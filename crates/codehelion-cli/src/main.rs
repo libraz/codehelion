@@ -13,7 +13,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match codehelion_cli::run(&cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(outcome) => outcome.exit_code(),
         Err(err) => {
             // `{err:#}` renders the whole anyhow context chain.
             eprintln!("error: {err:#}");
