@@ -20,6 +20,11 @@ name = "codehelion-eval"
 path = "src/bin/eval.rs"
 required-features = ["eval"]
 
+[[bin]]
+name = "codehelion-corpus-gen"
+path = "src/bin/corpus_gen.rs"
+required-features = ["corpus-gen"]
+
 [lib]
 name = "codehelion"
 path = "src/lib.rs"
@@ -28,6 +33,9 @@ path = "src/lib.rs"
 # Feature-gated development/CI evaluation harness. Off by default so the
 # published `codehelion` binary does not pull in serde.
 eval = ["dep:serde", "dep:serde_json"]
+# Feature-gated synthetic-corpus mutation generator. Builds on `eval` because
+# it emits the same label format the harness consumes.
+corpus-gen = ["eval"]
 
 [dependencies]
 anyhow = "1"
@@ -38,6 +46,7 @@ serde_json = { version = "1", optional = true }
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+tempfile = "3"
 
 [lints.rust]
 unsafe_code = "forbid"

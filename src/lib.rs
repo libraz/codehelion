@@ -10,6 +10,8 @@
 
 pub mod cli;
 pub mod core;
+#[cfg(feature = "corpus-gen")]
+pub mod corpus;
 #[cfg(feature = "eval")]
 pub mod eval;
 

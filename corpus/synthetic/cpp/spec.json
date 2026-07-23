@@ -1,0 +1,77 @@
+{
+  "schema_version": 0,
+  "language": "cpp",
+  "seed": "seed.cpp",
+  "variants": [
+    {
+      "file": "type1.cpp",
+      "type": "type-1",
+      "header_comment": "Type-1 variant of seed.cpp: identical logic, only comments and spacing differ.",
+      "items": [
+        {
+          "item": "fn sum_even",
+          "labelled": true,
+          "edits": [
+            { "op": "comment_before", "text": "Adds up the even entries." },
+            { "op": "blank_after", "anchor": "int total = 0;" }
+          ]
+        },
+        {
+          "item": "fn max_run",
+          "labelled": true,
+          "edits": [
+            { "op": "comment_before", "text": "Longest run of consecutive true flags." },
+            { "op": "comment_after", "anchor": "current = 0;", "text": "A false flag resets the run." }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "type2.cpp",
+      "type": "type-2",
+      "header_comment": "Type-2 variant of seed.cpp: renamed identifiers and changed literals.",
+      "items": [
+        {
+          "item": "fn sum_even",
+          "labelled": true,
+          "rename": { "values": "items", "total": "acc", "i": "idx" },
+          "literals": { "0": "1" }
+        },
+        {
+          "item": "fn max_run",
+          "labelled": true,
+          "rename": { "flags": "bits", "best": "longest", "current": "streak" }
+        },
+        {
+          "item": "class Counter",
+          "rename": { "Counter": "Tally", "count_": "total_", "value": "total" }
+        }
+      ]
+    },
+    {
+      "file": "type3.cpp",
+      "type": "type-3",
+      "header_comment": "Type-3 variant of seed.cpp: extra statements added inside sum_even.",
+      "items": [
+        {
+          "item": "fn sum_even",
+          "labelled": true,
+          "target_change_rate": 0.6,
+          "edits": [
+            { "op": "insert_after", "anchor": "int total = 0;", "lines": ["    int seen = 0;"] },
+            { "op": "insert_after", "anchor": "for (int i = 0; i < count; i++) {", "lines": ["        seen += 1;"] },
+            { "op": "insert_before", "anchor": "return total;", "lines": ["    static_cast<void>(seen);"] }
+          ]
+        },
+        {
+          "item": "fn max_run",
+          "labelled": true,
+          "type": "type-1"
+        }
+      ]
+    }
+  ],
+  "non_clones": [
+    { "reason": "getter-boilerplate", "function": "fn value", "variant": "type2.cpp" }
+  ]
+}

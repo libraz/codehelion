@@ -1,0 +1,59 @@
+{
+  "schema_version": 0,
+  "language": "rust",
+  "seed": "seed.rs",
+  "variants": [
+    {
+      "file": "type2_int.rs",
+      "type": "type-2",
+      "header_comment": "Type-2 variant: identifier rename plus one changed integer literal.",
+      "items": [
+        {
+          "item": "fn classify",
+          "labelled": true,
+          "rename": { "level": "value", "threshold": "limit", "result": "acc" },
+          "literals": { "10": "20" }
+        }
+      ]
+    },
+    {
+      "file": "type2_float.rs",
+      "type": "type-2",
+      "header_comment": "Type-2 variant: identifier rename plus one changed float literal.",
+      "items": [
+        {
+          "item": "fn classify",
+          "labelled": true,
+          "rename": { "level": "value", "threshold": "limit", "result": "acc" },
+          "literals": { "1.5": "2.5" }
+        }
+      ]
+    },
+    {
+      "file": "type2_str.rs",
+      "type": "type-2",
+      "header_comment": "Type-2 variant: identifier rename plus one changed string literal.",
+      "items": [
+        {
+          "item": "fn classify",
+          "labelled": true,
+          "rename": { "level": "value", "threshold": "limit", "result": "acc" },
+          "literals": { "\"warn\"": "\"alert\"" }
+        }
+      ]
+    },
+    {
+      "file": "type2_char.rs",
+      "type": "type-2",
+      "header_comment": "Type-2 variant: identifier rename plus one changed char literal.",
+      "items": [
+        {
+          "item": "fn classify",
+          "labelled": true,
+          "rename": { "level": "value", "threshold": "limit", "result": "acc" },
+          "literals": { "'x'": "'y'" }
+        }
+      ]
+    }
+  ]
+}

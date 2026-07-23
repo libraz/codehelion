@@ -1,29 +1,58 @@
 # Synthetic corpus
 
-A small, hand-authored seed set for the evaluation harness. It is deliberately
-tiny: enough to exercise the harness end to end and to serve as a fixture for
-recall/precision tests, not a statistically meaningful benchmark.
+A small seed set for the evaluation harness. It is deliberately tiny: enough to
+exercise the harness end to end and to serve as a fixture for recall/precision
+tests, not a statistically meaningful benchmark.
+
+The variant sources and their labels are **generated** from a seed plus a
+declarative mutation spec, so the labels can never drift out of sync with the
+sources. Do not hand-edit the generated files; edit the spec and regenerate.
 
 ## Contents
 
-`rust/` holds one seed file and three mutated variants:
+Each case is one directory holding a hand-authored `seed`, a `spec.json`
+mutation spec, the generated variant sources and the generated `labels.json`:
 
-- `seed.rs` — a few tiny functions plus a trivial getter.
-- `type1.rs` — `seed.rs` with only whitespace and comment changes (Type-1).
-- `type2.rs` — `seed.rs` with renamed identifiers and changed literals (Type-2).
-- `type3.rs` — `seed.rs` with one extra statement in one function (Type-3).
-- `labels.json` — a `LabelSet` describing the expected clone pairs between the
-  seed and each variant, plus one deliberate non-clone (the getter boilerplate).
+- `rust/` — Rust Type-1/2/3 variants of a few tiny functions plus a getter
+  non-clone. The reference case.
+- `rust-graded/` — one larger function mutated at graded Type-3 change rates
+  (~5/10/20/30%) for degradation-curve measurement.
+- `rust-literals/` — per-category Type-2 variants (integer, float, string, char
+  literal changed one at a time) for literal-normalization measurement.
+- `c/` and `cpp/` — the Rust reference case ported to C and C++.
+
+Within a case:
+
+- `spec.json` declares, per variant, the clone type and the edits
+  (comment/whitespace for Type-1, identifier/literal substitution for Type-2,
+  statement insert/delete with a target change rate for Type-3). A per-item
+  `type` override marks an item a variant leaves untouched (an unmutated item is
+  a Type-1 clone of the seed). `language` selects the item scanner
+  (`rust` | `c` | `cpp`).
+- `labels.json` is the generated `LabelSet`: clone pairs (seed fragment ↔
+  variant fragment, with the clone type) plus any deliberate non-clones. Line
+  ranges are computed from the edits the generator applied.
+
+## Generating and checking
+
+The generator is the feature-gated `codehelion-corpus-gen` binary:
+
+```sh
+# Regenerate variants + labels from the spec (overwrites the generated files):
+cargo run --features corpus-gen --bin codehelion-corpus-gen -- \
+  generate --spec corpus/synthetic/rust/spec.json --out-dir corpus/synthetic/rust
+
+# Verify the committed files match the spec (drift guard; non-zero on mismatch):
+cargo run --features corpus-gen --bin codehelion-corpus-gen -- \
+  check --spec corpus/synthetic/rust/spec.json --dir corpus/synthetic/rust
+```
+
+Output is deterministic: the same seed and spec always produce byte-identical
+files. The `check` subcommand is the mechanical drift guard — run it after
+editing any seed or spec.
 
 ## Line ranges
 
 The line ranges in `labels.json` are evaluation input only. Stable identity in
 codehelion is fingerprint-based, never line- or position-based, so these ranges
-never feed into any stable ID. When editing a `.rs` file, update the matching
-ranges in `labels.json`.
-
-## Roadmap
-
-This is a kickoff seed set authored by hand. A reproducible mutation generator
-that derives variants (and their labels) from a seed will replace the manual
-variants later; until then, keep this set small and its labels exact.
+never feed into any stable ID.

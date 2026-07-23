@@ -1,11 +1,11 @@
 {
   "schema_version": 0,
-  "language": "rust",
+  "language": "c",
   "files": [
-    "seed.rs",
-    "type1.rs",
-    "type2.rs",
-    "type3.rs"
+    "seed.c",
+    "type1.c",
+    "type2.c",
+    "type3.c"
   ],
   "clone_pairs": [
     {
@@ -13,12 +13,12 @@
       "type": "type-1",
       "fragments": [
         {
-          "file": "seed.rs",
+          "file": "seed.c",
           "start_line": 4,
           "end_line": 12
         },
         {
-          "file": "type1.rs",
+          "file": "type1.c",
           "start_line": 5,
           "end_line": 14
         }
@@ -29,12 +29,12 @@
       "type": "type-1",
       "fragments": [
         {
-          "file": "seed.rs",
+          "file": "seed.c",
           "start_line": 14,
           "end_line": 28
         },
         {
-          "file": "type1.rs",
+          "file": "type1.c",
           "start_line": 17,
           "end_line": 32
         }
@@ -45,12 +45,12 @@
       "type": "type-2",
       "fragments": [
         {
-          "file": "seed.rs",
+          "file": "seed.c",
           "start_line": 4,
           "end_line": 12
         },
         {
-          "file": "type2.rs",
+          "file": "type2.c",
           "start_line": 4,
           "end_line": 12
         }
@@ -61,12 +61,12 @@
       "type": "type-2",
       "fragments": [
         {
-          "file": "seed.rs",
+          "file": "seed.c",
           "start_line": 14,
           "end_line": 28
         },
         {
-          "file": "type2.rs",
+          "file": "type2.c",
           "start_line": 14,
           "end_line": 28
         }
@@ -77,12 +77,12 @@
       "type": "type-3",
       "fragments": [
         {
-          "file": "seed.rs",
+          "file": "seed.c",
           "start_line": 4,
           "end_line": 12
         },
         {
-          "file": "type3.rs",
+          "file": "type3.c",
           "start_line": 4,
           "end_line": 15
         }
@@ -93,12 +93,12 @@
       "type": "type-1",
       "fragments": [
         {
-          "file": "seed.rs",
+          "file": "seed.c",
           "start_line": 14,
           "end_line": 28
         },
         {
-          "file": "type3.rs",
+          "file": "type3.c",
           "start_line": 17,
           "end_line": 31
         }
@@ -111,14 +111,14 @@
       "reason": "getter-boilerplate",
       "fragments": [
         {
-          "file": "seed.rs",
-          "start_line": 35,
-          "end_line": 37
+          "file": "seed.c",
+          "start_line": 34,
+          "end_line": 36
         },
         {
-          "file": "type2.rs",
-          "start_line": 35,
-          "end_line": 37
+          "file": "type2.c",
+          "start_line": 34,
+          "end_line": 36
         }
       ]
     }

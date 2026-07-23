@@ -1,0 +1,91 @@
+{
+  "schema_version": 0,
+  "language": "rust",
+  "seed": "seed.rs",
+  "variants": [
+    {
+      "file": "type3_05.rs",
+      "type": "type-3",
+      "header_comment": "Type-3 variant of seed.rs at a ~5% statement-change rate.",
+      "items": [
+        {
+          "item": "fn score_tokens",
+          "labelled": true,
+          "target_change_rate": 0.05,
+          "edits": [
+            { "op": "insert_after", "anchor": "let mut score = 0;", "lines": ["    let mut extra = 0;"] }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "type3_10.rs",
+      "type": "type-3",
+      "header_comment": "Type-3 variant of seed.rs at a ~10% statement-change rate.",
+      "items": [
+        {
+          "item": "fn score_tokens",
+          "labelled": true,
+          "target_change_rate": 0.10,
+          "edits": [
+            {
+              "op": "insert_after",
+              "anchor": "let mut score = 0;",
+              "lines": ["    let mut extra = 0;", "    let mut bonus = 0;"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "type3_20.rs",
+      "type": "type-3",
+      "header_comment": "Type-3 variant of seed.rs at a ~20% statement-change rate.",
+      "items": [
+        {
+          "item": "fn score_tokens",
+          "labelled": true,
+          "target_change_rate": 0.20,
+          "edits": [
+            {
+              "op": "insert_after",
+              "anchor": "let mut score = 0;",
+              "lines": [
+                "    let mut extra = 0;",
+                "    let mut bonus = 0;",
+                "    extra += 1;",
+                "    bonus += 2;"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "type3_30.rs",
+      "type": "type-3",
+      "header_comment": "Type-3 variant of seed.rs at a ~30% statement-change rate.",
+      "items": [
+        {
+          "item": "fn score_tokens",
+          "labelled": true,
+          "target_change_rate": 0.30,
+          "edits": [
+            {
+              "op": "insert_after",
+              "anchor": "let mut score = 0;",
+              "lines": [
+                "    let mut extra = 0;",
+                "    let mut bonus = 0;",
+                "    extra += 1;",
+                "    bonus += 2;",
+                "    extra += bonus;",
+                "    score += extra;"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

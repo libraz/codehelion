@@ -1,0 +1,81 @@
+{
+  "schema_version": 0,
+  "language": "rust",
+  "seed": "seed.rs",
+  "variants": [
+    {
+      "file": "type1.rs",
+      "type": "type-1",
+      "header_comment": "Type-1 variant of seed.rs: identical logic, only comments and spacing differ.",
+      "items": [
+        {
+          "item": "fn sum_even",
+          "labelled": true,
+          "edits": [
+            { "op": "comment_before", "text": "Adds up the even entries." },
+            { "op": "blank_after", "anchor": "let mut total = 0;" }
+          ]
+        },
+        {
+          "item": "fn max_run",
+          "labelled": true,
+          "edits": [
+            { "op": "comment_before", "text": "Longest run of consecutive true flags." },
+            { "op": "comment_after", "anchor": "current = 0;", "text": "A false flag resets the run." }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "type2.rs",
+      "type": "type-2",
+      "header_comment": "Type-2 variant of seed.rs: renamed identifiers and changed literals.",
+      "items": [
+        {
+          "item": "fn sum_even",
+          "labelled": true,
+          "rename": { "values": "items", "value": "item", "total": "acc" },
+          "literals": { "0": "1" }
+        },
+        {
+          "item": "fn max_run",
+          "labelled": true,
+          "rename": { "flags": "bits", "flag": "bit", "best": "longest", "current": "streak" }
+        },
+        {
+          "item": "struct Counter",
+          "rename": { "Counter": "Tally", "count": "total" }
+        },
+        {
+          "item": "impl Counter",
+          "rename": { "Counter": "Tally", "count": "total", "value": "total" }
+        }
+      ]
+    },
+    {
+      "file": "type3.rs",
+      "type": "type-3",
+      "header_comment": "Type-3 variant of seed.rs: extra statements added inside sum_even.",
+      "items": [
+        {
+          "item": "fn sum_even",
+          "labelled": true,
+          "target_change_rate": 0.6,
+          "edits": [
+            { "op": "insert_after", "anchor": "let mut total = 0;", "lines": ["    let mut seen = 0;"] },
+            { "op": "insert_after", "anchor": "for value in values {", "lines": ["        seen += 1;"] },
+            { "op": "insert_before", "anchor": "total", "lines": ["    let _ = seen;"] }
+          ]
+        },
+        {
+          "item": "fn max_run",
+          "labelled": true,
+          "type": "type-1"
+        }
+      ]
+    }
+  ],
+  "non_clones": [
+    { "reason": "getter-boilerplate", "function": "fn value", "variant": "type2.rs" }
+  ]
+}

@@ -1,0 +1,33 @@
+// Seed for the graded Type-3 corpus. One larger straight-line-heavy function
+// so that inserted statements land on distinguishable change rates. Authored in
+// the controlled one-statement-per-line style the mutation generator assumes.
+
+fn score_tokens(tokens: &[i32]) -> i32 {
+    let mut score = 0;
+    let mut streak = 0;
+    let mut penalty = 0;
+    let mut seen_zero = false;
+    let count = tokens.len() as i32;
+    for token in tokens {
+        let value = *token;
+        if value > 0 {
+            score += value;
+            streak += 1;
+        } else if value < 0 {
+            penalty += value;
+            streak = 0;
+        } else {
+            seen_zero = true;
+            streak = 0;
+        }
+        if streak > 3 {
+            score += 10;
+        }
+    }
+    if seen_zero {
+        score -= 1;
+    }
+    score += penalty;
+    score -= count;
+    score
+}
