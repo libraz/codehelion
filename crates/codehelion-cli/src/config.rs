@@ -19,8 +19,9 @@ pub const CONFIG_FILE_NAME: &str = "codehelion.toml";
 
 /// Literal-normalization strategy for Type-2 detection.
 ///
-/// The default is [`Full`](LiteralNormalization::Full): the Phase 0 evaluation
-/// found full normalization gives Type-2 recall 1.0.
+/// The default is [`Full`](LiteralNormalization::Full): normalizing every
+/// literal recovers renamed-literal (Type-2) clones that a value-preserving
+/// pass would miss.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LiteralNormalization {
@@ -55,7 +56,7 @@ impl Default for Languages {
     }
 }
 
-/// Minimal Phase-1 suppression settings.
+/// Suppression settings applied before candidate generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Suppression {
@@ -106,7 +107,9 @@ impl Default for Config {
         Self {
             include: Vec::new(),
             exclude: Vec::new(),
-            // Phase 0 decision: k = 20-token effective minimum clone length.
+            // 20 tokens is the smallest clone length that stays clear of the
+            // short spurious matches (partial signatures, boilerplate) seen on
+            // the evaluation corpus.
             min_clone_tokens: 20,
             literal_normalization: LiteralNormalization::default(),
             languages: Languages::default(),
@@ -248,7 +251,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_the_phase0_values() {
+    fn defaults_are_the_evaluated_values() {
         let config = Config::default();
         assert_eq!(config.min_clone_tokens, 20);
         assert_eq!(config.literal_normalization, LiteralNormalization::Full);
