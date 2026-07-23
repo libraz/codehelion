@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Guardrail: block commits that fail formatting, linting or tests.
+# Install with: make hooks   (sets core.hooksPath to .githooks)
+set -euo pipefail
+
+echo "pre-commit: cargo fmt --check"
+cargo fmt --all --check
+
+echo "pre-commit: cargo clippy -D warnings"
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "pre-commit: cargo test"
+cargo test --all-targets --all-features
+
+echo "pre-commit: OK"

@@ -1,0 +1,28 @@
+# Rust build artifacts
+/target
+
+# Coverage
+/coverage
+*.profraw
+lcov.info
+
+# AI assistants / agent tooling (repo stays AI-free in git)
+/AGENTS.md
+/CLAUDE.md
+/.claude/
+/.codex/
+/.cursor/
+/.aider*
+/.github/copilot-instructions.md
+
+# Local-only working area (design docs, plans, scratch)
+/backup
+
+# Evaluation corpus: external OSS snapshots are fetched locally, never committed
+/corpus/external/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
