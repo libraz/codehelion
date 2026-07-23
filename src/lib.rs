@@ -10,6 +10,8 @@
 
 pub mod cli;
 pub mod core;
+#[cfg(feature = "eval")]
+pub mod eval;
 
 use std::io::{self, Write};
 

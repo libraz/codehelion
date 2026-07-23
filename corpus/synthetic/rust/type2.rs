@@ -1,0 +1,37 @@
+// Type-2 variant of seed.rs: renamed identifiers and changed literals.
+
+fn sum_even(items: &[i32]) -> i32 {
+    let mut acc = 0;
+    for item in items {
+        if item % 2 == 0 {
+            acc += item;
+        }
+    }
+    acc
+}
+
+fn max_run(bits: &[bool]) -> usize {
+    let mut longest = 0;
+    let mut streak = 0;
+    for bit in bits {
+        if *bit {
+            streak += 1;
+            if streak > longest {
+                longest = streak;
+            }
+        } else {
+            streak = 0;
+        }
+    }
+    longest
+}
+
+struct Tally {
+    total: u32,
+}
+
+impl Tally {
+    fn total(&self) -> u32 {
+        self.total
+    }
+}

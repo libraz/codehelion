@@ -23,40 +23,48 @@ explicit developer action, separate from the tool.
 
 ## Label format
 
-Labels are machine-readable YAML so they can be checked by a script rather than
-maintained as prose tables. One label file describes the expected clones (and
-the deliberate non-clones) among a set of source files.
+Labels are machine-readable JSON so they can be checked by a script rather than
+maintained as prose tables. The evaluation harness reads them with `serde_json`
+(JSON, not YAML: `serde_yaml` is unmaintained and disallowed under
+cargo-deny). One label file describes the expected clones (and the deliberate
+non-clones) among a set of source files.
 
 Line ranges are used **only** as evaluation input. Stable identity in
 codehelion is fingerprint-based, never line- or position-based, so ranges never
 feed into any stable ID.
 
-```yaml
-schema_version: 0
-language: rust            # rust | c | cpp
-# Source files this label set refers to, relative to this file's directory.
-files:
-  - a.rs
-  - b.rs
+Fields: `type` is one of `type-1 | type-2 | type-3 | restricted-semantic`;
+`clone_pairs` are positive examples that should be reported (drives recall);
+`non_clones` are boilerplate such as getters/setters, trait impls and test
+fixtures that must not be reported (drives precision). `language` is one of
+`rust | c | cpp`. Paths are relative to the label file's directory.
 
-# Positive examples: fragment pairs that SHOULD be reported as clones.
-# Drives recall.
-clone_pairs:
-  - id: cp-001
-    type: type-2          # type-1 | type-2 | type-3 | restricted-semantic
-    fragments:
-      - { file: a.rs, start_line: 10, end_line: 24 }
-      - { file: b.rs, start_line: 5, end_line: 19 }
-
-# Negative examples: fragments that must NOT be reported as clones.
-# Boilerplate such as getters/setters, trait impls, and test fixtures.
-# Drives precision (false-positive control).
-non_clones:
-  - id: nc-001
-    reason: getter-boilerplate
-    fragments:
-      - { file: a.rs, start_line: 30, end_line: 33 }
-      - { file: b.rs, start_line: 40, end_line: 43 }
+```json
+{
+  "schema_version": 0,
+  "language": "rust",
+  "files": ["a.rs", "b.rs"],
+  "clone_pairs": [
+    {
+      "id": "cp-001",
+      "type": "type-2",
+      "fragments": [
+        { "file": "a.rs", "start_line": 10, "end_line": 24 },
+        { "file": "b.rs", "start_line": 5, "end_line": 19 }
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "id": "nc-001",
+      "reason": "getter-boilerplate",
+      "fragments": [
+        { "file": "a.rs", "start_line": 30, "end_line": 33 },
+        { "file": "b.rs", "start_line": 40, "end_line": 43 }
+      ]
+    }
+  ]
+}
 ```
 
 The concrete detection-result format that the evaluation harness compares

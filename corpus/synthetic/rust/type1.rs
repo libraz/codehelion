@@ -1,0 +1,29 @@
+// Type-1 variant of seed.rs: identical logic, only comments and spacing differ.
+
+// Adds up the even entries.
+fn sum_even(values: &[i32]) -> i32 {
+    let mut total = 0;
+    for value in values {
+        if value % 2 == 0 {
+            total += value;
+        }
+    }
+    total
+}
+
+// Longest run of consecutive true flags.
+fn max_run(flags: &[bool]) -> usize {
+    let mut best = 0;
+    let mut current = 0;
+    for flag in flags {
+        if *flag {
+            current += 1;
+            if current > best {
+                best = current;
+            }
+        } else {
+            current = 0;
+        }
+    }
+    best
+}

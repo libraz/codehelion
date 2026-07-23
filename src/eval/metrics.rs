@@ -1,0 +1,483 @@
+//! Matching of detector findings against corpus labels, and the accuracy and
+//! stability metrics derived from that matching.
+//!
+//! # Matching semantics
+//!
+//! A labelled fragment set (a [`LabelPair`](crate::eval::labels::LabelPair) or a
+//! [`NonClone`](crate::eval::labels::NonClone), each with exactly two
+//! fragments) is *covered* by a [`Finding`] when, for **every** labelled
+//! fragment, the finding contains at least one fragment whose
+//! [`Fragment::overlap`] with it is greater than or equal to the match
+//! threshold.
+//!
+//! # True/false positives
+//!
+//! Metrics assume a fully-labelled synthetic corpus: every genuine clone is a
+//! labelled `clone_pair`. Under that assumption a finding is a **true
+//! positive** when it covers at least one `clone_pair`, and a **false
+//! positive** otherwise. On partially-labelled real code this over-counts false
+//! positives, so precision figures here are meaningful only against a complete
+//! label set.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+
+use crate::eval::labels::LabelSet;
+use crate::eval::schema::{CloneType, DetectionResult, Finding, Fragment};
+
+/// Default line-overlap threshold at or above which two fragments are
+/// considered the same code region.
+pub const DEFAULT_MATCH_THRESHOLD: f64 = 0.5;
+
+/// Whether `finding` covers the labelled `fragments` at `threshold`.
+///
+/// See the [module documentation](self) for the exact "covers" semantics.
+#[must_use]
+pub fn covers(finding: &Finding, fragments: &[Fragment], threshold: f64) -> bool {
+    fragments.iter().all(|labelled| {
+        finding
+            .fragments
+            .iter()
+            .any(|reported| reported.overlap(labelled) >= threshold)
+    })
+}
+
+/// Whether `finding` covers the labelled clone `pair` at `threshold`.
+#[must_use]
+pub fn matches_pair(
+    finding: &Finding,
+    pair: &crate::eval::labels::LabelPair,
+    threshold: f64,
+) -> bool {
+    covers(finding, &pair.fragments, threshold)
+}
+
+/// Accuracy metrics for one detection run against a label set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Metrics {
+    /// Fraction of all `clone_pairs` covered by at least one finding.
+    ///
+    /// `0.0` when there are no labelled pairs.
+    pub recall_overall: f64,
+    /// Per-type recall, keyed by [`CloneType`], for every type present in the
+    /// labels.
+    pub recall_by_type: BTreeMap<CloneType, f64>,
+    /// True positives divided by the number of findings. `0.0` when there are
+    /// no findings.
+    pub precision_overall: f64,
+    /// Findings per 1000 lines of analysed code. `0.0` when `loc` is `0`.
+    pub findings_per_kloc: f64,
+    /// False positives per 1000 lines of analysed code. `0.0` when `loc` is
+    /// `0`.
+    pub false_positives_per_kloc: f64,
+    /// Precision among the top-`k` findings ranked by score (descending, ties
+    /// broken by `id` ascending). `0.0` when there are no findings.
+    pub precision_at_k: f64,
+    /// Number of findings that cover a labelled `non_clone`; each is a clear
+    /// false positive.
+    pub non_clone_hits: usize,
+    /// Total number of findings evaluated.
+    pub total_findings: usize,
+    /// Number of findings classified as true positives.
+    pub true_positives: usize,
+    /// Number of findings classified as false positives.
+    pub false_positives: usize,
+    /// The `k` used for [`precision_at_k`](Self::precision_at_k).
+    pub top_k: usize,
+}
+
+/// Ratio `num / den`, or `0.0` when `den` is zero.
+#[allow(clippy::cast_precision_loss)] // Corpus counts are far below f64's exact range.
+fn ratio(num: usize, den: usize) -> f64 {
+    if den == 0 {
+        0.0
+    } else {
+        num as f64 / den as f64
+    }
+}
+
+/// `count` scaled to a per-1000-lines rate, or `0.0` when `loc` is zero.
+#[allow(clippy::cast_precision_loss)] // Corpus counts are far below f64's exact range.
+fn per_kloc(count: usize, loc: u32) -> f64 {
+    if loc == 0 {
+        0.0
+    } else {
+        count as f64 / f64::from(loc) * 1000.0
+    }
+}
+
+/// Score `results` against `labels`.
+///
+/// `loc` is the analysed line count used for the per-KLOC rates, `threshold`
+/// the overlap threshold for the "covers" relation, and `top_k` the cut-off for
+/// [`Metrics::precision_at_k`].
+#[must_use]
+pub fn evaluate(
+    results: &DetectionResult,
+    labels: &LabelSet,
+    loc: u32,
+    threshold: f64,
+    top_k: usize,
+) -> Metrics {
+    let total_findings = results.findings.len();
+
+    // Classify each finding: a true positive covers at least one clone pair.
+    let is_true_positive: Vec<bool> = results
+        .findings
+        .iter()
+        .map(|finding| {
+            labels
+                .clone_pairs
+                .iter()
+                .any(|pair| matches_pair(finding, pair, threshold))
+        })
+        .collect();
+    let true_positives = is_true_positive.iter().filter(|&&tp| tp).count();
+    let false_positives = total_findings - true_positives;
+
+    // Recall, overall and per type.
+    let mut per_type_total: BTreeMap<CloneType, usize> = BTreeMap::new();
+    let mut per_type_covered: BTreeMap<CloneType, usize> = BTreeMap::new();
+    let mut covered_pairs = 0usize;
+    for pair in &labels.clone_pairs {
+        let covered = results
+            .findings
+            .iter()
+            .any(|finding| matches_pair(finding, pair, threshold));
+        *per_type_total.entry(pair.clone_type).or_insert(0) += 1;
+        let covered_entry = per_type_covered.entry(pair.clone_type).or_insert(0);
+        if covered {
+            covered_pairs += 1;
+            *covered_entry += 1;
+        }
+    }
+    let recall_overall = ratio(covered_pairs, labels.clone_pairs.len());
+    let recall_by_type = per_type_total
+        .iter()
+        .map(|(&clone_type, &total)| {
+            let covered = per_type_covered.get(&clone_type).copied().unwrap_or(0);
+            (clone_type, ratio(covered, total))
+        })
+        .collect();
+
+    let precision_overall = ratio(true_positives, total_findings);
+    let findings_per_kloc = per_kloc(total_findings, loc);
+    let false_positives_per_kloc = per_kloc(false_positives, loc);
+
+    // Precision among the top-k findings, ranked by score then id.
+    let mut order: Vec<usize> = (0..total_findings).collect();
+    order.sort_by(|&i, &j| {
+        let (fi, fj) = (&results.findings[i], &results.findings[j]);
+        fj.score
+            .partial_cmp(&fi.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| fi.id.cmp(&fj.id))
+    });
+    let k = top_k.min(total_findings);
+    let precision_at_k = if k == 0 {
+        0.0
+    } else {
+        let tp_in_k = order
+            .iter()
+            .take(k)
+            .filter(|&&i| is_true_positive[i])
+            .count();
+        ratio(tp_in_k, k)
+    };
+
+    let non_clone_hits = results
+        .findings
+        .iter()
+        .filter(|finding| {
+            labels
+                .non_clones
+                .iter()
+                .any(|non_clone| covers(finding, &non_clone.fragments, threshold))
+        })
+        .count();
+
+    Metrics {
+        recall_overall,
+        recall_by_type,
+        precision_overall,
+        findings_per_kloc,
+        false_positives_per_kloc,
+        precision_at_k,
+        non_clone_hits,
+        total_findings,
+        true_positives,
+        false_positives,
+        top_k,
+    }
+}
+
+impl fmt::Display for Metrics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "recall (overall)          {:.4}", self.recall_overall)?;
+        for (clone_type, recall) in &self.recall_by_type {
+            writeln!(f, "  recall {:<19} {recall:.4}", clone_type.as_str())?;
+        }
+        writeln!(f, "precision (overall)       {:.4}", self.precision_overall)?;
+        writeln!(f, "precision@{:<15} {:.4}", self.top_k, self.precision_at_k)?;
+        writeln!(f, "findings / kLOC           {:.4}", self.findings_per_kloc)?;
+        writeln!(
+            f,
+            "false positives / kLOC    {:.4}",
+            self.false_positives_per_kloc
+        )?;
+        writeln!(
+            f,
+            "true / false positives    {} / {}  (of {})",
+            self.true_positives, self.false_positives, self.total_findings
+        )?;
+        write!(f, "non-clone hits            {}", self.non_clone_hits)
+    }
+}
+
+/// Run-to-run stability of two detection results over the same input.
+///
+/// Finding identity is the sorted set of `(file, start_line, end_line)`
+/// fragments, never the detector-assigned `id` (which may vary across runs).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stability {
+    /// Whether both runs reported exactly the same set of findings.
+    pub identical: bool,
+    /// Jaccard similarity of the two finding-key sets. `1.0` when both runs are
+    /// empty.
+    pub jaccard: f64,
+    /// `1.0 - jaccard`: the fraction of findings that changed.
+    pub churn: f64,
+}
+
+/// Canonical, id-independent key for a finding: its fragments as sorted tuples.
+type FindingKey = Vec<(String, u32, u32)>;
+
+fn key_set(result: &DetectionResult) -> BTreeSet<FindingKey> {
+    result
+        .findings
+        .iter()
+        .map(|finding| {
+            let mut key: FindingKey = finding
+                .fragments
+                .iter()
+                .map(|fragment| {
+                    (
+                        fragment.file.clone(),
+                        fragment.start_line,
+                        fragment.end_line,
+                    )
+                })
+                .collect();
+            key.sort();
+            key
+        })
+        .collect()
+}
+
+/// Compare the finding sets of two runs `a` and `b` over the same input.
+#[must_use]
+pub fn stability(a: &DetectionResult, b: &DetectionResult) -> Stability {
+    let keys_a = key_set(a);
+    let keys_b = key_set(b);
+    let intersection = keys_a.intersection(&keys_b).count();
+    let union = keys_a.union(&keys_b).count();
+    let jaccard = if union == 0 {
+        1.0
+    } else {
+        ratio(intersection, union)
+    };
+    Stability {
+        identical: keys_a == keys_b,
+        jaccard,
+        churn: 1.0 - jaccard,
+    }
+}
+
+impl fmt::Display for Stability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "identical                 {}", self.identical)?;
+        writeln!(f, "jaccard                   {:.4}", self.jaccard)?;
+        write!(f, "churn                     {:.4}", self.churn)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::eval::labels::{LabelPair, NonClone};
+
+    fn fragment(file: &str, start: u32, end: u32) -> Fragment {
+        Fragment {
+            file: file.to_string(),
+            start_line: start,
+            end_line: end,
+        }
+    }
+
+    fn finding(id: &str, score: f64, fragments: Vec<Fragment>) -> Finding {
+        Finding {
+            id: id.to_string(),
+            clone_type: CloneType::Type2,
+            score,
+            fragments,
+        }
+    }
+
+    /// Hand-crafted self-test: 2 clone pairs, 3 findings. Exactly 1 pair is
+    /// covered, exactly 2 findings are true positives, 1 is a false positive.
+    fn self_test_inputs() -> (DetectionResult, LabelSet) {
+        let results = DetectionResult {
+            schema_version: 0,
+            language: "rust".to_string(),
+            findings: vec![
+                // Covers pair A exactly -> true positive.
+                finding(
+                    "f-001",
+                    0.9,
+                    vec![fragment("x.rs", 1, 10), fragment("y.rs", 1, 10)],
+                ),
+                // Overlaps pair A ~0.818 -> true positive.
+                finding(
+                    "f-002",
+                    0.8,
+                    vec![fragment("x.rs", 2, 11), fragment("y.rs", 2, 11)],
+                ),
+                // Covers nothing labelled as a clone -> false positive, and it
+                // covers the non-clone region.
+                finding(
+                    "f-003",
+                    0.95,
+                    vec![fragment("x.rs", 200, 210), fragment("y.rs", 200, 210)],
+                ),
+            ],
+        };
+        let labels = LabelSet {
+            schema_version: 0,
+            language: "rust".to_string(),
+            files: vec!["x.rs".to_string(), "y.rs".to_string()],
+            clone_pairs: vec![
+                LabelPair {
+                    id: "cp-001".to_string(),
+                    clone_type: CloneType::Type2,
+                    fragments: vec![fragment("x.rs", 1, 10), fragment("y.rs", 1, 10)],
+                },
+                LabelPair {
+                    id: "cp-002".to_string(),
+                    clone_type: CloneType::Type3,
+                    fragments: vec![fragment("x.rs", 100, 110), fragment("y.rs", 100, 110)],
+                },
+            ],
+            non_clones: vec![NonClone {
+                id: "nc-001".to_string(),
+                reason: "unrelated".to_string(),
+                fragments: vec![fragment("x.rs", 200, 210), fragment("y.rs", 200, 210)],
+            }],
+        };
+        (results, labels)
+    }
+
+    #[test]
+    fn evaluate_matches_hand_computed_values() {
+        let (results, labels) = self_test_inputs();
+        let metrics = evaluate(&results, &labels, 100, DEFAULT_MATCH_THRESHOLD, 3);
+
+        assert!((metrics.recall_overall - 0.5).abs() < 1e-9);
+        assert!((metrics.precision_overall - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(metrics.true_positives, 2);
+        assert_eq!(metrics.false_positives, 1);
+
+        // 3 findings / 100 LOC * 1000 = 30; 1 FP / 100 * 1000 = 10.
+        assert!((metrics.findings_per_kloc - 30.0).abs() < 1e-9);
+        assert!((metrics.false_positives_per_kloc - 10.0).abs() < 1e-9);
+
+        // Per-type recall: type-2 pair covered (1.0), type-3 pair not (0.0).
+        assert!((metrics.recall_by_type[&CloneType::Type2] - 1.0).abs() < 1e-9);
+        assert!(metrics.recall_by_type[&CloneType::Type3].abs() < 1e-9);
+
+        // One finding lands on the non-clone region.
+        assert_eq!(metrics.non_clone_hits, 1);
+
+        // Top-3 precision equals overall precision here.
+        assert!((metrics.precision_at_k - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn precision_at_k_ranks_by_score() {
+        let (results, labels) = self_test_inputs();
+        // Ranked by score: f-003 (0.95, FP), f-001 (0.9, TP), f-002 (0.8, TP).
+        // Top-2 contains one TP -> 0.5.
+        let metrics = evaluate(&results, &labels, 100, DEFAULT_MATCH_THRESHOLD, 2);
+        assert!((metrics.precision_at_k - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stability_identical_runs() {
+        let (results, _) = self_test_inputs();
+        let s = stability(&results, &results);
+        assert!(s.identical);
+        assert!((s.jaccard - 1.0).abs() < 1e-9);
+        assert!(s.churn.abs() < 1e-9);
+    }
+
+    #[test]
+    fn stability_disjoint_runs() {
+        let a = DetectionResult {
+            schema_version: 0,
+            language: "rust".to_string(),
+            findings: vec![finding("f-a", 1.0, vec![fragment("x.rs", 1, 10)])],
+        };
+        let b = DetectionResult {
+            schema_version: 0,
+            language: "rust".to_string(),
+            findings: vec![finding("f-b", 1.0, vec![fragment("x.rs", 50, 60)])],
+        };
+        let s = stability(&a, &b);
+        assert!(!s.identical);
+        assert!(s.jaccard.abs() < 1e-9);
+        assert!((s.churn - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stability_partial_overlap_has_known_jaccard() {
+        // Shared key K2; A also has K1, B also has K3 -> intersection 1, union 3.
+        let k1 = vec![fragment("x.rs", 1, 10)];
+        let k2 = vec![fragment("y.rs", 1, 10)];
+        let k3 = vec![fragment("z.rs", 1, 10)];
+        let a = DetectionResult {
+            schema_version: 0,
+            language: "rust".to_string(),
+            findings: vec![finding("a1", 1.0, k1), finding("a2", 1.0, k2.clone())],
+        };
+        let b = DetectionResult {
+            schema_version: 0,
+            language: "rust".to_string(),
+            // Different id and clone_type for the shared key: identity is by
+            // fragments only.
+            findings: vec![
+                Finding {
+                    id: "b2".to_string(),
+                    clone_type: CloneType::Type1,
+                    score: 1.0,
+                    fragments: k2,
+                },
+                finding("b3", 1.0, k3),
+            ],
+        };
+        let s = stability(&a, &b);
+        assert!(!s.identical);
+        assert!((s.jaccard - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stability_empty_runs_are_identical() {
+        let empty = DetectionResult {
+            schema_version: 0,
+            language: "rust".to_string(),
+            findings: vec![],
+        };
+        let s = stability(&empty, &empty);
+        assert!(s.identical);
+        assert!((s.jaccard - 1.0).abs() < 1e-9);
+    }
+}
