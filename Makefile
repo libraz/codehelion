@@ -11,7 +11,7 @@ help: ## Show this help
 
 .PHONY: format
 format: ## Auto-fix everything: apply clippy fixes, then format
-	$(CARGO) clippy --fix --allow-dirty --allow-staged --all-targets --all-features
+	$(CARGO) clippy --fix --allow-dirty --allow-staged --workspace --all-targets --all-features
 	$(CARGO) fmt --all
 
 .PHONY: fix
@@ -25,15 +25,15 @@ format-check: ## Check formatting without modifying files
 
 .PHONY: lint
 lint: ## Static analysis only: clippy with warnings as errors
-	$(CARGO) clippy --all-targets --all-features -- -D warnings
+	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 
 .PHONY: test
 test: ## Run the full test suite
-	$(CARGO) test --all-targets --all-features
+	$(CARGO) test --workspace --all-targets --all-features
 
 .PHONY: doc
 doc: ## Build docs, failing on warnings
-	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --no-deps --all-features
+	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --all-features
 
 .PHONY: check
 check: format-check lint test doc ## Run every CI check locally
@@ -41,12 +41,12 @@ check: format-check lint test doc ## Run every CI check locally
 ## --- convenience ----------------------------------------------------------
 
 .PHONY: build
-build: ## Build a release binary
-	$(CARGO) build --release
+build: ## Build the release binary
+	$(CARGO) build --release -p codehelion-cli
 
 .PHONY: run
 run: ## Run the binary (pass args via ARGS="...")
-	$(CARGO) run -- $(ARGS)
+	$(CARGO) run -p codehelion-cli -- $(ARGS)
 
 .PHONY: audit
 audit: ## Check dependencies for advisories, bans and license issues
@@ -54,7 +54,7 @@ audit: ## Check dependencies for advisories, bans and license issues
 
 .PHONY: coverage
 coverage: ## Generate an HTML coverage report (needs cargo-llvm-cov)
-	$(CARGO) llvm-cov --all-features --html
+	$(CARGO) llvm-cov --workspace --all-features --html
 
 .PHONY: hooks
 hooks: ## Install the repo's git hooks

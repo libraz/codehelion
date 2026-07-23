@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::eval::schema::{CloneType, Fragment};
+use crate::schema::{CloneType, Fragment};
 
 /// A positive example: fragments that should be reported as clones.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

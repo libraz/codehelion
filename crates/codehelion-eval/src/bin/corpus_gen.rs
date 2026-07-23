@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
-use codehelion::corpus::generate::{ChangeRate, GeneratedCorpus, first_difference, generate};
-use codehelion::corpus::spec::MutationSpec;
+use codehelion_eval::corpus::generate::{ChangeRate, GeneratedCorpus, first_difference, generate};
+use codehelion_eval::corpus::spec::MutationSpec;
 
 /// Generate or verify a synthetic corpus from a mutation spec.
 #[derive(Debug, Parser)]

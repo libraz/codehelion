@@ -7,7 +7,7 @@
 //! ([`spec::TransplantSpec`]), producing fragment-level partial-clone labels.
 //! Label line ranges are computed from the edits the
 //! generator actually performs, so the emitted
-//! [`LabelSet`](crate::eval::labels::LabelSet) can never drift from the
+//! [`LabelSet`](crate::labels::LabelSet) can never drift from the
 //! variant files. This is a development and CI tool compiled only under the
 //! `corpus-gen` feature; it is not part of the shipped `codehelion` CLI.
 //!
@@ -36,7 +36,7 @@ use std::fmt;
 pub const SPEC_SCHEMA_VERSION: u32 = 0;
 
 /// Schema version written into generated label documents. Tracks the current
-/// [`LabelSet`](crate::eval::labels::LabelSet) format.
+/// [`LabelSet`](crate::labels::LabelSet) format.
 pub const LABEL_SCHEMA_VERSION: u32 = 0;
 
 /// File name of the generated label document.

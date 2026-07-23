@@ -3,8 +3,8 @@
 //!
 //! # Matching semantics
 //!
-//! A labelled fragment set (a [`LabelPair`](crate::eval::labels::LabelPair) or a
-//! [`NonClone`](crate::eval::labels::NonClone), each with exactly two
+//! A labelled fragment set (a [`LabelPair`](crate::labels::LabelPair) or a
+//! [`NonClone`](crate::labels::NonClone), each with exactly two
 //! fragments) is *covered* by a [`Finding`] when, for **every** labelled
 //! fragment, the finding contains at least one fragment whose
 //! [`Fragment::overlap`] with it is greater than or equal to the match
@@ -22,8 +22,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::eval::labels::LabelSet;
-use crate::eval::schema::{CloneType, DetectionResult, Finding, Fragment};
+use crate::labels::LabelSet;
+use crate::schema::{CloneType, DetectionResult, Finding, Fragment};
 
 /// Default line-overlap threshold at or above which two fragments are
 /// considered the same code region.
@@ -44,11 +44,7 @@ pub fn covers(finding: &Finding, fragments: &[Fragment], threshold: f64) -> bool
 
 /// Whether `finding` covers the labelled clone `pair` at `threshold`.
 #[must_use]
-pub fn matches_pair(
-    finding: &Finding,
-    pair: &crate::eval::labels::LabelPair,
-    threshold: f64,
-) -> bool {
+pub fn matches_pair(finding: &Finding, pair: &crate::labels::LabelPair, threshold: f64) -> bool {
     covers(finding, &pair.fragments, threshold)
 }
 
@@ -305,7 +301,7 @@ impl fmt::Display for Stability {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::eval::labels::{LabelPair, NonClone};
+    use crate::labels::{LabelPair, NonClone};
 
     fn fragment(file: &str, start: u32, end: u32) -> Fragment {
         Fragment {

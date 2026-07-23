@@ -4,20 +4,15 @@
 //! [`cli::Cli`] and hands them to [`run`]. Keeping the logic here makes it
 //! directly unit-testable without spawning a process.
 //!
-//! Modules mirror the eventual workspace crates. [`cli`] is the command layer;
-//! [`core`] is the engine layer. The dependency direction is strictly
-//! `cli -> core`.
+//! [`cli`] is the command layer; the engine lives in the `codehelion-core`
+//! crate. The dependency direction is strictly `cli -> core`.
 
 pub mod cli;
-pub mod core;
-#[cfg(feature = "corpus-gen")]
-pub mod corpus;
-#[cfg(feature = "eval")]
-pub mod eval;
 
 use std::io::{self, Write};
 
 use anyhow::Result;
+use codehelion_core::doctor;
 
 use crate::cli::{Cli, Command};
 
@@ -38,7 +33,7 @@ pub fn run(cli: &Cli) -> Result<()> {
 fn dispatch(command: &Command, out: &mut impl Write) -> Result<()> {
     match command {
         Command::Doctor => {
-            core::doctor::render(&core::doctor::diagnose(), out)?;
+            doctor::render(&doctor::diagnose(), out)?;
         }
     }
     Ok(())

@@ -1,5 +1,4 @@
 //! End-to-end tests that run the compiled corpus-gen binary.
-#![cfg(feature = "corpus-gen")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::fs;
@@ -13,7 +12,8 @@ fn cmd() -> Command {
 }
 
 fn corpus_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/synthetic/rust")
+    // Corpus lives at the workspace root, two levels up from this crate.
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/synthetic/rust")
 }
 
 fn generate_into(out_dir: &Path) {
@@ -120,7 +120,7 @@ fn committed_corpora_match_their_specs() {
         "cpp",
     ] {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("corpus/synthetic")
+            .join("../../corpus/synthetic")
             .join(case);
         cmd()
             .arg("check")

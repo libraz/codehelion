@@ -44,15 +44,16 @@ Within a case:
 
 ## Generating and checking
 
-The generator is the feature-gated `codehelion-corpus-gen` binary:
+The generator is the `codehelion-corpus-gen` binary in the `codehelion-eval`
+crate:
 
 ```sh
 # Regenerate variants + labels from the spec (overwrites the generated files):
-cargo run --features corpus-gen --bin codehelion-corpus-gen -- \
+cargo run -p codehelion-eval --bin codehelion-corpus-gen -- \
   generate --spec corpus/synthetic/rust/spec.json --out-dir corpus/synthetic/rust
 
 # Verify the committed files match the spec (drift guard; non-zero on mismatch):
-cargo run --features corpus-gen --bin codehelion-corpus-gen -- \
+cargo run -p codehelion-eval --bin codehelion-corpus-gen -- \
   check --spec corpus/synthetic/rust/spec.json --dir corpus/synthetic/rust
 ```
 

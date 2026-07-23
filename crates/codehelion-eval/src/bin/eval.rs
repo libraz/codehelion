@@ -12,9 +12,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use codehelion::eval::labels::LabelSet;
-use codehelion::eval::metrics::{DEFAULT_MATCH_THRESHOLD, evaluate, stability};
-use codehelion::eval::schema::DetectionResult;
+use codehelion_eval::labels::LabelSet;
+use codehelion_eval::metrics::{DEFAULT_MATCH_THRESHOLD, evaluate, stability};
+use codehelion_eval::schema::DetectionResult;
 
 /// Score detection-prototype output against a labelled corpus.
 #[derive(Debug, Parser)]

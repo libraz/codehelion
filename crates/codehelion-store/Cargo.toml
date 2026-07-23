@@ -1,0 +1,14 @@
+[package]
+name = "codehelion-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Local SQLite audit storage for the codehelion source-audit tool."
+
+[dependencies]
+
+[lints]
+workspace = true

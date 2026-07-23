@@ -21,8 +21,8 @@ use crate::corpus::spec::{
     EditOp, ItemSpec, MutationSpec, NonCloneSpec, TransplantSpec, VariantSpec,
 };
 use crate::corpus::{Error, LABEL_SCHEMA_VERSION, LABELS_FILE, SPEC_SCHEMA_VERSION};
-use crate::eval::labels::{LabelPair, LabelSet, NonClone};
-use crate::eval::schema::{CloneType, Fragment};
+use crate::labels::{LabelPair, LabelSet, NonClone};
+use crate::schema::{CloneType, Fragment};
 
 /// Marker comment emitted as the second line of every generated variant file.
 pub const GENERATED_MARKER: &str =

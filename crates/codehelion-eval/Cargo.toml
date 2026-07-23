@@ -1,0 +1,38 @@
+[package]
+name = "codehelion-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Development and CI evaluation harness and synthetic-corpus generator for codehelion."
+# Development/CI tooling: scores detection output against a labelled corpus and
+# generates the synthetic corpus. Never published to a registry.
+publish = false
+
+[lib]
+name = "codehelion_eval"
+path = "src/lib.rs"
+
+[[bin]]
+name = "codehelion-eval"
+path = "src/bin/eval.rs"
+
+[[bin]]
+name = "codehelion-corpus-gen"
+path = "src/bin/corpus_gen.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[lints]
+workspace = true

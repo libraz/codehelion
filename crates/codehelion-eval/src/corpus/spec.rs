@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::eval::schema::CloneType;
+use crate::schema::CloneType;
 
 /// Top-level mutation-spec document.
 ///

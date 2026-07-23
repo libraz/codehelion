@@ -1,18 +1,18 @@
 //! Binary entry point for `codehelion`.
 //!
 //! Parses command-line arguments and delegates to the library's
-//! [`codehelion::run`]; all real logic lives in the library crate.
+//! [`codehelion_cli::run`]; all real logic lives in the library crate.
 
 use std::process::ExitCode;
 
 use clap::Parser;
 
-use codehelion::cli::Cli;
+use codehelion_cli::cli::Cli;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    match codehelion::run(&cli) {
+    match codehelion_cli::run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             // `{err:#}` renders the whole anyhow context chain.
