@@ -2,7 +2,8 @@
 //!
 //! This is the engine layer of the workspace. The dependency direction is
 //! strictly `cli -> core`: nothing here may reach back into the CLI, the store
-//! or any frontend crate (AGENTS.md §4.1). Keeping the boundary at the crate
-//! level makes it mechanically enforceable.
+//! or any frontend crate. Keeping the boundary at the crate level makes it
+//! mechanically enforceable.
 
+pub mod discovery;
 pub mod doctor;
