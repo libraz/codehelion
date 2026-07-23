@@ -114,7 +114,8 @@ pub struct VariantSpec {
 ///   `literals` (whole-literal substitution). Line structure is preserved, so
 ///   ranges map line-for-line.
 /// - **type-3** — additionally statement-level [`EditOp::InsertAfter`],
-///   [`EditOp::InsertBefore`] and [`EditOp::Delete`], with an optional
+///   [`EditOp::InsertBefore`] and [`EditOp::Delete`], plus fragment
+///   [`transplants`](Self::transplants), with an optional
 ///   [`target_change_rate`](Self::target_change_rate) that the generator
 ///   compares against the achieved rate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -138,7 +139,14 @@ pub struct ItemSpec {
     /// `"text"`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub literals: BTreeMap<String, String>,
-    /// Line edits, applied in order after `rename`/`literals`.
+    /// Fragments transplanted from donor seed items into this item, applied
+    /// in order after `rename`/`literals` and before `edits`. Inserting a
+    /// fragment is a statement-level change, so any transplant requires the
+    /// item's effective clone type to be type-3.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transplants: Vec<TransplantSpec>,
+    /// Line edits, applied in order after `rename`/`literals` and
+    /// `transplants`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edits: Vec<EditOp>,
     /// Declared target statement-change rate for a type-3 item. The generator
@@ -208,6 +216,77 @@ pub enum EditOp {
     },
 }
 
+/// One fragment transplanted from a donor seed item into the host item.
+///
+/// A transplant copies a contiguous run of a *donor* seed item's lines and
+/// inserts it into the item that declares the transplant (the *host*), making
+/// the fragment — not the whole item — the cloned region. The generator then
+/// emits a fragment-level label pairing the donor fragment's range in the
+/// seed with the transplanted fragment's range in the variant.
+///
+/// # Format
+///
+/// ```json
+/// {
+///   "donor": "fn tally_input",
+///   "from": "let value = match line.parse::<i64>() {",
+///   "to": "};",
+///   "after": "for line in rows {",
+///   "labelled": true,
+///   "type": "type-2",
+///   "rename": { "sum": "kept" }
+/// }
+/// ```
+///
+/// - `from` and `to` anchor the first and last donor line of the fragment.
+///   Like edit anchors, each matches a line by exact comparison against the
+///   line's whitespace-trimmed text and must match exactly one line — here
+///   within the donor item's seed lines, before any mutation. The fragment
+///   must be brace-balanced.
+/// - `after` anchors the host line to insert the fragment after, matched
+///   against the host item's lines at the time the transplant is applied
+///   (after the host's `rename`/`literals` and any earlier transplants).
+/// - The donor lines are inserted verbatim, keeping their seed indentation,
+///   after `rename`/`literals` — the transplant's own maps, independent of
+///   the host's — are applied. A verbatim fragment is a type-1 partial clone;
+///   a substituted one is type-2.
+/// - `labelled` emits a `clone_pair` whose type is `type` (defaulting to the
+///   variant's type, like [`ItemSpec::clone_type`]); a labelled transplant
+///   must be type-1 or type-2, and type-1 forbids `rename`/`literals`.
+/// - `non_clone` instead emits a `non_clone` with the given reason, for a
+///   recurring boilerplate idiom that must not be reported as a clone. It is
+///   mutually exclusive with `labelled`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransplantSpec {
+    /// Key of the seed item the fragment is taken from, e.g. `fn tally_input`.
+    pub donor: String,
+    /// Trimmed text of the fragment's first line within the donor item.
+    pub from: String,
+    /// Trimmed text of the fragment's last line within the donor item.
+    pub to: String,
+    /// Trimmed text of the host line to insert the fragment after.
+    pub after: String,
+    /// Whether this transplant produces a labelled `clone_pair`.
+    #[serde(default)]
+    pub labelled: bool,
+    /// Clone type of the emitted `clone_pair`; defaults to the variant's
+    /// type. Must be `type-1` or `type-2` when `labelled` is set.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub clone_type: Option<CloneType>,
+    /// Whole-identifier substitution applied to the donor lines only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rename: BTreeMap<String, String>,
+    /// Whole-literal substitution applied to the donor lines only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub literals: BTreeMap<String, String>,
+    /// When set, emit a `non_clone` with this reason instead of a
+    /// `clone_pair`: the fragments look similar yet must not count as a
+    /// clone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_clone: Option<String>,
+}
+
 /// A deliberate non-clone carried into the label document.
 ///
 /// The generator emits one `non_clone` entry whose fragments are the named
@@ -275,6 +354,63 @@ mod tests {
         );
         assert_eq!(variant.items[1].clone_type, Some(CloneType::Type1));
         assert_eq!(spec.non_clones.len(), 1);
+    }
+
+    #[test]
+    fn parses_transplants() {
+        let json = r#"{
+          "schema_version": 0,
+          "language": "rust",
+          "seed": "seed.rs",
+          "variants": [
+            {
+              "file": "partial.rs",
+              "type": "type-3",
+              "header_comment": "Partial-clone variant.",
+              "items": [
+                {
+                  "item": "fn host",
+                  "transplants": [
+                    {
+                      "donor": "fn donor",
+                      "from": "let mut total = 0;",
+                      "to": "total",
+                      "after": "let mut count = 0;",
+                      "labelled": true,
+                      "type": "type-2",
+                      "rename": { "total": "sum" },
+                      "literals": { "0": "1" }
+                    },
+                    {
+                      "donor": "fn idiom",
+                      "from": "buffer.clear();",
+                      "to": "state = 0;",
+                      "after": "count",
+                      "non_clone": "cleanup-boilerplate"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }"#;
+        let spec = MutationSpec::from_json(json).expect("transplant spec parses");
+        let transplants = &spec.variants[0].items[0].transplants;
+        assert_eq!(transplants.len(), 2);
+        assert!(transplants[0].labelled);
+        assert_eq!(transplants[0].clone_type, Some(CloneType::Type2));
+        assert_eq!(transplants[0].rename["total"], "sum");
+        assert_eq!(transplants[0].literals["0"], "1");
+        assert!(transplants[0].non_clone.is_none());
+        assert!(!transplants[1].labelled);
+        assert_eq!(
+            transplants[1].non_clone.as_deref(),
+            Some("cleanup-boilerplate")
+        );
+        // Round trip: serializing and re-parsing preserves the spec.
+        let json = serde_json::to_string(&spec).unwrap();
+        let back = MutationSpec::from_json(&json).unwrap();
+        assert_eq!(back, spec);
     }
 
     #[test]

@@ -6,12 +6,20 @@
 //! provenance falls inside the region's seed range. Inserted lines between
 //! mapped lines are covered by the span; comment lines inserted before an
 //! item's header are not.
+//!
+//! Transplanted fragments ([`TransplantSpec`]) are tracked by insertion
+//! identity instead: each transplant's lines carry the transplant's ordinal,
+//! and its variant range spans the first to the last surviving line with that
+//! ordinal. Provenance would be ambiguous here, because the donor item can be
+//! carried into the same variant alongside the transplanted copy.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::corpus::lexer::substitute;
-use crate::corpus::scan::{Item, Language, scan_items};
-use crate::corpus::spec::{EditOp, ItemSpec, MutationSpec, NonCloneSpec, VariantSpec};
+use crate::corpus::scan::{Item, Language, brace_balance, scan_items};
+use crate::corpus::spec::{
+    EditOp, ItemSpec, MutationSpec, NonCloneSpec, TransplantSpec, VariantSpec,
+};
 use crate::corpus::{Error, LABEL_SCHEMA_VERSION, LABELS_FILE, SPEC_SCHEMA_VERSION};
 use crate::eval::labels::{LabelPair, LabelSet, NonClone};
 use crate::eval::schema::{CloneType, Fragment};
@@ -63,10 +71,16 @@ pub struct GeneratedCorpus {
 }
 
 /// One output line with the seed line it derives from, if any.
+// `seed_line` is the clearest name for the originating seed line number, even
+// though it ends with the struct name.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone)]
 struct Line {
     text: String,
     seed_line: Option<u32>,
+    /// Ordinal of the transplant that inserted this line, if any, for
+    /// fragment-range resolution after all edits.
+    transplant: Option<usize>,
 }
 
 /// A rendered variant file before serialization.
@@ -75,13 +89,46 @@ struct RenderedVariant {
     lines: Vec<Line>,
 }
 
-/// A labelled item whose variant range is resolved after rendering.
+/// A labelled region whose variant range is resolved after rendering.
 struct PendingPair {
     variant_file: String,
     clone_type: CloneType,
+    /// Item key the region belongs to (the donor key for a transplant), for
+    /// error messages.
     item_key: String,
     seed_start: u32,
     seed_end: u32,
+    /// When set, the variant fragment is the run of lines inserted by this
+    /// transplant rather than the provenance-mapped item range.
+    transplant: Option<usize>,
+}
+
+/// A transplant-derived non-clone whose variant range is resolved after
+/// rendering.
+struct PendingNonClone {
+    variant_file: String,
+    donor_key: String,
+    reason: String,
+    seed_start: u32,
+    seed_end: u32,
+    transplant: usize,
+}
+
+/// Labels collected while rendering, resolved once every variant is rendered.
+#[derive(Default)]
+struct PendingLabels {
+    pairs: Vec<PendingPair>,
+    non_clones: Vec<PendingNonClone>,
+    /// Next transplant ordinal; unique across all variants of one spec.
+    next_transplant: usize,
+}
+
+/// Shared read-only inputs for rendering one variant.
+struct RenderContext<'a> {
+    by_key: &'a BTreeMap<&'a str, &'a Item>,
+    seed_lines: &'a [&'a str],
+    variant_file: &'a str,
+    default_type: CloneType,
 }
 
 fn to_usize(n: u32) -> usize {
@@ -126,12 +173,17 @@ pub fn generate(spec: &MutationSpec, seed_text: &str) -> Result<GeneratedCorpus,
 
     let mut rendered = Vec::new();
     let mut change_rates = Vec::new();
-    let mut pending = Vec::new();
+    let mut pending = PendingLabels::default();
     for variant in &spec.variants {
+        let ctx = RenderContext {
+            by_key: &by_key,
+            seed_lines: &seed_lines,
+            variant_file: &variant.file,
+            default_type: variant.clone_type,
+        };
         rendered.push(render_variant(
             variant,
-            &by_key,
-            &seed_lines,
+            &ctx,
             &mut change_rates,
             &mut pending,
         )?);
@@ -139,12 +191,19 @@ pub fn generate(spec: &MutationSpec, seed_text: &str) -> Result<GeneratedCorpus,
 
     let mut files_list = vec![spec.seed.clone()];
     files_list.extend(spec.variants.iter().map(|variant| variant.file.clone()));
+    let mut non_clones = resolve_non_clones(&spec.non_clones, &by_key, &rendered, &spec.seed)?;
+    non_clones.extend(resolve_transplant_non_clones(
+        &pending.non_clones,
+        &rendered,
+        &spec.seed,
+        spec.non_clones.len(),
+    )?);
     let labels = LabelSet {
         schema_version: LABEL_SCHEMA_VERSION,
         language: spec.language.clone(),
         files: files_list,
-        clone_pairs: resolve_pairs(&pending, &rendered, &spec.seed)?,
-        non_clones: resolve_non_clones(&spec.non_clones, &by_key, &rendered, &spec.seed)?,
+        clone_pairs: resolve_pairs(&pending.pairs, &rendered, &spec.seed)?,
+        non_clones,
     };
     let files = collect_files(rendered, &labels)?;
     Ok(GeneratedCorpus {
@@ -184,19 +243,20 @@ fn index_items(items: &[Item]) -> Result<BTreeMap<&str, &Item>, Error> {
 
 fn render_variant(
     variant: &VariantSpec,
-    by_key: &BTreeMap<&str, &Item>,
-    seed_lines: &[&str],
+    ctx: &RenderContext<'_>,
     change_rates: &mut Vec<ChangeRate>,
-    pending: &mut Vec<PendingPair>,
+    pending: &mut PendingLabels,
 ) -> Result<RenderedVariant, Error> {
     let mut lines = vec![
         Line {
             text: format!("// {}", variant.header_comment),
             seed_line: None,
+            transplant: None,
         },
         Line {
             text: GENERATED_MARKER.to_string(),
             seed_line: None,
+            transplant: None,
         },
     ];
     let mut seen = BTreeSet::new();
@@ -206,7 +266,8 @@ fn render_variant(
                 key: item_spec.item.clone(),
             });
         }
-        let item = by_key
+        let item = ctx
+            .by_key
             .get(item_spec.item.as_str())
             .copied()
             .filter(|item| !item.nested)
@@ -215,13 +276,24 @@ fn render_variant(
                 item: item_spec.item.clone(),
             })?;
         let effective = item_spec.clone_type.unwrap_or(variant.clone_type);
-        validate_item(effective, &variant.file, item_spec)?;
+        validate_item(effective, ctx.default_type, &variant.file, item_spec)?;
 
         lines.push(Line {
             text: String::new(),
             seed_line: None,
+            transplant: None,
         });
-        let (mut item_lines, changed) = render_item(item_spec, item, seed_lines, &variant.file)?;
+        if item_spec.labelled {
+            pending.pairs.push(PendingPair {
+                variant_file: variant.file.clone(),
+                clone_type: effective,
+                item_key: item_spec.item.clone(),
+                seed_start: item.start_line,
+                seed_end: item.end_line,
+                transplant: None,
+            });
+        }
+        let (mut item_lines, changed) = render_item(item_spec, item, ctx, pending)?;
         lines.append(&mut item_lines);
 
         if effective == CloneType::Type3 && (changed > 0 || item_spec.target_change_rate.is_some())
@@ -231,16 +303,7 @@ fn render_variant(
                 item: item_spec.item.clone(),
                 target: item_spec.target_change_rate,
                 changed_statements: changed,
-                total_statements: count_statements(seed_lines, item),
-            });
-        }
-        if item_spec.labelled {
-            pending.push(PendingPair {
-                variant_file: variant.file.clone(),
-                clone_type: effective,
-                item_key: item_spec.item.clone(),
-                seed_start: item.start_line,
-                seed_end: item.end_line,
+                total_statements: count_statements(ctx.seed_lines, item),
             });
         }
     }
@@ -250,7 +313,12 @@ fn render_variant(
     })
 }
 
-fn validate_item(effective: CloneType, variant: &str, item_spec: &ItemSpec) -> Result<(), Error> {
+fn validate_item(
+    effective: CloneType,
+    default_type: CloneType,
+    variant: &str,
+    item_spec: &ItemSpec,
+) -> Result<(), Error> {
     if !matches!(
         effective,
         CloneType::Type1 | CloneType::Type2 | CloneType::Type3
@@ -282,26 +350,72 @@ fn validate_item(effective: CloneType, variant: &str, item_spec: &ItemSpec) -> R
         if has_statement_edit {
             return disallowed("statement insertion/deletion requires type-3");
         }
+        if !item_spec.transplants.is_empty() {
+            return disallowed("transplanting a fragment inserts statements and requires type-3");
+        }
         if item_spec.target_change_rate.is_some() {
             return disallowed("`target_change_rate` requires type-3");
         }
     }
+    for transplant in &item_spec.transplants {
+        validate_transplant(transplant, default_type, variant, &item_spec.item)?;
+    }
     Ok(())
 }
 
+/// Validate one transplant's label declaration against the effective-type
+/// rules: a labelled transplant is type-1 (verbatim only) or type-2, and
+/// `labelled` and `non_clone` are mutually exclusive.
+fn validate_transplant(
+    transplant: &TransplantSpec,
+    default_type: CloneType,
+    variant: &str,
+    item: &str,
+) -> Result<(), Error> {
+    let disallowed = |reason: String| {
+        Err(Error::DisallowedEdit {
+            variant: variant.to_string(),
+            item: item.to_string(),
+            reason,
+        })
+    };
+    if transplant.labelled && transplant.non_clone.is_some() {
+        return disallowed(format!(
+            "transplant from `{}` cannot be both `labelled` and a `non_clone`",
+            transplant.donor
+        ));
+    }
+    if !transplant.labelled {
+        return Ok(());
+    }
+    let effective = transplant.clone_type.unwrap_or(default_type);
+    let has_substitution = !transplant.rename.is_empty() || !transplant.literals.is_empty();
+    match effective {
+        CloneType::Type1 if has_substitution => disallowed(format!(
+            "a type-1 transplant from `{}` must be verbatim; `rename`/`literals` require type-2",
+            transplant.donor
+        )),
+        CloneType::Type1 | CloneType::Type2 => Ok(()),
+        _ => disallowed(format!(
+            "a labelled transplant from `{}` must be type-1 or type-2",
+            transplant.donor
+        )),
+    }
+}
+
 /// Render one item: copy its seed lines with provenance, apply substitution,
-/// then apply the line edits in spec order. Returns the lines and the number
-/// of statement lines inserted or deleted.
+/// apply the transplants, then apply the line edits in spec order. Returns
+/// the lines and the number of statement lines inserted or deleted.
 fn render_item(
     item_spec: &ItemSpec,
     item: &Item,
-    seed_lines: &[&str],
-    variant_file: &str,
+    ctx: &RenderContext<'_>,
+    pending: &mut PendingLabels,
 ) -> Result<(Vec<Line>, u32), Error> {
     let needs_substitution = !item_spec.rename.is_empty() || !item_spec.literals.is_empty();
     let mut lines = Vec::new();
     for line_no in item.start_line..=item.end_line {
-        if let Some(text) = seed_lines.get(to_usize(line_no).saturating_sub(1)) {
+        if let Some(text) = ctx.seed_lines.get(to_usize(line_no).saturating_sub(1)) {
             let text = if needs_substitution {
                 substitute(text, &item_spec.rename, &item_spec.literals)
             } else {
@@ -310,14 +424,138 @@ fn render_item(
             lines.push(Line {
                 text,
                 seed_line: Some(line_no),
+                transplant: None,
             });
         }
     }
     let mut changed = 0;
+    for transplant in &item_spec.transplants {
+        changed += apply_transplant(&mut lines, transplant, &item_spec.item, ctx, pending)?;
+    }
     for edit in &item_spec.edits {
-        changed += apply_edit(&mut lines, edit, variant_file, &item_spec.item)?;
+        changed += apply_edit(&mut lines, edit, ctx.variant_file, &item_spec.item)?;
     }
     Ok((lines, changed))
+}
+
+/// Apply one transplant: copy the donor fragment out of the seed, apply the
+/// transplant's substitutions, insert the lines after the host anchor and
+/// queue the declared label. Returns the number of statement lines inserted.
+fn apply_transplant(
+    lines: &mut Vec<Line>,
+    transplant: &TransplantSpec,
+    host_key: &str,
+    ctx: &RenderContext<'_>,
+    pending: &mut PendingLabels,
+) -> Result<u32, Error> {
+    let donor = ctx
+        .by_key
+        .get(transplant.donor.as_str())
+        .copied()
+        .ok_or_else(|| Error::UnknownItem {
+            variant: ctx.variant_file.to_string(),
+            item: transplant.donor.clone(),
+        })?;
+    let from = find_seed_anchor(ctx, donor, &transplant.from)?;
+    let to = find_seed_anchor(ctx, donor, &transplant.to)?;
+    if from > to {
+        return Err(Error::DisallowedEdit {
+            variant: ctx.variant_file.to_string(),
+            item: transplant.donor.clone(),
+            reason: format!(
+                "fragment anchor `{}` lies below its `to` anchor `{}`",
+                transplant.from, transplant.to
+            ),
+        });
+    }
+    let needs_substitution = !transplant.rename.is_empty() || !transplant.literals.is_empty();
+    let mut fragment = Vec::new();
+    let mut balance = 0;
+    let mut statements = 0;
+    for line_no in from..=to {
+        if let Some(text) = ctx.seed_lines.get(to_usize(line_no).saturating_sub(1)) {
+            balance += brace_balance(text);
+            let text = if needs_substitution {
+                substitute(text, &transplant.rename, &transplant.literals)
+            } else {
+                (*text).to_string()
+            };
+            statements += u32::from(is_statement(text.trim()));
+            fragment.push(text);
+        }
+    }
+    if balance != 0 {
+        return Err(Error::DisallowedEdit {
+            variant: ctx.variant_file.to_string(),
+            item: transplant.donor.clone(),
+            reason: format!(
+                "fragment `{}` .. `{}` is not brace-balanced",
+                transplant.from, transplant.to
+            ),
+        });
+    }
+    let index = find_anchor(lines, &transplant.after, ctx.variant_file, host_key)?;
+    let id = pending.next_transplant;
+    pending.next_transplant += 1;
+    for (offset, text) in fragment.into_iter().enumerate() {
+        lines.insert(
+            index + 1 + offset,
+            Line {
+                text,
+                seed_line: None,
+                transplant: Some(id),
+            },
+        );
+    }
+    if transplant.labelled {
+        pending.pairs.push(PendingPair {
+            variant_file: ctx.variant_file.to_string(),
+            clone_type: transplant.clone_type.unwrap_or(ctx.default_type),
+            item_key: transplant.donor.clone(),
+            seed_start: from,
+            seed_end: to,
+            transplant: Some(id),
+        });
+    }
+    if let Some(reason) = &transplant.non_clone {
+        pending.non_clones.push(PendingNonClone {
+            variant_file: ctx.variant_file.to_string(),
+            donor_key: transplant.donor.clone(),
+            reason: reason.clone(),
+            seed_start: from,
+            seed_end: to,
+            transplant: id,
+        });
+    }
+    Ok(statements)
+}
+
+/// Resolve an anchor against a donor item's seed lines, returning the
+/// matching absolute seed line (1-based). Like edit anchors, the anchor is
+/// compared against each line's whitespace-trimmed text and must match
+/// exactly one line of the item.
+fn find_seed_anchor(ctx: &RenderContext<'_>, donor: &Item, anchor: &str) -> Result<u32, Error> {
+    let mut found = None;
+    for line_no in donor.start_line..=donor.end_line {
+        let Some(text) = ctx.seed_lines.get(to_usize(line_no).saturating_sub(1)) else {
+            continue;
+        };
+        if text.trim() == anchor {
+            if found.is_some() {
+                return Err(Error::AmbiguousAnchor {
+                    variant: ctx.variant_file.to_string(),
+                    item: donor.key.clone(),
+                    anchor: anchor.to_string(),
+                });
+            }
+            found = Some(line_no);
+        }
+    }
+    found.ok_or_else(|| Error::AnchorNotFound {
+        variant: ctx.variant_file.to_string(),
+        item: donor.key.clone(),
+        anchor: anchor.to_string(),
+    })
 }
 
 /// Apply one edit, returning the number of statement lines it inserted or
@@ -331,6 +569,7 @@ fn apply_edit(
     let inserted = |text: String| Line {
         text,
         seed_line: None,
+        transplant: None,
     };
     match edit {
         EditOp::CommentBefore { text } => {
@@ -393,6 +632,7 @@ fn insert_lines(lines: &mut Vec<Line>, at: usize, new: &[String]) -> u32 {
             Line {
                 text: text.clone(),
                 seed_line: None,
+                transplant: None,
             },
         );
     }
@@ -476,6 +716,23 @@ fn mapped_range(lines: &[Line], seed_start: u32, seed_end: u32) -> Option<(u32, 
     first.zip(last)
 }
 
+/// Output-line span (1-based, inclusive) of the surviving lines a transplant
+/// inserted.
+fn transplant_range(lines: &[Line], id: usize) -> Option<(u32, u32)> {
+    let mut first = None;
+    let mut last = None;
+    for (index, line) in lines.iter().enumerate() {
+        if line.transplant == Some(id) {
+            let line_no = to_u32(index + 1);
+            if first.is_none() {
+                first = Some(line_no);
+            }
+            last = Some(line_no);
+        }
+    }
+    first.zip(last)
+}
+
 fn resolve_pairs(
     pending: &[PendingPair],
     rendered: &[RenderedVariant],
@@ -491,7 +748,12 @@ fn resolve_pairs(
                 .ok_or_else(|| Error::UnknownNonCloneRef {
                     reference: pair.variant_file.clone(),
                 })?;
-            let (start, end) = mapped_range(&variant.lines, pair.seed_start, pair.seed_end)
+            let (start, end) = pair
+                .transplant
+                .map_or_else(
+                    || mapped_range(&variant.lines, pair.seed_start, pair.seed_end),
+                    |id| transplant_range(&variant.lines, id),
+                )
                 .ok_or_else(|| Error::EmptyRange {
                     variant: pair.variant_file.clone(),
                     item: pair.item_key.clone(),
@@ -553,6 +815,51 @@ fn resolve_non_clones(
                     },
                     Fragment {
                         file: spec.variant.clone(),
+                        start_line: start,
+                        end_line: end,
+                    },
+                ],
+            })
+        })
+        .collect()
+}
+
+/// Resolve the transplant-derived non-clones. Their ids continue the
+/// numbering after the spec-level non-clones (`id_offset` entries).
+fn resolve_transplant_non_clones(
+    pending: &[PendingNonClone],
+    rendered: &[RenderedVariant],
+    seed_file: &str,
+    id_offset: usize,
+) -> Result<Vec<NonClone>, Error> {
+    pending
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let variant = rendered
+                .iter()
+                .find(|rendered| rendered.file == entry.variant_file)
+                .ok_or_else(|| Error::UnknownNonCloneRef {
+                    reference: entry.variant_file.clone(),
+                })?;
+            let (start, end) =
+                transplant_range(&variant.lines, entry.transplant).ok_or_else(|| {
+                    Error::EmptyRange {
+                        variant: entry.variant_file.clone(),
+                        item: entry.donor_key.clone(),
+                    }
+                })?;
+            Ok(NonClone {
+                id: format!("nc-{:03}", id_offset + index + 1),
+                reason: entry.reason.clone(),
+                fragments: vec![
+                    Fragment {
+                        file: seed_file.to_string(),
+                        start_line: entry.seed_start,
+                        end_line: entry.seed_end,
+                    },
+                    Fragment {
+                        file: entry.variant_file.clone(),
                         start_line: start,
                         end_line: end,
                     },
@@ -627,8 +934,23 @@ fn twice(x: i32) -> i32 {
             clone_type: None,
             rename: BTreeMap::new(),
             literals: BTreeMap::new(),
+            transplants: Vec::new(),
             edits: Vec::new(),
             target_change_rate: None,
+        }
+    }
+
+    fn transplant(donor: &str, from: &str, to: &str, after: &str) -> TransplantSpec {
+        TransplantSpec {
+            donor: donor.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+            after: after.to_string(),
+            labelled: false,
+            clone_type: None,
+            rename: BTreeMap::new(),
+            literals: BTreeMap::new(),
+            non_clone: None,
         }
     }
 
@@ -828,6 +1150,271 @@ fn twice(x: i32) -> i32 {
         });
         let corpus = generate(&spec, SEED).expect("generates");
         assert!(corpus.files["v1.rs"].contains("\n  let sum = a + b;\n"));
+    }
+
+    /// Seed for the transplant tests. `fn donor` spans lines 3..=9 with the
+    /// fragment `let mut total = 0;` .. `total` on lines 4..=8; `fn host`
+    /// spans lines 11..=17.
+    const PARTIAL_SEED: &str = "\
+// seed
+
+fn donor(values: &[i32]) -> i32 {
+    let mut total = 0;
+    for value in values {
+        total += *value;
+    }
+    total
+}
+
+fn host(items: &[i32]) -> i32 {
+    let mut count = 0;
+    for item in items {
+        count += 1;
+    }
+    count
+}
+";
+
+    fn partial_spec() -> MutationSpec {
+        let mut spec = base_spec();
+        spec.variants.push(VariantSpec {
+            file: "partial.rs".to_string(),
+            clone_type: CloneType::Type3,
+            header_comment: "Partial variant.".to_string(),
+            items: vec![ItemSpec {
+                labelled: false,
+                transplants: vec![TransplantSpec {
+                    labelled: true,
+                    clone_type: Some(CloneType::Type1),
+                    ..transplant(
+                        "fn donor",
+                        "let mut total = 0;",
+                        "total",
+                        "let mut count = 0;",
+                    )
+                }],
+                ..item("fn host")
+            }],
+        });
+        spec
+    }
+
+    #[test]
+    fn transplant_inserts_the_donor_fragment_verbatim() {
+        let corpus = generate(&partial_spec(), PARTIAL_SEED).expect("generates");
+        let expected = format!(
+            "// Partial variant.\n{GENERATED_MARKER}\n\n\
+             fn host(items: &[i32]) -> i32 {{\n    let mut count = 0;\n    let mut total = 0;\n    for value in values {{\n        total += *value;\n    }}\n    total\n    for item in items {{\n        count += 1;\n    }}\n    count\n}}\n"
+        );
+        assert_eq!(corpus.files["partial.rs"], expected);
+        // The transplanted statements count toward the host's change rate.
+        assert_eq!(corpus.change_rates.len(), 1);
+        assert_eq!(corpus.change_rates[0].changed_statements, 4);
+        assert_eq!(corpus.change_rates[0].total_statements, 4);
+    }
+
+    #[test]
+    fn transplant_pairs_the_donor_fragment_with_the_transplanted_lines() {
+        let corpus = generate(&partial_spec(), PARTIAL_SEED).expect("generates");
+        assert_eq!(corpus.labels.clone_pairs.len(), 1);
+        let pair = &corpus.labels.clone_pairs[0];
+        assert_eq!(pair.clone_type, CloneType::Type1);
+        // Donor fragment: seed lines 4..=8. Variant: header, marker, blank
+        // line and the host's first two lines precede it, so lines 6..=10.
+        assert_eq!(
+            pair.fragments,
+            vec![
+                Fragment {
+                    file: "seed.rs".to_string(),
+                    start_line: 4,
+                    end_line: 8,
+                },
+                Fragment {
+                    file: "partial.rs".to_string(),
+                    start_line: 6,
+                    end_line: 10,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn renamed_transplant_is_a_type2_partial_clone() {
+        let mut spec = partial_spec();
+        let transplanted = &mut spec.variants[0].items[0].transplants[0];
+        transplanted.clone_type = Some(CloneType::Type2);
+        transplanted.rename = map(&[("total", "sum"), ("value", "entry"), ("values", "items")]);
+        transplanted.literals = map(&[("0", "1")]);
+        let corpus = generate(&spec, PARTIAL_SEED).expect("generates");
+        let text = &corpus.files["partial.rs"];
+        assert!(text.contains("\n    let mut sum = 1;\n    for entry in items {\n        sum += *entry;\n    }\n    sum\n"));
+        let pair = &corpus.labels.clone_pairs[0];
+        assert_eq!(pair.clone_type, CloneType::Type2);
+        // Substitution preserves line structure, so the ranges are unchanged.
+        assert_eq!(pair.fragments[0].start_line, 4);
+        assert_eq!(pair.fragments[0].end_line, 8);
+        assert_eq!(pair.fragments[1].start_line, 6);
+        assert_eq!(pair.fragments[1].end_line, 10);
+    }
+
+    #[test]
+    fn transplant_non_clone_is_labelled_at_fragment_granularity() {
+        let mut spec = partial_spec();
+        let transplanted = &mut spec.variants[0].items[0].transplants[0];
+        transplanted.labelled = false;
+        transplanted.clone_type = None;
+        transplanted.non_clone = Some("loop-boilerplate".to_string());
+        spec.non_clones.push(NonCloneSpec {
+            reason: "host-scaffold".to_string(),
+            function: "fn host".to_string(),
+            variant: "partial.rs".to_string(),
+        });
+        let corpus = generate(&spec, PARTIAL_SEED).expect("generates");
+        assert!(corpus.labels.clone_pairs.is_empty());
+        assert_eq!(corpus.labels.non_clones.len(), 2);
+        // Spec-level non-clones come first; the transplant-derived one
+        // continues the id numbering at fragment granularity.
+        assert_eq!(corpus.labels.non_clones[0].id, "nc-001");
+        assert_eq!(corpus.labels.non_clones[0].reason, "host-scaffold");
+        let fragment_level = &corpus.labels.non_clones[1];
+        assert_eq!(fragment_level.id, "nc-002");
+        assert_eq!(fragment_level.reason, "loop-boilerplate");
+        assert_eq!(
+            fragment_level.fragments,
+            vec![
+                Fragment {
+                    file: "seed.rs".to_string(),
+                    start_line: 4,
+                    end_line: 8,
+                },
+                Fragment {
+                    file: "partial.rs".to_string(),
+                    start_line: 6,
+                    end_line: 10,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn transplant_range_survives_a_donor_copy_in_the_same_variant() {
+        let mut spec = partial_spec();
+        spec.variants[0].items.insert(
+            0,
+            ItemSpec {
+                clone_type: Some(CloneType::Type1),
+                ..item("fn donor")
+            },
+        );
+        let corpus = generate(&spec, PARTIAL_SEED).expect("generates");
+        assert_eq!(corpus.labels.clone_pairs.len(), 2);
+        // The donor's own copy maps by provenance (variant lines 4..=10);
+        // the transplant maps by insertion identity, unaffected by the donor
+        // copy carrying the same seed lines.
+        assert_eq!(corpus.labels.clone_pairs[0].fragments[1].start_line, 4);
+        assert_eq!(corpus.labels.clone_pairs[0].fragments[1].end_line, 10);
+        assert_eq!(corpus.labels.clone_pairs[1].fragments[0].start_line, 4);
+        assert_eq!(corpus.labels.clone_pairs[1].fragments[0].end_line, 8);
+        assert_eq!(corpus.labels.clone_pairs[1].fragments[1].start_line, 14);
+        assert_eq!(corpus.labels.clone_pairs[1].fragments[1].end_line, 18);
+    }
+
+    #[test]
+    fn transplant_generation_is_deterministic() {
+        let first = generate(&partial_spec(), PARTIAL_SEED).expect("first run");
+        let second = generate(&partial_spec(), PARTIAL_SEED).expect("second run");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn transplant_requires_a_type3_host() {
+        let mut spec = partial_spec();
+        spec.variants[0].clone_type = CloneType::Type2;
+        spec.variants[0].items[0].transplants[0].clone_type = Some(CloneType::Type1);
+        assert!(matches!(
+            generate(&spec, PARTIAL_SEED),
+            Err(Error::DisallowedEdit { .. })
+        ));
+    }
+
+    #[test]
+    fn labelled_transplant_must_declare_type1_or_type2() {
+        let mut spec = partial_spec();
+        // Without an override the label type defaults to the variant's
+        // type-3, which a labelled transplant cannot carry.
+        spec.variants[0].items[0].transplants[0].clone_type = None;
+        assert!(matches!(
+            generate(&spec, PARTIAL_SEED),
+            Err(Error::DisallowedEdit { .. })
+        ));
+    }
+
+    #[test]
+    fn type1_transplant_rejects_substitution() {
+        let mut spec = partial_spec();
+        spec.variants[0].items[0].transplants[0].rename = map(&[("total", "sum")]);
+        assert!(matches!(
+            generate(&spec, PARTIAL_SEED),
+            Err(Error::DisallowedEdit { .. })
+        ));
+    }
+
+    #[test]
+    fn transplant_cannot_be_both_labelled_and_non_clone() {
+        let mut spec = partial_spec();
+        spec.variants[0].items[0].transplants[0].non_clone = Some("boilerplate".to_string());
+        assert!(matches!(
+            generate(&spec, PARTIAL_SEED),
+            Err(Error::DisallowedEdit { .. })
+        ));
+    }
+
+    #[test]
+    fn transplant_unknown_donor_is_an_error() {
+        let mut spec = partial_spec();
+        spec.variants[0].items[0].transplants[0].donor = "fn missing".to_string();
+        assert!(matches!(
+            generate(&spec, PARTIAL_SEED),
+            Err(Error::UnknownItem { .. })
+        ));
+    }
+
+    #[test]
+    fn unbalanced_transplant_fragment_is_rejected() {
+        let mut spec = partial_spec();
+        spec.variants[0].items[0].transplants[0] = TransplantSpec {
+            labelled: true,
+            clone_type: Some(CloneType::Type1),
+            ..transplant(
+                "fn donor",
+                "for value in values {",
+                "total += *value;",
+                "let mut count = 0;",
+            )
+        };
+        assert!(matches!(
+            generate(&spec, PARTIAL_SEED),
+            Err(Error::DisallowedEdit { .. })
+        ));
+    }
+
+    #[test]
+    fn reversed_transplant_anchors_are_rejected() {
+        let mut spec = partial_spec();
+        spec.variants[0].items[0].transplants[0] = TransplantSpec {
+            labelled: true,
+            clone_type: Some(CloneType::Type1),
+            ..transplant(
+                "fn donor",
+                "total",
+                "let mut total = 0;",
+                "let mut count = 0;",
+            )
+        };
+        assert!(matches!(
+            generate(&spec, PARTIAL_SEED),
+            Err(Error::DisallowedEdit { .. })
+        ));
     }
 
     #[test]

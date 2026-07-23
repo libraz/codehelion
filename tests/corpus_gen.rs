@@ -111,7 +111,14 @@ fn check_fails_on_drifted_output() {
 /// someone hand-edits a variant or `labels.json` instead of regenerating.
 #[test]
 fn committed_corpora_match_their_specs() {
-    for case in ["rust", "rust-graded", "rust-literals", "c", "cpp"] {
+    for case in [
+        "rust",
+        "rust-graded",
+        "rust-literals",
+        "rust-partial",
+        "c",
+        "cpp",
+    ] {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("corpus/synthetic")
             .join(case);

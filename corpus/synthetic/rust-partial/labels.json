@@ -1,0 +1,77 @@
+{
+  "schema_version": 0,
+  "language": "rust",
+  "files": [
+    "seed.rs",
+    "partial1.rs",
+    "partial2.rs"
+  ],
+  "clone_pairs": [
+    {
+      "id": "cp-001",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 9,
+          "end_line": 22
+        },
+        {
+          "file": "partial1.rs",
+          "start_line": 10,
+          "end_line": 23
+        }
+      ]
+    },
+    {
+      "id": "cp-002",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 34,
+          "end_line": 41
+        },
+        {
+          "file": "partial2.rs",
+          "start_line": 10,
+          "end_line": 17
+        }
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "id": "nc-001",
+      "reason": "parse-error-boilerplate",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 49,
+          "end_line": 55
+        },
+        {
+          "file": "partial1.rs",
+          "start_line": 33,
+          "end_line": 39
+        }
+      ]
+    },
+    {
+      "id": "nc-002",
+      "reason": "parse-error-boilerplate",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 49,
+          "end_line": 55
+        },
+        {
+          "file": "partial2.rs",
+          "start_line": 26,
+          "end_line": 32
+        }
+      ]
+    }
+  ]
+}

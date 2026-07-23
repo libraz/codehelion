@@ -2,7 +2,10 @@
 //!
 //! Derives Type-1/2/3 clone variant source files, and their exact ground-truth
 //! labels, from a seed source file plus a declarative mutation spec
-//! ([`spec::MutationSpec`]). Label line ranges are computed from the edits the
+//! ([`spec::MutationSpec`]). Besides whole-item clones, a variant can
+//! transplant a fragment of one seed item into a different host item
+//! ([`spec::TransplantSpec`]), producing fragment-level partial-clone labels.
+//! Label line ranges are computed from the edits the
 //! generator actually performs, so the emitted
 //! [`LabelSet`](crate::eval::labels::LabelSet) can never drift from the
 //! variant files. This is a development and CI tool compiled only under the

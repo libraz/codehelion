@@ -144,7 +144,7 @@ fn item_key(trimmed: &str, language: Language) -> Option<String> {
 }
 
 /// Net brace balance of a line, ignoring any trailing line comment.
-fn brace_balance(line: &str) -> i32 {
+pub(crate) fn brace_balance(line: &str) -> i32 {
     let code = line.split("//").next().unwrap_or(line);
     let mut balance = 0;
     for c in code.chars() {

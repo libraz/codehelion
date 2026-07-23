@@ -19,6 +19,11 @@ mutation spec, the generated variant sources and the generated `labels.json`:
   (~5/10/20/30%) for degradation-curve measurement.
 - `rust-literals/` — per-category Type-2 variants (integer, float, string, char
   literal changed one at a time) for literal-normalization measurement.
+- `rust-partial/` — donor fragments transplanted into unrelated host functions
+  for partial-clone measurement: two labelled partial clones (a verbatim Type-1
+  loop body, a renamed Type-2 statement run) plus two `non_clone` idiom copies
+  (a verbatim parse-error block) that mark an idiom-suppression target rather
+  than a structural non-clone.
 - `c/` and `cpp/` — the Rust reference case ported to C and C++.
 
 Within a case:
@@ -27,7 +32,11 @@ Within a case:
   (comment/whitespace for Type-1, identifier/literal substitution for Type-2,
   statement insert/delete with a target change rate for Type-3). A per-item
   `type` override marks an item a variant leaves untouched (an unmutated item is
-  a Type-1 clone of the seed). `language` selects the item scanner
+  a Type-1 clone of the seed). An item may also declare `transplants`, each
+  copying a donor item's fragment (anchored `from`..`to`) into the item after an
+  `after` anchor, optionally renamed, to build partial clones; a labelled
+  transplant emits a fragment-level `clone_pair`, a `non_clone` one instead
+  marks a suppression target. `language` selects the item scanner
   (`rust` | `c` | `cpp`).
 - `labels.json` is the generated `LabelSet`: clone pairs (seed fragment ↔
   variant fragment, with the clone type) plus any deliberate non-clones. Line

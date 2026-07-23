@@ -1,0 +1,73 @@
+{
+  "schema_version": 0,
+  "language": "rust",
+  "seed": "seed.rs",
+  "variants": [
+    {
+      "file": "partial1.rs",
+      "type": "type-3",
+      "header_comment": "Partial-clone variant of seed.rs: a measurement loop body and the parse-error idiom transplanted into unrelated hosts.",
+      "items": [
+        {
+          "item": "fn scan_report",
+          "transplants": [
+            {
+              "donor": "fn measure_lines",
+              "from": "let trimmed = raw.trim();",
+              "to": "longest = longest.max(width);",
+              "after": "seen += raw.len() as u32;",
+              "labelled": true,
+              "type": "type-1"
+            }
+          ]
+        },
+        {
+          "item": "fn count_valid",
+          "transplants": [
+            {
+              "donor": "fn tally_input",
+              "from": "let value = match line.parse::<i64>() {",
+              "to": "};",
+              "after": "let value = i64::from(!line.is_empty());",
+              "non_clone": "parse-error-boilerplate"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "partial2.rs",
+      "type": "type-3",
+      "header_comment": "Partial-clone variant of seed.rs: a renamed checksum statement run and the parse-error idiom transplanted into unrelated hosts.",
+      "items": [
+        {
+          "item": "fn merge_batches",
+          "transplants": [
+            {
+              "donor": "fn checksum_records",
+              "from": "let mut acc = 1;",
+              "to": "*digest ^= acc;",
+              "after": "merged ^= *state;",
+              "labelled": true,
+              "type": "type-2",
+              "rename": { "acc": "blend", "digest": "state", "record": "entry", "records": "entries" },
+              "literals": { "7": "9" }
+            }
+          ]
+        },
+        {
+          "item": "fn sum_marked",
+          "transplants": [
+            {
+              "donor": "fn tally_input",
+              "from": "let value = match line.parse::<i64>() {",
+              "to": "};",
+              "after": "let value = line.len() as i64;",
+              "non_clone": "parse-error-boilerplate"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
