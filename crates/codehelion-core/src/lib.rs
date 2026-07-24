@@ -8,6 +8,7 @@
 pub mod discovery;
 pub mod doctor;
 pub mod engine;
+pub mod features;
 pub mod frontend;
 pub mod ir;
 pub mod stable_id;
