@@ -77,6 +77,7 @@ pub enum Format {
 
 /// Arguments for the `scan` subcommand.
 #[derive(Debug, clap::Args)]
+#[allow(clippy::struct_excessive_bools)] // independent CLI switches, not a state machine
 pub struct ScanArgs {
     /// Path to scan.
     #[arg(default_value = ".")]
@@ -105,6 +106,9 @@ pub struct ScanArgs {
     /// Also list suppressed groups, with the reason each was hidden.
     #[arg(long)]
     pub show_suppressed: bool,
+    /// List every group and every member instead of the summarised excerpt.
+    #[arg(long)]
+    pub verbose: bool,
     /// Exit with a non-zero status if any findings are reported.
     #[arg(long)]
     pub fail_on_findings: bool,
@@ -115,6 +119,9 @@ pub struct ScanArgs {
 pub struct ExplainArgs {
     /// Stable finding ID to explain.
     pub finding_id: String,
+    /// Output format for the detail view.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
     /// Audit-database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,

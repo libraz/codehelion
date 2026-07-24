@@ -209,6 +209,7 @@ dependencies = [
  "ignore",
  "predicates",
  "serde",
+ "serde_json",
  "tempfile",
  "toml",
 ]

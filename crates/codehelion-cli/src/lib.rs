@@ -19,6 +19,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod report;
 pub mod scan;
 pub mod suppress;
 
@@ -31,7 +32,7 @@ use codehelion_core::doctor;
 use codehelion_store::Store;
 
 use crate::cli::{
-    BaselineAction, CacheAction, Cli, Command, ConfigAction, ExplainArgs, Mode, ScanArgs,
+    BaselineAction, CacheAction, Cli, Command, ConfigAction, ExplainArgs, Format, Mode, ScanArgs,
 };
 use crate::config::ConfigSource;
 
@@ -101,6 +102,9 @@ fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
 }
 
 /// Look one occurrence up by its stable finding id and print its detail.
+///
+/// Both output formats render the same [`report::FindingDetail`] value, in
+/// the shape a scan report's member entries use.
 fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
     let path = resolve_db(args.db.as_deref())?;
     if !path.is_file() {
@@ -110,40 +114,35 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
         );
     }
     let store = Store::open(&path)?;
-    let Some(detail) = store.occurrence(&args.finding_id)? else {
+    let Some(occurrence) = store.occurrence(&args.finding_id)? else {
         bail!(
             "no occurrence with finding id {} in {}",
             args.finding_id,
             path.display()
         );
     };
-    writeln!(out, "finding {}", detail.member.finding_hex)?;
-    writeln!(
-        out,
-        "  location: {}:{}-{}",
-        detail.member.file_path,
-        detail.member.start_line.unwrap_or(0),
-        detail.member.end_line.unwrap_or(0),
-    )?;
-    if let Some(name) = &detail.member.unit_name {
-        writeln!(out, "  unit: {name}")?;
+    let line = |value: Option<i64>| u32::try_from(value.unwrap_or(0)).unwrap_or(0);
+    let detail = report::FindingDetail {
+        member: report::Member {
+            finding_id: occurrence.member.finding_hex,
+            file: occurrence.member.file_path,
+            start_line: line(occurrence.member.start_line),
+            end_line: line(occurrence.member.end_line),
+            unit: occurrence.member.unit_name,
+            tokens: u64::try_from(occurrence.member.token_count).unwrap_or(0),
+            canonical: occurrence.member.is_canonical,
+        },
+        group: report::GroupRef {
+            fingerprint: occurrence.group_fingerprint_hex,
+            clone_type: occurrence.clone_type,
+            confidence: occurrence.score,
+        },
+        scan_run: occurrence.scan_run_id,
+    };
+    match args.format {
+        Format::Json => write!(out, "{}", detail.to_json()?)?,
+        Format::Text => detail.render_text(out)?,
     }
-    writeln!(out, "  tokens: {}", detail.member.token_count)?;
-    writeln!(
-        out,
-        "  canonical: {}",
-        if detail.member.is_canonical {
-            "yes"
-        } else {
-            "no"
-        }
-    )?;
-    writeln!(
-        out,
-        "  group: {} ({}, score {:.2})",
-        detail.group_fingerprint_hex, detail.clone_type, detail.score
-    )?;
-    writeln!(out, "  scan run: {}", detail.scan_run_id)?;
     Ok(Outcome::Success)
 }
 
@@ -280,7 +279,6 @@ fn resolve_db(flag: Option<&Path>) -> Result<PathBuf> {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::cli::{Format, ScanArgs};
 
     fn scan_args(mode: Mode) -> ScanArgs {
         ScanArgs {
@@ -293,6 +291,7 @@ mod tests {
             jobs: None,
             db: None,
             show_suppressed: false,
+            verbose: false,
             fail_on_findings: false,
         }
     }

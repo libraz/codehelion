@@ -12,7 +12,7 @@
 //! all surface as counts or notes, never as silent omissions.
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -32,10 +32,8 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use crate::Outcome;
 use crate::cli::{Format, ScanArgs};
 use crate::config::{self, Config, LiteralNormalization};
+use crate::report::{self, Report};
 use crate::suppress;
-
-/// Number of groups the text report lists in detail.
-const REPORT_GROUP_LIMIT: usize = 10;
 
 /// One lexed source file, ready for the engine.
 struct LexedSource {
@@ -48,6 +46,8 @@ struct LexedSource {
     unit_lines: Vec<(u32, u32)>,
     /// 1-based lines carrying an inline suppression marker.
     marker_lines: Vec<u32>,
+    /// Source lines in the file.
+    lines: u64,
     diagnostics: usize,
 }
 
@@ -60,9 +60,6 @@ struct LexedSource {
 /// output fails. Per-file problems (unreadable or malformed sources) are
 /// counted and reported instead of failing the scan.
 pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
-    if args.format == Format::Json {
-        bail!("JSON reports are not yet implemented; use --format text");
-    }
     let started_at = rfc3339_now();
     let root = args
         .path
@@ -121,11 +118,13 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         .collect();
 
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
+    let finished_at = rfc3339_now();
     let run_id = record(
         &root,
         &cfg,
         &db_path,
         &started_at,
+        &finished_at,
         &discovered.build_variant,
         &lexed,
         &contexts,
@@ -135,33 +134,233 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         &group_suppressed,
     )?;
 
-    let render = RenderContext {
+    let model = build_report(&BuildInputs {
         root: &root,
-        lexed: &lexed,
+        db_path: &db_path,
+        run_id,
+        started_at: &started_at,
+        finished_at: &finished_at,
         discovered: &discovered,
         glob_excluded,
         unreadable,
+        lexed: &lexed,
         report: &report,
         ids: &ids,
         rules: &rules,
         group_suppressed: &group_suppressed,
-        show_suppressed: args.show_suppressed,
-        db_path: &db_path,
-        run_id,
-    };
-    write_report(args.output.as_deref(), out, &render)?;
+    });
+    write_report(args, out, &model)?;
 
-    let visible = report
+    let visible = model
         .groups
         .iter()
-        .zip(&group_suppressed)
-        .filter(|(group, rule)| group.suppressed.is_none() && rule.is_none())
+        .filter(|group| group.suppressed.is_none())
         .count();
     if args.fail_on_findings && visible > 0 {
         Ok(Outcome::FindingsPresent)
     } else {
         Ok(Outcome::Success)
     }
+}
+
+/// Everything [`build_report`] needs from the pipeline.
+struct BuildInputs<'a> {
+    root: &'a Path,
+    db_path: &'a Path,
+    run_id: i64,
+    started_at: &'a str,
+    finished_at: &'a str,
+    discovered: &'a DiscoveryReport,
+    glob_excluded: usize,
+    unreadable: u64,
+    lexed: &'a [LexedSource],
+    report: &'a EngineReport,
+    ids: &'a [GroupIds],
+    rules: &'a suppress::Rules,
+    group_suppressed: &'a [Option<usize>],
+}
+
+/// Assemble the report model both output formats render from. Groups are
+/// ordered by priority descending, fingerprint bytes ascending on ties, so
+/// every view is stable across reruns.
+fn build_report(inputs: &BuildInputs<'_>) -> Report {
+    let count = |language: Language| {
+        u64::try_from(
+            inputs
+                .lexed
+                .iter()
+                .filter(|file| file.language == language)
+                .count(),
+        )
+        .unwrap_or(u64::MAX)
+    };
+    let count_groups = |predicate: &dyn Fn(usize) -> bool| {
+        u64::try_from(
+            (0..inputs.report.groups.len())
+                .filter(|i| predicate(*i))
+                .count(),
+        )
+        .unwrap_or(u64::MAX)
+    };
+    let as_u64 = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+
+    let variant = &inputs.discovered.build_variant;
+    let mut order: Vec<usize> = (0..inputs.report.groups.len()).collect();
+    order.sort_by(|a, b| {
+        let (pa, pb) = (
+            final_priority(&inputs.report.groups[*a]),
+            final_priority(&inputs.report.groups[*b]),
+        );
+        pb.total_cmp(&pa)
+            .then_with(|| inputs.ids[*a].fingerprint.cmp(&inputs.ids[*b].fingerprint))
+    });
+
+    Report {
+        schema_version: report::SCHEMA_VERSION,
+        run: report::RunInfo {
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            mode: variant.mode.name().to_string(),
+            root: inputs.root.display().to_string(),
+            started_at: inputs.started_at.to_string(),
+            finished_at: inputs.finished_at.to_string(),
+            build_variant: report::BuildVariantInfo {
+                mode: variant.mode.name().to_string(),
+                languages: variant
+                    .languages
+                    .enabled()
+                    .into_iter()
+                    .map(|language| language.name().to_string())
+                    .collect(),
+                normalization_version: variant.normalization_version,
+                fingerprint: variant.fingerprint(),
+            },
+            detector_versions: detector_versions()
+                .into_iter()
+                .map(|(component, version)| report::DetectorVersion { component, version })
+                .collect(),
+            database: inputs.db_path.display().to_string(),
+            run_id: inputs.run_id,
+        },
+        summary: report::Summary {
+            files: report::FileCounts {
+                total: as_u64(inputs.lexed.len()),
+                rust: count(Language::Rust),
+                c: count(Language::C),
+                cpp: count(Language::Cpp),
+            },
+            lines: inputs.lexed.iter().map(|file| file.lines).sum(),
+            tokens: as_u64(inputs.report.stats.tokens),
+            lexer_diagnostics: as_u64(inputs.lexed.iter().map(|file| file.diagnostics).sum()),
+            excluded: report::ExcludedCounts {
+                generated: as_u64(inputs.discovered.suppressed_generated.len()),
+                by_glob: as_u64(inputs.glob_excluded),
+                skipped: inputs.discovered.skipped.total() + inputs.unreadable,
+            },
+            groups: report::GroupCounts {
+                total: as_u64(inputs.report.groups.len()),
+                type_1: count_groups(&|i| inputs.report.groups[i].clone_type == CloneType::Type1),
+                type_2: count_groups(&|i| inputs.report.groups[i].clone_type == CloneType::Type2),
+            },
+            suppressed: report::SuppressedCounts {
+                noise: count_groups(&|i| inputs.report.groups[i].suppressed.is_some()),
+                by_rule: count_groups(&|i| {
+                    inputs.report.groups[i].suppressed.is_none()
+                        && inputs.group_suppressed[i].is_some()
+                }),
+            },
+            pair_budget_exhausted: inputs.report.stats.pair_budget_exhausted,
+        },
+        groups: order
+            .iter()
+            .map(|&index| build_group(inputs, index))
+            .collect(),
+    }
+}
+
+/// One group of the report model, with its suppression cause resolved.
+fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
+    let group = &inputs.report.groups[index];
+    let suppressed = group.suppressed.map_or_else(
+        || {
+            inputs.group_suppressed[index].map(|rule| {
+                let row = &inputs.rules.rows[rule];
+                report::Suppression {
+                    kind: report::SuppressionKind::Rule,
+                    reason: None,
+                    scope: Some(row.scope.clone()),
+                    pattern: Some(row.pattern.clone()),
+                }
+            })
+        },
+        |reason| {
+            Some(report::Suppression {
+                kind: report::SuppressionKind::Noise,
+                reason: Some(reason.name().to_string()),
+                scope: None,
+                pattern: None,
+            })
+        },
+    );
+    report::Group {
+        fingerprint: inputs.ids[index].fingerprint.to_hex(),
+        clone_type: group.clone_type.name().to_string(),
+        confidence: group.score,
+        priority: report::Priority {
+            value: final_priority(group),
+            largest_member_tokens: u64::try_from(group_size(group)).unwrap_or(u64::MAX),
+            extra_instances: u64::try_from(group.members.len().saturating_sub(1))
+                .unwrap_or(u64::MAX),
+            similarity: group.score,
+        },
+        suppressed,
+        members: group
+            .members
+            .iter()
+            .zip(&inputs.ids[index].members)
+            .enumerate()
+            .map(|(position, (instance, member_ids))| {
+                let source = &inputs.lexed[instance.file];
+                report::Member {
+                    finding_id: member_ids.finding.to_hex(),
+                    file: source.relative_path.clone(),
+                    start_line: instance.start_line,
+                    end_line: instance.end_line,
+                    unit: instance
+                        .unit
+                        .and_then(|unit| source.units[unit].name.clone()),
+                    tokens: u64::try_from(instance.token_end - instance.token_start)
+                        .unwrap_or(u64::MAX),
+                    canonical: position == 0,
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Render the model in the requested format, to `--output` when given,
+/// otherwise to `out`. Colour is used only for text going to a terminal.
+fn write_report(args: &ScanArgs, out: &mut impl Write, model: &Report) -> Result<()> {
+    let text = match args.format {
+        Format::Json => model.to_json().context("serializing the JSON report")?,
+        Format::Text => {
+            let options = report::TextOptions {
+                verbose: args.verbose,
+                color: args.output.is_none() && std::io::stdout().is_terminal(),
+                show_suppressed: args.show_suppressed,
+            };
+            let mut buffer = Vec::new();
+            model.render_text(options, &mut buffer)?;
+            String::from_utf8(buffer).context("rendering the text report")?
+        }
+    };
+    match args.output.as_deref() {
+        Some(path) => {
+            std::fs::write(path, &text).with_context(|| format!("writing {}", path.display()))?;
+            writeln!(out, "wrote {}", path.display())?;
+        }
+        None => out.write_all(text.as_bytes())?,
+    }
+    Ok(())
 }
 
 /// The rule suppressing a whole group: present only when *every* member is
@@ -326,6 +525,7 @@ fn lex_one(source: &SourceUnit) -> Option<LexedSource> {
         units: file.units,
         unit_lines,
         marker_lines: suppress::marker_lines(&text),
+        lines: u64::try_from(text.lines().count()).unwrap_or(u64::MAX),
         diagnostics: file.diagnostics.len(),
     })
 }
@@ -353,6 +553,7 @@ fn record(
     cfg: &Config,
     db_path: &Path,
     started_at: &str,
+    finished_at: &str,
     variant: &BuildVariant,
     lexed: &[LexedSource],
     contexts: &[FileContext<'_>],
@@ -365,13 +566,12 @@ fn record(
     let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
     let detector_versions = detector_versions();
     let root_path = root.to_string_lossy();
-    let finished_at = rfc3339_now();
     let snapshot = Snapshot {
         root_path: &root_path,
         tool_version: env!("CARGO_PKG_VERSION"),
         config_hash: config_hash.as_str(),
         started_at,
-        finished_at: &finished_at,
+        finished_at,
         variant,
         detector_versions: &detector_versions,
         suppressions: rules.rows.clone(),
@@ -494,216 +694,6 @@ fn snapshot_rows(
         })
         .collect();
     (units, groups)
-}
-
-/// Everything the text report needs.
-struct RenderContext<'a> {
-    root: &'a Path,
-    lexed: &'a [LexedSource],
-    discovered: &'a DiscoveryReport,
-    glob_excluded: usize,
-    unreadable: u64,
-    report: &'a EngineReport,
-    ids: &'a [GroupIds],
-    rules: &'a suppress::Rules,
-    group_suppressed: &'a [Option<usize>],
-    show_suppressed: bool,
-    db_path: &'a Path,
-    run_id: i64,
-}
-
-impl RenderContext<'_> {
-    /// Whether the group at `index` is hidden from the default listing.
-    fn is_suppressed(&self, index: usize) -> bool {
-        self.report.groups[index].suppressed.is_some() || self.group_suppressed[index].is_some()
-    }
-
-    /// Why the group at `index` is suppressed, for the report.
-    fn suppression_label(&self, index: usize) -> String {
-        self.report.groups[index].suppressed.map_or_else(
-            || self.group_suppressed[index].map_or_else(String::new, |rule| self.rules.label(rule)),
-            |reason| format!("{} noise", reason.name()),
-        )
-    }
-}
-
-/// Render the report to `--output` when given, otherwise to `out`.
-fn write_report(
-    output: Option<&Path>,
-    out: &mut impl Write,
-    render: &RenderContext<'_>,
-) -> Result<()> {
-    let mut text = Vec::new();
-    render_summary(&mut text, render)?;
-    render_groups(&mut text, render)?;
-    match output {
-        Some(path) => {
-            std::fs::write(path, &text).with_context(|| format!("writing {}", path.display()))?;
-            writeln!(out, "wrote {}", path.display())?;
-        }
-        None => out.write_all(&text)?,
-    }
-    Ok(())
-}
-
-fn render_summary(out: &mut impl Write, ctx: &RenderContext<'_>) -> Result<()> {
-    let count = |language: Language| {
-        ctx.lexed
-            .iter()
-            .filter(|file| file.language == language)
-            .count()
-    };
-    writeln!(out, "codehelion scan (fast mode)")?;
-    writeln!(out, "  root: {}", ctx.root.display())?;
-    writeln!(
-        out,
-        "  files: {} analysed (rust {}, c {}, cpp {})",
-        ctx.lexed.len(),
-        count(Language::Rust),
-        count(Language::C),
-        count(Language::Cpp),
-    )?;
-    writeln!(
-        out,
-        "  excluded: {} generated, {} by glob, {} skipped",
-        ctx.discovered.suppressed_generated.len(),
-        ctx.glob_excluded,
-        ctx.discovered.skipped.total() + ctx.unreadable,
-    )?;
-    let diagnostics: usize = ctx.lexed.iter().map(|file| file.diagnostics).sum();
-    writeln!(
-        out,
-        "  tokens: {}; lexer diagnostics: {diagnostics}",
-        ctx.report.stats.tokens
-    )?;
-    let type1 = clone_type_count(ctx.report, CloneType::Type1);
-    let type2 = clone_type_count(ctx.report, CloneType::Type2);
-    let noise = ctx
-        .report
-        .groups
-        .iter()
-        .filter(|group| group.suppressed.is_some())
-        .count();
-    let by_rule = ctx
-        .report
-        .groups
-        .iter()
-        .zip(ctx.group_suppressed)
-        .filter(|(group, rule)| group.suppressed.is_none() && rule.is_some())
-        .count();
-    writeln!(
-        out,
-        "  clone groups: {} (type-1 {type1}, type-2 {type2}; suppressed: {noise} noise, \
-         {by_rule} by rule)",
-        ctx.report.groups.len(),
-    )?;
-    writeln!(
-        out,
-        "  snapshot: run {} in {}",
-        ctx.run_id,
-        ctx.db_path.display()
-    )?;
-    if ctx.report.stats.pair_budget_exhausted {
-        writeln!(
-            out,
-            "  note: the candidate-pair budget was exhausted; results may be incomplete"
-        )?;
-    }
-    Ok(())
-}
-
-fn clone_type_count(report: &EngineReport, clone_type: CloneType) -> usize {
-    report
-        .groups
-        .iter()
-        .filter(|group| group.clone_type == clone_type)
-        .count()
-}
-
-/// List the top unsuppressed groups: priority descending, fingerprint bytes
-/// ascending on ties, so the listing is stable across reruns. With
-/// `--show-suppressed`, a second section lists suppressed groups with the
-/// reason each was hidden.
-fn render_groups(out: &mut impl Write, ctx: &RenderContext<'_>) -> Result<()> {
-    let (visible, suppressed): (Vec<usize>, Vec<usize>) =
-        (0..ctx.report.groups.len()).partition(|index| !ctx.is_suppressed(*index));
-
-    if !visible.is_empty() {
-        let ordered = by_priority(&visible, ctx);
-        writeln!(out)?;
-        writeln!(out, "top groups by priority:")?;
-        for index in ordered.iter().take(REPORT_GROUP_LIMIT) {
-            render_group(out, ctx, *index, None)?;
-        }
-        if ordered.len() > REPORT_GROUP_LIMIT {
-            writeln!(
-                out,
-                "  ... and {} more groups",
-                ordered.len() - REPORT_GROUP_LIMIT
-            )?;
-        }
-    }
-
-    if ctx.show_suppressed && !suppressed.is_empty() {
-        let ordered = by_priority(&suppressed, ctx);
-        writeln!(out)?;
-        writeln!(out, "suppressed groups:")?;
-        for index in &ordered {
-            let label = ctx.suppression_label(*index);
-            render_group(out, ctx, *index, Some(&label))?;
-        }
-    }
-    Ok(())
-}
-
-/// Order group indices by priority descending, fingerprint ascending on ties.
-fn by_priority(indices: &[usize], ctx: &RenderContext<'_>) -> Vec<usize> {
-    let mut ordered = indices.to_vec();
-    ordered.sort_by(|a, b| {
-        let (pa, pb) = (
-            final_priority(&ctx.report.groups[*a]),
-            final_priority(&ctx.report.groups[*b]),
-        );
-        pb.total_cmp(&pa)
-            .then_with(|| ctx.ids[*a].fingerprint.cmp(&ctx.ids[*b].fingerprint))
-    });
-    ordered
-}
-
-/// Render one group: the priority with its inputs spelled out, then every
-/// member with its anchor.
-fn render_group(
-    out: &mut impl Write,
-    ctx: &RenderContext<'_>,
-    index: usize,
-    suppressed_as: Option<&str>,
-) -> Result<()> {
-    let group = &ctx.report.groups[index];
-    let marker = suppressed_as.map_or_else(String::new, |label| format!(" [suppressed: {label}]"));
-    writeln!(
-        out,
-        "  {} {} priority {:.1} ({} tokens x {} extra x {:.2} similarity){marker}",
-        ctx.ids[index].fingerprint.to_hex(),
-        group.clone_type.name(),
-        final_priority(group),
-        group_size(group),
-        group.members.len().saturating_sub(1),
-        group.score,
-    )?;
-    for (position, member) in group.members.iter().enumerate() {
-        let source = &ctx.lexed[member.file];
-        let unit_name = member
-            .unit
-            .and_then(|unit| source.units[unit].name.as_deref())
-            .map_or_else(String::new, |name| format!(" ({name})"));
-        let canonical = if position == 0 { " [canonical]" } else { "" };
-        writeln!(
-            out,
-            "    {}:{}-{}{unit_name}{canonical}",
-            source.relative_path, member.start_line, member.end_line,
-        )?;
-    }
-    Ok(())
 }
 
 /// The largest member's token count, used as the group's reported size.

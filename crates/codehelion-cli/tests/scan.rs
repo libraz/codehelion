@@ -266,15 +266,131 @@ fn an_inline_marker_suppresses_the_next_unit() {
     );
 }
 
+/// Run `scan --format json` in `root` and parse the produced document.
+fn scan_json(root: &Path) -> serde_json::Value {
+    let output = cmd()
+        .current_dir(root)
+        .args(["scan", ".", "--format", "json"])
+        .output()
+        .expect("run scan");
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice(&output.stdout).expect("stdout is one JSON document")
+}
+
 #[test]
-fn json_format_is_explicitly_unsupported() {
+fn json_reports_follow_the_versioned_schema() {
     let dir = fixture();
+    let value = scan_json(dir.path());
+
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["run"]["mode"], "fast");
+    assert_eq!(value["run"]["build_variant"]["mode"], "fast");
+    assert!(value["run"]["started_at"].as_str().unwrap().ends_with('Z'));
+    assert!(
+        value["run"]["detector_versions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["component"] == "fp-schema")
+    );
+    assert_eq!(value["summary"]["files"]["total"], 5);
+    assert!(value["summary"]["lines"].as_u64().unwrap() > 0);
+
+    // Deterministic listing: priority descending across the whole document.
+    let groups = value["groups"].as_array().unwrap();
+    assert!(!groups.is_empty());
+    let priorities: Vec<f64> = groups
+        .iter()
+        .map(|group| group["priority"]["value"].as_f64().unwrap())
+        .collect();
+    assert!(priorities.windows(2).all(|pair| pair[0] >= pair[1]));
+    for group in groups {
+        assert_eq!(group["suppressed"], serde_json::Value::Null);
+        let members = group["members"].as_array().unwrap();
+        assert!(members.len() >= 2);
+        assert_eq!(members[0]["canonical"], true);
+        assert_eq!(members[0]["finding_id"].as_str().unwrap().len(), 32);
+    }
+
+    // The JSON members carry exactly the finding ids the snapshot recorded.
+    let store = open_store(dir.path());
+    let run = store.latest_run().unwrap().expect("a recorded run");
+    let stored: std::collections::BTreeSet<String> = store
+        .run_groups(run.id)
+        .unwrap()
+        .iter()
+        .flat_map(|group| group.members.iter().map(|m| m.finding_hex.clone()))
+        .collect();
+    let reported: std::collections::BTreeSet<String> = groups
+        .iter()
+        .flat_map(|group| {
+            group["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["finding_id"].as_str().unwrap().to_string())
+        })
+        .collect();
+    assert_eq!(stored, reported);
+}
+
+#[test]
+fn json_reports_are_deterministic_across_reruns() {
+    let dir = fixture();
+    let mut documents = Vec::new();
+    for _ in 0..2 {
+        let mut value = scan_json(dir.path());
+        // Null out the only fields that legitimately differ between runs.
+        let run = value["run"].as_object_mut().unwrap();
+        for key in ["started_at", "finished_at", "run_id"] {
+            run.insert(key.to_string(), serde_json::Value::Null);
+        }
+        documents.push(value);
+    }
+    assert_eq!(documents[0], documents[1]);
+}
+
+#[test]
+fn json_suppression_status_names_the_matching_rule() {
+    let dir = fixture();
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[suppression]\npaths = [\"src/*.c\"]\n",
+    )
+    .unwrap();
+    let value = scan_json(dir.path());
+    let suppressed: Vec<_> = value["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|group| !group["suppressed"].is_null())
+        .collect();
+    assert_eq!(suppressed.len(), 1);
+    assert_eq!(suppressed[0]["suppressed"]["kind"], "rule");
+    assert_eq!(suppressed[0]["suppressed"]["scope"], "path_glob");
+    assert_eq!(suppressed[0]["suppressed"]["pattern"], "src/*.c");
+}
+
+#[test]
+fn default_reports_truncate_members_and_verbose_lists_them_all() {
+    let dir = fixture();
+    // Grow the verbatim Rust group to 9 members (a.rs, b.rs + 7 copies).
+    for index in 0..7 {
+        std::fs::write(dir.path().join(format!("src/copy{index}.rs")), CHECKSUM_RS).unwrap();
+    }
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--format", "json"])
+        .args(["scan", "."])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("not yet implemented"));
+        .success()
+        .stdout(predicate::str::contains("... and 4 more occurrences"));
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--verbose"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("more occurrences").not())
+        .stdout(predicate::str::contains("src/copy6.rs"));
 }
 
 #[test]
@@ -327,6 +443,20 @@ fn explain_looks_up_a_recorded_finding() {
         .success()
         .stdout(predicate::str::contains(&finding_hex))
         .stdout(predicate::str::contains(&file_path));
+
+    // The JSON detail view shares the same shape as a report member.
+    let output = cmd()
+        .current_dir(dir.path())
+        .args(["explain", &finding_hex, "--format", "json"])
+        .output()
+        .expect("run explain");
+    assert!(output.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+    assert_eq!(value["finding_id"], finding_hex.as_str());
+    assert_eq!(value["file"], file_path.as_str());
+    assert_eq!(value["group"]["fingerprint"].as_str().unwrap().len(), 32);
+    assert!(value["scan_run"].as_i64().unwrap() >= 1);
 
     // Well-formed but unknown id: a clear error, not silence.
     cmd()

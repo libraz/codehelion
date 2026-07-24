@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v1.schema.json",
+  "title": "codehelion scan report",
+  "description": "Machine-readable result of one codehelion scan. A change that breaks field compatibility increments schema_version and ships a new schema document; purely additive fields keep the version.",
+  "type": "object",
+  "required": ["schema_version", "run", "summary", "groups"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run": { "$ref": "#/$defs/run" },
+    "summary": { "$ref": "#/$defs/summary" },
+    "groups": {
+      "type": "array",
+      "description": "Every detected clone group, suppressed ones included, ordered by priority descending with the fingerprint as a tie-break.",
+      "items": { "$ref": "#/$defs/group" }
+    }
+  },
+  "$defs": {
+    "hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]+$"
+    },
+    "run": {
+      "type": "object",
+      "required": [
+        "tool_version",
+        "mode",
+        "root",
+        "started_at",
+        "finished_at",
+        "build_variant",
+        "detector_versions",
+        "database",
+        "run_id"
+      ],
+      "properties": {
+        "tool_version": { "type": "string" },
+        "mode": { "type": "string" },
+        "root": { "type": "string", "description": "Absolute path of the scanned directory." },
+        "started_at": { "type": "string", "format": "date-time" },
+        "finished_at": { "type": "string", "format": "date-time" },
+        "build_variant": { "$ref": "#/$defs/build_variant" },
+        "detector_versions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/detector_version" }
+        },
+        "database": { "type": "string", "description": "Path of the audit database the snapshot was recorded in." },
+        "run_id": { "type": "integer", "description": "Row id of the recorded scan run." }
+      }
+    },
+    "build_variant": {
+      "type": "object",
+      "required": ["mode", "languages", "normalization_version", "fingerprint"],
+      "properties": {
+        "mode": { "type": "string" },
+        "languages": { "type": "array", "items": { "type": "string" } },
+        "normalization_version": { "type": "integer" },
+        "fingerprint": { "$ref": "#/$defs/hex" }
+      }
+    },
+    "detector_version": {
+      "type": "object",
+      "required": ["component", "version"],
+      "properties": {
+        "component": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "files",
+        "lines",
+        "tokens",
+        "lexer_diagnostics",
+        "excluded",
+        "groups",
+        "suppressed",
+        "pair_budget_exhausted"
+      ],
+      "properties": {
+        "files": {
+          "type": "object",
+          "required": ["total", "rust", "c", "cpp"],
+          "properties": {
+            "total": { "type": "integer" },
+            "rust": { "type": "integer" },
+            "c": { "type": "integer" },
+            "cpp": { "type": "integer" }
+          }
+        },
+        "lines": { "type": "integer" },
+        "tokens": { "type": "integer" },
+        "lexer_diagnostics": { "type": "integer" },
+        "excluded": {
+          "type": "object",
+          "description": "Files the scan dropped, by cause; nothing is omitted silently.",
+          "required": ["generated", "by_glob", "skipped"],
+          "properties": {
+            "generated": { "type": "integer" },
+            "by_glob": { "type": "integer" },
+            "skipped": { "type": "integer" }
+          }
+        },
+        "groups": {
+          "type": "object",
+          "required": ["total", "type_1", "type_2"],
+          "properties": {
+            "total": { "type": "integer" },
+            "type_1": { "type": "integer" },
+            "type_2": { "type": "integer" }
+          }
+        },
+        "suppressed": {
+          "type": "object",
+          "required": ["noise", "by_rule"],
+          "properties": {
+            "noise": { "type": "integer" },
+            "by_rule": { "type": "integer" }
+          }
+        },
+        "pair_budget_exhausted": {
+          "type": "boolean",
+          "description": "True when the candidate-pair budget ran out and results may be incomplete."
+        }
+      }
+    },
+    "group": {
+      "type": "object",
+      "required": ["fingerprint", "clone_type", "confidence", "priority", "suppressed", "members"],
+      "properties": {
+        "fingerprint": { "$ref": "#/$defs/hex", "description": "Stable clone-group fingerprint." },
+        "clone_type": { "type": "string" },
+        "confidence": { "type": "number", "description": "Minimum pairwise similarity across the group." },
+        "priority": { "$ref": "#/$defs/priority" },
+        "suppressed": {
+          "oneOf": [{ "$ref": "#/$defs/suppression" }, { "type": "null" }],
+          "description": "Null when the group is visible in default reports."
+        },
+        "members": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/$defs/member" }
+        }
+      }
+    },
+    "priority": {
+      "type": "object",
+      "description": "The ranking value together with the inputs it was computed from; the collapsed number never replaces them.",
+      "required": ["value", "largest_member_tokens", "extra_instances", "similarity"],
+      "properties": {
+        "value": { "type": "number" },
+        "largest_member_tokens": { "type": "integer" },
+        "extra_instances": { "type": "integer" },
+        "similarity": { "type": "number" }
+      }
+    },
+    "suppression": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["noise", "rule"] },
+        "reason": { "type": "string", "description": "Engine noise category, present when kind is noise." },
+        "scope": { "type": "string", "description": "Suppression-rule scope, present when kind is rule." },
+        "pattern": { "type": "string", "description": "Suppression-rule pattern, present when kind is rule." }
+      }
+    },
+    "member": {
+      "type": "object",
+      "required": ["finding_id", "file", "start_line", "end_line", "unit", "tokens", "canonical"],
+      "properties": {
+        "finding_id": { "$ref": "#/$defs/hex", "description": "Stable per-occurrence finding identifier." },
+        "file": { "type": "string", "description": "Path relative to the scan root." },
+        "start_line": { "type": "integer" },
+        "end_line": { "type": "integer" },
+        "unit": {
+          "oneOf": [{ "type": "string" }, { "type": "null" }],
+          "description": "Name of the enclosing unit, when anchored to one."
+        },
+        "tokens": { "type": "integer" },
+        "canonical": { "type": "boolean" }
+      }
+    }
+  }
+}

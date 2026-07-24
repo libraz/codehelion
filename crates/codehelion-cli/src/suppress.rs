@@ -86,16 +86,6 @@ impl Rules {
         })
     }
 
-    /// Human-readable label of rule `index`, for the report.
-    pub(crate) fn label(&self, index: usize) -> String {
-        let row = &self.rows[index];
-        match row.scope.as_str() {
-            "path_glob" => format!("path glob {:?}", row.pattern),
-            "inline_comment" => format!("{} marker", row.pattern),
-            other => format!("{other} {:?}", row.pattern),
-        }
-    }
-
     /// Evaluate one file: its path against the globs, and its marker lines
     /// against its unit spans.
     pub(crate) fn evaluate_file(
