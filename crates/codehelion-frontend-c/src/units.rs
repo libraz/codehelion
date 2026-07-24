@@ -170,7 +170,7 @@ fn record_units(tokens: &[Token], pairs: &DelimPairs, dialect: &Dialect) -> Vec<
         let name = tokens[i + 1..open]
             .iter()
             .find(|t| t.kind == TokenKind::Identifier)
-            .map(|t| t.text.clone());
+            .map(|t| t.text.to_string());
         out.push(Unit {
             kind: UnitKind::Record,
             name,
@@ -292,7 +292,7 @@ fn resolve_signature(
                 records,
                 unit_start,
                 name_i,
-                name_token.text.clone(),
+                name_token.text.to_string(),
                 body_open,
             ));
         }

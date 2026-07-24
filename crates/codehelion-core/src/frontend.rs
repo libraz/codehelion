@@ -15,7 +15,119 @@
 //! stable identifiers: fingerprints are built from token kinds and normalized
 //! text, never from a line number or token offset.
 
+use std::borrow::Borrow;
+use std::collections::HashSet;
+use std::fmt;
+use std::ops::Deref;
+use std::sync::Arc;
+
 use crate::discovery::Language;
+
+/// A shared, immutable lexeme.
+///
+/// Token text is stored behind a shared pointer so that every occurrence of
+/// the same lexeme in a file shares one allocation instead of owning a copy;
+/// with millions of tokens in scope this is the difference between hundreds
+/// of megabytes and a few. Equality, ordering and hashing follow the text
+/// content, and the type dereferences to [`str`], so call sites treat it
+/// like a borrowed string.
+#[derive(Debug, Clone, Eq)]
+pub struct Lexeme(Arc<str>);
+
+impl Lexeme {
+    /// The lexeme text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq for Lexeme {
+    fn eq(&self, other: &Self) -> bool {
+        // Interned lexemes of one file share their allocation, so pointer
+        // identity settles most comparisons without touching the bytes.
+        Arc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+    }
+}
+
+impl std::hash::Hash for Lexeme {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Must agree with `str::hash` for `Borrow<str>` lookups.
+        self.0.hash(state);
+    }
+}
+
+impl Deref for Lexeme {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for Lexeme {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for Lexeme {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for Lexeme {
+    fn from(text: &str) -> Self {
+        Self(Arc::from(text))
+    }
+}
+
+impl PartialEq<str> for Lexeme {
+    fn eq(&self, other: &str) -> bool {
+        &*self.0 == other
+    }
+}
+
+impl PartialEq<&str> for Lexeme {
+    fn eq(&self, other: &&str) -> bool {
+        &*self.0 == *other
+    }
+}
+
+impl fmt::Display for Lexeme {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Deduplicating store of [`Lexeme`]s, typically one per lexed file.
+///
+/// Interning the same text twice returns two handles to one allocation. The
+/// interner is an implementation detail of memory layout: it never affects
+/// token equality or fingerprints, which follow text content only.
+#[derive(Debug, Default)]
+pub struct LexemeInterner {
+    known: HashSet<Lexeme>,
+}
+
+impl LexemeInterner {
+    /// Create an empty interner.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the shared lexeme for `text`, allocating it once.
+    pub fn intern(&mut self, text: &str) -> Lexeme {
+        if let Some(found) = self.known.get(text) {
+            return found.clone();
+        }
+        let lexeme = Lexeme::from(text);
+        self.known.insert(lexeme.clone());
+        lexeme
+    }
+}
 
 /// Category of a literal token, used by literal-normalization strategies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +202,7 @@ pub struct Token {
     /// Lexical category.
     pub kind: TokenKind,
     /// The raw lexeme exactly as it appeared in the source.
-    pub text: String,
+    pub text: Lexeme,
     /// Source position, for reporting only.
     pub span: SourceSpan,
 }
@@ -212,6 +324,40 @@ mod tests {
             TokenKind::Literal(LiteralKind::Integer).tag(),
             TokenKind::Literal(LiteralKind::String).tag()
         );
+    }
+
+    #[test]
+    fn interning_shares_one_allocation_per_text() {
+        let mut interner = LexemeInterner::new();
+        let a = interner.intern("alpha");
+        let b = interner.intern("alpha");
+        let c = interner.intern("beta");
+        assert!(Arc::ptr_eq(&a.0, &b.0), "same text must share storage");
+        assert!(!Arc::ptr_eq(&a.0, &c.0));
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn lexeme_equality_and_hash_follow_content_across_interners() {
+        let a = LexemeInterner::new().intern("shared");
+        let b = LexemeInterner::new().intern("shared");
+        assert!(
+            !Arc::ptr_eq(&a.0, &b.0),
+            "distinct interners allocate separately"
+        );
+        assert_eq!(a, b, "equality is by content, not by pointer");
+        let set: HashSet<Lexeme> = [a].into();
+        assert!(set.contains("shared"), "str lookups must hash consistently");
+    }
+
+    #[test]
+    fn lexeme_compares_against_plain_strings() {
+        let lexeme = Lexeme::from("fn");
+        assert_eq!(lexeme, "fn");
+        assert_eq!(lexeme.as_str(), "fn");
+        assert_eq!(lexeme.to_string(), "fn");
+        assert_eq!(lexeme.as_bytes(), b"fn");
     }
 
     #[test]

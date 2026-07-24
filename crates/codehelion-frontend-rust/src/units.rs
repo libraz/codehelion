@@ -112,7 +112,7 @@ fn impl_unit(tokens: &[Token], braces: &HashMap<usize, usize>, i: usize) -> Opti
     let name = tokens[i + 1..open]
         .iter()
         .find(|t| t.kind == TokenKind::Identifier)
-        .map(|t| t.text.clone());
+        .map(|t| t.text.to_string());
     Some(Unit {
         kind: UnitKind::Impl,
         name,
@@ -133,7 +133,7 @@ fn fn_unit(
     let name = tokens
         .get(i + 1)
         .filter(|t| t.kind == TokenKind::Identifier)
-        .map(|t| t.text.clone());
+        .map(|t| t.text.to_string());
     let inside_impl = impl_bodies
         .iter()
         .any(|&(body_open, body_close)| body_open < i && i < body_close);

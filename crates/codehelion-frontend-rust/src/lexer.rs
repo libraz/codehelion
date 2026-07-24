@@ -9,7 +9,7 @@
 //! tokens.
 
 use codehelion_core::frontend::{
-    Diagnostic, DiagnosticKind, LiteralKind, SourceSpan, Token, TokenKind,
+    Diagnostic, DiagnosticKind, LexemeInterner, LiteralKind, SourceSpan, Token, TokenKind,
 };
 
 /// Rust keywords. `true`/`false` are lexed as keywords rather than boolean
@@ -36,12 +36,14 @@ fn is_ident_continue(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-struct Lexer {
+struct Lexer<'s> {
+    source: &'s str,
     chars: Vec<char>,
     byte_at: Vec<usize>,
     i: usize,
     line: u32,
     column: u32,
+    interner: LexemeInterner,
     tokens: Vec<Token>,
     diagnostics: Vec<Diagnostic>,
 }
@@ -54,8 +56,8 @@ struct Mark {
     column: u32,
 }
 
-impl Lexer {
-    fn new(source: &str) -> Self {
+impl<'s> Lexer<'s> {
+    fn new(source: &'s str) -> Self {
         let chars: Vec<char> = source.chars().collect();
         let mut byte_at = Vec::with_capacity(chars.len() + 1);
         let mut byte = 0;
@@ -65,14 +67,21 @@ impl Lexer {
         }
         byte_at.push(source.len());
         Self {
+            source,
             chars,
             byte_at,
             i: 0,
             line: 1,
             column: 1,
+            interner: LexemeInterner::new(),
             tokens: Vec::new(),
             diagnostics: Vec::new(),
         }
+    }
+
+    /// The source text between a mark and the current position.
+    fn text_from(&self, start: Mark) -> &'s str {
+        &self.source[self.byte_at[start.index]..self.byte_at[self.i]]
     }
 
     fn peek(&self, ahead: usize) -> Option<char> {
@@ -110,7 +119,7 @@ impl Lexer {
     }
 
     fn push(&mut self, kind: TokenKind, start: Mark) {
-        let text: String = self.chars[start.index..self.i].iter().collect();
+        let text = self.interner.intern(self.text_from(start));
         self.tokens.push(Token {
             kind,
             text,
@@ -158,6 +167,9 @@ impl Lexer {
             }
             self.consume_punct();
         }
+        // Streams are long-lived (the whole scan holds every file's tokens),
+        // so growth slack is returned to the allocator.
+        self.tokens.shrink_to_fit();
         (self.tokens, self.diagnostics)
     }
 
@@ -385,8 +397,7 @@ impl Lexer {
         while self.peek(0).is_some_and(is_ident_continue) {
             self.bump();
         }
-        let text: String = self.chars[start.index..self.i].iter().collect();
-        let kind = if KEYWORDS.contains(&text.as_str()) {
+        let kind = if KEYWORDS.contains(&self.text_from(start)) {
             TokenKind::Keyword
         } else {
             TokenKind::Identifier
@@ -446,7 +457,7 @@ mod tests {
     }
 
     fn texts(source: &str) -> Vec<String> {
-        lex(source).0.into_iter().map(|t| t.text).collect()
+        lex(source).0.iter().map(|t| t.text.to_string()).collect()
     }
 
     #[test]
@@ -527,7 +538,8 @@ mod tests {
             .collect();
         assert_eq!(pairs[0].0, TokenKind::Identifier);
         assert_eq!(pairs[0].1, "println");
-        assert_eq!(pairs[1], (TokenKind::Punctuation, "!".to_string()));
+        assert_eq!(pairs[1].0, TokenKind::Punctuation);
+        assert_eq!(pairs[1].1, "!");
     }
 
     #[test]

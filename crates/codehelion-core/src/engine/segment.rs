@@ -312,7 +312,7 @@ mod tests {
     fn tok(kind: TokenKind, text: &str) -> Token {
         Token {
             kind,
-            text: text.to_string(),
+            text: text.into(),
             span: SourceSpan {
                 start_byte: 0,
                 end_byte: 0,

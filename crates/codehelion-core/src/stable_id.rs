@@ -438,7 +438,7 @@ mod tests {
             .enumerate()
             .map(|(i, (kind, text))| Token {
                 kind: *kind,
-                text: (*text).to_string(),
+                text: (*text).into(),
                 span: SourceSpan {
                     start_byte: i * 7,
                     end_byte: i * 7 + 1,

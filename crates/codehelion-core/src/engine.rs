@@ -285,7 +285,7 @@ mod tests {
                 };
                 Token {
                     kind,
-                    text: w.to_string(),
+                    text: w.into(),
                     span: SourceSpan {
                         start_byte: i,
                         end_byte: i + 1,

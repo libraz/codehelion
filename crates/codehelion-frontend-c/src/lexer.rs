@@ -16,7 +16,7 @@
 //! strings, digit separators), so the same machinery lexes both C and C++.
 
 use codehelion_core::frontend::{
-    Diagnostic, DiagnosticKind, LiteralKind, SourceSpan, Token, TokenKind,
+    Diagnostic, DiagnosticKind, LexemeInterner, LiteralKind, SourceSpan, Token, TokenKind,
 };
 
 use crate::dialect::Dialect;
@@ -35,8 +35,9 @@ fn is_ident_continue(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-struct Lexer<'d> {
+struct Lexer<'d, 's> {
     dialect: &'d Dialect,
+    source: &'s str,
     chars: Vec<char>,
     byte_at: Vec<usize>,
     i: usize,
@@ -46,6 +47,7 @@ struct Lexer<'d> {
     /// start a preprocessor directive when nothing but whitespace and
     /// comments precede it on its line.
     line_has_token: bool,
+    interner: LexemeInterner,
     tokens: Vec<Token>,
     diagnostics: Vec<Diagnostic>,
 }
@@ -58,8 +60,8 @@ struct Mark {
     column: u32,
 }
 
-impl<'d> Lexer<'d> {
-    fn new(source: &str, dialect: &'d Dialect) -> Self {
+impl<'d, 's> Lexer<'d, 's> {
+    fn new(source: &'s str, dialect: &'d Dialect) -> Self {
         let chars: Vec<char> = source.chars().collect();
         let mut byte_at = Vec::with_capacity(chars.len() + 1);
         let mut byte = 0;
@@ -70,15 +72,22 @@ impl<'d> Lexer<'d> {
         byte_at.push(source.len());
         Self {
             dialect,
+            source,
             chars,
             byte_at,
             i: 0,
             line: 1,
             column: 1,
             line_has_token: false,
+            interner: LexemeInterner::new(),
             tokens: Vec::new(),
             diagnostics: Vec::new(),
         }
+    }
+
+    /// The source text between a mark and the current position.
+    fn text_from(&self, start: Mark) -> &'s str {
+        &self.source[self.byte_at[start.index]..self.byte_at[self.i]]
     }
 
     fn peek(&self, ahead: usize) -> Option<char> {
@@ -116,7 +125,7 @@ impl<'d> Lexer<'d> {
     }
 
     fn push(&mut self, kind: TokenKind, start: Mark) {
-        let text: String = self.chars[start.index..self.i].iter().collect();
+        let text = self.interner.intern(self.text_from(start));
         self.tokens.push(Token {
             kind,
             text,
@@ -200,6 +209,9 @@ impl<'d> Lexer<'d> {
             }
             self.consume_punct();
         }
+        // Streams are long-lived (the whole scan holds every file's tokens),
+        // so growth slack is returned to the allocator.
+        self.tokens.shrink_to_fit();
         (self.tokens, self.diagnostics)
     }
 
@@ -481,8 +493,7 @@ impl<'d> Lexer<'d> {
         while self.peek(0).is_some_and(is_ident_continue) {
             self.bump();
         }
-        let text: String = self.chars[start.index..self.i].iter().collect();
-        let kind = if self.dialect.keywords.contains(&text.as_str()) {
+        let kind = if self.dialect.keywords.contains(&self.text_from(start)) {
             TokenKind::Keyword
         } else {
             TokenKind::Identifier
@@ -531,7 +542,7 @@ mod tests {
     }
 
     fn texts(source: &str) -> Vec<String> {
-        lex_c(source).0.into_iter().map(|t| t.text).collect()
+        lex_c(source).0.iter().map(|t| t.text.to_string()).collect()
     }
 
     #[test]

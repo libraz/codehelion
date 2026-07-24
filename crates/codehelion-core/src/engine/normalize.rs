@@ -110,30 +110,41 @@ fn is_preserved(tokens: &[Token], i: usize) -> bool {
 /// form regardless of its surroundings.
 #[must_use]
 pub fn normalize(tokens: &[Token], literals: LiteralNorm) -> Vec<NormToken<'_>> {
+    let mut out = Vec::new();
+    normalize_into(tokens, literals, &mut out);
+    out
+}
+
+/// [`normalize`] into a caller-owned buffer.
+///
+/// The buffer is cleared first. Callers normalizing millions of fragments
+/// reuse one buffer instead of allocating a vector per fragment.
+pub fn normalize_into<'a>(
+    tokens: &'a [Token],
+    literals: LiteralNorm,
+    out: &mut Vec<NormToken<'a>>,
+) {
+    out.clear();
     let mut names: BTreeMap<&str, u32> = BTreeMap::new();
-    tokens
-        .iter()
-        .enumerate()
-        .map(|(i, token)| {
-            let atom = match token.kind {
-                TokenKind::Identifier if is_preserved(tokens, i) => NormAtom::Text(&token.text),
-                TokenKind::Identifier | TokenKind::Lifetime => {
-                    let next = u32::try_from(names.len()).unwrap_or(u32::MAX);
-                    let n = *names.entry(token.text.as_str()).or_insert(next);
-                    NormAtom::Renamed(n)
-                }
-                TokenKind::Literal(kind) => match literals {
-                    LiteralNorm::Preserve => NormAtom::Text(&token.text),
-                    mode => NormAtom::Literal(literal_class(kind, mode)),
-                },
-                _ => NormAtom::Text(&token.text),
-            };
-            NormToken {
-                tag: token.kind.tag(),
-                atom,
+    out.extend(tokens.iter().enumerate().map(|(i, token)| {
+        let atom = match token.kind {
+            TokenKind::Identifier if is_preserved(tokens, i) => NormAtom::Text(&token.text),
+            TokenKind::Identifier | TokenKind::Lifetime => {
+                let next = u32::try_from(names.len()).unwrap_or(u32::MAX);
+                let n = *names.entry(token.text.as_str()).or_insert(next);
+                NormAtom::Renamed(n)
             }
-        })
-        .collect()
+            TokenKind::Literal(kind) => match literals {
+                LiteralNorm::Preserve => NormAtom::Text(&token.text),
+                mode => NormAtom::Literal(literal_class(kind, mode)),
+            },
+            _ => NormAtom::Text(&token.text),
+        };
+        NormToken {
+            tag: token.kind.tag(),
+            atom,
+        }
+    }));
 }
 
 #[cfg(test)]
@@ -147,7 +158,7 @@ mod tests {
         spec.iter()
             .map(|(kind, text)| Token {
                 kind: *kind,
-                text: (*text).to_string(),
+                text: (*text).into(),
                 span: SourceSpan {
                     start_byte: 0,
                     end_byte: 0,

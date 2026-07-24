@@ -20,14 +20,14 @@
 
 #![allow(clippy::redundant_pub_crate)] // internal helpers reached from the engine root
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::frontend::Token;
 
 use super::fingerprint::{
     kgram_hashes, norm_sequence_hash, raw_sequence_hash, raw_token_hash, winnow,
 };
-use super::normalize::normalize;
+use super::normalize::{NormToken, normalize_into};
 use super::segment::{self, SegmentId};
 use super::{ClonePair, CloneType, EngineConfig, EngineStats, InputFile, Instance};
 
@@ -70,6 +70,12 @@ type Posting = (usize, usize);
 
 /// A fragment occurrence: `(file index, token start, token end)`.
 type FragmentRef = (usize, usize, usize);
+
+/// One pairing class of the raw pass: `(size, hash, postings)`.
+type RawClass<'a> = (usize, u64, &'a [(u64, Posting)]);
+
+/// One pairing class of the fragment pass: `(size, key, members)`.
+type FragmentClass<'a> = (usize, u64, &'a [(u64, FragmentRef)]);
 
 /// A verified Type-2 candidate, before nested-pair filtering.
 #[derive(Debug, Clone, Copy)]
@@ -163,13 +169,16 @@ fn extend(
     (start_a, start_b, end_a - start_a)
 }
 
-/// Drop every run nested inside a larger run of the same file pair.
+/// Drop duplicate runs, then every run nested inside a larger run of the
+/// same file pair.
 ///
 /// Nesting is only possible between runs of the same `(file_a, file_b)` pair
-/// and the set iterates in exactly that order, so the pairwise containment
-/// check stays inside each file-pair bucket instead of scanning all runs.
-fn drop_nested(runs: BTreeSet<Run>) -> Vec<Run> {
-    let all: Vec<Run> = runs.into_iter().collect();
+/// and the sorted order groups exactly those together, so the pairwise
+/// containment check stays inside each file-pair bucket instead of scanning
+/// all runs.
+fn drop_nested(mut all: Vec<Run>) -> Vec<Run> {
+    all.sort_unstable();
+    all.dedup();
     all.chunk_by(|a, b| (a.file_a, a.file_b) == (b.file_a, b.file_b))
         .flat_map(|bucket| {
             bucket.iter().filter(|r| {
@@ -219,8 +228,12 @@ pub(crate) fn raw_pass(
 ) -> Vec<ClonePair> {
     let k = config.min_clone_tokens;
 
-    // Winnowed fingerprint index over per-segment token runs.
-    let mut index: BTreeMap<u64, Vec<Posting>> = BTreeMap::new();
+    // Winnowed fingerprint index over per-segment token runs, kept as one
+    // flat posting list instead of a tree of per-hash vectors: with millions
+    // of fingerprints the per-hash allocations dominate peak memory. The
+    // stable sort groups equal hashes while preserving discovery order
+    // within each group, exactly as the per-hash vectors did.
+    let mut flat: Vec<(u64, Posting)> = Vec::new();
     for (fi, file) in files.iter().enumerate() {
         let hashes: Vec<u64> = file.tokens.iter().map(raw_token_hash).collect();
         let seg = &segments[fi];
@@ -232,38 +245,39 @@ pub(crate) fn raw_pass(
             if i - start >= k {
                 let grams = kgram_hashes(&hashes[start..i], k);
                 for (h, gi) in winnow(&grams, config.winnow_window) {
-                    index.entry(h).or_default().push((fi, start + gi));
+                    flat.push((h, (fi, start + gi)));
                     stats.raw_fingerprints += 1;
                 }
             }
             start = i;
         }
     }
-    stats.raw_distinct = index.len();
+    flat.sort_by_key(|&(h, _)| h);
 
     // Stop-fingerprint suppression before any pairing.
-    let mut kept: Vec<(usize, u64, Vec<Posting>)> = Vec::new();
-    for (h, postings) in index {
+    let mut kept: Vec<RawClass<'_>> = Vec::new();
+    for postings in flat.chunk_by(|a, b| a.0 == b.0) {
+        stats.raw_distinct += 1;
         if postings.len() > config.posting_cap {
             stats.stop_fingerprints += 1;
             stats.stop_postings += postings.len();
         } else {
-            kept.push((postings.len(), h, postings));
+            kept.push((postings.len(), postings[0].0, postings));
         }
     }
     // Rarest fingerprints first: highest signal per candidate pair.
     kept.sort_by_key(|&(len, h, _)| (len, h));
 
-    let mut runs: BTreeSet<Run> = BTreeSet::new();
-    'seeding: for (_, _, postings) in &kept {
+    let mut runs: Vec<Run> = Vec::new();
+    'seeding: for &(_, _, postings) in &kept {
         for x in 0..postings.len() {
             for y in (x + 1)..postings.len() {
                 if !budget.take() {
                     break 'seeding;
                 }
                 stats.seed_candidates += 1;
-                let (mut fa, mut pa) = postings[x];
-                let (mut fb, mut pb) = postings[y];
+                let (mut fa, mut pa) = postings[x].1;
+                let (mut fb, mut pb) = postings[y].1;
                 if (fb, pb) < (fa, pa) {
                     std::mem::swap(&mut fa, &mut fb);
                     std::mem::swap(&mut pa, &mut pb);
@@ -284,7 +298,7 @@ pub(crate) fn raw_pass(
                 if fa == fb && a_start + len > b_start {
                     continue; // self-overlapping repetition
                 }
-                runs.insert(Run {
+                runs.push(Run {
                     file_a: fa,
                     file_b: fb,
                     a_start,
@@ -313,12 +327,18 @@ pub(crate) fn raw_pass(
 }
 
 /// Index every candidate fragment by its normalized content.
+///
+/// The result is one flat list sorted by class key; the stable sort keeps
+/// members of one class in emission order. One list allocation replaces a
+/// tree with a vector per class, which at millions of fragments is the
+/// difference between one arena-sized block and pathological heap churn.
 fn fragment_classes(
     files: &[InputFile<'_>],
     config: &EngineConfig,
     stats: &mut EngineStats,
-) -> BTreeMap<u64, Vec<FragmentRef>> {
-    let mut classes: BTreeMap<u64, Vec<FragmentRef>> = BTreeMap::new();
+) -> Vec<(u64, FragmentRef)> {
+    let mut flat: Vec<(u64, FragmentRef)> = Vec::new();
+    let mut norm: Vec<NormToken<'_>> = Vec::new();
     for (fi, file) in files.iter().enumerate() {
         let braces = segment::brace_pairs(file.tokens);
         for fragment in segment::fragments(
@@ -330,36 +350,38 @@ fn fragment_classes(
         ) {
             stats.fragments += 1;
             let slice = &file.tokens[fragment.start..fragment.end];
-            let key = norm_sequence_hash(&normalize(slice, config.literals));
-            classes
-                .entry(key)
-                .or_default()
-                .push((fi, fragment.start, fragment.end));
+            normalize_into(slice, config.literals, &mut norm);
+            let key = norm_sequence_hash(&norm);
+            flat.push((key, (fi, fragment.start, fragment.end)));
         }
     }
-    classes
+    flat.sort_by_key(|&(key, _)| key);
+    flat
 }
 
 /// Verify a class against hash collisions: every member must normalize
 /// identically to the first. Mismatches are evicted and counted.
-fn verified_members(
-    files: &[InputFile<'_>],
-    members: &[FragmentRef],
+fn verified_members<'a>(
+    files: &[InputFile<'a>],
+    members: &[(u64, FragmentRef)],
     config: &EngineConfig,
     stats: &mut EngineStats,
+    reference: &mut Vec<NormToken<'a>>,
+    candidate: &mut Vec<NormToken<'a>>,
 ) -> Vec<FragmentRef> {
-    let (fi, s, e) = members[0];
-    let reference = normalize(&files[fi].tokens[s..e], config.literals);
+    let (fi, s, e) = members[0].1;
+    normalize_into(&files[fi].tokens[s..e], config.literals, reference);
     members
         .iter()
-        .filter(|&&(fi, s, e)| {
-            let same = normalize(&files[fi].tokens[s..e], config.literals) == reference;
+        .filter(|&&(_, (fi, s, e))| {
+            normalize_into(&files[fi].tokens[s..e], config.literals, candidate);
+            let same = candidate == reference;
             if !same {
                 stats.hash_collisions += 1;
             }
             same
         })
-        .copied()
+        .map(|&(_, member)| member)
         .collect()
 }
 
@@ -372,8 +394,9 @@ pub(crate) fn fragment_pass(
     budget: &mut PairBudget,
 ) -> Vec<ClonePair> {
     // Classes ordered rarest-first, class-size cap applied before pairing.
-    let mut kept: Vec<(usize, u64, Vec<FragmentRef>)> = Vec::new();
-    for (key, members) in fragment_classes(files, config, stats) {
+    let flat = fragment_classes(files, config, stats);
+    let mut kept: Vec<FragmentClass<'_>> = Vec::new();
+    for members in flat.chunk_by(|a, b| a.0 == b.0) {
         if members.len() < 2 {
             continue;
         }
@@ -381,14 +404,23 @@ pub(crate) fn fragment_pass(
             stats.class_cap_dropped += 1;
             continue;
         }
-        kept.push((members.len(), key, members));
+        kept.push((members.len(), members[0].0, members));
     }
     stats.fragment_classes = kept.len();
     kept.sort_by_key(|&(len, key, _)| (len, key));
 
     let mut matches: Vec<FragmentMatch> = Vec::new();
-    'pairing: for (_, key, members) in &kept {
-        let verified = verified_members(files, members, config, stats);
+    let mut reference: Vec<NormToken<'_>> = Vec::new();
+    let mut candidate: Vec<NormToken<'_>> = Vec::new();
+    'pairing: for &(_, key, members) in &kept {
+        let verified = verified_members(
+            files,
+            members,
+            config,
+            stats,
+            &mut reference,
+            &mut candidate,
+        );
         for x in 0..verified.len() {
             for y in (x + 1)..verified.len() {
                 if !budget.take() {
@@ -412,7 +444,7 @@ pub(crate) fn fragment_pass(
                 #[allow(clippy::cast_precision_loss)] // token counts are small
                 let score = raw_eq as f64 / a.len() as f64;
                 matches.push(FragmentMatch {
-                    key: *key,
+                    key,
                     a: verified[x],
                     b: verified[y],
                     score,
