@@ -14,3 +14,4 @@ pub mod frontend;
 pub mod ir;
 pub mod near_match;
 pub mod stable_id;
+pub mod verify;
