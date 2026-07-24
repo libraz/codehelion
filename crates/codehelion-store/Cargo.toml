@@ -9,6 +9,12 @@ homepage.workspace = true
 description = "Local SQLite audit storage for the codehelion source-audit tool."
 
 [dependencies]
+codehelion-core = { version = "0.1.0", path = "../codehelion-core" }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+thiserror = "2"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
