@@ -1,0 +1,16 @@
+[package]
+name = "codehelion-frontend-cpp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "C++ Fast-mode lexer and unit-boundary frontend for the codehelion source-audit tool."
+
+[dependencies]
+codehelion-core = { path = "../codehelion-core" }
+codehelion-frontend-c = { path = "../codehelion-frontend-c" }
+
+[lints]
+workspace = true
