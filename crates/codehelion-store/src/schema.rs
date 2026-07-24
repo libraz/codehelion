@@ -4,7 +4,8 @@
 //! `SourceUnit`, `Fragment`, `Fingerprint`, `CloneGroup`, `GroupLineage`,
 //! `Finding`, `Suppression`, `Artifact`, `ArtifactSymbol`,
 //! `SourceArtifactMapping` and `DetectorVersion`, plus the candidate-index
-//! feature tables `FeatureFingerprint`, `FeatureOccurrence` and `UnitFeature`.
+//! feature tables `FeatureFingerprint`, `FeatureOccurrence` and `UnitFeature`,
+//! and the per-group `CloneGroupSimilarity` breakdown.
 //! The artifact tables and `group_lineage` are created empty in this release —
 //! the schema is the contract, population comes with the features that need
 //! them.
@@ -38,11 +39,11 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
-const MIGRATIONS: &[&str] = &[V1, V2];
+const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 /// Version 1: the full entity set.
 const V1: &str = "
@@ -287,6 +288,27 @@ CREATE TABLE unit_feature (
     cfg_op_count           INTEGER NOT NULL,
     cfg_max_loop_depth     INTEGER NOT NULL,
     cfg_branch_count       INTEGER NOT NULL
+) STRICT;
+";
+
+/// Version 3: the per-group similarity breakdown for Structural findings.
+///
+/// A group's similarity is never a single collapsed number; the breakdown
+/// keeps each measured dimension visible. `type_similarity` is nullable because
+/// Structural mode resolves no types, and the breakdown carries the weight
+/// recipe version it was scored under so a later reweighting is a versioned
+/// event. One row per group; Fast-mode groups write none.
+const V3: &str = "
+CREATE TABLE clone_group_similarity (
+    clone_group_id  INTEGER PRIMARY KEY REFERENCES clone_group (id) ON DELETE CASCADE,
+    weight_version  TEXT NOT NULL,
+    lexical         REAL NOT NULL,
+    structural      REAL NOT NULL,
+    control_flow    REAL NOT NULL,
+    type_similarity REAL,
+    api             REAL NOT NULL,
+    composite       REAL NOT NULL,
+    min_pairwise    REAL NOT NULL
 ) STRICT;
 ";
 

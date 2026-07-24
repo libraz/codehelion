@@ -724,6 +724,8 @@ fn snapshot_rows(
             suppress_reason: group.suppressed.map(|reason| reason.name().to_string()),
             suppressed_by: *suppressed_by,
             final_priority: final_priority(group),
+            // Fast mode measures no similarity breakdown.
+            similarity: None,
             members: group
                 .members
                 .iter()

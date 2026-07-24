@@ -62,8 +62,31 @@ pub struct StoredGroup {
     pub entropy_bits: f64,
     /// Noise marker name, if one fired.
     pub suppress_reason: Option<String>,
+    /// The similarity breakdown, when the mode measured one (Structural).
+    pub similarity: Option<StoredSimilarity>,
     /// The group's occurrences.
     pub members: Vec<StoredMember>,
+}
+
+/// A stored group's similarity breakdown, one measured dimension per field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredSimilarity {
+    /// The composite-weight recipe version.
+    pub weight_version: String,
+    /// Verbatim leading-token agreement.
+    pub lexical: f64,
+    /// Rename-invariant structural agreement.
+    pub structural: f64,
+    /// Control-flow-profile agreement.
+    pub control_flow: f64,
+    /// Type agreement, or `None` when types were unavailable.
+    pub type_similarity: Option<f64>,
+    /// Call-name multiset agreement.
+    pub api: f64,
+    /// Weighted mean of the measured dimensions.
+    pub composite: f64,
+    /// Weakest pairwise similarity inside the group.
+    pub min_pairwise: f64,
 }
 
 /// One stored finding: the audited row of a group in a run.
@@ -203,6 +226,7 @@ impl Store {
                         score: row.get(3)?,
                         entropy_bits: row.get(4)?,
                         suppress_reason: row.get(5)?,
+                        similarity: None,
                         members: Vec::new(),
                     },
                 ))
@@ -211,10 +235,38 @@ impl Store {
 
         let mut groups = Vec::with_capacity(rows.len());
         for (group_row_id, mut group) in rows {
+            group.similarity = self.group_similarity(group_row_id)?;
             group.members = self.group_members(group_row_id)?;
             groups.push(group);
         }
         Ok(groups)
+    }
+
+    /// The similarity breakdown of one group row, or `None` when the mode
+    /// measured none (Fast).
+    fn group_similarity(&self, group_row_id: i64) -> Result<Option<StoredSimilarity>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT weight_version, lexical, structural, control_flow,
+                        type_similarity, api, composite, min_pairwise
+                 FROM clone_group_similarity
+                 WHERE clone_group_id = ?1",
+                params![group_row_id],
+                |row| {
+                    Ok(StoredSimilarity {
+                        weight_version: row.get(0)?,
+                        lexical: row.get(1)?,
+                        structural: row.get(2)?,
+                        control_flow: row.get(3)?,
+                        type_similarity: row.get(4)?,
+                        api: row.get(5)?,
+                        composite: row.get(6)?,
+                        min_pairwise: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// The members of one group row, ordered by anchor then row id.

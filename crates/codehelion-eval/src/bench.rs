@@ -564,6 +564,7 @@ pub fn measure_store_insert(
             suppress_reason: None,
             suppressed_by: None,
             final_priority: 100.0,
+            similarity: None,
             members: (0..members_per_group)
                 .map(|member| {
                     let index = group * members_per_group + member;

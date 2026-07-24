@@ -67,6 +67,31 @@ pub struct MemberRow {
     pub token_count: usize,
 }
 
+/// A clone group's similarity breakdown, one measured dimension per field.
+///
+/// Persisted as one `clone_group_similarity` row. Every dimension stays
+/// visible; there is no single collapsed score. `type_similarity` is `None`
+/// when types are unavailable (Structural mode).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimilarityBreakdownRow {
+    /// The composite-weight recipe version this was scored under.
+    pub weight_version: String,
+    /// Verbatim agreement of aligned statements' leading tokens.
+    pub lexical: f64,
+    /// Rename-invariant structural agreement.
+    pub structural: f64,
+    /// Control-flow-profile agreement (a syntactic approximation).
+    pub control_flow: f64,
+    /// Type agreement, or `None` when types are unavailable.
+    pub type_similarity: Option<f64>,
+    /// Call-name multiset agreement.
+    pub api: f64,
+    /// Weighted mean of the measured dimensions.
+    pub composite: f64,
+    /// Weakest pairwise similarity inside the group: its cohesion.
+    pub min_pairwise: f64,
+}
+
 /// One clone group with its members.
 #[derive(Debug, Clone)]
 pub struct GroupRow {
@@ -86,6 +111,9 @@ pub struct GroupRow {
     /// Priority of this group's finding; the inputs it was derived from stay
     /// available on the group and member rows.
     pub final_priority: f64,
+    /// The similarity breakdown, when the mode measured one (Structural). Fast
+    /// groups leave this `None`.
+    pub similarity: Option<SimilarityBreakdownRow>,
     /// The occurrences, in deterministic order; the first is canonical.
     pub members: Vec<MemberRow>,
 }
@@ -512,6 +540,8 @@ fn write_group(
         ],
     )?;
 
+    write_group_similarity(tx, group_row_id, group.similarity.as_ref())?;
+
     for (index, member) in group.members.iter().enumerate() {
         let host_row_id = match member.host_unit {
             Some(unit_index) => Some(*unit_row_ids.get(unit_index).ok_or(
@@ -558,6 +588,35 @@ fn write_group(
             ],
         )?;
     }
+    Ok(())
+}
+
+/// Persist a group's similarity breakdown, when the mode measured one.
+fn write_group_similarity(
+    tx: &Transaction<'_>,
+    group_row_id: i64,
+    similarity: Option<&SimilarityBreakdownRow>,
+) -> Result<(), StoreError> {
+    let Some(similarity) = similarity else {
+        return Ok(());
+    };
+    tx.execute(
+        "INSERT INTO clone_group_similarity
+             (clone_group_id, weight_version, lexical, structural,
+              control_flow, type_similarity, api, composite, min_pairwise)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            group_row_id,
+            similarity.weight_version,
+            similarity.lexical,
+            similarity.structural,
+            similarity.control_flow,
+            similarity.type_similarity,
+            similarity.api,
+            similarity.composite,
+            similarity.min_pairwise,
+        ],
+    )?;
     Ok(())
 }
 

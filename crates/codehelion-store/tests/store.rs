@@ -15,7 +15,7 @@ use codehelion_core::stable_id::{
     CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint,
 };
 use codehelion_store::snapshot::{
-    FeatureRow, GroupRow, MemberRow, Snapshot, SuppressionRuleRow, UnitRow,
+    FeatureRow, GroupRow, MemberRow, SimilarityBreakdownRow, Snapshot, SuppressionRuleRow, UnitRow,
 };
 use codehelion_store::{Store, StoreError};
 
@@ -99,6 +99,7 @@ fn sample_snapshot<'a>(
             suppress_reason: None,
             suppressed_by: None,
             final_priority: 42.0,
+            similarity: None,
             members: vec![
                 member(1, "src/a.rs", Some(0)),
                 member(1, "src/b.rs", Some(1)),
@@ -129,6 +130,10 @@ fn a_snapshot_round_trips_through_queries() {
     let group = &groups[0];
     assert_eq!(group.fingerprint_hex, group_fp(9).to_hex());
     assert_eq!(group.clone_type, "type-1");
+    assert!(
+        group.similarity.is_none(),
+        "Fast mode measures no breakdown"
+    );
     assert_eq!(group.members.len(), 2);
     assert_eq!(group.members[0].file_path, "src/a.rs");
     assert_eq!(group.members[0].unit_name.as_deref(), Some("checksum"));
@@ -149,6 +154,40 @@ fn a_snapshot_round_trips_through_queries() {
         store.occurrence("not-hex"),
         Err(StoreError::MalformedId { .. })
     ));
+}
+
+#[test]
+fn a_structural_group_persists_its_similarity_breakdown() {
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.groups[0].clone_type = CloneType::Type2;
+    snapshot.groups[0].similarity = Some(SimilarityBreakdownRow {
+        weight_version: "structural-verify-v0".to_string(),
+        lexical: 0.8,
+        structural: 0.95,
+        control_flow: 0.9,
+        // Structural mode resolves no types.
+        type_similarity: None,
+        api: 0.5,
+        composite: 0.87,
+        min_pairwise: 0.72,
+    });
+    let run_id = store.record_snapshot(&snapshot).unwrap();
+
+    let groups = store.run_groups(run_id).unwrap();
+    let breakdown = groups[0]
+        .similarity
+        .as_ref()
+        .expect("the structural group carries a breakdown");
+    assert_eq!(breakdown.weight_version, "structural-verify-v0");
+    assert!((breakdown.structural - 0.95).abs() < 1e-9);
+    assert!((breakdown.composite - 0.87).abs() < 1e-9);
+    assert!((breakdown.min_pairwise - 0.72).abs() < 1e-9);
+    // The unmeasured type dimension survives the round-trip as absent.
+    assert!(breakdown.type_similarity.is_none());
 }
 
 #[test]

@@ -147,6 +147,7 @@ mod tests {
             "feature_fingerprint",
             "feature_occurrence",
             "unit_feature",
+            "clone_group_similarity",
         ] {
             let count: i64 = store
                 .conn
