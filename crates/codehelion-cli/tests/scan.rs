@@ -192,6 +192,81 @@ fn no_ignore_scans_files_gitignore_hides() {
 }
 
 #[test]
+fn reports_show_the_priority_and_its_inputs() {
+    let dir = fixture();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("top groups by priority:"))
+        .stdout(predicate::str::contains("priority"))
+        .stdout(predicate::str::contains("similarity"));
+}
+
+#[test]
+fn path_suppression_hides_but_records_findings() {
+    let dir = fixture();
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[suppression]\npaths = [\"src/*.c\"]\n",
+    )
+    .unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 by rule"))
+        .stdout(predicate::str::contains("src/one.c").not());
+
+    // Hidden, not deleted: the finding is recorded with its rule.
+    {
+        let store = open_store(dir.path());
+        let run = store.latest_run().unwrap().expect("a recorded run");
+        let findings = store.run_findings(run.id).unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.suppression_scope.as_deref() == Some("path_glob"))
+        );
+    }
+
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--show-suppressed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("suppressed groups:"))
+        .stdout(predicate::str::contains("src/one.c"));
+}
+
+#[test]
+fn an_inline_marker_suppresses_the_next_unit() {
+    let dir = fixture();
+    let marked = format!("// codehelion:ignore\n{CHECKSUM_RS}");
+    std::fs::write(dir.path().join("src/a.rs"), &marked).unwrap();
+    std::fs::write(dir.path().join("src/b.rs"), &marked).unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", "."])
+        .assert()
+        .success()
+        // The verbatim Rust pair (both instances marked) is suppressed; the
+        // Type-2 group still holds the unmarked src/c.rs and stays visible.
+        .stdout(predicate::str::contains("1 by rule"));
+
+    let store = open_store(dir.path());
+    let run = store.latest_run().unwrap().expect("a recorded run");
+    let findings = store.run_findings(run.id).unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.suppression_scope.as_deref() == Some("inline_comment"))
+    );
+}
+
+#[test]
 fn json_format_is_explicitly_unsupported() {
     let dir = fixture();
     cmd()

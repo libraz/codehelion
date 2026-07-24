@@ -20,6 +20,7 @@
 pub mod cli;
 pub mod config;
 pub mod scan;
+pub mod suppress;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -291,6 +292,7 @@ mod tests {
             no_ignore: false,
             jobs: None,
             db: None,
+            show_suppressed: false,
             fail_on_findings: false,
         }
     }

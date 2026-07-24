@@ -18,7 +18,7 @@ use codehelion_core::frontend::UnitKind;
 use codehelion_core::stable_id::{
     CloneGroupFingerprint, FindingId, FragmentFingerprint, HASH_ALGORITHM, UnitFingerprint,
 };
-use rusqlite::{Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{Store, StoreError};
 
@@ -77,8 +77,30 @@ pub struct GroupRow {
     pub entropy_bits: f64,
     /// Noise marker name (`low-entropy` / `high-frequency`), if one fired.
     pub suppress_reason: Option<String>,
+    /// Index into [`Snapshot::suppressions`] of the rule that suppressed this
+    /// group's finding, if one matched.
+    pub suppressed_by: Option<usize>,
+    /// Priority of this group's finding; the inputs it was derived from stay
+    /// available on the group and member rows.
+    pub final_priority: f64,
     /// The occurrences, in deterministic order; the first is canonical.
     pub members: Vec<MemberRow>,
+}
+
+/// One suppression rule active for the scan.
+///
+/// Rules are content-addressed by `(scope, pattern)`: recording the same rule
+/// again reuses the existing row, so findings from different runs suppressed
+/// by the same rule reference one row.
+#[derive(Debug, Clone)]
+pub struct SuppressionRuleRow {
+    /// Rule scope; must be one of the schema's suppression scopes (for
+    /// example `path_glob` or `inline_comment`).
+    pub scope: String,
+    /// The rule's pattern (a glob, a marker text, ...).
+    pub pattern: String,
+    /// Optional human-readable reason.
+    pub reason: Option<String>,
 }
 
 /// Everything one scan run persists.
@@ -99,6 +121,9 @@ pub struct Snapshot<'a> {
     /// Active `(component, version)` pairs, e.g. `("frontend.rust",
     /// "rust-lexer-v0")`.
     pub detector_versions: &'a [(String, String)],
+    /// Suppression rules active for this scan, referenced by
+    /// [`GroupRow::suppressed_by`].
+    pub suppressions: Vec<SuppressionRuleRow>,
     /// Units observed in the scanned sources.
     pub units: Vec<UnitRow>,
     /// Detected clone groups.
@@ -154,12 +179,52 @@ fn write_snapshot(tx: &Transaction<'_>, snapshot: &Snapshot<'_>) -> Result<i64, 
         )?;
     }
 
+    let suppression_row_ids = write_suppressions(tx, &snapshot.suppressions)?;
     // Units first: members reference them by index.
     let unit_row_ids = write_units(tx, snapshot, run_id, variant_id)?;
     for group in &snapshot.groups {
-        write_group(tx, snapshot, run_id, variant_id, group, &unit_row_ids)?;
+        write_group(
+            tx,
+            snapshot,
+            run_id,
+            variant_id,
+            group,
+            &unit_row_ids,
+            &suppression_row_ids,
+        )?;
     }
     Ok(run_id)
+}
+
+/// Record the active suppression rules, reusing existing `(scope, pattern)`
+/// rows so rules stay content-addressed across runs.
+fn write_suppressions(
+    tx: &Transaction<'_>,
+    rules: &[SuppressionRuleRow],
+) -> Result<Vec<i64>, StoreError> {
+    let mut row_ids = Vec::with_capacity(rules.len());
+    for rule in rules {
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM suppression
+                 WHERE scope = ?1 AND pattern = ?2 AND active = 1",
+                params![rule.scope, rule.pattern],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let id = if let Some(id) = existing {
+            id
+        } else {
+            tx.execute(
+                "INSERT INTO suppression (scope, pattern, reason, active)
+                 VALUES (?1, ?2, ?3, 1)",
+                params![rule.scope, rule.pattern, rule.reason],
+            )?;
+            tx.last_insert_rowid()
+        };
+        row_ids.push(id);
+    }
+    Ok(row_ids)
 }
 
 fn write_units(
@@ -200,6 +265,7 @@ fn write_units(
     Ok(unit_row_ids)
 }
 
+#[allow(clippy::too_many_arguments)] // transaction hand-off, one call site
 fn write_group(
     tx: &Transaction<'_>,
     snapshot: &Snapshot<'_>,
@@ -207,6 +273,7 @@ fn write_group(
     variant_id: i64,
     group: &GroupRow,
     unit_row_ids: &[i64],
+    suppression_row_ids: &[i64],
 ) -> Result<(), StoreError> {
     let group_fp_id =
         upsert_group_fingerprint(tx, group.fingerprint.as_bytes(), snapshot, variant_id)?;
@@ -229,13 +296,27 @@ fn write_group(
 
     // The audited row for this group in this run. Differencing against
     // earlier runs is a later stage; every finding starts as `new`.
-    // `final_priority` is filled by the priority stage; until then it is
-    // the neutral zero.
+    let suppression_row_id = match group.suppressed_by {
+        Some(index) => Some(*suppression_row_ids.get(index).ok_or(
+            StoreError::UnknownSuppressionIndex {
+                index,
+                rules: suppression_row_ids.len(),
+            },
+        )?),
+        None => None,
+    };
     tx.execute(
         "INSERT INTO finding
-             (scan_run_id, clone_group_id, audit_state, clone_confidence, final_priority)
-         VALUES (?1, ?2, 'new', ?3, 0.0)",
-        params![run_id, group_row_id, group.score],
+             (scan_run_id, clone_group_id, audit_state, suppression_id,
+              clone_confidence, final_priority)
+         VALUES (?1, ?2, 'new', ?3, ?4, ?5)",
+        params![
+            run_id,
+            group_row_id,
+            suppression_row_id,
+            group.score,
+            group.final_priority,
+        ],
     )?;
 
     for (index, member) in group.members.iter().enumerate() {

@@ -9,7 +9,7 @@ use codehelion_core::frontend::UnitKind;
 use codehelion_core::stable_id::{
     CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint,
 };
-use codehelion_store::snapshot::{GroupRow, MemberRow, Snapshot, UnitRow};
+use codehelion_store::snapshot::{GroupRow, MemberRow, Snapshot, SuppressionRuleRow, UnitRow};
 use codehelion_store::{Store, StoreError};
 
 const fn unit_fp(seed: u8) -> UnitFingerprint {
@@ -83,12 +83,15 @@ fn sample_snapshot<'a>(
                 token_count: 50,
             },
         ],
+        suppressions: Vec::new(),
         groups: vec![GroupRow {
             fingerprint: group_fp(9),
             clone_type: CloneType::Type1,
             score: 1.0,
             entropy_bits: 4.2,
             suppress_reason: None,
+            suppressed_by: None,
+            final_priority: 42.0,
             members: vec![
                 member(1, "src/a.rs", Some(0)),
                 member(1, "src/b.rs", Some(1)),
@@ -233,7 +236,50 @@ fn findings_start_in_the_new_state() {
     assert_eq!(findings[0].audit_state, "new");
     assert_eq!(findings[0].group_fingerprint_hex, group_fp(9).to_hex());
     assert!((findings[0].clone_confidence - 1.0).abs() < f64::EPSILON);
-    assert!(findings[0].final_priority.abs() < f64::EPSILON);
+    assert!((findings[0].final_priority - 42.0).abs() < f64::EPSILON);
+    assert!(findings[0].suppression_scope.is_none());
+}
+
+#[test]
+fn suppressed_findings_reference_a_deduplicated_rule_row() {
+    let variant = BuildVariant::fast(LanguageSelection::default());
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.suppressions = vec![SuppressionRuleRow {
+        scope: "path_glob".to_string(),
+        pattern: "vendor/**".to_string(),
+        reason: Some("vendored sources".to_string()),
+    }];
+    snapshot.groups[0].suppressed_by = Some(0);
+    let first_run = store.record_snapshot(&snapshot).unwrap();
+    let second_run = store.record_snapshot(&snapshot).unwrap();
+    assert_ne!(first_run, second_run);
+
+    // One rule row serves both runs' findings.
+    assert_eq!(store.table_count("suppression").unwrap(), 1);
+    for run_id in [first_run, second_run] {
+        let findings = store.run_findings(run_id).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].suppression_scope.as_deref(), Some("path_glob"));
+    }
+}
+
+#[test]
+fn an_unknown_suppression_index_rolls_the_snapshot_back() {
+    let variant = BuildVariant::fast(LanguageSelection::default());
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.groups[0].suppressed_by = Some(5);
+    let err = store.record_snapshot(&snapshot).unwrap_err();
+    assert!(matches!(
+        err,
+        StoreError::UnknownSuppressionIndex { index: 5, rules: 0 }
+    ));
+    assert!(store.latest_run().unwrap().is_none(), "no partial run");
 }
 
 #[test]

@@ -74,8 +74,12 @@ pub struct StoredFinding {
     pub audit_state: String,
     /// Clone confidence.
     pub clone_confidence: f64,
-    /// Final priority (zero until the priority stage fills it).
+    /// Final priority; the derivation inputs stay on the group and its
+    /// members rather than being collapsed into this one number.
     pub final_priority: f64,
+    /// Scope of the suppression rule that suppressed the finding, if any
+    /// (for example `path_glob` or `inline_comment`).
+    pub suppression_scope: Option<String>,
 }
 
 /// Detail of one occurrence, looked up by its finding id (for `explain`).
@@ -188,10 +192,12 @@ impl Store {
     /// Returns any underlying database error.
     pub fn run_findings(&self, run_id: i64) -> Result<Vec<StoredFinding>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT lower(hex(gf.hash)), fi.audit_state, fi.clone_confidence, fi.final_priority
+            "SELECT lower(hex(gf.hash)), fi.audit_state, fi.clone_confidence, fi.final_priority,
+                    s.scope
              FROM finding fi
              JOIN clone_group g ON g.id = fi.clone_group_id
              JOIN fingerprint gf ON gf.id = g.group_fingerprint_id
+             LEFT JOIN suppression s ON s.id = fi.suppression_id
              WHERE fi.scan_run_id = ?1
              ORDER BY gf.hash ASC",
         )?;
@@ -202,6 +208,7 @@ impl Store {
                     audit_state: row.get(1)?,
                     clone_confidence: row.get(2)?,
                     final_priority: row.get(3)?,
+                    suppression_scope: row.get(4)?,
                 })
             })?
             .collect::<Result<_, _>>()?;

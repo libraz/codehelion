@@ -102,6 +102,9 @@ pub struct ScanArgs {
     /// Audit-database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,
+    /// Also list suppressed groups, with the reason each was hidden.
+    #[arg(long)]
+    pub show_suppressed: bool,
     /// Exit with a non-zero status if any findings are reported.
     #[arg(long)]
     pub fail_on_findings: bool,

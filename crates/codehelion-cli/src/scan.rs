@@ -32,6 +32,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use crate::Outcome;
 use crate::cli::{Format, ScanArgs};
 use crate::config::{self, Config, LiteralNormalization};
+use crate::suppress;
 
 /// Number of groups the text report lists in detail.
 const REPORT_GROUP_LIMIT: usize = 10;
@@ -43,6 +44,10 @@ struct LexedSource {
     frontend_version: &'static str,
     tokens: Vec<Token>,
     units: Vec<Unit>,
+    /// `(start, end)` line range of each unit, parallel to `units`.
+    unit_lines: Vec<(u32, u32)>,
+    /// 1-based lines carrying an inline suppression marker.
+    marker_lines: Vec<u32>,
     diagnostics: usize,
 }
 
@@ -103,6 +108,18 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         engine_config.literals,
     );
 
+    let any_markers = lexed.iter().any(|file| !file.marker_lines.is_empty());
+    let rules = suppress::Rules::compile(&cfg.suppression.paths, any_markers)?;
+    let file_suppressions: Vec<suppress::FileSuppression> = lexed
+        .iter()
+        .map(|file| rules.evaluate_file(&file.relative_path, &file.marker_lines, &file.unit_lines))
+        .collect();
+    let group_suppressed: Vec<Option<usize>> = report
+        .groups
+        .iter()
+        .map(|group| group_rule(&rules, &file_suppressions, group))
+        .collect();
+
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
     let run_id = record(
         &root,
@@ -114,6 +131,8 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         &contexts,
         &report,
         &ids,
+        &rules,
+        &group_suppressed,
     )?;
 
     let render = RenderContext {
@@ -124,6 +143,9 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         unreadable,
         report: &report,
         ids: &ids,
+        rules: &rules,
+        group_suppressed: &group_suppressed,
+        show_suppressed: args.show_suppressed,
         db_path: &db_path,
         run_id,
     };
@@ -132,13 +154,45 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let visible = report
         .groups
         .iter()
-        .filter(|group| group.suppressed.is_none())
+        .zip(&group_suppressed)
+        .filter(|(group, rule)| group.suppressed.is_none() && rule.is_none())
         .count();
     if args.fail_on_findings && visible > 0 {
         Ok(Outcome::FindingsPresent)
     } else {
         Ok(Outcome::Success)
     }
+}
+
+/// The rule suppressing a whole group: present only when *every* member is
+/// suppressed. The canonical (first) member's rule is the one recorded.
+fn group_rule(
+    rules: &suppress::Rules,
+    files: &[suppress::FileSuppression],
+    group: &CloneGroup,
+) -> Option<usize> {
+    let mut first = None;
+    for member in &group.members {
+        let rule = rules.member_rule(
+            &files[member.file],
+            member.start_line,
+            member.end_line,
+            member.unit,
+        )?;
+        if first.is_none() {
+            first = Some(rule);
+        }
+    }
+    first
+}
+
+/// Final priority: `largest member size × extra instances × similarity` — a
+/// proxy for the tokens duplicated beyond the first instance. The inputs are
+/// always reported alongside; the collapsed number never replaces them.
+fn final_priority(group: &CloneGroup) -> f64 {
+    let size = u32::try_from(group_size(group)).unwrap_or(u32::MAX);
+    let extra = u32::try_from(group.members.len().saturating_sub(1)).unwrap_or(u32::MAX);
+    f64::from(size) * f64::from(extra) * group.score
 }
 
 /// Resolve the worker-thread count: flag over configuration over the number
@@ -253,12 +307,25 @@ fn lex_one(source: &SourceUnit) -> Option<LexedSource> {
         Language::C => codehelion_frontend_c::CFrontend.lex(&text),
         Language::Cpp => codehelion_frontend_cpp::CppFrontend.lex(&text),
     };
+    let unit_lines = file
+        .units
+        .iter()
+        .map(|unit| {
+            let end = unit.token_end.min(file.tokens.len());
+            let end_line = file.tokens[unit.token_start..end]
+                .last()
+                .map_or(unit.span.start_line, |token| token.span.start_line);
+            (unit.span.start_line, end_line)
+        })
+        .collect();
     Some(LexedSource {
         relative_path: source.relative_path.to_string_lossy().into_owned(),
         language: file.language,
         frontend_version: file.frontend_version,
         tokens: file.tokens,
         units: file.units,
+        unit_lines,
+        marker_lines: suppress::marker_lines(&text),
         diagnostics: file.diagnostics.len(),
     })
 }
@@ -291,8 +358,10 @@ fn record(
     contexts: &[FileContext<'_>],
     report: &EngineReport,
     ids: &[GroupIds],
+    rules: &suppress::Rules,
+    group_suppressed: &[Option<usize>],
 ) -> Result<i64> {
-    let (units, groups) = snapshot_rows(lexed, contexts, variant, report, ids);
+    let (units, groups) = snapshot_rows(lexed, contexts, variant, report, ids, group_suppressed);
     let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
     let detector_versions = detector_versions();
     let root_path = root.to_string_lossy();
@@ -305,6 +374,7 @@ fn record(
         finished_at: &finished_at,
         variant,
         detector_versions: &detector_versions,
+        suppressions: rules.rows.clone(),
         units,
         groups,
     };
@@ -358,6 +428,7 @@ fn snapshot_rows(
     variant: &BuildVariant,
     report: &EngineReport,
     ids: &[GroupIds],
+    group_suppressed: &[Option<usize>],
 ) -> (Vec<UnitRow>, Vec<GroupRow>) {
     let mut host_index: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     for group in &report.groups {
@@ -374,9 +445,7 @@ fn snapshot_rows(
         let unit = &source.units[*unit_idx];
         let end = unit.token_end.min(source.tokens.len());
         let tokens = &source.tokens[unit.token_start..end];
-        let end_line = tokens
-            .last()
-            .map_or(unit.span.start_line, |token| token.span.start_line);
+        let (_, end_line) = source.unit_lines[*unit_idx];
         units.push(UnitRow {
             fingerprint: stable_id::unit_fingerprint(
                 variant,
@@ -398,12 +467,15 @@ fn snapshot_rows(
         .groups
         .iter()
         .zip(ids)
-        .map(|(group, group_ids)| GroupRow {
+        .zip(group_suppressed)
+        .map(|((group, group_ids), suppressed_by)| GroupRow {
             fingerprint: group_ids.fingerprint,
             clone_type: group.clone_type,
             score: group.score,
             entropy_bits: group.entropy_bits,
             suppress_reason: group.suppressed.map(|reason| reason.name().to_string()),
+            suppressed_by: *suppressed_by,
+            final_priority: final_priority(group),
             members: group
                 .members
                 .iter()
@@ -433,8 +505,26 @@ struct RenderContext<'a> {
     unreadable: u64,
     report: &'a EngineReport,
     ids: &'a [GroupIds],
+    rules: &'a suppress::Rules,
+    group_suppressed: &'a [Option<usize>],
+    show_suppressed: bool,
     db_path: &'a Path,
     run_id: i64,
+}
+
+impl RenderContext<'_> {
+    /// Whether the group at `index` is hidden from the default listing.
+    fn is_suppressed(&self, index: usize) -> bool {
+        self.report.groups[index].suppressed.is_some() || self.group_suppressed[index].is_some()
+    }
+
+    /// Why the group at `index` is suppressed, for the report.
+    fn suppression_label(&self, index: usize) -> String {
+        self.report.groups[index].suppressed.map_or_else(
+            || self.group_suppressed[index].map_or_else(String::new, |rule| self.rules.label(rule)),
+            |reason| format!("{} noise", reason.name()),
+        )
+    }
 }
 
 /// Render the report to `--output` when given, otherwise to `out`.
@@ -488,15 +578,23 @@ fn render_summary(out: &mut impl Write, ctx: &RenderContext<'_>) -> Result<()> {
     )?;
     let type1 = clone_type_count(ctx.report, CloneType::Type1);
     let type2 = clone_type_count(ctx.report, CloneType::Type2);
-    let suppressed = ctx
+    let noise = ctx
         .report
         .groups
         .iter()
         .filter(|group| group.suppressed.is_some())
         .count();
+    let by_rule = ctx
+        .report
+        .groups
+        .iter()
+        .zip(ctx.group_suppressed)
+        .filter(|(group, rule)| group.suppressed.is_none() && rule.is_some())
+        .count();
     writeln!(
         out,
-        "  clone groups: {} (type-1 {type1}, type-2 {type2}; {suppressed} suppressed as noise)",
+        "  clone groups: {} (type-1 {type1}, type-2 {type2}; suppressed: {noise} noise, \
+         {by_rule} by rule)",
         ctx.report.groups.len(),
     )?;
     writeln!(
@@ -522,56 +620,87 @@ fn clone_type_count(report: &EngineReport, clone_type: CloneType) -> usize {
         .count()
 }
 
-/// List the largest unsuppressed groups: size descending, fingerprint bytes
-/// ascending on ties, so the listing is stable across reruns.
+/// List the top unsuppressed groups: priority descending, fingerprint bytes
+/// ascending on ties, so the listing is stable across reruns. With
+/// `--show-suppressed`, a second section lists suppressed groups with the
+/// reason each was hidden.
 fn render_groups(out: &mut impl Write, ctx: &RenderContext<'_>) -> Result<()> {
-    let mut visible: Vec<(usize, &CloneGroup)> = ctx
-        .report
-        .groups
-        .iter()
-        .enumerate()
-        .filter(|(_, group)| group.suppressed.is_none())
-        .collect();
-    visible.sort_by(|(a_idx, a), (b_idx, b)| {
-        group_size(b).cmp(&group_size(a)).then_with(|| {
-            ctx.ids[*a_idx]
-                .fingerprint
-                .cmp(&ctx.ids[*b_idx].fingerprint)
-        })
-    });
-    if visible.is_empty() {
-        return Ok(());
-    }
-    writeln!(out)?;
-    writeln!(out, "largest groups:")?;
-    for (index, group) in visible.iter().take(REPORT_GROUP_LIMIT) {
-        writeln!(
-            out,
-            "  {} {} {} instances, {} tokens",
-            ctx.ids[*index].fingerprint.to_hex(),
-            group.clone_type.name(),
-            group.members.len(),
-            group_size(group),
-        )?;
-        for (position, member) in group.members.iter().enumerate() {
-            let source = &ctx.lexed[member.file];
-            let unit_name = member
-                .unit
-                .and_then(|unit| source.units[unit].name.as_deref())
-                .map_or_else(String::new, |name| format!(" ({name})"));
-            let canonical = if position == 0 { " [canonical]" } else { "" };
+    let (visible, suppressed): (Vec<usize>, Vec<usize>) =
+        (0..ctx.report.groups.len()).partition(|index| !ctx.is_suppressed(*index));
+
+    if !visible.is_empty() {
+        let ordered = by_priority(&visible, ctx);
+        writeln!(out)?;
+        writeln!(out, "top groups by priority:")?;
+        for index in ordered.iter().take(REPORT_GROUP_LIMIT) {
+            render_group(out, ctx, *index, None)?;
+        }
+        if ordered.len() > REPORT_GROUP_LIMIT {
             writeln!(
                 out,
-                "    {}:{}-{}{unit_name}{canonical}",
-                source.relative_path, member.start_line, member.end_line,
+                "  ... and {} more groups",
+                ordered.len() - REPORT_GROUP_LIMIT
             )?;
         }
     }
-    if visible.len() > REPORT_GROUP_LIMIT {
+
+    if ctx.show_suppressed && !suppressed.is_empty() {
+        let ordered = by_priority(&suppressed, ctx);
+        writeln!(out)?;
+        writeln!(out, "suppressed groups:")?;
+        for index in &ordered {
+            let label = ctx.suppression_label(*index);
+            render_group(out, ctx, *index, Some(&label))?;
+        }
+    }
+    Ok(())
+}
+
+/// Order group indices by priority descending, fingerprint ascending on ties.
+fn by_priority(indices: &[usize], ctx: &RenderContext<'_>) -> Vec<usize> {
+    let mut ordered = indices.to_vec();
+    ordered.sort_by(|a, b| {
+        let (pa, pb) = (
+            final_priority(&ctx.report.groups[*a]),
+            final_priority(&ctx.report.groups[*b]),
+        );
+        pb.total_cmp(&pa)
+            .then_with(|| ctx.ids[*a].fingerprint.cmp(&ctx.ids[*b].fingerprint))
+    });
+    ordered
+}
+
+/// Render one group: the priority with its inputs spelled out, then every
+/// member with its anchor.
+fn render_group(
+    out: &mut impl Write,
+    ctx: &RenderContext<'_>,
+    index: usize,
+    suppressed_as: Option<&str>,
+) -> Result<()> {
+    let group = &ctx.report.groups[index];
+    let marker = suppressed_as.map_or_else(String::new, |label| format!(" [suppressed: {label}]"));
+    writeln!(
+        out,
+        "  {} {} priority {:.1} ({} tokens x {} extra x {:.2} similarity){marker}",
+        ctx.ids[index].fingerprint.to_hex(),
+        group.clone_type.name(),
+        final_priority(group),
+        group_size(group),
+        group.members.len().saturating_sub(1),
+        group.score,
+    )?;
+    for (position, member) in group.members.iter().enumerate() {
+        let source = &ctx.lexed[member.file];
+        let unit_name = member
+            .unit
+            .and_then(|unit| source.units[unit].name.as_deref())
+            .map_or_else(String::new, |name| format!(" ({name})"));
+        let canonical = if position == 0 { " [canonical]" } else { "" };
         writeln!(
             out,
-            "  ... and {} more groups",
-            visible.len() - REPORT_GROUP_LIMIT
+            "    {}:{}-{}{unit_name}{canonical}",
+            source.relative_path, member.start_line, member.end_line,
         )?;
     }
     Ok(())

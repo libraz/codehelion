@@ -48,6 +48,17 @@ pub enum StoreError {
         /// Number of units in the snapshot.
         units: usize,
     },
+    /// A snapshot group referenced a suppression-rule index that does not
+    /// exist.
+    #[error(
+        "snapshot group references suppression rule {index}, but only {rules} rules were given"
+    )]
+    UnknownSuppressionIndex {
+        /// The out-of-range index.
+        index: usize,
+        /// Number of rules in the snapshot.
+        rules: usize,
+    },
     /// An identifier string was not a 32-digit hex id.
     #[error("malformed identifier {id:?}: expected 32 hex digits")]
     MalformedId {
