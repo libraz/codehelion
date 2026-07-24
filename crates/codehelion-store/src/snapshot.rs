@@ -14,6 +14,9 @@
 
 use codehelion_core::discovery::{BuildVariant, Language};
 use codehelion_core::engine::CloneType;
+use codehelion_core::features::{
+    FEATURE_SCHEMA_VERSION, FeatureKind, SHAPE_TAG_SLOTS, UnitFeatures,
+};
 use codehelion_core::frontend::UnitKind;
 use codehelion_core::stable_id::{
     CloneGroupFingerprint, FindingId, FragmentFingerprint, HASH_ALGORITHM, UnitFingerprint,
@@ -103,6 +106,115 @@ pub struct SuppressionRuleRow {
     pub reason: Option<String>,
 }
 
+/// The candidate-extraction features of one unit, ready to persist.
+///
+/// A row pairs a unit (by its index into [`Snapshot::units`]) with the
+/// hash-valued feature occurrences it produced and its scalar features
+/// (characteristic vector and control-flow profile). Feature hashes are
+/// candidate-index keys, not stable identifiers; they are stored apart from
+/// the stable [`fingerprint`](crate::schema) rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeatureRow {
+    /// Index into [`Snapshot::units`] of the unit these features describe.
+    pub host_unit: usize,
+    /// The feature recipe version (`FEATURE_SCHEMA_VERSION`) these were
+    /// derived under.
+    pub feature_schema_version: &'static str,
+    /// Characteristic-vector shape-tag counts.
+    pub vector_counts: [u32; SHAPE_TAG_SLOTS],
+    /// Deepest root-to-leaf path in the unit subtree.
+    pub max_depth: u32,
+    /// Total nodes in the unit subtree.
+    pub node_count: u32,
+    /// Control ops emitted for the unit.
+    pub cfg_op_count: u32,
+    /// Deepest loop nesting in the unit subtree.
+    pub cfg_max_loop_depth: u32,
+    /// Two-way conditionals in the unit subtree.
+    pub cfg_branch_count: u32,
+    /// The unit's hash-valued feature occurrences (windows, subtrees, cfg,
+    /// api), each a posting-list entry.
+    pub occurrences: Vec<FeatureOccurrenceRow>,
+}
+
+/// One occurrence of a feature hash at a source location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeatureOccurrenceRow {
+    /// Which feature family produced the hash.
+    pub kind: FeatureKind,
+    /// The 16-byte feature hash.
+    pub hash: [u8; 16],
+    /// Anchor: first byte the occurrence covers.
+    pub start_byte: usize,
+    /// Anchor: one past the last byte the occurrence covers.
+    pub end_byte: usize,
+    /// Kind-specific size: window length, subtree node count, cfg op count or
+    /// api-call count.
+    pub extent: u32,
+}
+
+impl FeatureRow {
+    /// Build a persistable row from a unit's extracted features, tagging it
+    /// with its index into [`Snapshot::units`].
+    #[must_use]
+    pub fn from_unit(host_unit: usize, unit: &UnitFeatures) -> Self {
+        let mut occurrences = Vec::new();
+        for window in &unit.windows {
+            occurrences.push(FeatureOccurrenceRow {
+                kind: FeatureKind::StatementWindow,
+                hash: *window.hash.as_bytes(),
+                start_byte: window.range.start,
+                end_byte: window.range.end,
+                extent: clamp_u32(window.length),
+            });
+        }
+        for subtree in &unit.subtrees {
+            occurrences.push(FeatureOccurrenceRow {
+                kind: FeatureKind::Subtree,
+                hash: *subtree.hash.as_bytes(),
+                start_byte: subtree.range.start,
+                end_byte: subtree.range.end,
+                extent: clamp_u32(subtree.node_count),
+            });
+        }
+        occurrences.push(FeatureOccurrenceRow {
+            kind: FeatureKind::Cfg,
+            hash: *unit.cfg.hash.as_bytes(),
+            start_byte: unit.range.start,
+            end_byte: unit.range.end,
+            extent: unit.cfg.op_count,
+        });
+        let api_extent = clamp_u32(unit.api.names.len());
+        for (kind, hash) in [
+            (FeatureKind::ApiCallSequence, unit.api.sequence_hash),
+            (FeatureKind::ApiCallMultiset, unit.api.multiset_hash),
+        ] {
+            occurrences.push(FeatureOccurrenceRow {
+                kind,
+                hash: *hash.as_bytes(),
+                start_byte: unit.range.start,
+                end_byte: unit.range.end,
+                extent: api_extent,
+            });
+        }
+        Self {
+            host_unit,
+            feature_schema_version: FEATURE_SCHEMA_VERSION,
+            vector_counts: unit.vector.counts,
+            max_depth: unit.vector.max_depth,
+            node_count: unit.vector.node_count,
+            cfg_op_count: unit.cfg.op_count,
+            cfg_max_loop_depth: unit.cfg.max_loop_depth,
+            cfg_branch_count: unit.cfg.branch_count,
+            occurrences,
+        }
+    }
+}
+
+fn clamp_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 /// Everything one scan run persists.
 #[derive(Debug, Clone)]
 pub struct Snapshot<'a> {
@@ -128,6 +240,9 @@ pub struct Snapshot<'a> {
     pub units: Vec<UnitRow>,
     /// Detected clone groups.
     pub groups: Vec<GroupRow>,
+    /// Per-unit candidate-extraction features, referencing [`Self::units`] by
+    /// index. Empty in Fast mode, which derives no structural features.
+    pub features: Vec<FeatureRow>,
 }
 
 impl Store {
@@ -180,7 +295,7 @@ fn write_snapshot(tx: &Transaction<'_>, snapshot: &Snapshot<'_>) -> Result<i64, 
     }
 
     let suppression_row_ids = write_suppressions(tx, &snapshot.suppressions)?;
-    // Units first: members reference them by index.
+    // Units first: members and features reference them by index.
     let unit_row_ids = write_units(tx, snapshot, run_id, variant_id)?;
     for group in &snapshot.groups {
         write_group(
@@ -193,7 +308,85 @@ fn write_snapshot(tx: &Transaction<'_>, snapshot: &Snapshot<'_>) -> Result<i64, 
             &suppression_row_ids,
         )?;
     }
+    write_features(tx, snapshot, run_id, variant_id, &unit_row_ids)?;
     Ok(run_id)
+}
+
+/// Persist per-unit candidate-extraction features: the scalar `unit_feature`
+/// row and every hash occurrence, deduplicating feature fingerprints by their
+/// full analysis context.
+fn write_features(
+    tx: &Transaction<'_>,
+    snapshot: &Snapshot<'_>,
+    run_id: i64,
+    variant_id: i64,
+    unit_row_ids: &[i64],
+) -> Result<(), StoreError> {
+    for feature in &snapshot.features {
+        let unit_row_id =
+            *unit_row_ids
+                .get(feature.host_unit)
+                .ok_or(StoreError::UnknownUnitIndex {
+                    index: feature.host_unit,
+                    units: unit_row_ids.len(),
+                })?;
+        let language = snapshot.units[feature.host_unit].language;
+        let frontend_version = frontend_version_for(snapshot, language);
+        tx.execute(
+            "INSERT INTO unit_feature
+                 (source_unit_id, feature_schema_version, vector_counts,
+                  max_depth, node_count, cfg_op_count, cfg_max_loop_depth,
+                  cfg_branch_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                unit_row_id,
+                feature.feature_schema_version,
+                encode_counts(&feature.vector_counts),
+                feature.max_depth,
+                feature.node_count,
+                feature.cfg_op_count,
+                feature.cfg_max_loop_depth,
+                feature.cfg_branch_count,
+            ],
+        )?;
+        for occ in &feature.occurrences {
+            let fp_id = upsert_feature_fingerprint(
+                tx,
+                occ.kind,
+                &occ.hash,
+                feature.feature_schema_version,
+                frontend_version,
+                snapshot.variant.mode.name(),
+                language.name(),
+                variant_id,
+            )?;
+            tx.execute(
+                "INSERT INTO feature_occurrence
+                     (scan_run_id, feature_fingerprint_id, source_unit_id,
+                      start_byte, end_byte, extent)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    run_id,
+                    fp_id,
+                    unit_row_id,
+                    i64::try_from(occ.start_byte).unwrap_or(i64::MAX),
+                    i64::try_from(occ.end_byte).unwrap_or(i64::MAX),
+                    occ.extent,
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Little-endian encoding of the characteristic-vector counts, one `u32` per
+/// shape-tag slot.
+fn encode_counts(counts: &[u32; SHAPE_TAG_SLOTS]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(SHAPE_TAG_SLOTS * 4);
+    for &count in counts {
+        bytes.extend_from_slice(&count.to_le_bytes());
+    }
+    bytes
 }
 
 /// Record the active suppression rules, reusing existing `(scope, pattern)`
@@ -426,6 +619,55 @@ fn upsert_group_fingerprint(
         "",
         variant_id,
     )
+}
+
+/// Insert (or reuse) a feature-fingerprint row and return its id. Feature
+/// fingerprints deduplicate on their full context, `feature_schema_version`
+/// included, so identical hashes from incompatible recipes stay distinct.
+#[allow(clippy::too_many_arguments)] // one row, one call site per column set
+fn upsert_feature_fingerprint(
+    tx: &Transaction<'_>,
+    kind: FeatureKind,
+    hash: &[u8; 16],
+    feature_schema_version: &str,
+    frontend_version: &str,
+    mode: &str,
+    language: &str,
+    variant_id: i64,
+) -> Result<i64, StoreError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO feature_fingerprint
+             (kind, hash_algo, hash, feature_schema_version, frontend_version,
+              analysis_mode, language, build_variant_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            kind.name(),
+            HASH_ALGORITHM,
+            hash.as_slice(),
+            feature_schema_version,
+            frontend_version,
+            mode,
+            language,
+            variant_id,
+        ],
+    )?;
+    Ok(tx.query_row(
+        "SELECT id FROM feature_fingerprint
+         WHERE kind = ?1 AND hash_algo = ?2 AND hash = ?3
+           AND feature_schema_version = ?4 AND frontend_version = ?5
+           AND analysis_mode = ?6 AND language = ?7 AND build_variant_id = ?8",
+        params![
+            kind.name(),
+            HASH_ALGORITHM,
+            hash.as_slice(),
+            feature_schema_version,
+            frontend_version,
+            mode,
+            language,
+            variant_id,
+        ],
+        |row| row.get(0),
+    )?)
 }
 
 #[allow(clippy::too_many_arguments)] // one row, one call site per column set

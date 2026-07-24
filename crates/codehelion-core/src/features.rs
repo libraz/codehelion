@@ -65,6 +65,58 @@ pub const MIN_SUBTREE_NODES: usize = 5;
 /// tag, with slot 0 unused because tags start at 1.
 pub const SHAPE_TAG_SLOTS: usize = 23;
 
+/// The kind of a persisted feature hash.
+///
+/// These name the hash-valued feature families the candidate index keys on.
+/// Unlike a stable identifier, a feature hash is only meaningful within one
+/// [`FEATURE_SCHEMA_VERSION`]; the persistence layer stores that version
+/// alongside the hash so hashes from incompatible recipes never merge.
+///
+/// The [`CharacteristicVector`] is deliberately absent: it is a count vector,
+/// not a single hash, and is persisted as scalars rather than an index key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FeatureKind {
+    /// A [`WindowFeature`]: a fixed-length run of adjacent statements.
+    StatementWindow,
+    /// A [`SubtreeFeature`]: a Merkle hash over an IR subtree.
+    Subtree,
+    /// A [`CfgFeature`]: the approximate control-flow op sequence.
+    Cfg,
+    /// An [`ApiCallFeature::sequence_hash`]: callee names in source order.
+    ApiCallSequence,
+    /// An [`ApiCallFeature::multiset_hash`]: the order-independent callee set.
+    ApiCallMultiset,
+}
+
+impl FeatureKind {
+    /// Every kind, in declaration order.
+    pub const ALL: [Self; 5] = [
+        Self::StatementWindow,
+        Self::Subtree,
+        Self::Cfg,
+        Self::ApiCallSequence,
+        Self::ApiCallMultiset,
+    ];
+
+    /// The stable snake-case name used in storage and reports.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::StatementWindow => "statement_window",
+            Self::Subtree => "subtree",
+            Self::Cfg => "cfg",
+            Self::ApiCallSequence => "api_call_sequence",
+            Self::ApiCallMultiset => "api_call_multiset",
+        }
+    }
+
+    /// Parse a [`name`](Self::name) back into its kind.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
+    }
+}
+
 /// A 128-bit feature hash.
 ///
 /// Feature hashes are candidate-index keys, not stable identifiers: they are
@@ -1053,5 +1105,15 @@ mod tests {
         ];
         let file = file_of(roots, call_tokens_forward());
         assert_eq!(extract(&file), extract(&file));
+    }
+
+    #[test]
+    fn feature_kind_names_round_trip_and_are_distinct() {
+        let mut seen = std::collections::BTreeSet::new();
+        for kind in FeatureKind::ALL {
+            assert!(seen.insert(kind.name()), "duplicate name {}", kind.name());
+            assert_eq!(FeatureKind::from_name(kind.name()), Some(kind));
+        }
+        assert_eq!(FeatureKind::from_name("nope"), None);
     }
 }

@@ -144,6 +144,9 @@ mod tests {
             "artifact_symbol",
             "source_artifact_mapping",
             "detector_version",
+            "feature_fingerprint",
+            "feature_occurrence",
+            "unit_feature",
         ] {
             let count: i64 = store
                 .conn

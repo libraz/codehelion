@@ -3,15 +3,21 @@
 //! The schema covers every audit entity: `ScanRun`, `BuildVariant`,
 //! `SourceUnit`, `Fragment`, `Fingerprint`, `CloneGroup`, `GroupLineage`,
 //! `Finding`, `Suppression`, `Artifact`, `ArtifactSymbol`,
-//! `SourceArtifactMapping` and `DetectorVersion`. The artifact tables and
-//! `group_lineage` are created empty in this release — the schema is the
-//! contract, population comes with the features that need them.
+//! `SourceArtifactMapping` and `DetectorVersion`, plus the candidate-index
+//! feature tables `FeatureFingerprint`, `FeatureOccurrence` and `UnitFeature`.
+//! The artifact tables and `group_lineage` are created empty in this release —
+//! the schema is the contract, population comes with the features that need
+//! them.
 //!
 //! Invariants enforced at the schema level:
 //!
 //! - Stable identifiers are 16-byte fingerprint BLOBs; file paths, line
 //!   numbers and offsets appear only as non-authoritative anchor columns and
 //!   never in a UNIQUE or key role.
+//! - Feature hashes are candidate-index keys, not stable identifiers, and
+//!   live in their own tables. They carry a `feature_schema_version` (never a
+//!   `normalization_version`) in their dedup key, so hashes from incompatible
+//!   feature recipes never merge, and they never mix into `fingerprint`.
 //! - Every fingerprint row carries its full analysis context (hash
 //!   algorithm, normalization version, frontend version, mode, language,
 //!   build variant) inside its UNIQUE constraint, so equal hashes produced
@@ -32,11 +38,11 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
-const MIGRATIONS: &[&str] = &[V1];
+const MIGRATIONS: &[&str] = &[V1, V2];
 
 /// Version 1: the full entity set.
 const V1: &str = "
@@ -233,6 +239,55 @@ CREATE TABLE source_artifact_mapping (
     )
 ) STRICT;
 CREATE INDEX idx_sam_symbol ON source_artifact_mapping (artifact_symbol_id);
+";
+
+/// Version 2: candidate-extraction feature storage for Structural mode.
+///
+/// These tables hold feature hashes, which are candidate-index keys, not
+/// stable identifiers — kept separate from `fingerprint` (whose rows are
+/// stable ids) on purpose. A feature hash is valid only within one
+/// `feature_schema_version`, which is part of the dedup key.
+const V2: &str = "
+CREATE TABLE feature_fingerprint (
+    id                     INTEGER PRIMARY KEY,
+    kind                   TEXT NOT NULL CHECK (kind IN
+                               ('statement_window', 'subtree', 'cfg',
+                                'api_call_sequence', 'api_call_multiset')),
+    hash_algo              TEXT NOT NULL,
+    hash                   BLOB NOT NULL CHECK (length(hash) = 16),
+    feature_schema_version TEXT NOT NULL,
+    frontend_version       TEXT NOT NULL,
+    analysis_mode          TEXT NOT NULL CHECK (analysis_mode IN ('fast', 'structural', 'semantic')),
+    language               TEXT NOT NULL CHECK (language IN ('rust', 'c', 'cpp')),
+    build_variant_id       INTEGER NOT NULL REFERENCES build_variant (id),
+    UNIQUE (kind, hash_algo, hash, feature_schema_version, frontend_version,
+            analysis_mode, language, build_variant_id)
+) STRICT;
+CREATE INDEX idx_feature_fingerprint_kind_hash ON feature_fingerprint (kind, hash);
+
+CREATE TABLE feature_occurrence (
+    id                     INTEGER PRIMARY KEY,
+    scan_run_id            INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
+    feature_fingerprint_id INTEGER NOT NULL REFERENCES feature_fingerprint (id),
+    source_unit_id         INTEGER REFERENCES source_unit (id),
+    start_byte             INTEGER NOT NULL,
+    end_byte               INTEGER NOT NULL,
+    extent                 INTEGER NOT NULL
+) STRICT;
+CREATE INDEX idx_feature_occurrence_run ON feature_occurrence (scan_run_id);
+CREATE INDEX idx_feature_occurrence_fp ON feature_occurrence (feature_fingerprint_id);
+CREATE INDEX idx_feature_occurrence_unit ON feature_occurrence (source_unit_id);
+
+CREATE TABLE unit_feature (
+    source_unit_id         INTEGER PRIMARY KEY REFERENCES source_unit (id) ON DELETE CASCADE,
+    feature_schema_version TEXT NOT NULL,
+    vector_counts          BLOB NOT NULL,
+    max_depth              INTEGER NOT NULL,
+    node_count             INTEGER NOT NULL,
+    cfg_op_count           INTEGER NOT NULL,
+    cfg_max_loop_depth     INTEGER NOT NULL,
+    cfg_branch_count       INTEGER NOT NULL
+) STRICT;
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

@@ -594,6 +594,7 @@ pub fn measure_store_insert(
         suppressions: Vec::new(),
         units: unit_rows,
         groups: group_rows,
+        features: Vec::new(),
     };
 
     let db = work_dir.join("store-bench.db");

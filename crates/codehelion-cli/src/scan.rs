@@ -624,6 +624,7 @@ fn record(
         suppressions: rules.rows.clone(),
         units,
         groups,
+        features: Vec::new(),
     };
     let mut store = open_store(db_path)?;
     Ok(store.record_snapshot(&snapshot)?)

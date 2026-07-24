@@ -5,11 +5,18 @@
 
 use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::engine::CloneType;
+use codehelion_core::features::{
+    ApiCallFeature, CfgFeature, CharacteristicVector, FeatureHash, FeatureKind, SubtreeFeature,
+    UnitFeatures, WindowFeature,
+};
 use codehelion_core::frontend::UnitKind;
+use codehelion_core::ir::ByteRange;
 use codehelion_core::stable_id::{
     CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint,
 };
-use codehelion_store::snapshot::{GroupRow, MemberRow, Snapshot, SuppressionRuleRow, UnitRow};
+use codehelion_store::snapshot::{
+    FeatureRow, GroupRow, MemberRow, Snapshot, SuppressionRuleRow, UnitRow,
+};
 use codehelion_store::{Store, StoreError};
 
 const fn unit_fp(seed: u8) -> UnitFingerprint {
@@ -97,6 +104,7 @@ fn sample_snapshot<'a>(
                 member(1, "src/b.rs", Some(1)),
             ],
         }],
+        features: Vec::new(),
     }
 }
 
@@ -194,6 +202,120 @@ fn fingerprints_deduplicate_across_scans_but_runs_do_not() {
 
     // The later run is the latest.
     assert_eq!(store.latest_run().unwrap().unwrap().id, second_id);
+}
+
+/// A unit-features fixture with one window, one subtree, a cfg profile and
+/// the two api hashes — five distinct feature hashes in total.
+fn sample_unit_features() -> UnitFeatures {
+    let mut counts = [0u32; 23];
+    counts[1] = 3;
+    counts[11] = 2;
+    UnitFeatures {
+        name: None,
+        shape_tag: 1,
+        range: ByteRange { start: 0, end: 100 },
+        windows: vec![WindowFeature {
+            hash: FeatureHash::from_bytes([7; 16]),
+            length: 4,
+            range: ByteRange { start: 0, end: 40 },
+        }],
+        subtrees: vec![SubtreeFeature {
+            hash: FeatureHash::from_bytes([8; 16]),
+            node_count: 6,
+            range: ByteRange { start: 0, end: 50 },
+        }],
+        vector: CharacteristicVector {
+            counts,
+            max_depth: 4,
+            node_count: 12,
+        },
+        cfg: CfgFeature {
+            hash: FeatureHash::from_bytes([9; 16]),
+            op_count: 5,
+            max_loop_depth: 2,
+            branch_count: 1,
+        },
+        api: ApiCallFeature {
+            names: Vec::new(),
+            sequence_hash: FeatureHash::from_bytes([10; 16]),
+            multiset_hash: FeatureHash::from_bytes([11; 16]),
+        },
+    }
+}
+
+#[test]
+fn feature_fingerprints_persist_and_deduplicate_across_scans() {
+    let variant = BuildVariant::fast(LanguageSelection::default());
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let unit = sample_unit_features();
+    let mut first = sample_snapshot(&variant, &detectors);
+    first.features = vec![FeatureRow::from_unit(0, &unit)];
+    let run_id = store.record_snapshot(&first).unwrap();
+
+    // One window + one subtree + one cfg + two api hashes = five occurrences,
+    // each a distinct fingerprint; one scalar unit_feature row.
+    assert_eq!(store.table_count("feature_occurrence").unwrap(), 5);
+    assert_eq!(store.table_count("feature_fingerprint").unwrap(), 5);
+    assert_eq!(store.table_count("unit_feature").unwrap(), 1);
+
+    // The subtree hash resolves to its single occurrence with the right anchor
+    // and extent.
+    let posting = store
+        .feature_posting_list(FeatureKind::Subtree, &[8; 16])
+        .unwrap();
+    assert_eq!(posting.len(), 1);
+    assert_eq!(posting[0].scan_run_id, run_id);
+    assert_eq!(posting[0].start_byte, 0);
+    assert_eq!(posting[0].end_byte, 50);
+    assert_eq!(posting[0].extent, 6);
+    assert!(posting[0].source_unit_id.is_some());
+    assert!(
+        store
+            .feature_posting_list(FeatureKind::Subtree, &[99; 16])
+            .unwrap()
+            .is_empty()
+    );
+
+    // A second, identical scan reuses every fingerprint row but records fresh
+    // occurrences and a fresh unit_feature row.
+    let mut second = sample_snapshot(&variant, &detectors);
+    second.started_at = "2026-07-25T00:00:00Z";
+    second.finished_at = "2026-07-25T00:00:04Z";
+    second.features = vec![FeatureRow::from_unit(0, &unit)];
+    store.record_snapshot(&second).unwrap();
+    assert_eq!(store.table_count("feature_fingerprint").unwrap(), 5);
+    assert_eq!(store.table_count("feature_occurrence").unwrap(), 10);
+    assert_eq!(store.table_count("unit_feature").unwrap(), 2);
+    assert_eq!(
+        store
+            .feature_posting_list(FeatureKind::Subtree, &[8; 16])
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn a_feature_referencing_an_unknown_unit_rolls_the_snapshot_back() {
+    let variant = BuildVariant::fast(LanguageSelection::default());
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let unit = sample_unit_features();
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.features = vec![FeatureRow::from_unit(99, &unit)];
+    let err = store.record_snapshot(&snapshot).unwrap_err();
+    assert!(matches!(
+        err,
+        StoreError::UnknownUnitIndex { index: 99, .. }
+    ));
+
+    assert!(store.latest_run().unwrap().is_none(), "no partial run");
+    for table in ["feature_fingerprint", "feature_occurrence", "unit_feature"] {
+        assert_eq!(store.table_count(table).unwrap(), 0, "{table} not empty");
+    }
 }
 
 #[test]

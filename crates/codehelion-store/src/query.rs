@@ -6,6 +6,7 @@
 //! members by their anchor then row id — the same database always yields the
 //! same output.
 
+use codehelion_core::features::FeatureKind;
 use rusqlite::{OptionalExtension, params};
 
 use crate::{Store, StoreError};
@@ -97,7 +98,55 @@ pub struct OccurrenceDetail {
     pub scan_run_id: i64,
 }
 
+/// One posting-list entry: an occurrence of a feature hash at a location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeatureOccurrence {
+    /// Run the occurrence was recorded in.
+    pub scan_run_id: i64,
+    /// Enclosing unit row, when anchored to one.
+    pub source_unit_id: Option<i64>,
+    /// Anchor: first byte covered.
+    pub start_byte: i64,
+    /// Anchor: one past the last byte covered.
+    pub end_byte: i64,
+    /// Kind-specific size (window length, subtree node count, ...).
+    pub extent: i64,
+}
+
 impl Store {
+    /// The posting list of one feature hash: every occurrence of `kind`/`hash`,
+    /// deterministically ordered by run, unit and anchor. This is the read the
+    /// candidate index builds on.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn feature_posting_list(
+        &self,
+        kind: FeatureKind,
+        hash: &[u8; 16],
+    ) -> Result<Vec<FeatureOccurrence>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT o.scan_run_id, o.source_unit_id, o.start_byte, o.end_byte, o.extent
+             FROM feature_occurrence o
+             JOIN feature_fingerprint f ON f.id = o.feature_fingerprint_id
+             WHERE f.kind = ?1 AND f.hash = ?2
+             ORDER BY o.scan_run_id ASC, o.source_unit_id ASC, o.start_byte ASC, o.id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![kind.name(), hash.as_slice()], |row| {
+                Ok(FeatureOccurrence {
+                    scan_run_id: row.get(0)?,
+                    source_unit_id: row.get(1)?,
+                    start_byte: row.get(2)?,
+                    end_byte: row.get(3)?,
+                    extent: row.get(4)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// The most recently started scan run, if any.
     ///
     /// # Errors
