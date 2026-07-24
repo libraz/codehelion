@@ -11,6 +11,8 @@ description = "C++ Fast-mode lexer and unit-boundary frontend for the codehelion
 [dependencies]
 codehelion-core = { version = "0.1.0", path = "../codehelion-core" }
 codehelion-frontend-c = { version = "0.1.0", path = "../codehelion-frontend-c" }
+tree-sitter = "0.25"
+tree-sitter-cpp = "0.23"
 
 [lints]
 workspace = true
