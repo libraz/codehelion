@@ -74,14 +74,10 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let mut discovered = discover_sources(&root, &cfg, args.no_ignore)?;
     let sources = std::mem::take(&mut discovered.units);
     let (sources, glob_excluded) = filter_globs(&cfg, sources)?;
-    let (lexed, unreadable) = lex_sources(&sources, jobs)?;
+    let lex_timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
+    let (lexed, unreadable, timed_out) = lex_sources(&sources, jobs, lex_timeout)?;
 
-    let engine_config = EngineConfig {
-        min_clone_tokens: usize::try_from(cfg.min_clone_tokens)
-            .context("min-clone-tokens out of range")?,
-        literals: literal_norm(cfg.literal_normalization),
-        ..EngineConfig::default()
-    };
+    let engine_config = engine_config(&cfg)?;
     let input: Vec<InputFile<'_>> = lexed
         .iter()
         .map(|file| InputFile {
@@ -143,6 +139,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         discovered: &discovered,
         glob_excluded,
         unreadable,
+        timed_out,
         lexed: &lexed,
         report: &report,
         ids: &ids,
@@ -173,6 +170,7 @@ struct BuildInputs<'a> {
     discovered: &'a DiscoveryReport,
     glob_excluded: usize,
     unreadable: u64,
+    timed_out: u64,
     lexed: &'a [LexedSource],
     report: &'a EngineReport,
     ids: &'a [GroupIds],
@@ -254,7 +252,7 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
             excluded: report::ExcludedCounts {
                 generated: as_u64(inputs.discovered.suppressed_generated.len()),
                 by_glob: as_u64(inputs.glob_excluded),
-                skipped: inputs.discovered.skipped.total() + inputs.unreadable,
+                skipped: inputs.discovered.skipped.total() + inputs.unreadable + inputs.timed_out,
             },
             groups: report::GroupCounts {
                 total: as_u64(inputs.report.groups.len()),
@@ -404,6 +402,19 @@ fn effective_jobs(flag: Option<usize>, configured: Option<usize>) -> Result<usiz
     }
 }
 
+/// Build the engine configuration from the effective scan configuration:
+/// detection knobs plus the configured candidate ceilings.
+fn engine_config(cfg: &Config) -> Result<EngineConfig> {
+    Ok(EngineConfig {
+        min_clone_tokens: usize::try_from(cfg.min_clone_tokens)
+            .context("min-clone-tokens out of range")?,
+        literals: literal_norm(cfg.literal_normalization),
+        posting_cap: cfg.limits.posting_cap,
+        pair_budget: cfg.limits.pair_budget,
+        ..EngineConfig::default()
+    })
+}
+
 /// Map the configured literal strategy onto the engine's.
 const fn literal_norm(setting: LiteralNormalization) -> LiteralNorm {
     match setting {
@@ -417,6 +428,7 @@ const fn literal_norm(setting: LiteralNormalization) -> LiteralNorm {
 fn discover_sources(root: &Path, cfg: &Config, no_ignore: bool) -> Result<DiscoveryReport> {
     let discovery_config = DiscoveryConfig {
         respect_gitignore: !no_ignore,
+        max_file_bytes: cfg.limits.max_file_bytes,
         languages: LanguageSelection {
             rust: cfg.languages.rust,
             c: cfg.languages.c,
@@ -460,21 +472,43 @@ fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>> {
     Ok(Some(builder.build()?))
 }
 
+/// What became of one source file handed to the lexer.
+enum LexOutcome {
+    /// Lexed within the time ceiling; ready for the engine.
+    Lexed(Box<LexedSource>),
+    /// The file could not be read.
+    Unreadable,
+    /// Lexing exceeded the configured time ceiling; the file is excluded.
+    TimedOut,
+}
+
 /// Lex every source, spreading contiguous chunks across `jobs` worker
 /// threads. Chunks are joined in order, so the result order equals the
 /// (deterministic) discovery order regardless of thread scheduling. Files
-/// that vanished since discovery are counted, not fatal.
-fn lex_sources(sources: &[SourceUnit], jobs: usize) -> Result<(Vec<LexedSource>, u64)> {
+/// that vanished since discovery or blew the time ceiling are counted, not
+/// fatal. Returns the lexed files plus the unreadable and timed-out counts.
+fn lex_sources(
+    sources: &[SourceUnit],
+    jobs: usize,
+    timeout: std::time::Duration,
+) -> Result<(Vec<LexedSource>, u64, u64)> {
     if sources.is_empty() {
-        return Ok((Vec::new(), 0));
+        return Ok((Vec::new(), 0, 0));
     }
     let chunk_size = sources.len().div_ceil(jobs);
-    let mut chunk_results: Vec<Vec<Option<LexedSource>>> = Vec::new();
+    let mut chunk_results: Vec<Vec<LexOutcome>> = Vec::new();
     let mut worker_panicked = false;
     std::thread::scope(|scope| {
         let handles: Vec<_> = sources
             .chunks(chunk_size)
-            .map(|chunk| scope.spawn(move || chunk.iter().map(lex_one).collect::<Vec<_>>()))
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|s| lex_one(s, timeout))
+                        .collect::<Vec<_>>()
+                })
+            })
             .collect();
         for handle in handles {
             match handle.join() {
@@ -488,24 +522,37 @@ fn lex_sources(sources: &[SourceUnit], jobs: usize) -> Result<(Vec<LexedSource>,
     }
     let mut lexed = Vec::with_capacity(sources.len());
     let mut unreadable = 0u64;
+    let mut timed_out = 0u64;
     for result in chunk_results.into_iter().flatten() {
         match result {
-            Some(file) => lexed.push(file),
-            None => unreadable += 1,
+            LexOutcome::Lexed(file) => lexed.push(*file),
+            LexOutcome::Unreadable => unreadable += 1,
+            LexOutcome::TimedOut => timed_out += 1,
         }
     }
-    Ok((lexed, unreadable))
+    Ok((lexed, unreadable, timed_out))
 }
 
-/// Read and lex one source file; `None` when the file cannot be read.
-fn lex_one(source: &SourceUnit) -> Option<LexedSource> {
-    let bytes = std::fs::read(&source.absolute_path).ok()?;
+/// Read and lex one source file, enforcing the per-file time ceiling.
+///
+/// The ceiling is checked after the (single-pass, linear-time) lexer
+/// returns: with the discovery size ceiling bounding the input, lexing
+/// cannot run away, so a post-hoc check suffices to keep an unexpectedly
+/// slow file out of the results while the skipped count keeps it visible.
+fn lex_one(source: &SourceUnit, timeout: std::time::Duration) -> LexOutcome {
+    let started = std::time::Instant::now();
+    let Ok(bytes) = std::fs::read(&source.absolute_path) else {
+        return LexOutcome::Unreadable;
+    };
     let text = String::from_utf8_lossy(&bytes);
     let file = match source.language {
         Language::Rust => codehelion_frontend_rust::RustFrontend.lex(&text),
         Language::C => codehelion_frontend_c::CFrontend.lex(&text),
         Language::Cpp => codehelion_frontend_cpp::CppFrontend.lex(&text),
     };
+    if started.elapsed() > timeout {
+        return LexOutcome::TimedOut;
+    }
     let unit_lines = file
         .units
         .iter()
@@ -517,7 +564,7 @@ fn lex_one(source: &SourceUnit) -> Option<LexedSource> {
             (unit.span.start_line, end_line)
         })
         .collect();
-    Some(LexedSource {
+    LexOutcome::Lexed(Box::new(LexedSource {
         relative_path: source.relative_path.to_string_lossy().into_owned(),
         language: file.language,
         frontend_version: file.frontend_version,
@@ -527,7 +574,7 @@ fn lex_one(source: &SourceUnit) -> Option<LexedSource> {
         marker_lines: suppress::marker_lines(&text),
         lines: u64::try_from(text.lines().count()).unwrap_or(u64::MAX),
         diagnostics: file.diagnostics.len(),
-    })
+    }))
 }
 
 /// The audit-database location: an explicit flag is taken as given (relative
@@ -773,6 +820,23 @@ mod tests {
         assert_eq!(effective_jobs(None, Some(8)).unwrap(), 8);
         assert!(effective_jobs(None, None).unwrap() >= 1);
         assert!(effective_jobs(Some(0), None).is_err());
+    }
+
+    #[test]
+    fn engine_config_applies_configured_ceilings() {
+        let cfg = Config {
+            limits: config::Limits {
+                posting_cap: 5,
+                pair_budget: 7,
+                ..config::Limits::default()
+            },
+            ..Config::default()
+        };
+        let engine = engine_config(&cfg).unwrap();
+        assert_eq!(engine.posting_cap, 5);
+        assert_eq!(engine.pair_budget, 7);
+        // Detection knobs stay at their defaults.
+        assert_eq!(engine.min_clone_tokens, 20);
     }
 
     #[test]

@@ -278,6 +278,61 @@ fn scan_json(root: &Path) -> serde_json::Value {
 }
 
 #[test]
+fn configured_file_size_ceiling_skips_oversized_files() {
+    let dir = fixture();
+    // 4 KiB of valid Rust, above the 1 KiB ceiling set below.
+    let big = "// filler line to grow the file body\n".repeat(120);
+    std::fs::write(dir.path().join("src/big.rs"), big).unwrap();
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[limits]\nmax-file-bytes = 1024\n",
+    )
+    .unwrap();
+
+    let value = scan_json(dir.path());
+    assert_eq!(value["summary"]["files"]["total"], 5);
+    assert_eq!(value["summary"]["excluded"]["skipped"], 1);
+    assert!(
+        value["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|group| group["members"].as_array().unwrap())
+            .all(|member| member["file"] != "src/big.rs")
+    );
+}
+
+#[test]
+fn configured_pair_budget_exhaustion_is_reported() {
+    let dir = fixture();
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[limits]\npair-budget = 0\n",
+    )
+    .unwrap();
+
+    let value = scan_json(dir.path());
+    assert_eq!(value["summary"]["pair_budget_exhausted"], true);
+    assert_eq!(value["summary"]["groups"]["total"], 0);
+}
+
+#[test]
+fn zero_parse_timeout_excludes_every_file_visibly() {
+    let dir = fixture();
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[limits]\nparse-timeout-ms = 0\n",
+    )
+    .unwrap();
+
+    let value = scan_json(dir.path());
+    // Every file blows a zero ceiling; all five are excluded and counted.
+    assert_eq!(value["summary"]["files"]["total"], 0);
+    assert_eq!(value["summary"]["excluded"]["skipped"], 5);
+    assert_eq!(value["summary"]["groups"]["total"], 0);
+}
+
+#[test]
 fn json_reports_follow_the_versioned_schema() {
     let dir = fixture();
     let value = scan_json(dir.path());
