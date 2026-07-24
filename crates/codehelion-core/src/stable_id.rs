@@ -29,6 +29,7 @@ use crate::discovery::{BuildVariant, Language};
 use crate::engine::normalize::{self, LiteralNorm, NormAtom};
 use crate::engine::{CloneType, EngineReport, InputFile};
 use crate::frontend::Token;
+use crate::verify::StructuralClass;
 
 /// Version of the identifier-hashing recipe. Bump on any change to the hash
 /// inputs, their encoding or their order.
@@ -289,6 +290,49 @@ pub fn clone_group_fingerprint(
     hasher.write_str(variant.mode.name());
     hasher.write_str(&variant.canonical());
     hasher.write_str(clone_type.name());
+    hasher.write_u32(u32::try_from(distinct.len()).unwrap_or(u32::MAX));
+    for bytes in &distinct {
+        hasher.write_bytes(bytes);
+    }
+    CloneGroupFingerprint(hasher.finish())
+}
+
+/// Fingerprint a Structural (Type-3) clone group, anchored on its canonical
+/// instance.
+///
+/// A Type-3 group's members are similar but not identical, so — unlike a
+/// Type-1/2 group, whose members share one content fingerprint — there is no
+/// single content to hash. The group is instead identified by its canonical
+/// instance (the medoid, see [`crate::grouping`]) *and* the order-independent,
+/// deduplicated set of its members' own content fingerprints. Anchoring on the
+/// medoid keeps the identity tied to a concrete instance; folding in the whole
+/// member set means adding genuinely new member content changes the
+/// fingerprint, while reordering members or repeating identical content does
+/// not. Continuity across membership drift (a member editing away, the medoid
+/// being replaced) is [`GroupLineageId`]'s concern, not this fingerprint's.
+///
+/// The `canonical` fingerprint should also appear in `members`; it is hashed a
+/// second time, in a distinct anchor position, so two groups with the same
+/// member set but different medoids hash apart.
+#[must_use]
+pub fn structural_clone_group_fingerprint(
+    variant: &BuildVariant,
+    class: StructuralClass,
+    canonical: &FragmentFingerprint,
+    members: &[FragmentFingerprint],
+) -> CloneGroupFingerprint {
+    let mut distinct: Vec<[u8; 16]> = members.iter().map(|m| m.0).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+
+    let mut hasher = IdHasher::new("group-structural");
+    hasher.write_str(FP_SCHEMA_VERSION);
+    hasher.write_str(HASH_ALGORITHM);
+    hasher.write_str(variant.mode.name());
+    hasher.write_str(&variant.canonical());
+    hasher.write_str(class.name());
+    // Anchor on the canonical instance, then the order-independent member set.
+    hasher.write_bytes(&canonical.0);
     hasher.write_u32(u32::try_from(distinct.len()).unwrap_or(u32::MAX));
     for bytes in &distinct {
         hasher.write_bytes(bytes);
@@ -588,6 +632,40 @@ mod tests {
         // New member content changes it.
         let single = clone_group_fingerprint(&variant(), CloneType::Type1, &[a]);
         assert_ne!(forward, single);
+    }
+
+    #[test]
+    fn structural_group_fingerprint_is_anchored_and_order_independent() {
+        let a = fragment_fingerprint(&variant(), &ctx(), "member", &sample(), ContentNorm::Raw);
+        let b = fragment_fingerprint(
+            &variant(),
+            &ctx(),
+            "member",
+            &renamed_sample(),
+            ContentNorm::Raw,
+        );
+        let members = [a, b];
+        let forward =
+            structural_clone_group_fingerprint(&variant(), StructuralClass::Type3, &a, &members);
+        // Member order does not matter.
+        let reversed =
+            structural_clone_group_fingerprint(&variant(), StructuralClass::Type3, &a, &[b, a]);
+        assert_eq!(forward, reversed);
+        // A different canonical instance (medoid) over the same set hashes apart.
+        let other_anchor =
+            structural_clone_group_fingerprint(&variant(), StructuralClass::Type3, &b, &members);
+        assert_ne!(forward, other_anchor);
+        // New member content changes it.
+        let c = fragment_fingerprint(
+            &variant(),
+            &ctx(),
+            "member",
+            &toks(&[(Kw, "let"), (Id, "z"), (Pu, ";")]),
+            ContentNorm::Raw,
+        );
+        let grown =
+            structural_clone_group_fingerprint(&variant(), StructuralClass::Type3, &a, &[a, b, c]);
+        assert_ne!(forward, grown);
     }
 
     #[test]
