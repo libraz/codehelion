@@ -1,10 +1,12 @@
-//! Rust Fast frontend for codehelion.
+//! Rust frontends for codehelion.
 //!
 //! Implements [`codehelion_core::frontend::Frontend`] for Rust: an
 //! error-tolerant lexer paired with brace-matching unit-boundary detection.
-//! Nothing here parses or executes the source; macros and generics pass through
-//! as tokens.
+//! The [`ir`] module adds the Structural-mode frontend, which parses the file
+//! with a real Rust parser and maps the tree onto the Syntax IR. Nothing here
+//! executes or expands the source; macros and generics pass through as tokens.
 
+pub mod ir;
 mod lexer;
 mod units;
 
