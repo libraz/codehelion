@@ -93,6 +93,9 @@ pub struct ScanArgs {
     /// Configuration file to use instead of the discovered `codehelion.toml`.
     #[arg(long)]
     pub config: Option<PathBuf>,
+    /// Also scan files that `.gitignore` and related ignore files would hide.
+    #[arg(long)]
+    pub no_ignore: bool,
     /// Number of worker threads (default: automatic).
     #[arg(long)]
     pub jobs: Option<usize>,

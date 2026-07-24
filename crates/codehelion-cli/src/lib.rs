@@ -5,7 +5,9 @@
 //! directly unit-testable without spawning a process.
 //!
 //! [`cli`] is the command layer; the engine lives in the `codehelion-core`
-//! crate. The dependency direction is strictly `cli -> core`.
+//! crate. This crate is the composition root: it wires the per-language
+//! frontends and the store crate into the core engine, while `core` itself
+//! depends on none of them.
 //!
 //! # Exit status
 //!
@@ -17,6 +19,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod scan;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -24,8 +27,11 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use codehelion_core::doctor;
+use codehelion_store::Store;
 
-use crate::cli::{BaselineAction, CacheAction, Cli, Command, ConfigAction, Mode, ScanArgs};
+use crate::cli::{
+    BaselineAction, CacheAction, Cli, Command, ConfigAction, ExplainArgs, Mode, ScanArgs,
+};
 use crate::config::ConfigSource;
 
 /// Exit code returned when a scan reports findings and gating is requested.
@@ -71,12 +77,13 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
     match command {
         Command::Doctor => {
             doctor::render(&doctor::diagnose(), out)?;
+            doctor_database(out)?;
             Ok(Outcome::Success)
         }
         Command::Config { action } => config_command(action, out),
         Command::Cache { action } => cache_command(action, out),
-        Command::Scan(args) => scan(args),
-        Command::Explain(_) => bail!("explain is not yet implemented"),
+        Command::Scan(args) => scan_command(args, out),
+        Command::Explain(args) => explain(args, out),
         Command::Baseline { action } => baseline(action),
         Command::Audit => bail!("audit is not available in this release"),
         Command::Artifact => bail!("artifact analysis is not available in this release"),
@@ -84,14 +91,118 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
     }
 }
 
-fn scan(args: &ScanArgs) -> Result<Outcome> {
+fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     match args.mode {
         Mode::Structural => bail!("structural mode is not available in this release"),
         Mode::Semantic => bail!("semantic mode is not available in this release"),
-        // The Fast engine lands in a later step; argument parsing, config
-        // resolution and the exit-code contract are wired now.
-        Mode::Fast => bail!("fast scanning is not yet implemented"),
+        Mode::Fast => scan::run(args, out),
     }
+}
+
+/// Look one occurrence up by its stable finding id and print its detail.
+fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
+    let path = resolve_db(args.db.as_deref())?;
+    if !path.is_file() {
+        bail!(
+            "no audit database at {}; run `codehelion scan` first",
+            path.display()
+        );
+    }
+    let store = Store::open(&path)?;
+    let Some(detail) = store.occurrence(&args.finding_id)? else {
+        bail!(
+            "no occurrence with finding id {} in {}",
+            args.finding_id,
+            path.display()
+        );
+    };
+    writeln!(out, "finding {}", detail.member.finding_hex)?;
+    writeln!(
+        out,
+        "  location: {}:{}-{}",
+        detail.member.file_path,
+        detail.member.start_line.unwrap_or(0),
+        detail.member.end_line.unwrap_or(0),
+    )?;
+    if let Some(name) = &detail.member.unit_name {
+        writeln!(out, "  unit: {name}")?;
+    }
+    writeln!(out, "  tokens: {}", detail.member.token_count)?;
+    writeln!(
+        out,
+        "  canonical: {}",
+        if detail.member.is_canonical {
+            "yes"
+        } else {
+            "no"
+        }
+    )?;
+    writeln!(
+        out,
+        "  group: {} ({}, score {:.2})",
+        detail.group_fingerprint_hex, detail.clone_type, detail.score
+    )?;
+    writeln!(out, "  scan run: {}", detail.scan_run_id)?;
+    Ok(Outcome::Success)
+}
+
+/// Append the audit database's location to the doctor report, with a hint
+/// when the database would be committed to version control.
+fn doctor_database(out: &mut impl Write) -> Result<()> {
+    let cwd = std::env::current_dir().context("resolving the current directory")?;
+    let db = resolve_db(None)?;
+    let db_abs = if db.is_absolute() {
+        db.clone()
+    } else {
+        cwd.join(&db)
+    };
+    writeln!(out)?;
+    match std::fs::metadata(&db_abs) {
+        Ok(meta) => writeln!(
+            out,
+            "  audit database: {} ({} bytes)",
+            db.display(),
+            meta.len()
+        )?,
+        Err(_) => writeln!(out, "  audit database: {} (absent)", db.display())?,
+    }
+    if let Some(repo_root) = find_git_root(&cwd) {
+        if !is_git_ignored(&repo_root, &db_abs) {
+            writeln!(
+                out,
+                "  hint: the audit database is not matched by .gitignore; \
+                 consider ignoring it (for example, add `.codehelion/`)"
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The enclosing git repository root, found by walking up for a `.git` entry.
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let mut dir = Some(start);
+    while let Some(current) = dir {
+        if current.join(".git").exists() {
+            return Some(current.to_path_buf());
+        }
+        dir = current.parent();
+    }
+    None
+}
+
+/// Whether the repository root's `.gitignore` ignores `target`.
+///
+/// Only the root ignore file is consulted — this backs a hint, not an access
+/// decision. Paths outside the repository are reported as ignored so the
+/// hint stays quiet about them.
+fn is_git_ignored(repo_root: &Path, target: &Path) -> bool {
+    let Ok(relative) = target.strip_prefix(repo_root) else {
+        return true;
+    };
+    let (gitignore, _error) = ignore::gitignore::Gitignore::new(repo_root.join(".gitignore"));
+    gitignore
+        .matched_path_or_any_parents(relative, false)
+        .is_ignore()
 }
 
 fn baseline(action: &BaselineAction) -> Result<Outcome> {
@@ -177,6 +288,7 @@ mod tests {
             format: Format::Text,
             output: None,
             config: None,
+            no_ignore: false,
             jobs: None,
             db: None,
             fail_on_findings: false,
@@ -194,11 +306,12 @@ mod tests {
     }
 
     #[test]
-    fn scan_modes_report_distinct_unsupported_reasons() {
-        let structural = scan(&scan_args(Mode::Structural)).unwrap_err();
+    fn unsupported_scan_modes_report_their_reason() {
+        let mut buffer = Vec::new();
+        let structural = scan_command(&scan_args(Mode::Structural), &mut buffer).unwrap_err();
         assert!(format!("{structural:#}").contains("not available in this release"));
-        let fast = scan(&scan_args(Mode::Fast)).unwrap_err();
-        assert!(format!("{fast:#}").contains("not yet implemented"));
+        let semantic = scan_command(&scan_args(Mode::Semantic), &mut buffer).unwrap_err();
+        assert!(format!("{semantic:#}").contains("not available in this release"));
     }
 
     #[test]

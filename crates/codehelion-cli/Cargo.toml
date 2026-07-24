@@ -22,12 +22,19 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-codehelion-core = { path = "../codehelion-core" }
+codehelion-core = { version = "0.1.0", path = "../codehelion-core" }
+codehelion-frontend-c = { version = "0.1.0", path = "../codehelion-frontend-c" }
+codehelion-frontend-cpp = { version = "0.1.0", path = "../codehelion-frontend-cpp" }
+codehelion-frontend-rust = { version = "0.1.0", path = "../codehelion-frontend-rust" }
+codehelion-store = { version = "0.1.0", path = "../codehelion-store" }
+globset = "0.4"
+ignore = "0.4"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
 [dev-dependencies]
 assert_cmd = "2"
+codehelion-store = { path = "../codehelion-store" }
 predicates = "3"
 tempfile = "3"
 

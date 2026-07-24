@@ -51,15 +51,6 @@ fn help_flag_succeeds() {
 }
 
 #[test]
-fn scan_fast_reports_not_implemented() {
-    cmd()
-        .args(["scan", "--mode", "fast"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("not yet implemented"));
-}
-
-#[test]
 fn scan_structural_reports_unavailable() {
     cmd()
         .args(["scan", "--mode", "structural"])
