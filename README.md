@@ -7,37 +7,80 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
 A fully local command-line tool that audits Rust, C and C++ codebases for
-duplicate logic (Type-1 through Type-3 clones) and compiled-artifact bloat, and
-tracks how those findings change over time. It never sends your source or
-results anywhere and needs no network access by default.
+duplicate logic and tracks how those findings change over time. It never sends
+your source or results anywhere, needs no network access, and never executes
+the code it analyses.
 
-> Early development. The source-clone engine is being built out; today the CLI
-> ships the `doctor` diagnostic. Optional compiler and artifact backends arrive
-> in later releases.
+The current release ships the **Fast** analysis mode: token-level Type-1
+(identical) and Type-2 (renamed identifiers / changed literals) clone detection
+that scans hundreds of thousands of lines in seconds without requiring a build.
+Structural (Type-3) and semantic modes, plus optional compiled-artifact
+analysis, arrive in later releases.
+
+## Highlights
+
+- **Build-free scanning** — an error-tolerant lexer processes Rust, C and C++
+  sources directly; no compiler, build system or `compile_commands.json` needed.
+- **Stable finding IDs** — findings are identified by content fingerprints, not
+  line numbers, so unrelated edits don't churn your audit history.
+- **Local audit history** — every scan is snapshotted into a SQLite database;
+  JSON and text reports are exports, the database is the canonical record.
+- **Deterministic output** — the same input produces byte-identical reports.
+- **Visible limits** — every resource ceiling that fires (file size, parse
+  timeout, candidate budget) is counted in the report, never silently applied.
 
 ## Installation
 
 ```sh
-cargo install codehelion   # installs the `codehelion` command
-# or, from a checkout:
-cargo install --path .
+# From a checkout (crates.io, PyPI and Homebrew packages are planned):
+cargo install --path crates/codehelion-cli
 ```
+
+The result is a single self-contained binary; SQLite is bundled.
 
 ## Usage
 
 ```sh
-codehelion doctor   # report which analysis components are available
-codehelion --help
+codehelion scan               # scan the current directory, text report
+codehelion scan --format json --output report.json path/to/repo
+codehelion scan --verbose     # list every clone group and member
+codehelion explain <ID>       # show a finding from the audit database
+codehelion baseline           # manage accepted-findings baselines
+codehelion config init        # write a commented codehelion.toml template
+codehelion doctor             # report available analysis components
+```
+
+Findings are grouped into clone groups; each group and member carries a stable
+ID you can suppress, baseline or look up later with `explain`.
+
+## Configuration
+
+`codehelion scan` reads an optional `codehelion.toml` from the scan root.
+`codehelion config init` writes a fully commented template; the main knobs:
+
+```toml
+# min-clone-tokens = 20             # smallest clone reported, in tokens
+# literal-normalization = "full"    # "preserve", "category" or "full"
+# database = ".codehelion/audit.db" # audit-database location
+
+[suppression]
+# paths = []                        # glob patterns to hide from the report
+# generated-markers = ["@generated", "DO NOT EDIT"]
+
+[limits]                            # resource ceilings, all reported when hit
+# max-file-bytes = 2097152
+# parse-timeout-ms = 10000
+# posting-cap = 64
+# pair-budget = 1000000
 ```
 
 ## Development
 
-The project ships with a full set of guardrails. Common tasks are wrapped in the
-`Makefile`:
+Common tasks are wrapped in the `Makefile` (`make help` for the full list):
 
 ```sh
 make format        # auto-fix: clippy --fix + cargo fmt
-make format-check  # verify formatting (CI parity)
+make format-check  # verify formatting
 make lint          # clippy with warnings as errors
 make test          # run the test suite
 make check         # format-check + lint + test + doc
@@ -46,32 +89,24 @@ make coverage      # HTML coverage report (needs cargo-llvm-cov)
 make hooks         # install the pre-commit git hook
 ```
 
-### Guardrails
-
-- **Formatting** — `rustfmt` with a pinned config.
-- **Linting** — `clippy` with `pedantic` + `nursery` groups, plus denies on
-  `unwrap`/`expect`/`panic`/`todo` in production code. `unsafe` is forbidden.
-- **Tests** — unit tests next to the code and end-to-end tests that run the
-  compiled binary. Tests are written alongside the code they cover.
-- **Supply chain** — `cargo-deny` gates advisories, license policy and
-  duplicate dependencies.
-- **CI** — formatting, clippy, docs, tests on Linux/macOS/Windows, an MSRV
-  build and coverage.
-- **pre-commit hook** — blocks commits that fail fmt/clippy/test.
+Guardrails: `rustfmt` with a pinned config; `clippy` `pedantic` + `nursery`
+with warnings as errors and `unsafe` forbidden; `cargo-deny` bans network and
+process-spawning crates to enforce the fully-local design; tests are written
+alongside the code they cover and a pre-commit hook runs the whole `make check`
+suite.
 
 ## Project layout
 
 ```text
-src/
-  main.rs      thin binary entry point
-  lib.rs       command dispatch (unit-testable)
-  cli.rs       clap command definitions
-  core/        engine layer (in-crate stand-in for the future codehelion-core)
-    doctor.rs  environment diagnostics
-tests/
-  cli.rs       end-to-end tests against the built binary
-  fixtures/    small inputs for unit and integration tests
-corpus/        evaluation corpus for detector accuracy (see corpus/README.md)
+crates/
+  codehelion-cli/            command-line interface, config, reporters
+  codehelion-core/           discovery, clone engine, fingerprints, doctor
+  codehelion-store/          SQLite audit store (snapshots, baselines)
+  codehelion-frontend-rust/  build-free Rust lexer frontend
+  codehelion-frontend-c/     build-free C lexer frontend
+  codehelion-frontend-cpp/   build-free C++ lexer frontend
+  codehelion-eval/           accuracy-evaluation harness (internal)
+corpus/                      labeled evaluation corpus (see corpus/README.md)
 ```
 
 ## License
