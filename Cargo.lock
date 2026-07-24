@@ -228,6 +228,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "codehelion-frontend-rust"
+version = "0.1.0"
+dependencies = [
+ "codehelion-core",
+]
+
+[[package]]
 name = "codehelion-store"
 version = "0.1.0"
 

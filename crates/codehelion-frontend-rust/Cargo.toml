@@ -1,0 +1,15 @@
+[package]
+name = "codehelion-frontend-rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Rust Fast-mode lexer and unit-boundary frontend for the codehelion source-audit tool."
+
+[dependencies]
+codehelion-core = { path = "../codehelion-core" }
+
+[lints]
+workspace = true

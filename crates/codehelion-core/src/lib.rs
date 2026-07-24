@@ -7,3 +7,4 @@
 
 pub mod discovery;
 pub mod doctor;
+pub mod frontend;
