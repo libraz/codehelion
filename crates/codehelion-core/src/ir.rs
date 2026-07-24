@@ -246,11 +246,16 @@ impl IrNode {
     /// to its [`StatementSummary`]. Non-statement children (nested items,
     /// blocks acting as expressions) are skipped, matching how statement
     /// windows are cut.
+    ///
+    /// [`Shape::Native`] children are included: a native node that is a
+    /// direct child of the node being summarised sits in statement position
+    /// by construction (C `goto`, a preprocessor conditional inside a
+    /// function body), and dropping it would silently shorten the sequence.
     #[must_use]
     pub fn statement_summaries(&self, tokens: &[Token]) -> Vec<StatementSummary> {
         self.children
             .iter()
-            .filter(|child| child.shape.is_statement())
+            .filter(|child| child.shape.is_statement() || matches!(child.shape, Shape::Native(_)))
             .map(|child| StatementSummary::of(child, tokens))
             .collect()
     }
@@ -473,6 +478,10 @@ mod tests {
 
         let summaries = block.statement_summaries(&tokens);
         assert_eq!(summaries.len(), 2);
+        assert!(
+            summaries.iter().all(|s| s.native_kind.is_none()),
+            "no native statements in this block"
+        );
         assert_eq!(summaries[0].shape_tag, Shape::VarDecl.tag());
         assert_eq!(
             summaries[0].head,
@@ -486,6 +495,27 @@ mod tests {
         );
         assert_eq!(summaries[1].shape_tag, Shape::Return.tag());
         assert_eq!(summaries[1].head.len(), 2);
+    }
+
+    #[test]
+    fn native_children_count_as_statements_in_position() {
+        let tokens = vec![token("goto", 0), token("fail", 8)];
+        let mut block = node(Shape::Block, 0, 2);
+        block.children = vec![IrNode {
+            shape: Shape::Native(Lexeme::from("goto_statement")),
+            name: None,
+            token_start: 0,
+            token_end: 2,
+            range: ByteRange { start: 0, end: 12 },
+            children: Vec::new(),
+        }];
+
+        let summaries = block.statement_summaries(&tokens);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(
+            summaries[0].native_kind,
+            Some(Lexeme::from("goto_statement"))
+        );
     }
 
     #[test]
