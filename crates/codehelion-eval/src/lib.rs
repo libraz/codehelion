@@ -15,7 +15,10 @@
 //!   stability metrics derived from that matching.
 //! - [`corpus`] — the deterministic synthetic-corpus mutation generator that
 //!   emits variant sources and their ground-truth labels.
+//! - [`bench`](mod@bench) — large-corpus generation and cold-scan
+//!   measurement for the performance targets.
 
+pub mod bench;
 pub mod corpus;
 pub mod labels;
 pub mod metrics;
