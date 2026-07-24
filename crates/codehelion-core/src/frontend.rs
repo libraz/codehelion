@@ -122,11 +122,13 @@ pub struct Diagnostic {
 pub enum UnitKind {
     /// A free function.
     Function,
-    /// A method (a function inside an `impl` block).
+    /// A method (a function inside an `impl` block or a record body).
     Method,
     /// An `impl` block.
     Impl,
-    /// A closure with a block body.
+    /// A record body: a `class`, `struct` or `union` definition.
+    Record,
+    /// A closure or lambda with a block body.
     Closure,
 }
 
@@ -138,6 +140,7 @@ impl UnitKind {
             Self::Function => "function",
             Self::Method => "method",
             Self::Impl => "impl",
+            Self::Record => "record",
             Self::Closure => "closure",
         }
     }

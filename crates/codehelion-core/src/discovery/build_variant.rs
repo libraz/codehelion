@@ -14,7 +14,7 @@ use super::language::{Language, LanguageSelection};
 /// Bump this on any change that alters how sources are tokenised or normalised,
 /// so that fingerprints and cached results from an older ruleset are not
 /// silently treated as compatible.
-pub const NORMALIZATION_VERSION: u32 = 1;
+pub const NORMALIZATION_VERSION: u32 = 2;
 
 /// The analysis mode a run was performed under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +111,7 @@ mod tests {
         });
         assert_eq!(
             variant.canonical(),
-            "mode=fast;languages=rust,cpp;normalization=1"
+            "mode=fast;languages=rust,cpp;normalization=2"
         );
     }
 

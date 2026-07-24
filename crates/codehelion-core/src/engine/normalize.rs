@@ -20,7 +20,8 @@
 //!
 //! - it starts with an uppercase letter (types, enum variants, traits),
 //! - it is adjacent to `::` (a path segment),
-//! - it follows `.` (a method call or field access),
+//! - it follows `.` or `->` (a member access: method, field, or a named
+//!   return type after Rust's `->`),
 //! - it precedes `!` (a macro invocation).
 //!
 //! These are lexical heuristics; a local binding that happens to match one
@@ -99,7 +100,7 @@ fn is_preserved(tokens: &[Token], i: usize) -> bool {
         .and_then(|p| tokens.get(p))
         .and_then(punct_text);
     let next = tokens.get(i + 1).and_then(punct_text);
-    matches!(prev, Some("::" | ".")) || matches!(next, Some("::" | "!"))
+    matches!(prev, Some("::" | "." | "->")) || matches!(next, Some("::" | "!"))
 }
 
 /// Normalize `tokens` as one scope.
@@ -264,6 +265,23 @@ mod tests {
         assert_ne!(
             normalize(&swap, LiteralNorm::Full),
             normalize(&take, LiteralNorm::Full)
+        );
+    }
+
+    #[test]
+    fn arrow_member_names_are_preserved() {
+        // `p->next` vs `q->next`: pointer renamed, member preserved.
+        let a = toks(&[(Id, "p"), (Pu, "->"), (Id, "next")]);
+        let b = toks(&[(Id, "q"), (Pu, "->"), (Id, "next")]);
+        assert_eq!(
+            normalize(&a, LiteralNorm::Full),
+            normalize(&b, LiteralNorm::Full)
+        );
+        // `p->next` vs `p->prev`: different members must not match.
+        let c = toks(&[(Id, "p"), (Pu, "->"), (Id, "prev")]);
+        assert_ne!(
+            normalize(&a, LiteralNorm::Full),
+            normalize(&c, LiteralNorm::Full)
         );
     }
 

@@ -112,9 +112,10 @@ pub(crate) fn anchor_ids(tokens: &[Token], units: &[Unit]) -> Vec<Option<usize>>
 pub(crate) enum FragmentKind {
     /// The body of a function, method or closure.
     Body,
-    /// The body of a `for`, `while` or `loop`.
+    /// The body of a `for`, `while`, `loop` or `do` loop.
     Loop,
-    /// The body of an `if`/`else` branch, a `match` body or a `=>` block arm.
+    /// The body of an `if`/`else` branch, a `match`/`switch` body or a `=>`
+    /// block arm.
     Branch,
     /// A run of consecutive statements inside a body.
     StmtRun,
@@ -167,18 +168,24 @@ pub(crate) fn fragments(
         }
     }
 
-    // Loop and branch bodies, found by keyword scan. Rust forbids bare struct
-    // literals in `if`/`while`/`for` headers, so the first `{` after the
-    // keyword is reliably the body.
+    // Loop and branch bodies, found by keyword scan. The keyword texts span
+    // every supported language; a frontend only emits its own language's
+    // keywords, so `loop`/`match` never fire on C/C++ input nor `do`/`switch`
+    // on Rust. Header braces are not a concern in Rust (bare struct literals
+    // are forbidden in `if`/`while`/`for` headers) and rare in C/C++ (a
+    // compound literal or lambda in the header cuts a small spurious fragment,
+    // which the minimum-size gate then usually drops).
     for (i, token) in tokens.iter().enumerate() {
         match token.kind {
-            TokenKind::Keyword if matches!(token.text.as_str(), "for" | "while" | "loop") => {
+            TokenKind::Keyword
+                if matches!(token.text.as_str(), "for" | "while" | "loop" | "do") =>
+            {
                 if let Some((open, close)) = block_after(tokens, braces, i) {
                     bodies.push((open + 1, close));
                     push(FragmentKind::Loop, open + 1, close);
                 }
             }
-            TokenKind::Keyword if matches!(token.text.as_str(), "if" | "match") => {
+            TokenKind::Keyword if matches!(token.text.as_str(), "if" | "match" | "switch") => {
                 if let Some((open, close)) = block_after(tokens, braces, i) {
                     bodies.push((open + 1, close));
                     push(FragmentKind::Branch, open + 1, close);
