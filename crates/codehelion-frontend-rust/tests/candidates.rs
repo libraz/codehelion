@@ -7,6 +7,7 @@
 use codehelion_core::candidate::{self, CandidateConfig};
 use codehelion_core::features::{self, FileFeatures};
 use codehelion_core::ir::StructuralFrontend;
+use codehelion_core::near_match::{self, NearMatchConfig};
 use codehelion_frontend_rust::ir::RustStructuralFrontend;
 
 /// A function with enough body to clear the window and subtree minimums.
@@ -22,6 +23,8 @@ fn alpha(data: &[u32]) -> u32 {
         }
         count += 1;
     }
+    acc = acc.wrapping_mul(3);
+    count = count.wrapping_add(acc);
     return acc + count;
 }
 ";
@@ -40,7 +43,31 @@ fn beta(feed: &[u32]) -> u32 {
         }
         seen += 4;
     }
+    state = state.wrapping_mul(8);
+    seen = seen.wrapping_add(state);
     return state + seen;
+}
+";
+
+/// `ALPHA` with an extra statement inserted before the return: a Type-3 edit
+/// that shifts some windows but keeps most subtrees, so the shingle sets still
+/// overlap enough to clear the near-match gate.
+const ALPHA_TYPE3: &str = "\
+fn alpha(data: &[u32]) -> u32 {
+    let mut acc = 0u32;
+    let mut count = 0u32;
+    for value in data {
+        if *value > 10 {
+            acc = acc.wrapping_add(*value);
+        } else {
+            acc = acc.wrapping_sub(1);
+        }
+        count += 1;
+    }
+    acc = acc.wrapping_mul(3);
+    count = count.wrapping_add(acc);
+    let extra = acc ^ count;
+    return acc + count + extra;
 }
 ";
 
@@ -90,5 +117,26 @@ fn unrelated_functions_produce_no_candidates() {
     assert!(
         set.pairs.is_empty(),
         "unrelated functions must not seed candidate pairs"
+    );
+}
+
+#[test]
+fn a_type3_edit_surfaces_as_a_near_match_but_an_unrelated_function_does_not() {
+    let files = vec![
+        features_of(ALPHA),
+        features_of(ALPHA_TYPE3),
+        features_of(GAMMA),
+    ];
+    let set = near_match::generate(&files, &NearMatchConfig::default());
+
+    // The gapped edit pairs with the original; the unrelated function does not
+    // pair with either.
+    assert_eq!(set.pairs.len(), 1, "exactly the Type-3 pair must surface");
+    let pair = &set.pairs[0];
+    assert_eq!((pair.a.file, pair.b.file), (0, 1));
+    assert!(
+        pair.estimated_jaccard >= NearMatchConfig::default().min_estimated_jaccard,
+        "estimate {} below the gate",
+        pair.estimated_jaccard
     );
 }
