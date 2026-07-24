@@ -7,4 +7,5 @@
 
 pub mod discovery;
 pub mod doctor;
+pub mod engine;
 pub mod frontend;
