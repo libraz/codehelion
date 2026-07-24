@@ -9,3 +9,4 @@ pub mod discovery;
 pub mod doctor;
 pub mod engine;
 pub mod frontend;
+pub mod stable_id;
