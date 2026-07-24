@@ -13,7 +13,7 @@
 //! codebase). Thresholds only set a suppression marker; reporting stays
 //! honest about what was found.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::fingerprint::norm_token_hash;
 use super::normalize::normalize;
@@ -62,12 +62,10 @@ pub fn group_pairs(
         .into_iter()
         .map(|(content_key, pairs)| {
             let mut members: Vec<Instance> = Vec::new();
+            let mut seen: BTreeSet<(usize, usize, usize)> = BTreeSet::new();
             for pair in &pairs {
                 for candidate in [&pair.a, &pair.b] {
-                    if !members.iter().any(|m| {
-                        (m.file, m.token_start, m.token_end)
-                            == (candidate.file, candidate.token_start, candidate.token_end)
-                    }) {
+                    if seen.insert((candidate.file, candidate.token_start, candidate.token_end)) {
                         members.push(candidate.clone());
                     }
                 }

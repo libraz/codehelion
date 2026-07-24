@@ -164,22 +164,48 @@ fn extend(
 }
 
 /// Drop every run nested inside a larger run of the same file pair.
+///
+/// Nesting is only possible between runs of the same `(file_a, file_b)` pair
+/// and the set iterates in exactly that order, so the pairwise containment
+/// check stays inside each file-pair bucket instead of scanning all runs.
 fn drop_nested(runs: BTreeSet<Run>) -> Vec<Run> {
     let all: Vec<Run> = runs.into_iter().collect();
-    all.iter()
-        .filter(|r| {
-            !all.iter().any(|o| {
-                *o != **r
-                    && o.file_a == r.file_a
-                    && o.file_b == r.file_b
-                    && o.a_start <= r.a_start
-                    && r.a_start + r.len <= o.a_start + o.len
-                    && o.b_start <= r.b_start
-                    && r.b_start + r.len <= o.b_start + o.len
+    all.chunk_by(|a, b| (a.file_a, a.file_b) == (b.file_a, b.file_b))
+        .flat_map(|bucket| {
+            bucket.iter().filter(|r| {
+                !bucket.iter().any(|o| {
+                    *o != **r
+                        && o.a_start <= r.a_start
+                        && r.a_start + r.len <= o.a_start + o.len
+                        && o.b_start <= r.b_start
+                        && r.b_start + r.len <= o.b_start + o.len
+                })
             })
         })
         .copied()
         .collect()
+}
+
+/// Drop every match nested inside a larger match of the same file pair.
+///
+/// [`FragmentMatch::nested_in`] can only hold between matches of the same
+/// file pair, so matches are bucketed by that pair first and the pairwise
+/// containment check runs inside each bucket instead of scanning all matches.
+fn drop_nested_matches(matches: Vec<FragmentMatch>) -> Vec<FragmentMatch> {
+    let mut buckets: BTreeMap<(usize, usize), Vec<FragmentMatch>> = BTreeMap::new();
+    for m in matches {
+        buckets.entry((m.a.0, m.b.0)).or_default().push(m);
+    }
+    let mut kept: Vec<FragmentMatch> = Vec::new();
+    for bucket in buckets.values() {
+        kept.extend(
+            bucket
+                .iter()
+                .filter(|m| !bucket.iter().any(|o| m.nested_in(o)))
+                .copied(),
+        );
+    }
+    kept
 }
 
 /// The Type-1 pass: raw fingerprints, verified seeds, maximal runs.
@@ -396,9 +422,8 @@ pub(crate) fn fragment_pass(
     }
 
     // Drop matches nested inside a larger match of the same file pair.
-    let mut pairs: Vec<ClonePair> = matches
-        .iter()
-        .filter(|m| !matches.iter().any(|o| m.nested_in(o)))
+    let mut pairs: Vec<ClonePair> = drop_nested_matches(matches)
+        .into_iter()
         .map(|m| ClonePair {
             content_key: m.key,
             clone_type: CloneType::Type2,
@@ -420,4 +445,74 @@ const fn pair_order(pair: &ClonePair) -> (usize, usize, usize, usize, u64) {
         pair.b.token_start,
         pair.content_key,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const fn run(file_a: usize, file_b: usize, a_start: usize, b_start: usize, len: usize) -> Run {
+        Run {
+            file_a,
+            file_b,
+            a_start,
+            b_start,
+            len,
+        }
+    }
+
+    #[test]
+    fn nested_runs_are_dropped_within_their_file_pair_only() {
+        let outer = run(0, 1, 0, 0, 30);
+        let inner = run(0, 1, 5, 5, 10);
+        let other_pair = run(0, 2, 5, 5, 10); // same geometry, different pair
+        let kept = drop_nested([outer, inner, other_pair].into_iter().collect());
+        assert!(kept.contains(&outer));
+        assert!(!kept.contains(&inner), "nested run must be dropped");
+        assert!(
+            kept.contains(&other_pair),
+            "containment across file pairs must not fire"
+        );
+    }
+
+    #[test]
+    fn cross_diagonal_nested_runs_are_still_dropped() {
+        // Contained on both sides but at different pair offsets.
+        let outer = run(0, 1, 0, 0, 30);
+        let inner = run(0, 1, 2, 12, 10);
+        let kept = drop_nested([outer, inner].into_iter().collect());
+        assert_eq!(kept, vec![outer]);
+    }
+
+    const fn fragment(key: u64, a: FragmentRef, b: FragmentRef) -> FragmentMatch {
+        FragmentMatch {
+            key,
+            a,
+            b,
+            score: 0.5,
+        }
+    }
+
+    #[test]
+    fn nested_matches_are_dropped_within_their_file_pair_only() {
+        let outer = fragment(1, (0, 0, 30), (1, 0, 30));
+        let inner = fragment(2, (0, 5, 15), (1, 5, 15));
+        let other_pair = fragment(3, (0, 5, 15), (2, 5, 15));
+        let kept = drop_nested_matches(vec![outer, inner, other_pair]);
+        let keys: Vec<u64> = kept.iter().map(|m| m.key).collect();
+        assert!(keys.contains(&1));
+        assert!(!keys.contains(&2), "nested match must be dropped");
+        assert!(
+            keys.contains(&3),
+            "containment across file pairs must not fire"
+        );
+    }
+
+    #[test]
+    fn identical_coordinates_do_not_drop_each_other() {
+        let a = fragment(1, (0, 0, 30), (1, 0, 30));
+        let b = fragment(2, (0, 0, 30), (1, 0, 30));
+        let kept = drop_nested_matches(vec![a, b]);
+        assert_eq!(kept.len(), 2, "equal spans are duplicates, not nesting");
+    }
 }
