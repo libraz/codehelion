@@ -61,6 +61,19 @@ impl BuildVariant {
         }
     }
 
+    /// The implicit single variant used by a Structural-mode run over
+    /// `languages`. Like Fast mode, Structural resolves no build configuration,
+    /// so one implicit variant covers the run; only the mode differs, which is
+    /// enough to keep Fast and Structural fingerprints in separate spaces.
+    #[must_use]
+    pub const fn structural(languages: LanguageSelection) -> Self {
+        Self {
+            mode: AnalysisMode::Structural,
+            languages,
+            normalization_version: NORMALIZATION_VERSION,
+        }
+    }
+
     /// A canonical, order-stable string describing this variant.
     ///
     /// Two variants are equal exactly when their canonical strings match, which
@@ -100,6 +113,18 @@ mod tests {
         let variant = BuildVariant::fast(LanguageSelection::default());
         assert_eq!(variant.mode, AnalysisMode::Fast);
         assert_eq!(variant.normalization_version, NORMALIZATION_VERSION);
+    }
+
+    #[test]
+    fn structural_variant_differs_from_fast_only_in_mode() {
+        let languages = LanguageSelection::default();
+        let fast = BuildVariant::fast(languages);
+        let structural = BuildVariant::structural(languages);
+        assert_eq!(structural.mode, AnalysisMode::Structural);
+        assert_eq!(structural.languages, fast.languages);
+        assert_eq!(structural.normalization_version, fast.normalization_version);
+        // Distinct modes must land in distinct fingerprint spaces.
+        assert_ne!(fast.fingerprint(), structural.fingerprint());
     }
 
     #[test]
