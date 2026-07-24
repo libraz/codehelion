@@ -130,6 +130,30 @@ fn verbatim_and_renamed_copies_group_together() {
     );
     assert_eq!(report.stats.units, 4);
     assert!(report.stats.verified_pairs >= 2);
+
+    // Every group carries a parallel detail: a stable clone id and one
+    // medoid-to-member breakdown per member.
+    assert_eq!(report.details.len(), report.groups.groups.len());
+    let group_index = report
+        .groups
+        .groups
+        .iter()
+        .position(|g| g.members.contains(&0))
+        .unwrap();
+    let detail = &report.details[group_index];
+    assert_eq!(
+        detail.member_breakdowns.len(),
+        report.groups.groups[group_index].members.len()
+    );
+    // The medoid entry (member 0) is a perfect self-match.
+    assert!((detail.member_breakdowns[0].composite - 1.0).abs() < 1e-9);
+    // Type absent in Structural mode: every breakdown leaves it unmeasured.
+    assert!(
+        detail
+            .member_breakdowns
+            .iter()
+            .all(|b| b.type_similarity.is_none())
+    );
 }
 
 #[test]

@@ -32,8 +32,10 @@ use crate::grouping::{
 };
 use crate::ir::{ByteRange, Shape, SyntaxIrFile};
 use crate::near_match::{self, NearMatchConfig, NearMatchStats};
-use crate::stable_id::{self, ContentNorm, FileContext, UnitFingerprint};
-use crate::verify::{self, UnitView, VerifyConfig};
+use crate::stable_id::{
+    self, CloneGroupFingerprint, ContentNorm, FileContext, FragmentFingerprint, UnitFingerprint,
+};
+use crate::verify::{self, SimilarityBreakdown, UnitView, VerifyConfig};
 
 /// Tuning for a whole structural run: one config per stage.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -59,8 +61,25 @@ pub struct StructuralUnit {
     pub range: ByteRange,
     /// The unit's declared name, when the frontend recovered one.
     pub name: Option<Lexeme>,
-    /// The unit's raw content fingerprint: its stable grouping key.
+    /// The unit's raw content fingerprint: its stable grouping key and unit
+    /// identity.
     pub fingerprint: UnitFingerprint,
+    /// The unit's content fingerprint in fragment form, used as its member
+    /// content id when composing a group fingerprint (a whole-unit clone is a
+    /// fragment spanning the unit; keeping this as a fragment fingerprint keeps
+    /// the group id forward-compatible with sub-unit members).
+    pub content: FragmentFingerprint,
+}
+
+/// Reporting detail for one clone group, parallel to the group at the same
+/// index in [`StructuralReport::groups`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupDetail {
+    /// The group's stable, position-free fingerprint (its clone id).
+    pub fingerprint: CloneGroupFingerprint,
+    /// The similarity breakdown of the medoid against each member, parallel to
+    /// the group's `members` (the medoid's own entry is a perfect self-match).
+    pub member_breakdowns: Vec<SimilarityBreakdown>,
 }
 
 /// Funnel counters across the whole run: how many fragments, candidate pairs
@@ -91,6 +110,9 @@ pub struct StructuralReport {
     pub units: Vec<StructuralUnit>,
     /// Cohesive clone groups.
     pub groups: GroupingSet,
+    /// Reporting detail per group, parallel to `groups.groups`: stable clone id
+    /// and the medoid-to-member similarity breakdowns.
+    pub details: Vec<GroupDetail>,
     /// Funnel statistics.
     pub stats: StructuralStats,
 }
@@ -101,6 +123,7 @@ struct Unit {
     local: usize,
     statements: Vec<crate::ir::StatementSummary>,
     fingerprint: UnitFingerprint,
+    content: FragmentFingerprint,
     range: ByteRange,
     name: Option<Lexeme>,
 }
@@ -171,6 +194,14 @@ pub fn analyze(
         .collect();
     let groups = grouping::group(&grouping_units, &edges, &config.grouping);
 
+    // Per-group reporting detail: the stable clone id and the medoid-to-member
+    // similarity breakdowns (re-run against the chosen medoid, deterministic).
+    let details: Vec<GroupDetail> = groups
+        .groups
+        .iter()
+        .map(|group| group_detail(group, &units, &feature_files, variant, config))
+        .collect();
+
     let stats = StructuralStats {
         files: files.len(),
         units: units.len(),
@@ -188,13 +219,54 @@ pub fn analyze(
             range: unit.range,
             name: unit.name.clone(),
             fingerprint: unit.fingerprint,
+            content: unit.content,
         })
         .collect();
 
     StructuralReport {
         units: report_units,
         groups,
+        details,
         stats,
+    }
+}
+
+/// Compute one group's reporting detail: its stable clone fingerprint (anchored
+/// on the medoid's content, folding the member set) and the medoid-to-member
+/// similarity breakdowns.
+fn group_detail(
+    group: &grouping::StructuralGroup,
+    units: &[Unit],
+    feature_files: &[FileFeatures],
+    variant: &BuildVariant,
+    config: &StructuralConfig,
+) -> GroupDetail {
+    let medoid_view = view(&units[group.canonical], feature_files);
+    let member_breakdowns = group
+        .members
+        .iter()
+        .map(|&member| {
+            verify::verify(
+                &medoid_view,
+                &view(&units[member], feature_files),
+                &config.verify,
+            )
+            .breakdown
+        })
+        .collect();
+
+    let member_contents: Vec<FragmentFingerprint> =
+        group.members.iter().map(|&m| units[m].content).collect();
+    let fingerprint = stable_id::structural_clone_group_fingerprint(
+        variant,
+        group.clone_type,
+        &units[group.canonical].content,
+        &member_contents,
+    );
+
+    GroupDetail {
+        fingerprint,
+        member_breakdowns,
     }
 }
 
@@ -217,10 +289,14 @@ fn flatten_units(files: &[SyntaxIrFile], variant: &BuildVariant) -> (Vec<Unit>, 
                 let statements = verify::statement_sequence(node, &file.tokens);
                 let end = node.token_end.min(file.tokens.len());
                 let start = node.token_start.min(end);
-                let fingerprint = stable_id::unit_fingerprint(
+                let tokens = &file.tokens[start..end];
+                let fingerprint =
+                    stable_id::unit_fingerprint(variant, &context, tokens, ContentNorm::Raw);
+                let content_fp = stable_id::fragment_fingerprint(
                     variant,
                     &context,
-                    &file.tokens[start..end],
+                    "unit",
+                    tokens,
                     ContentNorm::Raw,
                 );
                 units.push(Unit {
@@ -228,6 +304,7 @@ fn flatten_units(files: &[SyntaxIrFile], variant: &BuildVariant) -> (Vec<Unit>, 
                     local,
                     statements,
                     fingerprint,
+                    content: content_fp,
                     range: node.range,
                     name: node.name.clone(),
                 });
