@@ -1,12 +1,16 @@
-//! C++ Fast frontend for codehelion.
+//! C++ frontends for codehelion.
 //!
-//! Implements [`codehelion_core::frontend::Frontend`] for C++ on top of the
-//! shared C-family machinery from `codehelion-frontend-c`: the same
-//! error-tolerant lexer and delimiter-matching unit-boundary detection, driven
-//! by a C++ [`Dialect`] that adds the C++ keyword set, the extra operators
-//! (`::`, `->*`, `.*`, `<=>`), raw string literals, digit separators, `class`
-//! records and lambdas. Nothing here parses, preprocesses, instantiates
+//! Fast mode implements [`codehelion_core::frontend::Frontend`] for C++ on
+//! top of the shared C-family machinery from `codehelion-frontend-c`: the
+//! same error-tolerant lexer and delimiter-matching unit-boundary detection,
+//! driven by a C++ [`Dialect`] that adds the C++ keyword set, the extra
+//! operators (`::`, `->*`, `.*`, `<=>`), raw string literals, digit
+//! separators, `class` records and lambdas. Structural mode lives in [`ir`]:
+//! a real tree-sitter parse mapped onto the language-neutral Syntax IR
+//! through the shared CST walker. Nothing here preprocesses, instantiates
 //! templates or executes the source.
+
+pub mod ir;
 
 use codehelion_core::discovery::Language;
 use codehelion_core::frontend::{Frontend, LexedFile};

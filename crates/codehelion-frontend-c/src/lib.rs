@@ -1,16 +1,19 @@
-//! C Fast frontend for codehelion.
+//! C frontends for codehelion.
 //!
-//! Implements [`codehelion_core::frontend::Frontend`] for C: an error-tolerant
-//! lexer paired with delimiter-matching unit-boundary detection. Nothing here
-//! parses, preprocesses or executes the source; directives are dropped whole
-//! and macros pass through as ordinary tokens.
+//! Fast mode implements [`codehelion_core::frontend::Frontend`]: an
+//! error-tolerant lexer paired with delimiter-matching unit-boundary
+//! detection. Nothing here preprocesses or executes the source; directives
+//! are dropped whole and macros pass through as ordinary tokens. Structural
+//! mode lives in [`ir`]: a real tree-sitter parse mapped onto the
+//! language-neutral Syntax IR.
 //!
-//! The lexing machinery is shared with the C++ frontend crate: both languages
-//! are lexed by the same code, parameterized by a [`dialect::Dialect`] that
-//! carries the keyword set, operator inventory and dialect-only literal
-//! forms.
+//! Both modes share their machinery with the C++ frontend crate: the lexer is
+//! parameterized by a [`dialect::Dialect`] carrying the keyword set, operator
+//! inventory and dialect-only literal forms, and the structural CST walker is
+//! parameterized by an [`ir::IrMapping`] carrying the node-mapping table.
 
 pub mod dialect;
+pub mod ir;
 pub mod lexer;
 pub mod units;
 
