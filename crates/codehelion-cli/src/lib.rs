@@ -79,6 +79,7 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
     match command {
         Command::Doctor => {
             doctor::render(&doctor::diagnose(), out)?;
+            doctor_install(out)?;
             doctor_database(out)?;
             Ok(Outcome::Success)
         }
@@ -144,6 +145,47 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
         Format::Text => detail.render_text(out)?,
     }
     Ok(Outcome::Success)
+}
+
+/// Append the binary's install channel and location to the doctor report.
+fn doctor_install(out: &mut impl Write) -> Result<()> {
+    let exe = std::env::current_exe().context("resolving the executable path")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "  install: {} ({})",
+        install_channel(&exe),
+        exe.display()
+    )?;
+    Ok(())
+}
+
+/// The distribution channel this binary appears to come from, inferred from
+/// its on-disk location. A heuristic for diagnostics only: an unrecognised
+/// location reports as a standalone install rather than failing.
+fn install_channel(exe: &Path) -> &'static str {
+    let components: Vec<String> = exe
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let has = |name: &str| components.iter().any(|c| c == name);
+    if has("Cellar") || has("homebrew") || has(".linuxbrew") {
+        return "homebrew";
+    }
+    if has(".cargo") {
+        return "cargo (crates.io)";
+    }
+    if has("site-packages") {
+        return "pypi";
+    }
+    let is_cargo_target = components
+        .iter()
+        .zip(components.iter().skip(1))
+        .any(|(a, b)| a == "target" && (b == "debug" || b == "release"));
+    if is_cargo_target {
+        return "local build";
+    }
+    "standalone (archive or manual install)"
 }
 
 /// Append the audit database's location to the doctor report, with a hint
@@ -304,6 +346,34 @@ mod tests {
         let text = String::from_utf8(buffer).expect("output is utf-8");
         assert!(text.contains("codehelion"));
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
+        // The test binary runs from the cargo target directory.
+        assert!(text.contains("install: local build"));
+    }
+
+    #[test]
+    fn install_channel_is_inferred_from_the_executable_location() {
+        let channel = |path: &str| install_channel(Path::new(path));
+        assert_eq!(
+            channel("/opt/homebrew/Cellar/codehelion/0.1.0/bin/codehelion"),
+            "homebrew"
+        );
+        assert_eq!(channel("/home/user/.linuxbrew/bin/codehelion"), "homebrew");
+        assert_eq!(
+            channel("/home/user/.cargo/bin/codehelion"),
+            "cargo (crates.io)"
+        );
+        assert_eq!(
+            channel("/venv/lib/python3.12/site-packages/codehelion/bin/codehelion"),
+            "pypi"
+        );
+        assert_eq!(
+            channel("/work/codehelion/target/release/codehelion"),
+            "local build"
+        );
+        assert_eq!(
+            channel("/usr/local/bin/codehelion"),
+            "standalone (archive or manual install)"
+        );
     }
 
     #[test]
