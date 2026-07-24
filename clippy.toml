@@ -1,0 +1,13 @@
+# Structural enforcement of two analysis-path invariants: the scan pipeline
+# never executes target code and never performs network access. `make lint`
+# runs clippy with `-D warnings`, so any use of these types in first-party
+# code fails the build. Legitimate exceptions (the benchmark harness driving
+# the compiled binary, future isolated helper crates) carry an explicit,
+# justified `#[allow(clippy::disallowed_types)]` at the use site.
+
+disallowed-types = [
+    { path = "std::process::Command", reason = "the scan path must not spawn processes; compiler helpers live in isolated binary crates" },
+    { path = "std::net::TcpStream", reason = "codehelion performs no network access" },
+    { path = "std::net::TcpListener", reason = "codehelion performs no network access" },
+    { path = "std::net::UdpSocket", reason = "codehelion performs no network access" },
+]

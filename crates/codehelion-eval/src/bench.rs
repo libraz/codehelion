@@ -13,6 +13,10 @@
 //!
 //! Nothing here executes generated code: the corpus only ever gets lexed.
 
+// The benchmark harness legitimately spawns the compiled `codehelion` binary
+// it measures; it is not part of the scan path the workspace-wide lint locks.
+#![allow(clippy::disallowed_types)]
+
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;

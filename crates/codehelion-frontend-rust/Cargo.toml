@@ -9,7 +9,7 @@ homepage.workspace = true
 description = "Rust Fast-mode lexer and unit-boundary frontend for the codehelion source-audit tool."
 
 [dependencies]
-codehelion-core = { path = "../codehelion-core" }
+codehelion-core = { version = "0.1.0", path = "../codehelion-core" }
 
 [lints]
 workspace = true

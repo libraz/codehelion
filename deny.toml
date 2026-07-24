@@ -8,6 +8,21 @@ yanked = "deny"
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# codehelion is fully local: it never sends source code or results anywhere
+# and has no network access by default. Ban the common network stacks so a
+# transitive dependency cannot quietly pull one in.
+deny = [
+    { crate = "reqwest", reason = "no network access" },
+    { crate = "ureq", reason = "no network access" },
+    { crate = "hyper", reason = "no network access" },
+    { crate = "curl", reason = "no network access" },
+    { crate = "curl-sys", reason = "no network access" },
+    { crate = "isahc", reason = "no network access" },
+    { crate = "native-tls", reason = "no network access" },
+    { crate = "openssl-sys", reason = "no network access" },
+    { crate = "rustls", reason = "no network access" },
+    { crate = "tokio", reason = "no network runtime; the scan pipeline is synchronous" },
+]
 
 [licenses]
 version = 2
