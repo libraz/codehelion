@@ -31,6 +31,11 @@ mutation spec, the generated variant sources and the generated `labels.json`:
   loop body, a renamed Type-2 statement run) plus two `non_clone` idiom copies
   (a verbatim parse-error block) that mark an idiom-suppression target rather
   than a structural non-clone.
+- `rust-negative/` — four functions built on one skeleton that compute
+  different things, plus a file of verbatim copies of all four. The copies are
+  the clones; every pairing of two different functions is a labelled
+  `non_clone`. Precision measurement: what must come out is one group per
+  function and nothing that mixes two of them.
 - `c/` and `cpp/` — the Rust reference case ported to C and C++.
 
 Within a case:
@@ -48,6 +53,10 @@ Within a case:
 - `labels.json` is the generated `LabelSet`: clone pairs (seed fragment ↔
   variant fragment, with the clone type) plus any deliberate non-clones. Line
   ranges are computed from the edits the generator applied.
+- A `non_clone` pairs a seed function with the variant's copy of it — a
+  recurring idiom that must not be reported — or, when it names a
+  `counterpart`, with a *different* function the variant carries, which is how
+  a genuine negative pair is expressed.
 
 ## Generating and checking
 

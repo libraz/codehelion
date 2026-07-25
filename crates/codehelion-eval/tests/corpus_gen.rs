@@ -116,6 +116,7 @@ fn committed_corpora_match_their_specs() {
         "rust-divergent",
         "rust-graded",
         "rust-literals",
+        "rust-negative",
         "rust-partial",
         "c",
         "cpp",

@@ -1,0 +1,56 @@
+{
+  "schema_version": 0,
+  "language": "rust",
+  "seed": "seed.rs",
+  "variants": [
+    {
+      "file": "copies.rs",
+      "type": "type-1",
+      "header_comment": "Verbatim copies of every seed function.",
+      "items": [
+        { "item": "fn sum_positive", "labelled": true },
+        { "item": "fn longest_run", "labelled": true },
+        { "item": "fn count_transitions", "labelled": true },
+        { "item": "fn narrowest_gap", "labelled": true }
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "function": "fn sum_positive",
+      "counterpart": "fn longest_run",
+      "variant": "copies.rs"
+    },
+    {
+      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "function": "fn sum_positive",
+      "counterpart": "fn count_transitions",
+      "variant": "copies.rs"
+    },
+    {
+      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "function": "fn longest_run",
+      "counterpart": "fn count_transitions",
+      "variant": "copies.rs"
+    },
+    {
+      "reason": "carry-the-previous-value skeleton, different computation",
+      "function": "fn count_transitions",
+      "counterpart": "fn narrowest_gap",
+      "variant": "copies.rs"
+    },
+    {
+      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "function": "fn longest_run",
+      "counterpart": "fn narrowest_gap",
+      "variant": "copies.rs"
+    },
+    {
+      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "function": "fn sum_positive",
+      "counterpart": "fn narrowest_gap",
+      "variant": "copies.rs"
+    }
+  ]
+}

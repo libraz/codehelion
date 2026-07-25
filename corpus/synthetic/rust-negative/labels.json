@@ -1,0 +1,172 @@
+{
+  "schema_version": 0,
+  "language": "rust",
+  "files": [
+    "seed.rs",
+    "copies.rs"
+  ],
+  "clone_pairs": [
+    {
+      "id": "cp-001",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 8,
+          "end_line": 16
+        },
+        {
+          "file": "copies.rs",
+          "start_line": 4,
+          "end_line": 12
+        }
+      ]
+    },
+    {
+      "id": "cp-002",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 18,
+          "end_line": 32
+        },
+        {
+          "file": "copies.rs",
+          "start_line": 14,
+          "end_line": 28
+        }
+      ]
+    },
+    {
+      "id": "cp-003",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 34,
+          "end_line": 44
+        },
+        {
+          "file": "copies.rs",
+          "start_line": 30,
+          "end_line": 40
+        }
+      ]
+    },
+    {
+      "id": "cp-004",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 46,
+          "end_line": 57
+        },
+        {
+          "file": "copies.rs",
+          "start_line": 42,
+          "end_line": 53
+        }
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "id": "nc-001",
+      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 8,
+          "end_line": 16
+        },
+        {
+          "file": "copies.rs",
+          "start_line": 14,
+          "end_line": 28
+        }
+      ]
+    },
+    {
+      "id": "nc-002",
+      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 8,
+          "end_line": 16
+        },
+        {
+          "file": "copies.rs",
+          "start_line": 30,
+          "end_line": 40
+        }
+      ]
+    },
+    {
+      "id": "nc-003",
+      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 18,
+          "end_line": 32
+        },
+        {
+          "file": "copies.rs",
+          "start_line": 30,
+          "end_line": 40
+        }
+      ]
+    },
+    {
+      "id": "nc-004",
+      "reason": "carry-the-previous-value skeleton, different computation",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 34,
+          "end_line": 44
+        },
+        {
+          "file": "copies.rs",
+          "start_line": 42,
+          "end_line": 53
+        }
+      ]
+    },
+    {
+      "id": "nc-005",
+      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 18,
+          "end_line": 32
+        },
+        {
+          "file": "copies.rs",
+          "start_line": 42,
+          "end_line": 53
+        }
+      ]
+    },
+    {
+      "id": "nc-006",
+      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 8,
+          "end_line": 16
+        },
+        {
+          "file": "copies.rs",
+          "start_line": 42,
+          "end_line": 53
+        }
+      ]
+    }
+  ]
+}
