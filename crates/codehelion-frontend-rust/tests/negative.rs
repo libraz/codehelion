@@ -68,10 +68,12 @@ fn negative_verdicts() -> Vec<(String, Verdict)> {
             let verdict = verify::verify(
                 &UnitView {
                     statements: &first.1,
+                    tokens: &file.tokens,
                     features: &extracted.units[i],
                 },
                 &UnitView {
                     statements: &second.1,
+                    tokens: &file.tokens,
                     features: &extracted.units[j],
                 },
                 &VerifyConfig::default(),
@@ -155,7 +157,7 @@ fn lexical_agreement_is_what_separates_these_from_real_copies() {
     // away from the one signal that works here, however it scores elsewhere.
     for (pair, verdict) in negative_verdicts() {
         assert!(
-            verdict.breakdown.lexical < 0.80,
+            verdict.breakdown.lexical < 0.60,
             "{pair} agrees lexically to {:.4}",
             verdict.breakdown.lexical
         );

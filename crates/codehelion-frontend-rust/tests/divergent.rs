@@ -59,10 +59,12 @@ fn breakdown(name: &str) -> SimilarityBreakdown {
     let verdict = verify::verify(
         &UnitView {
             statements: &seed_statements,
+            tokens: &seed.tokens,
             features: &seed_features.units[0],
         },
         &UnitView {
             statements: &variant_statements,
+            tokens: &variant.tokens,
             features: &variant_features.units[0],
         },
         &VerifyConfig::default(),
@@ -96,10 +98,11 @@ fn disturbing_control_flow_moves_only_the_control_flow_and_structure_dimensions(
 }
 
 #[test]
-fn renaming_every_callee_costs_the_api_dimension_alone() {
+fn renaming_every_callee_shows_in_the_text_as_well_as_the_call_surface() {
     let scores = breakdown(CALLS_SWAPPED);
+    // The rename touches nothing but the callee names, so the two shape
+    // dimensions are untouched.
     for (dimension, value) in [
-        ("lexical", scores.lexical),
         ("structural", scores.structural),
         ("control flow", scores.control_flow),
     ] {
@@ -113,9 +116,21 @@ fn renaming_every_callee_costs_the_api_dimension_alone() {
         Some(0.0),
         "no callee survives the rename, so the call surfaces are disjoint"
     );
-    // The heads a statement summary keeps do not reach the renamed callees, so
-    // the call surface is the only evidence that this is not a verbatim copy —
-    // and a Type-1 claim would assert that it is.
+    // A renamed callee is text, so it must show as text. Reading only the
+    // leading tokens of each statement would miss it and leave a full rename
+    // looking verbatim — which is the strongest claim there is, made on a pair
+    // that does not deserve it.
+    assert!(
+        scores.lexical < 1.0,
+        "the renamed callees must show in the text, got {}",
+        scores.lexical
+    );
+    // The rename is confined to the callees, so most of the text still agrees.
+    assert!(
+        scores.lexical > 0.90,
+        "only the callees changed, got {}",
+        scores.lexical
+    );
     let report = analyze(&[SEED, CALLS_SWAPPED]);
     assert_eq!(report.groups.groups.len(), 1);
     assert_eq!(report.groups.groups[0].clone_type, CloneClass::Type2);

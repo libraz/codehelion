@@ -9,8 +9,8 @@
 //!
 //! The dimensions:
 //!
-//! - **lexical** — how much of the aligned statements' leading tokens match
-//!   verbatim; separates a verbatim copy from a renamed one;
+//! - **lexical** — how much of the aligned statements' text matches verbatim;
+//!   separates a verbatim copy from a renamed one;
 //! - **structural** — the statement-summary alignment (a rename-invariant LCS)
 //!   folded with the characteristic-vector cosine and the subtree overlap;
 //! - **control flow** — the approximate control-flow profiles (a syntactic
@@ -45,9 +45,8 @@
 //! and control-flow agreement is high for both populations and only lexical
 //! agreement pulls them apart. Weighting shape more heavily than text therefore
 //! costs precision rather than buying it, and no reweighting of these five
-//! dimensions separates the two populations by more than a hair: the evidence
-//! that would settle the remaining overlap is the operators and operands
-//! *inside* each statement, which no dimension here reads.
+//! dimensions separates the two populations by more than a hair unless lexical
+//! is the one carrying the weight.
 //!
 //! Second, **a unit can be a genuine clone and still not be worth reporting**.
 //! Two one-line accessors are copies of each other by every measure in this
@@ -63,7 +62,7 @@ use crate::ir::{IrNode, Shape, StatementSummary};
 /// Version of the composite-weight recipe and judgment rules. Bump it when any
 /// weight default or classification rule changes, since findings change with
 /// it. Recorded as a detector version.
-pub const WEIGHT_VERSION: &str = "structural-verify-v3";
+pub const WEIGHT_VERSION: &str = "structural-verify-v4";
 
 /// Relative weights of the similarity dimensions in the composite score.
 ///
@@ -244,13 +243,17 @@ impl Alignment {
     }
 }
 
-/// One unit's inputs to verification: its flattened statement sequence and its
-/// extracted features.
+/// One unit's inputs to verification: its flattened statement sequence, the
+/// token stream those statements span, and its extracted features.
 #[derive(Debug, Clone, Copy)]
 pub struct UnitView<'a> {
     /// The unit's statements, flattened in pre-order (see
     /// [`statement_sequence`]).
     pub statements: &'a [StatementSummary],
+    /// The whole token stream of the file the statements came from. A
+    /// statement span indexes this, so it must be the same stream the
+    /// summaries were built against.
+    pub tokens: &'a [Token],
     /// The unit's extracted features.
     pub features: &'a UnitFeatures,
 }
@@ -323,7 +326,7 @@ const fn order_key(unit: &UnitView<'_>) -> (usize, [u8; 16], [u8; 16], u8) {
 fn measure(a: &UnitView<'_>, b: &UnitView<'_>, config: &VerifyConfig) -> Verdict {
     let (lcs, alignment) = align(a.statements, b.statements, config);
     let seq_sim = sequence_similarity(lcs, a.statements.len(), b.statements.len());
-    let lexical = lexical_similarity(a.statements, b.statements, &alignment);
+    let lexical = lexical_similarity(a, b, &alignment);
     let structural = mean3(
         seq_sim,
         a.features.vector.cosine_similarity(&b.features.vector),
@@ -574,31 +577,40 @@ fn sequence_similarity(lcs: usize, n: usize, m: usize) -> f64 {
     ratio(2 * lcs, n + m)
 }
 
-/// Lexical agreement: the mean, over aligned statement pairs, of how many
-/// leading tokens match verbatim. `1.0` when every aligned pair's head tokens
-/// are identical (a verbatim copy); lower when identifiers were renamed.
-fn lexical_similarity(
-    a: &[StatementSummary],
-    b: &[StatementSummary],
-    alignment: &Alignment,
-) -> f64 {
+/// Lexical agreement: the mean, over aligned statement pairs, of how much of
+/// their text matches verbatim. `1.0` when every aligned pair reads the same
+/// (a verbatim copy); lower when identifiers or literals were changed.
+///
+/// A compound statement spans its whole body, so the statements nested inside
+/// it are measured both on their own and again as part of it. That is
+/// deliberate: whether a loop's body was copied wholesale is the evidence that
+/// separates a copy from a routine that merely has a loop in the same place,
+/// and weighting a construct by how much code it encloses is what makes that
+/// evidence count. Comparing each statement's own text instead — a loop header
+/// without its body — measurably fails to tell the two apart, because
+/// lookalikes share those headers exactly.
+fn lexical_similarity(a: &UnitView<'_>, b: &UnitView<'_>, alignment: &Alignment) -> f64 {
     if alignment.matched.is_empty() {
         return 0.0;
     }
     let mut total = 0.0;
     for &(i, j) in &alignment.matched {
-        total += head_agreement(&a[i].head, &b[j].head);
+        total += text_agreement(
+            a.statements[i].tokens(a.tokens),
+            b.statements[j].tokens(b.tokens),
+        );
     }
     total / ratio_denominator(alignment.matched.len())
 }
 
-/// Fraction of leading-token positions that carry the same text.
-fn head_agreement(a: &[crate::frontend::Lexeme], b: &[crate::frontend::Lexeme]) -> f64 {
+/// Fraction of token positions that carry the same text, over the longer of
+/// the two statements so that extra text counts against the match.
+fn text_agreement(a: &[Token], b: &[Token]) -> f64 {
     let longest = a.len().max(b.len());
     if longest == 0 {
         return 1.0;
     }
-    let equal = a.iter().zip(b).filter(|(x, y)| x == y).count();
+    let equal = a.iter().zip(b).filter(|(x, y)| x.text == y.text).count();
     ratio(equal, longest)
 }
 
@@ -711,12 +723,65 @@ mod tests {
     use crate::frontend::Lexeme;
     use crate::ir::ByteRange;
 
-    fn summary(shape_tag: u8, head: &[&str]) -> StatementSummary {
+    /// A statement with no text of its own. Enough for the tests that only
+    /// exercise alignment, which reads shapes and never the tokens.
+    fn summary(shape_tag: u8) -> StatementSummary {
         StatementSummary {
             shape_tag,
             native_kind: None,
-            head: head.iter().map(|t| Lexeme::from(*t)).collect(),
+            token_start: 0,
+            token_end: 0,
         }
+    }
+
+    /// A statement sequence and the token stream it spans, built together: a
+    /// statement's span is only meaningful against the stream it was cut from,
+    /// so a test that cares about text has to own both.
+    struct Statements {
+        tokens: Vec<Token>,
+        summaries: Vec<StatementSummary>,
+    }
+
+    impl Statements {
+        fn view<'a>(&'a self, features: &'a UnitFeatures) -> UnitView<'a> {
+            UnitView {
+                statements: &self.summaries,
+                tokens: &self.tokens,
+                features,
+            }
+        }
+    }
+
+    /// Build statements from `(shape tag, token texts)` pairs, laying the
+    /// tokens out consecutively.
+    fn statements(spec: &[(u8, &[&str])]) -> Statements {
+        let mut built = Statements {
+            tokens: Vec::new(),
+            summaries: Vec::new(),
+        };
+        for &(shape_tag, texts) in spec {
+            let token_start = built.tokens.len();
+            for text in texts {
+                let start_byte = built.tokens.len() * 8;
+                built.tokens.push(Token {
+                    kind: crate::frontend::TokenKind::Identifier,
+                    text: Lexeme::from(*text),
+                    span: crate::frontend::SourceSpan {
+                        start_byte,
+                        end_byte: start_byte + text.len(),
+                        start_line: 1,
+                        start_column: 1,
+                    },
+                });
+            }
+            built.summaries.push(StatementSummary {
+                shape_tag,
+                native_kind: None,
+                token_start,
+                token_end: built.tokens.len(),
+            });
+        }
+        built
     }
 
     /// Features with a chosen characteristic vector, subtree-hash set, cfg hash
@@ -764,12 +829,9 @@ mod tests {
 
     #[test]
     fn identical_units_are_a_type1_clone() {
-        let stmts = vec![summary(3, &["if", "x"]), summary(12, &["let", "y"])];
+        let stmts = statements(&[(3, &["if", "x"]), (12, &["let", "y"])]);
         let feats = features(counts(4), &[1, 2, 3], 9, &["push", "len"]);
-        let view = UnitView {
-            statements: &stmts,
-            features: &feats,
-        };
+        let view = stmts.view(&feats);
         let verdict = verify(&view, &view, &VerifyConfig::default());
         assert_eq!(verdict.class, Some(CloneClass::Type1));
         assert_eq!(verdict.confidence, Some(Confidence::High));
@@ -780,17 +842,11 @@ mod tests {
 
     #[test]
     fn same_structure_but_renamed_heads_is_a_type2_clone() {
-        let a = vec![summary(3, &["if", "acc"]), summary(12, &["let", "count"])];
-        let b = vec![summary(3, &["if", "state"]), summary(12, &["let", "seen"])];
+        let a = statements(&[(3, &["if", "acc"]), (12, &["let", "count"])]);
+        let b = statements(&[(3, &["if", "state"]), (12, &["let", "seen"])]);
         let feats = features(counts(4), &[1, 2, 3], 9, &["push"]);
-        let va = UnitView {
-            statements: &a,
-            features: &feats,
-        };
-        let vb = UnitView {
-            statements: &b,
-            features: &feats,
-        };
+        let va = a.view(&feats);
+        let vb = b.view(&feats);
         let verdict = verify(&va, &vb, &VerifyConfig::default());
         assert_eq!(verdict.class, Some(CloneClass::Type2));
         assert!(verdict.breakdown.lexical < 1.0);
@@ -798,21 +854,56 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_past_the_opening_tokens_still_shows_in_the_text() {
+        // The two statements open identically and diverge only afterwards.
+        // Reading a fixed number of leading tokens would call this pair
+        // verbatim and hand it a Type-1 classification, which asserts the two
+        // units differ in nothing but whitespace — a claim this pair does not
+        // support. The whole statement is compared for exactly this reason.
+        let a = statements(&[(12, &["let", "total", "=", "first", "+", "second"])]);
+        let b = statements(&[(12, &["let", "total", "=", "first", "-", "third"])]);
+        let feats = features(counts(4), &[1, 2, 3], 9, &[]);
+        let verdict = verify(&a.view(&feats), &b.view(&feats), &VerifyConfig::default());
+        assert!(
+            verdict.breakdown.lexical < 1.0,
+            "the divergence past the opening tokens must show, got {}",
+            verdict.breakdown.lexical
+        );
+        assert_ne!(verdict.class, Some(CloneClass::Type1));
+        // Four of the six tokens still agree, so this is a near-copy, not a
+        // pair with nothing in common.
+        assert!((verdict.breakdown.lexical - 4.0 / 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_compound_statement_is_compared_over_everything_it_encloses() {
+        // A statement's span covers its body, so two loops that open the same
+        // way but enclose different code do not read as the same statement.
+        let a = statements(&[(7, &["for", "row", "in", "rows", "total", "+=", "row"])]);
+        let b = statements(&[(7, &["for", "row", "in", "rows", "widest", "=", "row"])]);
+        let feats = features(counts(4), &[1, 2, 3], 9, &[]);
+        let verdict = verify(&a.view(&feats), &b.view(&feats), &VerifyConfig::default());
+        // The four header tokens and the trailing operand agree; the two the
+        // body differs in do not. Had only the header been read, the pair
+        // would have scored a verbatim match on a body that was rewritten.
+        assert!(
+            (verdict.breakdown.lexical - 5.0 / 7.0).abs() < 1e-9,
+            "five of the seven tokens agree, got {}",
+            verdict.breakdown.lexical
+        );
+    }
+
+    #[test]
     fn a_renamed_call_surface_is_type2_however_quiet_the_heads_are() {
-        // The heads agree — the renamed callee sits past the summarised
-        // leading tokens — and the structure is identical, so only the call
-        // names carry the rename.
-        let stmts = vec![summary(3, &["let", "x", "=", "y"])];
+        // Both sides read identically and their structure is identical, so
+        // the only dimension carrying the rename is the call surface. This is
+        // the case the api dimension exists for: the statements cannot show a
+        // difference the features do.
+        let stmts = statements(&[(3, &["let", "x", "=", "y"])]);
         let fa = features(counts(4), &[1, 2, 3], 9, &["abs", "min"]);
         let fb = features(counts(4), &[1, 2, 3], 9, &["signum", "rem_euclid"]);
-        let va = UnitView {
-            statements: &stmts,
-            features: &fa,
-        };
-        let vb = UnitView {
-            statements: &stmts,
-            features: &fb,
-        };
+        let va = stmts.view(&fa);
+        let vb = stmts.view(&fb);
         let verdict = verify(&va, &vb, &VerifyConfig::default());
         assert!((verdict.breakdown.lexical - 1.0).abs() < 1e-9);
         assert!((verdict.breakdown.structural - 1.0).abs() < 1e-9);
@@ -827,18 +918,12 @@ mod tests {
         // every pair of call-free units on no evidence, which is exactly the
         // shape of code — small helpers — where a false positive is cheapest
         // to produce.
-        let a = vec![summary(12, &["let", "total"]), summary(4, &["return"])];
-        let b = vec![summary(12, &["let", "count"]), summary(4, &["return"])];
+        let a = statements(&[(12, &["let", "total"]), (4, &["return"])]);
+        let b = statements(&[(12, &["let", "count"]), (4, &["return"])]);
         let fa = features(counts(4), &[1, 2, 3], 9, &[]);
         let fb = features(counts(5), &[1, 2, 4], 8, &[]);
-        let va = UnitView {
-            statements: &a,
-            features: &fa,
-        };
-        let vb = UnitView {
-            statements: &b,
-            features: &fb,
-        };
+        let va = a.view(&fa);
+        let vb = b.view(&fb);
         let verdict = verify(&va, &vb, &VerifyConfig::default());
         assert_eq!(verdict.breakdown.api, None);
 
@@ -861,12 +946,9 @@ mod tests {
         // An absent dimension is not evidence against the strong claim: with
         // nothing to compare, it cannot contradict identical structure and
         // identical heads.
-        let stmts = vec![summary(12, &["let", "total"]), summary(4, &["return"])];
+        let stmts = statements(&[(12, &["let", "total"]), (4, &["return"])]);
         let feats = features(counts(4), &[1, 2, 3], 9, &[]);
-        let view = UnitView {
-            statements: &stmts,
-            features: &feats,
-        };
+        let view = stmts.view(&feats);
         let verdict = verify(&view, &view, &VerifyConfig::default());
         assert_eq!(verdict.breakdown.api, None);
         assert_eq!(verdict.class, Some(CloneClass::Type1));
@@ -881,27 +963,21 @@ mod tests {
         // matches the opening statement and pays for its differing head. Which
         // one the recurrence settles on follows the order of the arguments, so
         // the lexical dimension moves with it.
-        let a = vec![
-            summary(12, &["let", "seen"]),
-            summary(12, &["let", "total"]),
-            summary(12, &["let", "total"]),
-            summary(12, &["let", "total"]),
-        ];
-        let b = vec![
-            summary(4, &["return", "total"]),
-            summary(12, &["let", "total"]),
-            summary(12, &["let", "total"]),
-        ];
+        let a = statements(&[
+            (12, &["let", "seen"]),
+            (12, &["let", "total"]),
+            (12, &["let", "total"]),
+            (12, &["let", "total"]),
+        ]);
+        let b = statements(&[
+            (4, &["return", "total"]),
+            (12, &["let", "total"]),
+            (12, &["let", "total"]),
+        ]);
         let fa = features(counts(6), &[1, 2, 3, 4], 9, &["push"]);
         let fb = features(counts(5), &[1, 2, 3], 8, &["push"]);
-        let va = UnitView {
-            statements: &a,
-            features: &fa,
-        };
-        let vb = UnitView {
-            statements: &b,
-            features: &fb,
-        };
+        let va = a.view(&fa);
+        let vb = b.view(&fb);
         let forward = verify(&va, &vb, &VerifyConfig::default());
         let backward = verify(&vb, &va, &VerifyConfig::default());
         assert_eq!(forward.breakdown, backward.breakdown);
@@ -922,27 +998,17 @@ mod tests {
     #[test]
     fn a_gapped_edit_is_a_type3_clone_and_the_gap_shows_in_the_alignment() {
         // b has one extra leading statement; the rest align.
-        let a = vec![
-            summary(3, &["if"]),
-            summary(12, &["let"]),
-            summary(4, &["return"]),
-        ];
-        let b = vec![
-            summary(11, &["loop"]),
-            summary(3, &["if"]),
-            summary(12, &["let"]),
-            summary(4, &["return"]),
-        ];
+        let a = statements(&[(3, &["if"]), (12, &["let"]), (4, &["return"])]);
+        let b = statements(&[
+            (11, &["loop"]),
+            (3, &["if"]),
+            (12, &["let"]),
+            (4, &["return"]),
+        ]);
         let fa = features(counts(6), &[1, 2, 3, 4], 9, &["push", "len"]);
         let fb = features(counts(7), &[1, 2, 3, 5], 8, &["push", "len", "clear"]);
-        let va = UnitView {
-            statements: &a,
-            features: &fa,
-        };
-        let vb = UnitView {
-            statements: &b,
-            features: &fb,
-        };
+        let va = a.view(&fa);
+        let vb = b.view(&fb);
         let verdict = verify(&va, &vb, &VerifyConfig::default());
         assert_eq!(verdict.class, Some(CloneClass::Type3));
         // The type dimension is unavailable, so a Type-3 is capped at medium.
@@ -956,7 +1022,7 @@ mod tests {
     /// a real search rather than a run of identical statements.
     fn sequence(len: usize) -> Vec<StatementSummary> {
         (0..len)
-            .map(|index| summary(u8::try_from(index % 7).unwrap_or(0), &["let"]))
+            .map(|index| summary(u8::try_from(index % 7).unwrap_or(0)))
             .collect()
     }
 
@@ -968,7 +1034,7 @@ mod tests {
         let a = sequence(400);
         let mut b = a.clone();
         for extra in 0..16 {
-            b.insert(200 + extra, summary(9, &["loop"]));
+            b.insert(200 + extra, summary(9));
         }
         let (lcs, alignment) = align(&a, &b, &VerifyConfig::default());
         assert_eq!(lcs, a.len());
@@ -985,7 +1051,7 @@ mod tests {
         let a = sequence(200);
         let mut b = a.clone();
         for extra in 0..80 {
-            b.insert(100 + extra, summary(9, &["loop"]));
+            b.insert(100 + extra, summary(9));
         }
         let narrow = VerifyConfig {
             alignment_band: 4,
@@ -1027,8 +1093,8 @@ mod tests {
 
     #[test]
     fn unrelated_units_are_not_a_clone() {
-        let a = vec![summary(3, &["if"]), summary(4, &["return"])];
-        let b = vec![summary(12, &["let"]), summary(10, &["match"])];
+        let a = statements(&[(3, &["if"]), (4, &["return"])]);
+        let b = statements(&[(12, &["let"]), (10, &["match"])]);
         let fa = features(counts(4), &[1, 2], 9, &["push"]);
         let fb = features(counts(1), &[7, 8], 5, &["draw"]);
         // Give the vectors nothing in common.
@@ -1041,14 +1107,8 @@ mod tests {
             },
             ..fb
         };
-        let va = UnitView {
-            statements: &a,
-            features: &fa,
-        };
-        let vb = UnitView {
-            statements: &b,
-            features: &fb,
-        };
+        let va = a.view(&fa);
+        let vb = b.view(&fb);
         let verdict = verify(&va, &vb, &VerifyConfig::default());
         assert_eq!(verdict.class, None);
         assert_eq!(verdict.confidence, None);
@@ -1093,12 +1153,9 @@ mod tests {
 
     #[test]
     fn verification_is_deterministic() {
-        let a = vec![summary(3, &["if"]), summary(12, &["let"])];
+        let a = statements(&[(3, &["if"]), (12, &["let"])]);
         let feats = features(counts(4), &[1, 2, 3], 9, &["push"]);
-        let view = UnitView {
-            statements: &a,
-            features: &feats,
-        };
+        let view = a.view(&feats);
         let cfg = VerifyConfig::default();
         assert_eq!(verify(&view, &view, &cfg), verify(&view, &view, &cfg));
     }

@@ -795,7 +795,11 @@ function compute
             summaries[0].native_kind,
             Some(Lexeme::from("goto_statement"))
         );
-        let head: Vec<&str> = summaries[0].head.iter().map(Lexeme::as_str).collect();
+        let head: Vec<&str> = summaries[0]
+            .tokens(&file.tokens)
+            .iter()
+            .map(|token| token.text.as_str())
+            .collect();
         assert_eq!(head, vec!["goto", "out", ";"]);
     }
 

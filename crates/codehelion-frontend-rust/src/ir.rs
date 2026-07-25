@@ -616,8 +616,12 @@ trait T {
             ],
             "a bare call statement is a Call node, which is not a statement shape"
         );
-        let head: Vec<&str> = summaries[0].head.iter().map(Lexeme::as_str).collect();
-        assert_eq!(head, vec!["let", "a", "=", "1"]);
+        let text: Vec<&str> = summaries[0]
+            .tokens(&file.tokens)
+            .iter()
+            .map(|token| token.text.as_str())
+            .collect();
+        assert_eq!(text, vec!["let", "a", "=", "1", ";"]);
     }
 
     #[test]

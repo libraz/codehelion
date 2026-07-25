@@ -96,6 +96,7 @@ fn view(prepared: &Prepared) -> UnitView<'_> {
     ));
     UnitView {
         statements,
+        tokens: &prepared.ir.tokens,
         features: &prepared.features,
     }
 }

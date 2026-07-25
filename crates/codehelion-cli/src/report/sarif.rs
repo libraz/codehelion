@@ -678,7 +678,7 @@ mod tests {
         assert_eq!(properties["similarity"]["composite"], 0.82);
         assert_eq!(
             properties["similarity"]["weight_version"],
-            "structural-verify-v3"
+            "structural-verify-v4"
         );
         // The dimension the mode could not measure stays absent here too.
         assert_eq!(

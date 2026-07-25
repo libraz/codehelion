@@ -268,20 +268,28 @@ impl IrNode {
 /// How many leading tokens a [`StatementSummary`] keeps.
 pub const SUMMARY_HEAD_TOKENS: usize = 4;
 
-/// A statement reduced to its shape and leading tokens.
+/// A statement reduced to its shape and the span of its tokens.
 ///
-/// Statement windows hash sequences of these summaries instead of full
-/// subtrees, trading fidelity for volume: the shape carries the structural
-/// signal, the head tokens keep enough lexical signal to separate unrelated
-/// statements of the same shape.
+/// The shape carries the rename-invariant signal that aligns two statement
+/// sequences; the span is how the text itself is recovered, for the lexical
+/// comparison that decides whether aligned statements are actually copies.
+///
+/// The span is kept rather than the token texts because a compound statement
+/// covers its whole body: cloning the texts would cost a copy of the token
+/// stream once per level of nesting, while an index pair costs the same
+/// whatever the statement contains. It is a position into one file's stream
+/// and nothing more — identity in this tool is content-derived, and no
+/// fingerprint reads this type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatementSummary {
     /// Shape tag of the statement (see [`Shape::tag`]).
     pub shape_tag: u8,
     /// Native kind name when the statement is a [`Shape::Native`] node.
     pub native_kind: Option<Lexeme>,
-    /// Up to [`SUMMARY_HEAD_TOKENS`] leading token texts of the statement.
-    pub head: Vec<Lexeme>,
+    /// Index of the statement's first token in its file's stream.
+    pub token_start: usize,
+    /// Index one past the statement's last token in its file's stream.
+    pub token_end: usize,
 }
 
 impl StatementSummary {
@@ -292,18 +300,20 @@ impl StatementSummary {
             Shape::Native(kind) => Some(kind.clone()),
             _ => None,
         };
-        let end = node.token_end.min(tokens.len());
-        let start = node.token_start.min(end);
-        let head = tokens[start..end]
-            .iter()
-            .take(SUMMARY_HEAD_TOKENS)
-            .map(|token| token.text.clone())
-            .collect();
+        let token_end = node.token_end.min(tokens.len());
         Self {
             shape_tag: node.shape.tag(),
             native_kind,
-            head,
+            token_start: node.token_start.min(token_end),
+            token_end,
         }
+    }
+
+    /// The statement's tokens, resolved against the stream it was summarised
+    /// from. Empty for any other stream, since the span would not be its own.
+    #[must_use]
+    pub fn tokens<'a>(&self, tokens: &'a [Token]) -> &'a [Token] {
+        tokens.get(self.token_start..self.token_end).unwrap_or(&[])
     }
 }
 
@@ -487,18 +497,20 @@ mod tests {
             "no native statements in this block"
         );
         assert_eq!(summaries[0].shape_tag, Shape::VarDecl.tag());
+        let text = |summary: &StatementSummary| -> Vec<String> {
+            summary
+                .tokens(&tokens)
+                .iter()
+                .map(|token| token.text.as_str().to_string())
+                .collect()
+        };
         assert_eq!(
-            summaries[0].head,
-            vec![
-                Lexeme::from("let"),
-                Lexeme::from("x"),
-                Lexeme::from("="),
-                Lexeme::from("f"),
-            ],
-            "head keeps at most SUMMARY_HEAD_TOKENS leading tokens"
+            text(&summaries[0]),
+            vec!["let", "x", "=", "f", "(", ")"],
+            "the span covers the whole statement, not just its head"
         );
         assert_eq!(summaries[1].shape_tag, Shape::Return.tag());
-        assert_eq!(summaries[1].head.len(), 2);
+        assert_eq!(text(&summaries[1]), vec!["return", "x"]);
     }
 
     #[test]
@@ -527,7 +539,7 @@ mod tests {
         let tokens = vec![token("x", 0)];
         let stray = node(Shape::ExprStmt, 5, 9);
         let summary = StatementSummary::of(&stray, &tokens);
-        assert!(summary.head.is_empty());
+        assert!(summary.tokens(&tokens).is_empty());
     }
 
     #[test]

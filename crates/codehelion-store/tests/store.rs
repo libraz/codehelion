@@ -170,7 +170,7 @@ fn a_structural_group_persists_its_similarity_breakdown() {
     let mut snapshot = sample_snapshot(&variant, &detectors);
     snapshot.groups[0].clone_type = CloneClass::Type2;
     snapshot.groups[0].similarity = Some(SimilarityBreakdownRow {
-        weight_version: "structural-verify-v3".to_string(),
+        weight_version: "structural-verify-v4".to_string(),
         lexical: 0.8,
         structural: 0.95,
         control_flow: 0.9,
@@ -188,7 +188,7 @@ fn a_structural_group_persists_its_similarity_breakdown() {
         .similarity
         .as_ref()
         .expect("the structural group carries a breakdown");
-    assert_eq!(breakdown.weight_version, "structural-verify-v3");
+    assert_eq!(breakdown.weight_version, "structural-verify-v4");
     assert!((breakdown.structural - 0.95).abs() < 1e-9);
     assert!((breakdown.composite - 0.87).abs() < 1e-9);
     assert!((breakdown.min_pairwise - 0.72).abs() < 1e-9);
@@ -229,7 +229,7 @@ fn an_unmeasured_api_dimension_round_trips_as_absent() {
 
     let mut snapshot = sample_snapshot(&variant, &detectors);
     snapshot.groups[0].similarity = Some(SimilarityBreakdownRow {
-        weight_version: "structural-verify-v3".to_string(),
+        weight_version: "structural-verify-v4".to_string(),
         lexical: 1.0,
         structural: 1.0,
         control_flow: 1.0,

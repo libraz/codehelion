@@ -286,8 +286,8 @@ pub fn analyze(
     // Stage: precise verification of each distinct unit pair.
     let mut edges: Vec<SimilarityEdge> = Vec::new();
     for &(a, b) in &pairs {
-        let view_a = view(&units[a], &feature_files);
-        let view_b = view(&units[b], &feature_files);
+        let view_a = view(&units[a], files, &feature_files);
+        let view_b = view(&units[b], files, &feature_files);
         let verdict = verify::verify(&view_a, &view_b, &config.verify);
         if let (Some(class), Some(confidence)) = (verdict.class, verdict.confidence) {
             edges.push(SimilarityEdge {
@@ -314,7 +314,7 @@ pub fn analyze(
     let details: Vec<GroupDetail> = groups
         .groups
         .iter()
-        .map(|group| group_detail(group, &units, &feature_files, variant, config))
+        .map(|group| group_detail(group, &units, files, &feature_files, variant, config))
         .collect();
 
     let stats = StructuralStats {
@@ -536,18 +536,19 @@ fn token_span(tokens: &[Token], range: ByteRange) -> (usize, usize) {
 fn group_detail(
     group: &grouping::StructuralGroup,
     units: &[Unit],
+    files: &[SyntaxIrFile],
     feature_files: &[FileFeatures],
     variant: &BuildVariant,
     config: &StructuralConfig,
 ) -> GroupDetail {
-    let medoid_view = view(&units[group.canonical], feature_files);
+    let medoid_view = view(&units[group.canonical], files, feature_files);
     let member_breakdowns = group
         .members
         .iter()
         .map(|&member| {
             verify::verify(
                 &medoid_view,
-                &view(&units[member], feature_files),
+                &view(&units[member], files, feature_files),
                 &config.verify,
             )
             .breakdown
@@ -695,10 +696,16 @@ fn line_range(tokens: &[Token]) -> (u32, u32) {
     )
 }
 
-/// Build a unit's verification view from its statements and its features.
-fn view<'a>(unit: &'a Unit, feature_files: &'a [FileFeatures]) -> UnitView<'a> {
+/// Build a unit's verification view from its statements, the token stream they
+/// span, and its features.
+fn view<'a>(
+    unit: &'a Unit,
+    files: &'a [SyntaxIrFile],
+    feature_files: &'a [FileFeatures],
+) -> UnitView<'a> {
     UnitView {
         statements: &unit.statements,
+        tokens: &files[unit.file].tokens,
         features: &feature_files[unit.file].units[unit.local],
     }
 }
