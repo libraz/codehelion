@@ -107,50 +107,8 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let analysis = structural::analyze(&irs, &variant, &structural_config(&cfg));
 
     let mut rules = compile_rules(&cfg, &files, &analysis)?;
-    let hidden = hidden_boilerplate(&mut rules.rules, &cfg.suppression.boilerplate, &analysis);
     let regions = reportable_regions(&analysis);
-    let hidden_test_code = hidden_test_code(&mut rules.rules, &cfg, &analysis, &regions);
-    let local_units = local_unit_indices(&analysis);
-    // Most specific rule first: a clone id names this exact group, a path or
-    // symbol glob or an inline marker is an explicit instruction about where
-    // the members sit, the test attribute is the source stating what the code
-    // is, and a boilerplate category is the tool's judgement about its shape.
-    let group_suppressed: Vec<Option<usize>> = analysis
-        .groups
-        .groups
-        .iter()
-        .enumerate()
-        .map(|(index, group)| {
-            rules
-                .rules
-                .clone_id_rule(&analysis.details[index].fingerprint.to_hex())
-                .or_else(|| {
-                    rules.group_rule(group.members.iter().copied(), &analysis, &local_units)
-                })
-                .or_else(|| hidden_test_code.filter(|_| analysis.details[index].test_code))
-                .or_else(|| {
-                    analysis.details[index]
-                        .boilerplate
-                        .and_then(|category| hidden.get(&category).copied())
-                })
-        })
-        .collect();
-    // A duplicated run is suppressed by the same rules a whole unit is, read
-    // at the run's own line span rather than its host unit's: a marker or a
-    // path glob is an instruction about a place in the code, and a run has
-    // its own place.
-    let region_suppressed: Vec<Option<usize>> = regions
-        .reported
-        .iter()
-        .map(|&index| {
-            let region = &analysis.regions[index];
-            rules
-                .rules
-                .clone_id_rule(&region.fingerprint.to_hex())
-                .or_else(|| rules.region_rule(region, &analysis, &local_units))
-                .or_else(|| hidden_test_code.filter(|_| region_test_code(&analysis, region)))
-        })
-        .collect();
+    let suppressed = evaluate_suppression(&cfg, &mut rules, &analysis, &regions);
 
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
     let finished_at = rfc3339_now();
@@ -164,11 +122,13 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         irs: &irs,
         analysis: &analysis,
         rules: &rules.rules,
-        group_suppressed: &group_suppressed,
+        group_suppressed: &suppressed.groups,
         regions: &regions,
-        region_suppressed: &region_suppressed,
+        region_suppressed: &suppressed.regions,
         boilerplate: &cfg.suppression.boilerplate,
         test_code_action: cfg.suppression.test_code,
+        pair_suppressed: &suppressed.pairs,
+        split_pairs_action: cfg.suppression.split_pairs,
         literals: literal_norm(cfg.literal_normalization),
         glob_excluded,
         unreadable,
@@ -324,6 +284,86 @@ fn compile_rules(
         rules,
         files: evaluated,
     })
+}
+
+/// Which suppression rule, if any, hides each reported finding.
+struct SuppressionVerdicts {
+    /// Parallel to the analysis's clone groups.
+    groups: Vec<Option<usize>>,
+    /// Parallel to the runs the report lists.
+    regions: Vec<Option<usize>>,
+    /// Parallel to the verified pairs no group could hold.
+    pairs: Vec<Option<usize>>,
+}
+
+/// Evaluate the configured suppression against everything the report lists.
+///
+/// The three kinds of finding are judged by the same rules read at their own
+/// place in the code: a marker or a path glob is an instruction about where
+/// code sits, and a run or a pair sits somewhere as much as a group does.
+fn evaluate_suppression(
+    cfg: &Config,
+    rules: &mut StructuralRules,
+    analysis: &StructuralReport,
+    regions: &ReportableRegions,
+) -> SuppressionVerdicts {
+    let hidden = hidden_boilerplate(&mut rules.rules, &cfg.suppression.boilerplate, analysis);
+    let hidden_test_code = hidden_test_code(&mut rules.rules, cfg, analysis, regions);
+    let local_units = local_unit_indices(analysis);
+    // Most specific rule first: a clone id names this exact group, a path or
+    // symbol glob or an inline marker is an explicit instruction about where
+    // the members sit, the test attribute is the source stating what the code
+    // is, and a boilerplate category is the tool's judgement about its shape.
+    let groups = analysis
+        .groups
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| {
+            rules
+                .rules
+                .clone_id_rule(&analysis.details[index].fingerprint.to_hex())
+                .or_else(|| rules.group_rule(group.members.iter().copied(), analysis, &local_units))
+                .or_else(|| hidden_test_code.filter(|_| analysis.details[index].test_code))
+                .or_else(|| {
+                    analysis.details[index]
+                        .boilerplate
+                        .and_then(|category| hidden.get(&category).copied())
+                })
+        })
+        .collect();
+    let region_verdicts = regions
+        .reported
+        .iter()
+        .map(|&index| {
+            let region = &analysis.regions[index];
+            rules
+                .rules
+                .clone_id_rule(&region.fingerprint.to_hex())
+                .or_else(|| rules.region_rule(region, analysis, &local_units))
+                .or_else(|| hidden_test_code.filter(|_| region_test_code(analysis, region)))
+        })
+        .collect();
+    let pairs = analysis
+        .unrepresented
+        .iter()
+        .map(|pair| {
+            rules
+                .rules
+                .clone_id_rule(&pair.fingerprint.to_hex())
+                .or_else(|| rules.group_rule([pair.a, pair.b].into_iter(), analysis, &local_units))
+                .or_else(|| {
+                    hidden_test_code.filter(|_| {
+                        analysis.units[pair.a].test_code && analysis.units[pair.b].test_code
+                    })
+                })
+        })
+        .collect();
+    SuppressionVerdicts {
+        groups,
+        regions: region_verdicts,
+        pairs,
+    }
 }
 
 /// Register a suppression rule for every boilerplate category the policy
@@ -507,6 +547,11 @@ struct ReportInputs<'a> {
     boilerplate: &'a BoilerplatePolicy,
     /// What the report does with a group living wholly in a test suite.
     test_code_action: CategoryAction,
+    /// The rule hiding each verified pair no group could hold, parallel to
+    /// the analysis's own list of them.
+    pair_suppressed: &'a [Option<usize>],
+    /// What the report does with such a pair.
+    split_pairs_action: CategoryAction,
     /// Literal strategy the group content is scored under.
     literals: LiteralNorm,
     glob_excluded: usize,
@@ -539,6 +584,7 @@ impl ReportInputs<'_> {
             .group_suppressed
             .iter()
             .chain(self.region_suppressed)
+            .chain(self.pair_suppressed)
             .filter_map(|rule| *rule)
             .collect();
         self.rules
@@ -645,6 +691,16 @@ fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
         .chain((0..inputs.regions.reported.len()).map(|index| {
             let region = build_region(inputs, index);
             (inputs.ranked_down(None, region.test_code), region)
+        }))
+        // A pair no group could hold says less per finding than a group does
+        // — two members rather than a set — and there are more of them than
+        // there are groups, so the policy ranks them down by default rather
+        // than letting them crowd the top of the report.
+        .chain((0..inputs.analysis.unrepresented.len()).map(|index| {
+            let pair = build_split_pair(inputs, index);
+            let ranked_down = inputs.split_pairs_action == CategoryAction::RankDown
+                || inputs.ranked_down(None, pair.test_code);
+            (ranked_down, pair)
         }))
         .collect();
     entries.sort_by(|(a_ranked_down, a), (b_ranked_down, b)| {
@@ -836,6 +892,7 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             .map(|category| category.name().to_string()),
         test_code: detail.test_code,
         suppressed,
+        split_pair: false,
         members: group
             .members
             .iter()
@@ -846,6 +903,76 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                 report::Member {
                     finding_id: stable_id::finding_id(
                         &detail.fingerprint,
+                        Some(&unit.fingerprint),
+                        0,
+                    )
+                    .to_hex(),
+                    file: file.relative_path.clone(),
+                    start_line: unit.start_line,
+                    end_line: unit.end_line,
+                    unit: unit.name.as_deref().map(ToString::to_string),
+                    tokens: u64::try_from(unit.token_end.saturating_sub(unit.token_start))
+                        .unwrap_or(u64::MAX),
+                    canonical: position == 0,
+                }
+            })
+            .collect(),
+    }
+}
+
+/// One verified clone pair that no group could hold, as a report entry.
+///
+/// It is shaped exactly like a two-member group, because that is what it is:
+/// a set whose every member is a copy of every other, with two members in it.
+/// What sets it apart is that its members appear in other findings too, which
+/// `split_pair` says outright.
+fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
+    let pair = &inputs.analysis.unrepresented[index];
+    let suppressed = inputs.pair_suppressed[index].map(|rule| inputs.suppression(rule));
+    let other = if pair.canonical == pair.a {
+        pair.b
+    } else {
+        pair.a
+    };
+    let members: Vec<usize> = vec![pair.canonical, other];
+    let largest = members
+        .iter()
+        .map(|&member| {
+            let unit = &inputs.analysis.units[member];
+            unit.token_end.saturating_sub(unit.token_start)
+        })
+        .max()
+        .unwrap_or(0);
+    report::Group {
+        fingerprint: pair.fingerprint.to_hex(),
+        clone_type: pair.class.name().to_string(),
+        scope: CloneScope::Unit.name().to_string(),
+        statements: None,
+        confidence: pair.similarity,
+        priority: report::Priority {
+            // One extra instance, by construction: the same recipe the groups
+            // are ranked by, applied to a set of two.
+            value: f64::from(u32::try_from(largest).unwrap_or(u32::MAX)) * pair.similarity,
+            largest_member_tokens: u64::try_from(largest).unwrap_or(u64::MAX),
+            extra_instances: 1,
+            similarity: pair.similarity,
+        },
+        similarity: None,
+        boilerplate: None,
+        test_code: members
+            .iter()
+            .all(|&member| inputs.analysis.units[member].test_code),
+        suppressed,
+        split_pair: true,
+        members: members
+            .iter()
+            .enumerate()
+            .map(|(position, &member)| {
+                let unit = &inputs.analysis.units[member];
+                let file = &inputs.files[unit.file];
+                report::Member {
+                    finding_id: stable_id::finding_id(
+                        &pair.fingerprint,
                         Some(&unit.fingerprint),
                         0,
                     )
@@ -893,6 +1020,7 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
         boilerplate: None,
         test_code: region_test_code(inputs.analysis, region),
         suppressed: inputs.region_suppressed[index].map(|rule| inputs.suppression(rule)),
+        split_pair: false,
         members: region
             .occurrences
             .iter()
@@ -1041,6 +1169,12 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
             host_index.entry(occurrence.unit).or_insert(0);
         }
     }
+    // A pair no group could hold reaches units no group holds, so its members
+    // need recording as much as a group's do.
+    for pair in &inputs.analysis.unrepresented {
+        host_index.entry(pair.a).or_insert(0);
+        host_index.entry(pair.b).or_insert(0);
+    }
     let mut units = Vec::with_capacity(host_index.len());
     for (row, (unit_index, slot)) in host_index.iter_mut().enumerate() {
         *slot = row;
@@ -1061,6 +1195,9 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
     let regions = (0..inputs.regions.reported.len())
         .map(|index| region_row(inputs, index, &host_index))
         .collect::<Vec<_>>();
+    let split_pairs = (0..inputs.analysis.unrepresented.len())
+        .map(|index| split_pair_row(inputs, index, &host_index))
+        .collect::<Vec<_>>();
     let groups = inputs
         .analysis
         .groups
@@ -1075,6 +1212,7 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
                 clone_type: group.clone_type,
                 member_scope: CloneScope::Unit,
                 test_code: detail.test_code,
+                split_pair: false,
                 score: group.min_pairwise,
                 entropy_bits: engine::content_entropy_bits(
                     inputs.unit_tokens(medoid),
@@ -1111,6 +1249,7 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
             }
         })
         .chain(regions)
+        .chain(split_pairs)
         .collect();
     (units, groups)
 }
@@ -1118,6 +1257,63 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
 /// One duplicated run as a store row. Its entropy is measured over the
 /// canonical occurrence's own tokens, not its host unit's: the run is the
 /// content the group is about.
+/// One verified pair no group could hold, as a recorded group of two.
+fn split_pair_row(
+    inputs: &ReportInputs<'_>,
+    index: usize,
+    host_index: &BTreeMap<usize, usize>,
+) -> GroupRow {
+    let pair = &inputs.analysis.unrepresented[index];
+    let other = if pair.canonical == pair.a {
+        pair.b
+    } else {
+        pair.a
+    };
+    let canonical = &inputs.analysis.units[pair.canonical];
+    let largest = [pair.canonical, other]
+        .iter()
+        .map(|&member| {
+            let unit = &inputs.analysis.units[member];
+            unit.token_end.saturating_sub(unit.token_start)
+        })
+        .max()
+        .unwrap_or(0);
+    GroupRow {
+        fingerprint: pair.fingerprint,
+        clone_type: pair.class,
+        member_scope: CloneScope::Unit,
+        test_code: canonical.test_code && inputs.analysis.units[other].test_code,
+        split_pair: true,
+        score: pair.similarity,
+        entropy_bits: engine::content_entropy_bits(inputs.unit_tokens(canonical), inputs.literals),
+        suppress_reason: None,
+        boilerplate: None,
+        suppressed_by: inputs.pair_suppressed[index],
+        final_priority: f64::from(u32::try_from(largest).unwrap_or(u32::MAX)) * pair.similarity,
+        // The pair's evidence is the judge's verdict on it, which grouping did
+        // not re-run against a medoid, so there is no per-dimension row to
+        // record without inventing one.
+        similarity: None,
+        members: [pair.canonical, other]
+            .iter()
+            .map(|&member| {
+                let unit = &inputs.analysis.units[member];
+                let file = &inputs.files[unit.file];
+                MemberRow {
+                    content: unit.content,
+                    finding: stable_id::finding_id(&pair.fingerprint, Some(&unit.fingerprint), 0),
+                    language: file.language,
+                    host_unit: Some(host_index[&member]),
+                    file_path: file.relative_path.clone(),
+                    start_line: unit.start_line,
+                    end_line: unit.end_line,
+                    token_count: unit.token_end.saturating_sub(unit.token_start),
+                }
+            })
+            .collect(),
+    }
+}
+
 fn region_row(
     inputs: &ReportInputs<'_>,
     index: usize,
@@ -1136,6 +1332,7 @@ fn region_row(
         clone_type: region.clone_type,
         member_scope: CloneScope::Fragment,
         test_code: region_test_code(inputs.analysis, region),
+        split_pair: false,
         score: REGION_SIMILARITY,
         entropy_bits: engine::content_entropy_bits(&canonical, inputs.literals),
         suppress_reason: None,

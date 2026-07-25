@@ -136,6 +136,15 @@ pub struct Suppression {
     /// else it buries the code under test. Ranked down by default rather than
     /// hidden: repetition across a suite is worth reading, just not first.
     pub test_code: CategoryAction,
+    /// What to do with a verified clone pair that no group could hold.
+    ///
+    /// Being a clone is not transitive, so a unit can be a copy of two units
+    /// that are not copies of each other, and a set whose every member is a
+    /// copy of every other cannot hold all three. The pair such a set leaves
+    /// out is a verdict the judge reached, and there are more of them than
+    /// there are groups. Ranked down by default: reported, but below the
+    /// groups, which say more per finding.
+    pub split_pairs: CategoryAction,
 }
 
 impl Default for Suppression {
@@ -151,6 +160,7 @@ impl Default for Suppression {
             ],
             boilerplate: BoilerplatePolicy::default(),
             test_code: CategoryAction::RankDown,
+            split_pairs: CategoryAction::RankDown,
         }
     }
 }

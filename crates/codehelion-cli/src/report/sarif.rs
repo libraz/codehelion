@@ -343,6 +343,7 @@ impl<'a> From<&'a Group> for ResultEntry<'a> {
                 similarity: group.similarity.as_ref(),
                 boilerplate: group.boilerplate.as_deref(),
                 test_code: group.test_code,
+                split_pair: group.split_pair,
                 suppressed: group.suppressed.as_ref(),
             },
         }
@@ -357,6 +358,9 @@ fn message_text(group: &Group) -> String {
     let subject = match (group.scope.as_str(), group.statements) {
         (SCOPE_FRAGMENT, Some(statements)) => format!("run of {statements} statements"),
         (SCOPE_FRAGMENT, None) => "duplicated run".to_string(),
+        // A pair reported on its own overlaps other findings, which nothing
+        // else here does, so the message says what it is before anything else.
+        _ if group.split_pair => "pair no group holds".to_string(),
         _ => "clone group".to_string(),
     };
     let mut text = format!(
@@ -510,6 +514,7 @@ struct ResultProperties<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     boilerplate: Option<&'a str>,
     test_code: bool,
+    split_pair: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     suppressed: Option<&'a Suppression>,
 }

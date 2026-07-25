@@ -89,13 +89,13 @@ const CORPORA: &[Expected] = &[
     },
     Expected {
         name: "rust-divergent",
-        recall: 3.0 / 5.0,
-        shortfall: "the seed and its renamed-callee variant are a labelled \
-                    Type-2 pair scoring 0.85 — the strongest agreement in the \
-                    corpus — and they still land in different groups, because \
-                    that variant agrees with the seed's other variants too \
-                    weakly to sit beside them. The judge accepted this pair; a \
-                    partition into groups is what cannot hold it",
+        recall: 4.0 / 5.0,
+        shortfall: "the remaining labelled pair is the seed against the variant \
+                    that disturbs control flow and the call surface at once, \
+                    which the judge rejects outright at 0.57. The pair that \
+                    grouping splits — the seed and its renamed-callee variant, \
+                    the strongest agreement in the corpus — is recovered, \
+                    reported on its own because no group can hold both halves",
     },
 ];
 

@@ -388,6 +388,7 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
         boilerplate: None,
         test_code: false,
         suppressed,
+        split_pair: false,
         members: group
             .members
             .iter()
@@ -827,6 +828,7 @@ fn snapshot_rows(
             member_scope: CloneScope::Unit,
             // Fast mode compares tokens without a syntax tree, so it never
             // sees the attribute that marks a test.
+            split_pair: false,
             test_code: false,
             score: group.score,
             entropy_bits: group.entropy_bits,

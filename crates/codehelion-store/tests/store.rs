@@ -96,6 +96,7 @@ fn sample_snapshot<'a>(
         groups: vec![GroupRow {
             fingerprint: group_fp(9),
             clone_type: CloneClass::Type1,
+            split_pair: false,
             member_scope: CloneScope::Unit,
             test_code: false,
             score: 1.0,
@@ -660,6 +661,8 @@ fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
         let conn = rusqlite::Connection::open(&path).unwrap();
         // Every column added at or after that version has to go, or migrating
         // forward would try to add one twice.
+        conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
+            .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN test_code", [])
             .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN member_scope", [])
@@ -675,6 +678,51 @@ fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
     );
     let run = store.latest_run().unwrap().expect("the recorded run");
     assert_eq!(store.run_groups(run.id).unwrap()[0].member_scope, "unit");
+}
+
+#[test]
+fn a_pair_no_group_could_hold_records_that_it_is_one() {
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.groups[0].split_pair = true;
+    let run_id = store.record_snapshot(&snapshot).unwrap();
+
+    assert!(store.run_groups(run_id).unwrap()[0].split_pair);
+}
+
+#[test]
+fn a_group_recorded_before_the_split_pair_column_reads_as_a_whole_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.db");
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let detectors = detector_versions();
+    {
+        let mut store = Store::open(&path).unwrap();
+        let mut snapshot = sample_snapshot(&variant, &detectors);
+        snapshot.groups[0].split_pair = true;
+        store.record_snapshot(&snapshot).unwrap();
+    }
+    // An older tool reported only the groups a partition could hold, so every
+    // row it wrote was one of them. Migrating forward must say so rather than
+    // leave the question open.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
+            .unwrap();
+        conn.execute("UPDATE schema_meta SET version = 8", [])
+            .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.schema_version().unwrap(),
+        codehelion_store::schema::SCHEMA_VERSION
+    );
+    let run = store.latest_run().unwrap().expect("the recorded run");
+    assert!(!store.run_groups(run.id).unwrap()[0].split_pair);
 }
 
 #[test]
@@ -722,6 +770,8 @@ fn a_group_recorded_before_the_test_code_column_is_not_claimed_to_be_test_code()
     // claim either way. Migrating forward must not invent one.
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
+            .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN test_code", [])
             .unwrap();
         conn.execute("UPDATE schema_meta SET version = 7", [])

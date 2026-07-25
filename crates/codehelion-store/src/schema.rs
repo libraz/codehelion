@@ -39,11 +39,11 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
 
 /// Version 1: the full entity set.
 const V1: &str = "
@@ -388,6 +388,21 @@ ALTER TABLE clone_group ADD COLUMN member_scope TEXT NOT NULL DEFAULT 'unit'
 const V8: &str = "
 ALTER TABLE clone_group ADD COLUMN test_code INTEGER NOT NULL DEFAULT 0
     CHECK (test_code IN (0, 1));
+";
+
+/// Version 9: whether a clone group is a pair no larger group could hold.
+///
+/// A group asserts that every member is a copy of every other, and being a
+/// copy is not transitive, so a unit can be a copy of two units that are not
+/// copies of each other. Only one of those relations fits in a partition; the
+/// other is reported as its own two-member group, and it is the one kind of
+/// group whose members also appear in another. History has to be able to tell
+/// the two apart — a pair appearing beside the group that excluded it is not
+/// the same event as a group gaining a member. Rows written before this column
+/// were all partition members, which is what the default records.
+const V9: &str = "
+ALTER TABLE clone_group ADD COLUMN split_pair INTEGER NOT NULL DEFAULT 0
+    CHECK (split_pair IN (0, 1));
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

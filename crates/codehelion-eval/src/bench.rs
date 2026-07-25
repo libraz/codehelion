@@ -588,6 +588,7 @@ pub fn measure_store_insert(
         .map(|group| GroupRow {
             fingerprint: CloneGroupFingerprint::from_bytes(fp(2, group)),
             clone_type: CloneClass::Type1,
+            split_pair: false,
             member_scope: CloneScope::Unit,
             test_code: false,
             score: 1.0,

@@ -317,6 +317,16 @@ pub struct Group {
     /// test code: that duplication crosses the boundary, which is the case
     /// worth reading.
     pub test_code: bool,
+    /// Whether this is a pair reported on its own because no group could hold
+    /// both its members.
+    ///
+    /// A group asserts that every member is a copy of every other; being a
+    /// copy is not transitive, so a unit can be a copy of two units that are
+    /// not copies of each other, and only one of those relations fits in a
+    /// group. Such a pair is reported as its own two-member finding, which
+    /// means its members also appear elsewhere: these are the only findings
+    /// that overlap.
+    pub split_pair: bool,
     /// Why the group is hidden from default reports; `None` when visible.
     pub suppressed: Option<Suppression>,
     /// Every occurrence, the canonical instance first.
@@ -714,6 +724,14 @@ fn render_group(
         (None, None, true) => format!(" {}", palette.yellow("[test code]")),
         (None, None, false) => String::new(),
     };
+    // A pair reported on its own is the one kind of finding whose members
+    // turn up in other findings too. Saying so is what stops it reading as a
+    // second, contradictory account of the same code.
+    let overlap = if group.split_pair {
+        format!(" {}", palette.yellow("[pair no group holds]"))
+    } else {
+        String::new()
+    };
     // A fragment-scope group states its extent: without it "type-1, 40
     // tokens" reads as a duplicated unit, which it is not.
     let scope = match (group.scope.as_str(), group.statements) {
@@ -723,7 +741,7 @@ fn render_group(
     };
     writeln!(
         out,
-        "  {} {}{scope} priority {:.1} ({} tokens x {} extra x {:.2} similarity){marker}",
+        "  {} {}{scope} priority {:.1} ({} tokens x {} extra x {:.2} similarity){overlap}{marker}",
         palette.cyan(&group.fingerprint),
         group.clone_type,
         group.priority.value,
@@ -793,6 +811,9 @@ pub struct GroupRef {
     /// Whether every member of the group is test code, as recorded with the
     /// run.
     pub test_code: bool,
+    /// Whether the group is a verified pair no larger group could hold, as
+    /// recorded with the run.
+    pub split_pair: bool,
     /// Per-dimension evidence, absent when the mode measured none (Fast).
     pub similarity: Option<Similarity>,
     /// The rule that suppressed the group in the recorded run, if one
@@ -853,6 +874,12 @@ impl FindingDetail {
         }
         if let Some(category) = &self.group.boilerplate {
             writeln!(out, "  boilerplate: {category}")?;
+        }
+        if self.group.split_pair {
+            writeln!(
+                out,
+                "  pair: reported on its own, because no group holds both its members"
+            )?;
         }
         if self.group.test_code {
             writeln!(out, "  test code: every occurrence is inside a test")?;
@@ -956,6 +983,7 @@ pub(super) mod tests {
             boilerplate: None,
             test_code: false,
             suppressed: None,
+            split_pair: false,
             members: (0..7)
                 .map(|index| Member {
                     finding_id: format!("{index:032x}"),
@@ -993,6 +1021,7 @@ pub(super) mod tests {
                 scope: Some("path_glob".to_string()),
                 pattern: Some("vendor/**".to_string()),
             }),
+            split_pair: false,
             members: vec![
                 Member {
                     finding_id: "1".repeat(32),
@@ -1045,6 +1074,7 @@ pub(super) mod tests {
             boilerplate: None,
             test_code: false,
             suppressed: None,
+            split_pair: false,
             members: vec![
                 Member {
                     finding_id: "3".repeat(32),
@@ -1087,6 +1117,7 @@ pub(super) mod tests {
             boilerplate: None,
             test_code: false,
             suppressed: None,
+            split_pair: false,
             members: vec![
                 Member {
                     finding_id: "5".repeat(32),
@@ -1227,6 +1258,7 @@ pub(super) mod tests {
                 members: 2,
                 boilerplate: None,
                 test_code: true,
+                split_pair: false,
                 similarity: None,
                 suppressed: None,
             },
@@ -1253,6 +1285,7 @@ pub(super) mod tests {
                 members: 2,
                 boilerplate: None,
                 test_code: false,
+                split_pair: false,
                 similarity: None,
                 suppressed: None,
             },
@@ -1454,6 +1487,7 @@ pub(super) mod tests {
                 members: 2,
                 boilerplate: None,
                 test_code: false,
+                split_pair: false,
                 similarity: None,
                 suppressed: None,
             },
@@ -1496,6 +1530,7 @@ pub(super) mod tests {
                 members: 2,
                 boilerplate: Some("macro-repetition".to_string()),
                 test_code: false,
+                split_pair: false,
                 similarity: Some(Similarity {
                     weight_version: "structural-verify-v4".to_string(),
                     lexical: 0.71,

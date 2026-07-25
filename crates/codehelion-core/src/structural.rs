@@ -119,6 +119,13 @@ pub struct VerifiedPair {
     pub a: usize,
     /// Index of the second unit into [`StructuralReport::units`].
     pub b: usize,
+    /// Which of the two is the canonical instance, chosen by content so the
+    /// choice does not depend on where either unit was found.
+    pub canonical: usize,
+    /// The pair's stable, position-free clone id, composed exactly as a
+    /// group's is: a pair is a group of two, and nothing about its identity
+    /// should say otherwise.
+    pub fingerprint: CloneGroupFingerprint,
     /// The pair's composite similarity.
     pub similarity: f64,
     /// What the judge classified the pair as.
@@ -344,7 +351,7 @@ pub fn analyze(
         .map(|group| group_detail(group, &units, files, &feature_files, variant, config))
         .collect();
 
-    let unrepresented = unrepresented_pairs(&edges, &groups);
+    let unrepresented = unrepresented_pairs(&edges, &groups, &units, variant);
 
     let stats = StructuralStats {
         files: files.len(),
@@ -776,7 +783,12 @@ fn insert_pair(
 /// it is carried out separately rather than dropped: two units that are copies
 /// of each other remain worth knowing about whether or not a larger set formed
 /// around them.
-fn unrepresented_pairs(edges: &[SimilarityEdge], groups: &GroupingSet) -> Vec<VerifiedPair> {
+fn unrepresented_pairs(
+    edges: &[SimilarityEdge],
+    groups: &GroupingSet,
+    units: &[Unit],
+    variant: &BuildVariant,
+) -> Vec<VerifiedPair> {
     let mut group_of: BTreeMap<usize, usize> = BTreeMap::new();
     for (index, group) in groups.groups.iter().enumerate() {
         for &member in &group.members {
@@ -791,12 +803,28 @@ fn unrepresented_pairs(edges: &[SimilarityEdge], groups: &GroupingSet) -> Vec<Ve
                 _ => true,
             },
         )
-        .map(|edge| VerifiedPair {
-            a: edge.a,
-            b: edge.b,
-            similarity: edge.similarity,
-            class: edge.class,
-            confidence: edge.confidence,
+        .map(|edge| {
+            // Which half is canonical follows content, not position: the two
+            // are peers, and an index would make the id depend on walk order.
+            let (canonical, other) = if units[edge.a].content <= units[edge.b].content {
+                (edge.a, edge.b)
+            } else {
+                (edge.b, edge.a)
+            };
+            VerifiedPair {
+                a: edge.a,
+                b: edge.b,
+                canonical,
+                fingerprint: stable_id::structural_clone_group_fingerprint(
+                    variant,
+                    edge.class,
+                    &units[canonical].content,
+                    &[units[canonical].content, units[other].content],
+                ),
+                similarity: edge.similarity,
+                class: edge.class,
+                confidence: edge.confidence,
+            }
         })
         .collect();
     // Strongest first, then by member indices, so the order is deterministic

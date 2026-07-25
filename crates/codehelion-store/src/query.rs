@@ -67,6 +67,9 @@ pub struct StoredGroup {
     pub suppress_reason: Option<String>,
     /// The boilerplate shape every member matches, when they all match one.
     pub boilerplate: Option<String>,
+    /// Whether the group is a verified pair no larger group could hold, and
+    /// so the one kind whose members appear in another group too.
+    pub split_pair: bool,
     /// Whether every member is test code.
     pub test_code: bool,
     /// The similarity breakdown, when the mode measured one (Structural).
@@ -140,6 +143,8 @@ pub struct OccurrenceDetail {
     pub boilerplate: Option<String>,
     /// Whether every member of the owning group is test code.
     pub test_code: bool,
+    /// Whether the owning group is a verified pair no larger group could hold.
+    pub split_pair: bool,
     /// The owning group's similarity breakdown, when the mode measured one.
     pub similarity: Option<StoredSimilarity>,
     /// The rule that suppressed the finding in this run, if one matched.
@@ -246,7 +251,8 @@ impl Store {
     pub fn run_groups(&self, run_id: i64) -> Result<Vec<StoredGroup>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT g.id, lower(hex(f.hash)), g.clone_type, g.score, g.entropy_bits,
-                    g.suppress_reason, g.boilerplate, g.member_scope, g.test_code
+                    g.suppress_reason, g.boilerplate, g.member_scope, g.test_code,
+                    g.split_pair
              FROM clone_group g
              JOIN fingerprint f ON f.id = g.group_fingerprint_id
              WHERE g.scan_run_id = ?1
@@ -265,6 +271,7 @@ impl Store {
                         suppress_reason: row.get(5)?,
                         boilerplate: row.get(6)?,
                         test_code: row.get(8)?,
+                        split_pair: row.get(9)?,
                         similarity: None,
                         members: Vec::new(),
                     },
@@ -398,7 +405,7 @@ impl Store {
                         fr.token_count, u.name, m.is_canonical,
                         lower(hex(gf.hash)), g.clone_type, g.score, g.scan_run_id,
                         g.member_count, g.boilerplate, s.scope, s.pattern, g.id,
-                        g.member_scope, g.test_code
+                        g.member_scope, g.test_code, g.split_pair
                  FROM clone_group_member m
                  JOIN fragment fr ON fr.id = m.fragment_id
                  LEFT JOIN source_unit u ON u.id = fr.source_unit_id
@@ -432,6 +439,7 @@ impl Store {
                             member_count: row.get(11)?,
                             boilerplate: row.get(12)?,
                             test_code: row.get(17)?,
+                            split_pair: row.get(18)?,
                             similarity: None,
                             suppression,
                         },

@@ -1185,3 +1185,80 @@ fn a_run_duplicated_inside_one_unit_survives_the_fold() {
         assert_ne!(members[0]["start_line"], members[1]["start_line"]);
     }
 }
+
+/// A routine whose copy elsewhere is exact.
+const TRIO_A_RS: &str = "pub fn measure_alpha(rows: &[String]) -> usize {
+    let mut total = 0usize;
+    for row in rows {
+        let trimmed = row.trim_end();
+        total = total.saturating_add(trimmed.len());
+    }
+    total
+}
+";
+
+/// The verbatim copy of it.
+const TRIO_B_RS: &str = "pub fn measure_beta(rows: &[String]) -> usize {
+    let mut total = 0usize;
+    for row in rows {
+        let trimmed = row.trim_end();
+        total = total.saturating_add(trimmed.len());
+    }
+    total
+}
+";
+
+/// A variant close to the first two but carrying an extra loop, so it is a
+/// clone of one of them and further from the rest.
+const TRIO_C_RS: &str = "pub fn measure_gamma(rows: &[String], width: usize) -> usize {
+    let mut total = 0usize;
+    for row in rows {
+        let trimmed = row.trim_end();
+        total = total.saturating_add(trimmed.len());
+    }
+    let mut pad = 0usize;
+    while pad < width {
+        pad += 2;
+        total = total.saturating_add(pad);
+    }
+    total
+}
+";
+
+#[test]
+fn a_pair_no_group_holds_is_reported_and_says_so() {
+    // Being a clone is not transitive, so a scan can verify a pair that no
+    // group can hold. Dropping it would throw away a verdict the tool reached;
+    // reporting it without saying what it is would read as a second, competing
+    // account of code already covered elsewhere.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), TRIO_A_RS).unwrap();
+    std::fs::write(root.join("src/b.rs"), TRIO_B_RS).unwrap();
+    std::fs::write(root.join("src/c.rs"), TRIO_C_RS).unwrap();
+
+    let value = scan_json(root);
+    let groups = value["groups"].as_array().unwrap();
+    for group in groups {
+        assert!(
+            group["split_pair"].is_boolean(),
+            "every group states whether it is a pair no group holds"
+        );
+    }
+    assert!(
+        groups.iter().any(|group| group["split_pair"] == false),
+        "the verbatim copies group"
+    );
+    // Whatever the corpus produces, a pair reported on its own has exactly two
+    // members and is a clone class the judge accepted.
+    for pair in groups.iter().filter(|group| group["split_pair"] == true) {
+        assert_eq!(pair["members"].as_array().unwrap().len(), 2);
+        assert_eq!(pair["priority"]["extra_instances"], 1);
+        assert!(
+            pair["clone_type"].as_str().unwrap().starts_with("type-"),
+            "a pair carries the class the judge gave it"
+        );
+    }
+}

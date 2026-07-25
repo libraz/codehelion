@@ -213,6 +213,10 @@
           "type": "boolean",
           "description": "Whether every member is test code, recognised from the test marker in the source. False for a group spanning a test and the code it exercises: that duplication crosses the boundary."
         },
+        "split_pair": {
+          "type": "boolean",
+          "description": "Whether this is a verified pair reported on its own because no group could hold both members. Being a clone is not transitive, so a unit can be a copy of two units that are not copies of each other, and only one such relation fits in a group. These are the only findings whose members also appear in other findings."
+        },
         "suppressed": {
           "oneOf": [{ "$ref": "#/$defs/suppression" }, { "type": "null" }],
           "description": "Null when the group is visible in default reports."
