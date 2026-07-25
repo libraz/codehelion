@@ -17,6 +17,12 @@
 //!    pair inside the group clears the cohesion floor, so every pair in a
 //!    reported group — not merely every member-to-medoid edge — is similar.
 //!
+//! Refinement is quadratic in component size, so a component past
+//! [`GroupingConfig::max_component`] is cut into pieces first and each piece
+//! refined on its own. That costs recall and never soundness — the rules that
+//! make a group cohesive are unchanged — and the count of components it fired
+//! on is reported rather than left to be inferred from the timing.
+//!
 //! A pair that verification never proposed has no edge here; its similarity is
 //! taken as zero, which is what makes the complete-linkage floor split a chain
 //! whose ends were never compared. Singletons are not clone groups. The whole
@@ -46,6 +52,24 @@ pub struct GroupingConfig {
     /// Number of candidate medoids scored when a component exceeds
     /// [`Self::sampling_threshold`].
     pub sample_size: usize,
+    /// Largest component refined as one piece. A component above this is cut
+    /// into consecutive pieces of this size in key order, each refined on its
+    /// own.
+    ///
+    /// Refinement is quadratic in the size of the component it runs on: every
+    /// round ejects the members too far from the medoid and re-refines them,
+    /// so a component where nearly every member ejects costs one full pass per
+    /// member. A codebase of thousands of structurally interchangeable units
+    /// — generated code, or a repository built to make the scan expensive —
+    /// produces exactly that component, which is why the ceiling exists at all
+    /// (AGENTS.md §2-10, §7).
+    ///
+    /// Cutting costs recall, never soundness: each piece is refined by the
+    /// same medoid and complete-linkage rules, so every reported group is
+    /// still cohesive. What is lost is the chance that two members landing in
+    /// different pieces would have grouped. The cut is by stable key, so it is
+    /// deterministic, and the count of components it fired on is reported.
+    pub max_component: usize,
 }
 
 impl Default for GroupingConfig {
@@ -55,6 +79,9 @@ impl Default for GroupingConfig {
             min_pairwise_similarity: 0.60,
             sampling_threshold: 256,
             sample_size: 32,
+            // Above the sampling threshold, so a component between the two is
+            // still refined whole with a sampled medoid.
+            max_component: 1024,
         }
     }
 }
@@ -117,6 +144,10 @@ pub struct GroupingStats {
     pub edges: usize,
     /// Initial connected components carved by union-find.
     pub components: usize,
+    /// Components too large to refine as one piece, cut into pieces of
+    /// [`GroupingConfig::max_component`]. Reported because the cut can leave
+    /// clones of each other in separate groups.
+    pub oversized_components: usize,
     /// Groups emitted after medoid and complete-linkage refinement.
     pub groups: usize,
     /// Members ejected by the medoid constraint (and regrouped elsewhere).
@@ -158,7 +189,9 @@ pub fn group(
 
     let mut groups = Vec::new();
     for component in &components {
-        refine_component(component, units, &sim, config, &mut groups, &mut stats);
+        for piece in refinable_pieces(component, units, config, &mut stats) {
+            refine_component(&piece, units, &sim, config, &mut groups, &mut stats);
+        }
     }
 
     // Deterministic output order: by the medoid's key, then by size.
@@ -280,6 +313,28 @@ fn union(parent: &mut [usize], a: usize, b: usize) {
             parent[ra] = rb;
         }
     }
+}
+
+/// The pieces of a component that refinement runs on: the component itself
+/// when it fits under [`GroupingConfig::max_component`], otherwise consecutive
+/// pieces of that size in key order.
+fn refinable_pieces(
+    component: &[usize],
+    units: &[GroupingUnit],
+    config: &GroupingConfig,
+    stats: &mut GroupingStats,
+) -> Vec<Vec<usize>> {
+    let limit = config.max_component.max(2);
+    if component.len() <= limit {
+        return vec![component.to_vec()];
+    }
+    stats.oversized_components += 1;
+    let mut ordered = component.to_vec();
+    ordered.sort_by_key(|&member| units[member].key);
+    ordered
+        .chunks(limit)
+        .map(<[usize]>::to_vec)
+        .collect::<Vec<_>>()
 }
 
 /// Refine one component into cohesive groups, appending them to `groups`.
@@ -570,6 +625,72 @@ mod tests {
         assert_eq!(only.members.len(), 3);
         assert_eq!(only.canonical, 0);
         assert_eq!(only.members[0], 0, "medoid comes first");
+    }
+
+    /// Every pair among `count` units, all similar enough to group: one
+    /// component that refinement would otherwise handle as one piece.
+    fn clique(count: usize) -> Vec<SimilarityEdge> {
+        let mut edges = Vec::new();
+        for left in 0..count {
+            for right in (left + 1)..count {
+                edges.push(edge(left, right, 0.9));
+            }
+        }
+        edges
+    }
+
+    #[test]
+    fn a_component_over_the_ceiling_is_cut_into_pieces_and_the_cut_is_counted() {
+        let units = units(10);
+        let config = GroupingConfig {
+            max_component: 4,
+            ..GroupingConfig::default()
+        };
+        let set = group(&units, &clique(10), &config);
+        assert_eq!(set.stats.components, 1, "still one component");
+        assert_eq!(set.stats.oversized_components, 1, "the ceiling is reported");
+
+        // Recall is what the ceiling costs: the ten stay clones of each other
+        // but are reported as three groups instead of one.
+        assert_eq!(set.groups.len(), 3);
+        assert!(set.groups.iter().all(|g| g.members.len() <= 4));
+        let grouped: usize = set.groups.iter().map(|g| g.members.len()).sum();
+        assert_eq!(grouped, 10, "no member is lost to the cut");
+
+        // Soundness is what it does not cost: each piece is refined by the
+        // same rules, so every reported group is still cohesive.
+        assert!(
+            set.groups
+                .iter()
+                .all(|g| g.min_pairwise >= config.min_pairwise_similarity)
+        );
+    }
+
+    #[test]
+    fn the_cut_follows_the_keys_not_the_order_the_edges_arrived_in() {
+        let units = units(10);
+        let config = GroupingConfig {
+            max_component: 4,
+            ..GroupingConfig::default()
+        };
+        let mut reversed = clique(10);
+        reversed.reverse();
+        let forward = group(&units, &clique(10), &config);
+        let backward = group(&units, &reversed, &config);
+        assert_eq!(forward.groups, backward.groups);
+    }
+
+    #[test]
+    fn a_component_at_the_ceiling_is_refined_whole() {
+        let units = units(4);
+        let config = GroupingConfig {
+            max_component: 4,
+            ..GroupingConfig::default()
+        };
+        let set = group(&units, &clique(4), &config);
+        assert_eq!(set.stats.oversized_components, 0);
+        assert_eq!(set.groups.len(), 1);
+        assert_eq!(set.groups[0].members.len(), 4);
     }
 
     #[test]
