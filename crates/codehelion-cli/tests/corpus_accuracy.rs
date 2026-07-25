@@ -48,23 +48,24 @@ struct Expected {
 const CORPORA: &[Expected] = &[
     Expected {
         name: "rust",
-        recall: 5.0 / 6.0,
-        shortfall: "the labelled Type-3 pair is never judged: candidate \
-                    extraction pairs the gapped copy with the corpus's other \
-                    function family and never with the copies it belongs to, \
-                    so a pair the judge would accept at 0.71 is not put to it",
+        recall: 1.0,
+        shortfall: "",
     },
     Expected {
         name: "c",
-        recall: 5.0 / 6.0,
-        shortfall: "as in the Rust corpus, the labelled Type-3 pair is never \
-                    proposed as a candidate",
+        recall: 1.0,
+        shortfall: "",
     },
     Expected {
         name: "cpp",
         recall: 5.0 / 6.0,
-        shortfall: "as in the Rust corpus, the labelled Type-3 pair is never \
-                    proposed as a candidate",
+        shortfall: "the labelled Type-3 pair is proposed and judged, and the \
+                    judge turns it down at 0.62. The C++ variant discards its \
+                    added value with a cast the frontend reads as a call, so \
+                    the pair holds one unit that calls nothing against one \
+                    that calls something and the call dimension scores zero — \
+                    where the same edit in Rust discards with a wildcard \
+                    binding and the pair clears the bar at 0.71",
     },
     Expected {
         name: "rust-graded",
@@ -135,6 +136,7 @@ fn every_corpus_recovers_what_it_did_and_reports_no_labelled_non_clone() {
     let mut table = String::from(
         "\ncorpus            recall  precision  findings/kLOC  FP/kLOC  non-clone hits\n",
     );
+    let mut complaints = String::new();
 
     for expected in CORPORA {
         let corpus = root.join("corpus/synthetic").join(expected.name);
@@ -161,29 +163,39 @@ fn every_corpus_recovers_what_it_did_and_reports_no_labelled_non_clone() {
         )
         .expect("writing to a string cannot fail");
 
-        assert!(
-            (metrics.recall_overall - expected.recall).abs() < 1e-9,
-            "{}: recall {:.4}, expected {:.4}{}{}",
-            expected.name,
-            metrics.recall_overall,
-            expected.recall,
-            if expected.shortfall.is_empty() {
-                ""
-            } else {
-                " — the expected shortfall is that "
-            },
-            expected.shortfall,
-        );
+        if (metrics.recall_overall - expected.recall).abs() >= 1e-9 {
+            writeln!(
+                complaints,
+                "{}: recall {:.4}, expected {:.4}{}{}",
+                expected.name,
+                metrics.recall_overall,
+                expected.recall,
+                if expected.shortfall.is_empty() {
+                    ""
+                } else {
+                    " — the expected shortfall is that "
+                },
+                expected.shortfall,
+            )
+            .expect("writing to a string cannot fail");
+        }
         // A labelled non-clone is a pair built to look alike and compute
         // something else. Reporting one is a false positive by construction,
         // with no argument about incomplete labelling to excuse it.
-        assert_eq!(
-            metrics.non_clone_hits, 0,
-            "{}: reported {} pair(s) the corpus labels as deliberate non-clones",
-            expected.name, metrics.non_clone_hits,
-        );
+        if metrics.non_clone_hits > 0 {
+            writeln!(
+                complaints,
+                "{}: reported {} pair(s) the corpus labels as deliberate non-clones",
+                expected.name, metrics.non_clone_hits,
+            )
+            .expect("writing to a string cannot fail");
+        }
     }
 
     // Printed so a run leaves the figures behind: `make eval` shows this table.
     println!("{table}");
+    // Every corpus is scored before anything is asserted: a change to the
+    // detector moves several of these at once, and stopping at the first one
+    // would hide the rest behind a re-run.
+    assert!(complaints.is_empty(), "\n{complaints}");
 }

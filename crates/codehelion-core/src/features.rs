@@ -234,6 +234,41 @@ pub struct UnitFeatures {
     pub api: ApiCallFeature,
 }
 
+/// A reference to one unit inside a slice of [`FileFeatures`].
+///
+/// The unit-level candidate stages all speak in these: `file` indexes the slice
+/// they were given, `unit` indexes that file's [`FileFeatures::units`], and
+/// `node_count` is carried along because every stage that proposes unit pairs
+/// gates them on relative size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UnitRef {
+    /// Index of the file in the input slice.
+    pub file: usize,
+    /// Index of the unit in the file's units.
+    pub unit: usize,
+    /// Node count of the unit subtree; the size used by length-ratio gates.
+    pub node_count: u32,
+}
+
+impl UnitRef {
+    /// Whether this unit and `other` are within `max_ratio` of each other in
+    /// size. A large and a small unit are not a gapped copy of one another
+    /// however their features happened to meet, so every stage that proposes
+    /// unit pairs applies this before emitting one.
+    #[must_use]
+    pub fn within_length_ratio(self, other: Self, max_ratio: f64) -> bool {
+        let (small, large) = if self.node_count <= other.node_count {
+            (self.node_count, other.node_count)
+        } else {
+            (other.node_count, self.node_count)
+        };
+        if small == 0 {
+            return large == 0;
+        }
+        f64::from(large) / f64::from(small) <= max_ratio
+    }
+}
+
 /// One statement window: a fixed-length run of adjacent statements inside one
 /// block, hashed from per-statement summaries.
 ///
@@ -337,8 +372,19 @@ impl CharacteristicVector {
 pub struct CfgFeature {
     /// Hash over the control-op sequence.
     pub hash: FeatureHash,
+    /// Hash over the same sequence with calls left out: the unit's branching
+    /// and looping shape alone.
+    ///
+    /// A call is an operation the unit performs, not a fork in the path
+    /// through it, and codehelion already describes calls separately in
+    /// [`ApiCallFeature`]. Keeping them out of one of the two hashes gives a
+    /// key that survives an edit which only adds calls, which is what makes it
+    /// usable as a candidate-extraction index.
+    pub skeleton_hash: FeatureHash,
     /// Number of control ops emitted.
     pub op_count: u32,
+    /// Number of ops behind [`Self::skeleton_hash`]: `op_count` less the calls.
+    pub skeleton_ops: u32,
     /// Deepest loop nesting in the unit subtree; `0` without loops.
     pub max_loop_depth: u32,
     /// Number of two-way conditionals in the unit subtree.
@@ -520,7 +566,9 @@ fn accumulate_vector(node: &IrNode, depth: u32, vector: &mut CharacteristicVecto
 #[derive(Default)]
 struct CfgWalk {
     ops: Vec<u8>,
+    skeleton: Vec<u8>,
     op_count: u32,
+    skeleton_ops: u32,
     branch_count: u32,
     loop_depth: u32,
     max_loop_depth: u32,
@@ -530,6 +578,17 @@ impl CfgWalk {
     fn push_op(&mut self, op: u8) {
         self.ops.push(op);
         self.op_count += 1;
+        if op != OP_CALL {
+            self.skeleton.push(op);
+            self.skeleton_ops += 1;
+        }
+    }
+
+    /// Write raw operand bytes to both sequences: they qualify the op they
+    /// follow rather than being ops themselves, so they are not counted.
+    fn push_operand(&mut self, bytes: &[u8]) {
+        self.ops.extend_from_slice(bytes);
+        self.skeleton.extend_from_slice(bytes);
     }
 
     fn visit_children(&mut self, node: &IrNode) {
@@ -562,7 +621,7 @@ impl CfgWalk {
                     .filter(|child| matches!(child.shape, Shape::MatchArm))
                     .count();
                 let arms = u32::try_from(arms).unwrap_or(u32::MAX);
-                self.ops.extend_from_slice(&arms.to_le_bytes());
+                self.push_operand(&arms.to_le_bytes());
                 self.visit_children(node);
                 self.push_op(OP_MATCH_EXIT);
             }
@@ -602,9 +661,15 @@ fn cfg_feature(unit: &IrNode) -> CfgFeature {
     walk.visit(unit);
     let mut hasher = FeatureHasher::new("cfg");
     hasher.write_bytes(&walk.ops);
+    // A separate domain, so the two never collide for a unit that calls
+    // nothing and whose sequences are therefore byte-identical.
+    let mut skeleton = FeatureHasher::new("cfg-skeleton");
+    skeleton.write_bytes(&walk.skeleton);
     CfgFeature {
         hash: hasher.finish(),
+        skeleton_hash: skeleton.finish(),
         op_count: walk.op_count,
+        skeleton_ops: walk.skeleton_ops,
         max_loop_depth: walk.max_loop_depth,
         branch_count: walk.branch_count,
     }

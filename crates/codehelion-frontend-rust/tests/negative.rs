@@ -6,6 +6,12 @@
 //! copies are real clones; every pairing of two *different* functions is
 //! labelled a non-clone. What must come out is four groups, one per function,
 //! and nothing that mixes two of them.
+//!
+//! Sharing a skeleton is the whole construction of the corpus, which makes it
+//! the adversarial case for the candidate stage that indexes skeletons: the
+//! look-alikes are proposed, and only the judge separates them from the
+//! copies. What the corpus measures is therefore that separation, not the
+//! narrowness of what reaches it.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeSet;
@@ -115,14 +121,21 @@ fn only_the_verbatim_copies_are_reported() {
 }
 
 #[test]
-fn the_negative_pairs_are_not_even_proposed() {
+fn the_negative_pairs_are_proposed_and_then_rejected() {
     let report = analyze();
-    // One pair per function: its copy. No pair of two different functions is
-    // proposed, so this family never reaches the judge at all. That is a second
-    // line of defence, not the only one — the judge rejects them too — but it
-    // does mean widening candidate generation cannot be trusted until the
-    // rejection below has been re-measured against whatever it lets through.
-    assert_eq!(report.stats.unit_pairs, FUNCTIONS.len());
+    // These four functions were written around one control-flow skeleton, so
+    // the skeleton is the one description of them under which they are
+    // indistinguishable — and candidate extraction indexes exactly that. Every
+    // cross pairing is therefore proposed here, on top of the four real copies
+    // the exact-seed layer finds, and the judge is the only thing standing
+    // between the corpus and sixteen findings.
+    //
+    // The counts are pinned rather than bounded. A rise means candidate
+    // extraction reaches further into a family built to defeat it, which is
+    // worth knowing even when the judge still holds; a fall in the verified
+    // count means a real copy went missing.
+    assert!(report.stats.unit_pairs > FUNCTIONS.len());
+    assert_eq!(report.stats.unit_pairs, 16);
     assert_eq!(report.stats.verified_pairs, FUNCTIONS.len());
 }
 

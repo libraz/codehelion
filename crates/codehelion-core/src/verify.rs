@@ -808,7 +808,9 @@ mod tests {
             },
             cfg: CfgFeature {
                 hash: FeatureHash::from_bytes([cfg; 16]),
+                skeleton_hash: FeatureHash::from_bytes([cfg; 16]),
                 op_count: 5,
+                skeleton_ops: 5,
                 max_loop_depth: 1,
                 branch_count: 1,
             },
@@ -1129,14 +1131,18 @@ mod tests {
     fn cfg_similarity_is_one_on_equal_hashes_and_falls_otherwise() {
         let base = CfgFeature {
             hash: FeatureHash::from_bytes([1; 16]),
+            skeleton_hash: FeatureHash::from_bytes([1; 16]),
             op_count: 5,
+            skeleton_ops: 5,
             max_loop_depth: 1,
             branch_count: 1,
         };
         assert!((cfg_similarity(&base, &base) - 1.0).abs() < 1e-9);
         let other = CfgFeature {
             hash: FeatureHash::from_bytes([2; 16]),
+            skeleton_hash: FeatureHash::from_bytes([2; 16]),
             op_count: 10,
+            skeleton_ops: 10,
             max_loop_depth: 2,
             branch_count: 3,
         };

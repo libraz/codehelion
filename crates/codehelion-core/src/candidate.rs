@@ -325,7 +325,9 @@ mod tests {
             vector: CharacteristicVector::default(),
             cfg: CfgFeature {
                 hash: hash(0),
+                skeleton_hash: hash(0),
                 op_count: 0,
+                skeleton_ops: 0,
                 max_loop_depth: 0,
                 branch_count: 0,
             },

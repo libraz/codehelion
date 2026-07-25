@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::boilerplate::{self, Boilerplate};
 use crate::candidate::{self, CandidateConfig, CandidateStats};
 use crate::clone_class::CloneClass;
+use crate::control_flow::{self, ControlFlowConfig, ControlFlowStats};
 use crate::discovery::BuildVariant;
 use crate::engine::LiteralNorm;
 use crate::features::{self, FileFeatures};
@@ -57,6 +58,8 @@ pub struct StructuralConfig {
     pub candidate: CandidateConfig,
     /// MinHash/LSH near-match extraction.
     pub near_match: NearMatchConfig,
+    /// Control-flow skeleton extraction.
+    pub control_flow: ControlFlowConfig,
     /// Folding seed matches into maximal shared runs.
     pub maximal: MaximalConfig,
     /// Literal strategy the duplicated runs are confirmed under: it decides
@@ -206,6 +209,8 @@ pub struct StructuralStats {
     pub candidate: CandidateStats,
     /// Near-match extraction statistics.
     pub near_match: NearMatchStats,
+    /// Control-flow skeleton extraction statistics.
+    pub control_flow: ControlFlowStats,
     /// Maximal-region consolidation statistics.
     pub maximal: RegionStats,
     /// Duplicated runs confirmed against the source tokens.
@@ -281,29 +286,12 @@ pub fn analyze(
 
     let (units, offsets) = flatten_units(files, variant);
 
-    // Stage: candidate extraction (exact seeds + near matches), lifted to
-    // distinct unit pairs.
+    // Stage: candidate extraction (exact seeds, near matches and shared
+    // control-flow skeletons), lifted to distinct unit pairs.
     let candidate = candidate::generate(&feature_files, &config.candidate);
     let near = near_match::generate(&feature_files, &config.near_match);
-    let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
-    let mut nested_pairs = 0usize;
-    let mut places = Vec::with_capacity(candidate.pairs.len() + near.pairs.len());
-    places.extend(
-        candidate
-            .pairs
-            .iter()
-            .map(|pair| (pair.a.file, pair.a.unit, pair.b.file, pair.b.unit)),
-    );
-    places.extend(
-        near.pairs
-            .iter()
-            .map(|pair| (pair.a.file, pair.a.unit, pair.b.file, pair.b.unit)),
-    );
-    for (file_a, unit_a, file_b, unit_b) in places {
-        if insert_pair(&mut pairs, &units, &offsets, file_a, unit_a, file_b, unit_b) {
-            nested_pairs += 1;
-        }
-    }
+    let skeleton = control_flow::generate(&feature_files, &config.control_flow);
+    let (pairs, nested_pairs) = lift_to_unit_pairs(&candidate, &near, &skeleton, &units, &offsets);
 
     // Stage: fold the window seeds into the maximal shared runs they describe,
     // then confirm each candidate run against the tokens it actually covers.
@@ -358,6 +346,7 @@ pub fn analyze(
         units: units.len(),
         candidate: candidate.stats,
         near_match: near.stats,
+        control_flow: skeleton.stats,
         maximal: candidate_regions.stats,
         regions: regions.len(),
         region_singletons: singletons,
@@ -747,6 +736,46 @@ fn view<'a>(
         tokens: &files[unit.file].tokens,
         features: &feature_files[unit.file].units[unit.local],
     }
+}
+
+/// Collapse what the three candidate stages proposed into the set of distinct
+/// unit pairs verification will judge, and count the pairs dropped for nesting.
+///
+/// The stages describe candidates differently — a shared fragment, an
+/// overlapping shingle set, a shared skeleton — and they overlap heavily on
+/// real code. What verification needs is neither the evidence nor the
+/// duplicates, only which two units to compare, so all three are reduced to
+/// that here and deduplicated through an ordered set.
+fn lift_to_unit_pairs(
+    candidate: &candidate::CandidateSet,
+    near: &near_match::NearMatchSet,
+    skeleton: &control_flow::ControlFlowSet,
+    units: &[Unit],
+    offsets: &[usize],
+) -> (BTreeSet<(usize, usize)>, usize) {
+    let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut nested = 0usize;
+    let places = candidate
+        .pairs
+        .iter()
+        .map(|pair| (pair.a.file, pair.a.unit, pair.b.file, pair.b.unit))
+        .chain(
+            near.pairs
+                .iter()
+                .map(|pair| (pair.a.file, pair.a.unit, pair.b.file, pair.b.unit)),
+        )
+        .chain(
+            skeleton
+                .pairs
+                .iter()
+                .map(|pair| (pair.a.file, pair.a.unit, pair.b.file, pair.b.unit)),
+        );
+    for (file_a, unit_a, file_b, unit_b) in places {
+        if insert_pair(&mut pairs, units, offsets, file_a, unit_a, file_b, unit_b) {
+            nested += 1;
+        }
+    }
+    (pairs, nested)
 }
 
 /// Insert a `(file, unit)` pair as a global, ordered unit pair, dropping

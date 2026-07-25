@@ -38,7 +38,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::features::{FileFeatures, UnitFeatures};
+use crate::features::{FileFeatures, UnitFeatures, UnitRef};
 
 /// Default number of `MinHash` permutations per signature.
 pub const DEFAULT_NUM_HASHES: usize = 128;
@@ -109,18 +109,6 @@ impl NearMatchConfig {
     fn rows(&self) -> usize {
         (self.num_hashes / self.bands.max(1)).max(1)
     }
-}
-
-/// A unit that was signed for near-match search. `file` indexes the slice
-/// given to [`generate`]; `unit` indexes that file's [`FileFeatures::units`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct UnitRef {
-    /// Index of the file in the input slice.
-    pub file: usize,
-    /// Index of the unit in the file's units.
-    pub unit: usize,
-    /// Node count of the unit subtree; the size used by the length-ratio gate.
-    pub node_count: u32,
 }
 
 /// A near-match candidate: two units whose structural shingle sets overlap
@@ -210,7 +198,7 @@ pub fn generate(files: &[FileFeatures], config: &NearMatchConfig) -> NearMatchSe
     for (ai, bi) in proposed {
         let (ref_a, sig_a) = &signed[ai];
         let (ref_b, sig_b) = &signed[bi];
-        if !within_length_ratio(ref_a.node_count, ref_b.node_count, config.max_length_ratio) {
+        if !ref_a.within_length_ratio(*ref_b, config.max_length_ratio) {
             stats.filtered_by_size += 1;
             continue;
         }
@@ -342,15 +330,6 @@ fn estimated_jaccard(a: &[u64], b: &[u64]) -> f64 {
     frac(equal, a.len())
 }
 
-/// Whether two unit sizes are within `max_ratio` of each other.
-fn within_length_ratio(a: u32, b: u32, max_ratio: f64) -> bool {
-    let (small, large) = if a <= b { (a, b) } else { (b, a) };
-    if small == 0 {
-        return large == 0;
-    }
-    f64::from(large) / f64::from(small) <= max_ratio
-}
-
 /// Lossless `usize` ratio via `u32`, `0.0` when the denominator is zero.
 fn frac(numer: usize, denom: usize) -> f64 {
     let n = u32::try_from(numer).unwrap_or(u32::MAX);
@@ -439,7 +418,9 @@ mod tests {
             vector,
             cfg: CfgFeature {
                 hash: FeatureHash::from_bytes([0; 16]),
+                skeleton_hash: FeatureHash::from_bytes([0; 16]),
                 op_count: 0,
+                skeleton_ops: 0,
                 max_loop_depth: 0,
                 branch_count: 0,
             },

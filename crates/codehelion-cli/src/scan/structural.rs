@@ -183,7 +183,7 @@ fn parse_one(source: &SourceUnit, timeout: std::time::Duration) -> FileOutcome<P
 }
 
 /// Build the structural stage configuration from the effective scan
-/// configuration: the candidate ceilings apply to both candidate stages, so
+/// configuration: the candidate ceilings apply to every candidate stage, so
 /// one configured budget bounds the whole funnel.
 fn structural_config(cfg: &Config) -> StructuralConfig {
     let mut config = StructuralConfig::default();
@@ -191,6 +191,8 @@ fn structural_config(cfg: &Config) -> StructuralConfig {
     config.candidate.pair_budget = cfg.limits.pair_budget;
     config.near_match.posting_cap = cfg.limits.posting_cap;
     config.near_match.pair_budget = cfg.limits.pair_budget;
+    config.control_flow.posting_cap = cfg.limits.posting_cap;
+    config.control_flow.pair_budget = cfg.limits.pair_budget;
     config.grouping.max_component = cfg.limits.max_component;
     config.literals = literal_norm(cfg.literal_normalization);
     config
@@ -737,6 +739,20 @@ fn funnel(stats: &structural::StructuralStats) -> Vec<report::FunnelStage> {
             .dropping("crowded_bucket", as_u64(near.stop_buckets))
             .dropping("length_ratio", as_u64(near.filtered_by_size))
             .dropping("estimated_jaccard", as_u64(near.filtered_by_jaccard)),
+        report::FunnelStage::new(
+            "control-flow pairs",
+            as_u64(stats.control_flow.candidate_pairs),
+        )
+        .dropping(
+            "skeleton_too_small",
+            as_u64(stats.control_flow.skipped_shallow),
+        )
+        .dropping("common_skeleton", as_u64(stats.control_flow.stop_skeletons))
+        .dropping(
+            "common_skeleton_postings",
+            as_u64(stats.control_flow.stop_postings),
+        )
+        .dropping("length_ratio", as_u64(stats.control_flow.filtered_by_size)),
         report::FunnelStage::new("unit pairs", as_u64(stats.unit_pairs))
             .dropping("nested", as_u64(stats.nested_pairs)),
         report::FunnelStage::new("verified pairs", as_u64(stats.verified_pairs))
@@ -857,10 +873,11 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
             unused_suppressions: inputs.unused_suppressions(),
             funnel: funnel(stats),
             split_components: as_u64(stats.grouping.oversized_components),
-            // Either candidate stage exhausting its budget makes the result
+            // Any candidate stage exhausting its budget makes the result
             // potentially incomplete.
             pair_budget_exhausted: stats.candidate.budget_exhausted
-                || stats.near_match.budget_exhausted,
+                || stats.near_match.budget_exhausted
+                || stats.control_flow.budget_exhausted,
         },
         groups,
     }

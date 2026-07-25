@@ -387,7 +387,9 @@ fn sample_unit_features() -> UnitFeatures {
         },
         cfg: CfgFeature {
             hash: FeatureHash::from_bytes([9; 16]),
+            skeleton_hash: FeatureHash::from_bytes([11; 16]),
             op_count: 5,
+            skeleton_ops: 4,
             max_loop_depth: 2,
             branch_count: 1,
         },
