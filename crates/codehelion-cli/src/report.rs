@@ -772,7 +772,7 @@ pub(super) mod tests {
                 similarity: 0.79,
             },
             similarity: Some(Similarity {
-                weight_version: "structural-verify-v0".to_string(),
+                weight_version: "structural-verify-v1".to_string(),
                 lexical: 0.71,
                 structural: 0.88,
                 control_flow: 0.90,
@@ -837,7 +837,7 @@ pub(super) mod tests {
         let similarity = &value["groups"][2]["similarity"];
         assert_eq!(similarity["composite"], 0.82);
         assert_eq!(similarity["min_pairwise"], 0.79);
-        assert_eq!(similarity["weight_version"], "structural-verify-v0");
+        assert_eq!(similarity["weight_version"], "structural-verify-v1");
         assert_eq!(similarity["confidence_band"], "medium");
         // Unavailable, not guessed: the dimension is reported as absent.
         assert_eq!(similarity["type_similarity"], serde_json::Value::Null);
@@ -854,7 +854,7 @@ pub(super) mod tests {
         assert!(text.contains(
             "similarity: composite 0.82 (lexical 0.71, structural 0.88, \
              control-flow 0.90, type n/a, api 0.75); cohesion 0.79; \
-             confidence medium [structural-verify-v0]"
+             confidence medium [structural-verify-v1]"
         ));
     }
 
@@ -1003,7 +1003,7 @@ pub(super) mod tests {
                 members: 2,
                 boilerplate: Some("macro-repetition".to_string()),
                 similarity: Some(Similarity {
-                    weight_version: "structural-verify-v0".to_string(),
+                    weight_version: "structural-verify-v1".to_string(),
                     lexical: 0.71,
                     structural: 0.92,
                     control_flow: 1.0,
@@ -1037,7 +1037,7 @@ pub(super) mod tests {
     #[test]
     fn an_unrecorded_confidence_band_prints_as_absent() {
         let similarity = Similarity {
-            weight_version: "structural-verify-v0".to_string(),
+            weight_version: "structural-verify-v1".to_string(),
             lexical: 0.5,
             structural: 0.5,
             control_flow: 0.5,

@@ -127,7 +127,7 @@ fn a_gapped_clone_is_detected_and_recorded_with_its_evidence() {
         .similarity
         .as_ref()
         .expect("a structural group carries its breakdown");
-    assert_eq!(similarity.weight_version, "structural-verify-v0");
+    assert_eq!(similarity.weight_version, "structural-verify-v1");
     assert!(similarity.composite > 0.6);
     assert!(similarity.min_pairwise > 0.6);
     assert!(
@@ -282,7 +282,7 @@ fn explain_resolves_a_structural_finding() {
     let detail: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
     let similarity = &detail["group"]["similarity"];
-    assert_eq!(similarity["weight_version"], "structural-verify-v0");
+    assert_eq!(similarity["weight_version"], "structural-verify-v1");
     assert!(similarity["type_similarity"].is_null());
     assert!(similarity["confidence_band"].is_string());
     assert_eq!(detail["group"]["members"], 2);

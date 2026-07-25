@@ -35,7 +35,7 @@ use crate::ir::{IrNode, Shape, StatementSummary};
 /// Version of the composite-weight recipe and judgment rules. Bump it when any
 /// weight default or classification rule changes, since findings change with
 /// it. Recorded as a detector version.
-pub const WEIGHT_VERSION: &str = "structural-verify-v0";
+pub const WEIGHT_VERSION: &str = "structural-verify-v1";
 
 /// Relative weights of the similarity dimensions in the composite score.
 ///
@@ -186,6 +186,20 @@ pub struct Alignment {
     pub only_b: Vec<usize>,
 }
 
+impl Alignment {
+    /// The same alignment read from the other unit's side.
+    ///
+    /// An alignment is monotone in both coordinates, so swapping each matched
+    /// pair leaves the sequence ordered.
+    fn mirrored(self) -> Self {
+        Self {
+            matched: self.matched.into_iter().map(|(i, j)| (j, i)).collect(),
+            only_a: self.only_b,
+            only_b: self.only_a,
+        }
+    }
+}
+
 /// One unit's inputs to verification: its flattened statement sequence and its
 /// extracted features.
 #[derive(Debug, Clone, Copy)]
@@ -230,8 +244,39 @@ fn collect_statements(node: &IrNode, tokens: &[Token], out: &mut Vec<StatementSu
 
 /// Verify a candidate pair, producing its similarity breakdown, alignment and
 /// clone classification.
+///
+/// The verdict is a property of the pair, not of the order the two units were
+/// passed in: several alignments can be equally long, and which one the
+/// recurrence settles on depends on which unit leads, so the same two units
+/// would otherwise score differently depending on which of them a group picked
+/// as its medoid. The pair is therefore ordered by content before measuring,
+/// and the alignment is mirrored back so the caller still reads it as
+/// `(a, b)`.
 #[must_use]
 pub fn verify(a: &UnitView<'_>, b: &UnitView<'_>, config: &VerifyConfig) -> Verdict {
+    if order_key(b) < order_key(a) {
+        let mut verdict = measure(b, a, config);
+        verdict.alignment = verdict.alignment.mirrored();
+        return verdict;
+    }
+    measure(a, b, config)
+}
+
+/// Content-derived ordering key of one unit.
+///
+/// Nothing positional enters it: a unit's key must not change because the unit
+/// moved within its file.
+const fn order_key(unit: &UnitView<'_>) -> (usize, [u8; 16], [u8; 16], u8) {
+    (
+        unit.statements.len(),
+        *unit.features.cfg.hash.as_bytes(),
+        *unit.features.api.multiset_hash.as_bytes(),
+        unit.features.shape_tag,
+    )
+}
+
+/// Measure and classify one ordered pair.
+fn measure(a: &UnitView<'_>, b: &UnitView<'_>, config: &VerifyConfig) -> Verdict {
     let (lcs, alignment) = align(a.statements, b.statements, config);
     let seq_sim = sequence_similarity(lcs, a.statements.len(), b.statements.len());
     let lexical = lexical_similarity(a.statements, b.statements, &alignment);
@@ -283,7 +328,13 @@ fn classify(
     // Identical structure: the statement alignment, the shape vector and the
     // subtree set all agree completely.
     if exact(breakdown.structural) {
-        return if exact(breakdown.lexical) {
+        // A Type-1 claim says the copies differ only in whitespace and
+        // comments. A statement summary keeps just its leading tokens, so a
+        // rename further into a statement leaves `lexical` exact; the call
+        // surface is the dimension that carries identifier text, and a
+        // difference there is evidence of renaming that outranks the silence
+        // of the head tokens. Type-2 is then the claim the evidence supports.
+        return if exact(breakdown.lexical) && exact(breakdown.api) {
             (Some(CloneClass::Type1), Some(Confidence::High))
         } else {
             (Some(CloneClass::Type2), Some(Confidence::High))
@@ -691,6 +742,75 @@ mod tests {
         assert_eq!(verdict.class, Some(CloneClass::Type2));
         assert!(verdict.breakdown.lexical < 1.0);
         assert!((verdict.breakdown.structural - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_renamed_call_surface_is_type2_however_quiet_the_heads_are() {
+        // The heads agree — the renamed callee sits past the summarised
+        // leading tokens — and the structure is identical, so only the call
+        // names carry the rename.
+        let stmts = vec![summary(3, &["let", "x", "=", "y"])];
+        let fa = features(counts(4), &[1, 2, 3], 9, &["abs", "min"]);
+        let fb = features(counts(4), &[1, 2, 3], 9, &["signum", "rem_euclid"]);
+        let va = UnitView {
+            statements: &stmts,
+            features: &fa,
+        };
+        let vb = UnitView {
+            statements: &stmts,
+            features: &fb,
+        };
+        let verdict = verify(&va, &vb, &VerifyConfig::default());
+        assert!((verdict.breakdown.lexical - 1.0).abs() < 1e-9);
+        assert!((verdict.breakdown.structural - 1.0).abs() < 1e-9);
+        assert!(verdict.breakdown.api.abs() < 1e-9);
+        assert_eq!(verdict.class, Some(CloneClass::Type2));
+    }
+
+    #[test]
+    fn a_pair_scores_the_same_whichever_unit_leads() {
+        // `a` opens with a `let` the other side lacks and continues with `let`s
+        // that repeat, so two alignments are equally long: one skips `a`'s
+        // opening statement and matches the repeated ones verbatim, the other
+        // matches the opening statement and pays for its differing head. Which
+        // one the recurrence settles on follows the order of the arguments, so
+        // the lexical dimension moves with it.
+        let a = vec![
+            summary(12, &["let", "seen"]),
+            summary(12, &["let", "total"]),
+            summary(12, &["let", "total"]),
+            summary(12, &["let", "total"]),
+        ];
+        let b = vec![
+            summary(4, &["return", "total"]),
+            summary(12, &["let", "total"]),
+            summary(12, &["let", "total"]),
+        ];
+        let fa = features(counts(6), &[1, 2, 3, 4], 9, &["push"]);
+        let fb = features(counts(5), &[1, 2, 3], 8, &["push"]);
+        let va = UnitView {
+            statements: &a,
+            features: &fa,
+        };
+        let vb = UnitView {
+            statements: &b,
+            features: &fb,
+        };
+        let forward = verify(&va, &vb, &VerifyConfig::default());
+        let backward = verify(&vb, &va, &VerifyConfig::default());
+        assert_eq!(forward.breakdown, backward.breakdown);
+        assert_eq!(forward.class, backward.class);
+        assert_eq!(forward.confidence, backward.confidence);
+        // The alignment is reported from the caller's side either way.
+        assert_eq!(forward.alignment.only_a, backward.alignment.only_b);
+        assert_eq!(forward.alignment.only_b, backward.alignment.only_a);
+        let mirrored: Vec<(usize, usize)> = backward
+            .alignment
+            .matched
+            .iter()
+            .map(|&(i, j)| (j, i))
+            .collect();
+        assert_eq!(forward.alignment.matched, mirrored);
     }
 
     #[test]
