@@ -11,11 +11,13 @@ duplicate logic and tracks how those findings change over time. It never sends
 your source or results anywhere, needs no network access, and never executes
 the code it analyses.
 
-The current release ships the **Fast** analysis mode: token-level Type-1
-(identical) and Type-2 (renamed identifiers / changed literals) clone detection
-that scans hundreds of thousands of lines in seconds without requiring a build.
-Structural (Type-3) and semantic modes, plus optional compiled-artifact
-analysis, arrive in later releases.
+The current release ships two build-free analysis modes. **Fast** is
+token-level Type-1 (identical) and Type-2 (renamed identifiers / changed
+literals) detection that scans hundreds of thousands of lines in seconds.
+**Structural** adds syntax-structural Type-3 detection — clones that differ by
+added, removed or changed statements — and reports the per-dimension similarity
+each finding was judged on. Semantic analysis and optional compiled-artifact
+analysis arrive in later releases.
 
 ## Highlights
 
@@ -23,8 +25,12 @@ analysis, arrive in later releases.
   sources directly; no compiler, build system or `compile_commands.json` needed.
 - **Stable finding IDs** — findings are identified by content fingerprints, not
   line numbers, so unrelated edits don't churn your audit history.
+- **Evidence, not a single score** — a gapped clone reports lexical,
+  structural, control-flow, type and API similarity separately; a dimension the
+  mode cannot measure is reported as absent rather than guessed.
 - **Local audit history** — every scan is snapshotted into a SQLite database;
-  JSON and text reports are exports, the database is the canonical record.
+  text, JSON and SARIF reports are exports, the database is the canonical
+  record.
 - **Deterministic output** — the same input produces byte-identical reports.
 - **Visible limits** — every resource ceiling that fires (file size, parse
   timeout, candidate budget) is counted in the report, never silently applied.
@@ -42,7 +48,9 @@ The result is a single self-contained binary; SQLite is bundled.
 
 ```sh
 codehelion scan               # scan the current directory, text report
+codehelion scan --mode structural           # also detect gapped (Type-3) clones
 codehelion scan --format json --output report.json path/to/repo
+codehelion scan --format sarif --output report.sarif   # SARIF 2.1.0 log
 codehelion scan --verbose     # list every clone group and member
 codehelion explain <ID>       # show a finding from the audit database
 codehelion baseline           # manage accepted-findings baselines

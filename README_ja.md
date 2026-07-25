@@ -10,10 +10,11 @@ Rust / C / C++ のコードベースを対象に重複ロジックを検出し�
 完全ローカル実行のコマンドラインツールです。ソースコードや解析結果を外部に送信せず、
 ネットワークアクセスを必要とせず、解析対象のコードを実行することもありません。
 
-現行リリースは **Fast** 解析モードを提供します。トークンレベルの Type-1（完全一致）
-と Type-2（識別子リネーム・リテラル変更）クローン検出で、ビルド不要のまま数十万行を
-数秒でスキャンします。Structural（Type-3）・Semantic モードと任意のコンパイル成果物
-解析は後続リリースで追加します。
+現行リリースはビルド不要の解析モードを 2 つ提供します。**Fast** はトークンレベルの
+Type-1（完全一致）・Type-2（識別子リネーム・リテラル変更）検出で、数十万行を数秒で
+スキャンします。**Structural** は構文構造ベースの Type-3 検出を加え、文の追加・削除・
+変更を伴うクローンを検出したうえで、判定根拠となった次元別 similarity を報告します。
+Semantic モードと任意のコンパイル成果物解析は後続リリースで追加します。
 
 ## 特長
 
@@ -21,8 +22,11 @@ Rust / C / C++ のコードベースを対象に重複ロジックを検出し�
   直接処理します。コンパイラ・ビルドシステム・`compile_commands.json` は不要です。
 - **安定した finding ID** — 検出結果は行番号ではなく内容 fingerprint で識別され、
   無関係な編集で監査履歴が揺れません。
+- **単一スコアではなく根拠** — gapped クローンは lexical / structural / control-flow /
+  type / API の similarity を個別に報告します。そのモードで測定できない次元は推測せず、
+  測定なしとして報告します。
 - **ローカル監査履歴** — 各スキャンは SQLite データベースへスナップショットされます。
-  JSON / text レポートは export であり、正本はデータベースです。
+  text / JSON / SARIF レポートは export であり、正本はデータベースです。
 - **決定的な出力** — 同一入力からはバイト単位で一致するレポートが得られます。
 - **可視化された上限** — 発火したリソース上限（ファイルサイズ・parse timeout・
   候補 budget）はすべてレポートに計上され、黙って適用されることはありません。
@@ -40,7 +44,9 @@ cargo install --path crates/codehelion-cli
 
 ```sh
 codehelion scan               # カレントディレクトリをスキャンし text レポート
+codehelion scan --mode structural           # gapped（Type-3）クローンも検出
 codehelion scan --format json --output report.json path/to/repo
+codehelion scan --format sarif --output report.sarif   # SARIF 2.1.0 ログ
 codehelion scan --verbose     # 全クローングループと全メンバーを列挙
 codehelion explain <ID>       # 監査データベースから finding を表示
 codehelion baseline           # 既知 finding の baseline を管理
