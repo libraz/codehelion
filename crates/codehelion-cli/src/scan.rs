@@ -259,6 +259,8 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
                 total: as_u64(inputs.report.groups.len()),
                 type_1: count_groups(&|i| inputs.report.groups[i].clone_type == CloneClass::Type1),
                 type_2: count_groups(&|i| inputs.report.groups[i].clone_type == CloneClass::Type2),
+                // The Fast engine matches identical content only.
+                type_3: 0,
             },
             suppressed: report::SuppressedCounts {
                 noise: count_groups(&|i| inputs.report.groups[i].suppressed.is_some()),
@@ -311,6 +313,9 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
                 .unwrap_or(u64::MAX),
             similarity: group.score,
         },
+        // The Fast engine groups on identical content; it scores no
+        // similarity dimensions to report.
+        similarity: None,
         suppressed,
         members: group
             .members

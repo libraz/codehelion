@@ -145,6 +145,9 @@ pub struct GroupCounts {
     pub type_1: u64,
     /// Renamed (Type-2) groups.
     pub type_2: u64,
+    /// Gapped (Type-3) groups. Always zero in modes that report no gapped
+    /// clones.
+    pub type_3: u64,
 }
 
 /// Suppressed-group counts by mechanism.
@@ -161,16 +164,46 @@ pub struct SuppressedCounts {
 pub struct Group {
     /// Stable clone-group fingerprint, hex-encoded.
     pub fingerprint: String,
-    /// Clone classification (`type-1`, `type-2`).
+    /// Clone classification (`type-1`, `type-2`, `type-3`).
     pub clone_type: String,
     /// Minimum pairwise similarity across the group.
     pub confidence: f64,
     /// Ranking value with the inputs it was computed from.
     pub priority: Priority,
+    /// Per-dimension similarity evidence, when the mode measured it; `None`
+    /// in modes that match content exactly and score no dimensions.
+    pub similarity: Option<Similarity>,
     /// Why the group is hidden from default reports; `None` when visible.
     pub suppressed: Option<Suppression>,
     /// Every occurrence, the canonical instance first.
     pub members: Vec<Member>,
+}
+
+/// A group's similarity evidence, one measured dimension per field.
+///
+/// Every dimension stays visible: the composite never replaces the
+/// breakdown. An unavailable dimension is `None` — reported as absent, not
+/// as a guessed number.
+#[derive(Debug, Serialize)]
+pub struct Similarity {
+    /// The composite-weight recipe version the group was scored under.
+    pub weight_version: String,
+    /// Verbatim agreement of aligned statements' leading tokens.
+    pub lexical: f64,
+    /// Rename-invariant structural agreement.
+    pub structural: f64,
+    /// Control-flow-profile agreement.
+    pub control_flow: f64,
+    /// Type agreement, or `None` when types are unavailable.
+    pub type_similarity: Option<f64>,
+    /// Call-name multiset agreement.
+    pub api: f64,
+    /// Weighted mean of the measured dimensions.
+    pub composite: f64,
+    /// Weakest pairwise similarity inside the group: its cohesion.
+    pub min_pairwise: f64,
+    /// Confidence band of the classification (`high`, `medium`, `low`).
+    pub confidence_band: String,
 }
 
 /// A group's ranking value together with its inputs. The collapsed number
@@ -231,6 +264,30 @@ impl Suppression {
                 }
             }
         }
+    }
+}
+
+impl Similarity {
+    /// One-line rendering of the breakdown for the text views. An unavailable
+    /// dimension prints as `n/a`, never as a number.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let type_similarity = self
+            .type_similarity
+            .map_or_else(|| "n/a".to_string(), |value| format!("{value:.2}"));
+        format!(
+            "similarity: composite {:.2} (lexical {:.2}, structural {:.2}, \
+             control-flow {:.2}, type {type_similarity}, api {:.2}); \
+             cohesion {:.2}; confidence {} [{}]",
+            self.composite,
+            self.lexical,
+            self.structural,
+            self.control_flow,
+            self.api,
+            self.min_pairwise,
+            self.confidence_band,
+            self.weight_version,
+        )
     }
 }
 
@@ -341,10 +398,11 @@ impl Report {
         )?;
         writeln!(
             out,
-            "  clone groups: {} (type-1 {}, type-2 {}; suppressed: {} noise, {} by rule)",
+            "  clone groups: {} (type-1 {}, type-2 {}, type-3 {}; suppressed: {} noise, {} by rule)",
             summary.groups.total,
             summary.groups.type_1,
             summary.groups.type_2,
+            summary.groups.type_3,
             summary.suppressed.noise,
             summary.suppressed.by_rule,
         )?;
@@ -432,6 +490,9 @@ fn render_group(
         group.priority.extra_instances,
         group.priority.similarity,
     )?;
+    if let Some(similarity) = &group.similarity {
+        writeln!(out, "    {}", similarity.line())?;
+    }
     let limit = if opts.verbose {
         group.members.len()
     } else {
@@ -477,7 +538,7 @@ pub struct FindingDetail {
 pub struct GroupRef {
     /// Stable clone-group fingerprint, hex-encoded.
     pub fingerprint: String,
-    /// Clone classification (`type-1`, `type-2`).
+    /// Clone classification (`type-1`, `type-2`, `type-3`).
     pub clone_type: String,
     /// Minimum pairwise similarity across the group.
     pub confidence: f64,
@@ -572,6 +633,7 @@ mod tests {
                     total: 2,
                     type_1: 2,
                     type_2: 0,
+                    type_3: 0,
                 },
                 suppressed: SuppressedCounts {
                     noise: 0,
@@ -590,6 +652,7 @@ mod tests {
                         extra_instances: 1,
                         similarity: 1.0,
                     },
+                    similarity: None,
                     suppressed: None,
                     members: (0..7)
                         .map(|index| Member {
@@ -613,6 +676,7 @@ mod tests {
                         extra_instances: 1,
                         similarity: 1.0,
                     },
+                    similarity: None,
                     suppressed: Some(Suppression {
                         kind: SuppressionKind::Rule,
                         reason: None,
@@ -644,6 +708,54 @@ mod tests {
         }
     }
 
+    /// A gapped group as a mode that scores dimensions reports it: a
+    /// similarity breakdown whose type dimension was never measured.
+    fn structural_group() -> Group {
+        Group {
+            fingerprint: "0d".repeat(16),
+            clone_type: "type-3".to_string(),
+            confidence: 0.79,
+            priority: Priority {
+                value: 47.4,
+                largest_member_tokens: 60,
+                extra_instances: 1,
+                similarity: 0.79,
+            },
+            similarity: Some(Similarity {
+                weight_version: "structural-verify-v0".to_string(),
+                lexical: 0.71,
+                structural: 0.88,
+                control_flow: 0.90,
+                type_similarity: None,
+                api: 0.75,
+                composite: 0.82,
+                min_pairwise: 0.79,
+                confidence_band: "medium".to_string(),
+            }),
+            suppressed: None,
+            members: vec![
+                Member {
+                    finding_id: "3".repeat(32),
+                    file: "src/parse.rs".to_string(),
+                    start_line: 10,
+                    end_line: 30,
+                    unit: Some("parse_header".to_string()),
+                    tokens: 60,
+                    canonical: true,
+                },
+                Member {
+                    finding_id: "4".repeat(32),
+                    file: "src/parse.rs".to_string(),
+                    start_line: 40,
+                    end_line: 62,
+                    unit: Some("parse_trailer".to_string()),
+                    tokens: 58,
+                    canonical: false,
+                },
+            ],
+        }
+    }
+
     #[test]
     fn json_view_serializes_the_documented_shape() {
         let value: serde_json::Value =
@@ -665,18 +777,54 @@ mod tests {
     }
 
     #[test]
+    fn a_scored_group_reports_every_dimension_and_marks_the_absent_one() {
+        let mut report = sample_report();
+        report.summary.groups.type_3 = 1;
+        report.groups.push(structural_group());
+        let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+
+        let similarity = &value["groups"][2]["similarity"];
+        assert_eq!(similarity["composite"], 0.82);
+        assert_eq!(similarity["min_pairwise"], 0.79);
+        assert_eq!(similarity["weight_version"], "structural-verify-v0");
+        assert_eq!(similarity["confidence_band"], "medium");
+        // Unavailable, not guessed: the dimension is reported as absent.
+        assert_eq!(similarity["type_similarity"], serde_json::Value::Null);
+        // A mode that scores no dimensions says so rather than omitting the key.
+        assert_eq!(value["groups"][0]["similarity"], serde_json::Value::Null);
+        assert_eq!(value["summary"]["groups"]["type_3"], 1);
+
+        let mut buffer = Vec::new();
+        report
+            .render_text(TextOptions::default(), &mut buffer)
+            .unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        assert!(text.contains("type-1 2, type-2 0, type-3 1"));
+        assert!(text.contains(
+            "similarity: composite 0.82 (lexical 0.71, structural 0.88, \
+             control-flow 0.90, type n/a, api 0.75); cohesion 0.79; \
+             confidence medium [structural-verify-v0]"
+        ));
+    }
+
+    #[test]
     fn json_field_names_appear_in_the_shipped_schema() {
         let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA).unwrap();
         assert_eq!(
             schema["properties"]["schema_version"]["const"],
             i64::from(SCHEMA_VERSION)
         );
-        let value: serde_json::Value =
-            serde_json::from_str(&sample_report().to_json().unwrap()).unwrap();
+        let mut report = sample_report();
+        report.groups.push(structural_group());
+        let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
         let checks = [
             (&value, &schema["properties"]),
             (&value["run"], &schema["$defs"]["run"]["properties"]),
             (&value["summary"], &schema["$defs"]["summary"]["properties"]),
+            (
+                &value["summary"]["groups"],
+                &schema["$defs"]["summary"]["properties"]["groups"]["properties"],
+            ),
             (&value["groups"][0], &schema["$defs"]["group"]["properties"]),
             (
                 &value["groups"][0]["members"][0],
@@ -685,6 +833,10 @@ mod tests {
             (
                 &value["groups"][1]["suppressed"],
                 &schema["$defs"]["suppression"]["properties"],
+            ),
+            (
+                &value["groups"][2]["similarity"],
+                &schema["$defs"]["similarity"]["properties"],
             ),
         ];
         for (object, properties) in checks {

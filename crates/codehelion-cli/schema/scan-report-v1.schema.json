@@ -108,7 +108,8 @@
           "properties": {
             "total": { "type": "integer" },
             "type_1": { "type": "integer" },
-            "type_2": { "type": "integer" }
+            "type_2": { "type": "integer" },
+            "type_3": { "type": "integer", "description": "Gapped groups; zero in modes that report no gapped clones." }
           }
         },
         "suppressed": {
@@ -133,6 +134,10 @@
         "clone_type": { "type": "string" },
         "confidence": { "type": "number", "description": "Minimum pairwise similarity across the group." },
         "priority": { "$ref": "#/$defs/priority" },
+        "similarity": {
+          "oneOf": [{ "$ref": "#/$defs/similarity" }, { "type": "null" }],
+          "description": "Null in modes that match content exactly and score no dimensions."
+        },
         "suppressed": {
           "oneOf": [{ "$ref": "#/$defs/suppression" }, { "type": "null" }],
           "description": "Null when the group is visible in default reports."
@@ -153,6 +158,35 @@
         "largest_member_tokens": { "type": "integer" },
         "extra_instances": { "type": "integer" },
         "similarity": { "type": "number" }
+      }
+    },
+    "similarity": {
+      "type": "object",
+      "description": "Per-dimension similarity evidence. Every dimension stays visible; the composite never replaces the breakdown, and an unavailable dimension is null rather than a guessed number.",
+      "required": [
+        "weight_version",
+        "lexical",
+        "structural",
+        "control_flow",
+        "type_similarity",
+        "api",
+        "composite",
+        "min_pairwise",
+        "confidence_band"
+      ],
+      "properties": {
+        "weight_version": { "type": "string", "description": "Composite-weight recipe the group was scored under." },
+        "lexical": { "type": "number" },
+        "structural": { "type": "number" },
+        "control_flow": { "type": "number" },
+        "type_similarity": {
+          "oneOf": [{ "type": "number" }, { "type": "null" }],
+          "description": "Null when types are unavailable."
+        },
+        "api": { "type": "number" },
+        "composite": { "type": "number", "description": "Weighted mean of the measured dimensions." },
+        "min_pairwise": { "type": "number", "description": "Weakest pairwise similarity inside the group: its cohesion." },
+        "confidence_band": { "enum": ["high", "medium", "low"] }
       }
     },
     "suppression": {
