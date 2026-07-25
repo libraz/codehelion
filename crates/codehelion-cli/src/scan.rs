@@ -191,6 +191,25 @@ struct BuildInputs<'a> {
 /// Assemble the report model both output formats render from. Groups are
 /// ordered by priority descending, fingerprint bytes ascending on ties, so
 /// every view is stable across reruns.
+/// The configured suppression rules that hid nothing this run, read off the
+/// rules the groups actually cited.
+fn unused_suppressions(inputs: &BuildInputs<'_>) -> Vec<report::UnusedRule> {
+    let used: std::collections::BTreeSet<usize> = inputs
+        .group_suppressed
+        .iter()
+        .filter_map(|rule| *rule)
+        .collect();
+    inputs
+        .rules
+        .unused(&used)
+        .into_iter()
+        .map(|row| report::UnusedRule {
+            scope: row.scope.clone(),
+            pattern: row.pattern.clone(),
+        })
+        .collect()
+}
+
 fn build_report(inputs: &BuildInputs<'_>) -> Report {
     let count = |language: Language| {
         u64::try_from(
@@ -283,6 +302,7 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
                         && inputs.group_suppressed[i].is_some()
                 }),
             },
+            unused_suppressions: unused_suppressions(inputs),
             pair_budget_exhausted: inputs.report.stats.pair_budget_exhausted,
         },
         groups: order

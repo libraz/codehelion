@@ -115,9 +115,38 @@ pub struct Summary {
     pub groups: GroupCounts,
     /// Suppressed-group counts by mechanism.
     pub suppressed: SuppressedCounts,
+    /// Configured suppression rules that hid nothing in this run.
+    ///
+    /// A rule that matches nothing reads as an instruction that took effect
+    /// while the findings it was meant to cover are still being reported, so
+    /// it is named rather than left to be discovered by accident.
+    pub unused_suppressions: Vec<UnusedRule>,
     /// Whether the candidate-pair budget ran out, making results
     /// potentially incomplete.
     pub pair_budget_exhausted: bool,
+}
+
+/// One configured suppression rule that matched nothing.
+#[derive(Debug, Serialize)]
+pub struct UnusedRule {
+    /// Rule scope (`path_glob`, `symbol_pattern`, `stable_clone_id`).
+    pub scope: String,
+    /// The pattern as configured.
+    pub pattern: String,
+}
+
+impl UnusedRule {
+    /// One-line rendering for the text views, matching how a rule that *did*
+    /// match is named.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self.scope.as_str() {
+            "path_glob" => format!("path glob {:?}", self.pattern),
+            "symbol_pattern" => format!("symbol glob {:?}", self.pattern),
+            "stable_clone_id" => format!("clone id {}", self.pattern),
+            scope => format!("{scope} {:?}", self.pattern),
+        }
+    }
 }
 
 /// Analysed-file counts by language.
@@ -484,6 +513,19 @@ impl Report {
             "  snapshot: run {} in {}",
             self.run.run_id, self.run.database
         )?;
+        if !summary.unused_suppressions.is_empty() {
+            let names: Vec<String> = summary
+                .unused_suppressions
+                .iter()
+                .map(UnusedRule::label)
+                .collect();
+            writeln!(
+                out,
+                "  note: {} suppression rule(s) matched nothing: {}",
+                summary.unused_suppressions.len(),
+                names.join(", "),
+            )?;
+        }
         if summary.pair_budget_exhausted {
             writeln!(
                 out,
@@ -769,6 +811,7 @@ pub(super) mod tests {
                     noise: 0,
                     by_rule: 1,
                 },
+                unused_suppressions: Vec::new(),
                 pair_budget_exhausted: false,
             },
             groups: vec![visible_group(), suppressed_group()],
@@ -975,6 +1018,55 @@ pub(super) mod tests {
             "1 of them are runs duplicated inside units that are not clones of each other; \
              4 more were folded into the groups that already cover them and 2 into longer runs"
         ));
+    }
+
+    #[test]
+    fn a_rule_that_matched_nothing_is_named_not_left_to_be_noticed() {
+        let mut report = sample_report();
+        report.summary.unused_suppressions = vec![
+            UnusedRule {
+                scope: "path_glob".to_string(),
+                pattern: "third_party/**".to_string(),
+            },
+            UnusedRule {
+                scope: "stable_clone_id".to_string(),
+                pattern: "abcd1234".to_string(),
+            },
+        ];
+
+        let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+        assert_eq!(
+            value["summary"]["unused_suppressions"][0]["scope"],
+            "path_glob"
+        );
+        assert_eq!(
+            value["summary"]["unused_suppressions"][1]["pattern"],
+            "abcd1234"
+        );
+
+        let mut buffer = Vec::new();
+        report
+            .render_text(TextOptions::default(), &mut buffer)
+            .unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        // Named the way a rule that did match is named, so the two read alike.
+        assert!(text.contains(
+            "note: 2 suppression rule(s) matched nothing: path glob \"third_party/**\", \
+             clone id abcd1234"
+        ));
+    }
+
+    #[test]
+    fn a_run_with_every_rule_matching_says_nothing_about_them() {
+        let mut buffer = Vec::new();
+        sample_report()
+            .render_text(TextOptions::default(), &mut buffer)
+            .unwrap();
+        assert!(
+            !String::from_utf8(buffer)
+                .unwrap()
+                .contains("matched nothing")
+        );
     }
 
     #[test]

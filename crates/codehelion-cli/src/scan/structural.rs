@@ -531,6 +531,25 @@ impl ReportInputs<'_> {
         f64::from(size) * f64::from(extra) * group.min_pairwise
     }
 
+    /// The configured suppression rules that hid nothing this run, read off
+    /// the rules that whole-unit groups and duplicated runs actually cited.
+    fn unused_suppressions(&self) -> Vec<report::UnusedRule> {
+        let used: BTreeSet<usize> = self
+            .group_suppressed
+            .iter()
+            .chain(self.region_suppressed)
+            .filter_map(|rule| *rule)
+            .collect();
+        self.rules
+            .unused(&used)
+            .into_iter()
+            .map(|row| report::UnusedRule {
+                scope: row.scope.clone(),
+                pattern: row.pattern.clone(),
+            })
+            .collect()
+    }
+
     /// Whether an entry is reported below every group that carries behaviour:
     /// its shape is boilerplate the policy ranks down, or it lives wholly in a
     /// test suite the policy ranks down.
@@ -729,6 +748,7 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
                         .count(),
                 ),
             },
+            unused_suppressions: inputs.unused_suppressions(),
             // Either candidate stage exhausting its budget makes the result
             // potentially incomplete.
             pair_budget_exhausted: stats.candidate.budget_exhausted

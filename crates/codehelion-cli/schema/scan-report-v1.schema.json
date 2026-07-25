@@ -76,6 +76,7 @@
         "excluded",
         "groups",
         "suppressed",
+        "unused_suppressions",
         "pair_budget_exhausted"
       ],
       "properties": {
@@ -134,6 +135,18 @@
           "properties": {
             "noise": { "type": "integer" },
             "by_rule": { "type": "integer" }
+          }
+        },
+        "unused_suppressions": {
+          "type": "array",
+          "description": "Configured suppression rules that hid nothing in this run. A rule matching nothing reads as an instruction that took effect while the findings it was meant to cover are still reported, so it is named rather than left to be found by accident.",
+          "items": {
+            "type": "object",
+            "required": ["scope", "pattern"],
+            "properties": {
+              "scope": { "enum": ["path_glob", "symbol_pattern", "stable_clone_id"] },
+              "pattern": { "type": "string", "description": "The pattern as configured." }
+            }
           }
         },
         "pair_budget_exhausted": {

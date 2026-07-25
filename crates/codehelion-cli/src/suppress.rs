@@ -28,6 +28,8 @@
 //! (Generated-file markers are a further mechanism, applied earlier: those
 //! files are excluded during discovery, before any candidate exists.)
 
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, bail};
 use codehelion_store::snapshot::SuppressionRuleRow;
 use globset::{Glob, GlobMatcher};
@@ -164,6 +166,34 @@ impl Rules {
             reason: Some(reason.to_string()),
         });
         self.rows.len() - 1
+    }
+
+    /// The configured rules that hid nothing in this run, in the order they
+    /// were written.
+    ///
+    /// A rule that matches nothing is the worst failure mode suppression has:
+    /// it reads as an instruction that took effect while the findings it was
+    /// meant to cover are still being reported, or — for a clone id — the
+    /// duplication it judged has changed and the judgement no longer applies
+    /// to anything. Either way the user has to be told.
+    ///
+    /// Only rules the user wrote are considered. The inline-marker rule is
+    /// registered from markers actually found in the sources, and the shape
+    /// and attribute rules are registered from categories this run actually
+    /// produced, so neither can be stale in this sense.
+    pub(crate) fn unused(&self, used: &BTreeSet<usize>) -> Vec<&SuppressionRuleRow> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(index, row)| {
+                !used.contains(index)
+                    && matches!(
+                        row.scope.as_str(),
+                        "path_glob" | "symbol_pattern" | "stable_clone_id"
+                    )
+            })
+            .map(|(_, row)| row)
+            .collect()
     }
 
     /// Register a rule that matches by an attribute in the source, returning

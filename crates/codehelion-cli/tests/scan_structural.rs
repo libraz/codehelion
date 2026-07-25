@@ -807,6 +807,48 @@ fn a_path_rule_hides_a_run_as_it_hides_a_group() {
     );
 }
 
+#[test]
+fn a_suppression_rule_that_matched_nothing_is_named() {
+    let dir = fixture();
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        // The path glob names a directory this tree does not have, and the
+        // clone id names a group this run did not produce.
+        "[suppression]\npaths = [\"third_party/**\"]\nclone-ids = [\"0123456789abcdef\"]\n",
+    )
+    .unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "note: 2 suppression rule(s) matched nothing",
+        ))
+        .stdout(predicate::str::contains("path glob \"third_party/**\""))
+        .stdout(predicate::str::contains("clone id 0123456789abcdef"));
+
+    let value = scan_json(dir.path());
+    let unused = value["summary"]["unused_suppressions"].as_array().unwrap();
+    assert_eq!(unused.len(), 2);
+    assert_eq!(unused[0]["scope"], "path_glob");
+    assert_eq!(unused[1]["scope"], "stable_clone_id");
+}
+
+#[test]
+fn a_suppression_rule_that_hid_something_is_not_called_unused() {
+    let dir = fixture();
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[suppression]\npaths = [\"src/**\", \"third_party/**\"]\n",
+    )
+    .unwrap();
+    let value = scan_json(dir.path());
+    let unused = value["summary"]["unused_suppressions"].as_array().unwrap();
+    assert_eq!(unused.len(), 1, "only the glob that matched nothing");
+    assert_eq!(unused[0]["pattern"], "third_party/**");
+}
+
 /// A module compiled only for tests, holding two cases that differ in nothing
 /// but their names and values.
 const SUITE_RS: &str = "pub fn width_of(text: &str) -> usize {
