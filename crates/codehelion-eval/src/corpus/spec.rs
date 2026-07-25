@@ -290,8 +290,14 @@ pub struct TransplantSpec {
 /// A deliberate non-clone carried into the label document.
 ///
 /// The generator emits one `non_clone` entry whose fragments are the named
-/// seed function's range and that function's computed range in the named
-/// variant.
+/// seed function's range and, in the named variant, the range of
+/// [`counterpart`](Self::counterpart) — by default the same function again.
+///
+/// Naming a different counterpart is what expresses a negative pair: two
+/// functions that share a skeleton and must nonetheless never be reported as
+/// clones of each other. Leaving it unset expresses the other kind of
+/// negative — one function whose copy is a recurring idiom rather than a
+/// clone worth reporting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NonCloneSpec {
@@ -299,6 +305,10 @@ pub struct NonCloneSpec {
     pub reason: String,
     /// Seed function key, e.g. `fn value`; nested functions are allowed.
     pub function: String,
+    /// Seed key of the item forming the variant-side fragment; defaults to
+    /// [`function`](Self::function). The variant must carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counterpart: Option<String>,
     /// Variant file that carries the counterpart fragment.
     pub variant: String,
 }

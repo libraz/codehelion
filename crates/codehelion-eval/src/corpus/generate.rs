@@ -793,17 +793,25 @@ fn resolve_non_clones(
                     reference: spec.function.clone(),
                 }
             })?;
+            let counterpart_key = spec.counterpart.as_ref().unwrap_or(&spec.function);
+            let counterpart = by_key
+                .get(counterpart_key.as_str())
+                .copied()
+                .ok_or_else(|| Error::UnknownNonCloneRef {
+                    reference: counterpart_key.clone(),
+                })?;
             let variant = rendered
                 .iter()
                 .find(|rendered| rendered.file == spec.variant)
                 .ok_or_else(|| Error::UnknownNonCloneRef {
                     reference: spec.variant.clone(),
                 })?;
-            let (start, end) = mapped_range(&variant.lines, function.start_line, function.end_line)
-                .ok_or_else(|| Error::EmptyRange {
-                    variant: spec.variant.clone(),
-                    item: spec.function.clone(),
-                })?;
+            let (start, end) =
+                mapped_range(&variant.lines, counterpart.start_line, counterpart.end_line)
+                    .ok_or_else(|| Error::EmptyRange {
+                        variant: spec.variant.clone(),
+                        item: counterpart_key.clone(),
+                    })?;
             Ok(NonClone {
                 id: format!("nc-{:03}", index + 1),
                 reason: spec.reason.clone(),
@@ -1101,6 +1109,7 @@ fn twice(x: i32) -> i32 {
         spec.non_clones.push(NonCloneSpec {
             reason: "helper-boilerplate".to_string(),
             function: "fn add".to_string(),
+            counterpart: None,
             variant: "v2.rs".to_string(),
         });
         let corpus = generate(&spec, SEED).expect("generates");
@@ -1109,6 +1118,41 @@ fn twice(x: i32) -> i32 {
         assert_eq!(non_clone.id, "nc-001");
         assert_eq!(non_clone.fragments[0].start_line, 3);
         assert_eq!(non_clone.fragments[1].start_line, 4);
+    }
+
+    #[test]
+    fn a_non_clone_can_name_a_different_counterpart() {
+        let mut spec = type2_spec();
+        spec.variants[0].items.push(item("fn twice"));
+        spec.non_clones.push(NonCloneSpec {
+            reason: "same-skeleton-different-logic".to_string(),
+            function: "fn add".to_string(),
+            counterpart: Some("fn twice".to_string()),
+            variant: "v2.rs".to_string(),
+        });
+        let corpus = generate(&spec, SEED).expect("generates");
+        let non_clone = &corpus.labels.non_clones[0];
+        // The seed fragment is `fn add`, the variant fragment is `fn twice`
+        // as the variant carries it — two different functions, which is what
+        // makes the pair a negative rather than an unreportable copy.
+        assert_eq!(non_clone.fragments[0].start_line, 3);
+        assert_eq!(non_clone.fragments[1].start_line, 9);
+    }
+
+    #[test]
+    fn a_non_clone_counterpart_must_exist() {
+        let mut spec = type2_spec();
+        spec.non_clones.push(NonCloneSpec {
+            reason: "same-skeleton-different-logic".to_string(),
+            function: "fn add".to_string(),
+            counterpart: Some("fn missing".to_string()),
+            variant: "v2.rs".to_string(),
+        });
+        let error = generate(&spec, SEED).expect_err("the counterpart is unknown");
+        assert!(matches!(
+            error,
+            Error::UnknownNonCloneRef { ref reference } if reference == "fn missing"
+        ));
     }
 
     #[test]
@@ -1267,6 +1311,7 @@ fn host(items: &[i32]) -> i32 {
         spec.non_clones.push(NonCloneSpec {
             reason: "host-scaffold".to_string(),
             function: "fn host".to_string(),
+            counterpart: None,
             variant: "partial.rs".to_string(),
         });
         let corpus = generate(&spec, PARTIAL_SEED).expect("generates");
