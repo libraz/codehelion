@@ -5,6 +5,7 @@
 //! or any frontend crate. Keeping the boundary at the crate level makes it
 //! mechanically enforceable.
 
+pub mod boilerplate;
 pub mod candidate;
 pub mod clone_class;
 pub mod discovery;

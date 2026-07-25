@@ -3,7 +3,7 @@
 //! gapped edit joins as a Type-3 near-clone, and an unrelated function stays
 //! out — exercising candidate extraction, near-match, verification and medoid
 //! grouping together, with real stable fingerprints as the grouping keys.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use codehelion_core::discovery::{BuildVariant, LanguageSelection};
 use codehelion_core::frontend::UnitKind;
@@ -209,4 +209,115 @@ fn analysis_is_deterministic() {
     let first = structural::analyze(&files, &variant(), &StructuralConfig::default());
     let second = structural::analyze(&files, &variant(), &StructuralConfig::default());
     assert_eq!(first, second);
+}
+
+/// Accessors, delegating wrappers and macro runs, next to a function that
+/// does real work.
+const BOILERPLATE: &str = "\
+struct Config {
+    retries: u32,
+    inner: Inner,
+}
+
+impl Config {
+    fn retries(&self) -> u32 {
+        self.retries
+    }
+
+    fn set_retries(&mut self, value: u32) {
+        self.retries = value;
+    }
+
+    fn resolve(&self, name: &str) -> u32 {
+        self.inner.resolve(name)
+    }
+
+    fn dump(&self) {
+        println!(\"retries\");
+        println!(\"inner\");
+        println!(\"done\");
+    }
+
+    fn clamp(&self, value: u32) -> u32 {
+        if value > self.retries {
+            return self.retries;
+        }
+        value
+    }
+}
+";
+
+#[test]
+fn boilerplate_shapes_are_classified_on_real_parsed_code() {
+    use codehelion_core::boilerplate::Boilerplate;
+
+    let files = parse_all(&[BOILERPLATE]);
+    let report = structural::analyze(&files, &variant(), &StructuralConfig::default());
+
+    let category = |name: &str| {
+        report
+            .units
+            .iter()
+            .find(|unit| unit.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("{name} is an analysed unit"))
+            .boilerplate
+    };
+    // A getter's body is a tail expression, a setter's is one assignment.
+    assert_eq!(category("retries"), Some(Boilerplate::TrivialBody));
+    assert_eq!(category("set_retries"), Some(Boilerplate::TrivialBody));
+    assert_eq!(category("resolve"), Some(Boilerplate::Forwarding));
+    assert_eq!(category("dump"), Some(Boilerplate::MacroRepetition));
+    // Branching is behaviour, whatever else the body looks like.
+    assert_eq!(category("clamp"), None);
+}
+
+/// Two dump routines: nothing but macro invocations, so every occurrence of
+/// any group they form is macro repetition.
+const DUMP_A: &str = "\
+fn dump_config(config: &Config) {
+    println!(\"retries: {}\", config.retries);
+    println!(\"timeout: {}\", config.timeout);
+    println!(\"verbose: {}\", config.verbose);
+    println!(\"backend: {}\", config.backend);
+    println!(\"workers: {}\", config.workers);
+    println!(\"root: {}\", config.root);
+}
+";
+
+const DUMP_B: &str = "\
+fn dump_limits(limits: &Limits) {
+    println!(\"files: {}\", limits.files);
+    println!(\"bytes: {}\", limits.bytes);
+    println!(\"depth: {}\", limits.depth);
+    println!(\"jobs: {}\", limits.jobs);
+    println!(\"budget: {}\", limits.budget);
+    println!(\"cap: {}\", limits.cap);
+}
+";
+
+#[test]
+fn a_group_of_macro_runs_is_classified_as_boilerplate() {
+    use codehelion_core::boilerplate::Boilerplate;
+
+    let files = parse_all(&[DUMP_A, DUMP_B, ALPHA]);
+    let report = structural::analyze(&files, &variant(), &StructuralConfig::default());
+    let index = report
+        .groups
+        .groups
+        .iter()
+        .position(|group| group.members.contains(&0))
+        .expect("the two dump routines are clones of each other");
+    assert!(report.groups.groups[index].members.contains(&1));
+    assert_eq!(
+        report.details[index].boilerplate,
+        Some(Boilerplate::MacroRepetition),
+        "every member is a run of macro invocations, so the group is"
+    );
+
+    // The function that does real work is in no boilerplate group.
+    for (group, detail) in report.groups.groups.iter().zip(&report.details) {
+        if group.members.contains(&2) {
+            assert_eq!(detail.boilerplate, None);
+        }
+    }
 }

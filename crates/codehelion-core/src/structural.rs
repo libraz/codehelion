@@ -23,6 +23,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::boilerplate::{self, Boilerplate};
 use crate::candidate::{self, CandidateConfig, CandidateStats};
 use crate::discovery::BuildVariant;
 use crate::features::{self, FileFeatures};
@@ -71,6 +72,9 @@ pub struct StructuralUnit {
     pub token_end: usize,
     /// The unit's declared name, when the frontend recovered one.
     pub name: Option<Lexeme>,
+    /// The boilerplate shape the unit matches, when it matches one. Recorded,
+    /// not acted on: a classified unit is analysed and grouped like any other.
+    pub boilerplate: Option<Boilerplate>,
     /// The unit's raw content fingerprint: its stable grouping key and unit
     /// identity.
     pub fingerprint: UnitFingerprint,
@@ -90,6 +94,10 @@ pub struct GroupDetail {
     /// The similarity breakdown of the medoid against each member, parallel to
     /// the group's `members` (the medoid's own entry is a perfect self-match).
     pub member_breakdowns: Vec<SimilarityBreakdown>,
+    /// The boilerplate shape the whole group matches, when every member
+    /// matches the same one. A group whose members disagree is not boilerplate:
+    /// at least one occurrence carries behaviour the others share.
+    pub boilerplate: Option<Boilerplate>,
 }
 
 /// Funnel counters across the whole run: how many fragments, candidate pairs
@@ -139,6 +147,7 @@ struct Unit {
     lines: (u32, u32),
     tokens: (usize, usize),
     name: Option<Lexeme>,
+    boilerplate: Option<Boilerplate>,
 }
 
 /// Run the structural pipeline over parsed IR files.
@@ -236,6 +245,7 @@ pub fn analyze(
             token_start: unit.tokens.0,
             token_end: unit.tokens.1,
             name: unit.name.clone(),
+            boilerplate: unit.boilerplate,
             fingerprint: unit.fingerprint,
             content: unit.content,
         })
@@ -285,7 +295,21 @@ fn group_detail(
     GroupDetail {
         fingerprint,
         member_breakdowns,
+        boilerplate: unanimous_boilerplate(group, units),
     }
+}
+
+/// The boilerplate category every member of a group shares, or `None` when
+/// they do not all share one.
+fn unanimous_boilerplate(group: &grouping::StructuralGroup, units: &[Unit]) -> Option<Boilerplate> {
+    let mut members = group
+        .members
+        .iter()
+        .map(|&member| units[member].boilerplate);
+    let first = members.next().flatten()?;
+    members
+        .all(|category| category == Some(first))
+        .then_some(first)
 }
 
 /// Flatten every file's units into one global list, in IR-walk order, and
@@ -330,6 +354,7 @@ fn flatten_units(files: &[SyntaxIrFile], variant: &BuildVariant) -> (Vec<Unit>, 
                 lines: line_range(tokens),
                 tokens: (start, end),
                 name: node.name.clone(),
+                boilerplate: boilerplate::classify(node),
             });
             local += 1;
         });
