@@ -34,6 +34,7 @@ use codehelion_core::structural::{
     self, GroupDetail, RegionOccurrence, StructuralConfig, StructuralRegion, StructuralReport,
     StructuralUnit,
 };
+use codehelion_core::test_code::TEST_CODE_VERSION;
 use codehelion_core::verify::{SimilarityBreakdown, WEIGHT_VERSION};
 use codehelion_store::snapshot::{GroupRow, MemberRow, SimilarityBreakdownRow, Snapshot, UnitRow};
 
@@ -1131,6 +1132,7 @@ fn detector_versions() -> Vec<(String, String)> {
         ("features".to_string(), FEATURE_SCHEMA_VERSION.to_string()),
         ("verify-weights".to_string(), WEIGHT_VERSION.to_string()),
         ("boilerplate".to_string(), BOILERPLATE_VERSION.to_string()),
+        ("test-code".to_string(), TEST_CODE_VERSION.to_string()),
         (
             "frontend.rust".to_string(),
             codehelion_frontend_rust::ir::STRUCTURAL_FRONTEND_VERSION.to_string(),
