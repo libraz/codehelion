@@ -34,8 +34,8 @@
 //! The acceptance threshold is what separates clones from lookalikes, and the
 //! labelled corpora bound how well it can: functions written to share a
 //! skeleton while computing different things score up to 0.69, and the weakest
-//! labelled clone scores 0.76. [`VerifyConfig::type3_min_composite`] sits
-//! between them.
+//! pair that is a real copy scores 0.71.
+//! [`VerifyConfig::type3_min_composite`] sits between them.
 //!
 //! Two properties of that gap are worth stating, because they decide where
 //! future accuracy work belongs.
