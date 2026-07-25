@@ -68,7 +68,7 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 # database = ".codehelion/audit.db" # 監査データベースの場所
 
 [suppression]
-# paths = []                        # レポートから隠すパス glob
+# paths = []                        # 隠すパス glob。vendor 配下はここへ
 # symbols = []                      # 所属ユニット名に対する glob
 # clone-ids = []                    # 安定クローン ID（hex、前方一致可）
 # generated-markers = ["@generated", "DO NOT EDIT"]

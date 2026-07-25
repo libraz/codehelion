@@ -72,7 +72,7 @@ ID you can suppress, baseline or look up later with `explain`.
 # database = ".codehelion/audit.db" # audit-database location
 
 [suppression]
-# paths = []                        # path globs to hide from the report
+# paths = []                        # path globs to hide; vendored trees go here
 # symbols = []                      # globs over the name of the enclosing unit
 # clone-ids = []                    # stable clone ids (hex, prefix allowed)
 # generated-markers = ["@generated", "DO NOT EDIT"]

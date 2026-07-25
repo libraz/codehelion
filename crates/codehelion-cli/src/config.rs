@@ -370,6 +370,10 @@ pub const TEMPLATE: &str = "\
 # cpp = true
 
 # [suppression]
+# Globs matched against a file's path, relative to the scan root. A vendored
+# or imported tree is the usual entry — \"third_party/**\", \"vendor/**\" —
+# because nothing else here reads provenance from a path, and duplication you
+# did not write is duplication you cannot act on.
 # paths = []
 # Globs matched against the name of the unit an occurrence sits in.
 # symbols = []
