@@ -49,23 +49,22 @@ const CORPORA: &[Expected] = &[
     Expected {
         name: "rust",
         recall: 5.0 / 6.0,
-        shortfall: "the labelled Type-3 pair is judged a clone (0.71) and still \
-                    cannot be reported: its partner is a clone of the seed and \
-                    of the verbatim copy but not of the renamed one (0.63), so \
-                    no single group holds both halves of the labelled pair. A \
-                    partition cannot express a relation that is not transitive",
+        shortfall: "the labelled Type-3 pair is never judged: candidate \
+                    extraction pairs the gapped copy with the corpus's other \
+                    function family and never with the copies it belongs to, \
+                    so a pair the judge would accept at 0.71 is not put to it",
     },
     Expected {
         name: "c",
         recall: 5.0 / 6.0,
-        shortfall: "as in the Rust corpus, the labelled Type-3 pair spans two \
-                    groups",
+        shortfall: "as in the Rust corpus, the labelled Type-3 pair is never \
+                    proposed as a candidate",
     },
     Expected {
         name: "cpp",
         recall: 5.0 / 6.0,
-        shortfall: "as in the Rust corpus, the labelled Type-3 pair spans two \
-                    groups",
+        shortfall: "as in the Rust corpus, the labelled Type-3 pair is never \
+                    proposed as a candidate",
     },
     Expected {
         name: "rust-graded",
@@ -95,8 +94,8 @@ const CORPORA: &[Expected] = &[
                     Type-2 pair scoring 0.85 — the strongest agreement in the \
                     corpus — and they still land in different groups, because \
                     that variant agrees with the seed's other variants too \
-                    weakly to sit beside them. The same partition limit as in \
-                    the base corpus, reached from the other direction",
+                    weakly to sit beside them. The judge accepted this pair; a \
+                    partition into groups is what cannot hold it",
     },
 ];
 
