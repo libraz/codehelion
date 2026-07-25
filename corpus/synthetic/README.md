@@ -16,7 +16,14 @@ mutation spec, the generated variant sources and the generated `labels.json`:
 - `rust/` — Rust Type-1/2/3 variants of a few tiny functions plus a getter
   non-clone. The reference case.
 - `rust-graded/` — one larger function mutated at graded Type-3 change rates
-  (~5/10/20/30%) for degradation-curve measurement.
+  (~5/10/20/30%) for degradation-curve measurement. Its mutations insert
+  straight-line statements, which leaves the control-flow and call dimensions
+  untouched.
+- `rust-divergent/` — the axes the graded case cannot reach: variants that add a
+  guard branch, nest a loop, replace the early exits, rename every callee, and
+  one that does all of it at once. One axis per variant, so a dimension can be
+  read in isolation, and the composites land on both sides of the Type-3
+  acceptance threshold.
 - `rust-literals/` — per-category Type-2 variants (integer, float, string, char
   literal changed one at a time) for literal-normalization measurement.
 - `rust-partial/` — donor fragments transplanted into unrelated host functions

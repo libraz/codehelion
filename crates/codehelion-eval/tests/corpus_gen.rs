@@ -113,6 +113,7 @@ fn check_fails_on_drifted_output() {
 fn committed_corpora_match_their_specs() {
     for case in [
         "rust",
+        "rust-divergent",
         "rust-graded",
         "rust-literals",
         "rust-partial",

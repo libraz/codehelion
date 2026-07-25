@@ -1,0 +1,136 @@
+{
+  "schema_version": 0,
+  "language": "rust",
+  "seed": "seed.rs",
+  "variants": [
+    {
+      "file": "guard_added.rs",
+      "type": "type-3",
+      "header_comment": "Type-3 variant of seed.rs: an extra guard branch with an early exit.",
+      "items": [
+        {
+          "item": "fn tally_entries",
+          "labelled": true,
+          "target_change_rate": 0.18,
+          "edits": [
+            {
+              "op": "insert_after",
+              "anchor": "let value = entry.abs();",
+              "lines": [
+                "        if value == limit {",
+                "            kept += 1;",
+                "            continue;",
+                "        }"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "loop_nested.rs",
+      "type": "type-3",
+      "header_comment": "Type-3 variant of seed.rs: an inner loop nested inside the existing one.",
+      "items": [
+        {
+          "item": "fn tally_entries",
+          "labelled": true,
+          "target_change_rate": 0.12,
+          "edits": [
+            {
+              "op": "insert_after",
+              "anchor": "total += value;",
+              "lines": [
+                "            for _ in 0..value {",
+                "                kept += 1;",
+                "            }"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "exits_removed.rs",
+      "type": "type-3",
+      "header_comment": "Type-3 variant of seed.rs: the early exits replaced by plain statements.",
+      "items": [
+        {
+          "item": "fn tally_entries",
+          "labelled": true,
+          "target_change_rate": 0.18,
+          "edits": [
+            { "op": "delete", "anchor": "continue;" },
+            { "op": "delete", "anchor": "return 0;" },
+            {
+              "op": "insert_after",
+              "anchor": "if kept == 0 {",
+              "lines": ["        total = 0;"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "calls_swapped.rs",
+      "type": "type-2",
+      "header_comment": "Type-2 variant of seed.rs: every callee renamed, structure untouched.",
+      "items": [
+        {
+          "item": "fn tally_entries",
+          "labelled": true,
+          "rename": {
+            "abs": "signum",
+            "min": "rem_euclid",
+            "max": "saturating_add"
+          }
+        }
+      ]
+    },
+    {
+      "file": "rewritten.rs",
+      "type": "type-3",
+      "header_comment": "Type-3 variant of seed.rs: control flow and call surface both disturbed.",
+      "items": [
+        {
+          "item": "fn tally_entries",
+          "labelled": true,
+          "target_change_rate": 0.47,
+          "rename": {
+            "abs": "signum",
+            "min": "rem_euclid",
+            "max": "saturating_add"
+          },
+          "edits": [
+            { "op": "delete", "anchor": "continue;" },
+            { "op": "delete", "anchor": "return 0;" },
+            {
+              "op": "insert_after",
+              "anchor": "if kept == 0 {",
+              "lines": ["        total = 0;"]
+            },
+            {
+              "op": "insert_after",
+              "anchor": "let value = entry.signum();",
+              "lines": [
+                "        if value == limit {",
+                "            kept += 1;",
+                "            continue;",
+                "        }"
+              ]
+            },
+            {
+              "op": "insert_after",
+              "anchor": "total += value;",
+              "lines": [
+                "            for _ in 0..value {",
+                "                kept += 1;",
+                "            }"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

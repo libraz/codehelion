@@ -1,0 +1,95 @@
+{
+  "schema_version": 0,
+  "language": "rust",
+  "files": [
+    "seed.rs",
+    "guard_added.rs",
+    "loop_nested.rs",
+    "exits_removed.rs",
+    "calls_swapped.rs",
+    "rewritten.rs"
+  ],
+  "clone_pairs": [
+    {
+      "id": "cp-001",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 7,
+          "end_line": 30
+        },
+        {
+          "file": "guard_added.rs",
+          "start_line": 4,
+          "end_line": 31
+        }
+      ]
+    },
+    {
+      "id": "cp-002",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 7,
+          "end_line": 30
+        },
+        {
+          "file": "loop_nested.rs",
+          "start_line": 4,
+          "end_line": 30
+        }
+      ]
+    },
+    {
+      "id": "cp-003",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 7,
+          "end_line": 30
+        },
+        {
+          "file": "exits_removed.rs",
+          "start_line": 4,
+          "end_line": 26
+        }
+      ]
+    },
+    {
+      "id": "cp-004",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 7,
+          "end_line": 30
+        },
+        {
+          "file": "calls_swapped.rs",
+          "start_line": 4,
+          "end_line": 27
+        }
+      ]
+    },
+    {
+      "id": "cp-005",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 7,
+          "end_line": 30
+        },
+        {
+          "file": "rewritten.rs",
+          "start_line": 4,
+          "end_line": 33
+        }
+      ]
+    }
+  ],
+  "non_clones": []
+}
