@@ -332,6 +332,9 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
             },
             unused_suppressions: unused_suppressions(inputs),
             funnel: funnel(&inputs.report.stats),
+            // The Fast engine reports equivalence classes, which need no
+            // refinement and so have nothing to bound.
+            split_components: 0,
             pair_budget_exhausted: inputs.report.stats.pair_budget_exhausted,
         },
         groups: order

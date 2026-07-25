@@ -231,6 +231,7 @@ fn structural_config(cfg: &Config) -> StructuralConfig {
     config.candidate.pair_budget = cfg.limits.pair_budget;
     config.near_match.posting_cap = cfg.limits.posting_cap;
     config.near_match.pair_budget = cfg.limits.pair_budget;
+    config.grouping.max_component = cfg.limits.max_component;
     config.literals = literal_norm(cfg.literal_normalization);
     config
 }
@@ -797,6 +798,7 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
             },
             unused_suppressions: inputs.unused_suppressions(),
             funnel: funnel(stats),
+            split_components: as_u64(stats.grouping.oversized_components),
             // Either candidate stage exhausting its budget makes the result
             // potentially incomplete.
             pair_budget_exhausted: stats.candidate.budget_exhausted

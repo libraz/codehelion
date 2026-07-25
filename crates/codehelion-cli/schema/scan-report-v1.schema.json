@@ -78,6 +78,7 @@
         "suppressed",
         "unused_suppressions",
         "funnel",
+        "split_components",
         "pair_budget_exhausted"
       ],
       "properties": {
@@ -173,6 +174,10 @@
               }
             }
           }
+        },
+        "split_components": {
+          "type": "integer",
+          "description": "Sets of related units too large to compare as one piece, which grouping cut so its cost stays bounded. Every reported group is still cohesive; what the cut costs is the chance that two members on opposite sides of it would have been reported together."
         },
         "pair_budget_exhausted": {
           "type": "boolean",

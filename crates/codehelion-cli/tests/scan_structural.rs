@@ -836,6 +836,46 @@ fn a_suppression_rule_that_matched_nothing_is_named() {
 }
 
 #[test]
+fn a_set_of_related_units_too_large_to_compare_whole_is_cut_and_said_so() {
+    let dir = fixture();
+    // A third copy, so the three functions form one set of related units.
+    std::fs::write(
+        dir.path().join("src/c.rs"),
+        GAPPED_RS
+            .replace("beta", "gamma")
+            .replace("state", "total")
+            .replace("seen", "hits"),
+    )
+    .unwrap();
+    // A ceiling of two forces the cut on a set this small.
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[limits]\nmax-component = 2\n",
+    )
+    .unwrap();
+
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "note: 1 set(s) of related units were too large to compare as one",
+        ));
+
+    let value = scan_json(dir.path());
+    assert_eq!(value["summary"]["split_components"], 1);
+    // The cut costs recall, not soundness: the pieces are still cohesive
+    // groups, each with its own canonical instance.
+    let groups = value["groups"].as_array().unwrap();
+    assert!(groups.len() >= 2, "the set is reported as several groups");
+    for group in groups {
+        assert!(group["confidence"].as_f64().unwrap() >= 0.6);
+        assert_eq!(group["members"][0]["canonical"], true);
+    }
+}
+
+#[test]
 fn the_run_says_how_far_each_stage_of_the_pipeline_narrowed_it() {
     let dir = fixture();
     let value = scan_json(dir.path());

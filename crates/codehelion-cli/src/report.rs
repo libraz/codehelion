@@ -132,6 +132,13 @@ pub struct Summary {
     /// verification and sub-unit run consolidation, so the list is a record of
     /// what happened rather than a single arithmetic chain.
     pub funnel: Vec<FunnelStage>,
+    /// Groups of related units too large to refine as one piece, which were
+    /// cut so grouping stays bounded.
+    ///
+    /// Every reported group is still cohesive; what the cut costs is the
+    /// chance that two members on opposite sides of it would have been
+    /// reported together.
+    pub split_components: u64,
     /// Whether the candidate-pair budget ran out, making results
     /// potentially incomplete.
     pub pair_budget_exhausted: bool,
@@ -623,6 +630,14 @@ impl Report {
                 names.join(", "),
             )?;
         }
+        if summary.split_components > 0 {
+            writeln!(
+                out,
+                "  note: {} set(s) of related units were too large to compare as one and were \
+                 cut; clones of each other may be reported as separate groups",
+                summary.split_components,
+            )?;
+        }
         if summary.pair_budget_exhausted {
             writeln!(
                 out,
@@ -916,6 +931,7 @@ pub(super) mod tests {
                         .dropping("hash_collision", 0),
                     FunnelStage::new("verified pairs", 2),
                 ],
+                split_components: 0,
                 pair_budget_exhausted: false,
             },
             groups: vec![visible_group(), suppressed_group()],

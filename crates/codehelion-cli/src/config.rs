@@ -176,6 +176,11 @@ pub struct Limits {
     pub posting_cap: usize,
     /// Upper bound on candidate pairs examined across both engine passes.
     pub pair_budget: usize,
+    /// Largest set of related units compared as one piece when forming
+    /// groups; a larger set is cut, and the cut is reported. Comparing a set
+    /// costs time quadratic in its size, so without a ceiling a codebase of
+    /// thousands of interchangeable units makes a scan arbitrarily expensive.
+    pub max_component: usize,
 }
 
 impl Default for Limits {
@@ -186,6 +191,7 @@ impl Default for Limits {
             parse_timeout_ms: 10_000,
             posting_cap: engine.posting_cap,
             pair_budget: engine.pair_budget,
+            max_component: codehelion_core::grouping::GroupingConfig::default().max_component,
         }
     }
 }
@@ -385,6 +391,8 @@ pub const TEMPLATE: &str = "\
 # posting-cap = 64
 # Upper bound on candidate pairs examined across both engine passes.
 # pair-budget = 1000000
+# Largest set of related units compared as one piece when forming groups.
+# max-component = 1024
 ";
 
 #[cfg(test)]
@@ -421,6 +429,12 @@ mod tests {
         );
         assert_eq!(limits.posting_cap, engine.posting_cap);
         assert_eq!(limits.pair_budget, engine.pair_budget);
+        let grouping = codehelion_core::grouping::GroupingConfig::default();
+        assert_eq!(limits.max_component, grouping.max_component);
+        assert!(
+            limits.max_component > grouping.sampling_threshold,
+            "a set between the two ceilings is still compared whole, with a sampled medoid"
+        );
         assert!(limits.parse_timeout_ms > 0);
     }
 
@@ -430,6 +444,7 @@ mod tests {
         assert_eq!(config.limits.max_file_bytes, 1024);
         assert_eq!(config.limits.posting_cap, Limits::default().posting_cap);
         assert_eq!(config.limits.pair_budget, Limits::default().pair_budget);
+        assert_eq!(config.limits.max_component, Limits::default().max_component);
     }
 
     #[test]
