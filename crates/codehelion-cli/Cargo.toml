@@ -36,6 +36,10 @@ toml = "0.8"
 [dev-dependencies]
 assert_cmd = "2"
 boon = "0.6"
+# The evaluation harness scores a scan report against the committed corpora.
+# A dev-dependency: it measures the shipped binary from outside and is not
+# part of it, so the released crate pulls in none of it.
+codehelion-eval = { version = "0.1.0", path = "../codehelion-eval" }
 codehelion-store = { version = "0.1.0", path = "../codehelion-store" }
 predicates = "3"
 serde_json = "1"

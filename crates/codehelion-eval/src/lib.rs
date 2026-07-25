@@ -7,8 +7,9 @@
 //!
 //! The pieces are:
 //!
-//! - [`schema`] — the common detection-result contract that every prototype
-//!   emits as JSON.
+//! - [`schema`] — the common detection-result contract that scoring reads.
+//! - [`detected`] — reading the shipping scan report as that contract, so the
+//!   harness scores what the tool actually reports.
 //! - [`labels`] — the corpus ground-truth format (clone pairs and deliberate
 //!   non-clones).
 //! - [`metrics`] — matching of findings against labels plus the accuracy and
@@ -20,6 +21,7 @@
 
 pub mod bench;
 pub mod corpus;
+pub mod detected;
 pub mod labels;
 pub mod metrics;
 pub mod schema;

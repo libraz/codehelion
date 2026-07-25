@@ -35,6 +35,10 @@ test: ## Run the full test suite
 doc: ## Build docs, failing on warnings
 	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --all-features
 
+.PHONY: eval
+eval: ## Show detection accuracy over the committed corpora
+	$(CARGO) test -p codehelion-cli --test corpus_accuracy -- --nocapture
+
 .PHONY: check
 check: format-check lint test doc ## Run every CI check locally
 

@@ -6,6 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Schema version of the [`DetectionResult`] documents this crate produces.
+pub const SCHEMA_VERSION: u32 = 0;
+
 /// An inclusive source line range within a single file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fragment {
