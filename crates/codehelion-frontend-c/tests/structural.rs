@@ -120,3 +120,58 @@ fn every_reported_group_clears_the_cohesion_floor() {
 fn two_runs_over_the_same_corpus_agree() {
     assert_eq!(analyze().groups.groups, analyze().groups.groups);
 }
+
+/// Two copies of one case, written the way a C test framework makes an author
+/// write them, beside the production function they call.
+const SUITE: &str = "\
+int normalise(int value) {
+    int scaled = value * 2;
+    int shifted = scaled + 1;
+    return shifted;
+}
+
+TEST(NormaliseSuite, DoublesAndShifts) {
+    int input = 3;
+    int result = normalise(input);
+    ASSERT_EQ(result, 7);
+    ASSERT_NE(result, 0);
+}
+
+TEST(NormaliseSuite, HandlesZero) {
+    int input = 0;
+    int result = normalise(input);
+    ASSERT_EQ(result, 1);
+    ASSERT_NE(result, 0);
+}
+";
+
+#[test]
+fn a_case_written_as_a_framework_macro_is_no_unit_in_c() {
+    // C++ reads `MACRO(suite, name) { ... }` as a definition named after the
+    // macro, which is what makes the name usable as a test marker. The C
+    // grammar does not: it reads a call and then a block that belongs to
+    // nobody. So a C suite contributes no units at all, and the two identical
+    // cases below are not reported as duplicates of each other.
+    //
+    // This is pinned rather than fixed because the marker already handles the
+    // case the moment a unit appears — if this assertion ever fails, the
+    // grammar started producing one and the classification will be waiting.
+    let files = vec![CStructuralFrontend.parse(SUITE)];
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let report = structural::analyze(&files, &variant, &StructuralConfig::default());
+
+    let names: Vec<Option<&str>> = report
+        .units
+        .iter()
+        .map(|unit| unit.name.as_deref())
+        .collect();
+    assert_eq!(
+        names,
+        vec![Some("normalise")],
+        "only the function is a unit"
+    );
+    assert!(
+        report.groups.groups.is_empty(),
+        "nothing in the suite reaches a group"
+    );
+}

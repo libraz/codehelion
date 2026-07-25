@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use codehelion_core::discovery::{BuildVariant, LanguageSelection};
 use codehelion_core::grouping::GroupingConfig;
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
-use codehelion_core::structural::{self, StructuralConfig, StructuralReport};
+use codehelion_core::structural::{self, StructuralConfig, StructuralReport, StructuralUnit};
 use codehelion_frontend_cpp::ir::CppStructuralFrontend;
 
 const CORPUS: &str = "../../corpus/synthetic/cpp";
@@ -189,4 +189,65 @@ fn a_namespace_is_not_a_clone_of_the_class_it_holds() {
         report.stats.nested_pairs > 0,
         "the pair is dropped for nesting, and says so"
     );
+}
+
+/// Two copies of one case, written the way a C++ test framework makes an
+/// author write them, beside the production function they call.
+const SUITE: &str = "\
+int normalise(int value) {
+    int scaled = value * 2;
+    int shifted = scaled + 1;
+    return shifted;
+}
+
+TEST(NormaliseSuite, DoublesAndShifts) {
+    int input = 3;
+    int result = normalise(input);
+    ASSERT_EQ(result, 7);
+    ASSERT_NE(result, 0);
+}
+
+TEST_F(NormaliseFixture, HandlesZero) {
+    int input = 3;
+    int result = normalise(input);
+    ASSERT_EQ(result, 7);
+    ASSERT_NE(result, 0);
+}
+";
+
+#[test]
+fn a_case_written_as_a_framework_macro_is_recognised_as_test_code() {
+    // The macro stands where a return type and a name would, so the case
+    // parses as a definition named after the macro. That name is the author
+    // saying what the body is, and it is the only such statement C++ offers:
+    // the language has no attribute for it and no container to inherit from.
+    let files = vec![CppStructuralFrontend.parse(SUITE)];
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let report = structural::analyze(&files, &variant, &StructuralConfig::default());
+
+    let cases: Vec<&StructuralUnit> = report
+        .units
+        .iter()
+        .filter(|unit| matches!(unit.name.as_deref(), Some("TEST" | "TEST_F")))
+        .collect();
+    assert_eq!(cases.len(), 2, "both cases are units");
+    assert!(
+        cases.iter().all(|unit| unit.test_code),
+        "a case macro marks the body it opens"
+    );
+    assert!(
+        report
+            .units
+            .iter()
+            .any(|unit| unit.name.as_deref() == Some("normalise") && !unit.test_code),
+        "the function under test is not part of the suite"
+    );
+    // The two cases are copies of each other, so they do reach a group — and
+    // the group is the suite's, not the production code's.
+    let suite = report
+        .groups
+        .groups
+        .iter()
+        .find(|group| group.members.iter().all(|&m| report.units[m].test_code));
+    assert!(suite.is_some(), "the duplicated cases group together");
 }
