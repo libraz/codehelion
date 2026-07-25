@@ -188,9 +188,6 @@ struct BuildInputs<'a> {
     group_suppressed: &'a [Option<usize>],
 }
 
-/// Assemble the report model both output formats render from. Groups are
-/// ordered by priority descending, fingerprint bytes ascending on ties, so
-/// every view is stable across reruns.
 /// The configured suppression rules that hid nothing this run, read off the
 /// rules the groups actually cited.
 fn unused_suppressions(inputs: &BuildInputs<'_>) -> Vec<report::UnusedRule> {
@@ -210,6 +207,9 @@ fn unused_suppressions(inputs: &BuildInputs<'_>) -> Vec<report::UnusedRule> {
         .collect()
 }
 
+/// Assemble the report model both output formats render from. Groups are
+/// ordered by priority descending, fingerprint bytes ascending on ties, so
+/// every view is stable across reruns.
 fn build_report(inputs: &BuildInputs<'_>) -> Report {
     let count = |language: Language| {
         u64::try_from(
