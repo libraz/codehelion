@@ -72,7 +72,9 @@ ID you can suppress, baseline or look up later with `explain`.
 # database = ".codehelion/audit.db" # audit-database location
 
 [suppression]
-# paths = []                        # glob patterns to hide from the report
+# paths = []                        # path globs to hide from the report
+# symbols = []                      # globs over the name of the enclosing unit
+# clone-ids = []                    # stable clone ids (hex, prefix allowed)
 # generated-markers = ["@generated", "DO NOT EDIT"]
 
 [limits]                            # resource ceilings, all reported when hit
