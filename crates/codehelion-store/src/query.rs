@@ -83,8 +83,9 @@ pub struct StoredSimilarity {
     pub control_flow: f64,
     /// Type agreement, or `None` when types were unavailable.
     pub type_similarity: Option<f64>,
-    /// Call-name multiset agreement.
-    pub api: f64,
+    /// Call-name multiset agreement, or `None` when neither unit called
+    /// anything.
+    pub api: Option<f64>,
     /// Weighted mean of the measured dimensions.
     pub composite: f64,
     /// Weakest pairwise similarity inside the group.

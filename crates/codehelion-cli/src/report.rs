@@ -206,8 +206,9 @@ pub struct Similarity {
     pub control_flow: f64,
     /// Type agreement, or `None` when types are unavailable.
     pub type_similarity: Option<f64>,
-    /// Call-name multiset agreement.
-    pub api: f64,
+    /// Call-name multiset agreement, or `None` when neither unit calls
+    /// anything and there is nothing to compare.
+    pub api: Option<f64>,
     /// Weighted mean of the measured dimensions.
     pub composite: f64,
     /// Weakest pairwise similarity inside the group: its cohesion.
@@ -293,16 +294,18 @@ impl Similarity {
         let type_similarity = self
             .type_similarity
             .map_or_else(|| "n/a".to_string(), |value| format!("{value:.2}"));
+        let api = self
+            .api
+            .map_or_else(|| "n/a".to_string(), |value| format!("{value:.2}"));
         let band = self.confidence_band.as_deref().unwrap_or("n/a");
         format!(
             "similarity: composite {:.2} (lexical {:.2}, structural {:.2}, \
-             control-flow {:.2}, type {type_similarity}, api {:.2}); \
+             control-flow {:.2}, type {type_similarity}, api {api}); \
              cohesion {:.2}; confidence {band} [{}]",
             self.composite,
             self.lexical,
             self.structural,
             self.control_flow,
-            self.api,
             self.min_pairwise,
             self.weight_version,
         )
@@ -772,12 +775,12 @@ pub(super) mod tests {
                 similarity: 0.79,
             },
             similarity: Some(Similarity {
-                weight_version: "structural-verify-v1".to_string(),
+                weight_version: "structural-verify-v2".to_string(),
                 lexical: 0.71,
                 structural: 0.88,
                 control_flow: 0.90,
                 type_similarity: None,
-                api: 0.75,
+                api: Some(0.75),
                 composite: 0.82,
                 min_pairwise: 0.79,
                 confidence_band: Some("medium".to_string()),
@@ -837,7 +840,7 @@ pub(super) mod tests {
         let similarity = &value["groups"][2]["similarity"];
         assert_eq!(similarity["composite"], 0.82);
         assert_eq!(similarity["min_pairwise"], 0.79);
-        assert_eq!(similarity["weight_version"], "structural-verify-v1");
+        assert_eq!(similarity["weight_version"], "structural-verify-v2");
         assert_eq!(similarity["confidence_band"], "medium");
         // Unavailable, not guessed: the dimension is reported as absent.
         assert_eq!(similarity["type_similarity"], serde_json::Value::Null);
@@ -854,7 +857,7 @@ pub(super) mod tests {
         assert!(text.contains(
             "similarity: composite 0.82 (lexical 0.71, structural 0.88, \
              control-flow 0.90, type n/a, api 0.75); cohesion 0.79; \
-             confidence medium [structural-verify-v1]"
+             confidence medium [structural-verify-v2]"
         ));
     }
 
@@ -1003,12 +1006,12 @@ pub(super) mod tests {
                 members: 2,
                 boilerplate: Some("macro-repetition".to_string()),
                 similarity: Some(Similarity {
-                    weight_version: "structural-verify-v1".to_string(),
+                    weight_version: "structural-verify-v2".to_string(),
                     lexical: 0.71,
                     structural: 0.92,
                     control_flow: 1.0,
                     type_similarity: None,
-                    api: 0.8,
+                    api: Some(0.8),
                     composite: 0.87,
                     min_pairwise: 0.87,
                     confidence_band: Some("medium".to_string()),
@@ -1037,12 +1040,12 @@ pub(super) mod tests {
     #[test]
     fn an_unrecorded_confidence_band_prints_as_absent() {
         let similarity = Similarity {
-            weight_version: "structural-verify-v1".to_string(),
+            weight_version: "structural-verify-v2".to_string(),
             lexical: 0.5,
             structural: 0.5,
             control_flow: 0.5,
             type_similarity: None,
-            api: 0.5,
+            api: Some(0.5),
             composite: 0.5,
             min_pairwise: 0.5,
             confidence_band: None,

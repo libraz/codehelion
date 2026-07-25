@@ -168,13 +168,13 @@ fn a_structural_group_persists_its_similarity_breakdown() {
     let mut snapshot = sample_snapshot(&variant, &detectors);
     snapshot.groups[0].clone_type = CloneClass::Type2;
     snapshot.groups[0].similarity = Some(SimilarityBreakdownRow {
-        weight_version: "structural-verify-v1".to_string(),
+        weight_version: "structural-verify-v2".to_string(),
         lexical: 0.8,
         structural: 0.95,
         control_flow: 0.9,
         // Structural mode resolves no types.
         type_similarity: None,
-        api: 0.5,
+        api: Some(0.5),
         composite: 0.87,
         min_pairwise: 0.72,
         confidence_band: Confidence::Medium,
@@ -186,12 +186,13 @@ fn a_structural_group_persists_its_similarity_breakdown() {
         .similarity
         .as_ref()
         .expect("the structural group carries a breakdown");
-    assert_eq!(breakdown.weight_version, "structural-verify-v1");
+    assert_eq!(breakdown.weight_version, "structural-verify-v2");
     assert!((breakdown.structural - 0.95).abs() < 1e-9);
     assert!((breakdown.composite - 0.87).abs() < 1e-9);
     assert!((breakdown.min_pairwise - 0.72).abs() < 1e-9);
     // The unmeasured type dimension survives the round-trip as absent.
     assert!(breakdown.type_similarity.is_none());
+    assert_eq!(breakdown.api, Some(0.5));
     // The band is not derivable from the numbers, so it is stored alongside
     // them rather than recomputed on read.
     assert_eq!(breakdown.confidence_band.as_deref(), Some("medium"));
@@ -213,6 +214,38 @@ fn a_structural_group_persists_its_similarity_breakdown() {
         .expect("the occurrence carries its group's breakdown");
     assert!((breakdown.composite - 0.87).abs() < 1e-9);
     assert_eq!(breakdown.confidence_band.as_deref(), Some("medium"));
+}
+
+#[test]
+fn an_unmeasured_api_dimension_round_trips_as_absent() {
+    // Two units that call nothing have no call surfaces to compare. The column
+    // has to distinguish that from perfect agreement, or reading the row back
+    // would invent evidence the run never had.
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.groups[0].similarity = Some(SimilarityBreakdownRow {
+        weight_version: "structural-verify-v2".to_string(),
+        lexical: 1.0,
+        structural: 1.0,
+        control_flow: 1.0,
+        type_similarity: None,
+        api: None,
+        composite: 1.0,
+        min_pairwise: 1.0,
+        confidence_band: Confidence::High,
+    });
+    let run_id = store.record_snapshot(&snapshot).unwrap();
+
+    let groups = store.run_groups(run_id).unwrap();
+    let breakdown = groups[0]
+        .similarity
+        .as_ref()
+        .expect("the group carries a breakdown");
+    assert!(breakdown.api.is_none());
+    assert!((breakdown.composite - 1.0).abs() < 1e-9);
 }
 
 #[test]

@@ -84,8 +84,9 @@ fn disturbing_control_flow_moves_only_the_control_flow_and_structure_dimensions(
             scores.control_flow < 1.0,
             "{name} disturbs control flow, so the dimension must react: {scores:?}"
         );
-        assert!(
-            (scores.api - 1.0).abs() < 1e-9,
+        assert_eq!(
+            scores.api,
+            Some(1.0),
             "{name} leaves every callee in place: {scores:?}"
         );
         let report = analyze(&[SEED, name]);
@@ -107,8 +108,9 @@ fn renaming_every_callee_costs_the_api_dimension_alone() {
             "the rename leaves {dimension} untouched, got {value}"
         );
     }
-    assert!(
-        scores.api.abs() < 1e-9,
+    assert_eq!(
+        scores.api,
+        Some(0.0),
         "no callee survives the rename, so the call surfaces are disjoint"
     );
     // The heads a statement summary keeps do not reach the renamed callees, so

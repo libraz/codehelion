@@ -187,7 +187,10 @@
           "oneOf": [{ "type": "number" }, { "type": "null" }],
           "description": "Null when types are unavailable."
         },
-        "api": { "type": "number" },
+        "api": {
+          "oneOf": [{ "type": "number" }, { "type": "null" }],
+          "description": "Null when neither unit calls anything, so the dimension had nothing to compare."
+        },
         "composite": { "type": "number", "description": "Weighted mean of the measured dimensions." },
         "min_pairwise": { "type": "number", "description": "Weakest pairwise similarity inside the group: its cohesion." },
         "confidence_band": { "enum": ["high", "medium", "low"] }

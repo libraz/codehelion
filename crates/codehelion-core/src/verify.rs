@@ -18,7 +18,9 @@
 //! - **type** — unavailable in Structural mode: there are no resolved types, so
 //!   this dimension is `None` and the classification's confidence is penalised
 //!   accordingly rather than guessing;
-//! - **api** — how much the two call-name multisets overlap.
+//! - **api** — how much the two call-name multisets overlap; unavailable when
+//!   neither unit calls anything, since two empty call surfaces are an absence
+//!   of evidence rather than agreement.
 //!
 //! Alignment is a by-product: the LCS backtrace records which statements
 //! matched and which are unique to each side, which is the diff `explain`
@@ -35,7 +37,7 @@ use crate::ir::{IrNode, Shape, StatementSummary};
 /// Version of the composite-weight recipe and judgment rules. Bump it when any
 /// weight default or classification rule changes, since findings change with
 /// it. Recorded as a detector version.
-pub const WEIGHT_VERSION: &str = "structural-verify-v1";
+pub const WEIGHT_VERSION: &str = "structural-verify-v2";
 
 /// Relative weights of the similarity dimensions in the composite score.
 ///
@@ -166,8 +168,9 @@ pub struct SimilarityBreakdown {
     pub control_flow: f64,
     /// Type agreement, or `None` when types are unavailable (Structural mode).
     pub type_similarity: Option<f64>,
-    /// Call-name multiset agreement.
-    pub api: f64,
+    /// Call-name multiset agreement, or `None` when neither unit calls
+    /// anything and there is therefore nothing to compare.
+    pub api: Option<f64>,
     /// Weighted mean of the available dimensions.
     pub composite: f64,
 }
@@ -334,7 +337,7 @@ fn classify(
         // surface is the dimension that carries identifier text, and a
         // difference there is evidence of renaming that outranks the silence
         // of the head tokens. Type-2 is then the claim the evidence supports.
-        return if exact(breakdown.lexical) && exact(breakdown.api) {
+        return if exact(breakdown.lexical) && breakdown.api.is_none_or(exact) {
             (Some(CloneClass::Type1), Some(Confidence::High))
         } else {
             (Some(CloneClass::Type2), Some(Confidence::High))
@@ -367,7 +370,7 @@ fn composite(
     structural: f64,
     control_flow: f64,
     type_similarity: Option<f64>,
-    api: f64,
+    api: Option<f64>,
 ) -> f64 {
     let mut acc = 0.0;
     let mut total = 0.0;
@@ -378,7 +381,9 @@ fn composite(
     add(lexical, weights.lexical);
     add(structural, weights.structural);
     add(control_flow, weights.control_flow);
-    add(api, weights.api);
+    if let Some(api) = api {
+        add(api, weights.api);
+    }
     if let Some(type_sim) = type_similarity {
         add(type_sim, weights.type_similarity);
     }
@@ -586,8 +591,12 @@ fn subtree_jaccard(a: &[SubtreeFeature], b: &[SubtreeFeature]) -> f64 {
 }
 
 /// Api agreement: Jaccard of the two call-name multisets, treated as sets of
-/// distinct callee names. `1.0` when neither unit calls anything.
-fn api_similarity(a: &ApiCallFeature, b: &ApiCallFeature) -> f64 {
+/// distinct callee names.
+///
+/// `None` when neither unit calls anything: the dimension then has nothing to
+/// compare, and reporting that as perfect agreement would hand every call-free
+/// pair the dimension's full weight on no evidence at all.
+fn api_similarity(a: &ApiCallFeature, b: &ApiCallFeature) -> Option<f64> {
     let mut sa: Vec<&str> = a
         .names
         .iter()
@@ -598,11 +607,14 @@ fn api_similarity(a: &ApiCallFeature, b: &ApiCallFeature) -> f64 {
         .iter()
         .map(crate::frontend::Lexeme::as_str)
         .collect();
+    if sa.is_empty() && sb.is_empty() {
+        return None;
+    }
     sa.sort_unstable();
     sa.dedup();
     sb.sort_unstable();
     sb.dedup();
-    set_jaccard(&sa, &sb)
+    Some(set_jaccard(&sa, &sb))
 }
 
 /// Jaccard of two sorted, deduplicated slices. `1.0` when both are empty.
@@ -763,8 +775,61 @@ mod tests {
         let verdict = verify(&va, &vb, &VerifyConfig::default());
         assert!((verdict.breakdown.lexical - 1.0).abs() < 1e-9);
         assert!((verdict.breakdown.structural - 1.0).abs() < 1e-9);
-        assert!(verdict.breakdown.api.abs() < 1e-9);
+        assert_eq!(verdict.breakdown.api, Some(0.0));
         assert_eq!(verdict.class, Some(CloneClass::Type2));
+    }
+
+    #[test]
+    fn two_call_free_units_have_no_api_dimension_rather_than_a_perfect_one() {
+        // Neither unit calls anything, so there is no call surface to compare.
+        // Scoring that as agreement would hand the dimension's whole weight to
+        // every pair of call-free units on no evidence, which is exactly the
+        // shape of code — small helpers — where a false positive is cheapest
+        // to produce.
+        let a = vec![summary(12, &["let", "total"]), summary(4, &["return"])];
+        let b = vec![summary(12, &["let", "count"]), summary(4, &["return"])];
+        let fa = features(counts(4), &[1, 2, 3], 9, &[]);
+        let fb = features(counts(5), &[1, 2, 4], 8, &[]);
+        let va = UnitView {
+            statements: &a,
+            features: &fa,
+        };
+        let vb = UnitView {
+            statements: &b,
+            features: &fb,
+        };
+        let verdict = verify(&va, &vb, &VerifyConfig::default());
+        assert_eq!(verdict.breakdown.api, None);
+
+        // The composite is the mean over what was measured, so the absent
+        // dimension does not quietly pull the score towards 1.0.
+        let weights = Weights::default();
+        let measured = weights.lexical + weights.structural + weights.control_flow;
+        let expected = weights.lexical.mul_add(
+            verdict.breakdown.lexical,
+            weights.structural.mul_add(
+                verdict.breakdown.structural,
+                weights.control_flow * verdict.breakdown.control_flow,
+            ),
+        ) / measured;
+        assert!((verdict.breakdown.composite - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_call_free_verbatim_copy_is_still_a_type1_clone() {
+        // An absent dimension is not evidence against the strong claim: with
+        // nothing to compare, it cannot contradict identical structure and
+        // identical heads.
+        let stmts = vec![summary(12, &["let", "total"]), summary(4, &["return"])];
+        let feats = features(counts(4), &[1, 2, 3], 9, &[]);
+        let view = UnitView {
+            statements: &stmts,
+            features: &feats,
+        };
+        let verdict = verify(&view, &view, &VerifyConfig::default());
+        assert_eq!(verdict.breakdown.api, None);
+        assert_eq!(verdict.class, Some(CloneClass::Type1));
+        assert!((verdict.breakdown.composite - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -952,10 +1017,10 @@ mod tests {
     fn the_composite_renormalises_when_type_is_absent() {
         // With type absent, the composite is the weighted mean of the other
         // four dimensions; here all are 1.0 so it must be exactly 1.0.
-        let value = composite(&Weights::default(), 1.0, 1.0, 1.0, None, 1.0);
+        let value = composite(&Weights::default(), 1.0, 1.0, 1.0, None, Some(1.0));
         assert!((value - 1.0).abs() < 1e-9);
         // Present type similarity participates.
-        let value = composite(&Weights::default(), 1.0, 1.0, 1.0, Some(0.0), 1.0);
+        let value = composite(&Weights::default(), 1.0, 1.0, 1.0, Some(0.0), Some(1.0));
         assert!(value < 1.0);
     }
 

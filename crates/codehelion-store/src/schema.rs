@@ -39,11 +39,11 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
 
 /// Version 1: the full entity set.
 const V1: &str = "
@@ -333,6 +333,34 @@ ALTER TABLE clone_group ADD COLUMN boilerplate TEXT
 const V5: &str = "
 ALTER TABLE clone_group_similarity ADD COLUMN confidence_band TEXT
     CHECK (confidence_band IN ('high', 'medium', 'low'));
+";
+
+/// Version 6: the api dimension becomes nullable.
+///
+/// Two units that call nothing have no call surfaces to compare, and the
+/// dimension is then absent rather than in perfect agreement — the same
+/// distinction `type_similarity` already carries. `SQLite` cannot drop a NOT
+/// NULL constraint in place, so the table is rebuilt; every existing row was
+/// written with a value and keeps it.
+const V6: &str = "
+CREATE TABLE clone_group_similarity_new (
+    clone_group_id  INTEGER PRIMARY KEY REFERENCES clone_group (id) ON DELETE CASCADE,
+    weight_version  TEXT NOT NULL,
+    lexical         REAL NOT NULL,
+    structural      REAL NOT NULL,
+    control_flow    REAL NOT NULL,
+    type_similarity REAL,
+    api             REAL,
+    composite       REAL NOT NULL,
+    min_pairwise    REAL NOT NULL,
+    confidence_band TEXT CHECK (confidence_band IN ('high', 'medium', 'low'))
+) STRICT;
+INSERT INTO clone_group_similarity_new
+    SELECT clone_group_id, weight_version, lexical, structural, control_flow,
+           type_similarity, api, composite, min_pairwise, confidence_band
+    FROM clone_group_similarity;
+DROP TABLE clone_group_similarity;
+ALTER TABLE clone_group_similarity_new RENAME TO clone_group_similarity;
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

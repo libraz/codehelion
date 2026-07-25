@@ -148,6 +148,20 @@ fn the_judge_never_mistakes_a_negative_pair_for_a_copy() {
 }
 
 #[test]
+fn the_call_free_negatives_carry_no_api_evidence() {
+    // None of these functions calls anything, so the dimension has nothing to
+    // compare. Reporting that as agreement would hand each of these pairs the
+    // dimension's whole weight for free — and this family, small helpers built
+    // on a shared skeleton, is exactly where that inflation does damage.
+    for (pair, verdict) in negative_verdicts() {
+        assert_eq!(
+            verdict.breakdown.api, None,
+            "{pair} has no call surface to compare"
+        );
+    }
+}
+
+#[test]
 fn the_corpus_measures_the_same_twice() {
     let composites = |scored: Vec<(String, Verdict)>| -> Vec<(String, f64)> {
         scored
