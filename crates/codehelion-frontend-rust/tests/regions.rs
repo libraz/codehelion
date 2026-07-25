@@ -206,3 +206,133 @@ fn confirmation_is_deterministic() {
         analyze(&[DONOR, VERBATIM_HOST, RENAMED_HOST]).regions
     );
 }
+
+/// A donor whose measurement loop sits in the middle of a longer run: two
+/// accumulators, the loop, and two statements derived from what it computed.
+const NESTED_DONOR: &str = "\
+fn summarise_alpha(rows: &[String]) -> usize {
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    while cursor < rows.len() {
+        out.push_str(&rows[cursor]);
+        out.push('|');
+        cursor += 1;
+    }
+    if out.is_empty() {
+        return 0;
+    }
+    let mut total = 0usize;
+    let mut widest = 0usize;
+    for row in rows {
+        let trimmed = row.trim_end();
+        let size = trimmed.chars().count();
+        total = total.saturating_add(size);
+        widest = widest.max(size);
+    }
+    let ratio = total / widest.max(1);
+    let spread = widest.saturating_sub(ratio);
+    out.push('!');
+    total + spread + out.len()
+}
+";
+
+/// The same run inside a differently built host, verbatim: the outer run and
+/// the loop body inside it are both duplicated, and the outer accounts for
+/// the inner.
+const NESTED_HOST: &str = "\
+fn summarise_beta(rows: &[String], cap: usize) -> usize {
+    let mut guard = 0usize;
+    match rows.first() {
+        Some(head) if head.is_empty() => return 0,
+        Some(_) => guard += 1,
+        None => return cap,
+    }
+    while guard < cap {
+        guard += 1;
+    }
+    let mut total = 0usize;
+    let mut widest = 0usize;
+    for row in rows {
+        let trimmed = row.trim_end();
+        let size = trimmed.chars().count();
+        total = total.saturating_add(size);
+        widest = widest.max(size);
+    }
+    let ratio = total / widest.max(1);
+    let spread = widest.saturating_sub(ratio);
+    total + spread + guard
+}
+";
+
+/// The same host with the two statements *after* the loop renamed, so the
+/// outer run matches only up to renaming while the loop body inside it is
+/// still verbatim.
+const RENAMED_NESTED_HOST: &str = "\
+fn summarise_beta(rows: &[String], cap: usize) -> usize {
+    let mut guard = 0usize;
+    match rows.first() {
+        Some(head) if head.is_empty() => return 0,
+        Some(_) => guard += 1,
+        None => return cap,
+    }
+    while guard < cap {
+        guard += 1;
+    }
+    let mut total = 0usize;
+    let mut widest = 0usize;
+    for row in rows {
+        let trimmed = row.trim_end();
+        let size = trimmed.chars().count();
+        total = total.saturating_add(size);
+        widest = widest.max(size);
+    }
+    let quotient = total / widest.max(1);
+    let slack = widest.saturating_sub(quotient);
+    total + slack + guard
+}
+";
+
+/// A third file whose loop body summarises exactly like the donor's while
+/// computing something else. It contributes no duplication of its own, but it
+/// is what keeps the inner run a candidate in its own right: without a third
+/// party the inner match is absorbed into the outer one pair by pair, and the
+/// question of which run to report never arises.
+const SUMMARY_TWIN: &str = "\
+fn tally_gamma(items: &[String], seed: usize) -> usize {
+    let mut score = seed;
+    let mut peak = seed;
+    loop {
+        score += 1;
+        break;
+    }
+    for item in items {
+        let label = item.to_uppercase();
+        let count = label.chars().rev().count();
+        score = score.wrapping_sub(count);
+        peak = peak.min(count);
+    }
+    score + peak
+}
+";
+
+#[test]
+fn a_run_a_longer_one_accounts_for_is_not_reported_twice() {
+    let report = analyze(&[NESTED_DONOR, NESTED_HOST, SUMMARY_TWIN]);
+    // The loop body and the run it sits in are both duplicated in the same
+    // two places, so the longer one says everything the shorter one says.
+    assert_eq!(shape(&report), vec![(CloneClass::Type1, 5, 2)]);
+    assert_eq!(report.stats.region_subsumed, 1);
+}
+
+#[test]
+fn a_verbatim_run_inside_a_renamed_one_is_still_reported() {
+    // "These five statements match up to renaming, and these four of them
+    // match verbatim" is two facts. Reporting only the first loses the
+    // stronger one.
+    let report = analyze(&[NESTED_DONOR, RENAMED_NESTED_HOST, SUMMARY_TWIN]);
+    assert_eq!(
+        shape(&report),
+        vec![(CloneClass::Type1, 4, 2), (CloneClass::Type2, 5, 2)]
+    );
+    assert_eq!(report.stats.region_subsumed, 0);
+}

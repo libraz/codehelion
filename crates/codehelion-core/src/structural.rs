@@ -177,6 +177,9 @@ pub struct StructuralStats {
     /// candidate run shared: the statement summaries agreed but the code did
     /// not.
     pub region_singletons: usize,
+    /// Confirmed runs dropped because a longer run covers every one of their
+    /// occurrences and claims at least as much about them.
+    pub region_subsumed: usize,
     /// Distinct unit pairs handed to verification.
     pub unit_pairs: usize,
     /// Unit pairs that verification accepted as clones.
@@ -262,13 +265,14 @@ pub fn analyze(
     // Stage: fold the window seeds into the maximal shared runs they describe,
     // then confirm each candidate run against the tokens it actually covers.
     let candidate_regions = maximal::consolidate(&candidate.pairs, &config.maximal);
-    let (regions, singletons) = confirm_regions(
+    let (mut regions, singletons) = confirm_regions(
         &candidate_regions.shared,
         files,
         &offsets,
         variant,
         config.literals,
     );
+    let subsumed = drop_subsumed(&mut regions);
 
     // Stage: precise verification of each distinct unit pair.
     let mut edges: Vec<SimilarityEdge> = Vec::new();
@@ -312,6 +316,7 @@ pub fn analyze(
         maximal: candidate_regions.stats,
         regions: regions.len(),
         region_singletons: singletons,
+        region_subsumed: subsumed,
         unit_pairs: pairs.len(),
         verified_pairs: edges.len(),
         grouping: groups.stats.clone(),
@@ -407,6 +412,67 @@ fn confirm_regions(
     });
     regions.dedup_by(|a, b| a.fingerprint == b.fingerprint && a.occurrences == b.occurrences);
     (regions, singletons)
+}
+
+/// Drop the runs a longer run already accounts for, returning how many went.
+///
+/// The window lengths overlap by construction, so one duplicated stretch
+/// surfaces as a family of runs: the same eight statements confirm at length
+/// eight, and their first six confirm again with whatever extra copies share
+/// only those six. A run is dropped when *every* one of its occurrences sits
+/// inside an occurrence of another run — the covering run reports the same
+/// code in the same places, and more of it.
+///
+/// Coverage alone is not enough. A verbatim run nested inside a longer run
+/// that only matches up to renaming makes the stronger claim of the two:
+/// "these eight statements match up to renaming, and these six of them match
+/// verbatim" is two facts, not one repeated. So a run is only dropped by a
+/// cover that classifies at least as strictly, [`CloneClass`] ordering running
+/// from exact to gapped.
+fn drop_subsumed(regions: &mut Vec<StructuralRegion>) -> usize {
+    let before = regions.len();
+    // Widest cover first, so a run is judged against the longest thing that
+    // could account for it before anything shorter is considered.
+    let mut order: Vec<usize> = (0..regions.len()).collect();
+    order.sort_by_key(|&index| {
+        (
+            std::cmp::Reverse(regions[index].statements),
+            regions[index].fingerprint,
+        )
+    });
+
+    let mut dropped = vec![false; regions.len()];
+    for (rank, &inner) in order.iter().enumerate() {
+        // Only wider runs, and among equals only those already settled, can
+        // cover this one: a pair of runs covering each other must not remove
+        // both.
+        if order[..rank]
+            .iter()
+            .any(|&outer| !dropped[outer] && covers_run(&regions[outer], &regions[inner]))
+        {
+            dropped[inner] = true;
+        }
+    }
+    *regions = std::mem::take(regions)
+        .into_iter()
+        .zip(&dropped)
+        .filter_map(|(region, &drop)| (!drop).then_some(region))
+        .collect();
+    before - regions.len()
+}
+
+/// Whether `outer` accounts for every occurrence of `inner`.
+fn covers_run(outer: &StructuralRegion, inner: &StructuralRegion) -> bool {
+    if outer.fingerprint == inner.fingerprint || outer.clone_type > inner.clone_type {
+        return false;
+    }
+    inner.occurrences.iter().all(|occurrence| {
+        outer.occurrences.iter().any(|cover| {
+            cover.file == occurrence.file
+                && cover.range.start <= occurrence.range.start
+                && occurrence.range.end <= cover.range.end
+        })
+    })
 }
 
 /// Resolve one candidate occurrence into its tokens, returning the reportable
@@ -605,5 +671,139 @@ fn insert_pair(
     let b = offsets[file_b] + unit_b;
     if a != b {
         pairs.insert(if a <= b { (a, b) } else { (b, a) });
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::{CloneClass, RegionOccurrence, StructuralRegion, drop_subsumed};
+    use crate::ir::ByteRange;
+    use crate::stable_id::{CloneGroupFingerprint, FragmentFingerprint};
+
+    fn occurrence(file: usize, start: usize, end: usize) -> RegionOccurrence {
+        RegionOccurrence {
+            file,
+            unit: 0,
+            range: ByteRange { start, end },
+            start_line: 1,
+            end_line: 2,
+            token_start: start,
+            token_end: end,
+            content: FragmentFingerprint::from_bytes([u8::try_from(start % 251).unwrap(); 16]),
+        }
+    }
+
+    fn region(
+        id: u8,
+        clone_type: CloneClass,
+        statements: u32,
+        spans: &[(usize, usize, usize)],
+    ) -> StructuralRegion {
+        StructuralRegion {
+            fingerprint: CloneGroupFingerprint::from_bytes([id; 16]),
+            clone_type,
+            statements,
+            occurrences: spans
+                .iter()
+                .map(|&(file, start, end)| occurrence(file, start, end))
+                .collect(),
+        }
+    }
+
+    fn ids(regions: &[StructuralRegion]) -> Vec<u8> {
+        regions
+            .iter()
+            .map(|region| region.fingerprint.as_bytes()[0])
+            .collect()
+    }
+
+    #[test]
+    fn a_run_every_occurrence_of_which_sits_inside_a_longer_one_goes() {
+        // The window lengths overlap, so one stretch confirms at several
+        // lengths. The longest reports the same code in the same places.
+        let mut regions = vec![
+            region(1, CloneClass::Type1, 4, &[(0, 20, 40), (1, 120, 140)]),
+            region(2, CloneClass::Type1, 8, &[(0, 10, 60), (1, 110, 160)]),
+        ];
+        assert_eq!(drop_subsumed(&mut regions), 1);
+        assert_eq!(ids(&regions), vec![2]);
+    }
+
+    #[test]
+    fn a_run_with_a_copy_the_longer_one_misses_stays() {
+        // The third copy shares only the shorter stretch, so the longer run
+        // does not account for it and both runs carry a fact of their own.
+        let mut regions = vec![
+            region(
+                1,
+                CloneClass::Type1,
+                4,
+                &[(0, 20, 40), (1, 120, 140), (2, 220, 240)],
+            ),
+            region(2, CloneClass::Type1, 8, &[(0, 10, 60), (1, 110, 160)]),
+        ];
+        assert_eq!(drop_subsumed(&mut regions), 0);
+        assert_eq!(ids(&regions), vec![1, 2]);
+    }
+
+    #[test]
+    fn a_verbatim_run_inside_a_renamed_one_keeps_its_stronger_claim() {
+        // "These eight statements match up to renaming, and these four of
+        // them match verbatim" is two facts. Dropping the inner one would
+        // report only the weaker.
+        let mut regions = vec![
+            region(1, CloneClass::Type1, 4, &[(0, 20, 40), (1, 120, 140)]),
+            region(2, CloneClass::Type2, 8, &[(0, 10, 60), (1, 110, 160)]),
+        ];
+        assert_eq!(drop_subsumed(&mut regions), 0);
+        assert_eq!(ids(&regions), vec![1, 2]);
+
+        // The other way round the cover claims at least as much, so it wins.
+        let mut regions = vec![
+            region(1, CloneClass::Type2, 4, &[(0, 20, 40), (1, 120, 140)]),
+            region(2, CloneClass::Type1, 8, &[(0, 10, 60), (1, 110, 160)]),
+        ];
+        assert_eq!(drop_subsumed(&mut regions), 1);
+        assert_eq!(ids(&regions), vec![2]);
+    }
+
+    #[test]
+    fn two_runs_that_cover_each_other_do_not_both_disappear() {
+        let mut regions = vec![
+            region(1, CloneClass::Type1, 4, &[(0, 10, 60), (1, 110, 160)]),
+            region(2, CloneClass::Type1, 4, &[(0, 10, 60), (1, 110, 160)]),
+        ];
+        assert_eq!(drop_subsumed(&mut regions), 1);
+        assert_eq!(regions.len(), 1);
+    }
+
+    #[test]
+    fn a_run_covered_only_in_the_wrong_file_stays() {
+        // Same byte offsets, different file: coverage is per occurrence, and
+        // an occurrence is a place in a file.
+        let mut regions = vec![
+            region(1, CloneClass::Type1, 4, &[(0, 20, 40), (1, 120, 140)]),
+            region(2, CloneClass::Type1, 8, &[(0, 10, 60), (2, 110, 160)]),
+        ];
+        assert_eq!(drop_subsumed(&mut regions), 0);
+        assert_eq!(ids(&regions), vec![1, 2]);
+    }
+
+    #[test]
+    fn dropping_is_independent_of_the_order_the_runs_arrive_in() {
+        let build = || {
+            vec![
+                region(1, CloneClass::Type1, 4, &[(0, 20, 40), (1, 120, 140)]),
+                region(2, CloneClass::Type1, 6, &[(0, 15, 50), (1, 115, 150)]),
+                region(3, CloneClass::Type1, 8, &[(0, 10, 60), (1, 110, 160)]),
+            ]
+        };
+        let mut forward = build();
+        drop_subsumed(&mut forward);
+        let mut reversed: Vec<StructuralRegion> = build().into_iter().rev().collect();
+        drop_subsumed(&mut reversed);
+        assert_eq!(ids(&forward), vec![3]);
+        assert_eq!(ids(&reversed), vec![3]);
     }
 }
