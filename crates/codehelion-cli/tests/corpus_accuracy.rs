@@ -49,19 +49,23 @@ const CORPORA: &[Expected] = &[
     Expected {
         name: "rust",
         recall: 5.0 / 6.0,
-        shortfall: "the Type-3 variant of the accumulate-and-return function is \
-                    not recovered at all: the gapped copy of `sum_even` never \
-                    joins the group its seed is in",
+        shortfall: "the labelled Type-3 pair is judged a clone (0.71) and still \
+                    cannot be reported: its partner is a clone of the seed and \
+                    of the verbatim copy but not of the renamed one (0.63), so \
+                    no single group holds both halves of the labelled pair. A \
+                    partition cannot express a relation that is not transitive",
     },
     Expected {
         name: "c",
         recall: 5.0 / 6.0,
-        shortfall: "as in the Rust corpus, the Type-3 variant is missed",
+        shortfall: "as in the Rust corpus, the labelled Type-3 pair spans two \
+                    groups",
     },
     Expected {
         name: "cpp",
         recall: 5.0 / 6.0,
-        shortfall: "as in the Rust corpus, the Type-3 variant is missed",
+        shortfall: "as in the Rust corpus, the labelled Type-3 pair spans two \
+                    groups",
     },
     Expected {
         name: "rust-graded",
@@ -88,8 +92,11 @@ const CORPORA: &[Expected] = &[
         name: "rust-divergent",
         recall: 3.0 / 5.0,
         shortfall: "the seed and its renamed-callee variant are a labelled \
-                    Type-2 pair, and over the whole corpus they land in \
-                    different groups; scanned as a pair they do not",
+                    Type-2 pair scoring 0.85 — the strongest agreement in the \
+                    corpus — and they still land in different groups, because \
+                    that variant agrees with the seed's other variants too \
+                    weakly to sit beside them. The same partition limit as in \
+                    the base corpus, reached from the other direction",
     },
 ];
 
