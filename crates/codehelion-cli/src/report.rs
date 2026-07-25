@@ -30,6 +30,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// The JSON Schema document describing [`Report`]'s JSON form.
 pub const JSON_SCHEMA: &str = include_str!("../schema/scan-report-v1.schema.json");
 
+/// [`Group::scope`] value of a group whose members are runs of statements.
+const SCOPE_FRAGMENT: &str = "fragment";
+
 /// Number of groups the default (non-verbose) text report lists.
 const TEXT_GROUP_LIMIT: usize = 10;
 
@@ -153,6 +156,14 @@ pub struct GroupCounts {
     /// Gapped (Type-3) groups. Always zero in modes that report no gapped
     /// clones.
     pub type_3: u64,
+    /// How many of the total describe a duplicated run inside units that are
+    /// not clones of each other, rather than whole duplicated units. Always
+    /// zero in modes that only compare whole units.
+    pub fragment_scope: u64,
+    /// Duplicated runs left out of the listing because a reported whole-unit
+    /// group already covers them — the same duplication described twice.
+    /// Reported so the fold is visible rather than silent.
+    pub folded_runs: u64,
 }
 
 /// Suppressed-group counts by mechanism.
@@ -171,6 +182,17 @@ pub struct Group {
     pub fingerprint: String,
     /// Clone classification (`type-1`, `type-2`, `type-3`).
     pub clone_type: String,
+    /// What each member is: `unit` for a whole duplicated unit, `fragment`
+    /// for a run of statements duplicated inside units that need not be
+    /// clones of each other.
+    ///
+    /// The two answer different questions about the same code, so a reader
+    /// has to be able to tell them apart. They share one ranking because they
+    /// compete for the same attention.
+    pub scope: String,
+    /// Statements each member covers, for fragment-scope groups; `None` for
+    /// unit-scope groups, whose extent is the unit itself.
+    pub statements: Option<u64>,
     /// Minimum pairwise similarity across the group.
     pub confidence: f64,
     /// Ranking value with the inputs it was computed from.
@@ -427,6 +449,14 @@ impl Report {
             summary.suppressed.noise,
             summary.suppressed.by_rule,
         )?;
+        if summary.groups.fragment_scope > 0 || summary.groups.folded_runs > 0 {
+            writeln!(
+                out,
+                "    {} of them are runs duplicated inside units that are not clones of each \
+                 other; {} further runs were folded into the groups that already cover them",
+                summary.groups.fragment_scope, summary.groups.folded_runs,
+            )?;
+        }
         writeln!(
             out,
             "  snapshot: run {} in {}",
@@ -507,9 +537,16 @@ fn render_group(
         }
         (None, None) => String::new(),
     };
+    // A fragment-scope group states its extent: without it "type-1, 40
+    // tokens" reads as a duplicated unit, which it is not.
+    let scope = match (group.scope.as_str(), group.statements) {
+        (SCOPE_FRAGMENT, Some(statements)) => format!(" run of {statements} statements"),
+        (SCOPE_FRAGMENT, None) => " run".to_string(),
+        _ => String::new(),
+    };
     writeln!(
         out,
-        "  {} {} priority {:.1} ({} tokens x {} extra x {:.2} similarity){marker}",
+        "  {} {}{scope} priority {:.1} ({} tokens x {} extra x {:.2} similarity){marker}",
         palette.cyan(&group.fingerprint),
         group.clone_type,
         group.priority.value,
@@ -568,6 +605,8 @@ pub struct GroupRef {
     pub fingerprint: String,
     /// Clone classification (`type-1`, `type-2`, `type-3`).
     pub clone_type: String,
+    /// What each member is (`unit` or `fragment`), as recorded with the run.
+    pub scope: String,
     /// Minimum pairwise similarity across the group.
     pub confidence: f64,
     /// Number of occurrences in the group, this one included.
@@ -614,9 +653,16 @@ impl FindingDetail {
             "  canonical: {}",
             if self.member.canonical { "yes" } else { "no" }
         )?;
+        // Which of the two the occurrence is decides how to read its span:
+        // the whole unit is the clone, or a run inside it is.
+        let scope = if self.group.scope == SCOPE_FRAGMENT {
+            "duplicated run"
+        } else {
+            "duplicated unit"
+        };
         writeln!(
             out,
-            "  group: {} ({}, score {:.2}, {} instances)",
+            "  group: {} ({scope}, {}, score {:.2}, {} instances)",
             self.group.fingerprint,
             self.group.clone_type,
             self.group.confidence,
@@ -685,6 +731,8 @@ pub(super) mod tests {
                     type_1: 2,
                     type_2: 0,
                     type_3: 0,
+                    fragment_scope: 0,
+                    folded_runs: 0,
                 },
                 suppressed: SuppressedCounts {
                     noise: 0,
@@ -696,6 +744,8 @@ pub(super) mod tests {
                 Group {
                     fingerprint: "0b".repeat(16),
                     clone_type: "type-1".to_string(),
+                    scope: "unit".to_string(),
+                    statements: None,
                     confidence: 1.0,
                     priority: Priority {
                         value: 80.0,
@@ -721,6 +771,8 @@ pub(super) mod tests {
                 Group {
                     fingerprint: "0c".repeat(16),
                     clone_type: "type-1".to_string(),
+                    scope: "unit".to_string(),
+                    statements: None,
                     confidence: 1.0,
                     priority: Priority {
                         value: 30.0,
@@ -767,6 +819,8 @@ pub(super) mod tests {
         Group {
             fingerprint: "0d".repeat(16),
             clone_type: "type-3".to_string(),
+            scope: "unit".to_string(),
+            statements: None,
             confidence: 0.79,
             priority: Priority {
                 value: 47.4,
@@ -808,6 +862,108 @@ pub(super) mod tests {
                 },
             ],
         }
+    }
+
+    /// A run duplicated inside two units that are not clones of each other:
+    /// the members are stretches of their hosts, not the hosts.
+    pub(super) fn fragment_group() -> Group {
+        Group {
+            fingerprint: "0e".repeat(16),
+            clone_type: "type-1".to_string(),
+            scope: SCOPE_FRAGMENT.to_string(),
+            statements: Some(5),
+            confidence: 1.0,
+            priority: Priority {
+                value: 39.0,
+                largest_member_tokens: 39,
+                extra_instances: 1,
+                similarity: 1.0,
+            },
+            similarity: None,
+            boilerplate: None,
+            suppressed: None,
+            members: vec![
+                Member {
+                    finding_id: "5".repeat(32),
+                    file: "src/render.rs".to_string(),
+                    start_line: 17,
+                    end_line: 21,
+                    unit: Some("render_rows".to_string()),
+                    tokens: 39,
+                    canonical: true,
+                },
+                Member {
+                    finding_id: "6".repeat(32),
+                    file: "src/audit.rs".to_string(),
+                    start_line: 11,
+                    end_line: 15,
+                    unit: Some("audit_entries".to_string()),
+                    tokens: 39,
+                    canonical: false,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_duplicated_run_states_its_extent_in_every_view() {
+        let mut report = sample_report();
+        report.summary.groups.total = 3;
+        report.summary.groups.fragment_scope = 1;
+        report.summary.groups.folded_runs = 4;
+        report.groups.insert(0, fragment_group());
+
+        let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+        let group = &value["groups"][0];
+        assert_eq!(group["scope"], "fragment");
+        assert_eq!(group["statements"], 5);
+        // A whole-unit group says so, and says it has no such extent.
+        assert_eq!(value["groups"][1]["scope"], "unit");
+        assert_eq!(value["groups"][1]["statements"], serde_json::Value::Null);
+
+        let mut buffer = Vec::new();
+        report
+            .render_text(TextOptions::default(), &mut buffer)
+            .unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        assert!(text.contains("type-1 run of 5 statements priority 39.0"));
+        // What was folded away is stated rather than silently dropped.
+        assert!(text.contains(
+            "1 of them are runs duplicated inside units that are not clones of each other; \
+             4 further runs were folded into the groups that already cover them"
+        ));
+    }
+
+    #[test]
+    fn an_occurrence_of_a_run_explains_itself_as_a_run() {
+        let mut detail = FindingDetail {
+            member: fragment_group().members.remove(0),
+            group: GroupRef {
+                fingerprint: "0e".repeat(16),
+                clone_type: "type-1".to_string(),
+                scope: SCOPE_FRAGMENT.to_string(),
+                confidence: 1.0,
+                members: 2,
+                boilerplate: None,
+                similarity: None,
+                suppressed: None,
+            },
+            scan_run: 3,
+        };
+        let mut buffer = Vec::new();
+        detail.render_text(&mut buffer).unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        assert!(text.contains("duplicated run, type-1"));
+
+        // The same occurrence in a whole-unit group reads the other way.
+        detail.group.scope = "unit".to_string();
+        let mut buffer = Vec::new();
+        detail.render_text(&mut buffer).unwrap();
+        assert!(
+            String::from_utf8(buffer)
+                .unwrap()
+                .contains("duplicated unit")
+        );
     }
 
     #[test]
@@ -870,8 +1026,10 @@ pub(super) mod tests {
         );
         let mut report = sample_report();
         report.groups.push(structural_group());
+        report.groups.push(fragment_group());
         let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
         let checks = [
+            (&value["groups"][3], &schema["$defs"]["group"]["properties"]),
             (&value, &schema["properties"]),
             (&value["run"], &schema["$defs"]["run"]["properties"]),
             (&value["summary"], &schema["$defs"]["summary"]["properties"]),
@@ -962,6 +1120,7 @@ pub(super) mod tests {
             group: GroupRef {
                 fingerprint: "cd".repeat(16),
                 clone_type: "type-1".to_string(),
+                scope: "unit".to_string(),
                 confidence: 1.0,
                 members: 2,
                 boilerplate: None,
@@ -1002,6 +1161,7 @@ pub(super) mod tests {
             group: GroupRef {
                 fingerprint: "cd".repeat(16),
                 clone_type: "type-3".to_string(),
+                scope: "unit".to_string(),
                 confidence: 0.87,
                 members: 2,
                 boilerplate: Some("macro-repetition".to_string()),

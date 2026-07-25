@@ -137,6 +137,7 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
         group: report::GroupRef {
             fingerprint: occurrence.group_fingerprint_hex,
             clone_type: occurrence.clone_type,
+            scope: occurrence.member_scope,
             confidence: occurrence.score,
             members: u64::try_from(occurrence.member_count).unwrap_or(0),
             boilerplate: occurrence.boilerplate,

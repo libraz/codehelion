@@ -31,8 +31,8 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::{
-    BuildVariantInfo, DetectorVersion, Group, Member, Priority, Report, Similarity, Summary,
-    Suppression, SuppressionKind,
+    BuildVariantInfo, DetectorVersion, Group, Member, Priority, Report, SCOPE_FRAGMENT, Similarity,
+    Summary, Suppression, SuppressionKind,
 };
 
 /// SARIF version this reporter emits.
@@ -336,6 +336,8 @@ impl<'a> From<&'a Group> for ResultEntry<'a> {
                 .map(|cause| [SuppressionEntry::from(cause)]),
             properties: ResultProperties {
                 clone_type: &group.clone_type,
+                scope: &group.scope,
+                statements: group.statements,
                 confidence: group.confidence,
                 priority: &group.priority,
                 similarity: group.similarity.as_ref(),
@@ -349,8 +351,15 @@ impl<'a> From<&'a Group> for ResultEntry<'a> {
 /// One line describing the group, with the evidence it was judged on when the
 /// mode measured any.
 fn message_text(group: &Group) -> String {
+    // A run duplicated inside unrelated units is not a duplicated unit; the
+    // first words of the message have to say which one this is.
+    let subject = match (group.scope.as_str(), group.statements) {
+        (SCOPE_FRAGMENT, Some(statements)) => format!("run of {statements} statements"),
+        (SCOPE_FRAGMENT, None) => "duplicated run".to_string(),
+        _ => "clone group".to_string(),
+    };
     let mut text = format!(
-        "{} clone group: {} occurrences, {} tokens in the largest",
+        "{} {subject}: {} occurrences, {} tokens in the largest",
         group.clone_type,
         group.members.len(),
         group.priority.largest_member_tokens,
@@ -490,6 +499,9 @@ impl From<&Suppression> for SuppressionEntry {
 #[derive(Debug, Serialize)]
 struct ResultProperties<'a> {
     clone_type: &'a str,
+    scope: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    statements: Option<u64>,
     confidence: f64,
     priority: &'a Priority,
     #[serde(skip_serializing_if = "Option::is_none")]

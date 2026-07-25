@@ -109,7 +109,15 @@
             "total": { "type": "integer" },
             "type_1": { "type": "integer" },
             "type_2": { "type": "integer" },
-            "type_3": { "type": "integer", "description": "Gapped groups; zero in modes that report no gapped clones." }
+            "type_3": { "type": "integer", "description": "Gapped groups; zero in modes that report no gapped clones." },
+            "fragment_scope": {
+              "type": "integer",
+              "description": "How many of the total describe a run duplicated inside units that are not clones of each other; zero in modes that only compare whole units."
+            },
+            "folded_runs": {
+              "type": "integer",
+              "description": "Duplicated runs left out of the listing because a reported whole-unit group already covers them, so the fold is visible rather than silent."
+            }
           }
         },
         "suppressed": {
@@ -128,10 +136,18 @@
     },
     "group": {
       "type": "object",
-      "required": ["fingerprint", "clone_type", "confidence", "priority", "suppressed", "members"],
+      "required": ["fingerprint", "clone_type", "scope", "confidence", "priority", "suppressed", "members"],
       "properties": {
         "fingerprint": { "$ref": "#/$defs/hex", "description": "Stable clone-group fingerprint." },
         "clone_type": { "type": "string" },
+        "scope": {
+          "enum": ["unit", "fragment"],
+          "description": "What each member is: a whole duplicated unit, or a run of statements duplicated inside units that need not be clones of each other."
+        },
+        "statements": {
+          "oneOf": [{ "type": "integer" }, { "type": "null" }],
+          "description": "Statements each member covers, for fragment-scope groups; null for unit-scope groups, whose extent is the unit itself."
+        },
         "confidence": { "type": "number", "description": "Minimum pairwise similarity across the group." },
         "priority": { "$ref": "#/$defs/priority" },
         "similarity": {

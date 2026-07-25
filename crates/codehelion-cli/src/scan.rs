@@ -18,7 +18,7 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use codehelion_core::clone_class::CloneClass;
+use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::discovery::{
     self, BuildVariant, ContentHash, DEFAULT_SCAN_LINES, DiscoveryConfig, DiscoveryReport,
     GeneratedMarkers, Language, LanguageSelection, NORMALIZATION_VERSION, SourceUnit,
@@ -270,6 +270,9 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
                 type_2: count_groups(&|i| inputs.report.groups[i].clone_type == CloneClass::Type2),
                 // The Fast engine matches identical content only.
                 type_3: 0,
+                // The Fast engine compares whole units only.
+                fragment_scope: 0,
+                folded_runs: 0,
             },
             suppressed: report::SuppressedCounts {
                 noise: count_groups(&|i| inputs.report.groups[i].suppressed.is_some()),
@@ -314,6 +317,8 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
     report::Group {
         fingerprint: inputs.ids[index].fingerprint.to_hex(),
         clone_type: group.clone_type.name().to_string(),
+        scope: CloneScope::Unit.name().to_string(),
+        statements: None,
         confidence: group.score,
         priority: report::Priority {
             value: final_priority(group),
@@ -764,6 +769,7 @@ fn snapshot_rows(
         .map(|((group, group_ids), suppressed_by)| GroupRow {
             fingerprint: group_ids.fingerprint,
             clone_type: group.clone_type,
+            member_scope: CloneScope::Unit,
             score: group.score,
             entropy_bits: group.entropy_bits,
             suppress_reason: group.suppressed.map(|reason| reason.name().to_string()),

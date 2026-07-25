@@ -13,13 +13,13 @@
 //! dimension the mode cannot measure (types) is reported as absent rather
 //! than guessed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use codehelion_core::boilerplate::{BOILERPLATE_VERSION, Boilerplate};
-use codehelion_core::clone_class::CloneClass;
+use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::discovery::{
     BuildVariant, ContentHash, DiscoveryReport, Language, LanguageSelection, NORMALIZATION_VERSION,
     SourceUnit,
@@ -31,7 +31,8 @@ use codehelion_core::grouping::StructuralGroup;
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
 use codehelion_core::stable_id::{self, FP_SCHEMA_VERSION};
 use codehelion_core::structural::{
-    self, GroupDetail, StructuralConfig, StructuralReport, StructuralUnit,
+    self, GroupDetail, RegionOccurrence, StructuralConfig, StructuralRegion, StructuralReport,
+    StructuralUnit,
 };
 use codehelion_core::verify::{SimilarityBreakdown, WEIGHT_VERSION};
 use codehelion_store::snapshot::{GroupRow, MemberRow, SimilarityBreakdownRow, Snapshot, UnitRow};
@@ -131,6 +132,22 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
                 })
         })
         .collect();
+    let regions = reportable_regions(&analysis);
+    // A duplicated run is suppressed by the same rules a whole unit is, read
+    // at the run's own line span rather than its host unit's: a marker or a
+    // path glob is an instruction about a place in the code, and a run has
+    // its own place.
+    let region_suppressed: Vec<Option<usize>> = regions
+        .reported
+        .iter()
+        .map(|&index| {
+            let region = &analysis.regions[index];
+            rules
+                .rules
+                .clone_id_rule(&region.fingerprint.to_hex())
+                .or_else(|| rules.region_rule(region, &analysis, &local_units))
+        })
+        .collect();
 
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
     let finished_at = rfc3339_now();
@@ -145,6 +162,8 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         analysis: &analysis,
         rules: &rules.rules,
         group_suppressed: &group_suppressed,
+        regions: &regions,
+        region_suppressed: &region_suppressed,
         boilerplate: &cfg.suppression.boilerplate,
         literals: literal_norm(cfg.literal_normalization),
         glob_excluded,
@@ -243,6 +262,31 @@ impl StructuralRules {
         }
         first
     }
+
+    /// The rule hiding a whole duplicated run: present only when *every*
+    /// occurrence is suppressed, evaluated at the occurrence's own line span
+    /// inside its host unit.
+    fn region_rule(
+        &self,
+        region: &StructuralRegion,
+        analysis: &StructuralReport,
+        local_units: &[usize],
+    ) -> Option<usize> {
+        let mut first = None;
+        for occurrence in &region.occurrences {
+            let unit = &analysis.units[occurrence.unit];
+            let rule = self.rules.member_rule(
+                &self.files[unit.file],
+                occurrence.start_line,
+                occurrence.end_line,
+                Some(local_units[occurrence.unit]),
+            )?;
+            if first.is_none() {
+                first = Some(rule);
+            }
+        }
+        first
+    }
 }
 
 /// Compile the suppression rules and evaluate every parsed file against them.
@@ -306,6 +350,64 @@ fn hidden_boilerplate(
     hidden
 }
 
+/// Which duplicated runs the report lists, and how many it folded away.
+struct ReportableRegions {
+    /// Indices into the analysed regions, in analysis order.
+    reported: Vec<usize>,
+    /// Runs left out because a whole-unit group already covers them.
+    folded: usize,
+}
+
+/// Select the duplicated runs worth listing beside the whole-unit groups.
+///
+/// A run whose occurrences sit one apiece in units that are *themselves* a
+/// reported clone group says nothing the unit group does not already say:
+/// "these functions are clones" implies "they share this stretch". Listing
+/// both describes one duplication twice, and on real code most runs are of
+/// this kind, so the runs that name a duplication no unit group reaches would
+/// be buried. They are folded away and counted rather than silently dropped.
+///
+/// Two cases deliberately survive the fold, because no unit group implies
+/// them: a run occurring more than once inside the same unit, and a run whose
+/// host units are not all members of one group.
+fn reportable_regions(analysis: &StructuralReport) -> ReportableRegions {
+    let mut member_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (index, group) in analysis.groups.groups.iter().enumerate() {
+        for &member in &group.members {
+            member_of.entry(member).or_default().push(index);
+        }
+    }
+    let covers = |hosts: &BTreeSet<usize>| {
+        let Some(first) = hosts.first() else {
+            return false;
+        };
+        member_of.get(first).is_some_and(|groups| {
+            groups.iter().any(|&group| {
+                hosts
+                    .iter()
+                    .all(|host| analysis.groups.groups[group].members.contains(host))
+            })
+        })
+    };
+
+    let mut reported = Vec::new();
+    let mut folded = 0;
+    for (index, region) in analysis.regions.iter().enumerate() {
+        let hosts: BTreeSet<usize> = region
+            .occurrences
+            .iter()
+            .map(|occurrence| occurrence.unit)
+            .collect();
+        let one_per_unit = hosts.len() == region.occurrences.len();
+        if one_per_unit && hosts.len() > 1 && covers(&hosts) {
+            folded += 1;
+        } else {
+            reported.push(index);
+        }
+    }
+    ReportableRegions { reported, folded }
+}
+
 /// Each unit's index within its own file, which is what the file-local
 /// suppression evaluation indexes. Units come out of the analysis grouped by
 /// file in walk order, so one pass assigns every local index.
@@ -335,6 +437,10 @@ struct ReportInputs<'a> {
     analysis: &'a StructuralReport,
     rules: &'a suppress::Rules,
     group_suppressed: &'a [Option<usize>],
+    /// The duplicated runs the report lists.
+    regions: &'a ReportableRegions,
+    /// The rule hiding each listed run, parallel to [`Self::regions`].
+    region_suppressed: &'a [Option<usize>],
     /// What the report does with each recognised boilerplate shape.
     boilerplate: &'a BoilerplatePolicy,
     /// Literal strategy the group content is scored under.
@@ -384,31 +490,77 @@ impl ReportInputs<'_> {
             .max()
             .unwrap_or(0)
     }
+
+    /// The tokens one occurrence of a duplicated run covers, in its own file.
+    fn region_tokens(&self, occurrence: &RegionOccurrence) -> &[Token] {
+        let tokens = &self.irs[occurrence.file].tokens;
+        let end = occurrence.token_end.min(tokens.len());
+        let start = occurrence.token_start.min(end);
+        &tokens[start..end]
+    }
+
+    /// The suppression a report entry carries, from the index of the rule
+    /// that hid it.
+    fn suppression(&self, rule: usize) -> report::Suppression {
+        let row = &self.rules.rows[rule];
+        report::Suppression {
+            kind: report::SuppressionKind::Rule,
+            reason: None,
+            scope: Some(row.scope.clone()),
+            pattern: Some(row.pattern.clone()),
+        }
+    }
 }
 
-/// The order groups are reported in: priority descending, clone fingerprint
-/// ascending on ties, so every view is stable across reruns.
-fn report_order(inputs: &ReportInputs<'_>) -> Vec<usize> {
-    let groups = &inputs.analysis.groups.groups;
-    let mut order: Vec<usize> = (0..groups.len()).collect();
-    order.sort_by(|a, b| {
-        // Ranked-down boilerplate sits below everything that carries
-        // behaviour, whatever its size; within each band, priority decides.
-        inputs
-            .ranked_down(*a)
-            .cmp(&inputs.ranked_down(*b))
-            .then_with(|| {
-                inputs
-                    .priority(&groups[*b])
-                    .total_cmp(&inputs.priority(&groups[*a]))
-            })
-            .then_with(|| {
-                inputs.analysis.details[*a]
-                    .fingerprint
-                    .cmp(&inputs.analysis.details[*b].fingerprint)
-            })
+/// Token count of the longest occurrence of a duplicated run.
+fn largest_occurrence_tokens(region: &StructuralRegion) -> usize {
+    region
+        .occurrences
+        .iter()
+        .map(|occurrence| occurrence.token_end.saturating_sub(occurrence.token_start))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Ranking value of a duplicated run, on the same scale as a unit-scope
+/// group's: largest occurrence × extra occurrences × similarity.
+fn region_priority(region: &StructuralRegion) -> f64 {
+    let size = u32::try_from(largest_occurrence_tokens(region)).unwrap_or(u32::MAX);
+    let extra = u32::try_from(region.occurrences.len().saturating_sub(1)).unwrap_or(u32::MAX);
+    f64::from(size) * f64::from(extra) * REGION_SIMILARITY
+}
+
+/// Similarity reported for a confirmed duplicated run.
+///
+/// A run is confirmed by hashing the tokens its occurrences cover, so every
+/// occurrence carries identical content under the run's literal strategy.
+/// That is an exact match rather than a scored one: the similarity is 1 and
+/// there is no per-dimension breakdown to report, for the same reason the
+/// Fast engine reports none.
+const REGION_SIMILARITY: f64 = 1.0;
+
+/// Every reported entry, in the order the views render them: ranked-down
+/// boilerplate last, then priority descending, then fingerprint ascending, so
+/// every view is stable across reruns.
+///
+/// Duplicated units and duplicated runs share one ranking. They describe the
+/// code differently, and each entry says which it is, but they compete for
+/// the same attention and a reader wants the biggest duplication first
+/// whichever shape it has.
+fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
+    let mut entries: Vec<(bool, report::Group)> = (0..inputs.analysis.groups.groups.len())
+        .map(|index| (inputs.ranked_down(index), build_group(inputs, index)))
+        // A run carries no boilerplate classification: the classifier reads
+        // whole units, so no run is ever ranked down for its shape.
+        .chain((0..inputs.regions.reported.len()).map(|index| (false, build_region(inputs, index))))
+        .collect();
+    entries.sort_by(|(a_ranked_down, a), (b_ranked_down, b)| {
+        a_ranked_down
+            .cmp(b_ranked_down)
+            .then_with(|| b.priority.value.total_cmp(&a.priority.value))
+            .then_with(|| a.fingerprint.cmp(&b.fingerprint))
     });
-    order
+    entries.into_iter().map(|(_, group)| group).collect()
 }
 
 /// Assemble the report model both output formats render from.
@@ -423,9 +575,17 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
                 .count(),
         )
     };
-    let groups = &inputs.analysis.groups.groups;
-    let count_class =
-        |class: CloneClass| as_u64(groups.iter().filter(|g| g.clone_type == class).count());
+    // Counted off the report entries rather than the analysis, so the summary
+    // cannot disagree with what the views list.
+    let groups = build_groups(inputs);
+    let count_class = |class: CloneClass| {
+        as_u64(
+            groups
+                .iter()
+                .filter(|g| g.clone_type == class.name())
+                .count(),
+        )
+    };
     let variant = inputs.variant;
     let stats = &inputs.analysis.stats;
 
@@ -475,16 +635,22 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
                 type_1: count_class(CloneClass::Type1),
                 type_2: count_class(CloneClass::Type2),
                 type_3: count_class(CloneClass::Type3),
+                fragment_scope: as_u64(
+                    groups
+                        .iter()
+                        .filter(|group| group.scope == CloneScope::Fragment.name())
+                        .count(),
+                ),
+                folded_runs: as_u64(inputs.regions.folded),
             },
             suppressed: report::SuppressedCounts {
                 // The funnel marks no group as noise yet; suppression here is
                 // rule-driven only.
                 noise: 0,
                 by_rule: as_u64(
-                    inputs
-                        .group_suppressed
+                    groups
                         .iter()
-                        .filter(|rule| rule.is_some())
+                        .filter(|group| group.suppressed.is_some())
                         .count(),
                 ),
             },
@@ -493,10 +659,7 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
             pair_budget_exhausted: stats.candidate.budget_exhausted
                 || stats.near_match.budget_exhausted,
         },
-        groups: report_order(inputs)
-            .into_iter()
-            .map(|index| build_group(inputs, index))
-            .collect(),
+        groups,
     }
 }
 
@@ -505,18 +668,12 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
 fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
     let group = &inputs.analysis.groups.groups[index];
     let detail = &inputs.analysis.details[index];
-    let suppressed = inputs.group_suppressed[index].map(|rule| {
-        let row = &inputs.rules.rows[rule];
-        report::Suppression {
-            kind: report::SuppressionKind::Rule,
-            reason: None,
-            scope: Some(row.scope.clone()),
-            pattern: Some(row.pattern.clone()),
-        }
-    });
+    let suppressed = inputs.group_suppressed[index].map(|rule| inputs.suppression(rule));
     report::Group {
         fingerprint: detail.fingerprint.to_hex(),
         clone_type: group.clone_type.name().to_string(),
+        scope: CloneScope::Unit.name().to_string(),
+        statements: None,
         confidence: group.min_pairwise,
         priority: report::Priority {
             value: inputs.priority(group),
@@ -556,6 +713,84 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             })
             .collect(),
     }
+}
+
+/// One duplicated run as a report entry.
+///
+/// The occurrences are runs of statements, so each is anchored at its own line
+/// span and names the unit it sits in; the units themselves are usually not
+/// clones of each other, which is the whole point of reporting the run.
+fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
+    let region = &inputs.analysis.regions[inputs.regions.reported[index]];
+    let ranks = occurrence_ranks(region);
+    report::Group {
+        fingerprint: region.fingerprint.to_hex(),
+        clone_type: region.clone_type.name().to_string(),
+        scope: CloneScope::Fragment.name().to_string(),
+        statements: Some(u64::from(region.statements)),
+        confidence: REGION_SIMILARITY,
+        priority: report::Priority {
+            value: region_priority(region),
+            largest_member_tokens: u64::try_from(largest_occurrence_tokens(region))
+                .unwrap_or(u64::MAX),
+            extra_instances: u64::try_from(region.occurrences.len().saturating_sub(1))
+                .unwrap_or(u64::MAX),
+            similarity: REGION_SIMILARITY,
+        },
+        // Confirmed by content equality, not scored across dimensions: there
+        // is no breakdown to report.
+        similarity: None,
+        // Boilerplate is classified over whole units; a run inside one carries
+        // no such classification.
+        boilerplate: None,
+        suppressed: inputs.region_suppressed[index].map(|rule| inputs.suppression(rule)),
+        members: region
+            .occurrences
+            .iter()
+            .zip(&ranks)
+            .enumerate()
+            .map(|(position, (occurrence, &rank))| {
+                let unit = &inputs.analysis.units[occurrence.unit];
+                let file = &inputs.files[occurrence.file];
+                report::Member {
+                    finding_id: stable_id::finding_id(
+                        &region.fingerprint,
+                        Some(&unit.fingerprint),
+                        rank,
+                    )
+                    .to_hex(),
+                    file: file.relative_path.clone(),
+                    start_line: occurrence.start_line,
+                    end_line: occurrence.end_line,
+                    unit: unit.name.as_deref().map(ToString::to_string),
+                    tokens: u64::try_from(
+                        occurrence.token_end.saturating_sub(occurrence.token_start),
+                    )
+                    .unwrap_or(u64::MAX),
+                    canonical: position == 0,
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Rank of each occurrence within its host unit, in occurrence order.
+///
+/// A run can occur twice inside one unit — a stretch duplicated within the
+/// same function — and a finding identifier is derived from the group and the
+/// host unit, so the rank is what keeps the two identifiers apart.
+fn occurrence_ranks(region: &StructuralRegion) -> Vec<u32> {
+    let mut next: BTreeMap<usize, u32> = BTreeMap::new();
+    region
+        .occurrences
+        .iter()
+        .map(|occurrence| {
+            let slot = next.entry(occurrence.unit).or_insert(0);
+            let rank = *slot;
+            *slot = slot.saturating_add(1);
+            rank
+        })
+        .collect()
 }
 
 /// A group's reported similarity: the medoid-to-member breakdown of its
@@ -641,13 +876,20 @@ fn record(cfg: &Config, inputs: &ReportInputs<'_>) -> Result<i64> {
 }
 
 /// Turn the analysis into store rows. Every unit that hosts a member is
-/// written once, even when it appears in several groups; a member's host is
-/// the unit it *is*, since structural clones are whole units.
+/// written once, even when it appears in several groups. A unit-scope
+/// member's host is the unit it *is*; a duplicated run's host is the unit it
+/// sits inside, which is a different unit for each occurrence and usually not
+/// a clone of the others.
 fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
     let mut host_index: BTreeMap<usize, usize> = BTreeMap::new();
     for group in &inputs.analysis.groups.groups {
         for &member in &group.members {
             host_index.entry(member).or_insert(0);
+        }
+    }
+    for &index in &inputs.regions.reported {
+        for occurrence in &inputs.analysis.regions[index].occurrences {
+            host_index.entry(occurrence.unit).or_insert(0);
         }
     }
     let mut units = Vec::with_capacity(host_index.len());
@@ -667,6 +909,9 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
         });
     }
 
+    let regions = (0..inputs.regions.reported.len())
+        .map(|index| region_row(inputs, index, &host_index))
+        .collect::<Vec<_>>();
     let groups = inputs
         .analysis
         .groups
@@ -679,6 +924,7 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
             GroupRow {
                 fingerprint: detail.fingerprint,
                 clone_type: group.clone_type,
+                member_scope: CloneScope::Unit,
                 score: group.min_pairwise,
                 entropy_bits: engine::content_entropy_bits(
                     inputs.unit_tokens(medoid),
@@ -714,8 +960,62 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
                     .collect(),
             }
         })
+        .chain(regions)
         .collect();
     (units, groups)
+}
+
+/// One duplicated run as a store row. Its entropy is measured over the
+/// canonical occurrence's own tokens, not its host unit's: the run is the
+/// content the group is about.
+fn region_row(
+    inputs: &ReportInputs<'_>,
+    index: usize,
+    host_index: &BTreeMap<usize, usize>,
+) -> GroupRow {
+    let region = &inputs.analysis.regions[inputs.regions.reported[index]];
+    let ranks = occurrence_ranks(region);
+    let canonical = region
+        .occurrences
+        .first()
+        .map_or_else(Vec::new, |occurrence| {
+            inputs.region_tokens(occurrence).to_vec()
+        });
+    GroupRow {
+        fingerprint: region.fingerprint,
+        clone_type: region.clone_type,
+        member_scope: CloneScope::Fragment,
+        score: REGION_SIMILARITY,
+        entropy_bits: engine::content_entropy_bits(&canonical, inputs.literals),
+        suppress_reason: None,
+        boilerplate: None,
+        suppressed_by: inputs.region_suppressed[index],
+        final_priority: region_priority(region),
+        similarity: None,
+        members: region
+            .occurrences
+            .iter()
+            .zip(&ranks)
+            .map(|(occurrence, &rank)| {
+                let unit = &inputs.analysis.units[occurrence.unit];
+                let file = &inputs.files[occurrence.file];
+                MemberRow {
+                    content: occurrence.content,
+                    finding: stable_id::finding_id(
+                        &region.fingerprint,
+                        Some(&unit.fingerprint),
+                        rank,
+                    ),
+                    language: file.language,
+                    host_unit: Some(host_index[&occurrence.unit]),
+                    file_path: file.relative_path.clone(),
+                    start_line: occurrence.start_line,
+                    end_line: occurrence.end_line,
+                    token_count: occurrence.token_end.saturating_sub(occurrence.token_start),
+                }
+            })
+            .collect(),
+    }
 }
 
 /// The persisted form of a group's similarity evidence.
