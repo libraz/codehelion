@@ -274,6 +274,7 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
                 fragment_scope: 0,
                 folded_runs: 0,
                 subsumed_runs: 0,
+                test_code: 0,
             },
             suppressed: report::SuppressedCounts {
                 noise: count_groups(&|i| inputs.report.groups[i].suppressed.is_some()),
@@ -329,10 +330,11 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
             similarity: group.score,
         },
         // The Fast engine groups on identical content; it scores no
-        // similarity dimensions to report, and classifies no shapes: the
-        // classifier reads Syntax IR, which this mode never builds.
+        // similarity dimensions to report, classifies no shapes and reads no
+        // test marker: all three need Syntax IR, which this mode never builds.
         similarity: None,
         boilerplate: None,
+        test_code: false,
         suppressed,
         members: group
             .members

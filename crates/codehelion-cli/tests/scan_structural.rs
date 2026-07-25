@@ -807,6 +807,98 @@ fn a_path_rule_hides_a_run_as_it_hides_a_group() {
     );
 }
 
+/// A module compiled only for tests, holding two cases that differ in nothing
+/// but their names and values.
+const SUITE_RS: &str = "pub fn width_of(text: &str) -> usize {
+    text.trim().chars().count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_measures_a_short_string() {
+        let input = String::from(\"  hi  \");
+        let measured = width_of(&input);
+        let doubled = measured * 2;
+        assert_eq!(measured, 2);
+        assert_eq!(doubled, 4);
+    }
+
+    #[test]
+    fn it_measures_a_longer_string() {
+        let input = String::from(\"  hello  \");
+        let measured = width_of(&input);
+        let doubled = measured * 2;
+        assert_eq!(measured, 5);
+        assert_eq!(doubled, 10);
+    }
+}
+";
+
+fn suite_fixture() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/measure.rs"), SUITE_RS).unwrap();
+    dir
+}
+
+#[test]
+fn duplication_inside_a_test_suite_is_reported_and_marked() {
+    let dir = suite_fixture();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural"])
+        .assert()
+        .success()
+        // Ranked down, not hidden: the count is stated and the entry says why
+        // it sits where it does.
+        .stdout(predicate::str::contains("[test code]"))
+        .stdout(predicate::str::contains(
+            "1 of them are duplication inside test code",
+        ));
+
+    let value = scan_json(dir.path());
+    assert_eq!(value["summary"]["groups"]["test_code"], 1);
+    assert_eq!(value["summary"]["suppressed"]["by_rule"], 0);
+    assert!(
+        value["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|group| group["test_code"] == true)
+    );
+}
+
+#[test]
+fn a_policy_that_hides_test_code_records_the_marker_that_hid_it() {
+    let dir = suite_fixture();
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[suppression]\ntest-code = \"hide\"\n",
+    )
+    .unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 by rule"));
+
+    // Hidden, not deleted: the rule that hid it names the marker it read.
+    let store = open_store(dir.path());
+    let run = store.latest_run().unwrap().expect("a recorded run");
+    let findings = store.run_findings(run.id).unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.suppression_scope.as_deref() == Some("attribute"))
+    );
+}
+
 /// A measuring routine whose loop is a small part of it.
 const LOCAL_LEFT_RS: &str = "pub fn summarize_left(rows: &[String], width: usize) -> usize {
     let mut total = 0usize;

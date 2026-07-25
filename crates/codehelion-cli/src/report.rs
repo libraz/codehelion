@@ -167,6 +167,9 @@ pub struct GroupCounts {
     /// Duplicated runs left out because a longer run covers every one of
     /// their occurrences and claims at least as much about them.
     pub subsumed_runs: u64,
+    /// How many of the total live wholly in a test suite. Always zero in modes
+    /// that cannot read the marker.
+    pub test_code: u64,
 }
 
 /// Suppressed-group counts by mechanism.
@@ -208,6 +211,11 @@ pub struct Group {
     /// does with such a group is configured per category; the classification
     /// is stated either way.
     pub boilerplate: Option<String>,
+    /// Whether every member is test code, recognised from the test marker in
+    /// the source. A group spanning a suite and the code it exercises is not
+    /// test code: that duplication crosses the boundary, which is the case
+    /// worth reading.
+    pub test_code: bool,
     /// Why the group is hidden from default reports; `None` when visible.
     pub suppressed: Option<Suppression>,
     /// Every occurrence, the canonical instance first.
@@ -303,6 +311,7 @@ impl Suppression {
                     Some("stable_clone_id") => format!("clone id {pattern}"),
                     Some("inline_comment") => format!("{pattern} marker"),
                     Some("ast_pattern") => format!("boilerplate: {pattern}"),
+                    Some("attribute") => format!("{pattern} attribute"),
                     Some(scope) => format!("{scope} {pattern:?}"),
                     None => "rule".to_string(),
                 }
@@ -462,6 +471,14 @@ impl Report {
                 runs.fragment_scope, runs.folded_runs, runs.subsumed_runs,
             )?;
         }
+        if summary.groups.test_code > 0 {
+            writeln!(
+                out,
+                "    {} of them are duplication inside test code, which repeats itself by \
+                 design; a group spanning a test and what it exercises is not counted here",
+                summary.groups.test_code,
+            )?;
+        }
         writeln!(
             out,
             "  snapshot: run {} in {}",
@@ -530,17 +547,18 @@ fn render_group(
     palette: &Palette,
     out: &mut impl Write,
 ) -> io::Result<()> {
-    let marker = match (&group.suppressed, &group.boilerplate) {
-        (Some(cause), _) => format!(
+    // A group that is shown but ranked down says why: its place in the
+    // ranking is explained rather than silently lowered.
+    let marker = match (&group.suppressed, &group.boilerplate, group.test_code) {
+        (Some(cause), _, _) => format!(
             " {}",
             palette.yellow(&format!("[suppressed: {}]", cause.label()))
         ),
-        // A group that is boilerplate but still shown says so: its place in
-        // the ranking is explained rather than silently lowered.
-        (None, Some(category)) => {
+        (None, Some(category), _) => {
             format!(" {}", palette.yellow(&format!("[boilerplate: {category}]")))
         }
-        (None, None) => String::new(),
+        (None, None, true) => format!(" {}", palette.yellow("[test code]")),
+        (None, None, false) => String::new(),
     };
     // A fragment-scope group states its extent: without it "type-1, 40
     // tokens" reads as a duplicated unit, which it is not.
@@ -618,6 +636,9 @@ pub struct GroupRef {
     pub members: u64,
     /// The boilerplate shape every member matches, when they all match one.
     pub boilerplate: Option<String>,
+    /// Whether every member of the group is test code, as recorded with the
+    /// run.
+    pub test_code: bool,
     /// Per-dimension evidence, absent when the mode measured none (Fast).
     pub similarity: Option<Similarity>,
     /// The rule that suppressed the group in the recorded run, if one
@@ -679,6 +700,9 @@ impl FindingDetail {
         if let Some(category) = &self.group.boilerplate {
             writeln!(out, "  boilerplate: {category}")?;
         }
+        if self.group.test_code {
+            writeln!(out, "  test code: every occurrence is inside a test")?;
+        }
         if let Some(cause) = &self.group.suppressed {
             writeln!(out, "  suppressed: {}", cause.label())?;
         }
@@ -739,6 +763,7 @@ pub(super) mod tests {
                     fragment_scope: 0,
                     folded_runs: 0,
                     subsumed_runs: 0,
+                    test_code: 0,
                 },
                 suppressed: SuppressedCounts {
                     noise: 0,
@@ -746,74 +771,83 @@ pub(super) mod tests {
                 },
                 pair_budget_exhausted: false,
             },
-            groups: vec![
-                Group {
-                    fingerprint: "0b".repeat(16),
-                    clone_type: "type-1".to_string(),
-                    scope: "unit".to_string(),
-                    statements: None,
-                    confidence: 1.0,
-                    priority: Priority {
-                        value: 80.0,
-                        largest_member_tokens: 80,
-                        extra_instances: 1,
-                        similarity: 1.0,
-                    },
-                    similarity: None,
-                    boilerplate: None,
-                    suppressed: None,
-                    members: (0..7)
-                        .map(|index| Member {
-                            finding_id: format!("{index:032x}"),
-                            file: format!("src/file{index}.rs"),
-                            start_line: 1,
-                            end_line: 9,
-                            unit: Some("checksum".to_string()),
-                            tokens: 80,
-                            canonical: index == 0,
-                        })
-                        .collect(),
+            groups: vec![visible_group(), suppressed_group()],
+        }
+    }
+
+    /// A plain visible group: the highest-priority entry of the sample report.
+    fn visible_group() -> Group {
+        Group {
+            fingerprint: "0b".repeat(16),
+            clone_type: "type-1".to_string(),
+            scope: "unit".to_string(),
+            statements: None,
+            confidence: 1.0,
+            priority: Priority {
+                value: 80.0,
+                largest_member_tokens: 80,
+                extra_instances: 1,
+                similarity: 1.0,
+            },
+            similarity: None,
+            boilerplate: None,
+            test_code: false,
+            suppressed: None,
+            members: (0..7)
+                .map(|index| Member {
+                    finding_id: format!("{index:032x}"),
+                    file: format!("src/file{index}.rs"),
+                    start_line: 1,
+                    end_line: 9,
+                    unit: Some("checksum".to_string()),
+                    tokens: 80,
+                    canonical: index == 0,
+                })
+                .collect(),
+        }
+    }
+
+    /// A group a path rule hid, kept in the report rather than dropped.
+    fn suppressed_group() -> Group {
+        Group {
+            fingerprint: "0c".repeat(16),
+            clone_type: "type-1".to_string(),
+            scope: "unit".to_string(),
+            statements: None,
+            confidence: 1.0,
+            priority: Priority {
+                value: 30.0,
+                largest_member_tokens: 30,
+                extra_instances: 1,
+                similarity: 1.0,
+            },
+            similarity: None,
+            boilerplate: None,
+            test_code: false,
+            suppressed: Some(Suppression {
+                kind: SuppressionKind::Rule,
+                reason: None,
+                scope: Some("path_glob".to_string()),
+                pattern: Some("vendor/**".to_string()),
+            }),
+            members: vec![
+                Member {
+                    finding_id: "1".repeat(32),
+                    file: "vendor/a.rs".to_string(),
+                    start_line: 1,
+                    end_line: 5,
+                    unit: None,
+                    tokens: 30,
+                    canonical: true,
                 },
-                Group {
-                    fingerprint: "0c".repeat(16),
-                    clone_type: "type-1".to_string(),
-                    scope: "unit".to_string(),
-                    statements: None,
-                    confidence: 1.0,
-                    priority: Priority {
-                        value: 30.0,
-                        largest_member_tokens: 30,
-                        extra_instances: 1,
-                        similarity: 1.0,
-                    },
-                    similarity: None,
-                    boilerplate: None,
-                    suppressed: Some(Suppression {
-                        kind: SuppressionKind::Rule,
-                        reason: None,
-                        scope: Some("path_glob".to_string()),
-                        pattern: Some("vendor/**".to_string()),
-                    }),
-                    members: vec![
-                        Member {
-                            finding_id: "1".repeat(32),
-                            file: "vendor/a.rs".to_string(),
-                            start_line: 1,
-                            end_line: 5,
-                            unit: None,
-                            tokens: 30,
-                            canonical: true,
-                        },
-                        Member {
-                            finding_id: "2".repeat(32),
-                            file: "vendor/b.rs".to_string(),
-                            start_line: 1,
-                            end_line: 5,
-                            unit: None,
-                            tokens: 30,
-                            canonical: false,
-                        },
-                    ],
+                Member {
+                    finding_id: "2".repeat(32),
+                    file: "vendor/b.rs".to_string(),
+                    start_line: 1,
+                    end_line: 5,
+                    unit: None,
+                    tokens: 30,
+                    canonical: false,
                 },
             ],
         }
@@ -846,6 +880,7 @@ pub(super) mod tests {
                 confidence_band: Some("medium".to_string()),
             }),
             boilerplate: None,
+            test_code: false,
             suppressed: None,
             members: vec![
                 Member {
@@ -887,6 +922,7 @@ pub(super) mod tests {
             },
             similarity: None,
             boilerplate: None,
+            test_code: false,
             suppressed: None,
             members: vec![
                 Member {
@@ -942,6 +978,58 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_group_inside_the_suite_says_so_in_every_view() {
+        let mut report = sample_report();
+        report.summary.groups.test_code = 1;
+        let mut group = fragment_group();
+        group.test_code = true;
+        report.groups.insert(0, group);
+
+        let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+        assert_eq!(value["groups"][0]["test_code"], true);
+        // A group reaching outside the suite is the interesting case, and says
+        // as much rather than leaving the field out.
+        assert_eq!(value["groups"][1]["test_code"], false);
+
+        let mut buffer = Vec::new();
+        report
+            .render_text(TextOptions::default(), &mut buffer)
+            .unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        // Shown, not hidden, and its place in the ranking is explained.
+        assert!(text.contains("[test code]"));
+        assert!(text.contains("1 of them are duplication inside test code"));
+    }
+
+    #[test]
+    fn an_occurrence_inside_the_suite_explains_why() {
+        let mut group = fragment_group();
+        group.test_code = true;
+        let detail = FindingDetail {
+            member: group.members.remove(0),
+            group: GroupRef {
+                fingerprint: "0e".repeat(16),
+                clone_type: "type-1".to_string(),
+                scope: SCOPE_FRAGMENT.to_string(),
+                confidence: 1.0,
+                members: 2,
+                boilerplate: None,
+                test_code: true,
+                similarity: None,
+                suppressed: None,
+            },
+            scan_run: 3,
+        };
+        let mut buffer = Vec::new();
+        detail.render_text(&mut buffer).unwrap();
+        assert!(
+            String::from_utf8(buffer)
+                .unwrap()
+                .contains("test code: every occurrence is inside a test")
+        );
+    }
+
+    #[test]
     fn an_occurrence_of_a_run_explains_itself_as_a_run() {
         let mut detail = FindingDetail {
             member: fragment_group().members.remove(0),
@@ -952,6 +1040,7 @@ pub(super) mod tests {
                 confidence: 1.0,
                 members: 2,
                 boilerplate: None,
+                test_code: false,
                 similarity: None,
                 suppressed: None,
             },
@@ -1131,6 +1220,7 @@ pub(super) mod tests {
                 confidence: 1.0,
                 members: 2,
                 boilerplate: None,
+                test_code: false,
                 similarity: None,
                 suppressed: None,
             },
@@ -1172,6 +1262,7 @@ pub(super) mod tests {
                 confidence: 0.87,
                 members: 2,
                 boilerplate: Some("macro-repetition".to_string()),
+                test_code: false,
                 similarity: Some(Similarity {
                     weight_version: "structural-verify-v2".to_string(),
                     lexical: 0.71,

@@ -166,6 +166,21 @@ impl Rules {
         self.rows.len() - 1
     }
 
+    /// Register a rule that matches by an attribute in the source, returning
+    /// its index.
+    ///
+    /// Unlike a shape rule this states what the code says about itself: a unit
+    /// carrying the test attribute is a test because it was declared one. As
+    /// with a shape rule, it applies to a whole group rather than per file.
+    pub(crate) fn add_attribute_rule(&mut self, pattern: &str, reason: &str) -> usize {
+        self.rows.push(SuppressionRuleRow {
+            scope: "attribute".to_string(),
+            pattern: pattern.to_string(),
+            reason: Some(reason.to_string()),
+        });
+        self.rows.len() - 1
+    }
+
     /// Evaluate one file: its path against the path globs, its unit names
     /// against the symbol globs, and its marker lines against its unit spans.
     pub(crate) fn evaluate_file(

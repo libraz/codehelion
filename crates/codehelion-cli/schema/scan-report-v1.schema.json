@@ -121,6 +121,10 @@
             "subsumed_runs": {
               "type": "integer",
               "description": "Duplicated runs left out because a longer run covers every one of their occurrences and classifies at least as strictly."
+            },
+            "test_code": {
+              "type": "integer",
+              "description": "How many of the total live wholly in a test suite; zero in modes that cannot read the test marker."
             }
           }
         },
@@ -140,7 +144,7 @@
     },
     "group": {
       "type": "object",
-      "required": ["fingerprint", "clone_type", "scope", "confidence", "priority", "suppressed", "members"],
+      "required": ["fingerprint", "clone_type", "scope", "confidence", "priority", "test_code", "suppressed", "members"],
       "properties": {
         "fingerprint": { "$ref": "#/$defs/hex", "description": "Stable clone-group fingerprint." },
         "clone_type": { "type": "string" },
@@ -161,6 +165,10 @@
         "boilerplate": {
           "enum": ["trivial-body", "forwarding", "macro-repetition", null],
           "description": "The boilerplate shape every member matches; null when they do not all match one."
+        },
+        "test_code": {
+          "type": "boolean",
+          "description": "Whether every member is test code, recognised from the test marker in the source. False for a group spanning a test and the code it exercises: that duplication crosses the boundary."
         },
         "suppressed": {
           "oneOf": [{ "$ref": "#/$defs/suppression" }, { "type": "null" }],

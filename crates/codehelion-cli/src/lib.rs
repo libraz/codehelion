@@ -141,6 +141,7 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
             confidence: occurrence.score,
             members: u64::try_from(occurrence.member_count).unwrap_or(0),
             boilerplate: occurrence.boilerplate,
+            test_code: occurrence.test_code,
             similarity: occurrence.similarity.map(|stored| report::Similarity {
                 weight_version: stored.weight_version,
                 lexical: stored.lexical,

@@ -43,7 +43,7 @@ use super::{
 };
 use crate::Outcome;
 use crate::cli::ScanArgs;
-use crate::config::{self, BoilerplateAction, BoilerplatePolicy, Config};
+use crate::config::{self, BoilerplatePolicy, CategoryAction, Config};
 use crate::report::{self, Report};
 use crate::suppress;
 
@@ -108,11 +108,13 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
 
     let mut rules = compile_rules(&cfg, &files, &analysis)?;
     let hidden = hidden_boilerplate(&mut rules.rules, &cfg.suppression.boilerplate, &analysis);
+    let regions = reportable_regions(&analysis);
+    let hidden_test_code = hidden_test_code(&mut rules.rules, &cfg, &analysis, &regions);
     let local_units = local_unit_indices(&analysis);
     // Most specific rule first: a clone id names this exact group, a path or
     // symbol glob or an inline marker is an explicit instruction about where
-    // the members sit, and a boilerplate category is a judgement about their
-    // shape.
+    // the members sit, the test attribute is the source stating what the code
+    // is, and a boilerplate category is the tool's judgement about its shape.
     let group_suppressed: Vec<Option<usize>> = analysis
         .groups
         .groups
@@ -125,6 +127,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
                 .or_else(|| {
                     rules.group_rule(group.members.iter().copied(), &analysis, &local_units)
                 })
+                .or_else(|| hidden_test_code.filter(|_| analysis.details[index].test_code))
                 .or_else(|| {
                     analysis.details[index]
                         .boilerplate
@@ -132,7 +135,6 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
                 })
         })
         .collect();
-    let regions = reportable_regions(&analysis);
     // A duplicated run is suppressed by the same rules a whole unit is, read
     // at the run's own line span rather than its host unit's: a marker or a
     // path glob is an instruction about a place in the code, and a run has
@@ -146,6 +148,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
                 .rules
                 .clone_id_rule(&region.fingerprint.to_hex())
                 .or_else(|| rules.region_rule(region, &analysis, &local_units))
+                .or_else(|| hidden_test_code.filter(|_| region_test_code(&analysis, region)))
         })
         .collect();
 
@@ -165,6 +168,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         regions: &regions,
         region_suppressed: &region_suppressed,
         boilerplate: &cfg.suppression.boilerplate,
+        test_code_action: cfg.suppression.test_code,
         literals: literal_norm(cfg.literal_normalization),
         glob_excluded,
         unreadable,
@@ -334,7 +338,7 @@ fn hidden_boilerplate(
 ) -> BTreeMap<Boilerplate, usize> {
     let mut hidden = BTreeMap::new();
     for category in Boilerplate::all() {
-        if policy.action(category) != BoilerplateAction::Hide {
+        if policy.action(category) != CategoryAction::Hide {
             continue;
         }
         if !analysis
@@ -348,6 +352,28 @@ fn hidden_boilerplate(
         hidden.insert(category, index);
     }
     hidden
+}
+
+/// Register the rule hiding test-suite duplication, when the policy hides it
+/// *and* this run found some, returning the rule index.
+///
+/// As with a boilerplate category, a rule that hid nothing is not recorded:
+/// the rules kept are the ones that did something.
+fn hidden_test_code(
+    rules: &mut suppress::Rules,
+    cfg: &Config,
+    analysis: &StructuralReport,
+    regions: &ReportableRegions,
+) -> Option<usize> {
+    if cfg.suppression.test_code != CategoryAction::Hide {
+        return None;
+    }
+    let any_group = analysis.details.iter().any(|detail| detail.test_code);
+    let any_run = regions
+        .reported
+        .iter()
+        .any(|&index| region_test_code(analysis, &analysis.regions[index]));
+    (any_group || any_run).then(|| rules.add_attribute_rule("test", "test code"))
 }
 
 /// Which duplicated runs the report lists, and how many it folded away.
@@ -478,6 +504,8 @@ struct ReportInputs<'a> {
     region_suppressed: &'a [Option<usize>],
     /// What the report does with each recognised boilerplate shape.
     boilerplate: &'a BoilerplatePolicy,
+    /// What the report does with a group living wholly in a test suite.
+    test_code_action: CategoryAction,
     /// Literal strategy the group content is scored under.
     literals: LiteralNorm,
     glob_excluded: usize,
@@ -503,14 +531,13 @@ impl ReportInputs<'_> {
         f64::from(size) * f64::from(extra) * group.min_pairwise
     }
 
-    /// Whether a group is reported below every group that carries behaviour,
-    /// because its shape is boilerplate the policy ranks down.
-    fn ranked_down(&self, index: usize) -> bool {
-        self.analysis.details[index]
-            .boilerplate
-            .is_some_and(|category| {
-                self.boilerplate.action(category) == BoilerplateAction::RankDown
-            })
+    /// Whether an entry is reported below every group that carries behaviour:
+    /// its shape is boilerplate the policy ranks down, or it lives wholly in a
+    /// test suite the policy ranks down.
+    fn ranked_down(&self, boilerplate: Option<Boilerplate>, test_code: bool) -> bool {
+        boilerplate
+            .is_some_and(|category| self.boilerplate.action(category) == CategoryAction::RankDown)
+            || (test_code && self.test_code_action == CategoryAction::RankDown)
     }
 
     /// Token count of the group's largest member.
@@ -575,7 +602,7 @@ fn region_priority(region: &StructuralRegion) -> f64 {
 const REGION_SIMILARITY: f64 = 1.0;
 
 /// Every reported entry, in the order the views render them: ranked-down
-/// boilerplate last, then priority descending, then fingerprint ascending, so
+/// entries last, then priority descending, then fingerprint ascending, so
 /// every view is stable across reruns.
 ///
 /// Duplicated units and duplicated runs share one ranking. They describe the
@@ -584,10 +611,21 @@ const REGION_SIMILARITY: f64 = 1.0;
 /// whichever shape it has.
 fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
     let mut entries: Vec<(bool, report::Group)> = (0..inputs.analysis.groups.groups.len())
-        .map(|index| (inputs.ranked_down(index), build_group(inputs, index)))
+        .map(|index| {
+            let detail = &inputs.analysis.details[index];
+            (
+                inputs.ranked_down(detail.boilerplate, detail.test_code),
+                build_group(inputs, index),
+            )
+        })
         // A run carries no boilerplate classification: the classifier reads
-        // whole units, so no run is ever ranked down for its shape.
-        .chain((0..inputs.regions.reported.len()).map(|index| (false, build_region(inputs, index))))
+        // whole units, so no run is ever ranked down for its shape. Where it
+        // sits is another matter — a run duplicated across a suite is the
+        // suite's repetition as much as a duplicated test function is.
+        .chain((0..inputs.regions.reported.len()).map(|index| {
+            let region = build_region(inputs, index);
+            (inputs.ranked_down(None, region.test_code), region)
+        }))
         .collect();
     entries.sort_by(|(a_ranked_down, a), (b_ranked_down, b)| {
         a_ranked_down
@@ -678,6 +716,7 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
                 ),
                 folded_runs: as_u64(inputs.regions.folded),
                 subsumed_runs: as_u64(stats.region_subsumed),
+                test_code: as_u64(groups.iter().filter(|group| group.test_code).count()),
             },
             suppressed: report::SuppressedCounts {
                 // The funnel marks no group as noise yet; suppression here is
@@ -723,6 +762,7 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
         boilerplate: detail
             .boilerplate
             .map(|category| category.name().to_string()),
+        test_code: detail.test_code,
         suppressed,
         members: group
             .members
@@ -779,6 +819,7 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
         // Boilerplate is classified over whole units; a run inside one carries
         // no such classification.
         boilerplate: None,
+        test_code: region_test_code(inputs.analysis, region),
         suppressed: inputs.region_suppressed[index].map(|rule| inputs.suppression(rule)),
         members: region
             .occurrences

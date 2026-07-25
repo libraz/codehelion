@@ -342,6 +342,7 @@ impl<'a> From<&'a Group> for ResultEntry<'a> {
                 priority: &group.priority,
                 similarity: group.similarity.as_ref(),
                 boilerplate: group.boilerplate.as_deref(),
+                test_code: group.test_code,
                 suppressed: group.suppressed.as_ref(),
             },
         }
@@ -508,6 +509,7 @@ struct ResultProperties<'a> {
     similarity: Option<&'a Similarity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     boilerplate: Option<&'a str>,
+    test_code: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     suppressed: Option<&'a Suppression>,
 }
@@ -698,6 +700,22 @@ mod tests {
         assert_eq!(
             sarif(&classified)["runs"][0]["results"][2]["properties"]["boilerplate"],
             "macro-repetition"
+        );
+
+        // As does whether the group lives wholly in a test suite, which is why
+        // it may sit low in a report that still lists it.
+        let mut suite = sample_report();
+        let mut group = structural_group();
+        group.test_code = true;
+        suite.groups.push(group);
+        let log = sarif(&suite);
+        assert_eq!(
+            log["runs"][0]["results"][2]["properties"]["test_code"],
+            true
+        );
+        assert_eq!(
+            log["runs"][0]["results"][0]["properties"]["test_code"],
+            false
         );
 
         // A mode that scores no dimensions omits the key rather than
