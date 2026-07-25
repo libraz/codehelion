@@ -86,6 +86,21 @@ impl Rules {
         })
     }
 
+    /// Register a rule that matches by code shape rather than by location,
+    /// returning its index.
+    ///
+    /// This is how a configured boilerplate category suppresses a group: the
+    /// rule describes what the group *is*, so it applies to every member at
+    /// once instead of being evaluated per file.
+    pub(crate) fn add_shape_rule(&mut self, pattern: &str, reason: &str) -> usize {
+        self.rows.push(SuppressionRuleRow {
+            scope: "ast_pattern".to_string(),
+            pattern: pattern.to_string(),
+            reason: Some(reason.to_string()),
+        });
+        self.rows.len() - 1
+    }
+
     /// Evaluate one file: its path against the globs, and its marker lines
     /// against its unit spans.
     pub(crate) fn evaluate_file(

@@ -138,6 +138,10 @@
           "oneOf": [{ "$ref": "#/$defs/similarity" }, { "type": "null" }],
           "description": "Null in modes that match content exactly and score no dimensions."
         },
+        "boilerplate": {
+          "enum": ["trivial-body", "forwarding", "macro-repetition", null],
+          "description": "The boilerplate shape every member matches; null when they do not all match one."
+        },
         "suppressed": {
           "oneOf": [{ "$ref": "#/$defs/suppression" }, { "type": "null" }],
           "description": "Null when the group is visible in default reports."

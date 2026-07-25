@@ -339,6 +339,7 @@ impl<'a> From<&'a Group> for ResultEntry<'a> {
                 confidence: group.confidence,
                 priority: &group.priority,
                 similarity: group.similarity.as_ref(),
+                boilerplate: group.boilerplate.as_deref(),
                 suppressed: group.suppressed.as_ref(),
             },
         }
@@ -493,6 +494,8 @@ struct ResultProperties<'a> {
     priority: &'a Priority,
     #[serde(skip_serializing_if = "Option::is_none")]
     similarity: Option<&'a Similarity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    boilerplate: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     suppressed: Option<&'a Suppression>,
 }
@@ -674,6 +677,17 @@ mod tests {
                 .unwrap()
                 .contains("type n/a")
         );
+        // The classified shape travels with the result too, so no reporter
+        // says less about a group than another.
+        let mut classified = sample_report();
+        let mut group = structural_group();
+        group.boilerplate = Some("macro-repetition".to_string());
+        classified.groups.push(group);
+        assert_eq!(
+            sarif(&classified)["runs"][0]["results"][2]["properties"]["boilerplate"],
+            "macro-repetition"
+        );
+
         // A mode that scores no dimensions omits the key rather than
         // inventing values.
         assert!(

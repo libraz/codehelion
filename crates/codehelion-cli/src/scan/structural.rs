@@ -18,6 +18,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use codehelion_core::boilerplate::{BOILERPLATE_VERSION, Boilerplate};
 use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::{
     BuildVariant, ContentHash, DiscoveryReport, Language, LanguageSelection, NORMALIZATION_VERSION,
@@ -41,7 +42,7 @@ use super::{
 };
 use crate::Outcome;
 use crate::cli::ScanArgs;
-use crate::config::{self, Config};
+use crate::config::{self, BoilerplateAction, BoilerplatePolicy, Config};
 use crate::report::{self, Report};
 use crate::suppress;
 
@@ -104,13 +105,26 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     });
     let analysis = structural::analyze(&irs, &variant, &structural_config(&cfg));
 
-    let rules = compile_rules(&cfg, &files, &analysis)?;
+    let mut rules = compile_rules(&cfg, &files, &analysis)?;
+    let hidden = hidden_boilerplate(&mut rules.rules, &cfg.suppression.boilerplate, &analysis);
     let local_units = local_unit_indices(&analysis);
+    // Location rules first: a path glob or an inline marker is an explicit
+    // instruction about this code, while a boilerplate category is a
+    // judgement about its shape.
     let group_suppressed: Vec<Option<usize>> = analysis
         .groups
         .groups
         .iter()
-        .map(|group| rules.group_rule(group.members.iter().copied(), &analysis, &local_units))
+        .enumerate()
+        .map(|(index, group)| {
+            rules
+                .group_rule(group.members.iter().copied(), &analysis, &local_units)
+                .or_else(|| {
+                    analysis.details[index]
+                        .boilerplate
+                        .and_then(|category| hidden.get(&category).copied())
+                })
+        })
         .collect();
 
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
@@ -126,6 +140,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         analysis: &analysis,
         rules: &rules.rules,
         group_suppressed: &group_suppressed,
+        boilerplate: &cfg.suppression.boilerplate,
         literals: literal_norm(cfg.literal_normalization),
         glob_excluded,
         unreadable,
@@ -252,6 +267,35 @@ fn compile_rules(
     })
 }
 
+/// Register a suppression rule for every boilerplate category the policy
+/// hides *and* this run actually produced, returning the rule index per
+/// category.
+///
+/// A category with no group in this run registers no rule: the recorded rules
+/// are the ones that did something.
+fn hidden_boilerplate(
+    rules: &mut suppress::Rules,
+    policy: &BoilerplatePolicy,
+    analysis: &StructuralReport,
+) -> BTreeMap<Boilerplate, usize> {
+    let mut hidden = BTreeMap::new();
+    for category in Boilerplate::all() {
+        if policy.action(category) != BoilerplateAction::Hide {
+            continue;
+        }
+        if !analysis
+            .details
+            .iter()
+            .any(|detail| detail.boilerplate == Some(category))
+        {
+            continue;
+        }
+        let index = rules.add_shape_rule(category.name(), "boilerplate shape");
+        hidden.insert(category, index);
+    }
+    hidden
+}
+
 /// Each unit's index within its own file, which is what the file-local
 /// suppression evaluation indexes. Units come out of the analysis grouped by
 /// file in walk order, so one pass assigns every local index.
@@ -281,6 +325,8 @@ struct ReportInputs<'a> {
     analysis: &'a StructuralReport,
     rules: &'a suppress::Rules,
     group_suppressed: &'a [Option<usize>],
+    /// What the report does with each recognised boilerplate shape.
+    boilerplate: &'a BoilerplatePolicy,
     /// Literal strategy the group content is scored under.
     literals: LiteralNorm,
     glob_excluded: usize,
@@ -306,6 +352,16 @@ impl ReportInputs<'_> {
         f64::from(size) * f64::from(extra) * group.min_pairwise
     }
 
+    /// Whether a group is reported below every group that carries behaviour,
+    /// because its shape is boilerplate the policy ranks down.
+    fn ranked_down(&self, index: usize) -> bool {
+        self.analysis.details[index]
+            .boilerplate
+            .is_some_and(|category| {
+                self.boilerplate.action(category) == BoilerplateAction::RankDown
+            })
+    }
+
     /// Token count of the group's largest member.
     fn largest_member_tokens(&self, group: &StructuralGroup) -> usize {
         group
@@ -326,9 +382,16 @@ fn report_order(inputs: &ReportInputs<'_>) -> Vec<usize> {
     let groups = &inputs.analysis.groups.groups;
     let mut order: Vec<usize> = (0..groups.len()).collect();
     order.sort_by(|a, b| {
+        // Ranked-down boilerplate sits below everything that carries
+        // behaviour, whatever its size; within each band, priority decides.
         inputs
-            .priority(&groups[*b])
-            .total_cmp(&inputs.priority(&groups[*a]))
+            .ranked_down(*a)
+            .cmp(&inputs.ranked_down(*b))
+            .then_with(|| {
+                inputs
+                    .priority(&groups[*b])
+                    .total_cmp(&inputs.priority(&groups[*a]))
+            })
             .then_with(|| {
                 inputs.analysis.details[*a]
                     .fingerprint
@@ -454,6 +517,9 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             similarity: group.min_pairwise,
         },
         similarity: Some(similarity(group, detail)),
+        boilerplate: detail
+            .boilerplate
+            .map(|category| category.name().to_string()),
         suppressed,
         members: group
             .members
@@ -525,6 +591,7 @@ fn detector_versions() -> Vec<(String, String)> {
         ),
         ("features".to_string(), FEATURE_SCHEMA_VERSION.to_string()),
         ("verify-weights".to_string(), WEIGHT_VERSION.to_string()),
+        ("boilerplate".to_string(), BOILERPLATE_VERSION.to_string()),
         (
             "frontend.rust".to_string(),
             codehelion_frontend_rust::ir::STRUCTURAL_FRONTEND_VERSION.to_string(),
@@ -609,6 +676,7 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
                 ),
                 // The structural funnel marks no noise category yet.
                 suppress_reason: None,
+                boilerplate: detail.boilerplate,
                 suppressed_by: inputs.group_suppressed[index],
                 final_priority: inputs.priority(group),
                 similarity: Some(breakdown_row(group, detail)),

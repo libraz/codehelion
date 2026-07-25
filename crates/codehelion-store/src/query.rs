@@ -62,6 +62,8 @@ pub struct StoredGroup {
     pub entropy_bits: f64,
     /// Noise marker name, if one fired.
     pub suppress_reason: Option<String>,
+    /// The boilerplate shape every member matches, when they all match one.
+    pub boilerplate: Option<String>,
     /// The similarity breakdown, when the mode measured one (Structural).
     pub similarity: Option<StoredSimilarity>,
     /// The group's occurrences.
@@ -210,7 +212,7 @@ impl Store {
     pub fn run_groups(&self, run_id: i64) -> Result<Vec<StoredGroup>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT g.id, lower(hex(f.hash)), g.clone_type, g.score, g.entropy_bits,
-                    g.suppress_reason
+                    g.suppress_reason, g.boilerplate
              FROM clone_group g
              JOIN fingerprint f ON f.id = g.group_fingerprint_id
              WHERE g.scan_run_id = ?1
@@ -226,6 +228,7 @@ impl Store {
                         score: row.get(3)?,
                         entropy_bits: row.get(4)?,
                         suppress_reason: row.get(5)?,
+                        boilerplate: row.get(6)?,
                         similarity: None,
                         members: Vec::new(),
                     },

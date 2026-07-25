@@ -562,6 +562,7 @@ pub fn measure_store_insert(
             score: 1.0,
             entropy_bits: 24.0,
             suppress_reason: None,
+            boilerplate: None,
             suppressed_by: None,
             final_priority: 100.0,
             similarity: None,

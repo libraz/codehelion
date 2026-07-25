@@ -1,7 +1,7 @@
 //! End-to-end Structural-mode scan tests: the compiled binary against real
 //! fixture trees, with the recorded snapshot verified through the store's
 //! query layer.
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::path::Path;
 
@@ -311,4 +311,127 @@ fn the_scan_needs_no_executables_and_no_network() {
         .assert()
         .success()
         .stdout(predicate::str::contains("type-3 1"));
+}
+
+/// Two routines that are nothing but macro invocations: a duplicate a reader
+/// would not act on, and larger than the real clone above so ranking, not
+/// size, decides where it lands.
+const DUMP_A: &str = "pub fn dump_config(config: &Config) {
+    println!(\"a: {}\", config.a);
+    println!(\"b: {}\", config.b);
+    println!(\"c: {}\", config.c);
+    println!(\"d: {}\", config.d);
+    println!(\"e: {}\", config.e);
+    println!(\"f: {}\", config.f);
+    println!(\"g: {}\", config.g);
+    println!(\"h: {}\", config.h);
+}
+";
+
+const DUMP_B: &str = "pub fn dump_limits(limits: &Limits) {
+    println!(\"a: {}\", limits.a);
+    println!(\"b: {}\", limits.b);
+    println!(\"c: {}\", limits.c);
+    println!(\"d: {}\", limits.d);
+    println!(\"e: {}\", limits.e);
+    println!(\"f: {}\", limits.f);
+    println!(\"g: {}\", limits.g);
+    println!(\"h: {}\", limits.h);
+}
+";
+
+fn fixture_with_boilerplate() -> tempfile::TempDir {
+    let dir = fixture();
+    std::fs::write(dir.path().join("src/dump_a.rs"), DUMP_A).unwrap();
+    std::fs::write(dir.path().join("src/dump_b.rs"), DUMP_B).unwrap();
+    dir
+}
+
+#[test]
+fn boilerplate_is_named_and_ranked_below_code_that_carries_behaviour() {
+    let dir = fixture_with_boilerplate();
+    let value = scan_json(dir.path());
+    let groups = value["groups"].as_array().unwrap();
+
+    let position = |category: serde_json::Value| {
+        groups
+            .iter()
+            .position(|group| group["boilerplate"] == category)
+            .unwrap_or_else(|| panic!("a group with boilerplate {category}"))
+    };
+    let boilerplate = position(serde_json::json!("macro-repetition"));
+    let behaviour = position(serde_json::Value::Null);
+    assert!(
+        behaviour < boilerplate,
+        "the gapped clone outranks the larger run of macro invocations"
+    );
+    // Ranked down, not hidden, and its size is reported unchanged: the
+    // ranking moved, the measurements did not.
+    assert_eq!(groups[boilerplate]["suppressed"], serde_json::Value::Null);
+    assert!(
+        groups[boilerplate]["priority"]["value"].as_f64().unwrap()
+            > groups[behaviour]["priority"]["value"].as_f64().unwrap()
+    );
+
+    // The classifier's rules are versioned like every other detector.
+    assert!(
+        value["run"]["detector_versions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["component"] == "boilerplate")
+    );
+
+    let store = open_store(dir.path());
+    let run = store.latest_run().unwrap().expect("a recorded run");
+    let stored = store.run_groups(run.id).unwrap();
+    assert!(
+        stored
+            .iter()
+            .any(|group| group.boilerplate.as_deref() == Some("macro-repetition")),
+        "the classification is recorded, not just displayed"
+    );
+}
+
+#[test]
+fn a_hidden_boilerplate_category_is_recorded_with_the_rule_that_hid_it() {
+    let dir = fixture_with_boilerplate();
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[suppression.boilerplate]\nmacro-repetition = \"hide\"\n",
+    )
+    .unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 by rule"))
+        .stdout(predicate::str::contains("dump_config").not());
+
+    // Hidden, not deleted: the finding names the rule that hid it.
+    let store = open_store(dir.path());
+    let run = store.latest_run().unwrap().expect("a recorded run");
+    let findings = store.run_findings(run.id).unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.suppression_scope.as_deref() == Some("ast_pattern")),
+    );
+    assert!(
+        store
+            .run_groups(run.id)
+            .unwrap()
+            .iter()
+            .any(|group| group.boilerplate.as_deref() == Some("macro-repetition"))
+    );
+
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural", "--show-suppressed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "[suppressed: boilerplate: macro-repetition]",
+        ));
 }

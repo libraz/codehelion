@@ -39,11 +39,11 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
-const MIGRATIONS: &[&str] = &[V1, V2, V3];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 /// Version 1: the full entity set.
 const V1: &str = "
@@ -310,6 +310,17 @@ CREATE TABLE clone_group_similarity (
     composite       REAL NOT NULL,
     min_pairwise    REAL NOT NULL
 ) STRICT;
+";
+
+/// Version 4: the boilerplate shape a clone group matches.
+///
+/// This records what the group *is*, not what was done about it: whether a
+/// category is hidden, ranked down or shown is a configured policy, and the
+/// stored fact stays the same under every policy. A group whose members do not
+/// all match the same shape stores nothing.
+const V4: &str = "
+ALTER TABLE clone_group ADD COLUMN boilerplate TEXT
+    CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition'));
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

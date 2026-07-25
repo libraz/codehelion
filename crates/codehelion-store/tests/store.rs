@@ -3,6 +3,7 @@
 //! databases (in-memory and on-disk), never mocks.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::features::{
@@ -97,6 +98,7 @@ fn sample_snapshot<'a>(
             score: 1.0,
             entropy_bits: 4.2,
             suppress_reason: None,
+            boilerplate: None,
             suppressed_by: None,
             final_priority: 42.0,
             similarity: None,
@@ -188,6 +190,31 @@ fn a_structural_group_persists_its_similarity_breakdown() {
     assert!((breakdown.min_pairwise - 0.72).abs() < 1e-9);
     // The unmeasured type dimension survives the round-trip as absent.
     assert!(breakdown.type_similarity.is_none());
+}
+
+#[test]
+fn a_boilerplate_group_records_what_it_is_independently_of_policy() {
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.groups[0].boilerplate = Some(Boilerplate::MacroRepetition);
+    // Nothing was suppressed: the classification is a fact about the code,
+    // not a record of what the report did with it.
+    snapshot.groups[0].suppress_reason = None;
+    snapshot.groups[0].suppressed_by = None;
+    let run_id = store.record_snapshot(&snapshot).unwrap();
+
+    let groups = store.run_groups(run_id).unwrap();
+    assert_eq!(groups[0].boilerplate.as_deref(), Some("macro-repetition"));
+    assert!(groups[0].suppress_reason.is_none());
+
+    // A group that matches no shape stores none.
+    let mut plain = sample_snapshot(&variant, &detectors);
+    plain.groups[0].boilerplate = None;
+    let run_id = store.record_snapshot(&plain).unwrap();
+    assert!(store.run_groups(run_id).unwrap()[0].boilerplate.is_none());
 }
 
 #[test]

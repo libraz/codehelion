@@ -12,6 +12,7 @@
 //! written as anchor columns on the per-scan rows and participates in no
 //! identity.
 
+use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::{BuildVariant, Language};
 use codehelion_core::features::{
@@ -105,6 +106,10 @@ pub struct GroupRow {
     pub entropy_bits: f64,
     /// Noise marker name (`low-entropy` / `high-frequency`), if one fired.
     pub suppress_reason: Option<String>,
+    /// The boilerplate shape every member matches, when they all match one.
+    /// A recorded fact about the code, independent of what policy does with
+    /// it.
+    pub boilerplate: Option<Boilerplate>,
     /// Index into [`Snapshot::suppressions`] of the rule that suppressed this
     /// group's finding, if one matched.
     pub suppressed_by: Option<usize>,
@@ -501,8 +506,8 @@ fn write_group(
     tx.execute(
         "INSERT INTO clone_group
              (scan_run_id, group_fingerprint_id, clone_type, member_count,
-              score, entropy_bits, suppress_reason)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+              score, entropy_bits, suppress_reason, boilerplate)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             run_id,
             group_fp_id,
@@ -511,6 +516,7 @@ fn write_group(
             group.score,
             group.entropy_bits,
             group.suppress_reason,
+            group.boilerplate.map(Boilerplate::name),
         ],
     )?;
     let group_row_id = tx.last_insert_rowid();

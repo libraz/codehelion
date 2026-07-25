@@ -178,6 +178,11 @@ pub struct Group {
     /// Per-dimension similarity evidence, when the mode measured it; `None`
     /// in modes that match content exactly and score no dimensions.
     pub similarity: Option<Similarity>,
+    /// The boilerplate shape every member matches, when they all match one
+    /// (`trivial-body`, `forwarding`, `macro-repetition`). What the report
+    /// does with such a group is configured per category; the classification
+    /// is stated either way.
+    pub boilerplate: Option<String>,
     /// Why the group is hidden from default reports; `None` when visible.
     pub suppressed: Option<Suppression>,
     /// Every occurrence, the canonical instance first.
@@ -264,6 +269,7 @@ impl Suppression {
                 match self.scope.as_deref() {
                     Some("path_glob") => format!("path glob {pattern:?}"),
                     Some("inline_comment") => format!("{pattern} marker"),
+                    Some("ast_pattern") => format!("boilerplate: {pattern}"),
                     Some(scope) => format!("{scope} {pattern:?}"),
                     None => "rule".to_string(),
                 }
@@ -479,12 +485,18 @@ fn render_group(
     palette: &Palette,
     out: &mut impl Write,
 ) -> io::Result<()> {
-    let marker = group.suppressed.as_ref().map_or_else(String::new, |cause| {
-        format!(
+    let marker = match (&group.suppressed, &group.boilerplate) {
+        (Some(cause), _) => format!(
             " {}",
             palette.yellow(&format!("[suppressed: {}]", cause.label()))
-        )
-    });
+        ),
+        // A group that is boilerplate but still shown says so: its place in
+        // the ranking is explained rather than silently lowered.
+        (None, Some(category)) => {
+            format!(" {}", palette.yellow(&format!("[boilerplate: {category}]")))
+        }
+        (None, None) => String::new(),
+    };
     writeln!(
         out,
         "  {} {} priority {:.1} ({} tokens x {} extra x {:.2} similarity){marker}",
@@ -660,6 +672,7 @@ pub(super) mod tests {
                         similarity: 1.0,
                     },
                     similarity: None,
+                    boilerplate: None,
                     suppressed: None,
                     members: (0..7)
                         .map(|index| Member {
@@ -684,6 +697,7 @@ pub(super) mod tests {
                         similarity: 1.0,
                     },
                     similarity: None,
+                    boilerplate: None,
                     suppressed: Some(Suppression {
                         kind: SuppressionKind::Rule,
                         reason: None,
@@ -739,6 +753,7 @@ pub(super) mod tests {
                 min_pairwise: 0.79,
                 confidence_band: "medium".to_string(),
             }),
+            boilerplate: None,
             suppressed: None,
             members: vec![
                 Member {
