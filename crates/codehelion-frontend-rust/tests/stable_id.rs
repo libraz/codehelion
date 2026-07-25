@@ -5,8 +5,9 @@
 //! bit-identical. Only the anchors (lines, offsets) may differ.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::{BuildVariant, LanguageSelection};
-use codehelion_core::engine::{self, CloneType, EngineConfig, InputFile};
+use codehelion_core::engine::{self, EngineConfig, InputFile};
 use codehelion_core::frontend::{Frontend, LexedFile};
 use codehelion_core::stable_id::{self, FileContext};
 use codehelion_frontend_rust::RustFrontend;
@@ -192,7 +193,7 @@ fn type2_members_share_their_normalized_content_fingerprint() {
         .groups
         .iter()
         .zip(ids.iter())
-        .find(|(g, _)| g.clone_type == CloneType::Type2)
+        .find(|(g, _)| g.clone_type == CloneClass::Type2)
         .map(|(_, i)| i)
         .expect("a type-2 group");
     let first = &type2.members[0];

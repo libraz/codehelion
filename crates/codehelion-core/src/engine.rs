@@ -28,6 +28,7 @@ mod segment;
 pub use group::group_pairs;
 pub use normalize::LiteralNorm;
 
+use crate::clone_class::CloneClass;
 use crate::frontend::{Token, Unit};
 
 /// One lexed file, as the engine consumes it.
@@ -101,26 +102,6 @@ pub struct Instance {
     pub unit: Option<usize>,
 }
 
-/// Clone classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CloneType {
-    /// Verbatim copy (formatting and comments aside).
-    Type1,
-    /// Copy with consistent renames and/or changed literals.
-    Type2,
-}
-
-impl CloneType {
-    /// Stable lowercase identifier used in reports.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Type1 => "type-1",
-            Self::Type2 => "type-2",
-        }
-    }
-}
-
 /// Why a group was marked suppressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuppressReason {
@@ -148,7 +129,7 @@ pub struct ClonePair {
     /// content and merge into one group.
     pub content_key: u64,
     /// Clone classification.
-    pub clone_type: CloneType,
+    pub clone_type: CloneClass,
     /// Fraction of positions whose raw text also matches (1.0 for Type-1).
     pub score: f64,
     /// First instance (smaller `(file, token_start)`).
@@ -163,7 +144,7 @@ pub struct CloneGroup {
     /// Hash of the shared content.
     pub content_key: u64,
     /// Clone classification: Type-2 if any member differs in raw text.
-    pub clone_type: CloneType,
+    pub clone_type: CloneClass,
     /// Minimum pairwise raw-text similarity across the group (1.0 for Type-1).
     pub score: f64,
     /// Deduplicated instances, sorted by `(file, token range)`; the first
@@ -348,7 +329,7 @@ mod tests {
         let type1: Vec<_> = report
             .groups
             .iter()
-            .filter(|g| g.clone_type == CloneType::Type1)
+            .filter(|g| g.clone_type == CloneClass::Type1)
             .collect();
         assert_eq!(type1.len(), 1, "groups: {:?}", report.groups);
         let group = type1[0];
@@ -380,7 +361,7 @@ mod tests {
         let type2: Vec<_> = report
             .groups
             .iter()
-            .filter(|g| g.clone_type == CloneType::Type2)
+            .filter(|g| g.clone_type == CloneClass::Type2)
             .collect();
         assert_eq!(type2.len(), 1, "groups: {:?}", report.groups);
         let group = type2[0];
@@ -391,7 +372,7 @@ mod tests {
             report
                 .groups
                 .iter()
-                .all(|g| g.clone_type != CloneType::Type1)
+                .all(|g| g.clone_type != CloneClass::Type1)
         );
     }
 

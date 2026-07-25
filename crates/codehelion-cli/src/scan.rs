@@ -16,12 +16,13 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::{
     self, BuildVariant, ContentHash, DEFAULT_SCAN_LINES, DiscoveryConfig, DiscoveryReport,
     GeneratedMarkers, Language, LanguageSelection, NORMALIZATION_VERSION, SourceUnit,
 };
 use codehelion_core::engine::{
-    self, CloneGroup, CloneType, EngineConfig, EngineReport, InputFile, LiteralNorm,
+    self, CloneGroup, EngineConfig, EngineReport, InputFile, LiteralNorm,
 };
 use codehelion_core::frontend::{Frontend, Token, Unit};
 use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION, FileContext, GroupIds};
@@ -256,8 +257,8 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
             },
             groups: report::GroupCounts {
                 total: as_u64(inputs.report.groups.len()),
-                type_1: count_groups(&|i| inputs.report.groups[i].clone_type == CloneType::Type1),
-                type_2: count_groups(&|i| inputs.report.groups[i].clone_type == CloneType::Type2),
+                type_1: count_groups(&|i| inputs.report.groups[i].clone_type == CloneClass::Type1),
+                type_2: count_groups(&|i| inputs.report.groups[i].clone_type == CloneClass::Type2),
             },
             suppressed: report::SuppressedCounts {
                 noise: count_groups(&|i| inputs.report.groups[i].suppressed.is_some()),

@@ -26,7 +26,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::verify::{Confidence, StructuralClass};
+use crate::clone_class::CloneClass;
+use crate::verify::Confidence;
 
 /// Tuning for grouping. Similarities are in `[0, 1]`; the defaults are
 /// provisional and calibrated against the chain corpus.
@@ -70,7 +71,7 @@ pub struct SimilarityEdge {
     /// The pair's grouping similarity, in `[0, 1]` (the verdict composite).
     pub similarity: f64,
     /// The pair's clone classification.
-    pub class: StructuralClass,
+    pub class: CloneClass,
     /// The pair's confidence.
     pub confidence: Confidence,
 }
@@ -92,7 +93,7 @@ pub struct GroupingUnit {
 pub struct StructuralGroup {
     /// The weakest clone class among the group's internal edges (a group is no
     /// stronger than its loosest accepted pair).
-    pub clone_type: StructuralClass,
+    pub clone_type: CloneClass,
     /// The weakest confidence among the group's internal edges.
     pub confidence: Confidence,
     /// The medoid: the group's canonical instance (a unit index).
@@ -180,7 +181,7 @@ struct SimilarityGraph {
 #[derive(Debug, Clone, Copy)]
 struct EdgeData {
     similarity: f64,
-    class: StructuralClass,
+    class: CloneClass,
     confidence: Confidence,
 }
 
@@ -468,7 +469,7 @@ fn build_group(
         .collect();
 
     // Weakest class, confidence and pairwise similarity across internal edges.
-    let mut clone_type = StructuralClass::Type1;
+    let mut clone_type = CloneClass::Type1;
     let mut confidence = Confidence::High;
     let mut min_pairwise = 1.0_f64;
     for (i, &left) in ordered_members.iter().enumerate() {
@@ -492,11 +493,11 @@ fn build_group(
 }
 
 /// The looser of two classes: Type-3 is weakest, Type-1 strongest.
-const fn weaker_class(a: StructuralClass, b: StructuralClass) -> StructuralClass {
+const fn weaker_class(a: CloneClass, b: CloneClass) -> CloneClass {
     match (a, b) {
-        (StructuralClass::Type3, _) | (_, StructuralClass::Type3) => StructuralClass::Type3,
-        (StructuralClass::Type2, _) | (_, StructuralClass::Type2) => StructuralClass::Type2,
-        _ => StructuralClass::Type1,
+        (CloneClass::Type3, _) | (_, CloneClass::Type3) => CloneClass::Type3,
+        (CloneClass::Type2, _) | (_, CloneClass::Type2) => CloneClass::Type2,
+        _ => CloneClass::Type1,
     }
 }
 
@@ -528,7 +529,7 @@ mod tests {
             a,
             b,
             similarity,
-            class: StructuralClass::Type3,
+            class: CloneClass::Type3,
             confidence: Confidence::Medium,
         }
     }
@@ -629,27 +630,27 @@ mod tests {
                 a: 0,
                 b: 1,
                 similarity: 0.95,
-                class: StructuralClass::Type1,
+                class: CloneClass::Type1,
                 confidence: Confidence::High,
             },
             SimilarityEdge {
                 a: 1,
                 b: 2,
                 similarity: 0.9,
-                class: StructuralClass::Type3,
+                class: CloneClass::Type3,
                 confidence: Confidence::Low,
             },
             SimilarityEdge {
                 a: 0,
                 b: 2,
                 similarity: 0.9,
-                class: StructuralClass::Type2,
+                class: CloneClass::Type2,
                 confidence: Confidence::Medium,
             },
         ];
         let set = group(&units, &edges, &GroupingConfig::default());
         let only = &set.groups[0];
-        assert_eq!(only.clone_type, StructuralClass::Type3);
+        assert_eq!(only.clone_type, CloneClass::Type3);
         assert_eq!(only.confidence, Confidence::Low);
     }
 

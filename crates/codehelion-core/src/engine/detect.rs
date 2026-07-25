@@ -29,7 +29,7 @@ use super::fingerprint::{
 };
 use super::normalize::{NormToken, normalize_into};
 use super::segment::{self, SegmentId};
-use super::{ClonePair, CloneType, EngineConfig, EngineStats, InputFile, Instance};
+use super::{CloneClass, ClonePair, EngineConfig, EngineStats, InputFile, Instance};
 
 /// Remaining candidate-pair allowance shared by both passes.
 pub(crate) struct PairBudget {
@@ -315,7 +315,7 @@ pub(crate) fn raw_pass(
             let slice = &files[r.file_a].tokens[r.a_start..r.a_start + r.len];
             ClonePair {
                 content_key: raw_sequence_hash(slice),
-                clone_type: CloneType::Type1,
+                clone_type: CloneClass::Type1,
                 score: 1.0,
                 a: instance(files, anchors, r.file_a, r.a_start, r.a_start + r.len),
                 b: instance(files, anchors, r.file_b, r.b_start, r.b_start + r.len),
@@ -458,7 +458,7 @@ pub(crate) fn fragment_pass(
         .into_iter()
         .map(|m| ClonePair {
             content_key: m.key,
-            clone_type: CloneType::Type2,
+            clone_type: CloneClass::Type2,
             score: m.score,
             a: instance(files, anchors, m.a.0, m.a.1, m.a.2),
             b: instance(files, anchors, m.b.0, m.b.1, m.b.2),

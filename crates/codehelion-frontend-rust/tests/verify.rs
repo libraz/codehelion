@@ -4,9 +4,10 @@
 //! clone at all — driving `statement_sequence` and `verify` on real IR.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use codehelion_core::clone_class::CloneClass;
 use codehelion_core::features::{self, UnitFeatures};
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
-use codehelion_core::verify::{self, StructuralClass, UnitView, VerifyConfig};
+use codehelion_core::verify::{self, UnitView, VerifyConfig};
 use codehelion_frontend_rust::ir::RustStructuralFrontend;
 
 const ALPHA: &str = "\
@@ -110,7 +111,7 @@ fn leak(
 fn a_verbatim_copy_is_a_type1_clone() {
     let alpha = prepare(ALPHA);
     let verdict = verify::verify(&view(&alpha), &view(&alpha), &VerifyConfig::default());
-    assert_eq!(verdict.class, Some(StructuralClass::Type1));
+    assert_eq!(verdict.class, Some(CloneClass::Type1));
     assert!(verdict.alignment.only_a.is_empty());
     assert!(verdict.alignment.only_b.is_empty());
 }
@@ -120,7 +121,7 @@ fn a_consistently_renamed_copy_is_a_type2_clone() {
     let alpha = prepare(ALPHA);
     let renamed = prepare(ALPHA_RENAMED);
     let verdict = verify::verify(&view(&alpha), &view(&renamed), &VerifyConfig::default());
-    assert_eq!(verdict.class, Some(StructuralClass::Type2));
+    assert_eq!(verdict.class, Some(CloneClass::Type2));
     assert!(verdict.breakdown.lexical < 1.0, "renamed heads differ");
 }
 
@@ -129,7 +130,7 @@ fn a_gapped_edit_is_a_type3_clone_with_the_inserted_statement_in_the_alignment()
     let alpha = prepare(ALPHA);
     let edited = prepare(ALPHA_TYPE3);
     let verdict = verify::verify(&view(&alpha), &view(&edited), &VerifyConfig::default());
-    assert_eq!(verdict.class, Some(StructuralClass::Type3));
+    assert_eq!(verdict.class, Some(CloneClass::Type3));
     // The inserted `let extra = ...;` has no partner on the original side.
     assert!(
         !verdict.alignment.only_b.is_empty(),

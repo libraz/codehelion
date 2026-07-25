@@ -5,7 +5,8 @@
 
 use std::path::PathBuf;
 
-use codehelion_core::engine::{self, CloneType, EngineConfig, InputFile};
+use codehelion_core::clone_class::CloneClass;
+use codehelion_core::engine::{self, EngineConfig, InputFile};
 use codehelion_core::frontend::{Frontend, LexedFile};
 use codehelion_frontend_rust::RustFrontend;
 
@@ -39,7 +40,7 @@ fn detect_corpus(lexed: &[LexedFile]) -> engine::EngineReport {
 /// `lines_a` and another in `file_b` overlapping `lines_b`.
 fn found(
     report: &engine::EngineReport,
-    clone_type: CloneType,
+    clone_type: CloneClass,
     file_a: usize,
     lines_a: (u32, u32),
     file_b: usize,
@@ -62,7 +63,7 @@ fn labelled_type1_transplant_is_recovered() {
     // A measurement loop transplanted verbatim from seed.rs into an unrelated
     // host function in partial1.rs.
     assert!(
-        found(&report, CloneType::Type1, 0, (9, 22), 1, (10, 23)),
+        found(&report, CloneClass::Type1, 0, (9, 22), 1, (10, 23)),
         "type-1 transplant seed.rs:9-22 <-> partial1.rs:10-23 not found; groups: {:#?}",
         report.groups
     );
@@ -75,7 +76,7 @@ fn labelled_type2_transplant_is_recovered() {
     // A checksum statement run transplanted with renames and a changed
     // literal from seed.rs into an unrelated host function in partial2.rs.
     assert!(
-        found(&report, CloneType::Type2, 0, (34, 41), 2, (10, 17)),
+        found(&report, CloneClass::Type2, 0, (34, 41), 2, (10, 17)),
         "type-2 transplant seed.rs:34-41 <-> partial2.rs:10-17 not found; groups: {:#?}",
         report.groups
     );

@@ -6,6 +6,7 @@
 //! mechanically enforceable.
 
 pub mod candidate;
+pub mod clone_class;
 pub mod discovery;
 pub mod doctor;
 pub mod engine;

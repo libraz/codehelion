@@ -3,8 +3,8 @@
 //! databases (in-memory and on-disk), never mocks.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
-use codehelion_core::engine::CloneType;
 use codehelion_core::features::{
     ApiCallFeature, CfgFeature, CharacteristicVector, FeatureHash, FeatureKind, SubtreeFeature,
     UnitFeatures, WindowFeature,
@@ -93,7 +93,7 @@ fn sample_snapshot<'a>(
         suppressions: Vec::new(),
         groups: vec![GroupRow {
             fingerprint: group_fp(9),
-            clone_type: CloneType::Type1,
+            clone_type: CloneClass::Type1,
             score: 1.0,
             entropy_bits: 4.2,
             suppress_reason: None,
@@ -163,7 +163,7 @@ fn a_structural_group_persists_its_similarity_breakdown() {
     let mut store = Store::open_in_memory().unwrap();
 
     let mut snapshot = sample_snapshot(&variant, &detectors);
-    snapshot.groups[0].clone_type = CloneType::Type2;
+    snapshot.groups[0].clone_type = CloneClass::Type2;
     snapshot.groups[0].similarity = Some(SimilarityBreakdownRow {
         weight_version: "structural-verify-v0".to_string(),
         lexical: 0.8,

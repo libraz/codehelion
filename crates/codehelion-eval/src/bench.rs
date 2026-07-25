@@ -23,8 +23,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
+use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
-use codehelion_core::engine::CloneType;
 use codehelion_core::frontend::UnitKind;
 use codehelion_core::stable_id::{
     CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint,
@@ -558,7 +558,7 @@ pub fn measure_store_insert(
     let group_rows: Vec<GroupRow> = (0..groups)
         .map(|group| GroupRow {
             fingerprint: CloneGroupFingerprint::from_bytes(fp(2, group)),
-            clone_type: CloneType::Type1,
+            clone_type: CloneClass::Type1,
             score: 1.0,
             entropy_bits: 24.0,
             suppress_reason: None,

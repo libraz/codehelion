@@ -12,8 +12,8 @@
 //! written as anchor columns on the per-scan rows and participates in no
 //! identity.
 
+use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::{BuildVariant, Language};
-use codehelion_core::engine::CloneType;
 use codehelion_core::features::{
     FEATURE_SCHEMA_VERSION, FeatureKind, SHAPE_TAG_SLOTS, UnitFeatures,
 };
@@ -98,7 +98,7 @@ pub struct GroupRow {
     /// The group's stable fingerprint.
     pub fingerprint: CloneGroupFingerprint,
     /// Clone classification.
-    pub clone_type: CloneType,
+    pub clone_type: CloneClass,
     /// Minimum pairwise raw similarity across the group.
     pub score: f64,
     /// Shannon entropy of the shared content.

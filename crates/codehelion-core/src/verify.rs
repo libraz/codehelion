@@ -27,6 +27,7 @@
 //! with the detector identity (AGENTS.md §2-4). Everything here is a pure
 //! function of its inputs.
 
+use crate::clone_class::CloneClass;
 use crate::features::{ApiCallFeature, CfgFeature, SubtreeFeature, UnitFeatures};
 use crate::frontend::Token;
 use crate::ir::{IrNode, Shape, StatementSummary};
@@ -92,29 +93,6 @@ impl Default for VerifyConfig {
             high_confidence: 0.85,
             medium_confidence: 0.70,
             exact_epsilon: 1e-9,
-        }
-    }
-}
-
-/// Structural clone classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StructuralClass {
-    /// Identical structure and verbatim leading tokens.
-    Type1,
-    /// Identical structure with renamed identifiers or changed literals.
-    Type2,
-    /// Similar but not identical structure: a gapped clone.
-    Type3,
-}
-
-impl StructuralClass {
-    /// Stable lowercase identifier used in reports and storage.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Type1 => "type-1",
-            Self::Type2 => "type-2",
-            Self::Type3 => "type-3",
         }
     }
 }
@@ -200,7 +178,7 @@ pub struct UnitView<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Verdict {
     /// The clone class, or `None` when the pair is not a clone.
-    pub class: Option<StructuralClass>,
+    pub class: Option<CloneClass>,
     /// Confidence of the classification; `Some` exactly when `class` is.
     pub confidence: Option<Confidence>,
     /// The similarity breakdown.
@@ -275,7 +253,7 @@ pub fn verify(a: &UnitView<'_>, b: &UnitView<'_>, config: &VerifyConfig) -> Verd
 fn classify(
     breakdown: &SimilarityBreakdown,
     config: &VerifyConfig,
-) -> (Option<StructuralClass>, Option<Confidence>) {
+) -> (Option<CloneClass>, Option<Confidence>) {
     let eps = config.exact_epsilon;
     let exact = |value: f64| (1.0 - value).abs() <= eps;
 
@@ -283,9 +261,9 @@ fn classify(
     // subtree set all agree completely.
     if exact(breakdown.structural) {
         return if exact(breakdown.lexical) {
-            (Some(StructuralClass::Type1), Some(Confidence::High))
+            (Some(CloneClass::Type1), Some(Confidence::High))
         } else {
-            (Some(StructuralClass::Type2), Some(Confidence::High))
+            (Some(CloneClass::Type2), Some(Confidence::High))
         };
     }
     if breakdown.composite >= config.type3_min_composite {
@@ -302,7 +280,7 @@ fn classify(
         } else {
             band
         };
-        return (Some(StructuralClass::Type3), Some(band));
+        return (Some(CloneClass::Type3), Some(band));
     }
     (None, None)
 }
@@ -581,7 +559,7 @@ mod tests {
             features: &feats,
         };
         let verdict = verify(&view, &view, &VerifyConfig::default());
-        assert_eq!(verdict.class, Some(StructuralClass::Type1));
+        assert_eq!(verdict.class, Some(CloneClass::Type1));
         assert_eq!(verdict.confidence, Some(Confidence::High));
         assert!((verdict.breakdown.composite - 1.0).abs() < 1e-9);
         assert!(verdict.alignment.only_a.is_empty());
@@ -602,7 +580,7 @@ mod tests {
             features: &feats,
         };
         let verdict = verify(&va, &vb, &VerifyConfig::default());
-        assert_eq!(verdict.class, Some(StructuralClass::Type2));
+        assert_eq!(verdict.class, Some(CloneClass::Type2));
         assert!(verdict.breakdown.lexical < 1.0);
         assert!((verdict.breakdown.structural - 1.0).abs() < 1e-9);
     }
@@ -632,7 +610,7 @@ mod tests {
             features: &fb,
         };
         let verdict = verify(&va, &vb, &VerifyConfig::default());
-        assert_eq!(verdict.class, Some(StructuralClass::Type3));
+        assert_eq!(verdict.class, Some(CloneClass::Type3));
         // The type dimension is unavailable, so a Type-3 is capped at medium.
         assert_ne!(verdict.confidence, Some(Confidence::High));
         assert_eq!(verdict.alignment.only_b, vec![0]);

@@ -25,11 +25,11 @@
 
 use core::fmt;
 
+use crate::clone_class::CloneClass;
 use crate::discovery::{BuildVariant, Language};
 use crate::engine::normalize::{self, LiteralNorm, NormAtom};
-use crate::engine::{CloneType, EngineReport, InputFile};
+use crate::engine::{EngineReport, InputFile};
 use crate::frontend::Token;
-use crate::verify::StructuralClass;
 
 /// Version of the identifier-hashing recipe. Bump on any change to the hash
 /// inputs, their encoding or their order.
@@ -277,7 +277,7 @@ pub fn fragment_fingerprint(
 #[must_use]
 pub fn clone_group_fingerprint(
     variant: &BuildVariant,
-    clone_type: CloneType,
+    clone_type: CloneClass,
     members: &[FragmentFingerprint],
 ) -> CloneGroupFingerprint {
     let mut distinct: Vec<[u8; 16]> = members.iter().map(|m| m.0).collect();
@@ -317,7 +317,7 @@ pub fn clone_group_fingerprint(
 #[must_use]
 pub fn structural_clone_group_fingerprint(
     variant: &BuildVariant,
-    class: StructuralClass,
+    class: CloneClass,
     canonical: &FragmentFingerprint,
     members: &[FragmentFingerprint],
 ) -> CloneGroupFingerprint {
@@ -392,7 +392,11 @@ pub struct GroupIds {
 /// `contexts` runs parallel to `files`. Type-1 groups hash their members
 /// raw; Type-2 groups hash them under scope-local normalization with
 /// `literals` (the strategy the detection ran with), so the fingerprint
-/// captures exactly the identity that made the members a group.
+/// captures exactly the identity that made the members a group. The engine
+/// this reads reports no gapped clones, so only those two classes occur;
+/// gapped groups are identified by
+/// [`structural_clone_group_fingerprint`] instead, which anchors on a
+/// canonical instance rather than on one shared content.
 #[must_use]
 pub fn report_ids(
     files: &[InputFile<'_>],
@@ -406,8 +410,8 @@ pub fn report_ids(
         .iter()
         .map(|group| {
             let norm = match group.clone_type {
-                CloneType::Type1 => ContentNorm::Raw,
-                CloneType::Type2 => ContentNorm::Normalized(literals),
+                CloneClass::Type1 => ContentNorm::Raw,
+                CloneClass::Type2 | CloneClass::Type3 => ContentNorm::Normalized(literals),
             };
             let member_fps: Vec<FragmentFingerprint> = group
                 .members
@@ -623,14 +627,14 @@ mod tests {
             &renamed_sample(),
             ContentNorm::Raw,
         );
-        let forward = clone_group_fingerprint(&variant(), CloneType::Type1, &[a, b]);
-        let reversed = clone_group_fingerprint(&variant(), CloneType::Type1, &[b, a]);
+        let forward = clone_group_fingerprint(&variant(), CloneClass::Type1, &[a, b]);
+        let reversed = clone_group_fingerprint(&variant(), CloneClass::Type1, &[b, a]);
         assert_eq!(forward, reversed);
         // Another copy of known content leaves the fingerprint unchanged.
-        let duplicated = clone_group_fingerprint(&variant(), CloneType::Type1, &[a, b, a]);
+        let duplicated = clone_group_fingerprint(&variant(), CloneClass::Type1, &[a, b, a]);
         assert_eq!(forward, duplicated);
         // New member content changes it.
-        let single = clone_group_fingerprint(&variant(), CloneType::Type1, &[a]);
+        let single = clone_group_fingerprint(&variant(), CloneClass::Type1, &[a]);
         assert_ne!(forward, single);
     }
 
@@ -646,14 +650,14 @@ mod tests {
         );
         let members = [a, b];
         let forward =
-            structural_clone_group_fingerprint(&variant(), StructuralClass::Type3, &a, &members);
+            structural_clone_group_fingerprint(&variant(), CloneClass::Type3, &a, &members);
         // Member order does not matter.
         let reversed =
-            structural_clone_group_fingerprint(&variant(), StructuralClass::Type3, &a, &[b, a]);
+            structural_clone_group_fingerprint(&variant(), CloneClass::Type3, &a, &[b, a]);
         assert_eq!(forward, reversed);
         // A different canonical instance (medoid) over the same set hashes apart.
         let other_anchor =
-            structural_clone_group_fingerprint(&variant(), StructuralClass::Type3, &b, &members);
+            structural_clone_group_fingerprint(&variant(), CloneClass::Type3, &b, &members);
         assert_ne!(forward, other_anchor);
         // New member content changes it.
         let c = fragment_fingerprint(
@@ -664,7 +668,7 @@ mod tests {
             ContentNorm::Raw,
         );
         let grown =
-            structural_clone_group_fingerprint(&variant(), StructuralClass::Type3, &a, &[a, b, c]);
+            structural_clone_group_fingerprint(&variant(), CloneClass::Type3, &a, &[a, b, c]);
         assert_ne!(forward, grown);
     }
 
@@ -672,7 +676,7 @@ mod tests {
     fn finding_ids_discriminate_host_and_rank() {
         let group = clone_group_fingerprint(
             &variant(),
-            CloneType::Type1,
+            CloneClass::Type1,
             &[fragment_fingerprint(
                 &variant(),
                 &ctx(),

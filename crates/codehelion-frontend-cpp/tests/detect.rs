@@ -3,7 +3,8 @@
 //! renamed copy (Type-2) are both recovered across classes.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-use codehelion_core::engine::{self, CloneType, EngineConfig, InputFile};
+use codehelion_core::clone_class::CloneClass;
+use codehelion_core::engine::{self, EngineConfig, InputFile};
 use codehelion_core::frontend::{Frontend, LexedFile, UnitKind};
 use codehelion_frontend_cpp::CppFrontend;
 
@@ -73,7 +74,7 @@ fn detect_all(lexed: &[LexedFile]) -> engine::EngineReport {
 /// Whether some group of `clone_type` has members in both files.
 fn linked(
     report: &engine::EngineReport,
-    clone_type: CloneType,
+    clone_type: CloneClass,
     file_a: usize,
     file_b: usize,
 ) -> bool {
@@ -102,7 +103,7 @@ fn verbatim_method_copy_is_recovered_as_type1() {
     let lexed = lex_all();
     let report = detect_all(&lexed);
     assert!(
-        linked(&report, CloneType::Type1, 0, 1),
+        linked(&report, CloneClass::Type1, 0, 1),
         "type-1 method <-> free function copy not found; groups: {:#?}",
         report.groups
     );
@@ -113,7 +114,7 @@ fn renamed_method_copy_is_recovered_as_type2() {
     let lexed = lex_all();
     let report = detect_all(&lexed);
     assert!(
-        linked(&report, CloneType::Type2, 0, 2),
+        linked(&report, CloneClass::Type2, 0, 2),
         "type-2 renamed method copy not found; groups: {:#?}",
         report.groups
     );

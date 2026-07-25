@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::fingerprint::norm_token_hash;
 use super::normalize::normalize;
-use super::{CloneGroup, ClonePair, CloneType, EngineConfig, InputFile, Instance, SuppressReason};
+use super::{CloneClass, CloneGroup, ClonePair, EngineConfig, InputFile, Instance, SuppressReason};
 
 /// Shannon entropy, in bits, of the normalized-token distribution of a slice.
 #[allow(clippy::cast_precision_loss)] // token counts are far below 2^52
@@ -72,10 +72,10 @@ pub fn group_pairs(
             }
             members.sort_by_key(|m| (m.file, m.token_start, m.token_end));
 
-            let clone_type = if pairs.iter().any(|p| p.clone_type == CloneType::Type2) {
-                CloneType::Type2
+            let clone_type = if pairs.iter().any(|p| p.clone_type == CloneClass::Type2) {
+                CloneClass::Type2
             } else {
-                CloneType::Type1
+                CloneClass::Type1
             };
             let score = pairs.iter().map(|p| p.score).fold(f64::INFINITY, f64::min);
             let entropy = entropy_bits(files, &members[0], config);
