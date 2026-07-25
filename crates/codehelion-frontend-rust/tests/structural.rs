@@ -6,6 +6,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use codehelion_core::discovery::{BuildVariant, LanguageSelection};
+use codehelion_core::frontend::UnitKind;
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
 use codehelion_core::structural::{self, StructuralConfig};
 use codehelion_frontend_rust::ir::RustStructuralFrontend;
@@ -171,6 +172,32 @@ fn a_type3_edit_is_grouped_as_a_near_clone() {
         "the Type-3 edit joins alpha's group"
     );
     assert!(!group.members.contains(&2));
+}
+
+#[test]
+fn units_carry_the_anchors_a_report_needs() {
+    let files = parse_all(&[ALPHA, UNRELATED]);
+    let report = structural::analyze(&files, &variant(), &StructuralConfig::default());
+
+    let alpha = &report.units[0];
+    assert_eq!(alpha.file, 0);
+    assert_eq!(alpha.kind, UnitKind::Function);
+    assert_eq!(alpha.name.as_deref(), Some("alpha"));
+    // ALPHA's body spans its whole source, first line to last.
+    assert_eq!(alpha.start_line, 1);
+    assert_eq!(
+        alpha.end_line,
+        u32::try_from(ALPHA.lines().count()).unwrap(),
+        "the unit ends on the closing brace's line"
+    );
+    assert!(alpha.token_count > 40, "a whole function's tokens");
+    assert!(alpha.range.start < alpha.range.end);
+
+    // Anchors are reporting data only: they never enter the identity.
+    let other = &report.units[1];
+    assert_ne!(alpha.fingerprint, other.fingerprint);
+    assert_eq!(other.file, 1);
+    assert_eq!(other.start_line, 1);
 }
 
 #[test]

@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 use crate::candidate::{self, CandidateConfig, CandidateStats};
 use crate::discovery::BuildVariant;
 use crate::features::{self, FileFeatures};
-use crate::frontend::Lexeme;
+use crate::frontend::{Lexeme, Token, UnitKind};
 use crate::grouping::{
     self, GroupingConfig, GroupingSet, GroupingStats, GroupingUnit, SimilarityEdge,
 };
@@ -57,8 +57,16 @@ pub struct StructuralConfig {
 pub struct StructuralUnit {
     /// Index of the file this unit belongs to (into the input slice).
     pub file: usize,
+    /// What kind of unit this is; reporting only.
+    pub kind: UnitKind,
     /// Source bytes the unit covers; reporting only.
     pub range: ByteRange,
+    /// 1-based first line; reporting only, never an identity input.
+    pub start_line: u32,
+    /// 1-based last line; reporting only, never an identity input.
+    pub end_line: u32,
+    /// Size of the unit in tokens.
+    pub token_count: usize,
     /// The unit's declared name, when the frontend recovered one.
     pub name: Option<Lexeme>,
     /// The unit's raw content fingerprint: its stable grouping key and unit
@@ -121,10 +129,13 @@ pub struct StructuralReport {
 struct Unit {
     file: usize,
     local: usize,
+    kind: UnitKind,
     statements: Vec<crate::ir::StatementSummary>,
     fingerprint: UnitFingerprint,
     content: FragmentFingerprint,
     range: ByteRange,
+    lines: (u32, u32),
+    token_count: usize,
     name: Option<Lexeme>,
 }
 
@@ -216,7 +227,11 @@ pub fn analyze(
         .iter()
         .map(|unit| StructuralUnit {
             file: unit.file,
+            kind: unit.kind,
             range: unit.range,
+            start_line: unit.lines.0,
+            end_line: unit.lines.1,
+            token_count: unit.token_count,
             name: unit.name.clone(),
             fingerprint: unit.fingerprint,
             content: unit.content,
@@ -285,34 +300,64 @@ fn flatten_units(files: &[SyntaxIrFile], variant: &BuildVariant) -> (Vec<Unit>, 
         };
         let mut local = 0usize;
         file.walk(&mut |node| {
-            if matches!(node.shape, Shape::Function | Shape::Method | Shape::Closure) {
-                let statements = verify::statement_sequence(node, &file.tokens);
-                let end = node.token_end.min(file.tokens.len());
-                let start = node.token_start.min(end);
-                let tokens = &file.tokens[start..end];
-                let fingerprint =
-                    stable_id::unit_fingerprint(variant, &context, tokens, ContentNorm::Raw);
-                let content_fp = stable_id::fragment_fingerprint(
-                    variant,
-                    &context,
-                    "unit",
-                    tokens,
-                    ContentNorm::Raw,
-                );
-                units.push(Unit {
-                    file: file_index,
-                    local,
-                    statements,
-                    fingerprint,
-                    content: content_fp,
-                    range: node.range,
-                    name: node.name.clone(),
-                });
-                local += 1;
-            }
+            let Some(kind) = unit_kind(&node.shape) else {
+                return;
+            };
+            let statements = verify::statement_sequence(node, &file.tokens);
+            let end = node.token_end.min(file.tokens.len());
+            let start = node.token_start.min(end);
+            let tokens = &file.tokens[start..end];
+            let fingerprint =
+                stable_id::unit_fingerprint(variant, &context, tokens, ContentNorm::Raw);
+            let content_fp = stable_id::fragment_fingerprint(
+                variant,
+                &context,
+                "unit",
+                tokens,
+                ContentNorm::Raw,
+            );
+            units.push(Unit {
+                file: file_index,
+                local,
+                kind,
+                statements,
+                fingerprint,
+                content: content_fp,
+                range: node.range,
+                lines: line_range(tokens),
+                token_count: tokens.len(),
+                name: node.name.clone(),
+            });
+            local += 1;
         });
     }
     (units, offsets)
+}
+
+/// The reportable unit kind of an IR shape, or `None` for a shape that is not
+/// an analysed unit. The unit shapes here are exactly the ones
+/// [`features::extract`] walks, so unit indices stay aligned.
+const fn unit_kind(shape: &Shape) -> Option<UnitKind> {
+    match *shape {
+        Shape::Function => Some(UnitKind::Function),
+        Shape::Method => Some(UnitKind::Method),
+        Shape::Closure => Some(UnitKind::Closure),
+        _ => None,
+    }
+}
+
+/// The 1-based line range a token slice covers, following the Fast engine's
+/// rule: the last token's own newlines extend its end line, so a unit ending
+/// in a multi-line literal reports its true last line.
+fn line_range(tokens: &[Token]) -> (u32, u32) {
+    let (Some(first), Some(last)) = (tokens.first(), tokens.last()) else {
+        return (0, 0);
+    };
+    let newlines = u32::try_from(last.text.matches('\n').count()).unwrap_or(0);
+    (
+        first.span.start_line,
+        last.span.start_line.saturating_add(newlines),
+    )
 }
 
 /// Build a unit's verification view from its statements and its features.

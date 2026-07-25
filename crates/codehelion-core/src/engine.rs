@@ -25,7 +25,7 @@ mod detect;
 mod group;
 mod segment;
 
-pub use group::group_pairs;
+pub use group::{content_entropy_bits, group_pairs};
 pub use normalize::LiteralNorm;
 
 use crate::clone_class::CloneClass;

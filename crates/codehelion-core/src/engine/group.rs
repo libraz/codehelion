@@ -17,13 +17,23 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::fingerprint::norm_token_hash;
 use super::normalize::normalize;
-use super::{CloneClass, CloneGroup, ClonePair, EngineConfig, InputFile, Instance, SuppressReason};
+use super::{
+    CloneClass, CloneGroup, ClonePair, EngineConfig, InputFile, Instance, LiteralNorm,
+    SuppressReason,
+};
+use crate::frontend::Token;
 
-/// Shannon entropy, in bits, of the normalized-token distribution of a slice.
+/// Shannon entropy, in bits, of a token slice's normalized-token
+/// distribution.
+///
+/// Low entropy marks degenerate repetition — a long literal table, a run of
+/// near-identical accessors — which is a noise signal rather than a finding.
+/// Any mode that reports clone groups scores its content the same way, so the
+/// signal means the same thing across modes.
+#[must_use]
 #[allow(clippy::cast_precision_loss)] // token counts are far below 2^52
-fn entropy_bits(files: &[InputFile<'_>], instance: &Instance, config: &EngineConfig) -> f64 {
-    let slice = &files[instance.file].tokens[instance.token_start..instance.token_end];
-    let normalized = normalize(slice, config.literals);
+pub fn content_entropy_bits(tokens: &[Token], literals: LiteralNorm) -> f64 {
+    let normalized = normalize(tokens, literals);
     let mut counts: BTreeMap<u64, usize> = BTreeMap::new();
     for token in &normalized {
         *counts.entry(norm_token_hash(token)).or_insert(0) += 1;
@@ -39,6 +49,13 @@ fn entropy_bits(files: &[InputFile<'_>], instance: &Instance, config: &EngineCon
             -p * p.log2()
         })
         .sum()
+}
+
+/// Entropy of one instance's matched content, under the run's literal
+/// strategy.
+fn entropy_bits(files: &[InputFile<'_>], instance: &Instance, config: &EngineConfig) -> f64 {
+    let slice = &files[instance.file].tokens[instance.token_start..instance.token_end];
+    content_entropy_bits(slice, config.literals)
 }
 
 /// Group clone pairs into clone groups by matched content.
@@ -103,4 +120,44 @@ pub fn group_pairs(
         (c.file, c.token_start, c.token_end, g.content_key)
     });
     groups
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::frontend::{Lexeme, SourceSpan, TokenKind};
+
+    fn tokens(texts: &[&str]) -> Vec<Token> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| Token {
+                kind: TokenKind::Identifier,
+                text: Lexeme::from(*text),
+                span: SourceSpan {
+                    start_byte: index,
+                    end_byte: index + text.len(),
+                    start_line: 1,
+                    start_column: 1,
+                },
+            })
+            .collect()
+    }
+
+    #[test]
+    fn entropy_separates_repetition_from_variety() {
+        let empty = content_entropy_bits(&[], LiteralNorm::Full);
+        assert!(empty.abs() < 1e-12);
+
+        // Identifiers normalize scope-locally, so repetition shows up as a
+        // single symbol: no information, zero bits.
+        let repeated = content_entropy_bits(&tokens(&["a", "a", "a", "a"]), LiteralNorm::Full);
+        assert!(repeated.abs() < 1e-12);
+
+        // Four equally frequent distinct symbols carry exactly two bits.
+        let varied = content_entropy_bits(&tokens(&["a", "b", "c", "d"]), LiteralNorm::Full);
+        assert!(varied > repeated);
+        assert!((varied - 2.0).abs() < 1e-9, "expected 2 bits, got {varied}");
+    }
 }
