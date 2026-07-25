@@ -267,7 +267,53 @@ fn explain_resolves_a_structural_finding() {
         .assert()
         .success()
         .stdout(predicate::str::contains(&file_path))
-        .stdout(predicate::str::contains("type-3"));
+        .stdout(predicate::str::contains("type-3"))
+        // The evidence the scan reported is reachable from the occurrence.
+        .stdout(predicate::str::contains("2 instances"))
+        .stdout(predicate::str::contains("similarity: composite"))
+        .stdout(predicate::str::contains("type n/a"))
+        .stdout(predicate::str::contains("confidence "));
+
+    let output = cmd()
+        .current_dir(dir.path())
+        .args(["explain", &finding_hex, "--format", "json"])
+        .output()
+        .expect("run explain");
+    let detail: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+    let similarity = &detail["group"]["similarity"];
+    assert_eq!(similarity["weight_version"], "structural-verify-v0");
+    assert!(similarity["type_similarity"].is_null());
+    assert!(similarity["confidence_band"].is_string());
+    assert_eq!(detail["group"]["members"], 2);
+}
+
+#[test]
+fn explain_reports_a_fast_finding_without_inventing_dimensions() {
+    let dir = fixture();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    let finding_hex = {
+        let store = open_store(dir.path());
+        let run = store.latest_run().unwrap().expect("a recorded run");
+        let groups = store.run_groups(run.id).unwrap();
+        groups[0].members[0].finding_hex.clone()
+    };
+    let output = cmd()
+        .current_dir(dir.path())
+        .args(["explain", &finding_hex, "--format", "json"])
+        .output()
+        .expect("run explain");
+    let detail: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+    // Fast mode scores no dimensions, so the breakdown is absent rather than
+    // filled in.
+    assert!(detail["group"]["similarity"].is_null());
+    assert!(detail["group"]["suppressed"].is_null());
 }
 
 #[test]

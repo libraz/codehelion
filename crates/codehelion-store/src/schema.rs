@@ -39,11 +39,11 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 /// Version 1: the full entity set.
 const V1: &str = "
@@ -321,6 +321,18 @@ CREATE TABLE clone_group_similarity (
 const V4: &str = "
 ALTER TABLE clone_group ADD COLUMN boilerplate TEXT
     CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition'));
+";
+
+/// Version 5: the confidence band a group's verdict was assigned.
+///
+/// The band is not derivable from the stored numbers — it is the weakest band
+/// across the group's internal edges, lowered when no type evidence was
+/// available — so reporting it from the database requires storing it. Nullable
+/// because rows written before this column carry no band, and a band is a
+/// judgement that must not be invented after the fact.
+const V5: &str = "
+ALTER TABLE clone_group_similarity ADD COLUMN confidence_band TEXT
+    CHECK (confidence_band IN ('high', 'medium', 'low'));
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

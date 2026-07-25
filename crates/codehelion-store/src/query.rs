@@ -89,6 +89,10 @@ pub struct StoredSimilarity {
     pub composite: f64,
     /// Weakest pairwise similarity inside the group.
     pub min_pairwise: f64,
+    /// The band the verdict was assigned, or `None` for a row written before
+    /// the band was recorded. A band is a judgement, so an absent one is
+    /// reported as absent rather than derived from the numbers after the fact.
+    pub confidence_band: Option<String>,
 }
 
 /// One stored finding: the audited row of a group in a run.
@@ -109,6 +113,9 @@ pub struct StoredFinding {
 }
 
 /// Detail of one occurrence, looked up by its finding id (for `explain`).
+///
+/// The lookup carries the owning group's evidence, not just its identity: an
+/// occurrence is only interesting together with what made it a finding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OccurrenceDetail {
     /// The occurrence itself.
@@ -119,8 +126,25 @@ pub struct OccurrenceDetail {
     pub clone_type: String,
     /// The owning group's score.
     pub score: f64,
+    /// Number of occurrences in the owning group, this one included.
+    pub member_count: i64,
+    /// The boilerplate shape every member matches, when they all match one.
+    pub boilerplate: Option<String>,
+    /// The owning group's similarity breakdown, when the mode measured one.
+    pub similarity: Option<StoredSimilarity>,
+    /// The rule that suppressed the finding in this run, if one matched.
+    pub suppression: Option<StoredSuppressionRef>,
     /// Row id of the scan run the occurrence belongs to.
     pub scan_run_id: i64,
+}
+
+/// The suppression rule a finding references.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSuppressionRef {
+    /// Rule scope (`path_glob`, `symbol_pattern`, `stable_clone_id`, ...).
+    pub scope: String,
+    /// The rule's pattern.
+    pub pattern: String,
 }
 
 /// One posting-list entry: an occurrence of a feature hash at a location.
@@ -252,7 +276,8 @@ impl Store {
             .conn
             .query_row(
                 "SELECT weight_version, lexical, structural, control_flow,
-                        type_similarity, api, composite, min_pairwise
+                        type_similarity, api, composite, min_pairwise,
+                        confidence_band
                  FROM clone_group_similarity
                  WHERE clone_group_id = ?1",
                 params![group_row_id],
@@ -266,6 +291,7 @@ impl Store {
                         api: row.get(5)?,
                         composite: row.get(6)?,
                         min_pairwise: row.get(7)?,
+                        confidence_band: row.get(8)?,
                     })
                 },
             )
@@ -353,32 +379,57 @@ impl Store {
     /// otherwise any underlying database error.
     pub fn occurrence(&self, finding_hex: &str) -> Result<Option<OccurrenceDetail>, StoreError> {
         let bytes = parse_hex_id(finding_hex)?;
-        self.conn
+        let found = self
+            .conn
             .query_row(
                 "SELECT lower(hex(m.finding_id)), fr.file_path, fr.start_line, fr.end_line,
                         fr.token_count, u.name, m.is_canonical,
-                        lower(hex(gf.hash)), g.clone_type, g.score, g.scan_run_id
+                        lower(hex(gf.hash)), g.clone_type, g.score, g.scan_run_id,
+                        g.member_count, g.boilerplate, s.scope, s.pattern, g.id
                  FROM clone_group_member m
                  JOIN fragment fr ON fr.id = m.fragment_id
                  LEFT JOIN source_unit u ON u.id = fr.source_unit_id
                  JOIN clone_group g ON g.id = m.clone_group_id
                  JOIN fingerprint gf ON gf.id = g.group_fingerprint_id
+                 LEFT JOIN finding fi ON fi.clone_group_id = g.id
+                                     AND fi.scan_run_id = g.scan_run_id
+                 LEFT JOIN suppression s ON s.id = fi.suppression_id
                  WHERE m.finding_id = ?1
                  ORDER BY g.scan_run_id DESC
                  LIMIT 1",
                 params![bytes.as_slice()],
                 |row| {
-                    Ok(OccurrenceDetail {
-                        member: map_member(row)?,
-                        group_fingerprint_hex: row.get(7)?,
-                        clone_type: row.get(8)?,
-                        score: row.get(9)?,
-                        scan_run_id: row.get(10)?,
-                    })
+                    let suppression = row
+                        .get::<_, Option<String>>(13)?
+                        .map(|scope| -> Result<_, rusqlite::Error> {
+                            Ok(StoredSuppressionRef {
+                                scope,
+                                pattern: row.get(14)?,
+                            })
+                        })
+                        .transpose()?;
+                    Ok((
+                        OccurrenceDetail {
+                            member: map_member(row)?,
+                            group_fingerprint_hex: row.get(7)?,
+                            clone_type: row.get(8)?,
+                            score: row.get(9)?,
+                            scan_run_id: row.get(10)?,
+                            member_count: row.get(11)?,
+                            boilerplate: row.get(12)?,
+                            similarity: None,
+                            suppression,
+                        },
+                        row.get::<_, i64>(15)?,
+                    ))
                 },
             )
-            .optional()
-            .map_err(StoreError::from)
+            .optional()?;
+        let Some((mut detail, group_row_id)) = found else {
+            return Ok(None);
+        };
+        detail.similarity = self.group_similarity(group_row_id)?;
+        Ok(Some(detail))
     }
 }
 

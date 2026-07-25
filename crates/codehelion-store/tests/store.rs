@@ -15,6 +15,7 @@ use codehelion_core::ir::ByteRange;
 use codehelion_core::stable_id::{
     CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint,
 };
+use codehelion_core::verify::Confidence;
 use codehelion_store::snapshot::{
     FeatureRow, GroupRow, MemberRow, SimilarityBreakdownRow, Snapshot, SuppressionRuleRow, UnitRow,
 };
@@ -176,6 +177,7 @@ fn a_structural_group_persists_its_similarity_breakdown() {
         api: 0.5,
         composite: 0.87,
         min_pairwise: 0.72,
+        confidence_band: Confidence::Medium,
     });
     let run_id = store.record_snapshot(&snapshot).unwrap();
 
@@ -190,6 +192,56 @@ fn a_structural_group_persists_its_similarity_breakdown() {
     assert!((breakdown.min_pairwise - 0.72).abs() < 1e-9);
     // The unmeasured type dimension survives the round-trip as absent.
     assert!(breakdown.type_similarity.is_none());
+    // The band is not derivable from the numbers, so it is stored alongside
+    // them rather than recomputed on read.
+    assert_eq!(breakdown.confidence_band.as_deref(), Some("medium"));
+
+    // The same evidence is reachable from a single occurrence, which is what
+    // `explain` looks up.
+    let finding_hex = groups[0].members[0].finding_hex.clone();
+    let occurrence = store
+        .occurrence(&finding_hex)
+        .unwrap()
+        .expect("the occurrence is stored");
+    assert_eq!(occurrence.clone_type, "type-2");
+    assert_eq!(
+        occurrence.member_count,
+        i64::try_from(groups[0].members.len()).unwrap()
+    );
+    let breakdown = occurrence
+        .similarity
+        .expect("the occurrence carries its group's breakdown");
+    assert!((breakdown.composite - 0.87).abs() < 1e-9);
+    assert_eq!(breakdown.confidence_band.as_deref(), Some("medium"));
+}
+
+#[test]
+fn a_suppressed_occurrence_explains_the_rule_that_hid_it() {
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.suppressions = vec![SuppressionRuleRow {
+        scope: "symbol_pattern".to_string(),
+        pattern: "checksum_*".to_string(),
+        reason: None,
+    }];
+    snapshot.groups[0].suppressed_by = Some(0);
+    snapshot.groups[0].boilerplate = Some(Boilerplate::Forwarding);
+    let run_id = store.record_snapshot(&snapshot).unwrap();
+
+    let groups = store.run_groups(run_id).unwrap();
+    let occurrence = store
+        .occurrence(&groups[0].members[0].finding_hex)
+        .unwrap()
+        .expect("a suppressed occurrence is still stored");
+    let rule = occurrence
+        .suppression
+        .expect("the occurrence names the rule that hid it");
+    assert_eq!(rule.scope, "symbol_pattern");
+    assert_eq!(rule.pattern, "checksum_*");
+    assert_eq!(occurrence.boilerplate.as_deref(), Some("forwarding"));
 }
 
 #[test]

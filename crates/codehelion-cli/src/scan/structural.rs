@@ -584,7 +584,7 @@ fn similarity(group: &StructuralGroup, detail: &GroupDetail) -> report::Similari
         api: breakdown.api,
         composite: breakdown.composite,
         min_pairwise: group.min_pairwise,
-        confidence_band: group.confidence.name().to_string(),
+        confidence_band: Some(group.confidence.name().to_string()),
     }
 }
 
@@ -729,5 +729,6 @@ fn breakdown_row(group: &StructuralGroup, detail: &GroupDetail) -> SimilarityBre
         api: breakdown.api,
         composite: breakdown.composite,
         min_pairwise: group.min_pairwise,
+        confidence_band: group.confidence,
     }
 }

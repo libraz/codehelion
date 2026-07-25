@@ -22,6 +22,7 @@ use codehelion_core::frontend::UnitKind;
 use codehelion_core::stable_id::{
     CloneGroupFingerprint, FindingId, FragmentFingerprint, HASH_ALGORITHM, UnitFingerprint,
 };
+use codehelion_core::verify::Confidence;
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{Store, StoreError};
@@ -91,6 +92,10 @@ pub struct SimilarityBreakdownRow {
     pub composite: f64,
     /// Weakest pairwise similarity inside the group: its cohesion.
     pub min_pairwise: f64,
+    /// The band the verdict was assigned, which the numbers alone do not
+    /// determine: it is the weakest band across the group's internal edges,
+    /// lowered when no type evidence was available.
+    pub confidence_band: Confidence,
 }
 
 /// One clone group with its members.
@@ -609,8 +614,9 @@ fn write_group_similarity(
     tx.execute(
         "INSERT INTO clone_group_similarity
              (clone_group_id, weight_version, lexical, structural,
-              control_flow, type_similarity, api, composite, min_pairwise)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+              control_flow, type_similarity, api, composite, min_pairwise,
+              confidence_band)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             group_row_id,
             similarity.weight_version,
@@ -621,6 +627,7 @@ fn write_group_similarity(
             similarity.api,
             similarity.composite,
             similarity.min_pairwise,
+            similarity.confidence_band.name(),
         ],
     )?;
     Ok(())

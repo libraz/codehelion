@@ -213,7 +213,12 @@ pub struct Similarity {
     /// Weakest pairwise similarity inside the group: its cohesion.
     pub min_pairwise: f64,
     /// Confidence band of the classification (`high`, `medium`, `low`).
-    pub confidence_band: String,
+    ///
+    /// A scan always reports one. It is `None` only when the evidence comes
+    /// from a stored run recorded before the band was persisted: a band is a
+    /// judgement, so an unrecorded one is reported as absent rather than
+    /// re-derived from the numbers.
+    pub confidence_band: Option<String>,
 }
 
 /// A group's ranking value together with its inputs. The collapsed number
@@ -288,17 +293,17 @@ impl Similarity {
         let type_similarity = self
             .type_similarity
             .map_or_else(|| "n/a".to_string(), |value| format!("{value:.2}"));
+        let band = self.confidence_band.as_deref().unwrap_or("n/a");
         format!(
             "similarity: composite {:.2} (lexical {:.2}, structural {:.2}, \
              control-flow {:.2}, type {type_similarity}, api {:.2}); \
-             cohesion {:.2}; confidence {} [{}]",
+             cohesion {:.2}; confidence {band} [{}]",
             self.composite,
             self.lexical,
             self.structural,
             self.control_flow,
             self.api,
             self.min_pairwise,
-            self.confidence_band,
             self.weight_version,
         )
     }
@@ -552,7 +557,8 @@ pub struct FindingDetail {
     pub scan_run: i64,
 }
 
-/// A reference to an occurrence's owning group.
+/// A reference to an occurrence's owning group, carrying the evidence that
+/// made it a finding rather than its identity alone.
 #[derive(Debug, Serialize)]
 pub struct GroupRef {
     /// Stable clone-group fingerprint, hex-encoded.
@@ -561,6 +567,15 @@ pub struct GroupRef {
     pub clone_type: String,
     /// Minimum pairwise similarity across the group.
     pub confidence: f64,
+    /// Number of occurrences in the group, this one included.
+    pub members: u64,
+    /// The boilerplate shape every member matches, when they all match one.
+    pub boilerplate: Option<String>,
+    /// Per-dimension evidence, absent when the mode measured none (Fast).
+    pub similarity: Option<Similarity>,
+    /// The rule that suppressed the group in the recorded run, if one
+    /// matched. A suppressed finding is still recorded and still explainable.
+    pub suppressed: Option<Suppression>,
 }
 
 impl FindingDetail {
@@ -598,9 +613,21 @@ impl FindingDetail {
         )?;
         writeln!(
             out,
-            "  group: {} ({}, score {:.2})",
-            self.group.fingerprint, self.group.clone_type, self.group.confidence,
+            "  group: {} ({}, score {:.2}, {} instances)",
+            self.group.fingerprint,
+            self.group.clone_type,
+            self.group.confidence,
+            self.group.members,
         )?;
+        if let Some(similarity) = &self.group.similarity {
+            writeln!(out, "    {}", similarity.line())?;
+        }
+        if let Some(category) = &self.group.boilerplate {
+            writeln!(out, "  boilerplate: {category}")?;
+        }
+        if let Some(cause) = &self.group.suppressed {
+            writeln!(out, "  suppressed: {}", cause.label())?;
+        }
         writeln!(out, "  scan run: {}", self.scan_run)?;
         Ok(())
     }
@@ -753,7 +780,7 @@ pub(super) mod tests {
                 api: 0.75,
                 composite: 0.82,
                 min_pairwise: 0.79,
-                confidence_band: "medium".to_string(),
+                confidence_band: Some("medium".to_string()),
             }),
             boilerplate: None,
             suppressed: None,
@@ -933,6 +960,10 @@ pub(super) mod tests {
                 fingerprint: "cd".repeat(16),
                 clone_type: "type-1".to_string(),
                 confidence: 1.0,
+                members: 2,
+                boilerplate: None,
+                similarity: None,
+                suppressed: None,
             },
             scan_run: 7,
         };
@@ -940,6 +971,9 @@ pub(super) mod tests {
         assert_eq!(value["finding_id"], "ab".repeat(16));
         assert_eq!(value["group"]["clone_type"], "type-1");
         assert_eq!(value["scan_run"], 7);
+        // A Fast-mode occurrence measured no dimensions; the field is present
+        // and null rather than filled with a guess.
+        assert!(value["group"]["similarity"].is_null());
 
         let mut buffer = Vec::new();
         detail.render_text(&mut buffer).unwrap();
@@ -947,5 +981,72 @@ pub(super) mod tests {
         assert!(text.contains(&format!("finding {}", "ab".repeat(16))));
         assert!(text.contains("location: src/lib.rs:3-12"));
         assert!(text.contains("canonical: yes"));
+        assert!(text.contains("2 instances"));
+    }
+
+    #[test]
+    fn a_structural_occurrence_explains_itself_with_the_recorded_evidence() {
+        let detail = FindingDetail {
+            member: Member {
+                finding_id: "ef".repeat(16),
+                file: "src/b.rs".to_string(),
+                start_line: 1,
+                end_line: 20,
+                unit: Some("beta".to_string()),
+                tokens: 90,
+                canonical: false,
+            },
+            group: GroupRef {
+                fingerprint: "cd".repeat(16),
+                clone_type: "type-3".to_string(),
+                confidence: 0.87,
+                members: 2,
+                boilerplate: Some("macro-repetition".to_string()),
+                similarity: Some(Similarity {
+                    weight_version: "structural-verify-v0".to_string(),
+                    lexical: 0.71,
+                    structural: 0.92,
+                    control_flow: 1.0,
+                    type_similarity: None,
+                    api: 0.8,
+                    composite: 0.87,
+                    min_pairwise: 0.87,
+                    confidence_band: Some("medium".to_string()),
+                }),
+                suppressed: Some(Suppression {
+                    kind: SuppressionKind::Rule,
+                    reason: None,
+                    scope: Some("symbol_pattern".to_string()),
+                    pattern: Some("beta".to_string()),
+                }),
+            },
+            scan_run: 9,
+        };
+        let mut buffer = Vec::new();
+        detail.render_text(&mut buffer).unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        assert!(text.contains("similarity: composite 0.87"));
+        // The unmeasured dimension is named, never guessed.
+        assert!(text.contains("type n/a"));
+        assert!(text.contains("confidence medium"));
+        assert!(text.contains("boilerplate: macro-repetition"));
+        // A suppressed finding is still recorded and still explainable.
+        assert!(text.contains("suppressed: symbol glob \"beta\""));
+    }
+
+    #[test]
+    fn an_unrecorded_confidence_band_prints_as_absent() {
+        let similarity = Similarity {
+            weight_version: "structural-verify-v0".to_string(),
+            lexical: 0.5,
+            structural: 0.5,
+            control_flow: 0.5,
+            type_similarity: None,
+            api: 0.5,
+            composite: 0.5,
+            min_pairwise: 0.5,
+            confidence_band: None,
+        };
+        assert!(similarity.line().contains("confidence n/a"));
     }
 }
