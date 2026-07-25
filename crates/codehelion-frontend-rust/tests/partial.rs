@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use codehelion_core::discovery::{BuildVariant, LanguageSelection};
 use codehelion_core::ir::{ByteRange, StructuralFrontend, SyntaxIrFile};
-use codehelion_core::maximal::CloneRegion;
+use codehelion_core::maximal::{RegionSide, SharedRegion};
 use codehelion_core::structural::{self, StructuralConfig, StructuralReport};
 use codehelion_frontend_rust::ir::RustStructuralFrontend;
 
@@ -38,62 +38,77 @@ fn lines(text: &str, range: ByteRange) -> (usize, usize) {
     (line_of(range.start), line_of(range.end))
 }
 
-/// The name of the unit a region side sits in.
-fn host(report: &StructuralReport, file: usize, range: ByteRange) -> String {
+/// The name of the unit an occurrence sits in.
+fn host(report: &StructuralReport, side: RegionSide) -> String {
     report
         .units
         .iter()
         .filter(|unit| {
-            unit.file == file && unit.range.start <= range.start && range.end <= unit.range.end
+            unit.file == side.file
+                && unit.range.start <= side.range.start
+                && side.range.end <= unit.range.end
         })
         .find_map(|unit| unit.name.as_ref().map(|name| name.as_str().to_string()))
-        .unwrap_or_else(|| panic!("no unit encloses {range:?} in {}", FILES[file]))
+        .unwrap_or_else(|| panic!("no unit encloses {side:?} in {}", FILES[side.file]))
 }
 
-fn describe(report: &StructuralReport, region: &CloneRegion) -> String {
-    let a = read(FILES[region.a.file]);
-    let b = read(FILES[region.b.file]);
-    format!(
-        "{}:{:?} {} <-> {}:{:?} {}",
-        FILES[region.a.file],
-        lines(&a, region.a.range),
-        host(report, region.a.file, region.a.range),
-        FILES[region.b.file],
-        lines(&b, region.b.range),
-        host(report, region.b.file, region.b.range),
-    )
+/// Every occurrence of a region as `file:(first, last) host`.
+fn describe(report: &StructuralReport, region: &SharedRegion) -> Vec<String> {
+    region
+        .occurrences
+        .iter()
+        .map(|&side| {
+            format!(
+                "{}:{:?} {}",
+                FILES[side.file],
+                lines(&read(FILES[side.file]), side.range),
+                host(report, side)
+            )
+        })
+        .collect()
+}
+
+fn described(report: &StructuralReport) -> Vec<Vec<String>> {
+    report
+        .regions
+        .iter()
+        .map(|region| describe(report, region))
+        .collect()
 }
 
 #[test]
 fn the_transplanted_run_is_reported_once_at_its_labelled_extent() {
     let report = analyze();
-    let described: Vec<String> = report
-        .regions
-        .iter()
-        .map(|region| describe(&report, region))
-        .collect();
     assert_eq!(
         report.regions.len(),
         1,
-        "one labelled run is detectable here: {described:#?}"
+        "one labelled run is detectable here: {:#?}",
+        described(&report)
     );
 
-    let region = report.regions[0];
+    let region = &report.regions[0];
+    assert_eq!(region.occurrences.len(), 2);
     // The corpus labels this pair as a verbatim transplant of the measurement
     // loop body out of `measure_lines` into the unrelated host `scan_report`.
     assert_eq!(
-        host(&report, region.a.file, region.a.range),
-        "measure_lines"
+        describe(&report, region),
+        vec![
+            "seed.rs:(9, 22) measure_lines".to_string(),
+            "partial1.rs:(10, 23) scan_report".to_string(),
+        ]
     );
-    assert_eq!(host(&report, region.b.file, region.b.range), "scan_report");
-    assert_eq!(lines(&read(FILES[region.a.file]), region.a.range), (9, 22));
-    assert_eq!(lines(&read(FILES[region.b.file]), region.b.range), (10, 23));
 
-    // A verbatim transplant covers the same source on both sides.
-    assert_eq!(
-        read(FILES[region.a.file])[region.a.range.start..region.a.range.end].trim(),
-        read(FILES[region.b.file])[region.b.range.start..region.b.range.end].trim()
-    );
+    // A verbatim transplant covers the same source at every occurrence.
+    let text: Vec<String> = region
+        .occurrences
+        .iter()
+        .map(|&side| {
+            read(FILES[side.file])[side.range.start..side.range.end]
+                .trim()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(text[0], text[1]);
 }
 
 #[test]
@@ -102,11 +117,9 @@ fn the_sliding_windows_that_found_it_collapse_into_one_region() {
     // windows. Reporting them raw would mean two findings describing one
     // duplicated block, and neither would state the block's real extent.
     let report = analyze();
-    let region = report.regions[0];
-    assert_eq!(region.seeds, 2);
-    assert_eq!(region.a.run.length, 5);
-    assert_eq!(region.b.run.length, 5);
+    assert_eq!(report.regions[0].statements, 5);
     assert!(report.stats.maximal.seeds > report.stats.maximal.regions);
+    assert_eq!(report.stats.maximal.shared, report.regions.len());
 }
 
 #[test]
@@ -117,17 +130,15 @@ fn a_run_that_only_matches_on_summaries_is_not_reported() {
     // summaries alone; the source-length gap is what rejects it.
     let report = analyze();
     assert_eq!(report.stats.maximal.divergent_extent, 1);
-    let described: Vec<String> = report
-        .regions
-        .iter()
-        .map(|region| describe(&report, region))
-        .collect();
     assert!(
         !report.regions.iter().any(|region| {
-            host(&report, region.a.file, region.a.range) == "scan_report"
-                && host(&report, region.b.file, region.b.range) == "scan_report"
+            region
+                .occurrences
+                .iter()
+                .all(|&side| host(&report, side) == "scan_report")
         }),
-        "the summary-level coincidence must not be reported: {described:#?}"
+        "the summary-level coincidence must not be reported: {:#?}",
+        described(&report)
     );
 }
 
@@ -139,12 +150,12 @@ fn the_renamed_transplant_is_below_the_window_minimum() {
     // limit of the window lengths, not of the fold. Pinned so that changing
     // the window lengths surfaces here.
     let report = analyze();
-    assert!(
-        !report
-            .regions
+    assert!(!report.regions.iter().any(|region| {
+        region
+            .occurrences
             .iter()
-            .any(|region| host(&report, region.b.file, region.b.range) == "merge_batches"),
-    );
+            .any(|&side| host(&report, side) == "merge_batches")
+    }));
 }
 
 #[test]

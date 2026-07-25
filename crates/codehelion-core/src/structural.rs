@@ -40,7 +40,7 @@ use crate::grouping::{
     self, GroupingConfig, GroupingSet, GroupingStats, GroupingUnit, SimilarityEdge,
 };
 use crate::ir::{ByteRange, Shape, SyntaxIrFile};
-use crate::maximal::{self, CloneRegion, MaximalConfig, RegionStats};
+use crate::maximal::{self, MaximalConfig, RegionStats, SharedRegion};
 use crate::near_match::{self, NearMatchConfig, NearMatchStats};
 use crate::stable_id::{
     self, CloneGroupFingerprint, ContentNorm, FileContext, FragmentFingerprint, UnitFingerprint,
@@ -141,9 +141,10 @@ pub struct StructuralReport {
     pub units: Vec<StructuralUnit>,
     /// Cohesive clone groups.
     pub groups: GroupingSet,
-    /// Maximal shared statement runs, in units that need not be clones of each
-    /// other: the sub-unit view of the same corpus.
-    pub regions: Vec<CloneRegion>,
+    /// Maximal shared statement runs, each with every place it occurs. The
+    /// units involved need not be clones of each other: this is the sub-unit
+    /// view of the same corpus.
+    pub regions: Vec<SharedRegion>,
     /// Reporting detail per group, parallel to `groups.groups`: stable clone id
     /// and the medoid-to-member similarity breakdowns.
     pub details: Vec<GroupDetail>,
@@ -274,7 +275,7 @@ pub fn analyze(
     StructuralReport {
         units: report_units,
         groups,
-        regions: regions.regions,
+        regions: regions.shared,
         details,
         stats,
     }

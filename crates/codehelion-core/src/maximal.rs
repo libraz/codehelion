@@ -37,6 +37,13 @@
 //! and counted: the size gap is the direct evidence that the summary hid the
 //! difference.
 //!
+//! # One duplication, not every pair of its copies
+//!
+//! A run copied into `n` places matches pairwise `n * (n - 1) / 2` times, and
+//! every one of those pairs describes the same duplication. The stage therefore
+//! also reports [`SharedRegion`]s: one entry per duplicated run holding all of
+//! its occurrences.
+//!
 //! # Nesting
 //!
 //! An inner block's run sits inside its enclosing statement, so a duplicated
@@ -112,6 +119,22 @@ pub struct CloneRegion {
     pub seeds: usize,
 }
 
+/// One duplicated run and every place it occurs.
+///
+/// A run copied into `n` places produces `n * (n - 1) / 2` pairwise matches
+/// that all describe the same duplication, so the pairs are collapsed into the
+/// occurrence set they imply. Every occurrence in the set holds the same
+/// statement summaries as every other, not merely as its neighbours: see
+/// [`consolidate`] for why grouping by transitive closure is sound here and
+/// would not be for an approximate match.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SharedRegion {
+    /// Where the run occurs, at least twice, in ascending order.
+    pub occurrences: Vec<RegionSide>,
+    /// Length of the run, in statements; the same at every occurrence.
+    pub statements: u32,
+}
+
 /// What consolidation saw and dropped.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegionStats {
@@ -129,15 +152,21 @@ pub struct RegionStats {
     pub self_overlapping: usize,
     /// Regions shorter than [`MaximalConfig::min_statements`].
     pub below_minimum: usize,
-    /// Regions emitted.
+    /// Pairwise regions emitted.
     pub regions: usize,
+    /// Occurrence sets the pairwise regions collapse into: the number of
+    /// distinct duplicated runs.
+    pub shared: usize,
 }
 
 /// The consolidation stage's output.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegionSet {
-    /// Maximal regions, deterministically ordered.
+    /// Maximal pairwise regions, deterministically ordered: the evidence the
+    /// occurrence sets are built from.
     pub regions: Vec<CloneRegion>,
+    /// One entry per duplicated run, holding every place it occurs.
+    pub shared: Vec<SharedRegion>,
     /// What the stage saw and dropped.
     pub stats: RegionStats,
 }
@@ -254,7 +283,10 @@ pub fn consolidate(pairs: &[CandidatePair], config: &MaximalConfig) -> RegionSet
         )
     });
 
-    let mut kept: Vec<CloneRegion> = Vec::new();
+    // Containment can only hold between regions over the same two files, so
+    // the quadratic scan runs inside a file-pair bucket rather than over every
+    // region in the corpus.
+    let mut buckets: BTreeMap<(usize, usize), Vec<CloneRegion>> = BTreeMap::new();
     for region in folded {
         if region.a.run.length < config.min_statements {
             stats.below_minimum += 1;
@@ -264,6 +296,7 @@ pub fn consolidate(pairs: &[CandidatePair], config: &MaximalConfig) -> RegionSet
             stats.self_overlapping += 1;
             continue;
         }
+        let kept = buckets.entry((region.a.file, region.b.file)).or_default();
         if kept.iter().any(|outer| contains(outer, &region)) {
             stats.absorbed += 1;
             continue;
@@ -271,11 +304,77 @@ pub fn consolidate(pairs: &[CandidatePair], config: &MaximalConfig) -> RegionSet
         kept.push(region);
     }
 
+    let mut kept: Vec<CloneRegion> = buckets.into_values().flatten().collect();
     kept.sort_unstable();
     stats.regions = kept.len();
+    let shared = share(&kept);
+    stats.shared = shared.len();
     RegionSet {
         regions: kept,
+        shared,
         stats,
+    }
+}
+
+/// Collapse pairwise regions into one entry per duplicated run.
+///
+/// Grouping is the transitive closure over the pairwise matches — plain
+/// connected components, which is exactly what clone grouping must *not* use
+/// for approximate matches, because similarity is not transitive and chaining
+/// fuses unrelated code. It is correct here for the opposite reason: these
+/// matches are statement-for-statement equalities, and equality is transitive,
+/// so a component really is a set of mutually equal runs. An occurrence's
+/// extent is part of its identity, so a run that matches one neighbour over
+/// six statements and another over four contributes two occurrences and lands
+/// in two sets, each internally consistent.
+fn share(regions: &[CloneRegion]) -> Vec<SharedRegion> {
+    let mut index: BTreeMap<RegionSide, usize> = BTreeMap::new();
+    for region in regions {
+        let next = index.len();
+        index.entry(region.a).or_insert(next);
+        let next = index.len();
+        index.entry(region.b).or_insert(next);
+    }
+    let mut parent: Vec<usize> = (0..index.len()).collect();
+    for region in regions {
+        let (Some(&a), Some(&b)) = (index.get(&region.a), index.get(&region.b)) else {
+            continue;
+        };
+        join(&mut parent, a, b);
+    }
+
+    let mut sets: BTreeMap<usize, Vec<RegionSide>> = BTreeMap::new();
+    for (&side, &node) in &index {
+        sets.entry(find(&mut parent, node)).or_default().push(side);
+    }
+    let mut shared: Vec<SharedRegion> = sets
+        .into_values()
+        .filter(|occurrences| occurrences.len() >= 2)
+        .map(|mut occurrences| {
+            occurrences.sort_unstable();
+            let statements = occurrences.first().map_or(0, |side| side.run.length);
+            SharedRegion {
+                occurrences,
+                statements,
+            }
+        })
+        .collect();
+    shared.sort_unstable();
+    shared
+}
+
+fn find(parent: &mut [usize], mut node: usize) -> usize {
+    while parent[node] != node {
+        parent[node] = parent[parent[node]];
+        node = parent[node];
+    }
+    node
+}
+
+fn join(parent: &mut [usize], a: usize, b: usize) {
+    let (a, b) = (find(parent, a), find(parent, b));
+    if a != b {
+        parent[a.max(b)] = a.min(b);
     }
 }
 
@@ -512,6 +611,62 @@ mod tests {
         let set = consolidate(&[pair], &MaximalConfig::default());
         assert!(set.regions.is_empty());
         assert_eq!(set.stats.seeds, 0);
+    }
+
+    #[test]
+    fn three_copies_of_one_run_are_one_shared_region_not_three_pairs() {
+        // Files 0, 1 and 2 hold the same four statements. Pairwise that is
+        // three matches describing one duplication.
+        let mut pairs = Vec::new();
+        for a in 0..3usize {
+            for b in a + 1..3 {
+                pairs.push(seed(window(a, 0, 0, 0, 4), window(b, 0, 0, 0, 4)));
+            }
+        }
+        let set = consolidate(&pairs, &MaximalConfig::default());
+        assert_eq!(set.regions.len(), 3);
+        assert_eq!(set.shared.len(), 1);
+        assert_eq!(set.stats.shared, 1);
+        let shared = &set.shared[0];
+        assert_eq!(shared.statements, 4);
+        let files: Vec<usize> = shared.occurrences.iter().map(|side| side.file).collect();
+        assert_eq!(files, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn two_unrelated_duplications_stay_separate() {
+        let pairs = vec![
+            seed(window(0, 0, 0, 0, 4), window(1, 0, 0, 0, 4)),
+            seed(window(2, 0, 0, 8, 4), window(3, 0, 0, 8, 4)),
+        ];
+        let set = consolidate(&pairs, &MaximalConfig::default());
+        assert_eq!(set.shared.len(), 2);
+        assert!(
+            set.shared
+                .iter()
+                .all(|region| region.occurrences.len() == 2)
+        );
+    }
+
+    #[test]
+    fn an_occurrence_matched_at_two_extents_belongs_to_both_sets() {
+        // File 0 shares six statements with file 1 and only the first four
+        // with file 2. Those are two duplications of different sizes, and
+        // merging them would claim file 2 holds all six.
+        let pairs = vec![
+            seed(window(0, 0, 0, 0, 4), window(1, 0, 0, 0, 4)),
+            seed(window(0, 0, 0, 2, 4), window(1, 0, 0, 2, 4)),
+            seed(window(0, 0, 1, 0, 4), window(2, 0, 0, 0, 4)),
+        ];
+        let set = consolidate(&pairs, &MaximalConfig::default());
+        let mut sizes: Vec<u32> = set.shared.iter().map(|region| region.statements).collect();
+        sizes.sort_unstable();
+        assert_eq!(sizes, vec![4, 6]);
+        assert!(
+            set.shared
+                .iter()
+                .all(|region| region.occurrences.len() == 2)
+        );
     }
 
     #[test]
