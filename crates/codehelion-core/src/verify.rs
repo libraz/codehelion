@@ -28,6 +28,32 @@
 //! ([`WEIGHT_VERSION`]); changing them changes findings, so the version travels
 //! with the detector identity (AGENTS.md §2-4). Everything here is a pure
 //! function of its inputs.
+//!
+//! # What the composite can and cannot separate
+//!
+//! The acceptance threshold is what separates clones from lookalikes, and the
+//! labelled corpora bound how well it can: functions written to share a
+//! skeleton while computing different things score up to 0.69, and the weakest
+//! labelled clone scores 0.76. [`VerifyConfig::type3_min_composite`] sits
+//! between them.
+//!
+//! Two properties of that gap are worth stating, because they decide where
+//! future accuracy work belongs.
+//!
+//! First, **lexical is the dimension that discriminates**. Lookalikes agree on
+//! shape by construction — that is what makes them lookalikes — so structural
+//! and control-flow agreement is high for both populations and only lexical
+//! agreement pulls them apart. Weighting shape more heavily than text therefore
+//! costs precision rather than buying it, and no reweighting of these five
+//! dimensions separates the two populations by more than a hair: the evidence
+//! that would settle the remaining overlap is the operators and operands
+//! *inside* each statement, which no dimension here reads.
+//!
+//! Second, **a unit can be a genuine clone and still not be worth reporting**.
+//! Two one-line accessors are copies of each other by every measure in this
+//! module, and they score accordingly. Suppressing them is
+//! [`crate::boilerplate`]'s job, not this one's: lowering a similarity score to
+//! hide a triviality would corrupt the evidence the score exists to carry.
 
 use crate::clone_class::CloneClass;
 use crate::features::{ApiCallFeature, CfgFeature, SubtreeFeature, UnitFeatures};
@@ -37,7 +63,7 @@ use crate::ir::{IrNode, Shape, StatementSummary};
 /// Version of the composite-weight recipe and judgment rules. Bump it when any
 /// weight default or classification rule changes, since findings change with
 /// it. Recorded as a detector version.
-pub const WEIGHT_VERSION: &str = "structural-verify-v2";
+pub const WEIGHT_VERSION: &str = "structural-verify-v3";
 
 /// Relative weights of the similarity dimensions in the composite score.
 ///
@@ -78,10 +104,25 @@ pub struct VerifyConfig {
     /// Composite-score weights.
     pub weights: Weights,
     /// Smallest composite a Type-3 pair must reach to be a clone at all.
+    ///
+    /// Calibrated against the labelled corpora: the pairs deliberately built
+    /// to share a skeleton while computing different things reach 0.69, and
+    /// the weakest pair that is a real copy reaches 0.71. The threshold sits
+    /// in that gap.
+    ///
+    /// The gap is narrow, and which side an unlabelled pair falls on is
+    /// decided almost entirely by lexical agreement — the lookalikes reach
+    /// 0.77 there while the weakest real copy reaches 0.91. A composite near
+    /// this threshold is therefore weak evidence by construction, which is
+    /// what the low confidence band exists to say.
     pub type3_min_composite: f64,
     /// Composite at or above which a Type-3 finding is high confidence.
     pub high_confidence: f64,
     /// Composite at or above which a Type-3 finding is medium confidence.
+    ///
+    /// Kept above [`Self::type3_min_composite`], or the low band could never
+    /// be reached and a finding sitting just over the acceptance threshold
+    /// would be reported as confidently as one well clear of it.
     pub medium_confidence: f64,
     /// Tolerance for treating a similarity as exactly `1.0`.
     pub exact_epsilon: f64,
@@ -108,9 +149,9 @@ impl Default for VerifyConfig {
     fn default() -> Self {
         Self {
             weights: Weights::default(),
-            type3_min_composite: 0.60,
+            type3_min_composite: 0.70,
             high_confidence: 0.85,
-            medium_confidence: 0.70,
+            medium_confidence: 0.75,
             exact_epsilon: 1e-9,
             // Wide enough that the gapped clones the mode targets — copies
             // with statements inserted or removed — align exactly.

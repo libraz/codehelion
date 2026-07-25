@@ -103,7 +103,7 @@ fn similarity_falls_monotonically_with_the_change_rate() {
     let weakest = *composites.last().unwrap();
     let config = VerifyConfig::default();
     assert!(
-        weakest > config.type3_min_composite + 0.20,
+        weakest > config.type3_min_composite + 0.15,
         "weakest grade scored {weakest:.4}, unexpectedly close to the \
          acceptance threshold {:.2}",
         config.type3_min_composite

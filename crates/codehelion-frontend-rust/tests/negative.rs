@@ -113,37 +113,65 @@ fn only_the_verbatim_copies_are_reported() {
 }
 
 #[test]
-fn the_negative_pairs_are_kept_apart_by_candidate_generation() {
+fn the_negative_pairs_are_not_even_proposed() {
     let report = analyze();
     // One pair per function: its copy. No pair of two different functions is
-    // proposed, and that is what keeps them out of the report — the judge does
-    // not separate this family on its own, as the next test records. Widening
-    // candidate generation therefore means re-measuring here before trusting
-    // the result.
+    // proposed, so this family never reaches the judge at all. That is a second
+    // line of defence, not the only one — the judge rejects them too — but it
+    // does mean widening candidate generation cannot be trusted until the
+    // rejection below has been re-measured against whatever it lets through.
     assert_eq!(report.stats.unit_pairs, FUNCTIONS.len());
     assert_eq!(report.stats.verified_pairs, FUNCTIONS.len());
 }
 
 #[test]
-fn the_judge_never_mistakes_a_negative_pair_for_a_copy() {
-    // The composite is not what holds these apart, so fix what does: neither
-    // strong claim may be made. Type-1 and Type-2 both assert that the two
-    // units have identical structure, and these do not.
+fn the_judge_rejects_every_negative_pair() {
+    // These are the pairs the acceptance threshold is calibrated against: the
+    // highest-scoring of them is what the threshold has to sit above. Fixing
+    // the rejection here is what stops a future weight or threshold change
+    // from quietly re-admitting them.
+    let config = VerifyConfig::default();
     for (pair, verdict) in negative_verdicts() {
-        assert_ne!(
-            verdict.class,
-            Some(CloneClass::Type1),
-            "{pair} is not a verbatim copy"
-        );
-        assert_ne!(
-            verdict.class,
-            Some(CloneClass::Type2),
-            "{pair} is not a renamed copy"
+        assert_eq!(verdict.class, None, "{pair} is not a clone");
+        assert!(
+            verdict.breakdown.composite < config.type3_min_composite,
+            "{pair} scored {:.4}, at or above the acceptance threshold {:.2}",
+            verdict.breakdown.composite,
+            config.type3_min_composite
         );
         assert!(
             verdict.breakdown.structural < 1.0,
             "{pair} does not have identical structure"
         );
+    }
+}
+
+#[test]
+fn lexical_agreement_is_what_separates_these_from_real_copies() {
+    // The family shares a skeleton by construction, so shape agreement runs
+    // high for clone and lookalike alike and cannot tell them apart. Only the
+    // text does. Recording the ceiling these reach keeps that visible: a
+    // dimension reweighting that leans further on shape than on text is moving
+    // away from the one signal that works here, however it scores elsewhere.
+    for (pair, verdict) in negative_verdicts() {
+        assert!(
+            verdict.breakdown.lexical < 0.80,
+            "{pair} agrees lexically to {:.4}",
+            verdict.breakdown.lexical
+        );
+    }
+
+    // The real copies in the same corpus agree lexically in full, so the gap
+    // the text opens up between the two populations is the whole of it.
+    let report = analyze();
+    for detail in &report.details {
+        for breakdown in &detail.member_breakdowns {
+            assert!(
+                breakdown.lexical > 0.99,
+                "a verbatim copy agrees lexically to only {:.4}",
+                breakdown.lexical
+            );
+        }
     }
 }
 
