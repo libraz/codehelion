@@ -414,6 +414,8 @@ mod tests {
                 hash: FeatureHash::from_bytes([seed; 16]),
                 length: 4,
                 range: ByteRange { start: 0, end: 8 },
+                block: 0,
+                offset: 0,
             })
             .collect();
         let subtrees = subtrees

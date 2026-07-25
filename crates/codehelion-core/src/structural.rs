@@ -10,10 +10,18 @@
 //! 2. [`crate::candidate`] seeds exact-hash fragment pairs and [`crate::near_match`]
 //!    proposes near-clone unit pairs by MinHash/LSH — both over-approximate
 //!    cheaply, and both are lifted here to *unit* pairs;
-//! 3. [`crate::verify`] judges each distinct unit pair precisely, keeping only
+//! 3. [`crate::maximal`] folds the sliding-window seeds back into the maximal
+//!    shared statement runs they describe, so a duplicated block is one region
+//!    rather than a fan of overlapping window matches;
+//! 4. [`crate::verify`] judges each distinct unit pair precisely, keeping only
 //!    the ones that clear the clone threshold;
-//! 4. [`crate::grouping`] turns the surviving pairs into cohesive medoid groups,
+//! 5. [`crate::grouping`] turns the surviving pairs into cohesive medoid groups,
 //!    so non-transitive Type-3 chains do not fuse.
+//!
+//! Regions and groups answer different questions and neither replaces the
+//! other: a group says two whole units are copies of each other, a region says
+//! one stretch of statements is shared, which happens between units that are
+//! not copies at all.
 //!
 //! Every unit carries its raw [`UnitFingerprint`] as its stable, position-free
 //! grouping key ([`crate::stable_id`]). The whole function is deterministic: the
@@ -32,6 +40,7 @@ use crate::grouping::{
     self, GroupingConfig, GroupingSet, GroupingStats, GroupingUnit, SimilarityEdge,
 };
 use crate::ir::{ByteRange, Shape, SyntaxIrFile};
+use crate::maximal::{self, CloneRegion, MaximalConfig, RegionStats};
 use crate::near_match::{self, NearMatchConfig, NearMatchStats};
 use crate::stable_id::{
     self, CloneGroupFingerprint, ContentNorm, FileContext, FragmentFingerprint, UnitFingerprint,
@@ -45,6 +54,8 @@ pub struct StructuralConfig {
     pub candidate: CandidateConfig,
     /// MinHash/LSH near-match extraction.
     pub near_match: NearMatchConfig,
+    /// Folding seed matches into maximal shared runs.
+    pub maximal: MaximalConfig,
     /// Precise verification.
     pub verify: VerifyConfig,
     /// Medoid grouping.
@@ -112,6 +123,8 @@ pub struct StructuralStats {
     pub candidate: CandidateStats,
     /// Near-match extraction statistics.
     pub near_match: NearMatchStats,
+    /// Maximal-region consolidation statistics.
+    pub maximal: RegionStats,
     /// Distinct unit pairs handed to verification.
     pub unit_pairs: usize,
     /// Unit pairs that verification accepted as clones.
@@ -128,6 +141,9 @@ pub struct StructuralReport {
     pub units: Vec<StructuralUnit>,
     /// Cohesive clone groups.
     pub groups: GroupingSet,
+    /// Maximal shared statement runs, in units that need not be clones of each
+    /// other: the sub-unit view of the same corpus.
+    pub regions: Vec<CloneRegion>,
     /// Reporting detail per group, parallel to `groups.groups`: stable clone id
     /// and the medoid-to-member similarity breakdowns.
     pub details: Vec<GroupDetail>,
@@ -190,6 +206,9 @@ pub fn analyze(
         );
     }
 
+    // Stage: fold the window seeds into the maximal shared runs they describe.
+    let regions = maximal::consolidate(&candidate.pairs, &config.maximal);
+
     // Stage: precise verification of each distinct unit pair.
     let mut edges: Vec<SimilarityEdge> = Vec::new();
     for &(a, b) in &pairs {
@@ -229,6 +248,7 @@ pub fn analyze(
         units: units.len(),
         candidate: candidate.stats,
         near_match: near.stats,
+        maximal: regions.stats,
         unit_pairs: pairs.len(),
         verified_pairs: edges.len(),
         grouping: groups.stats.clone(),
@@ -254,6 +274,7 @@ pub fn analyze(
     StructuralReport {
         units: report_units,
         groups,
+        regions: regions.regions,
         details,
         stats,
     }

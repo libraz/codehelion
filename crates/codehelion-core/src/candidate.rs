@@ -57,6 +57,29 @@ impl Default for CandidateConfig {
     }
 }
 
+/// Where a statement-window fragment sits in its unit's statement sequences.
+///
+/// This is position, not identity: it lets adjacent window matches be folded
+/// back into one maximal statement run ([`crate::maximal`]), and it never
+/// enters a fingerprint (AGENTS.md invariant 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StatementRun {
+    /// Ordinal of the enclosing block within the unit, in walk order.
+    pub block: u32,
+    /// Index of the run's first statement within that block.
+    pub start: u32,
+    /// Length of the run, in statements.
+    pub length: u32,
+}
+
+impl StatementRun {
+    /// Index one past the run's last statement.
+    #[must_use]
+    pub const fn end(self) -> u32 {
+        self.start.saturating_add(self.length)
+    }
+}
+
 /// One occurrence of a hashed fragment (a statement window or a subtree) at a
 /// source location. `file` indexes the slice given to [`generate`]; `unit`
 /// indexes that file's [`FileFeatures::units`].
@@ -72,6 +95,9 @@ pub struct FragmentRef {
     pub end_byte: usize,
     /// Kind-specific size: window length or subtree node count.
     pub extent: u32,
+    /// The statement run this fragment covers, for a statement window. `None`
+    /// for a subtree, which is a tree region rather than a run of siblings.
+    pub run: Option<StatementRun>,
 }
 
 /// An exact-hash candidate pair: two fragments that share one feature hash.
@@ -168,6 +194,11 @@ pub fn generate(files: &[FileFeatures], config: &CandidateConfig) -> CandidateSe
                         start_byte: window.range.start,
                         end_byte: window.range.end,
                         extent: clamp_u32(window.length),
+                        run: Some(StatementRun {
+                            block: window.block,
+                            start: window.offset,
+                            length: clamp_u32(window.length),
+                        }),
                     },
                 );
                 stats.fragments += 1;
@@ -183,6 +214,7 @@ pub fn generate(files: &[FileFeatures], config: &CandidateConfig) -> CandidateSe
                         start_byte: subtree.range.start,
                         end_byte: subtree.range.end,
                         extent: clamp_u32(subtree.node_count),
+                        run: None,
                     },
                 );
                 stats.fragments += 1;
@@ -268,6 +300,8 @@ mod tests {
                     start: i * 10,
                     end: i * 10 + 8,
                 },
+                block: 0,
+                offset: u32::try_from(i).unwrap(),
             })
             .collect();
         let subtrees = subtrees

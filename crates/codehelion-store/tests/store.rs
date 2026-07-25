@@ -369,6 +369,8 @@ fn sample_unit_features() -> UnitFeatures {
             hash: FeatureHash::from_bytes([7; 16]),
             length: 4,
             range: ByteRange { start: 0, end: 40 },
+            block: 0,
+            offset: 0,
         }],
         subtrees: vec![SubtreeFeature {
             hash: FeatureHash::from_bytes([8; 16]),

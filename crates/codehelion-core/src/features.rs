@@ -251,6 +251,15 @@ pub struct WindowFeature {
     pub length: usize,
     /// Bytes from the first through the last statement; reporting only.
     pub range: ByteRange,
+    /// Ordinal of the enclosing block within the unit, in walk order.
+    ///
+    /// Position, never identity: this locates the window so adjacent windows
+    /// can be folded back into one statement run, and it never enters a hash
+    /// (AGENTS.md invariant 3).
+    pub block: u32,
+    /// Index of the window's first statement within its block's statement
+    /// sequence. Position, never identity, as for [`Self::block`].
+    pub offset: u32,
 }
 
 /// One subtree fingerprint: a Merkle hash over an IR subtree.
@@ -388,9 +397,11 @@ pub fn extract(file: &SyntaxIrFile) -> FileFeatures {
 /// Compute all four feature families for one unit subtree.
 fn unit_features(unit: &IrNode, tokens: &[Token]) -> UnitFeatures {
     let mut windows = Vec::new();
+    let mut block = 0u32;
     unit.walk(&mut |node| {
         if matches!(node.shape, Shape::Block) {
-            block_windows(node, tokens, &mut windows);
+            block_windows(node, block, tokens, &mut windows);
+            block = block.saturating_add(1);
         }
     });
 
@@ -421,14 +432,14 @@ fn native_kind(shape: &Shape) -> &str {
 }
 
 /// Slide every window length over one block's statement sequence.
-fn block_windows(block: &IrNode, tokens: &[Token], out: &mut Vec<WindowFeature>) {
+fn block_windows(block: &IrNode, ordinal: u32, tokens: &[Token], out: &mut Vec<WindowFeature>) {
     let statements: Vec<&IrNode> = block
         .children
         .iter()
         .filter(|child| child.shape.is_statement() || matches!(child.shape, Shape::Native(_)))
         .collect();
     for &length in WINDOW_LENGTHS {
-        for window in statements.windows(length) {
+        for (offset, window) in statements.windows(length).enumerate() {
             let mut hasher = FeatureHasher::new("stmt-window");
             hasher.write_u32(u32::try_from(length).unwrap_or(u32::MAX));
             for statement in window {
@@ -441,6 +452,8 @@ fn block_windows(block: &IrNode, tokens: &[Token], out: &mut Vec<WindowFeature>)
                     start: window[0].range.start,
                     end: window[length - 1].range.end,
                 },
+                block: ordinal,
+                offset: u32::try_from(offset).unwrap_or(u32::MAX),
             });
         }
     }

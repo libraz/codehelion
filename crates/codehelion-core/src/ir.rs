@@ -40,7 +40,11 @@ use crate::frontend::{Diagnostic, Lexeme, Token};
 pub const IR_SCHEMA_VERSION: u32 = 1;
 
 /// A half-open byte range into the source text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Ordering is by start then end, which is source order: it exists so ranges
+/// can be sorted into a deterministic reporting order, and carries no meaning
+/// beyond that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ByteRange {
     /// Byte offset of the range start.
     pub start: usize,
