@@ -117,6 +117,33 @@ fn every_reported_group_clears_the_cohesion_floor() {
 }
 
 #[test]
+fn the_gapped_copy_is_recovered_as_a_pair_beside_the_group_it_cannot_join() {
+    // The corpus's Type-3 variant of `sum_even` is a copy of the seed and of
+    // the verbatim variant, but not of the renamed one — so no group holds it
+    // with the family it belongs to, and it is reported on its own instead.
+    let report = analyze();
+    let gapped = unit_at(&report, ("type3.cpp", 4));
+    assert_eq!(
+        group_of(&report, gapped),
+        None,
+        "no group can hold this unit and every member of the family"
+    );
+    let partners: Vec<Place> = report
+        .unrepresented
+        .iter()
+        .filter(|pair| pair.a == gapped || pair.b == gapped)
+        .map(|pair| {
+            let other = &report.units[if pair.a == gapped { pair.b } else { pair.a }];
+            (FILES[other.file], other.start_line)
+        })
+        .collect();
+    assert!(
+        partners.contains(&("seed.cpp", 4)),
+        "the gapped copy must be reported against the seed it came from, got {partners:?}"
+    );
+}
+
+#[test]
 fn two_runs_over_the_same_corpus_agree() {
     assert_eq!(analyze().groups.groups, analyze().groups.groups);
 }

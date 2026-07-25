@@ -58,14 +58,8 @@ const CORPORA: &[Expected] = &[
     },
     Expected {
         name: "cpp",
-        recall: 5.0 / 6.0,
-        shortfall: "the labelled Type-3 pair is proposed and judged, and the \
-                    judge turns it down at 0.62. The C++ variant discards its \
-                    added value with a cast the frontend reads as a call, so \
-                    the pair holds one unit that calls nothing against one \
-                    that calls something and the call dimension scores zero — \
-                    where the same edit in Rust discards with a wildcard \
-                    binding and the pair clears the bar at 0.71",
+        recall: 1.0,
+        shortfall: "",
     },
     Expected {
         name: "rust-graded",

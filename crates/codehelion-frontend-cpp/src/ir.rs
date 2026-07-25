@@ -24,14 +24,17 @@
 //!   `throw` has no cross-language shape and stays native.
 
 use codehelion_core::discovery::Language;
+use codehelion_core::frontend::TokenKind;
 use codehelion_core::ir::{Shape, StructuralFrontend, SyntaxIrFile};
-use codehelion_frontend_c::ir::{IrMapping, Mapping, classify_c, parse_to_ir, record_mapping};
+use codehelion_frontend_c::ir::{
+    IrMapping, Mapping, classify_c, classify_token, parse_to_ir, record_mapping,
+};
 use tree_sitter::Node;
 
 /// Version tag of this structural frontend, used as a fingerprint input. Bump
 /// it whenever a change alters the token stream or the IR tree for unchanged
 /// input.
-pub const STRUCTURAL_FRONTEND_VERSION: &str = "cpp-ir-v0";
+pub const STRUCTURAL_FRONTEND_VERSION: &str = "cpp-ir-v1";
 
 /// The C++ node-mapping table: C++-only kinds first, then the shared C table.
 #[derive(Debug, Clone, Copy, Default)]
@@ -53,6 +56,26 @@ impl IrMapping for CppMapping {
             // and `delete_expression`, which are transparent interior detail —
             // falls through to the shared C-family table.
             _ => classify_c(node),
+        }
+    }
+
+    /// The shared table reads a leaf's token kind off its grammar kind, and
+    /// the C++ grammar spells several keywords as plain `identifier` leaves:
+    /// `static_cast<T>(x)` parses as a call whose callee is the identifier
+    /// `static_cast`. Left at that, the structural token stream disagrees with
+    /// the Fast lexer, which reads the same word off the C++ keyword set — and
+    /// a keyword read as an identifier is then taken for a callee name, so a
+    /// cast enters the API-call profile as though the code called something.
+    ///
+    /// Checking the identifier text against the same keyword set the Fast
+    /// lexer uses closes the whole divergence rather than the one word that
+    /// exposed it. Nothing legitimate is caught: a keyword cannot also be a
+    /// declared name, so an `identifier` leaf spelling one is the grammar's
+    /// artefact and not the program's.
+    fn token_kind(&self, kind: &str, is_named: bool, text: &str) -> TokenKind {
+        match classify_token(kind, is_named, text) {
+            TokenKind::Identifier if crate::CPP.keywords.contains(&text) => TokenKind::Keyword,
+            other => other,
         }
     }
 }
@@ -478,10 +501,34 @@ int S::out_of_class() { return 2; }
     }
 
     #[test]
+    fn a_keyword_the_grammar_spells_as_an_identifier_still_lexes_as_a_keyword() {
+        // The named casts are the case that exposed this: the grammar parses
+        // `static_cast<T>(x)` as a call whose callee leaf is an `identifier`.
+        // Read as an identifier, the word is taken for a callee name and the
+        // cast enters the unit's API-call profile as a call to something.
+        let file = parse(
+            "int f(int x) {\n    static_cast<void>(x);\n    return const_cast<int &>(x);\n}\n",
+        );
+        for word in ["static_cast", "const_cast"] {
+            let token = file.tokens.iter().find(|token| token.text == word);
+            assert_eq!(
+                token.map(|token| token.kind),
+                Some(TokenKind::Keyword),
+                "{word} is a C++ keyword, not a name"
+            );
+        }
+        // A real callee in the same file is still an identifier, so the rule
+        // has not simply reclassified everything in callee position.
+        let file = parse("int f(int x) { return g(x); }\n");
+        let g = file.tokens.iter().find(|token| token.text == "g").unwrap();
+        assert_eq!(g.kind, TokenKind::Identifier);
+    }
+
+    #[test]
     fn file_carries_language_and_versions() {
         let frontend = CppStructuralFrontend;
         assert_eq!(frontend.language(), Language::Cpp);
-        assert_eq!(frontend.frontend_version(), "cpp-ir-v0");
+        assert_eq!(frontend.frontend_version(), "cpp-ir-v1");
 
         let file = parse("int a;");
         assert_eq!(file.language, Language::Cpp);
