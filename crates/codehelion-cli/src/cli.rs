@@ -59,7 +59,9 @@ pub enum Mode {
     /// Token-level Type-1/Type-2 and partial-clone detection; never runs the
     /// target code.
     Fast,
-    /// Syntax-structural detection (Type-3). Not available in this release.
+    /// Syntax-structural detection: gapped Type-3 clones and duplicated
+    /// statement runs, judged on a similarity breakdown. Parses the sources
+    /// and never runs the target code.
     Structural,
     /// Semantic detection via out-of-process compiler helpers. Not available
     /// in this release.
