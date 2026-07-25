@@ -208,6 +208,7 @@ fn structural_config(cfg: &Config) -> StructuralConfig {
     config.candidate.pair_budget = cfg.limits.pair_budget;
     config.near_match.posting_cap = cfg.limits.posting_cap;
     config.near_match.pair_budget = cfg.limits.pair_budget;
+    config.literals = literal_norm(cfg.literal_normalization);
     config
 }
 

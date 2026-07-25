@@ -29,18 +29,20 @@
 //! ordered set, and grouping orders its own output. Nothing here executes target
 //! code — it only reads IR that was already produced from source.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::boilerplate::{self, Boilerplate};
 use crate::candidate::{self, CandidateConfig, CandidateStats};
+use crate::clone_class::CloneClass;
 use crate::discovery::BuildVariant;
+use crate::engine::LiteralNorm;
 use crate::features::{self, FileFeatures};
 use crate::frontend::{Lexeme, Token, UnitKind};
 use crate::grouping::{
     self, GroupingConfig, GroupingSet, GroupingStats, GroupingUnit, SimilarityEdge,
 };
 use crate::ir::{ByteRange, Shape, SyntaxIrFile};
-use crate::maximal::{self, MaximalConfig, RegionStats, SharedRegion};
+use crate::maximal::{self, MaximalConfig, RegionSide, RegionStats, SharedRegion};
 use crate::near_match::{self, NearMatchConfig, NearMatchStats};
 use crate::stable_id::{
     self, CloneGroupFingerprint, ContentNorm, FileContext, FragmentFingerprint, UnitFingerprint,
@@ -56,6 +58,9 @@ pub struct StructuralConfig {
     pub near_match: NearMatchConfig,
     /// Folding seed matches into maximal shared runs.
     pub maximal: MaximalConfig,
+    /// Literal strategy the duplicated runs are confirmed under: it decides
+    /// whether two runs differing only in literal values are the same run.
+    pub literals: LiteralNorm,
     /// Precise verification.
     pub verify: VerifyConfig,
     /// Medoid grouping.
@@ -111,6 +116,47 @@ pub struct GroupDetail {
     pub boilerplate: Option<Boilerplate>,
 }
 
+/// One occurrence of a duplicated statement run, resolved against the source
+/// it was found in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionOccurrence {
+    /// Index of the file this occurrence sits in.
+    pub file: usize,
+    /// Index of the enclosing unit in [`StructuralReport::units`].
+    pub unit: usize,
+    /// Source bytes the run covers; reporting only.
+    pub range: ByteRange,
+    /// 1-based first line; reporting only, never an identity input.
+    pub start_line: u32,
+    /// 1-based last line; reporting only, never an identity input.
+    pub end_line: u32,
+    /// Index of the run's first token in its file's stream.
+    pub token_start: usize,
+    /// Index one past the run's last token in its file's stream.
+    pub token_end: usize,
+    /// The occurrence's raw content fingerprint: its member content id.
+    pub content: FragmentFingerprint,
+}
+
+/// A duplicated run of statements and every place it occurs.
+///
+/// Unlike a [`GroupDetail`], whose members are only *similar*, every
+/// occurrence here holds the same content under the group's classification:
+/// the same tokens for [`CloneClass::Type1`], the same tokens up to consistent
+/// renaming for [`CloneClass::Type2`]. The enclosing units need not be clones
+/// of each other — that is the point of reporting runs separately.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuralRegion {
+    /// The run's stable, position-free clone-group fingerprint.
+    pub fingerprint: CloneGroupFingerprint,
+    /// How the occurrences match: verbatim or up to renaming.
+    pub clone_type: CloneClass,
+    /// Length of the run, in statements.
+    pub statements: u32,
+    /// Where the run occurs, at least twice, in ascending source order.
+    pub occurrences: Vec<RegionOccurrence>,
+}
+
 /// Funnel counters across the whole run: how many fragments, candidate pairs
 /// and verified pairs each stage saw.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -125,6 +171,12 @@ pub struct StructuralStats {
     pub near_match: NearMatchStats,
     /// Maximal-region consolidation statistics.
     pub maximal: RegionStats,
+    /// Duplicated runs confirmed against the source tokens.
+    pub regions: usize,
+    /// Occurrences dropped for holding content no other occurrence of their
+    /// candidate run shared: the statement summaries agreed but the code did
+    /// not.
+    pub region_singletons: usize,
     /// Distinct unit pairs handed to verification.
     pub unit_pairs: usize,
     /// Unit pairs that verification accepted as clones.
@@ -141,10 +193,10 @@ pub struct StructuralReport {
     pub units: Vec<StructuralUnit>,
     /// Cohesive clone groups.
     pub groups: GroupingSet,
-    /// Maximal shared statement runs, each with every place it occurs. The
-    /// units involved need not be clones of each other: this is the sub-unit
-    /// view of the same corpus.
-    pub regions: Vec<SharedRegion>,
+    /// Duplicated statement runs, each with every place it occurs. The units
+    /// involved need not be clones of each other: this is the sub-unit view of
+    /// the same corpus.
+    pub regions: Vec<StructuralRegion>,
     /// Reporting detail per group, parallel to `groups.groups`: stable clone id
     /// and the medoid-to-member similarity breakdowns.
     pub details: Vec<GroupDetail>,
@@ -207,8 +259,16 @@ pub fn analyze(
         );
     }
 
-    // Stage: fold the window seeds into the maximal shared runs they describe.
-    let regions = maximal::consolidate(&candidate.pairs, &config.maximal);
+    // Stage: fold the window seeds into the maximal shared runs they describe,
+    // then confirm each candidate run against the tokens it actually covers.
+    let candidate_regions = maximal::consolidate(&candidate.pairs, &config.maximal);
+    let (regions, singletons) = confirm_regions(
+        &candidate_regions.shared,
+        files,
+        &offsets,
+        variant,
+        config.literals,
+    );
 
     // Stage: precise verification of each distinct unit pair.
     let mut edges: Vec<SimilarityEdge> = Vec::new();
@@ -249,7 +309,9 @@ pub fn analyze(
         units: units.len(),
         candidate: candidate.stats,
         near_match: near.stats,
-        maximal: regions.stats,
+        maximal: candidate_regions.stats,
+        regions: regions.len(),
+        region_singletons: singletons,
         unit_pairs: pairs.len(),
         verified_pairs: edges.len(),
         grouping: groups.stats.clone(),
@@ -275,10 +337,121 @@ pub fn analyze(
     StructuralReport {
         units: report_units,
         groups,
-        regions: regions.shared,
+        regions,
         details,
         stats,
     }
+}
+
+/// Confirm each candidate run against the tokens it covers, and split it into
+/// the classes that genuinely hold the same content.
+///
+/// A candidate run comes from statement-window hashes, and a statement summary
+/// is its shape plus its leading token *kinds*. `let a = foo(x);` and
+/// `let b = bar(y, z);` therefore summarise identically, so a candidate run is
+/// a proposal about where duplication might be, not a finding. The proposal is
+/// settled here by hashing the tokens themselves: occurrences that agree up to
+/// consistent renaming form a [`CloneClass::Type2`] region, and one whose
+/// tokens agree outright is [`CloneClass::Type1`]. An occurrence left without a
+/// partner is dropped and counted — the summaries agreed, the code did not.
+fn confirm_regions(
+    candidates: &[SharedRegion],
+    files: &[SyntaxIrFile],
+    offsets: &[usize],
+    variant: &BuildVariant,
+    literals: LiteralNorm,
+) -> (Vec<StructuralRegion>, usize) {
+    let mut regions = Vec::new();
+    let mut singletons = 0usize;
+    for candidate in candidates {
+        // Occurrences whose normalized content agrees are the same run up to
+        // renaming; that is the coarsest claim this stage is willing to make.
+        let mut classes: BTreeMap<FragmentFingerprint, Vec<RegionOccurrence>> = BTreeMap::new();
+        for &side in &candidate.occurrences {
+            let Some((occurrence, normalized)) =
+                resolve_occurrence(side, files, offsets, variant, literals)
+            else {
+                singletons += 1;
+                continue;
+            };
+            classes.entry(normalized).or_default().push(occurrence);
+        }
+        for occurrences in classes.into_values() {
+            if occurrences.len() < 2 {
+                singletons += occurrences.len();
+                continue;
+            }
+            let contents: Vec<FragmentFingerprint> =
+                occurrences.iter().map(|entry| entry.content).collect();
+            // Identical raw content everywhere means the copies differ in
+            // nothing but whitespace and comments.
+            let clone_type = if contents.iter().all(|&content| content == contents[0]) {
+                CloneClass::Type1
+            } else {
+                CloneClass::Type2
+            };
+            regions.push(StructuralRegion {
+                fingerprint: stable_id::clone_group_fingerprint(variant, clone_type, &contents),
+                clone_type,
+                statements: candidate.statements,
+                occurrences,
+            });
+        }
+    }
+    // Position-free order: two runs are told apart by content, never by where
+    // they happen to sit.
+    regions.sort_by(|a, b| {
+        a.fingerprint
+            .cmp(&b.fingerprint)
+            .then_with(|| a.clone_type.name().cmp(b.clone_type.name()))
+    });
+    regions.dedup_by(|a, b| a.fingerprint == b.fingerprint && a.occurrences == b.occurrences);
+    (regions, singletons)
+}
+
+/// Resolve one candidate occurrence into its tokens, returning the reportable
+/// occurrence and its normalized content fingerprint (the class key).
+fn resolve_occurrence(
+    side: RegionSide,
+    files: &[SyntaxIrFile],
+    offsets: &[usize],
+    variant: &BuildVariant,
+    literals: LiteralNorm,
+) -> Option<(RegionOccurrence, FragmentFingerprint)> {
+    let file = files.get(side.file)?;
+    let (start, end) = token_span(&file.tokens, side.range);
+    if start >= end {
+        return None;
+    }
+    let tokens = &file.tokens[start..end];
+    let context = FileContext {
+        frontend_version: file.frontend_version,
+        language: file.language,
+    };
+    let fingerprint =
+        |norm| stable_id::fragment_fingerprint(variant, &context, "statement-run", tokens, norm);
+    let lines = line_range(tokens);
+    Some((
+        RegionOccurrence {
+            file: side.file,
+            unit: offsets[side.file] + side.unit,
+            range: side.range,
+            start_line: lines.0,
+            end_line: lines.1,
+            token_start: start,
+            token_end: end,
+            content: fingerprint(ContentNorm::Raw),
+        },
+        fingerprint(ContentNorm::Normalized(literals)),
+    ))
+}
+
+/// The half-open token index range fully inside a byte range. Tokens are in
+/// source order, so both ends are found by binary search.
+fn token_span(tokens: &[Token], range: ByteRange) -> (usize, usize) {
+    let start = tokens.partition_point(|token| token.span.start_byte < range.start);
+    let end = tokens.partition_point(|token| token.span.end_byte <= range.end);
+    (start, end.max(start))
 }
 
 /// Compute one group's reporting detail: its stable clone fingerprint (anchored
