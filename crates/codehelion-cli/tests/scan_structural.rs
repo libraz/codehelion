@@ -836,6 +836,53 @@ fn a_suppression_rule_that_matched_nothing_is_named() {
 }
 
 #[test]
+fn the_run_says_how_far_each_stage_of_the_pipeline_narrowed_it() {
+    let dir = fixture();
+    let value = scan_json(dir.path());
+    let funnel = value["summary"]["funnel"].as_array().unwrap();
+    let stage = |name: &str| {
+        funnel
+            .iter()
+            .find(|entry| entry["stage"] == name)
+            .unwrap_or_else(|| panic!("stage {name} is reported"))
+    };
+    let passed = |name: &str| stage(name)["passed"].as_u64().unwrap();
+
+    // Both branches of the run are accounted for: units narrow to verified
+    // pairs, and the window seeds narrow to confirmed runs.
+    assert!(passed("units") >= 3, "one unit per fixture function");
+    assert!(passed("indexed fragments") > passed("unit pairs"));
+    assert!(passed("verified pairs") <= passed("unit pairs"));
+    assert!(passed("confirmed runs") <= passed("duplicated runs"));
+
+    // Each stage's drops are named rather than folded into the passed count.
+    for entry in funnel {
+        for drop in entry["dropped"].as_array().unwrap() {
+            assert!(
+                drop["count"].as_u64().unwrap() > 0,
+                "{drop} dropped nothing"
+            );
+            assert!(drop["cause"].as_str().unwrap().is_ascii());
+        }
+    }
+
+    // The counts are detail, so they stay out of the default text view.
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("candidate pipeline:").not());
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural", "--verbose"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("candidate pipeline:"))
+        .stdout(predicate::str::contains("verified pairs"));
+}
+
+#[test]
 fn a_suppression_rule_that_hid_something_is_not_called_unused() {
     let dir = fixture();
     std::fs::write(

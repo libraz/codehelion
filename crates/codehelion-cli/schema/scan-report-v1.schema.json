@@ -77,6 +77,7 @@
         "groups",
         "suppressed",
         "unused_suppressions",
+        "funnel",
         "pair_budget_exhausted"
       ],
       "properties": {
@@ -146,6 +147,30 @@
             "properties": {
               "scope": { "enum": ["path_glob", "symbol_pattern", "stable_clone_id"] },
               "pattern": { "type": "string", "description": "The pattern as configured." }
+            }
+          }
+        },
+        "funnel": {
+          "type": "array",
+          "description": "How many items each stage of the candidate pipeline passed on, in run order. A scan finds duplication by narrowing, so without the intermediate counts a run that found nothing looks like a run whose filters threw the evidence away. Stage names differ between the scan modes, and the structural run forks after candidate extraction into whole-unit verification and sub-unit run consolidation, so the list is a record of what happened rather than one arithmetic chain.",
+          "items": {
+            "type": "object",
+            "required": ["stage", "passed", "dropped"],
+            "properties": {
+              "stage": { "type": "string", "description": "What the stage counts." },
+              "passed": { "type": "integer", "description": "Items handed to the next stage." },
+              "dropped": {
+                "type": "array",
+                "description": "Items the stage dropped, by cause; a cause that dropped nothing is left out.",
+                "items": {
+                  "type": "object",
+                  "required": ["cause", "count"],
+                  "properties": {
+                    "cause": { "type": "string", "description": "Why the items were dropped, as a snake_case cause." },
+                    "count": { "type": "integer" }
+                  }
+                }
+              }
             }
           }
         },

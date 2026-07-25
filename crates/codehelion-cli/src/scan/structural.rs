@@ -38,8 +38,8 @@ use codehelion_core::verify::{SimilarityBreakdown, WEIGHT_VERSION};
 use codehelion_store::snapshot::{GroupRow, MemberRow, SimilarityBreakdownRow, Snapshot, UnitRow};
 
 use super::{
-    FileOutcome, database_path, discover_sources, effective_jobs, filter_globs, literal_norm,
-    map_sources, open_store, rfc3339_now, write_report,
+    FileOutcome, as_u64, database_path, discover_sources, effective_jobs, filter_globs,
+    literal_norm, map_sources, open_store, rfc3339_now, write_report,
 };
 use crate::Outcome;
 use crate::cli::ScanArgs;
@@ -655,9 +655,56 @@ fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
     entries.into_iter().map(|(_, group)| group).collect()
 }
 
+/// The structural pipeline's pass counts, stage by stage.
+///
+/// The run forks after candidate extraction: whole units go to verification
+/// and grouping, while the statement windows that seeded the candidates are
+/// folded back into the maximal runs they describe and confirmed against the
+/// tokens they cover. The confirmed-run counts therefore continue the seed
+/// line, not the verified-pair line.
+fn funnel(stats: &structural::StructuralStats) -> Vec<report::FunnelStage> {
+    let near = &stats.near_match;
+    let grouping = &stats.grouping;
+    let maximal = &stats.maximal;
+    vec![
+        report::FunnelStage::new("units", as_u64(stats.units)),
+        report::FunnelStage::new("indexed fragments", as_u64(stats.candidate.fragments))
+            .dropping("high_frequency", as_u64(stats.candidate.stop_fingerprints))
+            .dropping(
+                "high_frequency_postings",
+                as_u64(stats.candidate.stop_postings),
+            ),
+        report::FunnelStage::new("exact seed pairs", as_u64(stats.candidate.candidate_pairs)),
+        report::FunnelStage::new("near-match pairs", as_u64(near.candidate_pairs))
+            .dropping("too_few_shingles", as_u64(near.skipped_small))
+            .dropping("crowded_bucket", as_u64(near.stop_buckets))
+            .dropping("length_ratio", as_u64(near.filtered_by_size))
+            .dropping("estimated_jaccard", as_u64(near.filtered_by_jaccard)),
+        report::FunnelStage::new("unit pairs", as_u64(stats.unit_pairs)),
+        report::FunnelStage::new("verified pairs", as_u64(stats.verified_pairs)),
+        report::FunnelStage::new("components", as_u64(grouping.components)),
+        report::FunnelStage::new("unit groups", as_u64(grouping.groups))
+            .dropping("outside_the_medoid", as_u64(grouping.medoid_ejections))
+            .dropping("linkage_split", as_u64(grouping.linkage_splits))
+            .dropping("left_alone", as_u64(grouping.singletons)),
+        report::FunnelStage::new(
+            "run seeds",
+            as_u64(maximal.seeds.saturating_sub(maximal.divergent_extent)),
+        )
+        .dropping("divergent_extent", as_u64(maximal.divergent_extent)),
+        report::FunnelStage::new("folded runs", as_u64(maximal.regions))
+            .dropping("below_minimum", as_u64(maximal.below_minimum))
+            .dropping("self_overlapping", as_u64(maximal.self_overlapping))
+            .dropping("contained", as_u64(maximal.absorbed)),
+        report::FunnelStage::new("duplicated runs", as_u64(maximal.shared)),
+        report::FunnelStage::new("confirmed runs", as_u64(stats.regions))
+            .dropping("unshared_content", as_u64(stats.region_singletons))
+            .dropping("subsumed", as_u64(stats.region_subsumed)),
+    ]
+}
+
 /// Assemble the report model both output formats render from.
 fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryReport) -> Report {
-    let as_u64 = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
     let count = |language: Language| {
         as_u64(
             inputs
@@ -749,6 +796,7 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
                 ),
             },
             unused_suppressions: inputs.unused_suppressions(),
+            funnel: funnel(stats),
             // Either candidate stage exhausting its budget makes the result
             // potentially incomplete.
             pair_budget_exhausted: stats.candidate.budget_exhausted

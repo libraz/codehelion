@@ -207,6 +207,35 @@ fn unused_suppressions(inputs: &BuildInputs<'_>) -> Vec<report::UnusedRule> {
         .collect()
 }
 
+/// A count as the report model carries it. Saturating rather than fallible:
+/// a count this large is already past any meaning a report could carry.
+fn as_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+/// The Fast pipeline's pass counts, stage by stage: a winnowed fingerprint
+/// index, the seed pairs its posting lists propose, the fragments the
+/// identifier-normalized pass cuts from those seeds, and the pairs that
+/// survive verification.
+fn funnel(stats: &engine::EngineStats) -> Vec<report::FunnelStage> {
+    vec![
+        report::FunnelStage::new("tokens", as_u64(stats.tokens)),
+        report::FunnelStage::new("fingerprints", as_u64(stats.raw_fingerprints)),
+        report::FunnelStage::new(
+            "indexed values",
+            as_u64(stats.raw_distinct.saturating_sub(stats.stop_fingerprints)),
+        )
+        .dropping("high_frequency", as_u64(stats.stop_fingerprints))
+        .dropping("high_frequency_postings", as_u64(stats.stop_postings)),
+        report::FunnelStage::new("seed pairs", as_u64(stats.seed_candidates)),
+        report::FunnelStage::new("fragments", as_u64(stats.fragments)),
+        report::FunnelStage::new("fragment classes", as_u64(stats.fragment_classes))
+            .dropping("class_cap", as_u64(stats.class_cap_dropped))
+            .dropping("hash_collision", as_u64(stats.hash_collisions)),
+        report::FunnelStage::new("verified pairs", as_u64(stats.pairs)),
+    ]
+}
+
 /// Assemble the report model both output formats render from. Groups are
 /// ordered by priority descending, fingerprint bytes ascending on ties, so
 /// every view is stable across reruns.
@@ -229,7 +258,6 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
         )
         .unwrap_or(u64::MAX)
     };
-    let as_u64 = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
 
     let variant = &inputs.discovered.build_variant;
     let mut order: Vec<usize> = (0..inputs.report.groups.len()).collect();
@@ -303,6 +331,7 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
                 }),
             },
             unused_suppressions: unused_suppressions(inputs),
+            funnel: funnel(&inputs.report.stats),
             pair_budget_exhausted: inputs.report.stats.pair_budget_exhausted,
         },
         groups: order

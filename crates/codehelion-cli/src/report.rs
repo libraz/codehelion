@@ -121,9 +121,74 @@ pub struct Summary {
     /// while the findings it was meant to cover are still being reported, so
     /// it is named rather than left to be discovered by accident.
     pub unused_suppressions: Vec<UnusedRule>,
+    /// How many items each stage of the candidate pipeline passed on, in run
+    /// order.
+    ///
+    /// A scan finds duplication by narrowing: everything the sources hold
+    /// goes in and a few findings come out. Without the intermediate counts a
+    /// run that found nothing looks the same as a run whose filters threw the
+    /// evidence away. The stage vocabulary differs between the modes, and the
+    /// structural run splits after candidate extraction into whole-unit
+    /// verification and sub-unit run consolidation, so the list is a record of
+    /// what happened rather than a single arithmetic chain.
+    pub funnel: Vec<FunnelStage>,
     /// Whether the candidate-pair budget ran out, making results
     /// potentially incomplete.
     pub pair_budget_exhausted: bool,
+}
+
+/// One stage of the candidate pipeline.
+#[derive(Debug, Serialize)]
+pub struct FunnelStage {
+    /// What the stage counts, as a short name.
+    pub stage: String,
+    /// Items the stage handed to the next one.
+    pub passed: u64,
+    /// Items the stage dropped, by cause. Causes that dropped nothing are
+    /// left out.
+    pub dropped: Vec<FunnelDrop>,
+}
+
+impl FunnelStage {
+    /// A stage that passed `passed` items on and has yet to record any drop.
+    #[must_use]
+    pub fn new(stage: &str, passed: u64) -> Self {
+        Self {
+            stage: stage.to_string(),
+            passed,
+            dropped: Vec::new(),
+        }
+    }
+
+    /// Record `count` items dropped for `cause`, ignoring a cause that
+    /// dropped nothing.
+    #[must_use]
+    pub fn dropping(mut self, cause: &str, count: u64) -> Self {
+        if count > 0 {
+            self.dropped.push(FunnelDrop {
+                cause: cause.to_string(),
+                count,
+            });
+        }
+        self
+    }
+}
+
+/// Items one stage dropped for a single reason.
+#[derive(Debug, Serialize)]
+pub struct FunnelDrop {
+    /// Why the items were dropped, as a `snake_case` cause.
+    pub cause: String,
+    /// How many were dropped.
+    pub count: u64,
+}
+
+impl FunnelDrop {
+    /// The cause as it reads in the text views.
+    #[must_use]
+    pub fn label(&self) -> String {
+        self.cause.replace('_', " ")
+    }
 }
 
 /// One configured suppression rule that matched nothing.
@@ -454,7 +519,39 @@ impl Report {
             enabled: opts.color,
         };
         self.render_summary(&palette, out)?;
+        if opts.verbose {
+            self.render_funnel(&palette, out)?;
+        }
         self.render_groups(opts, &palette, out)
+    }
+
+    /// The stage-by-stage pass counts, wide enough to be read as a column.
+    fn render_funnel(&self, palette: &Palette, out: &mut impl Write) -> io::Result<()> {
+        if self.summary.funnel.is_empty() {
+            return Ok(());
+        }
+        let width = self
+            .summary
+            .funnel
+            .iter()
+            .map(|stage| stage.stage.len())
+            .max()
+            .unwrap_or(0);
+        writeln!(out)?;
+        writeln!(out, "{}", palette.bold("candidate pipeline:"))?;
+        for stage in &self.summary.funnel {
+            write!(out, "  {:width$}  {}", stage.stage, stage.passed)?;
+            if !stage.dropped.is_empty() {
+                let causes: Vec<String> = stage
+                    .dropped
+                    .iter()
+                    .map(|drop| format!("{} {}", drop.label(), drop.count))
+                    .collect();
+                write!(out, "  (dropped: {})", causes.join(", "))?;
+            }
+            writeln!(out)?;
+        }
+        Ok(())
     }
 
     fn render_summary(&self, palette: &Palette, out: &mut impl Write) -> io::Result<()> {
@@ -812,6 +909,13 @@ pub(super) mod tests {
                     by_rule: 1,
                 },
                 unused_suppressions: Vec::new(),
+                funnel: vec![
+                    FunnelStage::new("tokens", 200),
+                    FunnelStage::new("fingerprints", 64)
+                        .dropping("high_frequency", 3)
+                        .dropping("hash_collision", 0),
+                    FunnelStage::new("verified pairs", 2),
+                ],
                 pair_budget_exhausted: false,
             },
             groups: vec![visible_group(), suppressed_group()],
@@ -1277,6 +1381,27 @@ pub(super) mod tests {
         assert!(!text.contains("more occurrences"));
         assert!(text.contains("suppressed groups:"));
         assert!(text.contains("[suppressed: path glob \"vendor/**\"]"));
+    }
+
+    #[test]
+    fn the_pipeline_counts_are_detail_the_verbose_view_asks_for() {
+        let render = |verbose| {
+            let opts = TextOptions {
+                verbose,
+                color: false,
+                show_suppressed: false,
+            };
+            let mut buffer = Vec::new();
+            sample_report().render_text(opts, &mut buffer).unwrap();
+            String::from_utf8(buffer).unwrap()
+        };
+        let verbose = render(true);
+        assert!(verbose.contains("candidate pipeline:"));
+        assert!(verbose.contains("tokens"));
+        assert!(verbose.contains("(dropped: high frequency 3)"));
+        // A cause that dropped nothing says nothing.
+        assert!(!verbose.contains("hash collision"));
+        assert!(!render(false).contains("candidate pipeline:"));
     }
 
     #[test]

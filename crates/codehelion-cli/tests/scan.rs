@@ -333,6 +333,40 @@ fn scan_json(root: &Path) -> serde_json::Value {
 }
 
 #[test]
+fn the_run_says_how_far_each_stage_of_the_pipeline_narrowed_it() {
+    let dir = fixture();
+    let value = scan_json(dir.path());
+    let funnel = value["summary"]["funnel"].as_array().unwrap();
+    let passed = |name: &str| {
+        funnel
+            .iter()
+            .find(|entry| entry["stage"] == name)
+            .expect("the stage is reported")["passed"]
+            .as_u64()
+            .unwrap()
+    };
+    // The Fast pipeline's own stage names, not the structural ones: it
+    // narrows a winnowed fingerprint index down to verified pairs.
+    assert!(passed("tokens") > passed("fingerprints"));
+    assert!(passed("fingerprints") >= passed("indexed values"));
+    assert!(passed("verified pairs") >= 1, "the fixture holds a clone");
+
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("candidate pipeline:").not());
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--verbose"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("candidate pipeline:"))
+        .stdout(predicate::str::contains("fragment classes"));
+}
+
+#[test]
 fn configured_file_size_ceiling_skips_oversized_files() {
     let dir = fixture();
     // 4 KiB of valid Rust, above the 1 KiB ceiling set below.
