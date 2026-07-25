@@ -97,6 +97,7 @@ fn sample_snapshot<'a>(
             fingerprint: group_fp(9),
             clone_type: CloneClass::Type1,
             member_scope: CloneScope::Unit,
+            test_code: false,
             score: 1.0,
             entropy_bits: 4.2,
             suppress_reason: None,
@@ -657,6 +658,10 @@ fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
     // which is what migrating forward has to conclude.
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
+        // Every column added at or after that version has to go, or migrating
+        // forward would try to add one twice.
+        conn.execute("ALTER TABLE clone_group DROP COLUMN test_code", [])
+            .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN member_scope", [])
             .unwrap();
         conn.execute("UPDATE schema_meta SET version = 6", [])
@@ -670,4 +675,64 @@ fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
     );
     let run = store.latest_run().unwrap().expect("the recorded run");
     assert_eq!(store.run_groups(run.id).unwrap()[0].member_scope, "unit");
+}
+
+#[test]
+fn a_group_wholly_inside_the_suite_records_that_it_is() {
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.groups[0].test_code = true;
+    let run_id = store.record_snapshot(&snapshot).unwrap();
+
+    assert!(store.run_groups(run_id).unwrap()[0].test_code);
+    let occurrence = store
+        .occurrence(&finding(101).to_hex())
+        .unwrap()
+        .expect("occurrence");
+    assert!(occurrence.test_code);
+}
+
+#[test]
+fn a_group_reaching_outside_the_suite_records_that_it_does() {
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let run_id = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+    assert!(!store.run_groups(run_id).unwrap()[0].test_code);
+}
+
+#[test]
+fn a_group_recorded_before_the_test_code_column_is_not_claimed_to_be_test_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.db");
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let detectors = detector_versions();
+    {
+        let mut store = Store::open(&path).unwrap();
+        let mut snapshot = sample_snapshot(&variant, &detectors);
+        snapshot.groups[0].test_code = true;
+        store.record_snapshot(&snapshot).unwrap();
+    }
+    // An older tool had no rules for recognising a test, so its rows carry no
+    // claim either way. Migrating forward must not invent one.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("ALTER TABLE clone_group DROP COLUMN test_code", [])
+            .unwrap();
+        conn.execute("UPDATE schema_meta SET version = 7", [])
+            .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.schema_version().unwrap(),
+        codehelion_store::schema::SCHEMA_VERSION
+    );
+    let run = store.latest_run().unwrap().expect("the recorded run");
+    assert!(!store.run_groups(run.id).unwrap()[0].test_code);
 }

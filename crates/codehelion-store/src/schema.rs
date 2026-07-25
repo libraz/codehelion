@@ -39,11 +39,11 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
 
 /// Version 1: the full entity set.
 const V1: &str = "
@@ -375,6 +375,19 @@ ALTER TABLE clone_group_similarity_new RENAME TO clone_group_similarity;
 const V7: &str = "
 ALTER TABLE clone_group ADD COLUMN member_scope TEXT NOT NULL DEFAULT 'unit'
     CHECK (member_scope IN ('unit', 'fragment'));
+";
+
+/// Version 8: whether a clone group lives entirely in a test suite.
+///
+/// A suite repeats itself deliberately, so duplication inside one says
+/// something different from duplication in the code it exercises, and a report
+/// that cannot tell them apart is dominated by the suite. Recording it makes
+/// the distinction available to history as well as to the report that found
+/// it. Rows written before this column predate the recognition rules and are
+/// not claimed to be test code, which is what the default records.
+const V8: &str = "
+ALTER TABLE clone_group ADD COLUMN test_code INTEGER NOT NULL DEFAULT 0
+    CHECK (test_code IN (0, 1));
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

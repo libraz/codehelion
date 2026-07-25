@@ -771,6 +771,9 @@ fn snapshot_rows(
             fingerprint: group_ids.fingerprint,
             clone_type: group.clone_type,
             member_scope: CloneScope::Unit,
+            // Fast mode compares tokens without a syntax tree, so it never
+            // sees the attribute that marks a test.
+            test_code: false,
             score: group.score,
             entropy_bits: group.entropy_bits,
             suppress_reason: group.suppressed.map(|reason| reason.name().to_string()),

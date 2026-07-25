@@ -560,6 +560,7 @@ pub fn measure_store_insert(
             fingerprint: CloneGroupFingerprint::from_bytes(fp(2, group)),
             clone_type: CloneClass::Type1,
             member_scope: CloneScope::Unit,
+            test_code: false,
             score: 1.0,
             entropy_bits: 24.0,
             suppress_reason: None,

@@ -108,6 +108,9 @@ pub struct GroupRow {
     pub clone_type: CloneClass,
     /// What the members are: whole units, or runs of statements inside them.
     pub member_scope: CloneScope,
+    /// Whether every member is test code. A recorded fact about the code, as
+    /// `boilerplate` is: what a report does with it is a separate decision.
+    pub test_code: bool,
     /// Minimum pairwise raw similarity across the group.
     pub score: f64,
     /// Shannon entropy of the shared content.
@@ -514,8 +517,9 @@ fn write_group(
     tx.execute(
         "INSERT INTO clone_group
              (scan_run_id, group_fingerprint_id, clone_type, member_scope,
-              member_count, score, entropy_bits, suppress_reason, boilerplate)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+              member_count, score, entropy_bits, suppress_reason, boilerplate,
+              test_code)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             run_id,
             group_fp_id,
@@ -526,6 +530,7 @@ fn write_group(
             group.entropy_bits,
             group.suppress_reason,
             group.boilerplate.map(Boilerplate::name),
+            group.test_code,
         ],
     )?;
     let group_row_id = tx.last_insert_rowid();

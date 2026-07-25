@@ -414,6 +414,18 @@ fn reportable_regions(analysis: &StructuralReport) -> ReportableRegions {
 /// is, near enough, the unit itself.
 const LOCALIZING_SHARE_DIVISOR: usize = 2;
 
+/// Whether every unit hosting a run is test code.
+///
+/// A run shared between a test and the code it exercises is duplication across
+/// that boundary, which is the case worth surfacing, so one host outside the
+/// suite is enough to keep the run out of the suite's ranking.
+fn region_test_code(analysis: &StructuralReport, region: &StructuralRegion) -> bool {
+    region
+        .occurrences
+        .iter()
+        .all(|occurrence| analysis.units[occurrence.unit].test_code)
+}
+
 /// Whether a run names a place inside its hosts rather than restating them.
 ///
 /// A unit group directs attention at whole units, so a run spanning most of
@@ -949,6 +961,7 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
                 fingerprint: detail.fingerprint,
                 clone_type: group.clone_type,
                 member_scope: CloneScope::Unit,
+                test_code: detail.test_code,
                 score: group.min_pairwise,
                 entropy_bits: engine::content_entropy_bits(
                     inputs.unit_tokens(medoid),
@@ -1009,6 +1022,7 @@ fn region_row(
         fingerprint: region.fingerprint,
         clone_type: region.clone_type,
         member_scope: CloneScope::Fragment,
+        test_code: region_test_code(inputs.analysis, region),
         score: REGION_SIMILARITY,
         entropy_bits: engine::content_entropy_bits(&canonical, inputs.literals),
         suppress_reason: None,
