@@ -166,6 +166,22 @@ fn structural_output_satisfies_the_published_schema() {
 }
 
 #[test]
+fn reruns_produce_the_same_log() {
+    let dir = fixture();
+    let mut logs = Vec::new();
+    for _ in 0..2 {
+        let mut log = scan_sarif(dir.path(), "structural");
+        // Everything except when the scan ran and which snapshot it wrote.
+        let run = &mut log["runs"][0];
+        run["invocations"][0]["startTimeUtc"] = Value::Null;
+        run["invocations"][0]["endTimeUtc"] = Value::Null;
+        run["properties"]["run_id"] = Value::Null;
+        logs.push(log);
+    }
+    assert_eq!(logs[0], logs[1], "reruns agree token for token");
+}
+
+#[test]
 fn the_stable_clone_id_is_published_as_a_partial_fingerprint() {
     let dir = fixture();
     let first = scan_sarif(dir.path(), "structural");
