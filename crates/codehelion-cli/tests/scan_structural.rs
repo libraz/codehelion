@@ -807,6 +807,90 @@ fn a_path_rule_hides_a_run_as_it_hides_a_group() {
     );
 }
 
+/// A measuring routine whose loop is a small part of it.
+const LOCAL_LEFT_RS: &str = "pub fn summarize_left(rows: &[String], width: usize) -> usize {
+    let mut total = 0usize;
+    let mut widest = 0usize;
+    for row in rows {
+        let trimmed = row.trim_end();
+        let size = trimmed.chars().count();
+        total = total.saturating_add(size);
+        widest = widest.max(size);
+    }
+    if width > 0 {
+        total /= width;
+    }
+    total + widest
+}
+";
+
+/// A routine that shares that loop verbatim and diverges everywhere else, so
+/// the two units are alike only overall while the loop matches exactly.
+const LOCAL_RIGHT_RS: &str = "pub fn summarize_right(rows: &[String], limit: usize) -> usize {
+    let mut total = 0usize;
+    let mut widest = 0usize;
+    for row in rows {
+        let trimmed = row.trim_end();
+        let size = trimmed.chars().count();
+        total = total.saturating_add(size);
+        widest = widest.max(size);
+    }
+    match limit {
+        0 => widest = 1,
+        other => total = total.min(other),
+    }
+    while total > widest {
+        total -= widest.max(1);
+    }
+    total + widest
+}
+";
+
+#[test]
+fn a_run_naming_a_place_inside_its_hosts_survives_the_fold() {
+    // The group says these two functions are alike overall, and says nothing
+    // about where they agree exactly. The run does: this stretch is identical
+    // and can be lifted out as it stands. Folding it would lose that, and it
+    // is small enough in both hosts that the group is not already pointing
+    // the reader at it.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/left.rs"), LOCAL_LEFT_RS).unwrap();
+    std::fs::write(root.join("src/right.rs"), LOCAL_RIGHT_RS).unwrap();
+
+    let value = scan_json(root);
+    assert_eq!(value["summary"]["groups"]["folded_runs"], 0);
+    assert_eq!(value["summary"]["groups"]["fragment_scope"], 1);
+
+    let groups = value["groups"].as_array().unwrap();
+    let unit = groups.iter().find(|g| g["scope"] == "unit").unwrap();
+    assert_eq!(unit["clone_type"], "type-3");
+    let run = groups.iter().find(|g| g["scope"] == "fragment").unwrap();
+    assert_eq!(run["clone_type"], "type-1");
+    assert_eq!(run["statements"], 4);
+    // Both hosts are members of the group that nonetheless failed to absorb it.
+    let hosts: Vec<&str> = run["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|member| member["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(hosts, vec!["src/left.rs", "src/right.rs"]);
+    // Each occurrence is well under half of the unit that hosts it; that is
+    // what keeps it out of the fold.
+    for member in run["members"].as_array().unwrap() {
+        let host = unit["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["file"] == member["file"])
+            .unwrap();
+        assert!(member["tokens"].as_u64().unwrap() * 2 <= host["tokens"].as_u64().unwrap());
+    }
+}
+
 /// A function that measures its input twice over, so a run is duplicated
 /// inside it.
 const SELF_A_RS: &str = "pub fn collect_alpha(rows: &[String]) -> usize {

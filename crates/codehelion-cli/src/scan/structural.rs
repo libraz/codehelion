@@ -367,9 +367,10 @@ struct ReportableRegions {
 /// this kind, so the runs that name a duplication no unit group reaches would
 /// be buried. They are folded away and counted rather than silently dropped.
 ///
-/// Two cases deliberately survive the fold, because no unit group implies
-/// them: a run occurring more than once inside the same unit, and a run whose
-/// host units are not all members of one group.
+/// Three cases deliberately survive the fold, because no unit group implies
+/// them: a run occurring more than once inside the same unit, a run whose host
+/// units are not all members of one group, and a run small enough to name a
+/// place inside its hosts rather than restate them.
 fn reportable_regions(analysis: &StructuralReport) -> ReportableRegions {
     let mut member_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (index, group) in analysis.groups.groups.iter().enumerate() {
@@ -399,13 +400,35 @@ fn reportable_regions(analysis: &StructuralReport) -> ReportableRegions {
             .map(|occurrence| occurrence.unit)
             .collect();
         let one_per_unit = hosts.len() == region.occurrences.len();
-        if one_per_unit && hosts.len() > 1 && covers(&hosts) {
+        if one_per_unit && hosts.len() > 1 && covers(&hosts) && !localizes(analysis, region) {
             folded += 1;
         } else {
             reported.push(index);
         }
     }
     ReportableRegions { reported, folded }
+}
+
+/// How much of a host unit a run may cover and still be said to point at a
+/// place *inside* it: at most one part in this many. Above that share the run
+/// is, near enough, the unit itself.
+const LOCALIZING_SHARE_DIVISOR: usize = 2;
+
+/// Whether a run names a place inside its hosts rather than restating them.
+///
+/// A unit group directs attention at whole units, so a run spanning most of
+/// one adds nothing: the reader is already looking there. A run that is a
+/// small part of *every* host is the opposite case — a gapped group says its
+/// members are alike overall and says nothing about where they agree exactly,
+/// so a short stretch they share verbatim is a finding the group cannot state
+/// and the one that can be lifted out as it stands.
+fn localizes(analysis: &StructuralReport, region: &StructuralRegion) -> bool {
+    region.occurrences.iter().all(|occurrence| {
+        let host = &analysis.units[occurrence.unit];
+        let host_tokens = host.token_end.saturating_sub(host.token_start);
+        let run_tokens = occurrence.token_end.saturating_sub(occurrence.token_start);
+        run_tokens.saturating_mul(LOCALIZING_SHARE_DIVISOR) <= host_tokens
+    })
 }
 
 /// Each unit's index within its own file, which is what the file-local
