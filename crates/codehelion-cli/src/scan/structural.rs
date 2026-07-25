@@ -683,7 +683,8 @@ fn funnel(stats: &structural::StructuralStats) -> Vec<report::FunnelStage> {
             .dropping("estimated_jaccard", as_u64(near.filtered_by_jaccard)),
         report::FunnelStage::new("unit pairs", as_u64(stats.unit_pairs))
             .dropping("nested", as_u64(stats.nested_pairs)),
-        report::FunnelStage::new("verified pairs", as_u64(stats.verified_pairs)),
+        report::FunnelStage::new("verified pairs", as_u64(stats.verified_pairs))
+            .dropping("no_group_holds_both", as_u64(stats.unrepresented_pairs)),
         report::FunnelStage::new("components", as_u64(grouping.components)),
         report::FunnelStage::new("unit groups", as_u64(grouping.groups))
             .dropping("outside_the_medoid", as_u64(grouping.medoid_ejections))

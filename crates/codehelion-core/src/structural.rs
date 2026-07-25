@@ -105,6 +105,28 @@ pub struct StructuralUnit {
     pub content: FragmentFingerprint,
 }
 
+/// A verified clone pair that no reported group could hold.
+///
+/// The two members are clones of each other by the judge's own verdict; what
+/// they are not is members of one set whose every pair is a clone, which is
+/// what a group asserts. Similarity is not transitive, so a unit can be a
+/// clone of two others that are not clones of each other, and a partition into
+/// groups can keep only one of those relations. The other is evidence the
+/// judge accepted, and it leaves the analysis here rather than being dropped.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifiedPair {
+    /// Index of the first unit into [`StructuralReport::units`].
+    pub a: usize,
+    /// Index of the second unit into [`StructuralReport::units`].
+    pub b: usize,
+    /// The pair's composite similarity.
+    pub similarity: f64,
+    /// What the judge classified the pair as.
+    pub class: CloneClass,
+    /// The judge's confidence in that classification.
+    pub confidence: verify::Confidence,
+}
+
 /// Reporting detail for one clone group, parallel to the group at the same
 /// index in [`StructuralReport::groups`].
 #[derive(Debug, Clone, PartialEq)]
@@ -194,6 +216,8 @@ pub struct StructuralStats {
     pub unit_pairs: usize,
     /// Unit pairs that verification accepted as clones.
     pub verified_pairs: usize,
+    /// Verified pairs no reported group holds both halves of.
+    pub unrepresented_pairs: usize,
     /// Grouping statistics.
     pub grouping: GroupingStats,
 }
@@ -213,6 +237,9 @@ pub struct StructuralReport {
     /// Reporting detail per group, parallel to `groups.groups`: stable clone id
     /// and the medoid-to-member similarity breakdowns.
     pub details: Vec<GroupDetail>,
+    /// Verified clone pairs no group holds both halves of, strongest first.
+    /// Real copies that a partition into groups cannot express.
+    pub unrepresented: Vec<VerifiedPair>,
     /// Funnel statistics.
     pub stats: StructuralStats,
 }
@@ -317,6 +344,8 @@ pub fn analyze(
         .map(|group| group_detail(group, &units, files, &feature_files, variant, config))
         .collect();
 
+    let unrepresented = unrepresented_pairs(&edges, &groups);
+
     let stats = StructuralStats {
         files: files.len(),
         units: units.len(),
@@ -329,6 +358,7 @@ pub fn analyze(
         nested_pairs,
         unit_pairs: pairs.len(),
         verified_pairs: edges.len(),
+        unrepresented_pairs: unrepresented.len(),
         grouping: groups.stats.clone(),
     };
 
@@ -355,6 +385,7 @@ pub fn analyze(
         groups,
         regions,
         details,
+        unrepresented,
         stats,
     }
 }
@@ -732,6 +763,51 @@ fn insert_pair(
     }
     pairs.insert(if a <= b { (a, b) } else { (b, a) });
     false
+}
+
+/// Verified clone pairs that no reported group holds both halves of.
+///
+/// A group is a set whose every member is a clone of every other, which is a
+/// stronger claim than any single pair makes, and it is the claim the reader
+/// is given. Similarity is not transitive, so a unit can be a clone of two
+/// others that are not clones of each other, and only one of those relations
+/// can survive into a partition. The relation that does not survive is
+/// evidence the judge accepted and the report would otherwise throw away, so
+/// it is carried out separately rather than dropped: two units that are copies
+/// of each other remain worth knowing about whether or not a larger set formed
+/// around them.
+fn unrepresented_pairs(edges: &[SimilarityEdge], groups: &GroupingSet) -> Vec<VerifiedPair> {
+    let mut group_of: BTreeMap<usize, usize> = BTreeMap::new();
+    for (index, group) in groups.groups.iter().enumerate() {
+        for &member in &group.members {
+            group_of.insert(member, index);
+        }
+    }
+    let mut pairs: Vec<VerifiedPair> = edges
+        .iter()
+        .filter(
+            |edge| match (group_of.get(&edge.a), group_of.get(&edge.b)) {
+                (Some(a), Some(b)) => a != b,
+                _ => true,
+            },
+        )
+        .map(|edge| VerifiedPair {
+            a: edge.a,
+            b: edge.b,
+            similarity: edge.similarity,
+            class: edge.class,
+            confidence: edge.confidence,
+        })
+        .collect();
+    // Strongest first, then by member indices, so the order is deterministic
+    // and the reader meets the best evidence first.
+    pairs.sort_by(|left, right| {
+        right
+            .similarity
+            .total_cmp(&left.similarity)
+            .then_with(|| (left.a, left.b).cmp(&(right.a, right.b)))
+    });
+    pairs
 }
 
 /// Whether one of the two units contains the other.

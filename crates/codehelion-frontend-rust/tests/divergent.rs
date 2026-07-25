@@ -98,6 +98,69 @@ fn disturbing_control_flow_moves_only_the_control_flow_and_structure_dimensions(
 }
 
 #[test]
+fn a_pair_no_group_can_hold_is_carried_out_of_the_analysis() {
+    // Over the whole corpus the seed and its renamed-callee variant are the
+    // strongest agreement there is, and they still end up in different groups:
+    // that variant agrees too weakly with the seed's other variants to sit
+    // beside them, and a group asserts that every member is a clone of every
+    // other. The pair is a verdict the judge reached, so it leaves the
+    // analysis as one rather than being spent on a group that could not form.
+    let names = [
+        SEED,
+        CALLS_SWAPPED,
+        REWRITTEN,
+        CONTROL_FLOW[0],
+        CONTROL_FLOW[1],
+        CONTROL_FLOW[2],
+    ];
+    let report = analyze(&names);
+
+    let group_of = |unit: usize| {
+        report
+            .groups
+            .groups
+            .iter()
+            .position(|group| group.members.contains(&unit))
+    };
+    for pair in &report.unrepresented {
+        assert!(
+            group_of(pair.a).is_none()
+                || group_of(pair.b).is_none()
+                || group_of(pair.a) != group_of(pair.b),
+            "a pair both of whose members share a group is represented"
+        );
+    }
+
+    let seed_unit = report
+        .units
+        .iter()
+        .position(|unit| unit.file == 0)
+        .expect("the seed is the first file");
+    let swapped_unit = report
+        .units
+        .iter()
+        .position(|unit| unit.file == 1)
+        .expect("the renamed-callee variant is the second file");
+    assert_ne!(
+        group_of(seed_unit),
+        group_of(swapped_unit),
+        "this is the pair grouping splits; if it stopped splitting, this test \
+         is measuring nothing"
+    );
+    let carried = report
+        .unrepresented
+        .iter()
+        .find(|pair| (pair.a, pair.b) == (seed_unit.min(swapped_unit), seed_unit.max(swapped_unit)))
+        .expect("the split pair is carried out of the analysis");
+    assert_eq!(carried.class, CloneClass::Type2);
+    assert!(
+        carried.similarity > 0.80,
+        "the pair scores {:.4}",
+        carried.similarity
+    );
+}
+
+#[test]
 fn renaming_every_callee_shows_in_the_text_as_well_as_the_call_surface() {
     let scores = breakdown(CALLS_SWAPPED);
     // The rename touches nothing but the callee names, so the two shape
