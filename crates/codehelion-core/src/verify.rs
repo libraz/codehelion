@@ -83,6 +83,23 @@ pub struct VerifyConfig {
     pub medium_confidence: f64,
     /// Tolerance for treating a similarity as exactly `1.0`.
     pub exact_epsilon: f64,
+    /// How far the statement alignment may stray from the diagonal that joins
+    /// the two sequences' ends, in statements.
+    ///
+    /// The band bounds the alignment's cost at `O(min(n, m) * band)` instead
+    /// of `O(n * m)`. Widening it can only raise a pair's similarity, so the
+    /// banded result is a lower bound: a real clone, whose alignment hugs that
+    /// diagonal, is measured exactly, while a pair that would need to wander
+    /// further is scored no higher than it deserves.
+    pub alignment_band: usize,
+    /// Largest alignment table, in cells.
+    ///
+    /// The band alone bounds the table for units of comparable length; this
+    /// bounds it for a pair whose lengths also differ widely, by narrowing the
+    /// band further until the table fits. Narrowing only weakens the lower
+    /// bound, so nothing is dropped — such a pair cannot align well enough to
+    /// be a clone in any case.
+    pub max_alignment_cells: usize,
 }
 
 impl Default for VerifyConfig {
@@ -93,6 +110,12 @@ impl Default for VerifyConfig {
             high_confidence: 0.85,
             medium_confidence: 0.70,
             exact_epsilon: 1e-9,
+            // Wide enough that the gapped clones the mode targets — copies
+            // with statements inserted or removed — align exactly.
+            alignment_band: 64,
+            // 4M cells is ~16 MiB of table, reached only by a pair of units
+            // in the tens of thousands of statements with lengths far apart.
+            max_alignment_cells: 4_000_000,
         }
     }
 }
@@ -209,7 +232,7 @@ fn collect_statements(node: &IrNode, tokens: &[Token], out: &mut Vec<StatementSu
 /// clone classification.
 #[must_use]
 pub fn verify(a: &UnitView<'_>, b: &UnitView<'_>, config: &VerifyConfig) -> Verdict {
-    let (lcs, alignment) = align(a.statements, b.statements);
+    let (lcs, alignment) = align(a.statements, b.statements, config);
     let seq_sim = sequence_similarity(lcs, a.statements.len(), b.statements.len());
     let lexical = lexical_similarity(a.statements, b.statements, &alignment);
     let structural = mean3(
@@ -311,21 +334,106 @@ fn composite(
     if total > 0.0 { acc / total } else { 0.0 }
 }
 
+/// The band of `second` indices row `ia` of the alignment table covers, as an
+/// offset range around `ia` itself.
+///
+/// The range normally contains both `0` (the table's start corner sits on
+/// `jb == ia`) and `len_b - len_a` (its end corner), with the configured slack
+/// either way, so the trivial paths are never banded out. When that range
+/// alone would exceed the cell budget — two very large units of very different
+/// lengths — it is narrowed around the start corner instead. A narrower band
+/// only weakens the lower bound the alignment reports; it never invents a
+/// match.
+struct Band {
+    /// How far `jb` may lag `ia`.
+    back: usize,
+    /// How far `jb` may lead `ia`.
+    forward: usize,
+}
+
+impl Band {
+    fn new(len_a: usize, len_b: usize, config: &VerifyConfig) -> Self {
+        let slack = config.alignment_band;
+        // The end corner sits at `jb - ia == len_b - len_a`, so the longer
+        // side gets the length difference on top of the slack.
+        let mut back = slack.saturating_add(len_a.saturating_sub(len_b));
+        let mut forward = slack.saturating_add(len_b.saturating_sub(len_a));
+        let allowed = (config.max_alignment_cells / (len_a + 1)).max(1);
+        if back + forward + 1 > allowed {
+            // Keep the diagonals nearest the start corner, where the
+            // backtrace begins.
+            back = back.min((allowed - 1) / 2);
+            forward = forward.min(allowed - 1 - back);
+        }
+        Self { back, forward }
+    }
+
+    /// Number of cells per row.
+    const fn width(&self) -> usize {
+        self.back + self.forward + 1
+    }
+
+    /// First `jb` row `ia` covers.
+    const fn first(&self, ia: usize) -> usize {
+        ia.saturating_sub(self.back)
+    }
+
+    /// Last `jb` row `ia` covers, given a `second` of length `len_b`.
+    const fn last(&self, ia: usize, len_b: usize) -> usize {
+        let end = ia.saturating_add(self.forward);
+        if end < len_b { end } else { len_b - 1 }
+    }
+
+    /// Index of `(ia, jb)` in the banded table, or `None` when `jb` lies
+    /// outside row `ia`'s band.
+    fn index(&self, ia: usize, jb: usize) -> Option<usize> {
+        let offset = (jb + self.back).checked_sub(ia)?;
+        (offset < self.width()).then(|| ia * self.width() + offset)
+    }
+}
+
 /// The longest common subsequence of two statement sequences under
 /// rename-invariant equality — equal shape tag and native kind — with its
 /// alignment. Returns the LCS length and the matched/unmatched indices.
-fn align(first: &[StatementSummary], second: &[StatementSummary]) -> (usize, Alignment) {
+///
+/// The search is banded: only alignments staying within
+/// [`VerifyConfig::alignment_band`] statements of the diagonal joining the two
+/// sequences' ends are considered, and the band narrows further if the table
+/// would exceed [`VerifyConfig::max_alignment_cells`]. Since every considered
+/// alignment is a real common subsequence, the result is a lower bound on the
+/// true LCS — never an overestimate — and it is exact for the copy-with-edits
+/// shapes the mode targets.
+fn align(
+    first: &[StatementSummary],
+    second: &[StatementSummary],
+    config: &VerifyConfig,
+) -> (usize, Alignment) {
     let (len_a, len_b) = (first.len(), second.len());
-    // Row-major DP table of size (len_a + 1) x (len_b + 1).
-    let width = len_b + 1;
-    let mut dp = vec![0usize; (len_a + 1) * width];
-    for ia in (0..len_a).rev() {
-        for jb in (0..len_b).rev() {
-            dp[ia * width + jb] = if summaries_align(&first[ia], &second[jb]) {
-                dp[(ia + 1) * width + (jb + 1)] + 1
-            } else {
-                dp[(ia + 1) * width + jb].max(dp[ia * width + (jb + 1)])
-            };
+    let band = Band::new(len_a, len_b, config);
+    // Row-major banded table: row `ia` holds the cells whose `jb` lies inside
+    // the band around `ia`. Out-of-band cells read as zero, which is the
+    // identity for the maximum below, so a path that would leave the band is
+    // simply not taken.
+    let mut dp = vec![0u32; (len_a + 1) * band.width()];
+    let at = |dp: &[u32], ia: usize, jb: usize| -> u32 {
+        if ia > len_a || jb > len_b {
+            return 0;
+        }
+        band.index(ia, jb).map_or(0, |index| dp[index])
+    };
+    if len_b > 0 {
+        for ia in (0..len_a).rev() {
+            for jb in (band.first(ia)..=band.last(ia, len_b)).rev() {
+                let value = if summaries_align(&first[ia], &second[jb]) {
+                    at(&dp, ia + 1, jb + 1) + 1
+                } else {
+                    at(&dp, ia + 1, jb).max(at(&dp, ia, jb + 1))
+                };
+                // `jb` came from row `ia`'s own band, so the cell exists.
+                if let Some(index) = band.index(ia, jb) {
+                    dp[index] = value;
+                }
+            }
         }
     }
 
@@ -336,7 +444,7 @@ fn align(first: &[StatementSummary], second: &[StatementSummary]) -> (usize, Ali
             alignment.matched.push((ia, jb));
             ia += 1;
             jb += 1;
-        } else if dp[(ia + 1) * width + jb] >= dp[ia * width + (jb + 1)] {
+        } else if at(&dp, ia + 1, jb) >= at(&dp, ia, jb + 1) {
             alignment.only_a.push(ia);
             ia += 1;
         } else {
@@ -352,7 +460,7 @@ fn align(first: &[StatementSummary], second: &[StatementSummary]) -> (usize, Ali
         alignment.only_b.push(jb);
         jb += 1;
     }
-    (dp[0], alignment)
+    (at(&dp, 0, 0).try_into().unwrap_or(usize::MAX), alignment)
 }
 
 /// Two statements align when their shape and native kind match; identifier and
@@ -616,6 +724,79 @@ mod tests {
         assert_eq!(verdict.alignment.only_b, vec![0]);
         assert_eq!(verdict.alignment.matched.len(), 3);
         assert!(verdict.breakdown.type_similarity.is_none());
+    }
+
+    /// A sequence of `len` statements whose shapes cycle, so that alignment is
+    /// a real search rather than a run of identical statements.
+    fn sequence(len: usize) -> Vec<StatementSummary> {
+        (0..len)
+            .map(|index| summary(u8::try_from(index % 7).unwrap_or(0), &["let"]))
+            .collect()
+    }
+
+    #[test]
+    fn the_band_recovers_the_exact_alignment_of_a_gapped_copy() {
+        // A copy with a run of statements inserted in the middle: the edit is
+        // well inside the band, so the banded search finds the whole original
+        // sequence, exactly as an unbounded one would.
+        let a = sequence(400);
+        let mut b = a.clone();
+        for extra in 0..16 {
+            b.insert(200 + extra, summary(9, &["loop"]));
+        }
+        let (lcs, alignment) = align(&a, &b, &VerifyConfig::default());
+        assert_eq!(lcs, a.len());
+        assert_eq!(alignment.matched.len(), a.len());
+        assert!(alignment.only_a.is_empty());
+        assert_eq!(alignment.only_b.len(), 16);
+    }
+
+    #[test]
+    fn a_narrower_band_never_reports_more_than_a_wider_one() {
+        // The gap is wider than the narrow band, so the narrow search cannot
+        // follow the alignment across it; what it reports stays a real common
+        // subsequence, never an overestimate.
+        let a = sequence(200);
+        let mut b = a.clone();
+        for extra in 0..80 {
+            b.insert(100 + extra, summary(9, &["loop"]));
+        }
+        let narrow = VerifyConfig {
+            alignment_band: 4,
+            ..VerifyConfig::default()
+        };
+        let (narrow_lcs, _) = align(&a, &b, &narrow);
+        let (wide_lcs, _) = align(&a, &b, &VerifyConfig::default());
+        assert_eq!(wide_lcs, a.len());
+        assert!(
+            narrow_lcs <= wide_lcs,
+            "narrow band reported {narrow_lcs}, above the wider band's {wide_lcs}"
+        );
+    }
+
+    #[test]
+    fn the_cell_ceiling_bounds_a_pair_of_very_different_lengths() {
+        // Lengths far enough apart that the diagonal span alone would dominate
+        // the table; the ceiling narrows the band instead of letting it grow.
+        let a = sequence(64);
+        let b = sequence(4096);
+        let config = VerifyConfig {
+            max_alignment_cells: 8_000,
+            ..VerifyConfig::default()
+        };
+        let band = Band::new(a.len(), b.len(), &config);
+        assert!(
+            (a.len() + 1) * band.width() <= config.max_alignment_cells,
+            "table of {} cells exceeds the ceiling",
+            (a.len() + 1) * band.width()
+        );
+        // The band still covers the start corner, so the search begins where
+        // the backtrace does.
+        assert_eq!(band.first(0), 0);
+        // And it still produces a real alignment.
+        let (lcs, alignment) = align(&a, &b, &config);
+        assert!(lcs <= a.len());
+        assert_eq!(alignment.matched.len() + alignment.only_a.len(), a.len());
     }
 
     #[test]
