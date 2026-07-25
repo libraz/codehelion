@@ -108,9 +108,10 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let mut rules = compile_rules(&cfg, &files, &analysis)?;
     let hidden = hidden_boilerplate(&mut rules.rules, &cfg.suppression.boilerplate, &analysis);
     let local_units = local_unit_indices(&analysis);
-    // Location rules first: a path glob or an inline marker is an explicit
-    // instruction about this code, while a boilerplate category is a
-    // judgement about its shape.
+    // Most specific rule first: a clone id names this exact group, a path or
+    // symbol glob or an inline marker is an explicit instruction about where
+    // the members sit, and a boilerplate category is a judgement about their
+    // shape.
     let group_suppressed: Vec<Option<usize>> = analysis
         .groups
         .groups
@@ -118,7 +119,11 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         .enumerate()
         .map(|(index, group)| {
             rules
-                .group_rule(group.members.iter().copied(), &analysis, &local_units)
+                .rules
+                .clone_id_rule(&analysis.details[index].fingerprint.to_hex())
+                .or_else(|| {
+                    rules.group_rule(group.members.iter().copied(), &analysis, &local_units)
+                })
                 .or_else(|| {
                     analysis.details[index]
                         .boilerplate
@@ -240,25 +245,29 @@ impl StructuralRules {
 }
 
 /// Compile the suppression rules and evaluate every parsed file against them.
-/// A file's unit line ranges come from the analysed units, in the order the
-/// analysis walked them, so an inline marker resolves to the same unit the
-/// findings anchor to.
+/// A file's units come from the analysed units, in the order the analysis
+/// walked them, so an inline marker resolves to the same unit the findings
+/// anchor to.
 fn compile_rules(
     cfg: &Config,
     files: &[SourceMeta],
     analysis: &StructuralReport,
 ) -> Result<StructuralRules> {
     let any_markers = files.iter().any(|file| !file.marker_lines.is_empty());
-    let rules = suppress::Rules::compile(&cfg.suppression.paths, any_markers)?;
-    let mut unit_lines: Vec<Vec<(u32, u32)>> = vec![Vec::new(); files.len()];
+    let rules = suppress::Rules::compile(&cfg.suppression, any_markers)?;
+    let mut spans: Vec<Vec<suppress::UnitSpan<'_>>> = files.iter().map(|_| Vec::new()).collect();
     for unit in &analysis.units {
-        unit_lines[unit.file].push((unit.start_line, unit.end_line));
+        spans[unit.file].push(suppress::UnitSpan {
+            start_line: unit.start_line,
+            end_line: unit.end_line,
+            name: unit.name.as_deref(),
+        });
     }
     let evaluated = files
         .iter()
         .enumerate()
         .map(|(index, file)| {
-            rules.evaluate_file(&file.relative_path, &file.marker_lines, &unit_lines[index])
+            rules.evaluate_file(&file.relative_path, &file.marker_lines, &spans[index])
         })
         .collect();
     Ok(StructuralRules {

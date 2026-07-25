@@ -268,6 +268,8 @@ impl Suppression {
                 let pattern = self.pattern.as_deref().unwrap_or("");
                 match self.scope.as_deref() {
                     Some("path_glob") => format!("path glob {pattern:?}"),
+                    Some("symbol_pattern") => format!("symbol glob {pattern:?}"),
+                    Some("stable_clone_id") => format!("clone id {pattern}"),
                     Some("inline_comment") => format!("{pattern} marker"),
                     Some("ast_pattern") => format!("boilerplate: {pattern}"),
                     Some(scope) => format!("{scope} {pattern:?}"),

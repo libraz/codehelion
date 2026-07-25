@@ -266,6 +266,61 @@ fn an_inline_marker_suppresses_the_next_unit() {
     );
 }
 
+#[test]
+fn a_symbol_glob_suppresses_by_unit_name_wherever_the_unit_lives() {
+    let dir = fixture();
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[suppression]\nsymbols = [\"mix_*\"]\n",
+    )
+    .unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", "."])
+        .assert()
+        .success()
+        // Both C instances are named mix_bytes, so their group is hidden;
+        // the Rust groups are untouched.
+        .stdout(predicate::str::contains("1 by rule"))
+        .stdout(predicate::str::contains("src/one.c").not())
+        .stdout(predicate::str::contains("src/a.rs"));
+
+    let store = open_store(dir.path());
+    let run = store.latest_run().unwrap().expect("a recorded run");
+    let findings = store.run_findings(run.id).unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.suppression_scope.as_deref() == Some("symbol_pattern"))
+    );
+
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--show-suppressed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("symbol glob \"mix_*\""));
+}
+
+#[test]
+fn a_symbol_glob_matching_only_part_of_a_group_leaves_it_visible() {
+    let dir = fixture();
+    // checksum_block appears twice and digest_chunk once; naming only the
+    // renamed copy leaves the duplication actionable, so nothing is hidden.
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[suppression]\nsymbols = [\"digest_chunk\"]\n",
+    )
+    .unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("0 by rule"))
+        .stdout(predicate::str::contains("src/c.rs"));
+}
+
 /// Run `scan --format json` in `root` and parse the produced document.
 fn scan_json(root: &Path) -> serde_json::Value {
     let output = cmd()

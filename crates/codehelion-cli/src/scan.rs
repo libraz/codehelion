@@ -105,15 +105,22 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     );
 
     let any_markers = lexed.iter().any(|file| !file.marker_lines.is_empty());
-    let rules = suppress::Rules::compile(&cfg.suppression.paths, any_markers)?;
+    let rules = suppress::Rules::compile(&cfg.suppression, any_markers)?;
     let file_suppressions: Vec<suppress::FileSuppression> = lexed
         .iter()
-        .map(|file| rules.evaluate_file(&file.relative_path, &file.marker_lines, &file.unit_lines))
+        .map(|file| rules.evaluate_file(&file.relative_path, &file.marker_lines, &unit_spans(file)))
         .collect();
     let group_suppressed: Vec<Option<usize>> = report
         .groups
         .iter()
-        .map(|group| group_rule(&rules, &file_suppressions, group))
+        .zip(&ids)
+        .map(|(group, group_ids)| {
+            // A clone id names this exact group, so it decides before any
+            // rule that happens to cover where the members sit.
+            rules
+                .clone_id_rule(&group_ids.fingerprint.to_hex())
+                .or_else(|| group_rule(&rules, &file_suppressions, group))
+        })
         .collect();
 
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
@@ -370,6 +377,20 @@ pub(crate) fn write_report(args: &ScanArgs, out: &mut impl Write, model: &Report
         None => out.write_all(text.as_bytes())?,
     }
     Ok(())
+}
+
+/// One lexed file's units as the suppression rules see them: their line
+/// ranges paired with the names the lexer recovered.
+fn unit_spans(file: &LexedSource) -> Vec<suppress::UnitSpan<'_>> {
+    file.units
+        .iter()
+        .zip(&file.unit_lines)
+        .map(|(unit, &(start_line, end_line))| suppress::UnitSpan {
+            start_line,
+            end_line,
+            name: unit.name.as_deref(),
+        })
+        .collect()
 }
 
 /// The rule suppressing a whole group: present only when *every* member is

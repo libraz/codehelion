@@ -435,3 +435,118 @@ fn a_hidden_boilerplate_category_is_recorded_with_the_rule_that_hid_it() {
             "[suppressed: boilerplate: macro-repetition]",
         ));
 }
+
+#[test]
+fn a_symbol_glob_hides_a_group_only_when_it_names_every_member() {
+    let dir = fixture();
+    // beta is the gapped copy of alpha; naming one of the two leaves the
+    // duplication actionable.
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[suppression]\nsymbols = [\"beta\"]\n",
+    )
+    .unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("0 by rule"))
+        .stdout(predicate::str::contains("src/a.rs"));
+
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[suppression]\nsymbols = [\"alpha\", \"beta\"]\n",
+    )
+    .unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 by rule"))
+        .stdout(predicate::str::contains("src/a.rs").not());
+
+    let store = open_store(dir.path());
+    let run = store.latest_run().unwrap().expect("a recorded run");
+    assert!(
+        store
+            .run_findings(run.id)
+            .unwrap()
+            .iter()
+            .any(|f| f.suppression_scope.as_deref() == Some("symbol_pattern"))
+    );
+}
+
+#[test]
+fn a_clone_id_hides_exactly_the_group_it_names() {
+    let dir = fixture();
+    let report = scan_json(dir.path());
+    let fingerprint = report["groups"][0]["fingerprint"]
+        .as_str()
+        .expect("a detected group")
+        .to_string();
+
+    // An id that identifies no group changes nothing.
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[suppression]\nclone-ids = [\"deadbeefdeadbeef\"]\n",
+    )
+    .unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("0 by rule"));
+
+    // A prefix of the reported id hides that group, and says so.
+    let prefix = &fingerprint[..12];
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        format!("[suppression]\nclone-ids = [\"{prefix}\"]\n"),
+    )
+    .unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 by rule"))
+        .stdout(predicate::str::contains(fingerprint.as_str()).not());
+
+    let store = open_store(dir.path());
+    let run = store.latest_run().unwrap().expect("a recorded run");
+    assert!(
+        store
+            .run_findings(run.id)
+            .unwrap()
+            .iter()
+            .any(|f| f.suppression_scope.as_deref() == Some("stable_clone_id"))
+    );
+
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural", "--show-suppressed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "[suppressed: clone id {prefix}]"
+        )));
+}
+
+#[test]
+fn a_clone_id_that_could_not_identify_a_group_fails_the_scan() {
+    let dir = fixture();
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[suppression]\nclone-ids = [\"abc\"]\n",
+    )
+    .unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("shorter than"));
+}
