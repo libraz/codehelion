@@ -188,6 +188,8 @@ pub struct StructuralStats {
     /// Confirmed runs dropped because a longer run covers every one of their
     /// occurrences and claims at least as much about them.
     pub region_subsumed: usize,
+    /// Candidate pairs dropped because one unit encloses the other.
+    pub nested_pairs: usize,
     /// Distinct unit pairs handed to verification.
     pub unit_pairs: usize,
     /// Unit pairs that verification accepted as clones.
@@ -250,25 +252,23 @@ pub fn analyze(
     let candidate = candidate::generate(&feature_files, &config.candidate);
     let near = near_match::generate(&feature_files, &config.near_match);
     let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
-    for pair in &candidate.pairs {
-        insert_pair(
-            &mut pairs,
-            &offsets,
-            pair.a.file,
-            pair.a.unit,
-            pair.b.file,
-            pair.b.unit,
-        );
-    }
-    for pair in &near.pairs {
-        insert_pair(
-            &mut pairs,
-            &offsets,
-            pair.a.file,
-            pair.a.unit,
-            pair.b.file,
-            pair.b.unit,
-        );
+    let mut nested_pairs = 0usize;
+    let mut places = Vec::with_capacity(candidate.pairs.len() + near.pairs.len());
+    places.extend(
+        candidate
+            .pairs
+            .iter()
+            .map(|pair| (pair.a.file, pair.a.unit, pair.b.file, pair.b.unit)),
+    );
+    places.extend(
+        near.pairs
+            .iter()
+            .map(|pair| (pair.a.file, pair.a.unit, pair.b.file, pair.b.unit)),
+    );
+    for (file_a, unit_a, file_b, unit_b) in places {
+        if insert_pair(&mut pairs, &units, &offsets, file_a, unit_a, file_b, unit_b) {
+            nested_pairs += 1;
+        }
     }
 
     // Stage: fold the window seeds into the maximal shared runs they describe,
@@ -326,6 +326,7 @@ pub fn analyze(
         regions: regions.len(),
         region_singletons: singletons,
         region_subsumed: subsumed,
+        nested_pairs,
         unit_pairs: pairs.len(),
         verified_pairs: edges.len(),
         grouping: groups.stats.clone(),
@@ -714,17 +715,37 @@ fn view<'a>(
 /// self-pairs.
 fn insert_pair(
     pairs: &mut BTreeSet<(usize, usize)>,
+    units: &[Unit],
     offsets: &[usize],
     file_a: usize,
     unit_a: usize,
     file_b: usize,
     unit_b: usize,
-) {
+) -> bool {
     let a = offsets[file_a] + unit_a;
     let b = offsets[file_b] + unit_b;
-    if a != b {
-        pairs.insert(if a <= b { (a, b) } else { (b, a) });
+    if a == b {
+        return false;
     }
+    if encloses(&units[a], &units[b]) {
+        return true;
+    }
+    pairs.insert(if a <= b { (a, b) } else { (b, a) });
+    false
+}
+
+/// Whether one of the two units contains the other.
+///
+/// A namespace whose only content is a class, or a function holding a single
+/// closure, agrees with what it encloses on every measure there is — the two
+/// are made of the same tokens. That agreement is not a copy: there is one
+/// stretch of code here, described at two levels, and reporting the pair
+/// claims a duplicate that nobody can remove. Containment holds within a file
+/// only, so units in different files are never each other's parents.
+const fn encloses(a: &Unit, b: &Unit) -> bool {
+    a.file == b.file
+        && ((a.tokens.0 <= b.tokens.0 && b.tokens.1 <= a.tokens.1)
+            || (b.tokens.0 <= a.tokens.0 && a.tokens.1 <= b.tokens.1))
 }
 
 #[cfg(test)]

@@ -120,3 +120,46 @@ fn every_reported_group_clears_the_cohesion_floor() {
 fn two_runs_over_the_same_corpus_agree() {
     assert_eq!(analyze().groups.groups, analyze().groups.groups);
 }
+
+/// A function whose whole body is one lambda: the function and the closure
+/// are made of the same code, one wrapped in the other.
+const WRAPPED: &str = "\
+double smooth_all(const double *xs, unsigned n) {
+    auto step = [&](unsigned count) {
+        double acc = 0.5;
+        for (unsigned i = 0; i < count; ++i) {
+            acc = acc * 0.5 + xs[i] * 0.5;
+            acc = acc + (acc / 8.0);
+        }
+        return acc;
+    };
+    return step(n);
+}
+";
+
+#[test]
+fn a_namespace_is_not_a_clone_of_the_class_it_holds() {
+    // The namespace and the class are made of the same tokens, so every
+    // measure agrees on them completely. That is not a copy: it is one stretch
+    // of code seen at two levels, and calling it a duplicate points the reader
+    // at work that does not exist. The pair is dropped before verification
+    // rather than after, so it costs nothing to score either.
+    let files = vec![CppStructuralFrontend.parse(WRAPPED)];
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let report = structural::analyze(&files, &variant, &StructuralConfig::default());
+
+    assert!(
+        report.units.len() >= 2,
+        "the namespace and the class are both units, got {}",
+        report.units.len()
+    );
+    assert_eq!(
+        report.groups.groups,
+        vec![],
+        "one nested stretch of code is not two instances of anything"
+    );
+    assert!(
+        report.stats.nested_pairs > 0,
+        "the pair is dropped for nesting, and says so"
+    );
+}

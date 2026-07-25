@@ -681,7 +681,8 @@ fn funnel(stats: &structural::StructuralStats) -> Vec<report::FunnelStage> {
             .dropping("crowded_bucket", as_u64(near.stop_buckets))
             .dropping("length_ratio", as_u64(near.filtered_by_size))
             .dropping("estimated_jaccard", as_u64(near.filtered_by_jaccard)),
-        report::FunnelStage::new("unit pairs", as_u64(stats.unit_pairs)),
+        report::FunnelStage::new("unit pairs", as_u64(stats.unit_pairs))
+            .dropping("nested", as_u64(stats.nested_pairs)),
         report::FunnelStage::new("verified pairs", as_u64(stats.verified_pairs)),
         report::FunnelStage::new("components", as_u64(grouping.components)),
         report::FunnelStage::new("unit groups", as_u64(grouping.groups))
