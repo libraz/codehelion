@@ -14,6 +14,11 @@
 //! a field, or changing a field's type or meaning — must increment the
 //! version and ship a new schema document; purely additive fields keep the
 //! version.
+//!
+//! [`sarif`] renders the same value as a SARIF 2.1.0 log for static-analysis
+//! consumers.
+
+pub mod sarif;
 
 use std::io::{self, Write};
 
@@ -589,10 +594,12 @@ impl FindingDetail {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn sample_report() -> Report {
+    /// A two-group report whose second group is hidden by a path rule; shared
+    /// with the sibling reporter tests.
+    pub(super) fn sample_report() -> Report {
         Report {
             schema_version: SCHEMA_VERSION,
             run: RunInfo {
@@ -710,7 +717,7 @@ mod tests {
 
     /// A gapped group as a mode that scores dimensions reports it: a
     /// similarity breakdown whose type dimension was never measured.
-    fn structural_group() -> Group {
+    pub(super) fn structural_group() -> Group {
         Group {
             fingerprint: "0d".repeat(16),
             clone_type: "type-3".to_string(),

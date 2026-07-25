@@ -73,6 +73,21 @@ pub enum Format {
     Text,
     /// Machine-readable JSON (versioned schema).
     Json,
+    /// SARIF 2.1.0 log, for static-analysis result consumers.
+    Sarif,
+}
+
+/// Output format for a single finding's detail view.
+///
+/// Kept apart from [`Format`]: SARIF describes a run's results, so offering it
+/// for a one-occurrence lookup would advertise a format the command could not
+/// produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum DetailFormat {
+    /// Human-readable text.
+    Text,
+    /// Machine-readable JSON.
+    Json,
 }
 
 /// Arguments for the `scan` subcommand.
@@ -120,8 +135,8 @@ pub struct ExplainArgs {
     /// Stable finding ID to explain.
     pub finding_id: String,
     /// Output format for the detail view.
-    #[arg(long, value_enum, default_value_t = Format::Text)]
-    pub format: Format,
+    #[arg(long, value_enum, default_value_t = DetailFormat::Text)]
+    pub format: DetailFormat,
     /// Audit-database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,

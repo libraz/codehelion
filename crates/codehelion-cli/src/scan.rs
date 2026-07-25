@@ -348,6 +348,7 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
 pub(crate) fn write_report(args: &ScanArgs, out: &mut impl Write, model: &Report) -> Result<()> {
     let text = match args.format {
         Format::Json => model.to_json().context("serializing the JSON report")?,
+        Format::Sarif => model.to_sarif().context("serializing the SARIF report")?,
         Format::Text => {
             let options = report::TextOptions {
                 verbose: args.verbose,

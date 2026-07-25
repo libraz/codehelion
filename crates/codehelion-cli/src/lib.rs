@@ -32,7 +32,8 @@ use codehelion_core::doctor;
 use codehelion_store::Store;
 
 use crate::cli::{
-    BaselineAction, CacheAction, Cli, Command, ConfigAction, ExplainArgs, Format, Mode, ScanArgs,
+    BaselineAction, CacheAction, Cli, Command, ConfigAction, DetailFormat, ExplainArgs, Mode,
+    ScanArgs,
 };
 use crate::config::ConfigSource;
 
@@ -141,8 +142,8 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
         scan_run: occurrence.scan_run_id,
     };
     match args.format {
-        Format::Json => write!(out, "{}", detail.to_json()?)?,
-        Format::Text => detail.render_text(out)?,
+        DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
+        DetailFormat::Text => detail.render_text(out)?,
     }
     Ok(Outcome::Success)
 }
@@ -321,6 +322,7 @@ fn resolve_db(flag: Option<&Path>) -> Result<PathBuf> {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::cli::Format;
 
     fn scan_args(mode: Mode) -> ScanArgs {
         ScanArgs {
