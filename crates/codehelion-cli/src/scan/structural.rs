@@ -642,6 +642,7 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
                         .count(),
                 ),
                 folded_runs: as_u64(inputs.regions.folded),
+                subsumed_runs: as_u64(stats.region_subsumed),
             },
             suppressed: report::SuppressedCounts {
                 // The funnel marks no group as noise yet; suppression here is

@@ -694,6 +694,8 @@ fn a_run_shared_by_unrelated_units_is_reported_as_a_run() {
     assert_eq!(value["summary"]["groups"]["total"], 1);
     assert_eq!(value["summary"]["groups"]["fragment_scope"], 1);
     assert_eq!(value["summary"]["groups"]["folded_runs"], 0);
+    // Nothing longer covers this run, so nothing is left out on that account.
+    assert_eq!(value["summary"]["groups"]["subsumed_runs"], 0);
     let group = &value["groups"][0];
     assert_eq!(group["scope"], "fragment");
     assert_eq!(group["statements"], 4);
@@ -759,7 +761,7 @@ fn a_run_a_group_already_covers_is_folded_into_it_and_counted() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "further runs were folded into the groups that already cover them",
+            "were folded into the groups that already cover them",
         ));
 
     let value = scan_json(dir.path());

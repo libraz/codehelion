@@ -117,6 +117,10 @@
             "folded_runs": {
               "type": "integer",
               "description": "Duplicated runs left out of the listing because a reported whole-unit group already covers them, so the fold is visible rather than silent."
+            },
+            "subsumed_runs": {
+              "type": "integer",
+              "description": "Duplicated runs left out because a longer run covers every one of their occurrences and classifies at least as strictly."
             }
           }
         },

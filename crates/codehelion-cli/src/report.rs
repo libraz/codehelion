@@ -164,6 +164,9 @@ pub struct GroupCounts {
     /// group already covers them — the same duplication described twice.
     /// Reported so the fold is visible rather than silent.
     pub folded_runs: u64,
+    /// Duplicated runs left out because a longer run covers every one of
+    /// their occurrences and claims at least as much about them.
+    pub subsumed_runs: u64,
 }
 
 /// Suppressed-group counts by mechanism.
@@ -449,12 +452,14 @@ impl Report {
             summary.suppressed.noise,
             summary.suppressed.by_rule,
         )?;
-        if summary.groups.fragment_scope > 0 || summary.groups.folded_runs > 0 {
+        let runs = &summary.groups;
+        if runs.fragment_scope > 0 || runs.folded_runs > 0 || runs.subsumed_runs > 0 {
             writeln!(
                 out,
                 "    {} of them are runs duplicated inside units that are not clones of each \
-                 other; {} further runs were folded into the groups that already cover them",
-                summary.groups.fragment_scope, summary.groups.folded_runs,
+                 other; {} more were folded into the groups that already cover them and {} \
+                 into longer runs",
+                runs.fragment_scope, runs.folded_runs, runs.subsumed_runs,
             )?;
         }
         writeln!(
@@ -733,6 +738,7 @@ pub(super) mod tests {
                     type_3: 0,
                     fragment_scope: 0,
                     folded_runs: 0,
+                    subsumed_runs: 0,
                 },
                 suppressed: SuppressedCounts {
                     noise: 0,
@@ -911,6 +917,7 @@ pub(super) mod tests {
         report.summary.groups.total = 3;
         report.summary.groups.fragment_scope = 1;
         report.summary.groups.folded_runs = 4;
+        report.summary.groups.subsumed_runs = 2;
         report.groups.insert(0, fragment_group());
 
         let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
@@ -930,7 +937,7 @@ pub(super) mod tests {
         // What was folded away is stated rather than silently dropped.
         assert!(text.contains(
             "1 of them are runs duplicated inside units that are not clones of each other; \
-             4 further runs were folded into the groups that already cover them"
+             4 more were folded into the groups that already cover them and 2 into longer runs"
         ));
     }
 

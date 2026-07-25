@@ -273,6 +273,7 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
                 // The Fast engine compares whole units only.
                 fragment_scope: 0,
                 folded_runs: 0,
+                subsumed_runs: 0,
             },
             suppressed: report::SuppressedCounts {
                 noise: count_groups(&|i| inputs.report.groups[i].suppressed.is_some()),
