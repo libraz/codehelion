@@ -13,7 +13,7 @@
 //! identity.
 
 use codehelion_core::boilerplate::Boilerplate;
-use codehelion_core::clone_class::CloneClass;
+use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::discovery::{BuildVariant, Language};
 use codehelion_core::features::{
     FEATURE_SCHEMA_VERSION, FeatureKind, SHAPE_TAG_SLOTS, UnitFeatures,
@@ -106,6 +106,8 @@ pub struct GroupRow {
     pub fingerprint: CloneGroupFingerprint,
     /// Clone classification.
     pub clone_type: CloneClass,
+    /// What the members are: whole units, or runs of statements inside them.
+    pub member_scope: CloneScope,
     /// Minimum pairwise raw similarity across the group.
     pub score: f64,
     /// Shannon entropy of the shared content.
@@ -511,13 +513,14 @@ fn write_group(
         upsert_group_fingerprint(tx, group.fingerprint.as_bytes(), snapshot, variant_id)?;
     tx.execute(
         "INSERT INTO clone_group
-             (scan_run_id, group_fingerprint_id, clone_type, member_count,
-              score, entropy_bits, suppress_reason, boilerplate)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (scan_run_id, group_fingerprint_id, clone_type, member_scope,
+              member_count, score, entropy_bits, suppress_reason, boilerplate)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             run_id,
             group_fp_id,
             group.clone_type.name(),
+            group.member_scope.name(),
             i64::try_from(group.members.len()).unwrap_or(i64::MAX),
             group.score,
             group.entropy_bits,

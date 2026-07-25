@@ -4,7 +4,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use codehelion_core::boilerplate::Boilerplate;
-use codehelion_core::clone_class::CloneClass;
+use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::features::{
     ApiCallFeature, CfgFeature, CharacteristicVector, FeatureHash, FeatureKind, SubtreeFeature,
@@ -96,6 +96,7 @@ fn sample_snapshot<'a>(
         groups: vec![GroupRow {
             fingerprint: group_fp(9),
             clone_type: CloneClass::Type1,
+            member_scope: CloneScope::Unit,
             score: 1.0,
             entropy_bits: 4.2,
             suppress_reason: None,
@@ -594,4 +595,79 @@ fn on_disk_databases_reopen_and_a_newer_schema_is_refused() {
             supported: _
         }
     ));
+}
+
+#[test]
+fn a_run_duplicated_inside_its_hosts_is_recorded_as_a_fragment_group() {
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    // The same two units, but what is duplicated is a stretch inside each of
+    // them rather than the units themselves.
+    snapshot.groups[0].member_scope = CloneScope::Fragment;
+    for member in &mut snapshot.groups[0].members {
+        member.start_line = 4;
+        member.end_line = 7;
+        member.token_count = 18;
+    }
+    let run_id = store.record_snapshot(&snapshot).unwrap();
+
+    let groups = store.run_groups(run_id).unwrap();
+    let group = &groups[0];
+    assert_eq!(group.member_scope, "fragment");
+    // Recorded, not inferred from how the anchors compare: each occurrence
+    // still names the unit that hosts it.
+    assert_eq!(group.members[0].unit_name.as_deref(), Some("checksum"));
+    assert!(group.members[0].token_count < 50);
+
+    let occurrence = store
+        .occurrence(&finding(101).to_hex())
+        .unwrap()
+        .expect("occurrence");
+    assert_eq!(occurrence.member_scope, "fragment");
+}
+
+#[test]
+fn a_whole_unit_group_records_the_scope_it_was_written_with() {
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let run_id = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+    assert_eq!(store.run_groups(run_id).unwrap()[0].member_scope, "unit");
+}
+
+#[test]
+fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.db");
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let detectors = detector_versions();
+    {
+        let mut store = Store::open(&path).unwrap();
+        store
+            .record_snapshot(&sample_snapshot(&variant, &detectors))
+            .unwrap();
+    }
+    // Put the database back the way an older tool left it: the column gone
+    // and the version behind. Every group it holds described a whole unit,
+    // which is what migrating forward has to conclude.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("ALTER TABLE clone_group DROP COLUMN member_scope", [])
+            .unwrap();
+        conn.execute("UPDATE schema_meta SET version = 6", [])
+            .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.schema_version().unwrap(),
+        codehelion_store::schema::SCHEMA_VERSION
+    );
+    let run = store.latest_run().unwrap().expect("the recorded run");
+    assert_eq!(store.run_groups(run.id).unwrap()[0].member_scope, "unit");
 }

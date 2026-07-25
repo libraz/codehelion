@@ -39,11 +39,11 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
 
 /// Version 1: the full entity set.
 const V1: &str = "
@@ -361,6 +361,20 @@ INSERT INTO clone_group_similarity_new
     FROM clone_group_similarity;
 DROP TABLE clone_group_similarity;
 ALTER TABLE clone_group_similarity_new RENAME TO clone_group_similarity;
+";
+
+/// Version 7: what a clone group's members are.
+///
+/// A group whose members are runs of statements inside otherwise-unrelated
+/// units says something different about the code from one whose members are
+/// whole duplicated units. The difference could be guessed by comparing each
+/// member's line anchors against its host unit's, but that is inference from
+/// position, and it gives the wrong answer for a run that happens to span its
+/// whole host. The fact is recorded instead. Every row written before this
+/// column described a whole unit, which is what the default records.
+const V7: &str = "
+ALTER TABLE clone_group ADD COLUMN member_scope TEXT NOT NULL DEFAULT 'unit'
+    CHECK (member_scope IN ('unit', 'fragment'));
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

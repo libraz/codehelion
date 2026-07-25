@@ -56,6 +56,9 @@ pub struct StoredGroup {
     pub fingerprint_hex: String,
     /// Clone classification name (`type-1`, `type-2`, ...).
     pub clone_type: String,
+    /// What the members are: `unit` for whole duplicated units, `fragment`
+    /// for a run of statements duplicated inside them.
+    pub member_scope: String,
     /// Minimum pairwise raw similarity.
     pub score: f64,
     /// Content entropy in bits.
@@ -125,6 +128,8 @@ pub struct OccurrenceDetail {
     pub group_fingerprint_hex: String,
     /// The owning group's clone type name.
     pub clone_type: String,
+    /// What the owning group's members are (`unit` or `fragment`).
+    pub member_scope: String,
     /// The owning group's score.
     pub score: f64,
     /// Number of occurrences in the owning group, this one included.
@@ -237,7 +242,7 @@ impl Store {
     pub fn run_groups(&self, run_id: i64) -> Result<Vec<StoredGroup>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT g.id, lower(hex(f.hash)), g.clone_type, g.score, g.entropy_bits,
-                    g.suppress_reason, g.boilerplate
+                    g.suppress_reason, g.boilerplate, g.member_scope
              FROM clone_group g
              JOIN fingerprint f ON f.id = g.group_fingerprint_id
              WHERE g.scan_run_id = ?1
@@ -250,6 +255,7 @@ impl Store {
                     StoredGroup {
                         fingerprint_hex: row.get(1)?,
                         clone_type: row.get(2)?,
+                        member_scope: row.get(7)?,
                         score: row.get(3)?,
                         entropy_bits: row.get(4)?,
                         suppress_reason: row.get(5)?,
@@ -386,7 +392,8 @@ impl Store {
                 "SELECT lower(hex(m.finding_id)), fr.file_path, fr.start_line, fr.end_line,
                         fr.token_count, u.name, m.is_canonical,
                         lower(hex(gf.hash)), g.clone_type, g.score, g.scan_run_id,
-                        g.member_count, g.boilerplate, s.scope, s.pattern, g.id
+                        g.member_count, g.boilerplate, s.scope, s.pattern, g.id,
+                        g.member_scope
                  FROM clone_group_member m
                  JOIN fragment fr ON fr.id = m.fragment_id
                  LEFT JOIN source_unit u ON u.id = fr.source_unit_id
@@ -414,6 +421,7 @@ impl Store {
                             member: map_member(row)?,
                             group_fingerprint_hex: row.get(7)?,
                             clone_type: row.get(8)?,
+                            member_scope: row.get(16)?,
                             score: row.get(9)?,
                             scan_run_id: row.get(10)?,
                             member_count: row.get(11)?,

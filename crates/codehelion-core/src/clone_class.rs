@@ -34,15 +34,44 @@ impl CloneClass {
     }
 }
 
+/// What the members of a clone group are.
+///
+/// Orthogonal to [`CloneClass`]: a run of statements duplicated verbatim is a
+/// Type-1 clone exactly as a duplicated function is, and the two say different
+/// things about the code. A reader has to be able to tell "these functions are
+/// copies" from "these functions share a copied stretch", so the distinction
+/// is recorded rather than inferred from how the line ranges compare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CloneScope {
+    /// Each member is a whole unit: a function, method, impl block or record.
+    Unit,
+    /// Each member is a run of statements inside a unit. The enclosing units
+    /// need not be clones of each other, and usually are not.
+    Fragment,
+}
+
+impl CloneScope {
+    /// Stable lowercase identifier used in reports and storage.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Unit => "unit",
+            Self::Fragment => "fragment",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::CloneClass;
+    use super::{CloneClass, CloneScope};
 
     #[test]
     fn names_are_the_stable_report_identifiers() {
         assert_eq!(CloneClass::Type1.name(), "type-1");
         assert_eq!(CloneClass::Type2.name(), "type-2");
         assert_eq!(CloneClass::Type3.name(), "type-3");
+        assert_eq!(CloneScope::Unit.name(), "unit");
+        assert_eq!(CloneScope::Fragment.name(), "fragment");
     }
 
     #[test]
