@@ -78,6 +78,7 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 # parse-timeout-ms = 10000
 # posting-cap = 64
 # pair-budget = 1000000
+# max-component = 1024
 ```
 
 ## 開発

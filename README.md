@@ -82,6 +82,7 @@ ID you can suppress, baseline or look up later with `explain`.
 # parse-timeout-ms = 10000
 # posting-cap = 64
 # pair-budget = 1000000
+# max-component = 1024
 ```
 
 ## Development
