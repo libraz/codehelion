@@ -41,12 +41,13 @@ use crate::frontend::{Lexeme, Token, UnitKind};
 use crate::grouping::{
     self, GroupingConfig, GroupingSet, GroupingStats, GroupingUnit, SimilarityEdge,
 };
-use crate::ir::{ByteRange, Shape, SyntaxIrFile};
+use crate::ir::{ByteRange, IrNode, Shape, SyntaxIrFile};
 use crate::maximal::{self, MaximalConfig, RegionSide, RegionStats, SharedRegion};
 use crate::near_match::{self, NearMatchConfig, NearMatchStats};
 use crate::stable_id::{
     self, CloneGroupFingerprint, ContentNorm, FileContext, FragmentFingerprint, UnitFingerprint,
 };
+use crate::test_code;
 use crate::verify::{self, SimilarityBreakdown, UnitView, VerifyConfig};
 
 /// Tuning for a whole structural run: one config per stage.
@@ -91,6 +92,9 @@ pub struct StructuralUnit {
     /// The boilerplate shape the unit matches, when it matches one. Recorded,
     /// not acted on: a classified unit is analysed and grouped like any other.
     pub boilerplate: Option<Boilerplate>,
+    /// Whether the unit is test code: marked as a test itself, or sitting
+    /// inside an item that is. Recorded, not acted on, as `boilerplate` is.
+    pub test_code: bool,
     /// The unit's raw content fingerprint: its stable grouping key and unit
     /// identity.
     pub fingerprint: UnitFingerprint,
@@ -114,6 +118,10 @@ pub struct GroupDetail {
     /// matches the same one. A group whose members disagree is not boilerplate:
     /// at least one occurrence carries behaviour the others share.
     pub boilerplate: Option<Boilerplate>,
+    /// Whether every member is test code. A group with even one member outside
+    /// the suite is duplication between test and tested code, which is the
+    /// interesting case and must not be ranked with the suite.
+    pub test_code: bool,
 }
 
 /// One occurrence of a duplicated statement run, resolved against the source
@@ -220,6 +228,7 @@ struct Unit {
     tokens: (usize, usize),
     name: Option<Lexeme>,
     boilerplate: Option<Boilerplate>,
+    test_code: bool,
 }
 
 /// Run the structural pipeline over parsed IR files.
@@ -334,6 +343,7 @@ pub fn analyze(
             token_end: unit.tokens.1,
             name: unit.name.clone(),
             boilerplate: unit.boilerplate,
+            test_code: unit.test_code,
             fingerprint: unit.fingerprint,
             content: unit.content,
         })
@@ -557,6 +567,7 @@ fn group_detail(
         fingerprint,
         member_breakdowns,
         boilerplate: unanimous_boilerplate(group, units),
+        test_code: group.members.iter().all(|&member| units[member].test_code),
     }
 }
 
@@ -582,45 +593,80 @@ fn flatten_units(files: &[SyntaxIrFile], variant: &BuildVariant) -> (Vec<Unit>, 
     let mut offsets = Vec::with_capacity(files.len());
     for (file_index, file) in files.iter().enumerate() {
         offsets.push(units.len());
-        let context = FileContext {
-            frontend_version: file.frontend_version,
-            language: file.language,
+        let mut walk = UnitWalk {
+            file: file_index,
+            source: file,
+            context: FileContext {
+                frontend_version: file.frontend_version,
+                language: file.language,
+            },
+            variant,
+            local: 0,
+            units: &mut units,
         };
-        let mut local = 0usize;
-        file.walk(&mut |node| {
-            let Some(kind) = unit_kind(&node.shape) else {
-                return;
-            };
-            let statements = verify::statement_sequence(node, &file.tokens);
-            let end = node.token_end.min(file.tokens.len());
-            let start = node.token_start.min(end);
-            let tokens = &file.tokens[start..end];
+        for root in &file.roots {
+            walk.visit(root, false);
+        }
+    }
+    (units, offsets)
+}
+
+/// A depth-first walk over one file's IR that collects its analysed units.
+///
+/// [`IrNode::walk`] would do for the units themselves, but a unit inherits
+/// facts from the items enclosing it — a function inside a test-only module is
+/// test code without carrying a marker of its own — and a flat visitor has no
+/// ancestors to inherit from. The order matches [`IrNode::walk`]'s, and so
+/// [`features::extract`]'s: pre-order, children in source order.
+struct UnitWalk<'a> {
+    file: usize,
+    source: &'a SyntaxIrFile,
+    context: FileContext<'a>,
+    variant: &'a BuildVariant,
+    local: usize,
+    units: &'a mut Vec<Unit>,
+}
+
+impl UnitWalk<'_> {
+    /// Visit one node, recording it when it is an analysed unit, then its
+    /// children. `test_code` is what the enclosing items established.
+    fn visit(&mut self, node: &IrNode, test_code: bool) {
+        let end = node.token_end.min(self.source.tokens.len());
+        let start = node.token_start.min(end);
+        let tokens = &self.source.tokens[start..end];
+        let test_code = test_code || test_code::is_marked(self.source.language, tokens);
+
+        if let Some(kind) = unit_kind(&node.shape) {
             let fingerprint =
-                stable_id::unit_fingerprint(variant, &context, tokens, ContentNorm::Raw);
-            let content_fp = stable_id::fragment_fingerprint(
-                variant,
-                &context,
+                stable_id::unit_fingerprint(self.variant, &self.context, tokens, ContentNorm::Raw);
+            let content = stable_id::fragment_fingerprint(
+                self.variant,
+                &self.context,
                 "unit",
                 tokens,
                 ContentNorm::Raw,
             );
-            units.push(Unit {
-                file: file_index,
-                local,
+            self.units.push(Unit {
+                file: self.file,
+                local: self.local,
                 kind,
-                statements,
+                statements: verify::statement_sequence(node, &self.source.tokens),
                 fingerprint,
-                content: content_fp,
+                content,
                 range: node.range,
                 lines: line_range(tokens),
                 tokens: (start, end),
                 name: node.name.clone(),
                 boilerplate: boilerplate::classify(node),
+                test_code,
             });
-            local += 1;
-        });
+            self.local += 1;
+        }
+
+        for child in &node.children {
+            self.visit(child, test_code);
+        }
     }
-    (units, offsets)
 }
 
 /// The reportable unit kind of an IR shape, or `None` for a shape that is not

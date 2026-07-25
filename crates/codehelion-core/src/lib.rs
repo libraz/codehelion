@@ -19,4 +19,5 @@ pub mod maximal;
 pub mod near_match;
 pub mod stable_id;
 pub mod structural;
+pub mod test_code;
 pub mod verify;
