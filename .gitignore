@@ -6,8 +6,8 @@
 *.profraw
 lcov.info
 
-# Local audit database written by `codehelion scan`
-/.codehelion/
+# Local audit database written by `codehelion scan`, wherever it is run from
+.codehelion/
 
 # AI assistants / agent tooling (repo stays AI-free in git)
 /AGENTS.md
