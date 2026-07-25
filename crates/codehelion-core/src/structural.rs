@@ -65,8 +65,10 @@ pub struct StructuralUnit {
     pub start_line: u32,
     /// 1-based last line; reporting only, never an identity input.
     pub end_line: u32,
-    /// Size of the unit in tokens.
-    pub token_count: usize,
+    /// Index of the unit's first token in its file's stream.
+    pub token_start: usize,
+    /// Index one past the unit's last token in its file's stream.
+    pub token_end: usize,
     /// The unit's declared name, when the frontend recovered one.
     pub name: Option<Lexeme>,
     /// The unit's raw content fingerprint: its stable grouping key and unit
@@ -135,7 +137,7 @@ struct Unit {
     content: FragmentFingerprint,
     range: ByteRange,
     lines: (u32, u32),
-    token_count: usize,
+    tokens: (usize, usize),
     name: Option<Lexeme>,
 }
 
@@ -231,7 +233,8 @@ pub fn analyze(
             range: unit.range,
             start_line: unit.lines.0,
             end_line: unit.lines.1,
-            token_count: unit.token_count,
+            token_start: unit.tokens.0,
+            token_end: unit.tokens.1,
             name: unit.name.clone(),
             fingerprint: unit.fingerprint,
             content: unit.content,
@@ -325,7 +328,7 @@ fn flatten_units(files: &[SyntaxIrFile], variant: &BuildVariant) -> (Vec<Unit>, 
                 content: content_fp,
                 range: node.range,
                 lines: line_range(tokens),
-                token_count: tokens.len(),
+                tokens: (start, end),
                 name: node.name.clone(),
             });
             local += 1;

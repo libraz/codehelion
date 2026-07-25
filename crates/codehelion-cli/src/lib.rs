@@ -96,8 +96,8 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
 
 fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     match args.mode {
-        Mode::Structural => bail!("structural mode is not available in this release"),
         Mode::Semantic => bail!("semantic mode is not available in this release"),
+        Mode::Structural => scan::structural::run(args, out),
         Mode::Fast => scan::run(args, out),
     }
 }
@@ -379,8 +379,6 @@ mod tests {
     #[test]
     fn unsupported_scan_modes_report_their_reason() {
         let mut buffer = Vec::new();
-        let structural = scan_command(&scan_args(Mode::Structural), &mut buffer).unwrap_err();
-        assert!(format!("{structural:#}").contains("not available in this release"));
         let semantic = scan_command(&scan_args(Mode::Semantic), &mut buffer).unwrap_err();
         assert!(format!("{semantic:#}").contains("not available in this release"));
     }

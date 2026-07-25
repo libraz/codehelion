@@ -51,9 +51,9 @@ fn help_flag_succeeds() {
 }
 
 #[test]
-fn scan_structural_reports_unavailable() {
+fn scan_semantic_reports_unavailable() {
     cmd()
-        .args(["scan", "--mode", "structural"])
+        .args(["scan", "--mode", "semantic"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("not available in this release"));

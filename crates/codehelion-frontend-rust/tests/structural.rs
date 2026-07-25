@@ -190,7 +190,10 @@ fn units_carry_the_anchors_a_report_needs() {
         u32::try_from(ALPHA.lines().count()).unwrap(),
         "the unit ends on the closing brace's line"
     );
-    assert!(alpha.token_count > 40, "a whole function's tokens");
+    assert!(
+        alpha.token_end - alpha.token_start > 40,
+        "a whole function's tokens"
+    );
     assert!(alpha.range.start < alpha.range.end);
 
     // Anchors are reporting data only: they never enter the identity.

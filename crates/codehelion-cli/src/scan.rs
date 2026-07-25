@@ -11,6 +11,8 @@
 //! files, glob-excluded files, unreadable files and engine budget exhaustion
 //! all surface as counts or notes, never as silent omissions.
 
+pub mod structural;
+
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -343,7 +345,7 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
 
 /// Render the model in the requested format, to `--output` when given,
 /// otherwise to `out`. Colour is used only for text going to a terminal.
-fn write_report(args: &ScanArgs, out: &mut impl Write, model: &Report) -> Result<()> {
+pub(crate) fn write_report(args: &ScanArgs, out: &mut impl Write, model: &Report) -> Result<()> {
     let text = match args.format {
         Format::Json => model.to_json().context("serializing the JSON report")?,
         Format::Text => {
@@ -400,7 +402,7 @@ fn final_priority(group: &CloneGroup) -> f64 {
 
 /// Resolve the worker-thread count: flag over configuration over the number
 /// of available CPUs.
-fn effective_jobs(flag: Option<usize>, configured: Option<usize>) -> Result<usize> {
+pub(crate) fn effective_jobs(flag: Option<usize>, configured: Option<usize>) -> Result<usize> {
     match flag.or(configured) {
         Some(0) => bail!("jobs must be at least 1"),
         Some(jobs) => Ok(jobs),
@@ -422,7 +424,7 @@ fn engine_config(cfg: &Config) -> Result<EngineConfig> {
 }
 
 /// Map the configured literal strategy onto the engine's.
-const fn literal_norm(setting: LiteralNormalization) -> LiteralNorm {
+pub(crate) const fn literal_norm(setting: LiteralNormalization) -> LiteralNorm {
     match setting {
         LiteralNormalization::Preserve => LiteralNorm::Preserve,
         LiteralNormalization::Category => LiteralNorm::Category,
@@ -431,7 +433,11 @@ const fn literal_norm(setting: LiteralNormalization) -> LiteralNorm {
 }
 
 /// Run project discovery under the effective configuration.
-fn discover_sources(root: &Path, cfg: &Config, no_ignore: bool) -> Result<DiscoveryReport> {
+pub(crate) fn discover_sources(
+    root: &Path,
+    cfg: &Config,
+    no_ignore: bool,
+) -> Result<DiscoveryReport> {
     let discovery_config = DiscoveryConfig {
         respect_gitignore: !no_ignore,
         max_file_bytes: cfg.limits.max_file_bytes,
@@ -451,7 +457,10 @@ fn discover_sources(root: &Path, cfg: &Config, no_ignore: bool) -> Result<Discov
 
 /// Apply the configured include/exclude globs to the discovered sources.
 /// Returns the retained sources and how many were filtered out.
-fn filter_globs(cfg: &Config, sources: Vec<SourceUnit>) -> Result<(Vec<SourceUnit>, usize)> {
+pub(crate) fn filter_globs(
+    cfg: &Config,
+    sources: Vec<SourceUnit>,
+) -> Result<(Vec<SourceUnit>, usize)> {
     let include = build_globset(&cfg.include).context("in include globs")?;
     let exclude = build_globset(&cfg.exclude).context("in exclude globs")?;
     let before = sources.len();
@@ -478,43 +487,40 @@ fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>> {
     Ok(Some(builder.build()?))
 }
 
-/// What became of one source file handed to the lexer.
-enum LexOutcome {
-    /// Lexed within the time ceiling; ready for the engine.
-    Lexed(Box<LexedSource>),
+/// What became of one source file handed to a frontend.
+pub(crate) enum FileOutcome<T> {
+    /// Read and analysed within the time ceiling.
+    Done(Box<T>),
     /// The file could not be read.
     Unreadable,
-    /// Lexing exceeded the configured time ceiling; the file is excluded.
+    /// The frontend exceeded the configured time ceiling; the file is
+    /// excluded.
     TimedOut,
 }
 
-/// Lex every source, spreading contiguous chunks across `jobs` worker
-/// threads. Chunks are joined in order, so the result order equals the
-/// (deterministic) discovery order regardless of thread scheduling. Files
-/// that vanished since discovery or blew the time ceiling are counted, not
-/// fatal. Returns the lexed files plus the unreadable and timed-out counts.
-fn lex_sources(
+/// Run `frontend` over every source, spreading contiguous chunks across
+/// `jobs` worker threads.
+///
+/// Chunks are joined in order, so the result order equals the (deterministic)
+/// discovery order regardless of thread scheduling. Files that vanished since
+/// discovery or blew the time ceiling are counted, not fatal. Returns the
+/// analysed files plus the unreadable and timed-out counts.
+pub(crate) fn map_sources<T: Send>(
     sources: &[SourceUnit],
     jobs: usize,
-    timeout: std::time::Duration,
-) -> Result<(Vec<LexedSource>, u64, u64)> {
+    frontend: impl Fn(&SourceUnit) -> FileOutcome<T> + Sync,
+) -> Result<(Vec<T>, u64, u64)> {
     if sources.is_empty() {
         return Ok((Vec::new(), 0, 0));
     }
     let chunk_size = sources.len().div_ceil(jobs);
-    let mut chunk_results: Vec<Vec<LexOutcome>> = Vec::new();
+    let mut chunk_results: Vec<Vec<FileOutcome<T>>> = Vec::new();
     let mut worker_panicked = false;
+    let frontend = &frontend;
     std::thread::scope(|scope| {
         let handles: Vec<_> = sources
             .chunks(chunk_size)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    chunk
-                        .iter()
-                        .map(|s| lex_one(s, timeout))
-                        .collect::<Vec<_>>()
-                })
-            })
+            .map(|chunk| scope.spawn(move || chunk.iter().map(frontend).collect::<Vec<_>>()))
             .collect();
         for handle in handles {
             match handle.join() {
@@ -524,19 +530,28 @@ fn lex_sources(
         }
     });
     if worker_panicked {
-        bail!("a lexer worker thread panicked");
+        bail!("a frontend worker thread panicked");
     }
-    let mut lexed = Vec::with_capacity(sources.len());
+    let mut analysed = Vec::with_capacity(sources.len());
     let mut unreadable = 0u64;
     let mut timed_out = 0u64;
     for result in chunk_results.into_iter().flatten() {
         match result {
-            LexOutcome::Lexed(file) => lexed.push(*file),
-            LexOutcome::Unreadable => unreadable += 1,
-            LexOutcome::TimedOut => timed_out += 1,
+            FileOutcome::Done(file) => analysed.push(*file),
+            FileOutcome::Unreadable => unreadable += 1,
+            FileOutcome::TimedOut => timed_out += 1,
         }
     }
-    Ok((lexed, unreadable, timed_out))
+    Ok((analysed, unreadable, timed_out))
+}
+
+/// Lex every source with the Fast frontends.
+fn lex_sources(
+    sources: &[SourceUnit],
+    jobs: usize,
+    timeout: std::time::Duration,
+) -> Result<(Vec<LexedSource>, u64, u64)> {
+    map_sources(sources, jobs, |source| lex_one(source, timeout))
 }
 
 /// Read and lex one source file, enforcing the per-file time ceiling.
@@ -545,10 +560,10 @@ fn lex_sources(
 /// returns: with the discovery size ceiling bounding the input, lexing
 /// cannot run away, so a post-hoc check suffices to keep an unexpectedly
 /// slow file out of the results while the skipped count keeps it visible.
-fn lex_one(source: &SourceUnit, timeout: std::time::Duration) -> LexOutcome {
+fn lex_one(source: &SourceUnit, timeout: std::time::Duration) -> FileOutcome<LexedSource> {
     let started = std::time::Instant::now();
     let Ok(bytes) = std::fs::read(&source.absolute_path) else {
-        return LexOutcome::Unreadable;
+        return FileOutcome::Unreadable;
     };
     let text = String::from_utf8_lossy(&bytes);
     let file = match source.language {
@@ -557,7 +572,7 @@ fn lex_one(source: &SourceUnit, timeout: std::time::Duration) -> LexOutcome {
         Language::Cpp => codehelion_frontend_cpp::CppFrontend.lex(&text),
     };
     if started.elapsed() > timeout {
-        return LexOutcome::TimedOut;
+        return FileOutcome::TimedOut;
     }
     let unit_lines = file
         .units
@@ -570,7 +585,7 @@ fn lex_one(source: &SourceUnit, timeout: std::time::Duration) -> LexOutcome {
             (unit.span.start_line, end_line)
         })
         .collect();
-    LexOutcome::Lexed(Box::new(LexedSource {
+    FileOutcome::Done(Box::new(LexedSource {
         relative_path: source.relative_path.to_string_lossy().into_owned(),
         language: file.language,
         frontend_version: file.frontend_version,
@@ -586,7 +601,7 @@ fn lex_one(source: &SourceUnit, timeout: std::time::Duration) -> LexOutcome {
 /// The audit-database location: an explicit flag is taken as given (relative
 /// to the working directory); the configured path resolves against the scan
 /// root unless absolute.
-fn database_path(root: &Path, flag: Option<&Path>, cfg: &Config) -> PathBuf {
+pub(crate) fn database_path(root: &Path, flag: Option<&Path>, cfg: &Config) -> PathBuf {
     flag.map_or_else(
         || {
             if cfg.database.is_absolute() {
@@ -637,7 +652,7 @@ fn record(
 }
 
 /// Open (creating directories and running migrations as needed) the store.
-fn open_store(path: &Path) -> Result<Store> {
+pub(crate) fn open_store(path: &Path) -> Result<Store> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -766,7 +781,7 @@ fn group_size(group: &CloneGroup) -> usize {
 ///
 /// Hand-formatted so the width never varies: lexicographic order then equals
 /// chronological order, which the store's latest-run ordering relies on.
-fn rfc3339_now() -> String {
+pub(crate) fn rfc3339_now() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
