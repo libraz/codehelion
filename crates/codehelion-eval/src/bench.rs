@@ -407,12 +407,17 @@ pub struct ScanMeasurement {
 /// Run `binary scan corpus` once, cold (fresh database), under the
 /// platform's `time` wrapper to capture peak memory.
 ///
+/// The scan runs verbose so the report carries the candidate pipeline's
+/// stage counts: at this size the question is not only how long a mode takes
+/// but which stage the time went into.
+///
 /// # Errors
 ///
 /// Returns an error when the scan cannot be spawned or exits non-zero.
 pub fn measure_scan(
     binary: &Path,
     corpus: &Path,
+    mode: &str,
     jobs: Option<usize>,
     work_dir: &Path,
 ) -> Result<ScanMeasurement> {
@@ -426,6 +431,8 @@ pub fn measure_scan(
     command
         .arg("scan")
         .arg(corpus)
+        .args(["--mode", mode])
+        .arg("--verbose")
         .arg("--db")
         .arg(&db)
         .arg("--output")
@@ -447,19 +454,41 @@ pub fn measure_scan(
         );
     }
     let max_rss_bytes = parse_max_rss(&String::from_utf8_lossy(&output.stderr));
-    let summary = std::fs::read_to_string(&report)
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| {
-            line.contains("files:") || line.contains("lines:") || line.contains("clone groups:")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let summary = summarize(&std::fs::read_to_string(&report).unwrap_or_default());
     Ok(ScanMeasurement {
         wall,
         max_rss_bytes,
         summary,
     })
+}
+
+/// The size lines of a text report, every note it carries, and the whole
+/// candidate-pipeline block.
+///
+/// That is what a timing number needs beside it to mean anything, and the
+/// notes matter most: a run that exhausted its pair budget is fast partly
+/// because it stopped early, which the timing alone would hide.
+#[must_use]
+pub fn summarize(report: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut in_pipeline = false;
+    for line in report.lines() {
+        if line.starts_with("candidate pipeline:") {
+            in_pipeline = true;
+        } else if in_pipeline && line.trim().is_empty() {
+            in_pipeline = false;
+            continue;
+        }
+        if in_pipeline
+            || line.contains("files:")
+            || line.contains("lines:")
+            || line.contains("clone groups:")
+            || line.trim_start().starts_with("note:")
+        {
+            kept.push(line);
+        }
+    }
+    kept.join("\n")
 }
 
 /// The command that runs `binary` under a resource-reporting wrapper where
@@ -707,6 +736,26 @@ mod tests {
         let gnu = "\tMaximum resident set size (kbytes): 204800\n";
         assert_eq!(parse_max_rss(gnu), Some(204_800 * 1024));
         assert_eq!(parse_max_rss("no such line"), None);
+    }
+
+    #[test]
+    fn the_summary_keeps_the_sizes_and_the_whole_pipeline_block() {
+        let report = "codehelion scan (structural mode)\n  \
+             root: /corpus\n  files: 400 analysed (rust 240, c 80, cpp 80)\n  \
+             lines: 100000; tokens: 900000; lexer diagnostics: 0\n  \
+             clone groups: 12 (type-1 4, type-2 5, type-3 3)\n\n\
+             note: the candidate-pair budget was exhausted; results may be incomplete\n\n\
+             candidate pipeline:\n  units  2000\n  verified pairs  40  (dropped: length ratio 3)\n\n\
+             top groups by priority:\n  [1] type-3\n";
+        let summary = summarize(report);
+        assert!(summary.contains("files: 400 analysed"));
+        assert!(summary.contains("clone groups: 12"));
+        assert!(summary.contains("verified pairs  40  (dropped: length ratio 3)"));
+        // A run that stopped early is fast for a reason the timing hides.
+        assert!(summary.contains("candidate-pair budget was exhausted"));
+        // The block ends where it ends: findings are not a size measurement.
+        assert!(!summary.contains("top groups"));
+        assert!(!summary.contains("root:"));
     }
 
     #[test]

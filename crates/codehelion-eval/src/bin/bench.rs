@@ -13,7 +13,7 @@ use codehelion_eval::bench::{
     CorpusSpec, default_binary, generate_corpus, measure_scan, measure_store_insert,
 };
 
-/// Benchmark harness for the Fast scan path.
+/// Benchmark harness for the scan paths.
 #[derive(Debug, Parser)]
 #[command(name = "codehelion-bench", version, about, long_about = None)]
 struct Args {
@@ -47,6 +47,9 @@ enum Command {
         /// Path of the `codehelion` binary (default: the release build).
         #[arg(long)]
         binary: Option<PathBuf>,
+        /// Scan mode to measure.
+        #[arg(long, default_value = "fast")]
+        mode: String,
         /// Number of cold runs.
         #[arg(long, default_value_t = 3)]
         runs: u32,
@@ -95,6 +98,7 @@ fn main() -> Result<()> {
         Command::Scan {
             corpus,
             binary,
+            mode,
             runs,
             jobs,
         } => {
@@ -106,11 +110,12 @@ fn main() -> Result<()> {
                 binary.display()
             );
             let work = tempfile::tempdir().context("creating a work directory")?;
+            println!("scan mode: {mode}");
             println!("| run | wall_s | max_rss_mib |");
             println!("| --- | ------ | ----------- |");
             let mut last_summary = String::new();
             for run in 1..=runs {
-                let measurement = measure_scan(&binary, &corpus, jobs, work.path())?;
+                let measurement = measure_scan(&binary, &corpus, &mode, jobs, work.path())?;
                 let rss = measurement.max_rss_bytes.map_or_else(
                     || "n/a".to_string(),
                     |bytes| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0)),
