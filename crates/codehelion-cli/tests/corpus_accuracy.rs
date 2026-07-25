@@ -80,7 +80,14 @@ const CORPORA: &[Expected] = &[
         name: "rust-partial",
         recall: 1.0 / 2.0,
         shortfall: "the renamed three-statement transplant is shorter than the \
-                    shortest statement window, so no seed can propose it",
+                    shortest statement window, so no seed can propose it. \
+                    Looking for three-statement runs recovers it, and costs \
+                    what was measured over a 324k-line C++ tree: 87 per cent \
+                    more seed pairs, 73 per cent more confirmed runs and 29 \
+                    per cent more findings, most of them a binding-glue \
+                    preamble repeated across twenty-odd wrappers. That is a \
+                    decision about how much a report should hold, not a \
+                    detector bug, and it is left as one",
     },
     Expected {
         name: "rust-divergent",
