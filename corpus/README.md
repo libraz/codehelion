@@ -86,6 +86,31 @@ A case whose `snapshot/` has not been materialized is reported as unscored, not
 scored as perfect — so a machine without the sources gets no precision figure
 rather than a flattering one.
 
+### Working rules
+
+Two rules keep this corpus the arbiter rather than a rubber stamp.
+
+**A false positive becomes a label before it becomes a fix.** Reading a bad
+finding tells you what a plausible fix would be; it does not tell you whether
+the fix costs a true one. Write the verdict first, then change the detector,
+and the change arrives with the evidence for it already in place.
+
+**A threshold or default that changes what the report shows carries the corpus
+numbers either side of it.** Not the direction — the numbers, per case. A
+change that improves one project and costs another is a different change from
+one that improves all of them, and only the table says which it is.
+
+Where a change is a threshold rather than a rule, the numbers alone are not
+enough: pick the value on all but one case and check it against the one held
+back. A value that either does nothing or costs the held-out case its clearest
+finding is fitted to the sample, however good the overall figure looks.
+
+Some lookalike classes cannot be labelled from real code at all, because the
+detector already drops them and a dropped pair reaches no report. Those belong
+in the tests that assert *why* the pair was dropped, which is a stronger claim
+than a corpus negative can make: a corpus says the pair went missing, a stat
+says it went missing for the stated reason.
+
 ### `non_clones` reasons
 
 `reason` is a controlled vocabulary, not free text, so classes of lookalike can
