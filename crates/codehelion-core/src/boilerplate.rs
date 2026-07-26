@@ -11,10 +11,12 @@
 //!
 //! Classification is *syntactic and conservative*. It reads the unit's IR
 //! subtree and nothing else: no name heuristics, no path guesses, no attempt
-//! to infer intent. A unit that branches is never classified, because
-//! branching is where behaviour — and therefore the interesting kind of
-//! duplication — lives. Handing an error upwards is not branching: it leaves
-//! the unit with one path, and the caller with the same one it would have had.
+//! to infer intent. Branching is where behaviour — and therefore the
+//! interesting kind of duplication — lives, so a unit that branches is
+//! classified only when the branch is a single guard and the body holds
+//! nothing else: that unit chooses an answer rather than working one out.
+//! Handing an error upwards is not branching at all: it leaves the unit with
+//! one path, and the caller with the same one it would have had.
 //!
 //! The classification is recorded, never acted on here: a classified unit is
 //! still analysed, still verified and still grouped. Whether a category is
@@ -28,7 +30,7 @@ use crate::ir::{IrNode, Shape};
 /// Recorded alongside the other detector versions: a change in what counts as
 /// boilerplate changes which findings a report shows, so results from two
 /// versions are not comparable without saying so.
-pub const BOILERPLATE_VERSION: &str = "boilerplate-v2";
+pub const BOILERPLATE_VERSION: &str = "boilerplate-v3";
 
 /// A recognised boilerplate shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -44,6 +46,9 @@ pub enum Boilerplate {
     /// What the macros expand to is unknown here — the repetition itself is
     /// the observation.
     MacroRepetition,
+    /// One guard and then an answer on each side of it, with nothing else:
+    /// the unit chooses between two results rather than producing one.
+    GuardedDispatch,
 }
 
 impl Boilerplate {
@@ -54,13 +59,19 @@ impl Boilerplate {
             Self::TrivialBody => "trivial-body",
             Self::Forwarding => "forwarding",
             Self::MacroRepetition => "macro-repetition",
+            Self::GuardedDispatch => "guarded-dispatch",
         }
     }
 
     /// Every category, in the order reports and configuration list them.
     #[must_use]
-    pub const fn all() -> [Self; 3] {
-        [Self::TrivialBody, Self::Forwarding, Self::MacroRepetition]
+    pub const fn all() -> [Self; 4] {
+        [
+            Self::TrivialBody,
+            Self::Forwarding,
+            Self::MacroRepetition,
+            Self::GuardedDispatch,
+        ]
     }
 
     /// The category with this identifier, if any.
@@ -102,6 +113,17 @@ struct Body {
     /// arithmetic. That is why declarations are punctuation only beside a
     /// delegation, never on their own.
     work: usize,
+    /// Two-way conditionals, counted apart from the rest of the control flow.
+    ///
+    /// One of them is a guard. Several are a decision table, which is
+    /// something a reader can act on: two copies of one table differing in
+    /// their constants is exactly the duplication worth reporting.
+    branches: usize,
+    /// Local declarations, counted apart so a body can be required to have
+    /// none. See `work` for why an initialiser cannot be inspected.
+    declarations: usize,
+    /// `return` statements.
+    returns: usize,
 }
 
 /// Classify a unit by the shape of its body, or return `None` when it does
@@ -111,9 +133,8 @@ struct Body {
 #[must_use]
 pub fn classify(unit: &IrNode) -> Option<Boilerplate> {
     let body = count(unit);
-    // Anything that branches, loops or handles errors carries behaviour.
     if body.control > 0 {
-        return None;
+        return dispatch(&body);
     }
     if body.macros >= 2 && body.calls == 0 && body.statements == 0 {
         return Some(Boilerplate::MacroRepetition);
@@ -128,6 +149,36 @@ pub fn classify(unit: &IrNode) -> Option<Boilerplate> {
         1 if body.work == 0 => Some(Boilerplate::Forwarding),
         _ => None,
     }
+}
+
+/// Classify a body that branches, which is only boilerplate in one shape.
+///
+/// A single guard, with an answer or one delegation on each side of it, is the
+/// unit picking between two results rather than producing one: a null check
+/// and a field, a capability check and one of two calls, a free guarded
+/// against a null pointer. Written once per type or per constant it is the
+/// language standing in for a parameter, and every copy says the same thing.
+///
+/// The shape is bounded because nothing here can read an expression: with no
+/// assignment, no bare expression statement, no local, nothing but `return`s
+/// and no more calls than there are answers, the body is one condition and
+/// what it chooses between. Two branches would be a decision table instead,
+/// and two copies of a table differing in their constants is duplication a
+/// reader can act on.
+///
+/// What this cannot separate is a guard whose answer is computed — `if (v >
+/// hi) return hi; return v;` reaches here as the same shape as a null check
+/// and a field read, because the IR carries no expression to tell them apart.
+fn dispatch(body: &Body) -> Option<Boilerplate> {
+    let shaped = body.branches == 1
+        && body.control == body.branches
+        && body.macros == 0
+        && body.work == 0
+        && body.declarations == 0
+        && body.returns >= 2;
+    // Each answer is one thing, and the condition may be one more. Beyond that
+    // the body is computing something the IR cannot show.
+    (shaped && body.calls <= body.returns).then_some(Boilerplate::GuardedDispatch)
 }
 
 /// Count what a unit's subtree contains, excluding the unit node itself.
@@ -150,12 +201,13 @@ fn descend(node: &IrNode, in_call: bool, body: &mut Body) {
 
 fn tally(node: &IrNode, in_call: bool, body: &mut Body) {
     match node.shape {
-        Shape::Loop
-        | Shape::Branch
-        | Shape::Match
-        | Shape::MatchArm
-        | Shape::Break
-        | Shape::Continue => body.control += 1,
+        Shape::Branch => {
+            body.control += 1;
+            body.branches += 1;
+        }
+        Shape::Loop | Shape::Match | Shape::MatchArm | Shape::Break | Shape::Continue => {
+            body.control += 1;
+        }
         Shape::Try => {
             if handles(node) {
                 body.control += 1;
@@ -167,7 +219,14 @@ fn tally(node: &IrNode, in_call: bool, body: &mut Body) {
             }
         }
         Shape::MacroCall => body.macros += 1,
-        Shape::Return | Shape::VarDecl => body.statements += 1,
+        Shape::Return => {
+            body.statements += 1;
+            body.returns += 1;
+        }
+        Shape::VarDecl => {
+            body.statements += 1;
+            body.declarations += 1;
+        }
         Shape::Assign | Shape::ExprStmt => {
             body.statements += 1;
             body.work += 1;
@@ -380,7 +439,71 @@ mod tests {
     }
 
     #[test]
-    fn control_flow_is_never_boilerplate() {
+    fn a_guard_and_an_answer_on_each_side_is_a_dispatch() {
+        // `if (item == NULL) { return false; } return item->kind == KIND;`
+        let guarded = vec![
+            nest(Shape::Branch, vec![leaf(Shape::Return)]),
+            leaf(Shape::Return),
+        ];
+        assert_eq!(
+            classify(&unit_of(guarded)),
+            Some(Boilerplate::GuardedDispatch)
+        );
+
+        // A delegation on each side is the same choice: `if (c) return f(x);
+        // return g(x);`
+        let dispatched = vec![
+            nest(
+                Shape::Branch,
+                vec![nest(Shape::Return, vec![leaf(Shape::Call)])],
+            ),
+            nest(Shape::Return, vec![leaf(Shape::Call)]),
+        ];
+        assert_eq!(
+            classify(&unit_of(dispatched)),
+            Some(Boilerplate::GuardedDispatch)
+        );
+    }
+
+    #[test]
+    fn more_than_one_guard_is_a_decision_table() {
+        // Two copies of a table differing in their constants is duplication
+        // worth reporting, so a body that decides is never set aside.
+        let table = vec![
+            nest(Shape::Branch, vec![leaf(Shape::Return)]),
+            nest(Shape::Branch, vec![leaf(Shape::Return)]),
+            leaf(Shape::Return),
+        ];
+        assert_eq!(classify(&unit_of(table)), None);
+    }
+
+    #[test]
+    fn work_beside_a_guard_is_not_a_choice_between_answers() {
+        let assigning = vec![
+            nest(Shape::Branch, vec![leaf(Shape::Assign)]),
+            leaf(Shape::Return),
+        ];
+        assert_eq!(classify(&unit_of(assigning)), None);
+        // A local is opaque here, so a guard beside one says nothing.
+        let declaring = vec![
+            leaf(Shape::VarDecl),
+            nest(Shape::Branch, vec![leaf(Shape::Return)]),
+            leaf(Shape::Return),
+        ];
+        assert_eq!(classify(&unit_of(declaring)), None);
+        // More calls than answers means the body is computing one.
+        let computing = vec![
+            nest(Shape::Branch, vec![leaf(Shape::Return)]),
+            nest(
+                Shape::Return,
+                vec![leaf(Shape::Call), leaf(Shape::Call), leaf(Shape::Call)],
+            ),
+        ];
+        assert_eq!(classify(&unit_of(computing)), None);
+    }
+
+    #[test]
+    fn control_flow_other_than_one_guard_is_never_boilerplate() {
         for shape in [Shape::Branch, Shape::Loop, Shape::Match] {
             assert_eq!(
                 classify(&unit(std::slice::from_ref(&shape))),

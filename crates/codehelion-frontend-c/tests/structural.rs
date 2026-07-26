@@ -507,3 +507,61 @@ fn the_halves_of_an_unrolled_run_are_its_period_not_two_copies() {
         "one stretch of code repeating is not two instances of anything"
     );
 }
+
+/// Two predicates written per type, a teardown guarded against a null
+/// pointer, and a routine that decides rather than answering.
+const GUARDED: &str = "\
+static int is_false(const item_t *item)
+{
+    if (item == NULL) { return 0; }
+    return (item->type & 0xFF) == TYPE_FALSE;
+}
+
+static int is_true(const item_t *item)
+{
+    if (item == NULL) { return 0; }
+    return (item->type & 0xFF) == TYPE_TRUE;
+}
+
+static int release(state_t *state)
+{
+    if (!state) { return 0; }
+    free_state(state);
+    return 0;
+}
+
+static int rank(int a, int b, int c)
+{
+    if (a) { return 1; }
+    if (b) { return 2; }
+    if (c) { return 3; }
+    return 4;
+}
+";
+
+#[test]
+fn a_body_that_chooses_an_answer_is_not_a_body_that_works_one_out() {
+    // One guard with an answer on each side of it is the language standing in
+    // for a parameter: written once per type, every copy says the same thing.
+    // Two guards are a decision table, and two tables differing in their
+    // constants is duplication a reader can act on.
+    use codehelion_core::boilerplate::Boilerplate;
+
+    let files = vec![CStructuralFrontend.parse(GUARDED)];
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let report = structural::analyze(&files, &variant, &StructuralConfig::default());
+
+    let category = |name: &str| {
+        report
+            .units
+            .iter()
+            .find(|unit| unit.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("{name} is an analysed unit"))
+            .boilerplate
+    };
+    assert_eq!(category("is_false"), Some(Boilerplate::GuardedDispatch));
+    assert_eq!(category("is_true"), Some(Boilerplate::GuardedDispatch));
+    // A guard, one thing done and a fixed answer is the same shape.
+    assert_eq!(category("release"), Some(Boilerplate::GuardedDispatch));
+    assert_eq!(category("rank"), None);
+}

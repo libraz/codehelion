@@ -114,6 +114,9 @@ pub struct BoilerplatePolicy {
     pub forwarding: CategoryAction,
     /// Bodies that are nothing but macro invocations.
     pub macro_repetition: CategoryAction,
+    /// Bodies that are one guard and an answer on each side of it. Hidden by
+    /// default, on the same evidence as the wrappers.
+    pub guarded_dispatch: CategoryAction,
 }
 
 impl Default for BoilerplatePolicy {
@@ -129,6 +132,12 @@ impl Default for BoilerplatePolicy {
             // A run of macro invocations can genuinely be worth consolidating,
             // so it is ranked down rather than hidden.
             macro_repetition: CategoryAction::RankDown,
+            // A unit that picks between two answers behaves like a wrapper in
+            // the corpora and is set aside on the same footing. Note that a
+            // guard whose answer is computed cannot be told from one that
+            // reads a field, so this is the category to raise to "report"
+            // first when a real duplication goes missing.
+            guarded_dispatch: CategoryAction::Hide,
         }
     }
 }
@@ -141,6 +150,7 @@ impl BoilerplatePolicy {
             Boilerplate::TrivialBody => self.trivial_body,
             Boilerplate::Forwarding => self.forwarding,
             Boilerplate::MacroRepetition => self.macro_repetition,
+            Boilerplate::GuardedDispatch => self.guarded_dispatch,
         }
     }
 }
@@ -435,6 +445,7 @@ pub const TEMPLATE: &str = "\
 # trivial-body = \"hide\"
 # forwarding = \"hide\"
 # macro-repetition = \"rank-down\"
+# guarded-dispatch = \"hide\"
 
 # Resource ceilings; every ceiling that fires is accounted for in the report.
 # [limits]
@@ -512,6 +523,10 @@ mod tests {
         // A group of wrappers has never been worth acting on in the labelled
         // projects, so it is set aside rather than merely ranked down.
         assert_eq!(policy.action(Boilerplate::Forwarding), CategoryAction::Hide);
+        assert_eq!(
+            policy.action(Boilerplate::GuardedDispatch),
+            CategoryAction::Hide
+        );
         // A run of macro invocations can still be worth consolidating.
         assert_eq!(
             policy.action(Boilerplate::MacroRepetition),
