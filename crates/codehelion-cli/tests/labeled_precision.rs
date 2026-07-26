@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use assert_cmd::Command;
 use codehelion_eval::detected;
 use codehelion_eval::labels::LabelSet;
-use codehelion_eval::metrics::{DEFAULT_MATCH_THRESHOLD, adjudicate};
+use codehelion_eval::metrics::{DEFAULT_MATCH_THRESHOLD, SizeSplit, adjudicate};
 
 /// One labelled corpus and the verdict split it currently produces.
 struct Expected {
@@ -113,6 +113,7 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
         String::from("\ncorpus            precision  confirmed  refuted  unjudged  conflicts\n");
     let mut complaints = String::new();
     let mut unmaterialized = 0usize;
+    let mut sizes = SizeSplit::default();
 
     for expected in CORPORA {
         let corpus = root.join("corpus/labeled").join(expected.name);
@@ -142,6 +143,7 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
             .unwrap_or_else(|error| panic!("reading the report for {}: {error}", expected.name));
 
         let ruled = adjudicate(&result, &labels, DEFAULT_MATCH_THRESHOLD);
+        sizes.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
         writeln!(
             table,
             "{:<16} {:>9.4} {:>10} {:>8} {:>9} {:>10}",
@@ -186,6 +188,10 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
     }
 
     println!("{table}");
+    // Printed, not asserted. Length is the first knob anyone reaches for when
+    // precision is short, and these two ranges are what says whether it can
+    // help: they answer the question in one command instead of by intuition.
+    println!("{sizes}\n");
     if unmaterialized > 0 {
         println!(
             "{unmaterialized} of {} labelled corpora have no snapshot and were not scored.\n\

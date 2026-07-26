@@ -261,22 +261,119 @@ pub fn adjudicate(results: &DetectionResult, labels: &LabelSet, threshold: f64) 
         unjudged: 0,
     };
     for finding in &results.findings {
-        let is_clone = labels
-            .clone_pairs
-            .iter()
-            .any(|pair| matches_pair(finding, pair, threshold));
-        let is_non_clone = labels
-            .non_clones
-            .iter()
-            .any(|non_clone| covers(finding, &non_clone.fragments, threshold));
-        match (is_clone, is_non_clone) {
-            (true, true) => adjudication.conflicting += 1,
-            (true, false) => adjudication.confirmed += 1,
-            (false, true) => adjudication.refuted += 1,
-            (false, false) => adjudication.unjudged += 1,
+        match verdict(finding, labels, threshold) {
+            Verdict::Conflicting => adjudication.conflicting += 1,
+            Verdict::Confirmed => adjudication.confirmed += 1,
+            Verdict::Refuted => adjudication.refuted += 1,
+            Verdict::Unjudged => adjudication.unjudged += 1,
         }
     }
     adjudication
+}
+
+/// What the labels say about a single finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Verdict {
+    /// Covers a labelled `clone_pair` and no labelled `non_clone`.
+    Confirmed,
+    /// Covers a labelled `non_clone` and no labelled `clone_pair`.
+    Refuted,
+    /// Covers both, which is the labels disagreeing with each other.
+    Conflicting,
+    /// No label speaks about it.
+    Unjudged,
+}
+
+/// Rule one finding against `labels` at `threshold`.
+#[must_use]
+pub fn verdict(finding: &Finding, labels: &LabelSet, threshold: f64) -> Verdict {
+    let is_clone = labels
+        .clone_pairs
+        .iter()
+        .any(|pair| matches_pair(finding, pair, threshold));
+    let is_non_clone = labels
+        .non_clones
+        .iter()
+        .any(|non_clone| covers(finding, &non_clone.fragments, threshold));
+    match (is_clone, is_non_clone) {
+        (true, true) => Verdict::Conflicting,
+        (true, false) => Verdict::Confirmed,
+        (false, true) => Verdict::Refuted,
+        (false, false) => Verdict::Unjudged,
+    }
+}
+
+/// How large the judged findings are, measured in lines of their smallest
+/// member and split by verdict.
+///
+/// This exists to keep one recurring question answerable from data rather than
+/// from intuition: whether a length floor could drop the lookalikes without
+/// dropping real clones. Length is the most obvious knob a clone detector has,
+/// and the two populations have to be looked at together to see that it does
+/// not sort them — see [`Self::confirmed_within_refuted_range`].
+///
+/// The smallest member is the right end to measure, because a group is only as
+/// convincing as its least substantial instance.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SizeSplit {
+    /// Smallest member of each confirmed finding, in lines, ascending.
+    pub confirmed: Vec<u32>,
+    /// Smallest member of each refuted finding, in lines, ascending.
+    pub refuted: Vec<u32>,
+}
+
+impl SizeSplit {
+    /// Add every judged finding in `results` to the split.
+    ///
+    /// Accumulates, so one split can span several corpora. Findings that are
+    /// unjudged or conflicting are left out: neither is a statement about what
+    /// a clone is worth.
+    pub fn record(&mut self, results: &DetectionResult, labels: &LabelSet, threshold: f64) {
+        for finding in &results.findings {
+            let Some(smallest) = finding.fragments.iter().map(Fragment::line_count).min() else {
+                continue;
+            };
+            match verdict(finding, labels, threshold) {
+                Verdict::Confirmed => self.confirmed.push(smallest),
+                Verdict::Refuted => self.refuted.push(smallest),
+                Verdict::Conflicting | Verdict::Unjudged => {}
+            }
+        }
+        self.confirmed.sort_unstable();
+        self.refuted.sort_unstable();
+    }
+
+    /// How many confirmed findings are no larger than the largest refuted one.
+    ///
+    /// This is what a length floor high enough to remove every refuted finding
+    /// would take with it. Zero would mean the two populations separate by
+    /// length and a floor is worth calibrating; anything else is the price of
+    /// one, and says the shortest real clones are as short as the shortest
+    /// lookalikes.
+    #[must_use]
+    pub fn confirmed_within_refuted_range(&self) -> usize {
+        let Some(&largest) = self.refuted.last() else {
+            return 0;
+        };
+        self.confirmed.iter().filter(|&&n| n <= largest).count()
+    }
+}
+
+impl fmt::Display for SizeSplit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let span = |sizes: &[u32]| match (sizes.first(), sizes.last()) {
+            (Some(low), Some(high)) => format!("{low}-{high} lines (n={})", sizes.len()),
+            _ => "none".to_string(),
+        };
+        writeln!(f, "smallest member, confirmed  {}", span(&self.confirmed))?;
+        writeln!(f, "smallest member, refuted    {}", span(&self.refuted))?;
+        write!(
+            f,
+            "confirmed inside that range {} — the cost of a length floor that \
+             removed every refuted finding",
+            self.confirmed_within_refuted_range()
+        )
+    }
 }
 
 impl fmt::Display for Adjudication {
@@ -562,6 +659,58 @@ mod tests {
         assert_eq!(ruled.judged(), 0);
         assert_eq!(ruled.unjudged, 3);
         assert!(ruled.precision().abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn the_size_split_measures_the_smallest_member_of_each_judged_finding() {
+        let (results, labels) = self_test_inputs();
+        let mut split = SizeSplit::default();
+        split.record(&results, &labels, DEFAULT_MATCH_THRESHOLD);
+
+        // f-001 and f-002 are confirmed, f-003 refuted; every fragment above
+        // spans 10 or 11 lines.
+        assert_eq!(split.confirmed, vec![10, 10]);
+        assert_eq!(split.refuted, vec![11]);
+    }
+
+    #[test]
+    fn a_split_that_separates_by_length_costs_nothing() {
+        let split = SizeSplit {
+            confirmed: vec![20, 30, 40],
+            refuted: vec![3, 4, 5],
+        };
+        assert_eq!(
+            split.confirmed_within_refuted_range(),
+            0,
+            "no confirmed finding is as short as the longest lookalike, so a \
+             floor at 6 lines removes the lookalikes for free"
+        );
+    }
+
+    #[test]
+    fn a_split_that_overlaps_prices_the_floor_in_real_clones() {
+        let split = SizeSplit {
+            confirmed: vec![4, 9, 40],
+            refuted: vec![3, 4, 12],
+        };
+        assert_eq!(
+            split.confirmed_within_refuted_range(),
+            2,
+            "a floor above 12 lines takes the 4- and 9-line clones with it"
+        );
+    }
+
+    #[test]
+    fn nothing_refuted_leaves_a_floor_unpriced() {
+        let split = SizeSplit {
+            confirmed: vec![4, 9],
+            refuted: vec![],
+        };
+        assert_eq!(
+            split.confirmed_within_refuted_range(),
+            0,
+            "with no lookalikes to remove there is no floor to price"
+        );
     }
 
     #[test]
