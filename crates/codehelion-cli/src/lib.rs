@@ -17,6 +17,7 @@
 //! `1` in `main`, and `clap` uses `2` for usage errors. Commands whose engine
 //! or store support is not built yet fail with an explicit message.
 
+pub mod baseline;
 pub mod cli;
 pub mod config;
 pub mod report;
@@ -88,7 +89,7 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
         Command::Cache { action } => cache_command(action, out),
         Command::Scan(args) => scan_command(args, out),
         Command::Explain(args) => explain(args, out),
-        Command::Baseline { action } => baseline(action),
+        Command::Baseline { action } => baseline(action, out),
         Command::Audit => bail!("audit is not available in this release"),
         Command::Artifact => bail!("artifact analysis is not available in this release"),
         Command::Divergence => bail!("divergence reporting is not available in this release"),
@@ -270,10 +271,86 @@ fn is_git_ignored(repo_root: &Path, target: &Path) -> bool {
         .is_ignore()
 }
 
-fn baseline(action: &BaselineAction) -> Result<Outcome> {
-    match action {
-        BaselineAction::Create { .. } => bail!("baseline recording is not yet implemented"),
+/// Freeze or prune a baseline against the last recorded scan of a tree.
+///
+/// Both actions read a scan that already happened rather than performing one:
+/// a baseline is a judgement about a result, and taking it from the recorded
+/// result keeps the judgement and the report it refers to the same thing.
+fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
+    let (args, create) = match action {
+        BaselineAction::Create(args) => (args, true),
+        BaselineAction::Update(args) => (args, false),
+    };
+    let root = args
+        .path
+        .canonicalize()
+        .with_context(|| format!("resolving path {}", args.path.display()))?;
+    let cfg = config::load(None, &root)?.config;
+    let db_path = scan::database_path(&root, args.db.as_deref(), &cfg);
+    if !db_path.is_file() {
+        bail!(
+            "no audit database at {}; run `codehelion scan` first",
+            db_path.display()
+        );
     }
+    let store = Store::open(&db_path)?;
+    let root_path = root.to_string_lossy();
+    let Some(origin) = store.latest_completed_run(&root_path)? else {
+        bail!(
+            "{} holds no completed scan of {}; run `codehelion scan` first",
+            db_path.display(),
+            root.display()
+        );
+    };
+    let groups = store.run_groups(origin.id)?;
+
+    if create {
+        if args.file.exists() && !args.force {
+            bail!(
+                "{} already exists; pass --force to overwrite",
+                args.file.display()
+            );
+        }
+        let recorded = baseline::Baseline::from_run(&origin, &groups, &scan::rfc3339_now());
+        recorded.write(&args.file)?;
+        writeln!(
+            out,
+            "wrote {} ({} findings frozen from run {}, {} mode)",
+            args.file.display(),
+            recorded.entries.len(),
+            origin.id,
+            origin.analysis_mode,
+        )?;
+        return Ok(Outcome::Success);
+    }
+
+    let existing = baseline::Baseline::load(&args.file)?;
+    if let Some(reason) = existing.mismatch(&origin.variant_fingerprint, &origin.detector_versions)
+    {
+        bail!(
+            "{} does not describe run {}: {}; re-record it with `baseline create --force`",
+            args.file.display(),
+            origin.id,
+            reason
+        );
+    }
+    let present: std::collections::BTreeSet<String> = groups
+        .iter()
+        .map(|group| group.fingerprint_hex.clone())
+        .collect();
+    let (pruned, dropped) = existing.pruned(&present);
+    pruned.write(&args.file)?;
+    writeln!(
+        out,
+        "updated {} ({} entries kept, {} resolved and dropped)",
+        args.file.display(),
+        pruned.entries.len(),
+        dropped.len(),
+    )?;
+    for id in &dropped {
+        writeln!(out, "  resolved: {id}")?;
+    }
+    Ok(Outcome::Success)
 }
 
 fn config_command(action: &ConfigAction, out: &mut impl Write) -> Result<Outcome> {
@@ -356,6 +433,7 @@ mod tests {
             no_ignore: false,
             jobs: None,
             db: None,
+            baseline: None,
             show_suppressed: false,
             verbose: false,
             fail_on_findings: false,

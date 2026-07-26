@@ -132,6 +132,21 @@
             "removed": { "type": "integer" }
           }
         },
+        "baseline": {
+          "type": "object",
+          "description": "What the baseline the scan was given did to its findings. Absent when no baseline was given.",
+          "required": ["file", "entries", "matched", "stale"],
+          "properties": {
+            "file": { "type": "string", "description": "The baseline file, as it was named on the command line." },
+            "entries": { "type": "integer" },
+            "matched": { "type": "integer", "description": "Entries whose duplication this run still reports." },
+            "stale": { "type": "integer", "description": "Entries that hid nothing, the duplication they covered being gone. A number to act on with `baseline update`, not a fault." },
+            "mismatch": {
+              "type": "string",
+              "description": "Why the baseline covers nothing in this run, present only when it does not describe it: its ids were computed under conditions this run does not share, so none of them can match."
+            }
+          }
+        },
         "groups": {
           "type": "object",
           "required": ["total", "type_1", "type_2"],

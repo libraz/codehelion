@@ -25,6 +25,12 @@
 //! judgement made about one duplication does not silently carry over to a
 //! different one.
 //!
+//! A **baseline** (see [`crate::baseline`]) is the same kind of rule applied
+//! wholesale: the ids a recorded scan reported, frozen so that a later scan
+//! reports what came after. It is consulted last of all, because it is the
+//! weakest thing that can be said about a finding — that it is not new — and
+//! every other rule says something about the code itself.
+//!
 //! (Generated-file markers are a further mechanism, applied earlier: those
 //! files are excluded during discovery, before any candidate exists.)
 
@@ -79,6 +85,10 @@ pub(crate) struct Rules {
     /// Index of the inline-marker rule in `rows`, present only when at least
     /// one marker was seen in the scanned sources.
     inline_rule: Option<usize>,
+    /// The group ids a baseline froze, and the index of the rule that hides
+    /// them. One rule stands for the whole file: which entry matched is the
+    /// file's business, and it is where the reader has to look anyway.
+    baseline: Option<(BTreeSet<String>, usize)>,
     pub(crate) rows: Vec<SuppressionRuleRow>,
 }
 
@@ -149,8 +159,32 @@ impl Rules {
             symbol_matchers,
             clone_ids,
             inline_rule,
+            baseline: None,
             rows,
         })
+    }
+
+    /// Register the baseline `file` as a rule hiding the groups it froze,
+    /// returning its index.
+    ///
+    /// The rule's pattern is the file rather than any one id: a baseline is a
+    /// decision recorded in one place, and pointing at that place is what a
+    /// reader needs in order to reverse it.
+    pub(crate) fn add_baseline(&mut self, file: &str, ids: BTreeSet<String>) -> usize {
+        self.rows.push(SuppressionRuleRow {
+            scope: "baseline".to_string(),
+            pattern: file.to_string(),
+            reason: Some("recorded before this baseline".to_string()),
+        });
+        let index = self.rows.len() - 1;
+        self.baseline = Some((ids, index));
+        index
+    }
+
+    /// The rule hiding a group because a baseline froze it, if one did.
+    pub(crate) fn baseline_rule(&self, fingerprint_hex: &str) -> Option<usize> {
+        let (ids, rule) = self.baseline.as_ref()?;
+        ids.contains(fingerprint_hex).then_some(*rule)
     }
 
     /// Register a rule that matches by code shape rather than by location,

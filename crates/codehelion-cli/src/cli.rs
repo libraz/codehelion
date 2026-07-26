@@ -120,6 +120,9 @@ pub struct ScanArgs {
     /// Audit-database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,
+    /// Hide the findings this baseline file froze, reporting what came after.
+    #[arg(long)]
+    pub baseline: Option<PathBuf>,
     /// Also list suppressed groups, with the reason each was hidden.
     #[arg(long)]
     pub show_suppressed: bool,
@@ -165,15 +168,36 @@ pub enum ConfigAction {
     },
 }
 
+/// Default baseline file, relative to the working directory.
+///
+/// Unlike the audit database this is meant to be committed: it is a decision
+/// the project made, and it has to travel with the code the decision is about.
+pub const BASELINE_FILE_NAME: &str = "codehelion-baseline.json";
+
 /// Actions for the `baseline` subcommand.
 #[derive(Debug, Subcommand)]
 pub enum BaselineAction {
-    /// Record the current scan result as a baseline.
-    Create {
-        /// Audit-database path, overriding the configured location.
-        #[arg(long)]
-        db: Option<PathBuf>,
-    },
+    /// Freeze the last scan's reported findings as a baseline.
+    Create(BaselineArgs),
+    /// Drop the baseline entries the last scan no longer reports.
+    Update(BaselineArgs),
+}
+
+/// Arguments shared by the `baseline` actions.
+#[derive(Debug, clap::Args)]
+pub struct BaselineArgs {
+    /// Scanned path whose recorded run the baseline is taken from.
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+    /// Baseline file to write.
+    #[arg(long, default_value = BASELINE_FILE_NAME)]
+    pub file: PathBuf,
+    /// Overwrite an existing baseline file.
+    #[arg(long)]
+    pub force: bool,
+    /// Audit-database path, overriding the configured location.
+    #[arg(long)]
+    pub db: Option<PathBuf>,
 }
 
 /// Actions for the `cache` subcommand.

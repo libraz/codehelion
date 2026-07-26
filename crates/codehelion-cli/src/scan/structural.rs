@@ -117,6 +117,12 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let analysis = structural::analyze(&irs, &variant, &structural_config(&cfg));
 
     let mut rules = compile_rules(&cfg, &files, &analysis)?;
+    let baseline = crate::scan::load_baseline(
+        args.baseline.as_deref(),
+        &mut rules.rules,
+        &variant,
+        &detector_versions(),
+    )?;
     let regions = reportable_regions(&analysis);
     let suppressed = evaluate_suppression(&cfg, &mut rules, &analysis, &regions);
 
@@ -147,7 +153,12 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         changes,
     };
     let run_id = record(&cfg, &inputs, crate::scan::file_rows(&sources))?;
-    let model = build_report(&inputs, run_id, &discovered);
+    let mut model = build_report(&inputs, run_id, &discovered);
+    // Counted against the assembled report rather than the raw analysis: a
+    // stale entry is one whose duplication this run does not list.
+    model.summary.baseline = baseline
+        .as_ref()
+        .map(|baseline| crate::scan::baseline_status(baseline, &model.groups));
     write_report(args, out, &model)?;
 
     let visible = model
@@ -346,6 +357,11 @@ fn evaluate_suppression(
                         .boilerplate
                         .and_then(|category| hidden.get(&category).copied())
                 })
+                .or_else(|| {
+                    rules
+                        .rules
+                        .baseline_rule(&analysis.details[index].fingerprint.to_hex())
+                })
         })
         .collect();
     let region_verdicts = regions
@@ -358,6 +374,7 @@ fn evaluate_suppression(
                 .clone_id_rule(&region.fingerprint.to_hex())
                 .or_else(|| rules.region_rule(region, analysis, &local_units))
                 .or_else(|| hidden_test_code.filter(|_| region_test_code(analysis, region)))
+                .or_else(|| rules.rules.baseline_rule(&region.fingerprint.to_hex()))
         })
         .collect();
     let pairs = analysis
@@ -373,6 +390,7 @@ fn evaluate_suppression(
                         analysis.units[pair.a].test_code && analysis.units[pair.b].test_code
                     })
                 })
+                .or_else(|| rules.rules.baseline_rule(&pair.fingerprint.to_hex()))
         })
         .collect();
     SuppressionVerdicts {
@@ -811,28 +829,10 @@ fn funnel(stats: &structural::StructuralStats) -> Vec<report::FunnelStage> {
 
 /// Assemble the report model both output formats render from.
 fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryReport) -> Report {
-    let count = |language: Language| {
-        as_u64(
-            inputs
-                .files
-                .iter()
-                .filter(|file| file.language == language)
-                .count(),
-        )
-    };
     // Counted off the report entries rather than the analysis, so the summary
     // cannot disagree with what the views list.
     let groups = build_groups(inputs);
-    let count_class = |class: CloneClass| {
-        as_u64(
-            groups
-                .iter()
-                .filter(|g| g.clone_type == class.name())
-                .count(),
-        )
-    };
     let variant = inputs.variant;
-    let stats = &inputs.analysis.stats;
 
     Report {
         schema_version: report::SCHEMA_VERSION,
@@ -861,62 +861,93 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
             database: inputs.db_path.display().to_string(),
             run_id,
         },
-        summary: report::Summary {
-            files: report::FileCounts {
-                total: as_u64(inputs.files.len()),
-                rust: count(Language::Rust),
-                c: count(Language::C),
-                cpp: count(Language::Cpp),
-            },
-            lines: inputs.files.iter().map(|file| file.lines).sum(),
-            tokens: as_u64(inputs.irs.iter().map(|ir| ir.tokens.len()).sum::<usize>()),
-            lexer_diagnostics: as_u64(inputs.files.iter().map(|file| file.diagnostics).sum()),
-            unparsed: Some(report::UnparsedCounts::new(
-                inputs.files.iter().map(|file| file.unaccounted_tokens),
-                as_u64(inputs.irs.iter().map(|ir| ir.tokens.len()).sum::<usize>()),
-            )),
-            excluded: report::ExcludedCounts {
-                generated: as_u64(discovered.suppressed_generated.len()),
-                by_glob: as_u64(inputs.glob_excluded),
-                skipped: discovered.skipped.total() + inputs.unreadable + inputs.timed_out,
-            },
-            changes: inputs.changes,
-            groups: report::GroupCounts {
-                total: as_u64(groups.len()),
-                type_1: count_class(CloneClass::Type1),
-                type_2: count_class(CloneClass::Type2),
-                type_3: count_class(CloneClass::Type3),
-                fragment_scope: as_u64(
-                    groups
-                        .iter()
-                        .filter(|group| group.scope == CloneScope::Fragment.name())
-                        .count(),
-                ),
-                folded_runs: as_u64(inputs.regions.folded),
-                subsumed_runs: as_u64(stats.region_subsumed),
-                test_code: as_u64(groups.iter().filter(|group| group.test_code).count()),
-            },
-            suppressed: report::SuppressedCounts {
-                // The funnel marks no group as noise yet; suppression here is
-                // rule-driven only.
-                noise: 0,
-                by_rule: as_u64(
-                    groups
-                        .iter()
-                        .filter(|group| group.suppressed.is_some())
-                        .count(),
-                ),
-            },
-            unused_suppressions: inputs.unused_suppressions(),
-            funnel: funnel(stats),
-            split_components: as_u64(stats.grouping.oversized_components),
-            // Any candidate stage exhausting its budget makes the result
-            // potentially incomplete.
-            pair_budget_exhausted: stats.candidate.budget_exhausted
-                || stats.near_match.budget_exhausted
-                || stats.control_flow.budget_exhausted,
-        },
+        summary: summary(inputs, &groups, discovered),
         groups,
+    }
+}
+
+/// The summary block of the report: everything the run measured, counted off
+/// the assembled entries so the totals cannot disagree with the listing.
+fn summary(
+    inputs: &ReportInputs<'_>,
+    groups: &[report::Group],
+    discovered: &DiscoveryReport,
+) -> report::Summary {
+    let count = |language: Language| {
+        as_u64(
+            inputs
+                .files
+                .iter()
+                .filter(|file| file.language == language)
+                .count(),
+        )
+    };
+    let count_class = |class: CloneClass| {
+        as_u64(
+            groups
+                .iter()
+                .filter(|g| g.clone_type == class.name())
+                .count(),
+        )
+    };
+    let stats = &inputs.analysis.stats;
+    report::Summary {
+        files: report::FileCounts {
+            total: as_u64(inputs.files.len()),
+            rust: count(Language::Rust),
+            c: count(Language::C),
+            cpp: count(Language::Cpp),
+        },
+        lines: inputs.files.iter().map(|file| file.lines).sum(),
+        tokens: as_u64(inputs.irs.iter().map(|ir| ir.tokens.len()).sum::<usize>()),
+        lexer_diagnostics: as_u64(inputs.files.iter().map(|file| file.diagnostics).sum()),
+        unparsed: Some(report::UnparsedCounts::new(
+            inputs.files.iter().map(|file| file.unaccounted_tokens),
+            as_u64(inputs.irs.iter().map(|ir| ir.tokens.len()).sum::<usize>()),
+        )),
+        excluded: report::ExcludedCounts {
+            generated: as_u64(discovered.suppressed_generated.len()),
+            by_glob: as_u64(inputs.glob_excluded),
+            skipped: discovered.skipped.total() + inputs.unreadable + inputs.timed_out,
+        },
+        changes: inputs.changes,
+        // Filled in after the groups are assembled, which is what a
+        // stale entry has to be counted against.
+        baseline: None,
+        groups: report::GroupCounts {
+            total: as_u64(groups.len()),
+            type_1: count_class(CloneClass::Type1),
+            type_2: count_class(CloneClass::Type2),
+            type_3: count_class(CloneClass::Type3),
+            fragment_scope: as_u64(
+                groups
+                    .iter()
+                    .filter(|group| group.scope == CloneScope::Fragment.name())
+                    .count(),
+            ),
+            folded_runs: as_u64(inputs.regions.folded),
+            subsumed_runs: as_u64(stats.region_subsumed),
+            test_code: as_u64(groups.iter().filter(|group| group.test_code).count()),
+        },
+        suppressed: report::SuppressedCounts {
+            // The funnel marks no group as noise yet; suppression here is
+            // rule-driven only.
+            noise: 0,
+            by_rule: as_u64(
+                groups
+                    .iter()
+                    .filter(|group| group.suppressed.is_some())
+                    .count(),
+            ),
+        },
+        unused_suppressions: inputs.unused_suppressions(),
+        funnel: funnel(stats),
+        split_components: as_u64(stats.grouping.oversized_components),
+        // Any candidate stage exhausting its budget makes the result
+        // potentially incomplete.
+        pair_budget_exhausted: stats.candidate.budget_exhausted
+            || stats.near_match.budget_exhausted
+            || stats.control_flow.budget_exhausted,
     }
 }
 

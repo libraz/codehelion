@@ -32,6 +32,18 @@ const RENAMED_RS: &str = "pub fn digest_chunk(start: u64, items: &[u64]) -> u64 
 }
 ";
 
+/// A Rust function sharing nothing structural with the checksum family, so a
+/// pair of these is its own group rather than a member of an existing one.
+const FORMAT_RS: &str = "pub fn describe_entry(name: &str, size: usize) -> String {
+    let mut text = String::new();
+    text.push_str(name);
+    text.push(':');
+    text.push(' ');
+    text.push_str(&size.to_string());
+    text
+}
+";
+
 /// A verbatim C clone pair member.
 const MIX_C: &str =
     "unsigned long mix_bytes(unsigned long seed, const unsigned long *data, int len) {
@@ -323,9 +335,15 @@ fn a_symbol_glob_matching_only_part_of_a_group_leaves_it_visible() {
 
 /// Run `scan --format json` in `root` and parse the produced document.
 fn scan_json(root: &Path) -> serde_json::Value {
+    scan_json_with(root, &[])
+}
+
+/// The same, with extra arguments appended to the scan.
+fn scan_json_with(root: &Path, extra: &[&str]) -> serde_json::Value {
     let output = cmd()
         .current_dir(root)
         .args(["scan", ".", "--format", "json"])
+        .args(extra)
         .output()
         .expect("run scan");
     assert!(output.status.success(), "{output:?}");
@@ -775,4 +793,218 @@ fn a_scan_under_different_settings_has_nothing_to_compare_with() {
         value["summary"].get("changes").is_none(),
         "the Fast run is not a baseline for the Structural one"
     );
+}
+
+/// The fingerprints of every group a report lists, visible or not.
+fn group_ids(report: &serde_json::Value) -> Vec<String> {
+    report["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .map(|group| group["fingerprint"].as_str().expect("a hex id").to_string())
+        .collect()
+}
+
+/// The fingerprints a report lists without a suppression.
+fn visible_ids(report: &serde_json::Value) -> Vec<String> {
+    report["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .filter(|group| group["suppressed"].is_null())
+        .map(|group| group["fingerprint"].as_str().expect("a hex id").to_string())
+        .collect()
+}
+
+/// Record a baseline of `root`'s last scan into `root/baseline.json`.
+fn record_baseline(root: &Path) {
+    cmd()
+        .current_dir(root)
+        .args(["baseline", "create", ".", "--file", "baseline.json"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn a_baseline_hides_what_came_before_it_and_nothing_else() {
+    let dir = fixture();
+    let root = dir.path();
+
+    let before = scan_json(root);
+    let frozen = visible_ids(&before);
+    assert!(!frozen.is_empty(), "the fixture duplicates on purpose");
+    record_baseline(root);
+
+    // Everything the baseline froze is hidden, and hidden by the baseline.
+    let baselined = scan_json_with(root, &["--baseline", "baseline.json"]);
+    assert!(visible_ids(&baselined).is_empty(), "all of it was frozen");
+    let status = &baselined["summary"]["baseline"];
+    assert_eq!(status["entries"], frozen.len());
+    assert_eq!(status["matched"], frozen.len());
+    assert_eq!(status["stale"], 0);
+    assert!(status.get("mismatch").is_none(), "the same run's own ids");
+    let hidden = baselined["groups"].as_array().expect("groups");
+    assert!(
+        hidden
+            .iter()
+            .all(|group| group["suppressed"]["scope"] == "baseline"),
+        "suppressed, not deleted, and by the baseline: {hidden:?}"
+    );
+
+    // A duplication written after the baseline is the one thing left to see.
+    // It has to be unlike anything already there: a near-copy of a frozen
+    // group would join that group, and a group's id moves when its membership
+    // gains content — which is a different behaviour from this one.
+    std::fs::write(root.join("src/new_one.rs"), FORMAT_RS).unwrap();
+    std::fs::write(root.join("src/new_two.rs"), FORMAT_RS).unwrap();
+    let after = scan_json_with(root, &["--baseline", "baseline.json"]);
+    let visible = visible_ids(&after);
+    assert_eq!(visible.len(), 1, "only what came after: {visible:?}");
+    assert!(!frozen.contains(&visible[0]));
+}
+
+#[test]
+fn a_baseline_survives_an_edit_that_changes_no_code() {
+    let dir = fixture();
+    let root = dir.path();
+    scan_json(root);
+    record_baseline(root);
+
+    // Comments and blank lines do not survive tokenization, so an edit made
+    // of nothing else cannot move a content fingerprint — however far it
+    // shifts the line numbers the report prints.
+    std::fs::write(
+        root.join("src/a.rs"),
+        format!("// A leading comment.\n//\n// And another.\n\n{CHECKSUM_RS}"),
+    )
+    .unwrap();
+
+    let after = scan_json_with(root, &["--baseline", "baseline.json"]);
+    assert!(
+        visible_ids(&after).is_empty(),
+        "reformatting is not new duplication"
+    );
+    assert_eq!(after["summary"]["baseline"]["stale"], 0);
+}
+
+#[test]
+fn resolving_a_duplication_makes_its_entry_stale_and_update_drops_it() {
+    let dir = fixture();
+    let root = dir.path();
+    let before = scan_json(root);
+    let frozen = group_ids(&before).len();
+    record_baseline(root);
+
+    // The C pair is resolved the way it would be in practice: one copy goes.
+    std::fs::remove_file(root.join("src/two.c")).unwrap();
+    let after = scan_json_with(root, &["--baseline", "baseline.json"]);
+    let stale = after["summary"]["baseline"]["stale"]
+        .as_u64()
+        .expect("a count");
+    assert!(stale > 0, "the duplication the deleted file was half of");
+
+    cmd()
+        .current_dir(root)
+        .args(["baseline", "update", ".", "--file", "baseline.json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("resolved and dropped"));
+
+    // Pruning drops exactly the stale entries and adopts nothing.
+    let pruned = scan_json_with(root, &["--baseline", "baseline.json"]);
+    assert_eq!(pruned["summary"]["baseline"]["stale"], 0);
+    assert_eq!(
+        pruned["summary"]["baseline"]["entries"]
+            .as_u64()
+            .expect("a count"),
+        u64::try_from(frozen).unwrap() - stale
+    );
+}
+
+#[test]
+fn a_baseline_from_other_settings_says_so_instead_of_hiding_nothing_quietly() {
+    let dir = fixture();
+    let root = dir.path();
+    scan_json(root);
+    record_baseline(root);
+
+    // Every id is computed under a build variant. Handed to a run under
+    // another one, a baseline matches nothing — which looks exactly like a
+    // baseline that worked unless the report says otherwise.
+    let output = cmd()
+        .current_dir(root)
+        .args([
+            "scan",
+            ".",
+            "--mode",
+            "structural",
+            "--baseline",
+            "baseline.json",
+        ])
+        .output()
+        .expect("run scan");
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).expect("utf-8");
+    assert!(
+        text.contains("this baseline hid nothing"),
+        "the mismatch has to be stated: {text}"
+    );
+    assert!(text.contains("build variant"));
+}
+
+#[test]
+fn a_baseline_that_cannot_be_read_stops_the_scan() {
+    let dir = fixture();
+    let root = dir.path();
+    std::fs::write(root.join("broken.json"), "{ not json").unwrap();
+
+    // Scanning on without the baseline would report the very findings the
+    // user asked to have hidden, so a named file that cannot be applied is a
+    // reason to stop.
+    cmd()
+        .current_dir(root)
+        .args(["scan", ".", "--baseline", "broken.json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("broken.json"));
+
+    cmd()
+        .current_dir(root)
+        .args(["scan", ".", "--baseline", "absent.json"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn recording_a_baseline_needs_a_scan_and_refuses_to_overwrite_silently() {
+    let dir = fixture();
+    let root = dir.path();
+
+    cmd()
+        .current_dir(root)
+        .args(["baseline", "create", "."])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("scan"));
+
+    scan_json(root);
+    record_baseline(root);
+    cmd()
+        .current_dir(root)
+        .args(["baseline", "create", ".", "--file", "baseline.json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--force"));
+    cmd()
+        .current_dir(root)
+        .args([
+            "baseline",
+            "create",
+            ".",
+            "--file",
+            "baseline.json",
+            "--force",
+        ])
+        .assert()
+        .success();
 }

@@ -13,7 +13,7 @@
 
 pub mod structural;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -105,24 +105,13 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         engine_config.literals,
     );
 
-    let any_markers = lexed.iter().any(|file| !file.marker_lines.is_empty());
-    let rules = suppress::Rules::compile(&cfg.suppression, any_markers)?;
-    let file_suppressions: Vec<suppress::FileSuppression> = lexed
-        .iter()
-        .map(|file| rules.evaluate_file(&file.relative_path, &file.marker_lines, &unit_spans(file)))
-        .collect();
-    let group_suppressed: Vec<Option<usize>> = report
-        .groups
-        .iter()
-        .zip(&ids)
-        .map(|(group, group_ids)| {
-            // A clone id names this exact group, so it decides before any
-            // rule that happens to cover where the members sit.
-            rules
-                .clone_id_rule(&group_ids.fingerprint.to_hex())
-                .or_else(|| group_rule(&rules, &file_suppressions, group))
-        })
-        .collect();
+    let suppression =
+        evaluate_suppression(args, &cfg, &discovered.build_variant, &lexed, &report, &ids)?;
+    let Suppression {
+        rules,
+        baseline,
+        groups: group_suppressed,
+    } = suppression;
 
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
     let changes = tree_changes(&db_path, &root, &discovered.build_variant, &sources)?;
@@ -143,7 +132,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         file_rows(&sources),
     )?;
 
-    let model = build_report(&BuildInputs {
+    let mut model = build_report(&BuildInputs {
         root: &root,
         db_path: &db_path,
         run_id,
@@ -160,6 +149,11 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         group_suppressed: &group_suppressed,
         changes,
     });
+    // Counted against the assembled report rather than the raw analysis: a
+    // stale entry is one whose duplication this run does not list.
+    model.summary.baseline = baseline
+        .as_ref()
+        .map(|baseline| baseline_status(baseline, &model.groups));
     write_report(args, out, &model)?;
 
     let visible = model
@@ -172,6 +166,60 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     } else {
         Ok(Outcome::Success)
     }
+}
+
+/// What suppression decided for one run.
+struct Suppression {
+    /// The compiled rules, which the snapshot records.
+    rules: suppress::Rules,
+    /// The baseline the scan was given, if any.
+    baseline: Option<ScanBaseline>,
+    /// The rule hiding each group, parallel to the engine's groups.
+    groups: Vec<Option<usize>>,
+}
+
+/// Compile the suppression rules, apply the baseline, and decide which rule
+/// hides each detected group.
+fn evaluate_suppression(
+    args: &ScanArgs,
+    cfg: &Config,
+    variant: &BuildVariant,
+    lexed: &[LexedSource],
+    report: &EngineReport,
+    ids: &[GroupIds],
+) -> Result<Suppression> {
+    let any_markers = lexed.iter().any(|file| !file.marker_lines.is_empty());
+    let mut rules = suppress::Rules::compile(&cfg.suppression, any_markers)?;
+    let baseline = load_baseline(
+        args.baseline.as_deref(),
+        &mut rules,
+        variant,
+        &detector_versions(),
+    )?;
+    let file_suppressions: Vec<suppress::FileSuppression> = lexed
+        .iter()
+        .map(|file| rules.evaluate_file(&file.relative_path, &file.marker_lines, &unit_spans(file)))
+        .collect();
+    let groups = report
+        .groups
+        .iter()
+        .zip(ids)
+        .map(|(group, group_ids)| {
+            // A clone id names this exact group, so it decides before any
+            // rule that happens to cover where the members sit. The baseline
+            // decides last: that a finding is not new says less about it than
+            // anything the rules say about the code.
+            rules
+                .clone_id_rule(&group_ids.fingerprint.to_hex())
+                .or_else(|| group_rule(&rules, &file_suppressions, group))
+                .or_else(|| rules.baseline_rule(&group_ids.fingerprint.to_hex()))
+        })
+        .collect();
+    Ok(Suppression {
+        rules,
+        baseline,
+        groups,
+    })
 }
 
 /// Everything [`build_report`] needs from the pipeline.
@@ -196,7 +244,7 @@ struct BuildInputs<'a> {
 /// The configured suppression rules that hid nothing this run, read off the
 /// rules the groups actually cited.
 fn unused_suppressions(inputs: &BuildInputs<'_>) -> Vec<report::UnusedRule> {
-    let used: std::collections::BTreeSet<usize> = inputs
+    let used: BTreeSet<usize> = inputs
         .group_suppressed
         .iter()
         .filter_map(|rule| *rule)
@@ -321,6 +369,9 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
                 skipped: inputs.discovered.skipped.total() + inputs.unreadable + inputs.timed_out,
             },
             changes: inputs.changes,
+            // Filled in after the groups are assembled, which is what a
+            // stale entry has to be counted against.
+            baseline: None,
             groups: report::GroupCounts {
                 total: as_u64(inputs.report.groups.len()),
                 type_1: count_groups(&|i| inputs.report.groups[i].clone_type == CloneClass::Type1),
@@ -745,6 +796,82 @@ pub(crate) fn tree_changes(
         added: as_u64(changes.added.len()),
         removed: as_u64(changes.removed.len()),
     }))
+}
+
+/// A baseline a scan was told to apply.
+pub(crate) struct ScanBaseline {
+    /// The file as it was named on the command line.
+    file: String,
+    /// The group ids it froze.
+    ids: BTreeSet<String>,
+    /// Why it does not describe this run, when it does not.
+    mismatch: Option<String>,
+}
+
+/// Load the baseline a scan was given and register it as a suppression rule.
+///
+/// A baseline recorded under conditions this run does not share is loaded and
+/// registered all the same: none of its ids can match, so it hides nothing,
+/// and letting that happen through the ordinary path keeps the reported
+/// counts true. What it must not do is happen quietly — the mismatch travels
+/// with the status so the report can say it outright.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or is not a baseline this
+/// build understands. A named file that cannot be applied is a mistake worth
+/// stopping for; silently scanning without it would report findings the user
+/// asked to have hidden.
+pub(crate) fn load_baseline(
+    path: Option<&Path>,
+    rules: &mut suppress::Rules,
+    variant: &BuildVariant,
+    detectors: &[(String, String)],
+) -> Result<Option<ScanBaseline>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let baseline = crate::baseline::Baseline::load(path)?;
+    let mismatch = baseline.mismatch(&variant.fingerprint(), detectors);
+    let ids: BTreeSet<String> = baseline
+        .entries
+        .iter()
+        .map(|entry| entry.group.clone())
+        .collect();
+    let file = path.display().to_string();
+    rules.add_baseline(&file, ids.clone());
+    Ok(Some(ScanBaseline {
+        file,
+        ids,
+        mismatch,
+    }))
+}
+
+/// What the baseline did to this run, counted against what the run found.
+///
+/// An entry counts as matched when the duplication it froze is still detected,
+/// whichever rule ended up hiding it: the question a stale count answers is
+/// whether the duplication is gone, not which reason won.
+pub(crate) fn baseline_status(
+    baseline: &ScanBaseline,
+    groups: &[report::Group],
+) -> report::BaselineStatus {
+    let reported: BTreeSet<&str> = groups
+        .iter()
+        .map(|group| group.fingerprint.as_str())
+        .collect();
+    let matched = baseline
+        .ids
+        .iter()
+        .filter(|id| reported.contains(id.as_str()))
+        .count();
+    report::BaselineStatus {
+        file: baseline.file.clone(),
+        entries: as_u64(baseline.ids.len()),
+        matched: as_u64(matched),
+        stale: as_u64(baseline.ids.len().saturating_sub(matched)),
+        mismatch: baseline.mismatch.clone(),
+    }
 }
 
 /// The tree a scan read, as rows to record beside its findings.

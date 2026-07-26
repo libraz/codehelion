@@ -22,7 +22,7 @@ pub mod sarif;
 
 use std::io::{self, Write};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Version of the JSON report format.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -94,7 +94,10 @@ pub struct BuildVariantInfo {
 }
 
 /// Version of one detection component.
-#[derive(Debug, Serialize)]
+///
+/// Readable back as well as writable: a baseline records the versions its ids
+/// were computed under, and a later run has to compare against them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetectorVersion {
     /// Component name, such as `fp-schema` or `frontend.rust`.
     pub component: String,
@@ -123,6 +126,9 @@ pub struct Summary {
     /// compare against.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changes: Option<TreeChanges>,
+    /// What the baseline hid, when the scan was given one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<BaselineStatus>,
     /// Clone-group counts by type.
     pub groups: GroupCounts,
     /// Suppressed-group counts by mechanism.
@@ -264,6 +270,32 @@ pub struct TreeChanges {
     pub added: u64,
     /// Files the previous scan read and this one did not.
     pub removed: u64,
+}
+
+/// What a baseline did to this run's findings.
+///
+/// An entry that matched nothing is reported rather than left implicit, and
+/// it is deliberately not phrased as a problem: a baseline going stale is a
+/// duplication that got fixed. The number is what tells the reader that
+/// `baseline update` has something to drop.
+///
+/// `mismatch` is the other case entirely — the baseline is intact but was
+/// recorded under conditions that give every id a different value, so it
+/// covers nothing at all. That is stated outright, because a suppression
+/// silently covering nothing looks exactly like one that worked.
+#[derive(Debug, Clone, Serialize)]
+pub struct BaselineStatus {
+    /// The baseline file, as it was given on the command line.
+    pub file: String,
+    /// Entries the file holds.
+    pub entries: u64,
+    /// Entries that hid a finding in this run.
+    pub matched: u64,
+    /// Entries that hid nothing, the duplication they covered being gone.
+    pub stale: u64,
+    /// Why the baseline does not describe this run, when it does not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mismatch: Option<String>,
 }
 
 /// Files the scan dropped, by cause. Nothing is omitted silently.
@@ -699,6 +731,18 @@ impl Report {
                 changes.removed,
             )?;
         }
+        if let Some(baseline) = &summary.baseline {
+            writeln!(
+                out,
+                "  baseline {}: {} of {} entries matched, {} no longer found",
+                baseline.file, baseline.matched, baseline.entries, baseline.stale,
+            )?;
+            // A baseline that covers nothing hides nothing, and that is
+            // indistinguishable from a baseline that worked unless it is said.
+            if let Some(reason) = &baseline.mismatch {
+                writeln!(out, "    warning: this baseline hid nothing — {reason}")?;
+            }
+        }
         Ok(())
     }
 
@@ -1070,6 +1114,7 @@ pub(super) mod tests {
                     skipped: 0,
                 },
                 changes: None,
+                baseline: None,
                 groups: GroupCounts {
                     total: 2,
                     type_1: 2,
@@ -1530,9 +1575,20 @@ pub(super) mod tests {
         let mut report = sample_report();
         report.groups.push(structural_group());
         report.groups.push(fragment_group());
+        report.summary.baseline = Some(BaselineStatus {
+            file: "codehelion-baseline.json".to_string(),
+            entries: 12,
+            matched: 11,
+            stale: 1,
+            mismatch: Some("recorded under another build variant".to_string()),
+        });
         let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
         let checks = [
             (&value["groups"][3], &schema["$defs"]["group"]["properties"]),
+            (
+                &value["summary"]["baseline"],
+                &schema["$defs"]["summary"]["properties"]["baseline"]["properties"],
+            ),
             (&value, &schema["properties"]),
             (&value["run"], &schema["$defs"]["run"]["properties"]),
             (&value["summary"], &schema["$defs"]["summary"]["properties"]),
@@ -1562,6 +1618,43 @@ pub(super) mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_baseline_that_covered_nothing_says_so_rather_than_reading_as_success() {
+        let mut report = sample_report();
+        report.summary.baseline = Some(BaselineStatus {
+            file: "codehelion-baseline.json".to_string(),
+            entries: 12,
+            matched: 0,
+            stale: 12,
+            mismatch: Some("recorded under build variant aaaa in fast mode".to_string()),
+        });
+        let mut buffer = Vec::new();
+        report
+            .render_text(TextOptions::default(), &mut buffer)
+            .unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        assert!(text.contains("baseline codehelion-baseline.json: 0 of 12 entries matched"));
+        // Without this the run is indistinguishable from one whose baseline
+        // hid everything it was meant to.
+        assert!(text.contains("warning: this baseline hid nothing"));
+
+        // A baseline that applies says only what it did.
+        report.summary.baseline = Some(BaselineStatus {
+            file: "codehelion-baseline.json".to_string(),
+            entries: 12,
+            matched: 11,
+            stale: 1,
+            mismatch: None,
+        });
+        let mut buffer = Vec::new();
+        report
+            .render_text(TextOptions::default(), &mut buffer)
+            .unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        assert!(text.contains("11 of 12 entries matched, 1 no longer found"));
+        assert!(!text.contains("warning:"));
     }
 
     #[test]
