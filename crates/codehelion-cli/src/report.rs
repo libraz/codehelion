@@ -113,6 +113,10 @@ pub struct Summary {
     pub tokens: u64,
     /// Lexer diagnostics emitted while reading the sources.
     pub lexer_diagnostics: u64,
+    /// How much of the source the parser could not follow, in the modes that
+    /// parse. Absent in Fast mode, which lexes and does not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unparsed: Option<UnparsedCounts>,
     /// Files the scan dropped, by cause.
     pub excluded: ExcludedCounts,
     /// Clone-group counts by type.
@@ -247,6 +251,50 @@ pub struct ExcludedCounts {
     pub by_glob: u64,
     /// Files skipped for other causes (size, binary content, read errors).
     pub skipped: u64,
+}
+
+/// How much of the source the parser could not follow.
+///
+/// A parser that recovers keeps going, so a file it could not follow still
+/// produces units and still reaches detection — the difference is that those
+/// units describe error recovery rather than the code. Without this the two
+/// are indistinguishable in a report: a scan that read a tenth of a project
+/// looks exactly like a scan that read all of it and found little.
+#[derive(Debug, Serialize)]
+pub struct UnparsedCounts {
+    /// Files with at least one region the parser could not follow.
+    pub files: u64,
+    /// Bytes inside those regions.
+    pub bytes: u64,
+    /// Those bytes as a share of every analysed byte, rounded to four places.
+    pub share: f64,
+}
+
+impl UnparsedCounts {
+    /// Tally regions covering `bytes` per file against `total` analysed bytes.
+    #[must_use]
+    pub fn new(per_file: impl IntoIterator<Item = u64>, total: u64) -> Self {
+        let mut files = 0;
+        let mut unparsed = 0;
+        for bytes in per_file {
+            if bytes > 0 {
+                files += 1;
+                unparsed += bytes;
+            }
+        }
+        // Ratios of counts this size lose nothing that a report shows.
+        #[allow(clippy::cast_precision_loss)]
+        let share = if total == 0 {
+            0.0
+        } else {
+            ((unparsed as f64 / total as f64) * 10_000.0).round() / 10_000.0
+        };
+        Self {
+            files,
+            bytes: unparsed,
+            share,
+        }
+    }
 }
 
 /// Clone-group counts by type.
@@ -606,6 +654,20 @@ impl Report {
             "  lines: {}; tokens: {}; lexer diagnostics: {}",
             summary.lines, summary.tokens, summary.lexer_diagnostics,
         )?;
+        // A recovering parser reports no failure, so the share it could not
+        // follow is the only thing separating "little duplication here" from
+        // "most of this was never read".
+        if let Some(unparsed) = &summary.unparsed
+            && unparsed.files > 0
+        {
+            writeln!(
+                out,
+                "    the parser could not follow {:.1}% of the source, over {} of {} files",
+                unparsed.share * 100.0,
+                unparsed.files,
+                summary.files.total,
+            )?;
+        }
         writeln!(
             out,
             "  clone groups: {} (type-1 {}, type-2 {}, type-3 {}; suppressed: {} noise, {} by rule)",
@@ -944,6 +1006,7 @@ pub(super) mod tests {
                 lines: 40,
                 tokens: 200,
                 lexer_diagnostics: 0,
+                unparsed: None,
                 excluded: ExcludedCounts {
                     generated: 0,
                     by_glob: 0,
@@ -1318,6 +1381,34 @@ pub(super) mod tests {
                 .unwrap()
                 .contains("duplicated unit")
         );
+    }
+
+    #[test]
+    fn the_unparsed_share_counts_files_and_bytes_against_the_whole_scan() {
+        let counts = UnparsedCounts::new([0, 250, 0, 750], 4000);
+        assert_eq!(counts.files, 2, "only the files with a region count");
+        assert_eq!(counts.bytes, 1000);
+        assert!((counts.share - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_scan_the_parser_followed_reports_a_share_of_nothing() {
+        let clean = UnparsedCounts::new([0, 0], 4000);
+        assert_eq!((clean.files, clean.bytes), (0, 0));
+        assert!(clean.share.abs() < f64::EPSILON);
+        // An empty scan divides by nothing rather than producing a NaN that
+        // would serialize as `null` and read as "not measured".
+        let empty = UnparsedCounts::new([], 0);
+        assert!(empty.share.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_lexing_mode_reports_no_parse_coverage_rather_than_a_clean_one() {
+        // Fast mode has no parser, so `unparsed` is absent from its JSON. A
+        // zero there would claim the parser followed everything.
+        let value: serde_json::Value =
+            serde_json::from_str(&sample_report().to_json().unwrap()).unwrap();
+        assert!(value["summary"].get("unparsed").is_none());
     }
 
     #[test]

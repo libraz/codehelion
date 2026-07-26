@@ -307,6 +307,9 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
             lines: inputs.lexed.iter().map(|file| file.lines).sum(),
             tokens: as_u64(inputs.report.stats.tokens),
             lexer_diagnostics: as_u64(inputs.lexed.iter().map(|file| file.diagnostics).sum()),
+            // Fast mode lexes and does not parse, so it has nothing to report
+            // here; a zero would read as "the parser followed everything".
+            unparsed: None,
             excluded: report::ExcludedCounts {
                 generated: as_u64(inputs.discovered.suppressed_generated.len()),
                 by_glob: as_u64(inputs.glob_excluded),

@@ -100,6 +100,16 @@
         "lines": { "type": "integer" },
         "tokens": { "type": "integer" },
         "lexer_diagnostics": { "type": "integer" },
+        "unparsed": {
+          "type": "object",
+          "description": "How much of the source the parser could not follow. Absent in Fast mode, which lexes and does not parse.",
+          "required": ["files", "bytes", "share"],
+          "properties": {
+            "files": { "type": "integer", "description": "Files with at least one region the parser could not follow." },
+            "bytes": { "type": "integer", "description": "Bytes inside those regions, counting overlapping regions once." },
+            "share": { "type": "number", "description": "Those bytes as a share of every analysed byte." }
+          }
+        },
         "excluded": {
           "type": "object",
           "description": "Files the scan dropped, by cause; nothing is omitted silently.",

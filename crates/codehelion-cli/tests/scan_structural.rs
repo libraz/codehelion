@@ -224,6 +224,45 @@ fn structural_results_are_a_distinct_build_variant_from_fast() {
 }
 
 #[test]
+fn a_source_the_parser_could_not_follow_is_reported_as_such() {
+    // An error-tolerant parser keeps going, so a file it could not read still
+    // reaches detection and still contributes units. Without this count a
+    // scan that understood a fraction of a project is indistinguishable from
+    // one that understood all of it and found little.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::write(root.join("good.rs"), ALPHA_RS).unwrap();
+    std::fs::write(root.join("broken.rs"), "pub fn wrecked( { let x = ;;; \n").unwrap();
+
+    let value = scan_json(root);
+    let unparsed = &value["summary"]["unparsed"];
+    assert_eq!(unparsed["files"], 1, "only the broken file is counted");
+    assert!(unparsed["bytes"].as_u64().unwrap() > 0);
+    let share = unparsed["share"].as_f64().unwrap();
+    assert!((0.0..1.0).contains(&share), "a share of the scan: {share}");
+
+    cmd()
+        .current_dir(root)
+        .args(["scan", ".", "--mode", "structural"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("the parser could not follow"));
+}
+
+#[test]
+fn a_scan_the_parser_followed_says_nothing_about_coverage() {
+    let dir = fixture();
+    let value = scan_json(dir.path());
+    assert_eq!(value["summary"]["unparsed"]["files"], 0);
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("the parser could not follow").not());
+}
+
+#[test]
 fn both_modes_read_a_bare_header_the_same_way() {
     // The header grammar is settled once, during discovery, and Structural
     // rebuilds its own variant afterwards. If it rebuilt that variant from
