@@ -176,6 +176,74 @@ fn a_case_written_as_a_framework_macro_is_no_unit_in_c() {
     );
 }
 
+/// A store written out one byte at a time, at two widths — the shape C reaches
+/// for when a loop would cost more than it saves.
+const UNROLLED: &str = "\
+static void write_le32(void *dst, unsigned int value32)
+{
+    unsigned char *const p = (unsigned char *)dst;
+    p[0] = (unsigned char)value32;
+    p[1] = (unsigned char)(value32 >> 8);
+    p[2] = (unsigned char)(value32 >> 16);
+    p[3] = (unsigned char)(value32 >> 24);
+}
+
+static void write_le64(void *dst, unsigned long long value64)
+{
+    unsigned char *const p = (unsigned char *)dst;
+    p[0] = (unsigned char)value64;
+    p[1] = (unsigned char)(value64 >> 8);
+    p[2] = (unsigned char)(value64 >> 16);
+    p[3] = (unsigned char)(value64 >> 24);
+    p[4] = (unsigned char)(value64 >> 32);
+    p[5] = (unsigned char)(value64 >> 40);
+    p[6] = (unsigned char)(value64 >> 48);
+    p[7] = (unsigned char)(value64 >> 56);
+}
+";
+
+#[test]
+fn an_unrolled_run_is_not_a_clone_of_itself() {
+    // Every statement of the wider store summarises like every other, so each
+    // window of the run matches every shifted window of itself. Those pairs
+    // are rejected one by one for covering one stretch of code rather than
+    // two — and then arrive together anyway, as occurrences of one run, joined
+    // by the narrower store they all match. Reported that way, the run comes
+    // back as a clone of itself at four offsets.
+    let files = vec![CStructuralFrontend.parse(UNROLLED)];
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let report = structural::analyze(&files, &variant, &StructuralConfig::default());
+
+    assert!(
+        report.stats.region_overlapping > 0,
+        "the shifted windows have to be recognised, not merely absent"
+    );
+    for region in &report.regions {
+        let units: Vec<usize> = region
+            .occurrences
+            .iter()
+            .map(|occurrence| occurrence.unit)
+            .collect();
+        assert!(
+            units.iter().any(|unit| *unit != units[0]),
+            "a run reported inside one function only: {:?}",
+            region
+                .occurrences
+                .iter()
+                .map(|occurrence| (occurrence.start_line, occurrence.end_line))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // What the two functions do share is still reported: the narrower store is
+    // the wider one's first four bytes.
+    assert_eq!(
+        report.groups.groups.len(),
+        1,
+        "the two stores are one group"
+    );
+}
+
 /// One function written twice, once per platform, the way a portable C source
 /// writes it — beside an unguarded pair that really is duplicated.
 const PORTABLE: &str = "\

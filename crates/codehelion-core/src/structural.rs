@@ -248,6 +248,10 @@ pub struct StructuralStats {
     /// candidate run shared: the statement summaries agreed but the code did
     /// not.
     pub region_singletons: usize,
+    /// Occurrences dropped for covering source a kept occurrence of the same
+    /// run already covers, which makes them one stretch of code rather than
+    /// two instances of it.
+    pub region_overlapping: usize,
     /// Confirmed runs dropped because a longer run covers every one of their
     /// occurrences and claims at least as much about them.
     pub region_subsumed: usize,
@@ -345,7 +349,7 @@ pub fn analyze(
     // Stage: fold the window seeds into the maximal shared runs they describe,
     // then confirm each candidate run against the tokens it actually covers.
     let candidate_regions = maximal::consolidate(&candidate.pairs, &config.maximal);
-    let (mut confirmed, mut singletons) = confirm_regions(
+    let (mut confirmed, mut singletons, mut overlapping) = confirm_regions(
         &candidate_regions.shared,
         files,
         &offsets,
@@ -355,6 +359,7 @@ pub fn analyze(
     let merged = grow_runs(
         &mut confirmed,
         &mut singletons,
+        &mut overlapping,
         files,
         &offsets,
         variant,
@@ -395,6 +400,7 @@ pub fn analyze(
         maximal: candidate_regions.stats,
         regions: regions.len(),
         region_singletons: singletons,
+        region_overlapping: overlapping,
         region_subsumed: subsumed,
         region_merged: merged,
         nested_pairs: lifted.nested,
@@ -474,15 +480,20 @@ fn verify_pairs(
 /// consistent renaming form a [`CloneClass::Type2`] region, and one whose
 /// tokens agree outright is [`CloneClass::Type1`]. An occurrence left without a
 /// partner is dropped and counted — the summaries agreed, the code did not.
+///
+/// Occurrences that hold the same content and cover the same source are also
+/// settled here: see [`distinct`] for why they arrive and why this is the stage
+/// that can tell them apart.
 fn confirm_regions(
     candidates: &[SharedRegion],
     files: &[SyntaxIrFile],
     offsets: &[usize],
     variant: &BuildVariant,
     literals: LiteralNorm,
-) -> (Vec<Confirmed>, usize) {
+) -> (Vec<Confirmed>, usize, usize) {
     let mut regions = Vec::new();
     let mut singletons = 0usize;
+    let mut overlapping = 0usize;
     for candidate in candidates {
         // Occurrences whose normalized content agrees are the same run up to
         // renaming; that is the coarsest claim this stage is willing to make.
@@ -501,6 +512,9 @@ fn confirm_regions(
                 .push((occurrence, side));
         }
         for class in classes.into_values() {
+            let kept = class.len();
+            let class = distinct(class);
+            overlapping += kept - class.len();
             if class.len() < 2 {
                 singletons += class.len();
                 continue;
@@ -538,7 +552,40 @@ fn confirm_regions(
     regions.dedup_by(|a, b| {
         a.region.fingerprint == b.region.fingerprint && a.region.occurrences == b.region.occurrences
     });
-    (regions, singletons)
+    (regions, singletons, overlapping)
+}
+
+/// Keep one occurrence per stretch of source, dropping any that overlaps one
+/// already kept.
+///
+/// A candidate set is the transitive closure over pairwise matches, so two
+/// occurrences that overlap each other can still arrive together by way of a
+/// third they both match — even though the pairwise stage rejects an
+/// overlapping pair as one stretch of code rather than two. That rejection has
+/// to hold here too, or a run of interchangeable statements comes back as a
+/// clone of itself: every shifted window of the run matches every other, and
+/// each window arrives as its own occurrence.
+///
+/// This is the stage that can decide it. Overlapping occurrences reach it only
+/// once they are known to hold the same content, so dropping one really does
+/// leave the same code behind. Deciding it earlier, on statement summaries
+/// alone, discards whichever overlapping window happens to sit first — which is
+/// not always the one that holds the shared content.
+///
+/// A class left with one occurrence is not a duplication and is dropped by the
+/// caller. `class` must be in occurrence order, which makes the survivor of an
+/// overlapping cluster its first member rather than an artefact of match order.
+fn distinct(class: Vec<(RegionOccurrence, RegionSide)>) -> Vec<(RegionOccurrence, RegionSide)> {
+    let mut kept: Vec<(RegionOccurrence, RegionSide)> = Vec::with_capacity(class.len());
+    for entry in class {
+        if kept.iter().any(|(_, other)| {
+            other.file == entry.1.file && maximal::intersects(other.range, entry.1.range)
+        }) {
+            continue;
+        }
+        kept.push(entry);
+    }
+    kept
 }
 
 /// Join the confirmed runs that describe one stretch at several offsets,
@@ -557,6 +604,7 @@ fn confirm_regions(
 fn grow_runs(
     confirmed: &mut Vec<Confirmed>,
     singletons: &mut usize,
+    overlapping: &mut usize,
     files: &[SyntaxIrFile],
     offsets: &[usize],
     variant: &BuildVariant,
@@ -566,8 +614,10 @@ fn grow_runs(
     if candidates.is_empty() {
         return 0;
     }
-    let (grown, dropped) = confirm_regions(&candidates, files, offsets, variant, literals);
+    let (grown, dropped, overlapped) =
+        confirm_regions(&candidates, files, offsets, variant, literals);
     *singletons += dropped;
+    *overlapping += overlapped;
     let before = confirmed.len();
     confirmed.extend(grown);
     confirmed.sort_by_key(|entry| entry.region.fingerprint);

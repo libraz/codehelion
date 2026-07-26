@@ -327,6 +327,11 @@ pub fn consolidate(pairs: &[CandidatePair], config: &MaximalConfig) -> RegionSet
 /// extent is part of its identity, so a run that matches one neighbour over
 /// six statements and another over four contributes two occurrences and lands
 /// in two sets, each internally consistent.
+///
+/// A set can hold occurrences that overlap each other, because the closure
+/// reaches them through a third occurrence they both match. Whether those are
+/// one stretch of code or two is not decidable from statement summaries, so it
+/// is left to content confirmation downstream.
 fn share(regions: &[CloneRegion]) -> Vec<SharedRegion> {
     let mut index: BTreeMap<RegionSide, usize> = BTreeMap::new();
     for region in regions {
