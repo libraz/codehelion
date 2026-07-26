@@ -237,7 +237,7 @@ fn a_source_the_parser_could_not_follow_is_reported_as_such() {
     let value = scan_json(root);
     let unparsed = &value["summary"]["unparsed"];
     assert_eq!(unparsed["files"], 1, "only the broken file is counted");
-    assert!(unparsed["bytes"].as_u64().unwrap() > 0);
+    assert!(unparsed["tokens"].as_u64().unwrap() > 0);
     let share = unparsed["share"].as_f64().unwrap();
     assert!((0.0..1.0).contains(&share), "a share of the scan: {share}");
 

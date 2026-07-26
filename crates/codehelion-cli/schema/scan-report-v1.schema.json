@@ -102,12 +102,12 @@
         "lexer_diagnostics": { "type": "integer" },
         "unparsed": {
           "type": "object",
-          "description": "How much of the source the parser could not follow. Absent in Fast mode, which lexes and does not parse.",
-          "required": ["files", "bytes", "share"],
+          "description": "Tokens the parser could not attach to any structure. Absent in Fast mode, which lexes and does not parse.",
+          "required": ["files", "tokens", "share"],
           "properties": {
-            "files": { "type": "integer", "description": "Files with at least one region the parser could not follow." },
-            "bytes": { "type": "integer", "description": "Bytes inside those regions, counting overlapping regions once." },
-            "share": { "type": "number", "description": "Those bytes as a share of every analysed byte." }
+            "files": { "type": "integer", "description": "Files holding at least one such token." },
+            "tokens": { "type": "integer", "description": "How many such tokens there are, excluding what error recovery salvaged." },
+            "share": { "type": "number", "description": "Those tokens as a share of every analysed token." }
           }
         },
         "excluded": {

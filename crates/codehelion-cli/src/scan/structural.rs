@@ -28,7 +28,7 @@ use codehelion_core::engine::{self, LiteralNorm};
 use codehelion_core::features::FEATURE_SCHEMA_VERSION;
 use codehelion_core::frontend::Token;
 use codehelion_core::grouping::StructuralGroup;
-use codehelion_core::ir::{ByteRange, StructuralFrontend, SyntaxIrFile};
+use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
 use codehelion_core::stable_id::{self, FP_SCHEMA_VERSION};
 use codehelion_core::structural::{
     self, GroupDetail, RegionOccurrence, StructuralConfig, StructuralRegion, StructuralReport,
@@ -57,10 +57,8 @@ struct SourceMeta {
     /// Source lines in the file.
     lines: u64,
     diagnostics: usize,
-    /// Bytes in the file.
-    bytes: u64,
-    /// Bytes inside regions the parser could not follow.
-    unparsed_bytes: u64,
+    /// Tokens the parser could not attach to any structure.
+    unaccounted_tokens: u64,
 }
 
 /// One parsed source file: its Syntax IR plus the metadata that travels with
@@ -180,10 +178,7 @@ fn parse_one(source: &SourceUnit, timeout: std::time::Duration) -> FileOutcome<P
     if started.elapsed() > timeout {
         return FileOutcome::TimedOut;
     }
-    // Error regions nest, so the ranges are merged before they are measured;
-    // adding them up would count an outer region's bytes once per region
-    // inside it and report more unparsed source than the file holds.
-    let unparsed_bytes = merged_length(&ir.error_ranges);
+    let unaccounted_tokens = as_u64(ir.unaccounted_tokens());
     FileOutcome::Done(Box::new(ParsedSource {
         meta: SourceMeta {
             relative_path: source.relative_path.to_string_lossy().into_owned(),
@@ -191,27 +186,10 @@ fn parse_one(source: &SourceUnit, timeout: std::time::Duration) -> FileOutcome<P
             marker_lines: suppress::marker_lines(&text),
             lines: u64::try_from(text.lines().count()).unwrap_or(u64::MAX),
             diagnostics: ir.diagnostics.len(),
-            bytes: as_u64(text.len()),
-            unparsed_bytes,
+            unaccounted_tokens,
         },
         ir,
     }))
-}
-
-/// Total length of `ranges` counting overlapping bytes once.
-fn merged_length(ranges: &[ByteRange]) -> u64 {
-    let mut sorted: Vec<&ByteRange> = ranges.iter().collect();
-    sorted.sort_unstable_by_key(|range| (range.start, range.end));
-    let mut total = 0u64;
-    let mut covered = 0usize;
-    for range in sorted {
-        let start = range.start.max(covered);
-        if range.end > start {
-            total += as_u64(range.end - start);
-            covered = range.end;
-        }
-    }
-    total
 }
 
 /// Build the structural stage configuration from the effective scan
@@ -875,8 +853,8 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
             tokens: as_u64(inputs.irs.iter().map(|ir| ir.tokens.len()).sum::<usize>()),
             lexer_diagnostics: as_u64(inputs.files.iter().map(|file| file.diagnostics).sum()),
             unparsed: Some(report::UnparsedCounts::new(
-                inputs.files.iter().map(|file| file.unparsed_bytes),
-                inputs.files.iter().map(|file| file.bytes).sum(),
+                inputs.files.iter().map(|file| file.unaccounted_tokens),
+                as_u64(inputs.irs.iter().map(|ir| ir.tokens.len()).sum::<usize>()),
             )),
             excluded: report::ExcludedCounts {
                 generated: as_u64(discovered.suppressed_generated.len()),
@@ -1436,38 +1414,5 @@ fn breakdown_row(group: &StructuralGroup, detail: &GroupDetail) -> SimilarityBre
         composite: breakdown.composite,
         min_pairwise: group.min_pairwise,
         confidence_band: group.confidence,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn range(start: usize, end: usize) -> ByteRange {
-        ByteRange { start, end }
-    }
-
-    #[test]
-    fn nested_error_regions_are_measured_once() {
-        // An error-tolerant parser marks a region and the regions inside it,
-        // so summing the ranges would report more unreadable source than the
-        // file holds — up to several times its length on a badly broken file.
-        assert_eq!(merged_length(&[range(0, 100), range(10, 20)]), 100);
-        assert_eq!(merged_length(&[range(10, 20), range(0, 100)]), 100);
-    }
-
-    #[test]
-    fn separate_error_regions_add_up() {
-        assert_eq!(merged_length(&[range(0, 10), range(30, 45)]), 25);
-    }
-
-    #[test]
-    fn partly_overlapping_error_regions_count_their_union() {
-        assert_eq!(merged_length(&[range(0, 30), range(20, 50)]), 50);
-    }
-
-    #[test]
-    fn a_file_the_parser_followed_has_nothing_to_measure() {
-        assert_eq!(merged_length(&[]), 0);
     }
 }

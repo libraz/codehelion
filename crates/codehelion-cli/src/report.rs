@@ -260,26 +260,36 @@ pub struct ExcludedCounts {
 /// units describe error recovery rather than the code. Without this the two
 /// are indistinguishable in a report: a scan that read a tenth of a project
 /// looks exactly like a scan that read all of it and found little.
+///
+/// The measure is tokens rather than bytes, and it excludes what recovery
+/// salvaged. Recovery routinely opens one error region around far more than
+/// the construct that caused it, so the region's extent is not a measure of
+/// anything; see [`SyntaxIrFile::unaccounted_tokens`].
+///
+/// [`SyntaxIrFile::unaccounted_tokens`]: codehelion_core::ir::SyntaxIrFile::unaccounted_tokens
 #[derive(Debug, Serialize)]
 pub struct UnparsedCounts {
-    /// Files with at least one region the parser could not follow.
+    /// Files holding at least one token the parser could not attach to any
+    /// structure.
     pub files: u64,
-    /// Bytes inside those regions.
-    pub bytes: u64,
-    /// Those bytes as a share of every analysed byte, rounded to four places.
+    /// How many such tokens there are.
+    pub tokens: u64,
+    /// Those tokens as a share of every analysed token, rounded to four
+    /// places.
     pub share: f64,
 }
 
 impl UnparsedCounts {
-    /// Tally regions covering `bytes` per file against `total` analysed bytes.
+    /// Tally the unaccounted tokens `per_file` against `total` analysed
+    /// tokens.
     #[must_use]
     pub fn new(per_file: impl IntoIterator<Item = u64>, total: u64) -> Self {
         let mut files = 0;
         let mut unparsed = 0;
-        for bytes in per_file {
-            if bytes > 0 {
+        for tokens in per_file {
+            if tokens > 0 {
                 files += 1;
-                unparsed += bytes;
+                unparsed += tokens;
             }
         }
         // Ratios of counts this size lose nothing that a report shows.
@@ -291,7 +301,7 @@ impl UnparsedCounts {
         };
         Self {
             files,
-            bytes: unparsed,
+            tokens: unparsed,
             share,
         }
     }
@@ -662,7 +672,7 @@ impl Report {
         {
             writeln!(
                 out,
-                "    the parser could not follow {:.1}% of the source, over {} of {} files",
+                "    the parser could not follow {:.2}% of the tokens, over {} of {} files",
                 unparsed.share * 100.0,
                 unparsed.files,
                 summary.files.total,
@@ -1384,17 +1394,17 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn the_unparsed_share_counts_files_and_bytes_against_the_whole_scan() {
+    fn the_unparsed_share_counts_files_and_tokens_against_the_whole_scan() {
         let counts = UnparsedCounts::new([0, 250, 0, 750], 4000);
-        assert_eq!(counts.files, 2, "only the files with a region count");
-        assert_eq!(counts.bytes, 1000);
+        assert_eq!(counts.files, 2, "only the files that lost something count");
+        assert_eq!(counts.tokens, 1000);
         assert!((counts.share - 0.25).abs() < f64::EPSILON);
     }
 
     #[test]
     fn a_scan_the_parser_followed_reports_a_share_of_nothing() {
         let clean = UnparsedCounts::new([0, 0], 4000);
-        assert_eq!((clean.files, clean.bytes), (0, 0));
+        assert_eq!((clean.files, clean.tokens), (0, 0));
         assert!(clean.share.abs() < f64::EPSILON);
         // An empty scan divides by nothing rather than producing a NaN that
         // would serialize as `null` and read as "not measured".
