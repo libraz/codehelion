@@ -9,10 +9,16 @@
 # Extraction is from the object database, never from a working tree — a tree
 # with uncommitted edits shifts line numbers underneath the labels.
 #
+# A case that records an `origin` URL is fetched into `corpus/external/<case>`
+# on first use, so the case is reproducible on any machine. A case with only a
+# local `repo` path is reproducible only where that path exists.
+#
 # Usage: corpus/scripts/materialize-labeled.sh [case ...]
 set -euo pipefail
 
-labeled_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../labeled" && pwd)"
+corpus_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+labeled_dir="$corpus_dir/labeled"
+external_dir="$corpus_dir/external"
 
 read_key() {
   # Value of a top-level `key = "..."` in a snapshot.toml, ignoring comments.
@@ -23,6 +29,26 @@ read_paths() {
   # Values of the `paths = ["a", "b"]` array in a snapshot.toml.
   sed -n 's/^paths[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "$1" |
     tr ',' '\n' | tr -d ' "' | grep -v '^$'
+}
+
+fetch_origin() {
+  # Make $commit available in a local mirror of $origin, cloning on first use.
+  # Kept under corpus/external, which is git-ignored: nothing fetched here is
+  # redistributed by this repository.
+  local name="$1" origin="$2" commit="$3" dir="$external_dir/$name"
+  if [ ! -d "$dir/.git" ]; then
+    echo "$name: cloning $origin" >&2
+    mkdir -p "$dir"
+    git init --quiet "$dir"
+    git -C "$dir" remote add origin "$origin"
+  fi
+  if ! git -C "$dir" cat-file -e "$commit^{commit}" 2>/dev/null; then
+    # Fetching one commit needs its full hash; fall back to everything when
+    # the server declines to serve a bare object.
+    git -C "$dir" fetch --quiet --depth 1 origin "$commit" ||
+      git -C "$dir" fetch --quiet --tags origin
+  fi
+  echo "$dir"
 }
 
 cases=("$@")
@@ -41,9 +67,18 @@ for name in "${cases[@]}"; do
     continue
   fi
 
+  origin="$(read_key "$manifest" origin)"
   repo="$(read_key "$manifest" repo)"
   commit="$(read_key "$manifest" commit)"
   mapfile -t paths < <(read_paths "$manifest")
+
+  if [ -n "$origin" ]; then
+    repo="$(fetch_origin "$name" "$origin" "$commit")" || {
+      echo "$name: could not fetch $commit from $origin" >&2
+      status=1
+      continue
+    }
+  fi
 
   if [ ! -d "$repo/.git" ]; then
     echo "$name: $repo is not a git repository — clone it there first" >&2
