@@ -223,6 +223,9 @@ pub struct StructuralStats {
     /// Confirmed runs dropped because a longer run covers every one of their
     /// occurrences and claims at least as much about them.
     pub region_subsumed: usize,
+    /// Longer runs made by joining confirmed runs that describe one stretch at
+    /// two offsets. The parts they cover leave through `region_subsumed`.
+    pub region_merged: usize,
     /// Candidate pairs dropped because one unit encloses the other.
     pub nested_pairs: usize,
     /// Candidate pairs dropped because the two units sit under different arms
@@ -303,13 +306,23 @@ pub fn analyze(
     // Stage: fold the window seeds into the maximal shared runs they describe,
     // then confirm each candidate run against the tokens it actually covers.
     let candidate_regions = maximal::consolidate(&candidate.pairs, &config.maximal);
-    let (mut regions, singletons) = confirm_regions(
+    let (mut confirmed, mut singletons) = confirm_regions(
         &candidate_regions.shared,
         files,
         &offsets,
         variant,
         config.literals,
     );
+    let merged = grow_runs(
+        &mut confirmed,
+        &mut singletons,
+        files,
+        &offsets,
+        variant,
+        config.literals,
+    );
+    let mut regions: Vec<StructuralRegion> =
+        confirmed.into_iter().map(|entry| entry.region).collect();
     let subsumed = drop_subsumed(&mut regions);
 
     // Stage: precise verification of each distinct unit pair.
@@ -358,6 +371,7 @@ pub fn analyze(
         regions: regions.len(),
         region_singletons: singletons,
         region_subsumed: subsumed,
+        region_merged: merged,
         nested_pairs: lifted.nested,
         alternative_pairs: lifted.alternatives,
         unit_pairs: pairs.len(),
@@ -411,13 +425,14 @@ fn confirm_regions(
     offsets: &[usize],
     variant: &BuildVariant,
     literals: LiteralNorm,
-) -> (Vec<StructuralRegion>, usize) {
+) -> (Vec<Confirmed>, usize) {
     let mut regions = Vec::new();
     let mut singletons = 0usize;
     for candidate in candidates {
         // Occurrences whose normalized content agrees are the same run up to
         // renaming; that is the coarsest claim this stage is willing to make.
-        let mut classes: BTreeMap<FragmentFingerprint, Vec<RegionOccurrence>> = BTreeMap::new();
+        let mut classes: BTreeMap<FragmentFingerprint, Vec<(RegionOccurrence, RegionSide)>> =
+            BTreeMap::new();
         for &side in &candidate.occurrences {
             let Some((occurrence, normalized)) =
                 resolve_occurrence(side, files, offsets, variant, literals)
@@ -425,13 +440,18 @@ fn confirm_regions(
                 singletons += 1;
                 continue;
             };
-            classes.entry(normalized).or_default().push(occurrence);
+            classes
+                .entry(normalized)
+                .or_default()
+                .push((occurrence, side));
         }
-        for occurrences in classes.into_values() {
-            if occurrences.len() < 2 {
-                singletons += occurrences.len();
+        for class in classes.into_values() {
+            if class.len() < 2 {
+                singletons += class.len();
                 continue;
             }
+            let (occurrences, sides): (Vec<RegionOccurrence>, Vec<RegionSide>) =
+                class.into_iter().unzip();
             let contents: Vec<FragmentFingerprint> =
                 occurrences.iter().map(|entry| entry.content).collect();
             // Identical raw content everywhere means the copies differ in
@@ -441,23 +461,220 @@ fn confirm_regions(
             } else {
                 CloneClass::Type2
             };
-            regions.push(StructuralRegion {
-                fingerprint: stable_id::clone_group_fingerprint(variant, clone_type, &contents),
-                clone_type,
-                statements: candidate.statements,
-                occurrences,
+            regions.push(Confirmed {
+                region: StructuralRegion {
+                    fingerprint: stable_id::clone_group_fingerprint(variant, clone_type, &contents),
+                    clone_type,
+                    statements: candidate.statements,
+                    occurrences,
+                },
+                sides,
             });
         }
     }
     // Position-free order: two runs are told apart by content, never by where
     // they happen to sit.
     regions.sort_by(|a, b| {
-        a.fingerprint
-            .cmp(&b.fingerprint)
-            .then_with(|| a.clone_type.name().cmp(b.clone_type.name()))
+        a.region
+            .fingerprint
+            .cmp(&b.region.fingerprint)
+            .then_with(|| a.region.clone_type.name().cmp(b.region.clone_type.name()))
     });
-    regions.dedup_by(|a, b| a.fingerprint == b.fingerprint && a.occurrences == b.occurrences);
+    regions.dedup_by(|a, b| {
+        a.region.fingerprint == b.region.fingerprint && a.region.occurrences == b.region.occurrences
+    });
     (regions, singletons)
+}
+
+/// Join the confirmed runs that describe one stretch at several offsets,
+/// confirm the joins in turn, and return how many longer runs that produced.
+///
+/// Confirmation is what makes the joins possible, so it has to run first: an
+/// occurrence's extent is part of its identity while the runs are still
+/// candidates, and only once the occurrences that do not hold the content are
+/// gone does a family of runs turn out to be one stretch.
+///
+/// One sweep is enough. [`merge_adjacent`] grows each chain to its maximum in
+/// a single pass, so a second round would have nothing left to reach; joining
+/// pair by pair and repeating would instead emit every intermediate length,
+/// which on a long repetitive block is quadratically many candidates to
+/// confirm.
+fn grow_runs(
+    confirmed: &mut Vec<Confirmed>,
+    singletons: &mut usize,
+    files: &[SyntaxIrFile],
+    offsets: &[usize],
+    variant: &BuildVariant,
+    literals: LiteralNorm,
+) -> usize {
+    let candidates = merge_adjacent(confirmed);
+    if candidates.is_empty() {
+        return 0;
+    }
+    let (grown, dropped) = confirm_regions(&candidates, files, offsets, variant, literals);
+    *singletons += dropped;
+    let before = confirmed.len();
+    confirmed.extend(grown);
+    confirmed.sort_by_key(|entry| entry.region.fingerprint);
+    confirmed.dedup_by(|a, b| {
+        a.region.fingerprint == b.region.fingerprint && a.region.occurrences == b.region.occurrences
+    });
+    confirmed.len() - before
+}
+
+/// A confirmed run together with the candidate sides it was confirmed from.
+///
+/// The sides carry the statement indices [`merge_adjacent`] needs and the
+/// report does not, so they travel beside the region rather than inside it.
+struct Confirmed {
+    region: StructuralRegion,
+    sides: Vec<RegionSide>,
+}
+
+/// Candidate runs made by joining confirmed runs that continue one another.
+///
+/// The window fold already joins seeds that touch, but it works on candidate
+/// occurrence sets, and an occurrence's extent is part of its identity there:
+/// a stretch shared six statements deep with one neighbour and four with
+/// another is two sets, deliberately, because merging them would credit the
+/// second neighbour with statements it does not have. Confirmation then drops
+/// whichever occurrences do not really hold the content — and once the short
+/// neighbour is gone, what is left of the two sets is one run reported twice,
+/// at two offsets, with the same occurrences.
+///
+/// Joining them is sound for the same reason the fold is: runs at one
+/// alignment that overlap or touch compose into their union, every statement
+/// of which is covered by one of them at the same relative position. Nothing
+/// is assumed about the join — the result goes back through confirmation like
+/// any other candidate, and the parts it covers are dropped afterwards by
+/// [`drop_subsumed`], which keeps a part making a stricter claim than the
+/// whole.
+///
+/// Runs are grown in one sweep per alignment rather than pair by pair. Pairing
+/// every run with every other would emit each intermediate length as its own
+/// candidate, and a long repetitive block has quadratically many of those; the
+/// sweep emits only the maximal run each chain reaches, which is the only one
+/// that survives [`drop_subsumed`] anyway.
+fn merge_adjacent(confirmed: &[Confirmed]) -> Vec<SharedRegion> {
+    // Runs join only if their occurrences sit in the same places and hold the
+    // same offsets relative to one another, so that is the bucket key: within
+    // one bucket the runs differ in nothing but where the chain starts.
+    let mut alignments: BTreeMap<Alignment, Vec<&Confirmed>> = BTreeMap::new();
+    for entry in confirmed {
+        let Some(alignment) = alignment_of(entry) else {
+            continue;
+        };
+        alignments.entry(alignment).or_default().push(entry);
+    }
+
+    let mut joined = Vec::new();
+    for mut runs in alignments.into_values() {
+        runs.sort_by_key(|entry| entry.sides[0].run.start);
+        let mut chain: Option<Chain> = None;
+        for run in runs {
+            let touches = chain
+                .as_ref()
+                .is_some_and(|grown| run.sides[0].run.start <= grown.sides[0].run.end());
+            match chain.as_mut() {
+                Some(grown) if touches => grown.absorb(&run.sides),
+                _ => {
+                    if let Some(region) = chain.take().and_then(Chain::finish) {
+                        joined.push(region);
+                    }
+                    chain = Some(Chain::starting_at(&run.sides));
+                }
+            }
+        }
+        if let Some(region) = chain.and_then(Chain::finish) {
+            joined.push(region);
+        }
+    }
+    joined.sort_unstable();
+    joined.dedup();
+    joined
+}
+
+/// A run of runs, grown along one alignment.
+struct Chain {
+    /// The union so far, one entry per occurrence.
+    sides: Vec<RegionSide>,
+    /// The longest single run the chain has absorbed. The union is only worth
+    /// proposing when it is longer than this: a chain of one says nothing new,
+    /// and a run wholly inside another is containment, which
+    /// [`drop_subsumed`] settles without a fresh confirmation.
+    longest: u32,
+}
+
+impl Chain {
+    fn starting_at(sides: &[RegionSide]) -> Self {
+        Self {
+            sides: sides.to_vec(),
+            longest: sides.first().map_or(0, |side| side.run.length),
+        }
+    }
+
+    fn absorb(&mut self, sides: &[RegionSide]) {
+        for (grown, part) in self.sides.iter_mut().zip(sides) {
+            grown.run.length = part.run.end().max(grown.run.end()) - grown.run.start;
+            grown.range.start = grown.range.start.min(part.range.start);
+            grown.range.end = grown.range.end.max(part.range.end);
+        }
+        self.longest = self
+            .longest
+            .max(sides.first().map_or(0, |side| side.run.length));
+    }
+
+    /// Whether growing the chain has made two of its occurrences reach into
+    /// each other. Repetitive code matches a shifted copy of itself, and a
+    /// long enough union of those matches runs into its own other end: that is
+    /// one stretch of source, not two instances of anything. The fold has the
+    /// same guard for the same reason.
+    fn overlaps_itself(&self) -> bool {
+        self.sides.iter().enumerate().any(|(index, here)| {
+            self.sides[index + 1..].iter().any(|there| {
+                here.file == there.file && maximal::intersects(here.range, there.range)
+            })
+        })
+    }
+
+    fn finish(mut self) -> Option<SharedRegion> {
+        let statements = self.sides.first()?.run.length;
+        if statements <= self.longest {
+            return None;
+        }
+        if self.overlaps_itself() {
+            return None;
+        }
+        self.sides.sort_unstable();
+        Some(SharedRegion {
+            occurrences: self.sides,
+            statements,
+        })
+    }
+}
+
+/// How a run's occurrences sit relative to one another: where each is, and how
+/// far it starts from the first. Two runs with the same alignment describe the
+/// same stretch at different offsets along it.
+type Alignment = Vec<(usize, usize, u32, i64)>;
+
+/// A run's alignment, or `None` when it has no occurrences to align.
+fn alignment_of(entry: &Confirmed) -> Option<Alignment> {
+    let anchor = i64::from(entry.sides.first()?.run.start);
+    Some(
+        entry
+            .sides
+            .iter()
+            .map(|side| {
+                (
+                    side.file,
+                    side.unit,
+                    side.run.block,
+                    i64::from(side.run.start) - anchor,
+                )
+            })
+            .collect(),
+    )
 }
 
 /// Drop the runs a longer run already accounts for, returning how many went.
@@ -945,7 +1162,11 @@ const fn encloses(a: &Unit, b: &Unit) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{CloneClass, RegionOccurrence, StructuralRegion, drop_subsumed};
+    use super::{
+        CloneClass, Confirmed, RegionOccurrence, RegionSide, StructuralRegion, drop_subsumed,
+        merge_adjacent,
+    };
+    use crate::candidate::StatementRun;
     use crate::ir::ByteRange;
     use crate::stable_id::{CloneGroupFingerprint, FragmentFingerprint};
 
@@ -1073,5 +1294,120 @@ mod tests {
         drop_subsumed(&mut reversed);
         assert_eq!(ids(&forward), vec![3]);
         assert_eq!(ids(&reversed), vec![3]);
+    }
+
+    /// A confirmed run at one alignment: `spans` gives each occurrence's file
+    /// and the statement it starts at, all in one block.
+    fn confirmed(id: u8, statements: u32, spans: &[(usize, u32)]) -> Confirmed {
+        let sides: Vec<RegionSide> = spans
+            .iter()
+            .map(|&(file, start)| RegionSide {
+                file,
+                unit: 0,
+                run: StatementRun {
+                    block: 0,
+                    start,
+                    length: statements,
+                },
+                // Ten bytes a statement, so ranges follow the run.
+                range: ByteRange {
+                    start: (start as usize) * 10,
+                    end: (start as usize + statements as usize) * 10,
+                },
+            })
+            .collect();
+        let occurrences = sides
+            .iter()
+            .map(|side| occurrence(side.file, side.range.start, side.range.end))
+            .collect();
+        Confirmed {
+            region: StructuralRegion {
+                fingerprint: CloneGroupFingerprint::from_bytes([id; 16]),
+                clone_type: CloneClass::Type1,
+                statements,
+                occurrences,
+            },
+            sides,
+        }
+    }
+
+    #[test]
+    fn two_runs_describing_one_stretch_at_two_offsets_join() {
+        // Statements 2..7 in one file match 1..6 in another, and 3..8 match
+        // 2..7. That is one six-statement stretch, reported twice.
+        let confirmed = vec![
+            confirmed(1, 5, &[(0, 2), (1, 1)]),
+            confirmed(2, 5, &[(0, 3), (1, 2)]),
+        ];
+        let joined = merge_adjacent(&confirmed);
+        assert_eq!(joined.len(), 1);
+        assert_eq!(joined[0].statements, 6);
+        let starts: Vec<u32> = joined[0]
+            .occurrences
+            .iter()
+            .map(|side| side.run.start)
+            .collect();
+        assert_eq!(starts, vec![2, 1]);
+        assert_eq!(
+            joined[0].occurrences[0].range,
+            ByteRange { start: 20, end: 80 }
+        );
+    }
+
+    #[test]
+    fn runs_too_far_apart_to_touch_are_two_duplications() {
+        // A gap of statements neither run covers: joining would claim the
+        // statements in between match, which nothing checked.
+        let confirmed = vec![
+            confirmed(1, 4, &[(0, 0), (1, 0)]),
+            confirmed(2, 4, &[(0, 9), (1, 9)]),
+        ];
+        assert_eq!(merge_adjacent(&confirmed), vec![]);
+    }
+
+    #[test]
+    fn runs_that_shift_by_different_amounts_do_not_join() {
+        // One side advances by one statement and the other by three, so the
+        // two runs are not one stretch seen twice.
+        let confirmed = vec![
+            confirmed(1, 5, &[(0, 2), (1, 2)]),
+            confirmed(2, 5, &[(0, 3), (1, 5)]),
+        ];
+        assert_eq!(merge_adjacent(&confirmed), vec![]);
+    }
+
+    #[test]
+    fn runs_with_different_occurrence_counts_do_not_join() {
+        // The shorter run has a third copy, which the join would silently
+        // credit with statements it does not hold.
+        let confirmed = vec![
+            confirmed(1, 5, &[(0, 2), (1, 1)]),
+            confirmed(2, 5, &[(0, 3), (1, 2), (2, 4)]),
+        ];
+        assert_eq!(merge_adjacent(&confirmed), vec![]);
+    }
+
+    #[test]
+    fn runs_starting_together_are_left_to_containment() {
+        let confirmed = vec![
+            confirmed(1, 4, &[(0, 2), (1, 1)]),
+            confirmed(2, 6, &[(0, 2), (1, 1)]),
+        ];
+        assert_eq!(merge_adjacent(&confirmed), vec![]);
+    }
+
+    #[test]
+    fn joining_does_not_depend_on_the_order_the_runs_arrive_in() {
+        let build = || {
+            vec![
+                confirmed(1, 5, &[(0, 2), (1, 1)]),
+                confirmed(2, 5, &[(0, 3), (1, 2)]),
+                confirmed(3, 5, &[(0, 4), (1, 3)]),
+            ]
+        };
+        let forward = merge_adjacent(&build());
+        let reversed: Vec<Confirmed> = build().into_iter().rev().collect();
+        assert_eq!(forward, merge_adjacent(&reversed));
+        assert!(!forward.is_empty());
     }
 }

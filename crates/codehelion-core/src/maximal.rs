@@ -416,7 +416,8 @@ const fn overlaps_itself(region: &CloneRegion) -> bool {
 }
 
 /// Whether two byte ranges share at least one byte.
-const fn intersects(a: ByteRange, b: ByteRange) -> bool {
+#[must_use]
+pub const fn intersects(a: ByteRange, b: ByteRange) -> bool {
     a.start < b.end && b.start < a.end
 }
 

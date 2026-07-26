@@ -774,6 +774,7 @@ fn funnel(stats: &structural::StructuralStats) -> Vec<report::FunnelStage> {
             .dropping("self_overlapping", as_u64(maximal.self_overlapping))
             .dropping("contained", as_u64(maximal.absorbed)),
         report::FunnelStage::new("duplicated runs", as_u64(maximal.shared)),
+        report::FunnelStage::new("joined runs", as_u64(stats.region_merged)),
         report::FunnelStage::new("confirmed runs", as_u64(stats.regions))
             .dropping("unshared_content", as_u64(stats.region_singletons))
             .dropping("subsumed", as_u64(stats.region_subsumed)),
