@@ -180,6 +180,7 @@ fn reruns_produce_the_same_log() {
         run["invocations"][0]["endTimeUtc"] = Value::Null;
         run["properties"]["run_id"] = Value::Null;
         run["properties"]["summary"]["changes"] = Value::Null;
+        run["properties"]["summary"]["audit"] = Value::Null;
         logs.push(log);
     }
     assert_eq!(logs[0], logs[1], "reruns agree token for token");

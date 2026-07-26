@@ -37,7 +37,7 @@ use codehelion_core::structural::{
 use codehelion_core::test_code::TEST_CODE_VERSION;
 use codehelion_core::verify::{SimilarityBreakdown, WEIGHT_VERSION};
 use codehelion_store::snapshot::{
-    FileRow, GroupRow, MemberRow, SimilarityBreakdownRow, Snapshot, UnitRow,
+    FileRow, GroupOrigin, GroupRow, MemberRow, SimilarityBreakdownRow, Snapshot, UnitRow,
 };
 
 use super::{
@@ -129,7 +129,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
     let changes = crate::scan::tree_changes(&db_path, &root, &variant, &sources)?;
     let finished_at = rfc3339_now();
-    let inputs = ReportInputs {
+    let mut inputs = ReportInputs {
         root: &root,
         db_path: &db_path,
         started_at: &started_at,
@@ -151,8 +151,10 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         unreadable,
         timed_out,
         changes,
+        audit: None,
     };
-    let run_id = record(&cfg, &inputs, crate::scan::file_rows(&sources))?;
+    let (run_id, audit) = record(&cfg, &inputs, crate::scan::file_rows(&sources))?;
+    inputs.audit = audit;
     let mut model = build_report(&inputs, run_id, &discovered);
     // Counted against the assembled report rather than the raw analysis: a
     // stale entry is one whose duplication this run does not list.
@@ -603,6 +605,7 @@ struct ReportInputs<'a> {
     timed_out: u64,
     /// What moved since the previous scan of this tree, when comparable.
     changes: Option<report::TreeChanges>,
+    audit: Option<report::AuditSummary>,
 }
 
 impl ReportInputs<'_> {
@@ -911,6 +914,7 @@ fn summary(
             skipped: discovered.skipped.total() + inputs.unreadable + inputs.timed_out,
         },
         changes: inputs.changes,
+        audit: inputs.audit.clone(),
         // Filled in after the groups are assembled, which is what a
         // stale entry has to be counted against.
         baseline: None,
@@ -992,6 +996,7 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                         0,
                     )
                     .to_hex(),
+                    content: unit.content.to_hex(),
                     file: file.relative_path.clone(),
                     start_line: unit.start_line,
                     end_line: unit.end_line,
@@ -1062,6 +1067,7 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                         0,
                     )
                     .to_hex(),
+                    content: unit.content.to_hex(),
                     file: file.relative_path.clone(),
                     start_line: unit.start_line,
                     end_line: unit.end_line,
@@ -1121,6 +1127,7 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                         rank,
                     )
                     .to_hex(),
+                    content: occurrence.content.to_hex(),
                     file: file.relative_path.clone(),
                     start_line: occurrence.start_line,
                     end_line: occurrence.end_line,
@@ -1216,8 +1223,15 @@ fn detector_versions() -> Vec<(String, String)> {
 }
 
 /// Assemble and persist the snapshot; returns the recorded run id.
-fn record(cfg: &Config, inputs: &ReportInputs<'_>, files: Vec<FileRow>) -> Result<i64> {
-    let (units, groups) = snapshot_rows(inputs);
+fn record(
+    cfg: &Config,
+    inputs: &ReportInputs<'_>,
+    files: Vec<FileRow>,
+) -> Result<(i64, Option<report::AuditSummary>)> {
+    let (units, mut groups) = snapshot_rows(inputs);
+    let mut store = open_store(inputs.db_path)?;
+    let audit =
+        crate::scan::attach_history(&store, inputs.root, inputs.variant, &units, &mut groups)?;
     let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
     let detector_versions = detector_versions();
     let root_path = inputs.root.to_string_lossy();
@@ -1235,8 +1249,7 @@ fn record(cfg: &Config, inputs: &ReportInputs<'_>, files: Vec<FileRow>) -> Resul
         groups,
         features: Vec::new(),
     };
-    let mut store = open_store(inputs.db_path)?;
-    Ok(store.record_snapshot(&snapshot)?)
+    Ok((store.record_snapshot(&snapshot)?, audit))
 }
 
 /// Turn the analysis into store rows. Every unit that hosts a member is
@@ -1296,6 +1309,7 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
             let medoid = &inputs.analysis.units[group.canonical];
             GroupRow {
                 fingerprint: detail.fingerprint,
+                history: GroupOrigin::unconnected(&detail.fingerprint),
                 clone_type: group.clone_type,
                 member_scope: CloneScope::Unit,
                 test_code: detail.test_code,
@@ -1367,6 +1381,7 @@ fn split_pair_row(
         .unwrap_or(0);
     GroupRow {
         fingerprint: pair.fingerprint,
+        history: GroupOrigin::unconnected(&pair.fingerprint),
         clone_type: pair.class,
         member_scope: CloneScope::Unit,
         test_code: canonical.test_code && inputs.analysis.units[other].test_code,
@@ -1416,6 +1431,7 @@ fn region_row(
         });
     GroupRow {
         fingerprint: region.fingerprint,
+        history: GroupOrigin::unconnected(&region.fingerprint),
         clone_type: region.clone_type,
         member_scope: CloneScope::Fragment,
         test_code: region_test_code(inputs.analysis, region),

@@ -60,12 +60,14 @@ fn scan_semantic_reports_unavailable() {
 }
 
 #[test]
-fn audit_is_unavailable() {
+fn auditing_a_tree_that_was_never_scanned_says_to_scan_it() {
+    let dir = tempfile::tempdir().expect("temp dir");
     cmd()
+        .current_dir(dir.path())
         .arg("audit")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("not available in this release"));
+        .stderr(predicate::str::contains("run `codehelion scan` first"));
 }
 
 #[test]

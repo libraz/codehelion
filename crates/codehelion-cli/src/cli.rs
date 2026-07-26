@@ -45,8 +45,8 @@ pub enum Command {
         #[command(subcommand)]
         action: CacheAction,
     },
-    /// Audit compiled-artifact bloat.
-    Audit,
+    /// Report what became of the duplication since the previous audit.
+    Audit(AuditArgs),
     /// Analyse compiled artifacts.
     Artifact,
     /// Report source/artifact divergence.
@@ -142,6 +142,31 @@ pub struct ExplainArgs {
     /// Output format for the detail view.
     #[arg(long, value_enum, default_value_t = DetailFormat::Text)]
     pub format: DetailFormat,
+    /// Audit-database path, overriding the configured location.
+    #[arg(long)]
+    pub db: Option<PathBuf>,
+}
+
+/// Arguments for the `audit` subcommand.
+#[derive(Debug, clap::Args)]
+pub struct AuditArgs {
+    /// Scanned path whose recorded runs are compared.
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+    /// Compare against this exported JSON scan report instead of against the
+    /// run recorded before the latest one.
+    #[arg(long)]
+    pub previous: Option<PathBuf>,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = DetailFormat::Text)]
+    pub format: DetailFormat,
+    /// Also list the groups that did not change.
+    #[arg(long)]
+    pub show_unchanged: bool,
+    /// Exit with a non-zero status if any duplication is new, spreading or
+    /// drifting apart.
+    #[arg(long)]
+    pub fail_on_new: bool,
     /// Audit-database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,

@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codehelion.dev/schema/audit-report-v1.schema.json",
+  "title": "codehelion audit report",
+  "description": "What became of a tree's duplication between two results. Every entry names one clone group and the state the comparison settled on, with the evidence the verdict rests on. States are judged on member content fingerprints; file paths and unit names decide only whether unchanged content is still in the same place, and line numbers decide nothing.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "root",
+    "previous",
+    "current",
+    "build_variant",
+    "summary",
+    "entries"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Version of this output format."
+    },
+    "root": {
+      "type": "string",
+      "description": "Absolute path of the audited tree."
+    },
+    "previous": { "$ref": "#/$defs/resultRef" },
+    "current": { "$ref": "#/$defs/resultRef" },
+    "build_variant": {
+      "type": "string",
+      "description": "Fingerprint of the build variant both results belong to. Results of different variants are never compared."
+    },
+    "summary": {
+      "type": "array",
+      "description": "How many groups are in each state, states holding none omitted.",
+      "items": {
+        "type": "object",
+        "required": ["state", "count"],
+        "additionalProperties": false,
+        "properties": {
+          "state": { "$ref": "#/$defs/state" },
+          "count": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "state": {
+      "enum": [
+        "new",
+        "expanded",
+        "diverged",
+        "reclassified",
+        "moved",
+        "reduced",
+        "resolved",
+        "unchanged"
+      ]
+    },
+    "resultRef": {
+      "type": "object",
+      "required": ["source", "finished_at"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "How the result was reached: a run id, or the path of an exported scan report."
+        },
+        "run_id": { "type": "integer" },
+        "finished_at": {
+          "type": "string",
+          "description": "RFC 3339 finish time of the run."
+        }
+      }
+    },
+    "occurrence": {
+      "type": "object",
+      "required": ["file"],
+      "additionalProperties": false,
+      "properties": {
+        "file": { "type": "string" },
+        "unit": { "type": "string" }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "required": [
+        "state",
+        "lineage",
+        "clone_type",
+        "scope",
+        "shared_content",
+        "overlap",
+        "parents",
+        "siblings",
+        "occurrences"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "state": { "$ref": "#/$defs/state" },
+        "lineage": {
+          "type": "string",
+          "description": "The history this group belongs to, carried unchanged across every state but a new one. Derived from the group fingerprint the history was first observed at, which is where the record begins and not necessarily where the duplication did."
+        },
+        "group": {
+          "type": "string",
+          "description": "The group's fingerprint in the current result; absent for a resolved group."
+        },
+        "previous_group": {
+          "type": "string",
+          "description": "The fingerprint of the group this one descends from; absent for a new group."
+        },
+        "clone_type": { "enum": ["type-1", "type-2", "type-3"] },
+        "scope": { "enum": ["unit", "fragment"] },
+        "members": { "type": "integer", "minimum": 0 },
+        "previous_members": { "type": "integer", "minimum": 0 },
+        "shared_content": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Member contents both sides hold."
+        },
+        "overlap": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Shared content as a fraction of the smaller group, which is what connected the two."
+        },
+        "parents": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Previous groups this one descends from; more than one is a merge."
+        },
+        "siblings": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Groups the primary parent fed; more than one is a split."
+        },
+        "relocations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["from", "to"],
+            "additionalProperties": false,
+            "properties": {
+              "from": { "$ref": "#/$defs/occurrence" },
+              "to": { "$ref": "#/$defs/occurrence" }
+            }
+          }
+        },
+        "occurrences": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/occurrence" }
+        }
+      }
+    }
+  }
+}

@@ -153,10 +153,10 @@ fn json_reports_carry_the_breakdown_and_stay_deterministic() {
         }
         // The second run knows a first run happened. That is the comparison
         // working, not the findings moving.
-        value["summary"]
-            .as_object_mut()
-            .unwrap()
-            .insert("changes".to_string(), serde_json::Value::Null);
+        let summary = value["summary"].as_object_mut().unwrap();
+        for key in ["changes", "audit"] {
+            summary.insert(key.to_string(), serde_json::Value::Null);
+        }
         documents.push(value);
     }
     assert_eq!(documents[0], documents[1], "reruns agree token for token");

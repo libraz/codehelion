@@ -22,6 +22,7 @@ pub mod sarif;
 
 use std::io::{self, Write};
 
+use codehelion_core::lineage::{AuditDiff, AuditState};
 use serde::{Deserialize, Serialize};
 
 /// Version of the JSON report format.
@@ -126,6 +127,9 @@ pub struct Summary {
     /// compare against.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changes: Option<TreeChanges>,
+    /// What became of the duplication since the previous audit of this tree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit: Option<AuditSummary>,
     /// What the baseline hid, when the scan was given one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline: Option<BaselineStatus>,
@@ -270,6 +274,50 @@ pub struct TreeChanges {
     pub added: u64,
     /// Files the previous scan read and this one did not.
     pub removed: u64,
+}
+
+/// What became of the tree's duplication since the previous audit of it.
+///
+/// The counts are of clone groups, not of files: two scans of a tree nobody
+/// touched agree here trivially, and the interesting case is the tree that
+/// changed in ways that left the duplication where it was. `codehelion audit`
+/// lists which group is in which state; this says how many, so a scan that
+/// found something new says so without being asked.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditSummary {
+    /// Row id of the run this is measured against.
+    pub since_run_id: i64,
+    /// How many groups are in each state, states with no group omitted, in
+    /// the order the states are listed.
+    pub states: Vec<StateCount>,
+}
+
+/// How many groups one audit state holds.
+#[derive(Debug, Clone, Serialize)]
+pub struct StateCount {
+    /// State name (`new`, `unchanged`, `resolved`, ...).
+    pub state: String,
+    /// Groups in it.
+    pub count: u64,
+}
+
+/// Count each state of a comparison, dropping the ones nothing is in.
+///
+/// An empty list is the honest report of two runs that share no groups at all,
+/// and it is distinguishable from an absent summary, which means there was
+/// nothing to compare against.
+#[must_use]
+pub fn state_counts(diff: &AuditDiff) -> Vec<StateCount> {
+    AuditState::all()
+        .into_iter()
+        .filter_map(|state| {
+            let count = diff.count(state);
+            (count > 0).then(|| StateCount {
+                state: state.name().to_string(),
+                count: count as u64,
+            })
+        })
+        .collect()
 }
 
 /// What a baseline did to this run's findings.
@@ -580,6 +628,13 @@ impl Similarity {
 pub struct Member {
     /// Stable per-occurrence finding identifier, hex-encoded.
     pub finding_id: String,
+    /// Content fingerprint of the matched slice, hex-encoded.
+    ///
+    /// What makes an exported report comparable with a later run: the finding
+    /// id is derived from the group fingerprint and moves whenever the group's
+    /// content does, so a diff keyed on it can only see identity, never
+    /// history.
+    pub content: String,
     /// File path relative to the scan root.
     pub file: String,
     /// 1-based first line.
@@ -729,6 +784,27 @@ impl Report {
                 changes.modified,
                 changes.added,
                 changes.removed,
+            )?;
+        }
+        // What the tree did and what its duplication did are separate facts:
+        // a refactor can rewrite half the files and leave every clone group
+        // exactly where it was, and an edit to one file can be the moment a
+        // clone group starts to drift.
+        if let Some(audit) = &summary.audit {
+            let states: Vec<String> = audit
+                .states
+                .iter()
+                .map(|entry| format!("{} {}", entry.count, entry.state))
+                .collect();
+            writeln!(
+                out,
+                "  audit since run {}: {}",
+                audit.since_run_id,
+                if states.is_empty() {
+                    "no groups on either side".to_string()
+                } else {
+                    states.join(", ")
+                },
             )?;
         }
         if let Some(baseline) = &summary.baseline {
@@ -1098,6 +1174,7 @@ pub(super) mod tests {
                 run_id: 1,
             },
             summary: Summary {
+                audit: None,
                 files: FileCounts {
                     total: 2,
                     rust: 2,
@@ -1166,6 +1243,7 @@ pub(super) mod tests {
             members: (0..7)
                 .map(|index| Member {
                     finding_id: format!("{index:032x}"),
+                    content: "c0".repeat(16),
                     file: format!("src/file{index}.rs"),
                     start_line: 1,
                     end_line: 9,
@@ -1204,6 +1282,7 @@ pub(super) mod tests {
             members: vec![
                 Member {
                     finding_id: "1".repeat(32),
+                    content: "c0".repeat(16),
                     file: "vendor/a.rs".to_string(),
                     start_line: 1,
                     end_line: 5,
@@ -1213,6 +1292,7 @@ pub(super) mod tests {
                 },
                 Member {
                     finding_id: "2".repeat(32),
+                    content: "c0".repeat(16),
                     file: "vendor/b.rs".to_string(),
                     start_line: 1,
                     end_line: 5,
@@ -1257,6 +1337,7 @@ pub(super) mod tests {
             members: vec![
                 Member {
                     finding_id: "3".repeat(32),
+                    content: "c0".repeat(16),
                     file: "src/parse.rs".to_string(),
                     start_line: 10,
                     end_line: 30,
@@ -1266,6 +1347,7 @@ pub(super) mod tests {
                 },
                 Member {
                     finding_id: "4".repeat(32),
+                    content: "c0".repeat(16),
                     file: "src/parse.rs".to_string(),
                     start_line: 40,
                     end_line: 62,
@@ -1300,6 +1382,7 @@ pub(super) mod tests {
             members: vec![
                 Member {
                     finding_id: "5".repeat(32),
+                    content: "c0".repeat(16),
                     file: "src/render.rs".to_string(),
                     start_line: 17,
                     end_line: 21,
@@ -1309,6 +1392,7 @@ pub(super) mod tests {
                 },
                 Member {
                     finding_id: "6".repeat(32),
+                    content: "c0".repeat(16),
                     file: "src/audit.rs".to_string(),
                     start_line: 11,
                     end_line: 15,
@@ -1727,6 +1811,7 @@ pub(super) mod tests {
         let detail = FindingDetail {
             member: Member {
                 finding_id: "ab".repeat(16),
+                content: "c0".repeat(16),
                 file: "src/lib.rs".to_string(),
                 start_line: 3,
                 end_line: 12,
@@ -1770,6 +1855,7 @@ pub(super) mod tests {
         let detail = FindingDetail {
             member: Member {
                 finding_id: "ef".repeat(16),
+                content: "c0".repeat(16),
                 file: "src/b.rs".to_string(),
                 start_line: 1,
                 end_line: 20,

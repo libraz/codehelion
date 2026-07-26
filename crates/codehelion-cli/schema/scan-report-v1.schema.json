@@ -132,6 +132,28 @@
             "removed": { "type": "integer" }
           }
         },
+        "audit": {
+          "type": "object",
+          "description": "What became of the tree's duplication since the previous audit of it. Absent when there is no earlier run under these settings to compare against.",
+          "required": ["since_run_id", "states"],
+          "properties": {
+            "since_run_id": { "type": "integer" },
+            "states": {
+              "type": "array",
+              "description": "How many clone groups are in each audit state, states holding none omitted.",
+              "items": {
+                "type": "object",
+                "required": ["state", "count"],
+                "properties": {
+                  "state": {
+                    "enum": ["new", "expanded", "diverged", "reclassified", "moved", "reduced", "resolved", "unchanged"]
+                  },
+                  "count": { "type": "integer", "minimum": 0 }
+                }
+              }
+            }
+          }
+        },
         "baseline": {
           "type": "object",
           "description": "What the baseline the scan was given did to its findings. Absent when no baseline was given.",
@@ -325,9 +347,13 @@
     },
     "member": {
       "type": "object",
-      "required": ["finding_id", "file", "start_line", "end_line", "unit", "tokens", "canonical"],
+      "required": ["finding_id", "content", "file", "start_line", "end_line", "unit", "tokens", "canonical"],
       "properties": {
         "finding_id": { "$ref": "#/$defs/hex", "description": "Stable per-occurrence finding identifier." },
+        "content": {
+          "$ref": "#/$defs/hex",
+          "description": "Content fingerprint of the matched slice. Shared by every occurrence of the same content, and unlike the finding id it does not move when the group's fingerprint does — which is what lets a report exported here be compared against a run elsewhere."
+        },
         "file": { "type": "string", "description": "Path relative to the scan root." },
         "start_line": { "type": "integer" },
         "end_line": { "type": "integer" },

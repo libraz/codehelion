@@ -17,6 +17,7 @@
 //! `1` in `main`, and `clap` uses `2` for usage errors. Commands whose engine
 //! or store support is not built yet fail with an explicit message.
 
+pub mod audit;
 pub mod baseline;
 pub mod cli;
 pub mod config;
@@ -90,7 +91,7 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
         Command::Scan(args) => scan_command(args, out),
         Command::Explain(args) => explain(args, out),
         Command::Baseline { action } => baseline(action, out),
-        Command::Audit => bail!("audit is not available in this release"),
+        Command::Audit(args) => audit::run(args, out),
         Command::Artifact => bail!("artifact analysis is not available in this release"),
         Command::Divergence => bail!("divergence reporting is not available in this release"),
     }
@@ -128,6 +129,7 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
     let detail = report::FindingDetail {
         member: report::Member {
             finding_id: occurrence.member.finding_hex,
+            content: occurrence.member.content_hex,
             file: occurrence.member.file_path,
             start_line: line(occurrence.member.start_line),
             end_line: line(occurrence.member.end_line),

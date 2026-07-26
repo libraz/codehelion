@@ -579,10 +579,10 @@ fn json_reports_are_deterministic_across_reruns() {
         // The second run has a first run to compare itself with; what it
         // found in the sources is what has to agree, not what it knows about
         // its own history.
-        value["summary"]
-            .as_object_mut()
-            .unwrap()
-            .insert("changes".to_string(), serde_json::Value::Null);
+        let summary = value["summary"].as_object_mut().unwrap();
+        for key in ["changes", "audit"] {
+            summary.insert(key.to_string(), serde_json::Value::Null);
+        }
         documents.push(value);
     }
     assert_eq!(documents[0], documents[1]);

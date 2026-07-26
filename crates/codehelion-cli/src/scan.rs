@@ -28,9 +28,12 @@ use codehelion_core::engine::{
 };
 use codehelion_core::frontend::{Frontend, Token, Unit};
 use codehelion_core::incremental;
+use codehelion_core::lineage;
 use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION, FileContext, GroupIds};
 use codehelion_store::Store;
-use codehelion_store::snapshot::{FileRow, GroupRow, MemberRow, Snapshot, UnitRow};
+use codehelion_store::snapshot::{
+    FileRow, GroupOrigin, GroupRow, LineageParent, MemberRow, Snapshot, UnitRow,
+};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::Outcome;
@@ -116,7 +119,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
     let changes = tree_changes(&db_path, &root, &discovered.build_variant, &sources)?;
     let finished_at = rfc3339_now();
-    let run_id = record(
+    let (run_id, audit) = record(
         &root,
         &cfg,
         &db_path,
@@ -148,6 +151,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         rules: &rules,
         group_suppressed: &group_suppressed,
         changes,
+        audit,
     });
     // Counted against the assembled report rather than the raw analysis: a
     // stale entry is one whose duplication this run does not list.
@@ -239,6 +243,7 @@ struct BuildInputs<'a> {
     rules: &'a suppress::Rules,
     group_suppressed: &'a [Option<usize>],
     changes: Option<report::TreeChanges>,
+    audit: Option<report::AuditSummary>,
 }
 
 /// The configured suppression rules that hid nothing this run, read off the
@@ -312,7 +317,6 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
         .unwrap_or(u64::MAX)
     };
 
-    let variant = &inputs.discovered.build_variant;
     let mut order: Vec<usize> = (0..inputs.report.groups.len()).collect();
     order.sort_by(|a, b| {
         let (pa, pb) = (
@@ -325,31 +329,7 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
 
     Report {
         schema_version: report::SCHEMA_VERSION,
-        run: report::RunInfo {
-            tool_version: env!("CARGO_PKG_VERSION").to_string(),
-            mode: variant.mode.name().to_string(),
-            root: inputs.root.display().to_string(),
-            started_at: inputs.started_at.to_string(),
-            finished_at: inputs.finished_at.to_string(),
-            build_variant: report::BuildVariantInfo {
-                mode: variant.mode.name().to_string(),
-                languages: variant
-                    .languages
-                    .enabled()
-                    .into_iter()
-                    .map(|language| language.name().to_string())
-                    .collect(),
-                headers: variant.headers.map(|language| language.name().to_string()),
-                normalization_version: variant.normalization_version,
-                fingerprint: variant.fingerprint(),
-            },
-            detector_versions: detector_versions()
-                .into_iter()
-                .map(|(component, version)| report::DetectorVersion { component, version })
-                .collect(),
-            database: inputs.db_path.display().to_string(),
-            run_id: inputs.run_id,
-        },
+        run: run_info(inputs),
         summary: report::Summary {
             files: report::FileCounts {
                 total: as_u64(inputs.lexed.len()),
@@ -369,6 +349,7 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
                 skipped: inputs.discovered.skipped.total() + inputs.unreadable + inputs.timed_out,
             },
             changes: inputs.changes,
+            audit: inputs.audit.clone(),
             // Filled in after the groups are assembled, which is what a
             // stale entry has to be counted against.
             baseline: None,
@@ -402,6 +383,37 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
             .iter()
             .map(|&index| build_group(inputs, index))
             .collect(),
+    }
+}
+
+/// What produced the results: the tool, the settings, and where the snapshot
+/// went. Every value here qualifies the findings rather than describing them.
+fn run_info(inputs: &BuildInputs<'_>) -> report::RunInfo {
+    let variant = &inputs.discovered.build_variant;
+    report::RunInfo {
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        mode: variant.mode.name().to_string(),
+        root: inputs.root.display().to_string(),
+        started_at: inputs.started_at.to_string(),
+        finished_at: inputs.finished_at.to_string(),
+        build_variant: report::BuildVariantInfo {
+            mode: variant.mode.name().to_string(),
+            languages: variant
+                .languages
+                .enabled()
+                .into_iter()
+                .map(|language| language.name().to_string())
+                .collect(),
+            headers: variant.headers.map(|language| language.name().to_string()),
+            normalization_version: variant.normalization_version,
+            fingerprint: variant.fingerprint(),
+        },
+        detector_versions: detector_versions()
+            .into_iter()
+            .map(|(component, version)| report::DetectorVersion { component, version })
+            .collect(),
+        database: inputs.db_path.display().to_string(),
+        run_id: inputs.run_id,
     }
 }
 
@@ -459,6 +471,7 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
                 let source = &inputs.lexed[instance.file];
                 report::Member {
                     finding_id: member_ids.finding.to_hex(),
+                    content: member_ids.content.to_hex(),
                     file: source.relative_path.clone(),
                     start_line: instance.start_line,
                     end_line: instance.end_line,
@@ -874,6 +887,86 @@ pub(crate) fn baseline_status(
     }
 }
 
+/// Settle what became of every group this run found, against the previous
+/// audit of the same tree under the same build variant.
+///
+/// Written into the rows before they are recorded, rather than computed later
+/// on demand: the run that produced a finding is the only one that can record
+/// what the finding *was*, and a stored state of `new` for a group that has
+/// been there for a year is a lie the schema would keep repeating.
+///
+/// A tree with no previous run under this variant compares against nothing,
+/// which leaves every group at the [`GroupOrigin::unconnected`] the rows were
+/// built with and reports no summary — there is no audit to be since.
+///
+/// # Errors
+///
+/// Returns an error when the previous run cannot be read. A scan that cannot
+/// read its own database is about to fail recording anyway.
+pub(crate) fn attach_history(
+    store: &Store,
+    root: &Path,
+    variant: &BuildVariant,
+    units: &[UnitRow],
+    groups: &mut [GroupRow],
+) -> Result<Option<report::AuditSummary>> {
+    let root_path = root.to_string_lossy();
+    let Some(since_run_id) = store
+        .previous_run(&root_path, &variant.fingerprint())
+        .with_context(|| format!("reading the previous audit of {root_path}"))?
+    else {
+        return Ok(None);
+    };
+    let previous = store
+        .run_group_snapshots(since_run_id)
+        .with_context(|| format!("reading the groups of run {since_run_id}"))?;
+    let current: Vec<lineage::GroupSnapshot> =
+        groups.iter().map(|group| group.snapshot(units)).collect();
+    let diff = lineage::diff(&previous, &current);
+
+    let mut by_fingerprint: BTreeMap<String, &lineage::GroupHistory> = BTreeMap::new();
+    for entry in &diff.entries {
+        if let Some(current) = entry.current {
+            by_fingerprint.insert(current.fingerprint.to_hex(), entry);
+        }
+    }
+    for group in groups.iter_mut() {
+        let Some(entry) = by_fingerprint.get(&group.fingerprint.to_hex()) else {
+            continue;
+        };
+        group.history = GroupOrigin {
+            state: entry.state,
+            lineage: entry.lineage,
+            parents: parents_of(entry, &diff),
+        };
+    }
+    Ok(Some(report::AuditSummary {
+        since_run_id,
+        states: report::state_counts(&diff),
+    }))
+}
+
+/// The connections back from one group, primary first.
+fn parents_of(entry: &lineage::GroupHistory, diff: &lineage::AuditDiff) -> Vec<LineageParent> {
+    let Some(current) = entry.current else {
+        return Vec::new();
+    };
+    let mut parents: Vec<LineageParent> = diff
+        .edges
+        .iter()
+        .filter(|edge| edge.current == current.fingerprint)
+        .map(|edge| LineageParent {
+            fingerprint: edge.previous,
+            lineage: edge.previous_lineage,
+            primary: edge.primary,
+            shared_content: edge.shared,
+            overlap: edge.overlap,
+        })
+        .collect();
+    parents.sort_by_key(|parent| std::cmp::Reverse(parent.primary));
+    parents
+}
+
 /// The tree a scan read, as rows to record beside its findings.
 ///
 /// Every discovered file is here, including the ones that yielded no unit: a
@@ -907,8 +1000,11 @@ fn record(
     rules: &suppress::Rules,
     group_suppressed: &[Option<usize>],
     files: Vec<FileRow>,
-) -> Result<i64> {
-    let (units, groups) = snapshot_rows(lexed, contexts, variant, report, ids, group_suppressed);
+) -> Result<(i64, Option<report::AuditSummary>)> {
+    let (units, mut groups) =
+        snapshot_rows(lexed, contexts, variant, report, ids, group_suppressed);
+    let mut store = open_store(db_path)?;
+    let audit = attach_history(&store, root, variant, &units, &mut groups)?;
     let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
     let detector_versions = detector_versions();
     let root_path = root.to_string_lossy();
@@ -926,8 +1022,7 @@ fn record(
         features: Vec::new(),
         files,
     };
-    let mut store = open_store(db_path)?;
-    Ok(store.record_snapshot(&snapshot)?)
+    Ok((store.record_snapshot(&snapshot)?, audit))
 }
 
 /// Open (creating directories and running migrations as needed) the store.
@@ -1018,6 +1113,9 @@ fn snapshot_rows(
         .zip(group_suppressed)
         .map(|((group, group_ids), suppressed_by)| GroupRow {
             fingerprint: group_ids.fingerprint,
+            // Overwritten by the comparison against the previous audit, when
+            // there is one to compare against.
+            history: GroupOrigin::unconnected(&group_ids.fingerprint),
             clone_type: group.clone_type,
             member_scope: CloneScope::Unit,
             // Fast mode compares tokens without a syntax tree, so it never
