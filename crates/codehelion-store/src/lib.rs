@@ -71,6 +71,17 @@ pub enum StoreError {
         /// The rejected name.
         table: String,
     },
+    /// A stored row names a classification this build does not know, which
+    /// happens when a newer release wrote it. Reported rather than rounded to
+    /// the nearest known value: a comparison against a guess is worse than no
+    /// comparison.
+    #[error("stored {field} {value:?} is not one this build understands")]
+    UnknownVocabulary {
+        /// Which column the value came from.
+        field: &'static str,
+        /// The value read.
+        value: String,
+    },
 }
 
 /// An open audit database, migrated to the current schema.

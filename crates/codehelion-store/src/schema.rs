@@ -6,9 +6,8 @@
 //! `SourceArtifactMapping` and `DetectorVersion`, plus the candidate-index
 //! feature tables `FeatureFingerprint`, `FeatureOccurrence` and `UnitFeature`,
 //! and the per-group `CloneGroupSimilarity` breakdown.
-//! The artifact tables and `group_lineage` are created empty in this release —
-//! the schema is the contract, population comes with the features that need
-//! them.
+//! The artifact tables are created empty in this release — the schema is the
+//! contract, population comes with the features that need them.
 //!
 //! Invariants enforced at the schema level:
 //!
@@ -39,11 +38,11 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
 
 /// Version 1: the full entity set.
 const V1: &str = "
@@ -455,6 +454,48 @@ CREATE TABLE scanned_file (
     byte_len      INTEGER NOT NULL,
     PRIMARY KEY (scan_run_id, relative_path)
 ) STRICT;
+";
+
+/// Version 12: which history each group belongs to, and what connects it
+/// there.
+///
+/// The V1 shape carried one `previous_lineage_id` per row, which can express a
+/// group that continued and a group that split, but not two groups that merged
+/// into one — a case the comparison genuinely produces. Connections move into
+/// their own table, where a child can have several parents and the run that
+/// observed each connection is on the row: a lineage edge is something one
+/// audit concluded, not a timeless fact about the code.
+///
+/// `last_seen_scan_run_id` and `first_seen_scan_run_id` go with it. Both are
+/// the extremes of the rows already present for a lineage, and a stored copy
+/// of a derivable value is a second answer waiting to disagree with the first.
+///
+/// The table is replaced rather than rebuilt through a copy. No release
+/// between V1 and V11 wrote a row into it — the schema was the contract and
+/// the population came later — so there is nothing to carry over, and a copy
+/// statement would only bind this migration to column names that a database
+/// restored from an older shape need not still have.
+const V12: &str = "
+DROP TABLE IF EXISTS group_lineage;
+CREATE TABLE group_lineage (
+    scan_run_id          INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
+    lineage_id           BLOB NOT NULL CHECK (length(lineage_id) = 16),
+    group_fingerprint_id INTEGER NOT NULL REFERENCES fingerprint (id),
+    PRIMARY KEY (scan_run_id, group_fingerprint_id)
+) STRICT;
+CREATE INDEX idx_group_lineage_id ON group_lineage (lineage_id);
+
+CREATE TABLE group_lineage_edge (
+    scan_run_id                 INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
+    child_group_fingerprint_id  INTEGER NOT NULL REFERENCES fingerprint (id),
+    parent_group_fingerprint_id INTEGER NOT NULL REFERENCES fingerprint (id),
+    parent_lineage_id           BLOB NOT NULL CHECK (length(parent_lineage_id) = 16),
+    is_primary                  INTEGER NOT NULL CHECK (is_primary IN (0, 1)),
+    shared_content              INTEGER NOT NULL,
+    overlap                     REAL NOT NULL,
+    PRIMARY KEY (scan_run_id, child_group_fingerprint_id, parent_group_fingerprint_id)
+) STRICT;
+CREATE INDEX idx_group_lineage_edge_parent ON group_lineage_edge (parent_group_fingerprint_id);
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

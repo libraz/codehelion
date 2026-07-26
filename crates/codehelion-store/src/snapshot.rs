@@ -19,8 +19,10 @@ use codehelion_core::features::{
     FEATURE_SCHEMA_VERSION, FeatureKind, SHAPE_TAG_SLOTS, UnitFeatures,
 };
 use codehelion_core::frontend::UnitKind;
+use codehelion_core::lineage::{Anchor, AuditState, GroupSnapshot, MemberSnapshot};
 use codehelion_core::stable_id::{
-    CloneGroupFingerprint, FindingId, FragmentFingerprint, HASH_ALGORITHM, UnitFingerprint,
+    CloneGroupFingerprint, FindingId, FragmentFingerprint, GroupLineageId, HASH_ALGORITHM,
+    UnitFingerprint,
 };
 use codehelion_core::verify::Confidence;
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -99,6 +101,58 @@ pub struct SimilarityBreakdownRow {
     pub confidence_band: Confidence,
 }
 
+/// What became of one clone group since the previous audit of the tree.
+///
+/// Every recorded group carries one. A first scan has nothing to compare
+/// against, and says so by recording each group as
+/// [`new`](AuditState::New) with a history that starts at itself — which is a
+/// statement about the record, not a claim that the duplication is recent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupOrigin {
+    /// The state the comparison settled on.
+    pub state: AuditState,
+    /// The history this group belongs to.
+    pub lineage: GroupLineageId,
+    /// The previous groups this one descends from, primary first. Empty for a
+    /// group nothing connects to.
+    pub parents: Vec<LineageParent>,
+}
+
+impl GroupOrigin {
+    /// The history of a group nothing before it connects to: it starts here.
+    ///
+    /// This is what a first audit records for everything it finds, and the
+    /// value a later audit's comparison overwrites for the groups it can
+    /// connect. It is deliberately the starting point rather than an absent
+    /// one: a recorded group without a recorded history would have to be read
+    /// as either "never compared" or "compared and found new", and those are
+    /// not the same claim.
+    #[must_use]
+    pub fn unconnected(fingerprint: &CloneGroupFingerprint) -> Self {
+        Self {
+            state: AuditState::New,
+            lineage: codehelion_core::stable_id::group_lineage_id(fingerprint),
+            parents: Vec::new(),
+        }
+    }
+}
+
+/// One connection back to a previous group.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineageParent {
+    /// The parent group's fingerprint.
+    pub fingerprint: CloneGroupFingerprint,
+    /// The history the parent belonged to. Equal to the child's for the
+    /// primary parent; a merge's other parents bring their own.
+    pub lineage: GroupLineageId,
+    /// Whether the child's state was judged against this parent.
+    pub primary: bool,
+    /// Member contents both groups hold.
+    pub shared_content: usize,
+    /// Shared content as a fraction of the smaller group.
+    pub overlap: f64,
+}
+
 /// One clone group with its members.
 #[derive(Debug, Clone)]
 pub struct GroupRow {
@@ -133,8 +187,43 @@ pub struct GroupRow {
     /// The similarity breakdown, when the mode measured one (Structural). Fast
     /// groups leave this `None`.
     pub similarity: Option<SimilarityBreakdownRow>,
+    /// What became of this group since the previous audit.
+    pub history: GroupOrigin,
     /// The occurrences, in deterministic order; the first is canonical.
     pub members: Vec<MemberRow>,
+}
+
+impl GroupRow {
+    /// This group as an audit comparison sees it: content, placement and the
+    /// classification, with the evidence a comparison never reads left out.
+    ///
+    /// `units` is [`Snapshot::units`], which members reference by index for
+    /// their enclosing unit's name.
+    #[must_use]
+    pub fn snapshot(&self, units: &[UnitRow]) -> GroupSnapshot {
+        GroupSnapshot {
+            fingerprint: self.fingerprint,
+            clone_type: self.clone_type,
+            scope: self.member_scope,
+            score: self.score,
+            canonical: self.members.first().map(|member| member.content),
+            lineage: None,
+            members: self
+                .members
+                .iter()
+                .map(|member| MemberSnapshot {
+                    content: member.content,
+                    anchor: Anchor {
+                        file: member.file_path.clone(),
+                        unit: member
+                            .host_unit
+                            .and_then(|index| units.get(index))
+                            .and_then(|unit| unit.name.clone()),
+                    },
+                })
+                .collect(),
+        }
+    }
 }
 
 /// One suppression rule active for the scan.
@@ -580,8 +669,8 @@ fn write_group(
     )?;
     let group_row_id = tx.last_insert_rowid();
 
-    // The audited row for this group in this run. Differencing against
-    // earlier runs is a later stage; every finding starts as `new`.
+    // The audited row for this group in this run: what was found, and what
+    // became of it since the tree was last looked at.
     let suppression_row_id = match group.suppressed_by {
         Some(index) => Some(*suppression_row_ids.get(index).ok_or(
             StoreError::UnknownSuppressionIndex {
@@ -595,15 +684,17 @@ fn write_group(
         "INSERT INTO finding
              (scan_run_id, clone_group_id, audit_state, suppression_id,
               clone_confidence, final_priority)
-         VALUES (?1, ?2, 'new', ?3, ?4, ?5)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             run_id,
             group_row_id,
+            group.history.state.name(),
             suppression_row_id,
             group.score,
             group.final_priority,
         ],
     )?;
+    write_lineage(tx, snapshot, run_id, variant_id, group, group_fp_id)?;
 
     write_group_similarity(tx, group_row_id, group.similarity.as_ref())?;
 
@@ -650,6 +741,57 @@ fn write_group(
                 fragment_row_id,
                 member.finding.as_bytes().as_slice(),
                 i64::from(index == 0),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Record which history a group belongs to and what connected it there.
+///
+/// The edge rows carry the run that observed them, because a connection is a
+/// conclusion one audit drew from two results; a later audit comparing a
+/// different pair of runs may draw a different one, and both stay on the
+/// record. A parent's fingerprint row already exists — the run that found it
+/// wrote it — so the upsert here finds rather than creates, except where a
+/// caller supplies a parent no recorded run held, which the write treats the
+/// same way rather than rejecting: this layer stores what it is given.
+fn write_lineage(
+    tx: &Transaction<'_>,
+    snapshot: &Snapshot<'_>,
+    run_id: i64,
+    variant_id: i64,
+    group: &GroupRow,
+    group_fp_id: i64,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "INSERT INTO group_lineage (scan_run_id, lineage_id, group_fingerprint_id)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT (scan_run_id, group_fingerprint_id) DO NOTHING",
+        params![
+            run_id,
+            group.history.lineage.as_bytes().as_slice(),
+            group_fp_id,
+        ],
+    )?;
+    for parent in &group.history.parents {
+        let parent_fp_id =
+            upsert_group_fingerprint(tx, parent.fingerprint.as_bytes(), snapshot, variant_id)?;
+        tx.execute(
+            "INSERT INTO group_lineage_edge
+                 (scan_run_id, child_group_fingerprint_id, parent_group_fingerprint_id,
+                  parent_lineage_id, is_primary, shared_content, overlap)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (scan_run_id, child_group_fingerprint_id,
+                          parent_group_fingerprint_id) DO NOTHING",
+            params![
+                run_id,
+                group_fp_id,
+                parent_fp_id,
+                parent.lineage.as_bytes().as_slice(),
+                parent.primary,
+                i64::try_from(parent.shared_content).unwrap_or(i64::MAX),
+                parent.overlap,
             ],
         )?;
     }

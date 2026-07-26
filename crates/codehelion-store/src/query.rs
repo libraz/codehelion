@@ -9,7 +9,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::features::FeatureKind;
+use codehelion_core::lineage::{Anchor, GroupSnapshot, MemberSnapshot};
+use codehelion_core::stable_id::{CloneGroupFingerprint, FragmentFingerprint, GroupLineageId};
 use rusqlite::{OptionalExtension, params};
 
 use crate::{Store, StoreError};
@@ -73,6 +76,13 @@ pub struct RunOrigin {
 pub struct StoredMember {
     /// Hex form of the occurrence's stable finding id.
     pub finding_hex: String,
+    /// Hex form of the content fingerprint of the matched slice.
+    ///
+    /// Two occurrences of the same content share it, which is what makes a
+    /// result exported from one machine comparable with a run on another: the
+    /// finding id is derived from the group fingerprint and moves with it,
+    /// while this does not.
+    pub content_hex: String,
     /// Anchor: file path relative to the scan root.
     pub file_path: String,
     /// Anchor: 1-based first line.
@@ -326,6 +336,24 @@ impl Store {
         Ok(Some((run_id, tree)))
     }
 
+    /// Row id of the newest completed run over `root_path` under `variant`,
+    /// which is the run a scan about to record compares itself against.
+    ///
+    /// Unlike [`Self::previous_tree`] this answers even for a run that
+    /// recorded no files: what a run found is recorded whether or not what it
+    /// read was, and the findings are what a lineage comparison reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn previous_run(
+        &self,
+        root_path: &str,
+        variant_fingerprint: &str,
+    ) -> Result<Option<i64>, StoreError> {
+        self.completed_run_id(root_path, Some(variant_fingerprint))
+    }
+
     /// Row id of the newest completed run over `root_path`, optionally
     /// narrowed to one build variant.
     ///
@@ -368,6 +396,13 @@ impl Store {
         let Some(run_id) = self.completed_run_id(root_path, None)? else {
             return Ok(None);
         };
+        self.run_origin(run_id).map(Some)
+    }
+
+    /// The identity of one run by row id: the conditions its stable ids were
+    /// computed under, which every judgement about its results is qualified
+    /// by.
+    fn run_origin(&self, run_id: i64) -> Result<RunOrigin, StoreError> {
         let mut origin = self.conn.query_row(
             "SELECT r.root_path, r.tool_version, r.analysis_mode, r.finished_at,
                     v.variant_fingerprint, v.normalization_version
@@ -398,7 +433,131 @@ impl Store {
         origin.detector_versions = stmt
             .query_map(params![run_id], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<Result<_, _>>()?;
-        Ok(Some(origin))
+        Ok(origin)
+    }
+
+    /// Every completed run over `root_path`, newest first, at most `limit` of
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn completed_runs(
+        &self,
+        root_path: &str,
+        limit: usize,
+    ) -> Result<Vec<RunOrigin>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT r.id
+             FROM scan_run r
+             WHERE r.root_path = ?1 AND r.status = 'completed'
+             ORDER BY r.started_at DESC, r.id DESC
+             LIMIT ?2",
+        )?;
+        let ids: Vec<i64> = stmt
+            .query_map(
+                params![root_path, i64::try_from(limit).unwrap_or(i64::MAX)],
+                |row| row.get(0),
+            )?
+            .collect::<Result<_, _>>()?;
+        ids.into_iter().map(|id| self.run_origin(id)).collect()
+    }
+
+    /// Every clone group of `run_id` reduced to what history compares:
+    /// content fingerprints, anchors, and the lineage the run recorded.
+    ///
+    /// Read in one pass rather than through [`Self::run_groups`], which fans
+    /// out into per-group queries for evidence a comparison never looks at.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::UnknownVocabulary`] when a row names a clone type or
+    /// member scope this build does not know; otherwise any underlying
+    /// database error.
+    pub fn run_group_snapshots(&self, run_id: i64) -> Result<Vec<GroupSnapshot>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT lower(hex(gf.hash)), g.clone_type, g.member_scope, g.score,
+                    lower(hex(ff.hash)), fr.file_path, u.name, m.is_canonical,
+                    lower(hex(gl.lineage_id))
+             FROM clone_group g
+             JOIN fingerprint gf ON gf.id = g.group_fingerprint_id
+             JOIN clone_group_member m ON m.clone_group_id = g.id
+             JOIN fragment fr ON fr.id = m.fragment_id
+             JOIN fingerprint ff ON ff.id = fr.fingerprint_id
+             LEFT JOIN source_unit u ON u.id = fr.source_unit_id
+             LEFT JOIN group_lineage gl ON gl.scan_run_id = g.scan_run_id
+                                       AND gl.group_fingerprint_id = g.group_fingerprint_id
+             WHERE g.scan_run_id = ?1
+             ORDER BY gf.hash ASC, fr.file_path ASC, fr.start_line ASC, fr.id ASC",
+        )?;
+        let rows = stmt.query_map(params![run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, i64>(7)? != 0,
+                row.get::<_, Option<String>>(8)?,
+            ))
+        })?;
+
+        let mut groups: Vec<GroupSnapshot> = Vec::new();
+        for row in rows {
+            let (
+                fingerprint,
+                clone_type,
+                member_scope,
+                score,
+                content,
+                file,
+                unit,
+                canonical,
+                lineage,
+            ) = row?;
+            let content = FragmentFingerprint::from_bytes(parse_hex_id(&content)?);
+            if groups
+                .last()
+                .is_none_or(|group| group.fingerprint.to_hex() != fingerprint)
+            {
+                groups.push(GroupSnapshot {
+                    fingerprint: CloneGroupFingerprint::from_bytes(parse_hex_id(&fingerprint)?),
+                    clone_type: CloneClass::from_name(&clone_type).ok_or_else(|| {
+                        StoreError::UnknownVocabulary {
+                            field: "clone_type",
+                            value: clone_type.clone(),
+                        }
+                    })?,
+                    scope: CloneScope::from_name(&member_scope).ok_or_else(|| {
+                        StoreError::UnknownVocabulary {
+                            field: "member_scope",
+                            value: member_scope.clone(),
+                        }
+                    })?,
+                    score,
+                    canonical: None,
+                    lineage: lineage
+                        .as_deref()
+                        .map(parse_hex_id)
+                        .transpose()?
+                        .map(GroupLineageId::from_bytes),
+                    members: Vec::new(),
+                });
+            }
+            let Some(group) = groups.last_mut() else {
+                continue;
+            };
+            if canonical {
+                group.canonical = Some(content);
+            }
+            group.members.push(MemberSnapshot {
+                content,
+                anchor: Anchor { file, unit },
+            });
+        }
+        Ok(groups)
     }
 
     /// Every clone group of `run_id`, deterministically ordered by
@@ -487,15 +646,16 @@ impl Store {
     fn group_members(&self, group_row_id: i64) -> Result<Vec<StoredMember>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT lower(hex(m.finding_id)), fr.file_path, fr.start_line, fr.end_line,
-                    fr.token_count, u.name, m.is_canonical
+                    fr.token_count, u.name, m.is_canonical, lower(hex(ff.hash))
              FROM clone_group_member m
              JOIN fragment fr ON fr.id = m.fragment_id
+             JOIN fingerprint ff ON ff.id = fr.fingerprint_id
              LEFT JOIN source_unit u ON u.id = fr.source_unit_id
              WHERE m.clone_group_id = ?1
              ORDER BY fr.file_path ASC, fr.start_line ASC, fr.id ASC",
         )?;
         let members = stmt
-            .query_map(params![group_row_id], map_member)?
+            .query_map(params![group_row_id], |row| map_member(row, 7))?
             .collect::<Result<_, _>>()?;
         Ok(members)
     }
@@ -571,9 +731,10 @@ impl Store {
                         fr.token_count, u.name, m.is_canonical,
                         lower(hex(gf.hash)), g.clone_type, g.score, g.scan_run_id,
                         g.member_count, g.boilerplate, s.scope, s.pattern, g.id,
-                        g.member_scope, g.test_code, g.split_pair
+                        g.member_scope, g.test_code, g.split_pair, lower(hex(ff.hash))
                  FROM clone_group_member m
                  JOIN fragment fr ON fr.id = m.fragment_id
+                 JOIN fingerprint ff ON ff.id = fr.fingerprint_id
                  LEFT JOIN source_unit u ON u.id = fr.source_unit_id
                  JOIN clone_group g ON g.id = m.clone_group_id
                  JOIN fingerprint gf ON gf.id = g.group_fingerprint_id
@@ -596,7 +757,7 @@ impl Store {
                         .transpose()?;
                     Ok((
                         OccurrenceDetail {
-                            member: map_member(row)?,
+                            member: map_member(row, 19)?,
                             group_fingerprint_hex: row.get(7)?,
                             clone_type: row.get(8)?,
                             member_scope: row.get(16)?,
@@ -622,9 +783,13 @@ impl Store {
     }
 }
 
-fn map_member(row: &rusqlite::Row<'_>) -> Result<StoredMember, rusqlite::Error> {
+/// Read one member from a row whose first seven columns are the member's, and
+/// whose `content` column the caller names by index — the two queries that
+/// select members place it differently.
+fn map_member(row: &rusqlite::Row<'_>, content: usize) -> Result<StoredMember, rusqlite::Error> {
     Ok(StoredMember {
         finding_hex: row.get(0)?,
+        content_hex: row.get(content)?,
         file_path: row.get(1)?,
         start_line: row.get(2)?,
         end_line: row.get(3)?,

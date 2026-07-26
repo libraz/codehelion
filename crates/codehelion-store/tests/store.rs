@@ -12,13 +12,14 @@ use codehelion_core::features::{
 };
 use codehelion_core::frontend::UnitKind;
 use codehelion_core::ir::ByteRange;
+use codehelion_core::lineage::AuditState;
 use codehelion_core::stable_id::{
-    CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint,
+    CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint, group_lineage_id,
 };
 use codehelion_core::verify::Confidence;
 use codehelion_store::snapshot::{
-    FeatureRow, FileRow, GroupRow, MemberRow, SimilarityBreakdownRow, Snapshot, SuppressionRuleRow,
-    UnitRow,
+    FeatureRow, FileRow, GroupOrigin, GroupRow, LineageParent, MemberRow, SimilarityBreakdownRow,
+    Snapshot, SuppressionRuleRow, UnitRow,
 };
 use codehelion_store::{Store, StoreError};
 
@@ -96,6 +97,7 @@ fn sample_snapshot<'a>(
         suppressions: Vec::new(),
         groups: vec![GroupRow {
             fingerprint: group_fp(9),
+            history: GroupOrigin::unconnected(&group_fp(9)),
             clone_type: CloneClass::Type1,
             split_pair: false,
             member_scope: CloneScope::Unit,
@@ -492,19 +494,14 @@ fn a_feature_referencing_an_unknown_unit_rolls_the_snapshot_back() {
 }
 
 #[test]
-fn artifact_and_lineage_tables_exist_and_stay_empty() {
+fn artifact_tables_exist_and_stay_empty() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
     store
         .record_snapshot(&sample_snapshot(&variant, &detectors))
         .unwrap();
-    for table in [
-        "artifact",
-        "artifact_symbol",
-        "source_artifact_mapping",
-        "group_lineage",
-    ] {
+    for table in ["artifact", "artifact_symbol", "source_artifact_mapping"] {
         assert_eq!(
             store.table_count(table).unwrap(),
             0,
@@ -519,7 +516,7 @@ fn artifact_and_lineage_tables_exist_and_stay_empty() {
 }
 
 #[test]
-fn findings_start_in_the_new_state() {
+fn a_finding_records_the_state_the_run_settled_on() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
@@ -528,11 +525,54 @@ fn findings_start_in_the_new_state() {
         .unwrap();
     let findings = store.run_findings(run_id).unwrap();
     assert_eq!(findings.len(), 1);
+    // The sample compares against nothing, which is what a first audit does.
     assert_eq!(findings[0].audit_state, "new");
     assert_eq!(findings[0].group_fingerprint_hex, group_fp(9).to_hex());
     assert!((findings[0].clone_confidence - 1.0).abs() < f64::EPSILON);
     assert!((findings[0].final_priority - 42.0).abs() < f64::EPSILON);
     assert!(findings[0].suppression_scope.is_none());
+}
+
+#[test]
+fn a_recorded_group_carries_the_history_it_belongs_to() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    let ancestor = group_fp(3);
+    let lineage = group_lineage_id(&ancestor);
+    snapshot.groups[0].history = GroupOrigin {
+        state: AuditState::Expanded,
+        lineage,
+        parents: vec![LineageParent {
+            fingerprint: ancestor,
+            lineage,
+            primary: true,
+            shared_content: 1,
+            overlap: 0.5,
+        }],
+    };
+    let run_id = store.record_snapshot(&snapshot).unwrap();
+
+    assert_eq!(
+        store.run_findings(run_id).unwrap()[0].audit_state,
+        "expanded"
+    );
+    assert_eq!(store.table_count("group_lineage").unwrap(), 1);
+    assert_eq!(store.table_count("group_lineage_edge").unwrap(), 1);
+    // The history reads back on the group, so the next audit continues it
+    // rather than starting a second one at the same duplication.
+    let snapshots = store.run_group_snapshots(run_id).unwrap();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].lineage, Some(lineage));
+    assert_eq!(snapshots[0].members.len(), 2);
+    assert_eq!(snapshots[0].canonical, Some(frag_fp(1)));
+    assert_eq!(snapshots[0].members[0].anchor.file, "src/a.rs");
+    assert_eq!(
+        snapshots[0].members[0].anchor.unit.as_deref(),
+        Some("checksum")
+    );
 }
 
 #[test]
@@ -721,6 +761,7 @@ fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
         // Every column and table added at or after that version has to go, or
         // migrating forward would try to add one twice.
         conn.execute("DROP TABLE scanned_file", []).unwrap();
+        conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
             .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN test_code", [])
@@ -771,6 +812,7 @@ fn a_group_recorded_before_the_split_pair_column_reads_as_a_whole_group() {
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute("DROP TABLE scanned_file", []).unwrap();
+        conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
             .unwrap();
         conn.execute("UPDATE schema_meta SET version = 8", [])
@@ -832,6 +874,7 @@ fn a_group_recorded_before_the_test_code_column_is_not_claimed_to_be_test_code()
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute("DROP TABLE scanned_file", []).unwrap();
+        conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
             .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN test_code", [])
