@@ -66,8 +66,8 @@ const CORPORA: &[Expected] = &[
     },
     Expected {
         name: "cjson",
-        confirmed: 13,
-        refuted: 12,
+        confirmed: 14,
+        refuted: 10,
     },
     Expected {
         name: "lz4",

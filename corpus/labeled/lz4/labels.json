@@ -669,7 +669,7 @@
     },
     {
       "id": "nc-025",
-      "reason": "subsumed-by-unit-clone",
+      "reason": "declaration-run",
       "fragments": [
         {
           "file": "lib/xxhash.c",

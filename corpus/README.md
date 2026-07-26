@@ -102,13 +102,16 @@ be counted rather than merely described. The ones in use:
 | `declaration-run` | a run of declarations or field assignments carrying no logic |
 | `list-walk-idiom` | a null guard and a linked-list traversal, the idiom rather than shared logic |
 | `unrolled-repetition` | adjacent stretches of one hand-unrolled run, alike because the run repeats one operation |
-| `subsumed-by-unit-clone` | a fragment group whose members all sit inside a unit group the same report already carries |
 
 Extend the table when a case needs a class it does not have; do not reach for
 the nearest existing word.
 
-`subsumed-by-unit-clone` names a defect rather than a judgement call: it is the
-same duplication arriving twice in one report.
+A run inside units the same report already groups is not automatically a
+lookalike. It is one when the group is exact, because "these functions are
+copies" accounts for every stretch inside them. It is a finding of its own when
+the group is gapped: a group at 0.79 says its members are alike overall and
+nothing about where they agree exactly, so a stretch they share verbatim is
+something only the run can state.
 
 A group can only be refuted when it is distinguishable from the groups around
 it. Where a redundant report overlaps a real one by more than the match

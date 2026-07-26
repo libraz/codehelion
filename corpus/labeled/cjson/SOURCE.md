@@ -34,7 +34,8 @@ The clones are the opposite — parsing and printing an array and an object shar
 their whole skeleton, and two files carry independent copies of the same
 doubly-linked-list surgery and the same float comparison.
 
-Two groups are refuted for a reason that is not about the code at all: the
-detector reported a run of statements as a fragment group when it had already
-reported the enclosing functions as a unit group, so the same duplication
-arrives twice. Those carry `subsumed-by-unit-clone`.
+The `Create…Array` family shows both sides of one rule at once. The four
+functions are an exact group, and the prologue they share is not reported
+beside it — the group already accounts for it. The array and object parsers are
+a gapped group, and the epilogue they share verbatim *is* reported, because
+being 79% alike says nothing about which lines are identical.

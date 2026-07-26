@@ -213,6 +213,22 @@
           "end_line": 1751
         }
       ]
+    },
+    {
+      "id": "cp-014",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 1535,
+          "end_line": 1546
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 1716,
+          "end_line": 1726
+        }
+      ]
     }
   ],
   "non_clones": [
@@ -266,22 +282,6 @@
     },
     {
       "id": "nc-004",
-      "reason": "subsumed-by-unit-clone",
-      "fragments": [
-        {
-          "file": "cJSON.c",
-          "start_line": 2571,
-          "end_line": 2580
-        },
-        {
-          "file": "cJSON.c",
-          "start_line": 2611,
-          "end_line": 2620
-        }
-      ]
-    },
-    {
-      "id": "nc-005",
       "reason": "trivial-factory",
       "fragments": [
         {
@@ -297,7 +297,7 @@
       ]
     },
     {
-      "id": "nc-006",
+      "id": "nc-005",
       "reason": "list-walk-idiom",
       "fragments": [
         {
@@ -313,23 +313,7 @@
       ]
     },
     {
-      "id": "nc-007",
-      "reason": "subsumed-by-unit-clone",
-      "fragments": [
-        {
-          "file": "cJSON.c",
-          "start_line": 1535,
-          "end_line": 1546
-        },
-        {
-          "file": "cJSON.c",
-          "start_line": 1716,
-          "end_line": 1726
-        }
-      ]
-    },
-    {
-      "id": "nc-008",
+      "id": "nc-006",
       "reason": "trivial-accessor-pair",
       "fragments": [
         {
@@ -345,7 +329,7 @@
       ]
     },
     {
-      "id": "nc-009",
+      "id": "nc-007",
       "reason": "declaration-run",
       "fragments": [
         {
@@ -361,7 +345,7 @@
       ]
     },
     {
-      "id": "nc-010",
+      "id": "nc-008",
       "reason": "declaration-run",
       "fragments": [
         {
@@ -377,7 +361,7 @@
       ]
     },
     {
-      "id": "nc-011",
+      "id": "nc-009",
       "reason": "type-dispatch-accessor",
       "fragments": [
         {
@@ -393,7 +377,7 @@
       ]
     },
     {
-      "id": "nc-012",
+      "id": "nc-010",
       "reason": "forwarding-wrapper",
       "fragments": [
         {
