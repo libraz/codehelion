@@ -423,3 +423,54 @@ fn a_stumble_inside_the_conditional_excludes_nothing() {
         "the two arms are reported as the clone they measure as"
     );
 }
+
+/// Two readers written the way C requires when the callee answers through a
+/// pointer, and one that computes instead of delegating.
+const OUT_PARAMETER: &str = "\
+static unsigned read32(const void *src)
+{
+    unsigned value;
+    copy_bytes(&value, src, sizeof(value));
+    return value;
+}
+
+static unsigned long long read64(const void *src)
+{
+    unsigned long long value;
+    copy_bytes(&value, src, sizeof(value));
+    return value;
+}
+
+static unsigned mix32(unsigned h)
+{
+    unsigned value = h * 31u + 7u;
+    return value;
+}
+";
+
+#[test]
+fn a_local_the_callee_answers_through_does_not_make_a_wrapper_into_work() {
+    // `unsigned value; copy_bytes(&value, ...); return value;` is one
+    // delegation spelled the only way C allows when the answer comes back
+    // through a pointer. Counting the local as work said this body did three
+    // things, which left the commonest small C wrapper unclassified.
+    use codehelion_core::boilerplate::Boilerplate;
+
+    let files = vec![CStructuralFrontend.parse(OUT_PARAMETER)];
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let report = structural::analyze(&files, &variant, &StructuralConfig::default());
+
+    let category = |name: &str| {
+        report
+            .units
+            .iter()
+            .find(|unit| unit.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("{name} is an analysed unit"))
+            .boilerplate
+    };
+    assert_eq!(category("read32"), Some(Boilerplate::Forwarding));
+    assert_eq!(category("read64"), Some(Boilerplate::Forwarding));
+    // With nothing delegated there is nothing for the local to belong to, and
+    // the IR cannot see that this one is filled with arithmetic.
+    assert_eq!(category("mix32"), None);
+}

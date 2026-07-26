@@ -244,6 +244,10 @@ impl Config {
         }
         value
     }
+
+    fn reload(&self, name: &str) -> Result<u32, Error> {
+        Ok(self.inner.reload(name)?)
+    }
 }
 ";
 
@@ -269,6 +273,9 @@ fn boilerplate_shapes_are_classified_on_real_parsed_code() {
     assert_eq!(category("dump"), Some(Boilerplate::MacroRepetition));
     // Branching is behaviour, whatever else the body looks like.
     assert_eq!(category("clamp"), None);
+    // `?` hands the error upwards and leaves one path through the body, so
+    // the wrapper is still a wrapper.
+    assert_eq!(category("reload"), Some(Boilerplate::Forwarding));
 }
 
 /// Two dump routines: nothing but macro invocations, so every occurrence of

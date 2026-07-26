@@ -251,3 +251,44 @@ fn a_case_written_as_a_framework_macro_is_recognised_as_test_code() {
         .find(|group| group.members.iter().all(|&m| report.units[m].test_code));
     assert!(suite.is_some(), "the duplicated cases group together");
 }
+
+/// One loader that hands its error upwards untouched and one that catches it,
+/// beside the wrapper both are written around.
+const ERROR_PATHS: &str = "\
+Doc plain(const std::string &path) {
+    return parse(path);
+}
+
+Doc guarded(const std::string &path) {
+    try {
+        return parse(path);
+    } catch (const std::exception &error) {
+        throw LoadError(error.what());
+    }
+}
+";
+
+#[test]
+fn catching_an_error_is_a_second_path_and_a_wrapper_has_one() {
+    // Propagation and handling arrive as one shape, because they are one
+    // concept. They are not one amount of behaviour: a handler is a second
+    // path through the body, and it is written as a block. Without that
+    // distinction either every `?` wrapper stays unclassified or every
+    // `catch` gets called boilerplate.
+    use codehelion_core::boilerplate::Boilerplate;
+
+    let files = vec![CppStructuralFrontend.parse(ERROR_PATHS)];
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::Cpp);
+    let report = structural::analyze(&files, &variant, &StructuralConfig::default());
+
+    let category = |name: &str| {
+        report
+            .units
+            .iter()
+            .find(|unit| unit.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("{name} is an analysed unit"))
+            .boilerplate
+    };
+    assert_eq!(category("plain"), Some(Boilerplate::Forwarding));
+    assert_eq!(category("guarded"), None);
+}
