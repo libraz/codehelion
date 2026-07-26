@@ -1,0 +1,419 @@
+{
+  "schema_version": 0,
+  "language": "cpp",
+  "files": [
+    "src/adapters/ryml_emitter.cpp",
+    "src/adapters/ryml_scanner.cpp",
+    "src/adapters/ryml_validator.cpp",
+    "src/binding/async_tasks.cpp",
+    "src/binding/error_bridge.cpp",
+    "src/binding/sync_api.cpp",
+    "src/core/ast.cpp",
+    "src/core/dumper.cpp",
+    "src/core/loader.cpp"
+  ],
+  "clone_pairs": [
+    {
+      "id": "cp-001",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/binding/async_tasks.cpp",
+          "start_line": 314,
+          "end_line": 336
+        },
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 40,
+          "end_line": 62
+        }
+      ]
+    },
+    {
+      "id": "cp-002",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/core/loader.cpp",
+          "start_line": 114,
+          "end_line": 160
+        },
+        {
+          "file": "src/core/loader.cpp",
+          "start_line": 78,
+          "end_line": 112
+        }
+      ]
+    },
+    {
+      "id": "cp-003",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/binding/async_tasks.cpp",
+          "start_line": 79,
+          "end_line": 105
+        },
+        {
+          "file": "src/binding/async_tasks.cpp",
+          "start_line": 164,
+          "end_line": 190
+        }
+      ]
+    },
+    {
+      "id": "cp-004",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 237,
+          "end_line": 306
+        },
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 118,
+          "end_line": 168
+        }
+      ]
+    },
+    {
+      "id": "cp-005",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 434,
+          "end_line": 443
+        },
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 505,
+          "end_line": 514
+        }
+      ]
+    },
+    {
+      "id": "cp-006",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/binding/async_tasks.cpp",
+          "start_line": 343,
+          "end_line": 354
+        },
+        {
+          "file": "src/binding/async_tasks.cpp",
+          "start_line": 433,
+          "end_line": 444
+        }
+      ]
+    },
+    {
+      "id": "cp-007",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/binding/async_tasks.cpp",
+          "start_line": 376,
+          "end_line": 470
+        },
+        {
+          "file": "src/binding/async_tasks.cpp",
+          "start_line": 295,
+          "end_line": 368
+        }
+      ]
+    },
+    {
+      "id": "cp-008",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 332,
+          "end_line": 344
+        },
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 393,
+          "end_line": 405
+        }
+      ]
+    },
+    {
+      "id": "cp-009",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 36,
+          "end_line": 65
+        },
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 74,
+          "end_line": 110
+        }
+      ]
+    },
+    {
+      "id": "cp-010",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/binding/error_bridge.cpp",
+          "start_line": 102,
+          "end_line": 111
+        },
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 151,
+          "end_line": 160
+        }
+      ]
+    },
+    {
+      "id": "cp-011",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 119,
+          "end_line": 130
+        },
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 177,
+          "end_line": 188
+        }
+      ]
+    },
+    {
+      "id": "cp-012",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/core/loader.cpp",
+          "start_line": 338,
+          "end_line": 372
+        },
+        {
+          "file": "src/core/loader.cpp",
+          "start_line": 296,
+          "end_line": 336
+        }
+      ]
+    },
+    {
+      "id": "cp-013",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/core/dumper.cpp",
+          "start_line": 290,
+          "end_line": 303
+        },
+        {
+          "file": "src/core/dumper.cpp",
+          "start_line": 305,
+          "end_line": 318
+        }
+      ]
+    },
+    {
+      "id": "cp-014",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 151,
+          "end_line": 162
+        },
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 212,
+          "end_line": 223
+        }
+      ]
+    },
+    {
+      "id": "cp-015",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/binding/async_tasks.cpp",
+          "start_line": 393,
+          "end_line": 422
+        },
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 78,
+          "end_line": 107
+        }
+      ]
+    },
+    {
+      "id": "cp-016",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/binding/async_tasks.cpp",
+          "start_line": 152,
+          "end_line": 161
+        },
+        {
+          "file": "src/binding/async_tasks.cpp",
+          "start_line": 67,
+          "end_line": 76
+        }
+      ]
+    },
+    {
+      "id": "cp-017",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 138,
+          "end_line": 148
+        },
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 199,
+          "end_line": 209
+        }
+      ]
+    },
+    {
+      "id": "cp-018",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 118,
+          "end_line": 168
+        },
+        {
+          "file": "src/binding/sync_api.cpp",
+          "start_line": 176,
+          "end_line": 229
+        }
+      ]
+    },
+    {
+      "id": "cp-019",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/adapters/ryml_emitter.cpp",
+          "start_line": 97,
+          "end_line": 111
+        },
+        {
+          "file": "src/adapters/ryml_emitter.cpp",
+          "start_line": 151,
+          "end_line": 165
+        }
+      ]
+    },
+    {
+      "id": "cp-020",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/adapters/ryml_emitter.cpp",
+          "start_line": 113,
+          "end_line": 149
+        },
+        {
+          "file": "src/adapters/ryml_emitter.cpp",
+          "start_line": 58,
+          "end_line": 95
+        }
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "id": "nc-001",
+      "reason": "trivial-accessor-pair",
+      "fragments": [
+        {
+          "file": "src/adapters/ryml_scanner.cpp",
+          "start_line": 65,
+          "end_line": 71
+        },
+        {
+          "file": "src/adapters/ryml_scanner.cpp",
+          "start_line": 57,
+          "end_line": 63
+        }
+      ]
+    },
+    {
+      "id": "nc-002",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/core/ast.cpp",
+          "start_line": 68,
+          "end_line": 73
+        },
+        {
+          "file": "src/core/ast.cpp",
+          "start_line": 75,
+          "end_line": 80
+        }
+      ]
+    },
+    {
+      "id": "nc-003",
+      "reason": "trivial-factory",
+      "fragments": [
+        {
+          "file": "src/core/ast.cpp",
+          "start_line": 50,
+          "end_line": 55
+        },
+        {
+          "file": "src/core/ast.cpp",
+          "start_line": 43,
+          "end_line": 48
+        }
+      ]
+    },
+    {
+      "id": "nc-004",
+      "reason": "const-overload-pair",
+      "fragments": [
+        {
+          "file": "src/adapters/ryml_emitter.cpp",
+          "start_line": 24,
+          "end_line": 26
+        },
+        {
+          "file": "src/adapters/ryml_emitter.cpp",
+          "start_line": 20,
+          "end_line": 22
+        }
+      ]
+    },
+    {
+      "id": "nc-005",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "src/core/loader.cpp",
+          "start_line": 437,
+          "end_line": 440
+        },
+        {
+          "file": "src/core/loader.cpp",
+          "start_line": 442,
+          "end_line": 445
+        }
+      ]
+    }
+  ]
+}

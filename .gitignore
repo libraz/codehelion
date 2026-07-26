@@ -23,6 +23,9 @@ lcov.info
 
 # Evaluation corpus: external OSS snapshots are fetched locally, never committed
 /corpus/external/
+# Labelled cases commit their verdicts; the sources are cut from a pinned
+# commit by corpus/scripts/materialize-labeled.sh and stay out of the tree.
+/corpus/labeled/*/snapshot/
 
 # Editor / OS
 .DS_Store

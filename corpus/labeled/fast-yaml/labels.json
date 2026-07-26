@@ -1,0 +1,26 @@
+{
+  "schema_version": 0,
+  "language": "rust",
+  "files": [
+    "src/parse.rs"
+  ],
+  "clone_pairs": [
+    {
+      "id": "cp-001",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/parse.rs",
+          "start_line": 14,
+          "end_line": 39
+        },
+        {
+          "file": "src/parse.rs",
+          "start_line": 42,
+          "end_line": 66
+        }
+      ]
+    }
+  ],
+  "non_clones": []
+}

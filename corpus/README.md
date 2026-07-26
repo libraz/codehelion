@@ -10,16 +10,84 @@ it, so treat changes here as changes to the ground truth.
 ```text
 corpus/
   synthetic/   generated mutation cases (seed code + mutation scripts). Committed.
-  labeled/     hand-labelled real code snippets with clone annotations. Committed.
+  labeled/     verdicts on real code: labels.json + the commit they are anchored
+               to. The sources themselves are NOT committed (git-ignored).
   external/    checkouts of real OSS repositories. NOT committed (git-ignored).
   scripts/     fetch/generate helpers run manually by developers.
 ```
+
+Only `synthetic/` carries source in the repository, because the generator wrote
+it. A labelled case carries its **verdicts** — which is the part that took
+judgement and the part worth keeping — plus the commit those verdicts are
+anchored to. The code stays where it came from.
 
 `external/` holds snapshots of third-party repositories used for
 `precision@top-k` evaluation. These are **not redistributed**: they are cloned
 locally by a script in `scripts/`, pinned to a recorded commit hash, and never
 committed. codehelion itself performs no network access — fetching is an
 explicit developer action, separate from the tool.
+
+## What each half measures
+
+The two committed halves answer different questions, and neither can answer the
+other's.
+
+`synthetic/` measures **recall**. A generated corpus knows every clone it
+contains, because it made them. It cannot measure precision: it labels the
+clones it was built around and nothing else, so an unlabelled true copy that the
+detector finds counts against it.
+
+`labeled/` measures **precision**. Each case is a snapshot of a real project,
+and what is labelled is what the detector reported: every group carries a
+hand-written verdict, either a clone worth reporting or a lookalike that must
+not be. It does not measure recall — nobody enumerated the clones in the project
+first — so its `clone_pairs` are verdicts on reported groups, not a census.
+
+That split is deliberate. Labelling a real tree exhaustively is not work anyone
+finishes, and a precision figure that charges the detector for finding something
+true is worse than no figure at all.
+
+### Adding a labelled case
+
+1. Write `snapshot.toml`: the repository, the commit, and the paths to take from
+   it. Never a live working tree — uncommitted edits shift line numbers
+   underneath the labels.
+2. Run `corpus/scripts/materialize-labeled.sh` to cut `snapshot/` from that
+   commit.
+3. Scan it in Structural mode and read **every** group it reports.
+4. Record a verdict for each in `labels.json`: a `clone_pair` when the
+   duplication is real and worth reporting, a `non_clone` when the two are alike
+   for a reason that makes reporting them wrong.
+5. Commit `labels.json`, `snapshot.toml` and `SOURCE.md`. Not `snapshot/`.
+
+The commit in `snapshot.toml` is never bumped in place: the verdicts are about
+that revision, and moving it invalidates every one of them. A newer revision is
+a new case.
+
+A group left without a verdict fails the harness rather than defaulting either
+way. When the detector starts reporting something new about labelled code, that
+is a verdict waiting to be made.
+
+A case whose `snapshot/` has not been materialized is reported as unscored, not
+scored as perfect — so a machine without the sources gets no precision figure
+rather than a flattering one.
+
+### `non_clones` reasons
+
+`reason` is a controlled vocabulary, not free text, so classes of lookalike can
+be counted rather than merely described. The ones in use:
+
+| reason | what it names |
+|---|---|
+| `getter-boilerplate` | accessors whose body is one field read or write |
+| `type-dispatch-accessor` | one guard-and-extract skeleton repeated per member type |
+| `trivial-factory` | construct-and-return, differing only in the kind constructed |
+| `forwarding-wrapper` | a body that is one delegating call |
+| `const-overload-pair` | the const and non-const overloads of one operation |
+| `trivial-accessor-pair` | two-statement accessors differing in a single operation |
+
+Extend the table when a case needs a class it does not have; do not reach for
+the nearest existing word.
 
 ## Label format
 
@@ -74,7 +142,6 @@ against these labels is defined alongside the harness itself.
 
 - `external/` snapshots are never redistributed; only a fetch script and the
   pinned commit hash live in the repository.
-- Any snippet copied into `labeled/` must be under an Apache-2.0-compatible
-  license, so that the committed corpus stays compatible with this project's
-  Apache-2.0 distribution. Record the source and its license next to the
-  snippet.
+- `labeled/` cases redistribute nothing either: the verdicts are this
+  repository's, the code they are about is not. Record each case's origin and
+  license in its `SOURCE.md`.

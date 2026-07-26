@@ -38,6 +38,7 @@ doc: ## Build docs, failing on warnings
 .PHONY: eval
 eval: ## Show detection accuracy over the committed corpora
 	$(CARGO) test -p codehelion-cli --test corpus_accuracy -- --nocapture
+	$(CARGO) test -p codehelion-cli --test labeled_precision -- --nocapture
 
 .PHONY: check
 check: format-check lint test doc ## Run every CI check locally
