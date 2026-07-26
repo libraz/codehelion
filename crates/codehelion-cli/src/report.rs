@@ -22,14 +22,16 @@ pub mod sarif;
 
 use std::io::{self, Write};
 
+use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::lineage::{AuditDiff, AuditState};
+use codehelion_core::priority::{self, GroupFacts, Weights};
 use serde::{Deserialize, Serialize};
 
 /// Version of the JSON report format.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The JSON Schema document describing [`Report`]'s JSON form.
-pub const JSON_SCHEMA: &str = include_str!("../schema/scan-report-v1.schema.json");
+pub const JSON_SCHEMA: &str = include_str!("../schema/scan-report-v2.schema.json");
 
 /// [`Group::scope`] value of a group whose members are runs of statements.
 const SCOPE_FRAGMENT: &str = "fragment";
@@ -71,6 +73,8 @@ pub struct RunInfo {
     pub build_variant: BuildVariantInfo,
     /// Versions of every detection component involved.
     pub detector_versions: Vec<DetectorVersion>,
+    /// How the run composed its ranking.
+    pub ranking: RankingInfo,
     /// Path of the audit database the snapshot was recorded in.
     pub database: String,
     /// Row id of the recorded scan run.
@@ -532,18 +536,204 @@ pub struct Similarity {
     pub confidence_band: Option<String>,
 }
 
-/// A group's ranking value together with its inputs. The collapsed number
-/// never replaces the inputs in any view.
-#[derive(Debug, Serialize)]
+/// Where a group belongs in the report, as separated measures.
+///
+/// [`value`](Self::value) is what the report is ordered by, and it never
+/// appears without the three measures it composes or the facts they were read
+/// from. Everything here is on `0..1` and computed from the group alone, so
+/// the same group ranks the same in every run it appears in.
+#[derive(Debug, Clone, Serialize)]
 pub struct Priority {
-    /// `largest_member_tokens × extra_instances × similarity`.
+    /// The composed ranking value.
     pub value: f64,
-    /// Token count of the group's largest member.
+    /// How sure the finding is duplication worth reporting.
+    pub clone_confidence: f64,
+    /// What keeping the copies in step costs.
+    pub maintenance_risk: f64,
+    /// What removing the duplication would cost.
+    pub refactoring_difficulty: f64,
+    /// How sure the finding is semantically equivalent. Absent until a
+    /// compiler backend measures it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_confidence: Option<f64>,
+    /// How sure the source is the source of a given artifact. Absent until an
+    /// artifact backend measures it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_artifact_confidence: Option<f64>,
+    /// How sure the reported savings are. Absent: nothing measures savings
+    /// yet, and a number here would read as a guarantee.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub savings_confidence: Option<f64>,
+    /// The facts the measures were read from.
+    pub inputs: PriorityInputs,
+}
+
+/// What the ranking read about a group.
+///
+/// Reported in full so that a reader who disagrees with where a finding landed
+/// can see which input put it there, and so that the ranking can be reproduced
+/// from the published report rather than taken on trust.
+#[derive(Debug, Clone, Serialize)]
+pub struct PriorityInputs {
+    /// Token count of the smallest occurrence, which is what decides how
+    /// easily the group could have matched by coincidence.
+    pub smallest_member_tokens: u64,
+    /// Token count of the largest occurrence.
     pub largest_member_tokens: u64,
-    /// Number of instances beyond the first.
-    pub extra_instances: u64,
+    /// Occurrences in the group.
+    pub instances: u64,
     /// Minimum pairwise similarity across the group.
     pub similarity: f64,
+    /// Distinct files the occurrences sit in.
+    pub files: u64,
+    /// Distinct directories the occurrences sit in.
+    pub directories: u64,
+    /// Distinct languages the occurrences are written in.
+    pub languages: u64,
+    /// The run's minimum clone length, which the sizes are read against.
+    pub min_clone_tokens: u64,
+    /// How often the duplicated code changed. Absent: no mode reads repository
+    /// history yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub churn: Option<f64>,
+    /// How many people own the copies. Absent, on the same footing as
+    /// [`churn`](Self::churn).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ownership_spread: Option<f64>,
+}
+
+/// How the run composed its ranking.
+///
+/// A run-level setting rather than a per-group one, and reported because two
+/// reports ordered under different weights are different orderings of the same
+/// findings, which nothing else in the document would say.
+#[derive(Debug, Clone, Serialize)]
+pub struct RankingInfo {
+    /// Version of the ranking rules together with the weights applied.
+    pub recipe: String,
+    /// Weight given to what keeping the copies in step costs.
+    pub maintenance_risk: u32,
+    /// Weight given to how cheap the duplication would be to remove.
+    pub refactoring_ease: u32,
+}
+
+impl Priority {
+    /// The value a group carries between being built and being ranked.
+    ///
+    /// No report holds one: every group is handed straight to [`ranked`], which
+    /// is also what the ranking has to read the group to do. Zero throughout,
+    /// so a group that somehow escaped ranking sorts last rather than first.
+    #[must_use]
+    pub const fn unranked() -> Self {
+        Self {
+            value: 0.0,
+            clone_confidence: 0.0,
+            maintenance_risk: 0.0,
+            refactoring_difficulty: 0.0,
+            semantic_confidence: None,
+            source_artifact_confidence: None,
+            savings_confidence: None,
+            inputs: PriorityInputs {
+                smallest_member_tokens: 0,
+                largest_member_tokens: 0,
+                instances: 0,
+                similarity: 0.0,
+                files: 0,
+                directories: 0,
+                languages: 0,
+                min_clone_tokens: 0,
+                churn: None,
+                ownership_spread: None,
+            },
+        }
+    }
+}
+
+impl Group {
+    /// What the ranking reads about this group.
+    ///
+    /// Taken from the assembled report entry rather than from each mode's own
+    /// data structures, so that Fast and Structural cannot rank the same facts
+    /// differently, and so that anyone holding the JSON report can reproduce
+    /// the ranking from it.
+    ///
+    /// `min_clone_tokens` is the run's length floor, which is a setting rather
+    /// than a property of the group and so is not carried on it.
+    fn facts(&self, min_clone_tokens: u64) -> GroupFacts {
+        let tokens = || self.members.iter().map(|member| member.tokens);
+        let distinct = |values: Vec<&str>| {
+            let mut seen: Vec<&str> = values;
+            seen.sort_unstable();
+            seen.dedup();
+            u64::try_from(seen.len()).unwrap_or(u64::MAX)
+        };
+        GroupFacts {
+            clone_type: CloneClass::from_name(&self.clone_type).unwrap_or(CloneClass::Type3),
+            scope: CloneScope::from_name(&self.scope).unwrap_or(CloneScope::Unit),
+            instances: u64::try_from(self.members.len()).unwrap_or(u64::MAX),
+            smallest_member_tokens: tokens().min().unwrap_or(0),
+            largest_member_tokens: tokens().max().unwrap_or(0),
+            min_pairwise: self.confidence,
+            files: distinct(
+                self.members
+                    .iter()
+                    .map(|member| member.file.as_str())
+                    .collect(),
+            ),
+            directories: distinct(
+                self.members
+                    .iter()
+                    .map(|member| directory_of(&member.file))
+                    .collect(),
+            ),
+            languages: distinct(
+                self.members
+                    .iter()
+                    .map(|member| member.language.as_str())
+                    .collect(),
+            ),
+            min_clone_tokens,
+            churn: None,
+            ownership_spread: None,
+        }
+    }
+}
+
+/// The directory part of a report-relative path, `""` for a file at the root.
+fn directory_of(path: &str) -> &str {
+    path.rfind('/').map_or("", |cut| &path[..cut])
+}
+
+/// Rank one assembled group.
+///
+/// Every construction site hands its group through here, which is what keeps
+/// one ranking rule over both analysis modes and all four kinds of entry.
+#[must_use]
+pub fn ranked(mut group: Group, weights: &Weights, min_clone_tokens: u64) -> Group {
+    let facts = group.facts(min_clone_tokens);
+    let ranked = priority::rank(&facts, weights);
+    group.priority = Priority {
+        value: ranked.final_priority,
+        clone_confidence: ranked.clone_confidence,
+        maintenance_risk: ranked.maintenance_risk,
+        refactoring_difficulty: ranked.refactoring_difficulty,
+        semantic_confidence: ranked.semantic_confidence,
+        source_artifact_confidence: ranked.source_artifact_confidence,
+        savings_confidence: ranked.savings_confidence,
+        inputs: PriorityInputs {
+            smallest_member_tokens: facts.smallest_member_tokens,
+            largest_member_tokens: facts.largest_member_tokens,
+            instances: facts.instances,
+            similarity: facts.min_pairwise,
+            files: facts.files,
+            directories: facts.directories,
+            languages: facts.languages,
+            min_clone_tokens: facts.min_clone_tokens,
+            churn: facts.churn,
+            ownership_spread: facts.ownership_spread,
+        },
+    };
+    group
 }
 
 /// Which mechanism suppressed a group.
@@ -637,6 +827,13 @@ pub struct Member {
     pub content: String,
     /// File path relative to the scan root.
     pub file: String,
+    /// Language the occurrence was read as (`rust`, `c`, `cpp`).
+    ///
+    /// Which grammar read a file decides what the analysis could see in it,
+    /// and a bare `.h` header is read as whichever of C and C++ the tree is
+    /// written in. Recorded per occurrence so that a group spanning two
+    /// languages is visible as one.
+    pub language: String,
     /// 1-based first line.
     pub start_line: u32,
     /// 1-based last line.
@@ -990,15 +1187,29 @@ fn render_group(
         (SCOPE_FRAGMENT, None) => " run".to_string(),
         _ => String::new(),
     };
+    let priority = &group.priority;
     writeln!(
         out,
-        "  {} {}{scope} priority {:.1} ({} tokens x {} extra x {:.2} similarity){overlap}{marker}",
+        "  {} {}{scope} priority {:.2}{overlap}{marker}",
         palette.cyan(&group.fingerprint),
         group.clone_type,
-        group.priority.value,
-        group.priority.largest_member_tokens,
-        group.priority.extra_instances,
-        group.priority.similarity,
+        priority.value,
+    )?;
+    // The composed number is never shown on its own: the three measures that
+    // made it say why the finding is where it is, and disagreeing with the
+    // placement means disagreeing with one of them.
+    writeln!(
+        out,
+        "    confidence {:.2}, maintenance risk {:.2}, refactoring difficulty {:.2} \
+         ({} instances, {}-{} tokens, {:.2} similarity, {} file(s))",
+        priority.clone_confidence,
+        priority.maintenance_risk,
+        priority.refactoring_difficulty,
+        priority.inputs.instances,
+        priority.inputs.smallest_member_tokens,
+        priority.inputs.largest_member_tokens,
+        priority.inputs.similarity,
+        priority.inputs.files,
     )?;
     if let Some(similarity) = &group.similarity {
         writeln!(out, "    {}", similarity.line())?;
@@ -1030,6 +1241,54 @@ fn render_group(
     Ok(())
 }
 
+/// Where a stored run ranked a finding, as it was recorded.
+///
+/// Deliberately not [`Priority`]. That one is what a scan just computed, and
+/// every measure in it exists by construction. This one is what a database
+/// holds, which may have been written by a release that took fewer measures
+/// than this one does — so a measure is `None` when the run did not take it,
+/// rather than filled in with today's rules applied to yesterday's facts.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecordedPriority {
+    /// The composed ranking value the run acted on.
+    pub value: f64,
+    /// How sure the run was that the finding was worth reporting.
+    pub clone_confidence: f64,
+    /// What the run judged keeping the copies in step to cost.
+    pub maintenance_risk: Option<f64>,
+    /// What the run judged removing the duplication to cost.
+    pub refactoring_difficulty: Option<f64>,
+    /// How sure the finding is semantically equivalent.
+    pub semantic_confidence: Option<f64>,
+    /// How sure the source is the source of a given artifact.
+    pub source_artifact_confidence: Option<f64>,
+    /// How sure the reported savings are.
+    pub savings_confidence: Option<f64>,
+    /// The group facts behind the measures, as the stored run holds them.
+    pub inputs: RecordedInputs,
+}
+
+/// The stored facts a recorded ranking was read from.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct RecordedInputs {
+    /// Token count of the smallest occurrence.
+    pub smallest_member_tokens: u64,
+    /// Token count of the largest occurrence.
+    pub largest_member_tokens: u64,
+    /// Occurrences in the group.
+    pub instances: u64,
+    /// Distinct files the occurrences sit in.
+    pub files: u64,
+    /// Distinct directories the occurrences sit in.
+    pub directories: u64,
+    /// Distinct languages the occurrences are written in.
+    pub languages: u64,
+    /// The floor the run reported under. `None` for a run recorded before runs
+    /// stored it, which is the one input a stored ranking can be missing while
+    /// still having been computed from it.
+    pub min_clone_tokens: Option<u64>,
+}
+
 /// The detail view of one occurrence, shared by `codehelion explain`'s text
 /// and JSON output.
 #[derive(Debug, Serialize)]
@@ -1055,6 +1314,9 @@ pub struct GroupRef {
     pub scope: String,
     /// Minimum pairwise similarity across the group.
     pub confidence: f64,
+    /// Where the group was ranked, as recorded with the run, together with the
+    /// facts it was ranked on. Absent for a group with no audited finding row.
+    pub priority: Option<RecordedPriority>,
     /// Number of occurrences in the group, this one included.
     pub members: u64,
     /// The boilerplate shape every member matches, when they all match one.
@@ -1123,6 +1385,7 @@ impl FindingDetail {
         if let Some(similarity) = &self.group.similarity {
             writeln!(out, "    {}", similarity.line())?;
         }
+        self.render_priority(out)?;
         if let Some(category) = &self.group.boilerplate {
             writeln!(out, "  boilerplate: {category}")?;
         }
@@ -1139,6 +1402,86 @@ impl FindingDetail {
             writeln!(out, "  suppressed: {}", cause.label())?;
         }
         writeln!(out, "  scan run: {}", self.scan_run)?;
+        Ok(())
+    }
+
+    /// Why the finding is ranked where it is: each measure, the facts it read,
+    /// and the rule that turned the one into the other.
+    ///
+    /// The rules are stated in words rather than as the arithmetic, because
+    /// what a reader needs in order to argue with a placement is which fact
+    /// drove it, not the constant it was multiplied by. The constants are in
+    /// the ranking recipe the run recorded.
+    fn render_priority(&self, out: &mut impl Write) -> io::Result<()> {
+        let Some(priority) = &self.group.priority else {
+            return Ok(());
+        };
+        let inputs = &priority.inputs;
+        let measure = |value: Option<f64>| {
+            value.map_or_else(|| "n/a".to_string(), |value| format!("{value:.2}"))
+        };
+        writeln!(out, "  priority: {:.2}", priority.value)?;
+        writeln!(
+            out,
+            "    clone confidence {:.2} — {} tokens in the smallest occurrence{}, \
+             {:.2} similarity, matched as {}",
+            priority.clone_confidence,
+            inputs.smallest_member_tokens,
+            inputs.min_clone_tokens.map_or_else(
+                // The floor decides how much a length is worth, so a run that
+                // did not record it leaves the confidence readable but not
+                // reproducible, and says which of the two this is.
+                || " (the run did not record the length floor it used)".to_string(),
+                |floor| format!(" against a {floor}-token floor"),
+            ),
+            self.group.confidence,
+            self.group.clone_type,
+        )?;
+        writeln!(
+            out,
+            "    maintenance risk {} — {} occurrences over {} file(s) in {} \
+             director(y/ies), largest {} tokens",
+            measure(priority.maintenance_risk),
+            inputs.instances,
+            inputs.files,
+            inputs.directories,
+            inputs.largest_member_tokens,
+        )?;
+        writeln!(
+            out,
+            "    refactoring difficulty {} — {} tokens to move, {}, {} language(s)",
+            measure(priority.refactoring_difficulty),
+            inputs.largest_member_tokens,
+            if self.group.scope == SCOPE_FRAGMENT {
+                "a run inside its units, with no boundary to lift it out at"
+            } else {
+                "whole units, which already have a boundary"
+            },
+            inputs.languages,
+        )?;
+        // Named rather than left implicit: an input nobody has measured is not
+        // an input worth zero, and a reader comparing two releases needs to
+        // know which of the two it was.
+        let reserved: Vec<&str> = [
+            ("semantic confidence", priority.semantic_confidence),
+            (
+                "source-artifact confidence",
+                priority.source_artifact_confidence,
+            ),
+            ("savings confidence", priority.savings_confidence),
+        ]
+        .into_iter()
+        .filter(|(_, value)| value.is_none())
+        .map(|(name, _)| name)
+        .collect();
+        if !reserved.is_empty() {
+            writeln!(
+                out,
+                "    not measured by this run, and so not weighed: {}, churn, \
+                 ownership spread",
+                reserved.join(", "),
+            )?;
+        }
         Ok(())
     }
 }
@@ -1170,6 +1513,11 @@ pub(super) mod tests {
                     component: "fp-schema".to_string(),
                     version: "1".to_string(),
                 }],
+                ranking: RankingInfo {
+                    recipe: Weights::default().recipe(),
+                    maintenance_risk: 2,
+                    refactoring_ease: 1,
+                },
                 database: ".codehelion/audit.db".to_string(),
                 run_id: 1,
             },
@@ -1223,185 +1571,188 @@ pub(super) mod tests {
 
     /// A plain visible group: the highest-priority entry of the sample report.
     fn visible_group() -> Group {
-        Group {
-            fingerprint: "0b".repeat(16),
-            clone_type: "type-1".to_string(),
-            scope: "unit".to_string(),
-            statements: None,
-            confidence: 1.0,
-            priority: Priority {
-                value: 80.0,
-                largest_member_tokens: 80,
-                extra_instances: 1,
-                similarity: 1.0,
+        ranked(
+            Group {
+                fingerprint: "0b".repeat(16),
+                clone_type: "type-1".to_string(),
+                scope: "unit".to_string(),
+                statements: None,
+                confidence: 1.0,
+                priority: Priority::unranked(),
+                similarity: None,
+                boilerplate: None,
+                test_code: false,
+                suppressed: None,
+                split_pair: false,
+                members: (0..7)
+                    .map(|index| Member {
+                        finding_id: format!("{index:032x}"),
+                        content: "c0".repeat(16),
+                        file: format!("src/file{index}.rs"),
+                        language: "rust".to_string(),
+                        start_line: 1,
+                        end_line: 9,
+                        unit: Some("checksum".to_string()),
+                        tokens: 80,
+                        canonical: index == 0,
+                    })
+                    .collect(),
             },
-            similarity: None,
-            boilerplate: None,
-            test_code: false,
-            suppressed: None,
-            split_pair: false,
-            members: (0..7)
-                .map(|index| Member {
-                    finding_id: format!("{index:032x}"),
-                    content: "c0".repeat(16),
-                    file: format!("src/file{index}.rs"),
-                    start_line: 1,
-                    end_line: 9,
-                    unit: Some("checksum".to_string()),
-                    tokens: 80,
-                    canonical: index == 0,
-                })
-                .collect(),
-        }
+            &Weights::default(),
+            20,
+        )
     }
 
     /// A group a path rule hid, kept in the report rather than dropped.
     fn suppressed_group() -> Group {
-        Group {
-            fingerprint: "0c".repeat(16),
-            clone_type: "type-1".to_string(),
-            scope: "unit".to_string(),
-            statements: None,
-            confidence: 1.0,
-            priority: Priority {
-                value: 30.0,
-                largest_member_tokens: 30,
-                extra_instances: 1,
-                similarity: 1.0,
+        ranked(
+            Group {
+                fingerprint: "0c".repeat(16),
+                clone_type: "type-1".to_string(),
+                scope: "unit".to_string(),
+                statements: None,
+                confidence: 1.0,
+                priority: Priority::unranked(),
+                similarity: None,
+                boilerplate: None,
+                test_code: false,
+                suppressed: Some(Suppression {
+                    kind: SuppressionKind::Rule,
+                    reason: None,
+                    scope: Some("path_glob".to_string()),
+                    pattern: Some("vendor/**".to_string()),
+                }),
+                split_pair: false,
+                members: vec![
+                    Member {
+                        finding_id: "1".repeat(32),
+                        content: "c0".repeat(16),
+                        file: "vendor/a.rs".to_string(),
+                        language: "rust".to_string(),
+                        start_line: 1,
+                        end_line: 5,
+                        unit: None,
+                        tokens: 30,
+                        canonical: true,
+                    },
+                    Member {
+                        finding_id: "2".repeat(32),
+                        content: "c0".repeat(16),
+                        file: "vendor/b.rs".to_string(),
+                        language: "rust".to_string(),
+                        start_line: 1,
+                        end_line: 5,
+                        unit: None,
+                        tokens: 30,
+                        canonical: false,
+                    },
+                ],
             },
-            similarity: None,
-            boilerplate: None,
-            test_code: false,
-            suppressed: Some(Suppression {
-                kind: SuppressionKind::Rule,
-                reason: None,
-                scope: Some("path_glob".to_string()),
-                pattern: Some("vendor/**".to_string()),
-            }),
-            split_pair: false,
-            members: vec![
-                Member {
-                    finding_id: "1".repeat(32),
-                    content: "c0".repeat(16),
-                    file: "vendor/a.rs".to_string(),
-                    start_line: 1,
-                    end_line: 5,
-                    unit: None,
-                    tokens: 30,
-                    canonical: true,
-                },
-                Member {
-                    finding_id: "2".repeat(32),
-                    content: "c0".repeat(16),
-                    file: "vendor/b.rs".to_string(),
-                    start_line: 1,
-                    end_line: 5,
-                    unit: None,
-                    tokens: 30,
-                    canonical: false,
-                },
-            ],
-        }
+            &Weights::default(),
+            20,
+        )
     }
 
     /// A gapped group as a mode that scores dimensions reports it: a
     /// similarity breakdown whose type dimension was never measured.
     pub(super) fn structural_group() -> Group {
-        Group {
-            fingerprint: "0d".repeat(16),
-            clone_type: "type-3".to_string(),
-            scope: "unit".to_string(),
-            statements: None,
-            confidence: 0.79,
-            priority: Priority {
-                value: 47.4,
-                largest_member_tokens: 60,
-                extra_instances: 1,
-                similarity: 0.79,
+        ranked(
+            Group {
+                fingerprint: "0d".repeat(16),
+                clone_type: "type-3".to_string(),
+                scope: "unit".to_string(),
+                statements: None,
+                confidence: 0.79,
+                priority: Priority::unranked(),
+                similarity: Some(Similarity {
+                    weight_version: "structural-verify-v4".to_string(),
+                    lexical: 0.71,
+                    structural: 0.88,
+                    control_flow: 0.90,
+                    type_similarity: None,
+                    api: Some(0.75),
+                    composite: 0.82,
+                    min_pairwise: 0.79,
+                    confidence_band: Some("medium".to_string()),
+                }),
+                boilerplate: None,
+                test_code: false,
+                suppressed: None,
+                split_pair: false,
+                members: vec![
+                    Member {
+                        finding_id: "3".repeat(32),
+                        content: "c0".repeat(16),
+                        file: "src/parse.rs".to_string(),
+                        language: "rust".to_string(),
+                        start_line: 10,
+                        end_line: 30,
+                        unit: Some("parse_header".to_string()),
+                        tokens: 60,
+                        canonical: true,
+                    },
+                    Member {
+                        finding_id: "4".repeat(32),
+                        content: "c0".repeat(16),
+                        file: "src/parse.rs".to_string(),
+                        language: "rust".to_string(),
+                        start_line: 40,
+                        end_line: 62,
+                        unit: Some("parse_trailer".to_string()),
+                        tokens: 58,
+                        canonical: false,
+                    },
+                ],
             },
-            similarity: Some(Similarity {
-                weight_version: "structural-verify-v4".to_string(),
-                lexical: 0.71,
-                structural: 0.88,
-                control_flow: 0.90,
-                type_similarity: None,
-                api: Some(0.75),
-                composite: 0.82,
-                min_pairwise: 0.79,
-                confidence_band: Some("medium".to_string()),
-            }),
-            boilerplate: None,
-            test_code: false,
-            suppressed: None,
-            split_pair: false,
-            members: vec![
-                Member {
-                    finding_id: "3".repeat(32),
-                    content: "c0".repeat(16),
-                    file: "src/parse.rs".to_string(),
-                    start_line: 10,
-                    end_line: 30,
-                    unit: Some("parse_header".to_string()),
-                    tokens: 60,
-                    canonical: true,
-                },
-                Member {
-                    finding_id: "4".repeat(32),
-                    content: "c0".repeat(16),
-                    file: "src/parse.rs".to_string(),
-                    start_line: 40,
-                    end_line: 62,
-                    unit: Some("parse_trailer".to_string()),
-                    tokens: 58,
-                    canonical: false,
-                },
-            ],
-        }
+            &Weights::default(),
+            20,
+        )
     }
 
     /// A run duplicated inside two units that are not clones of each other:
     /// the members are stretches of their hosts, not the hosts.
     pub(super) fn fragment_group() -> Group {
-        Group {
-            fingerprint: "0e".repeat(16),
-            clone_type: "type-1".to_string(),
-            scope: SCOPE_FRAGMENT.to_string(),
-            statements: Some(5),
-            confidence: 1.0,
-            priority: Priority {
-                value: 39.0,
-                largest_member_tokens: 39,
-                extra_instances: 1,
-                similarity: 1.0,
+        ranked(
+            Group {
+                fingerprint: "0e".repeat(16),
+                clone_type: "type-1".to_string(),
+                scope: SCOPE_FRAGMENT.to_string(),
+                statements: Some(5),
+                confidence: 1.0,
+                priority: Priority::unranked(),
+                similarity: None,
+                boilerplate: None,
+                test_code: false,
+                suppressed: None,
+                split_pair: false,
+                members: vec![
+                    Member {
+                        finding_id: "5".repeat(32),
+                        content: "c0".repeat(16),
+                        file: "src/render.rs".to_string(),
+                        language: "rust".to_string(),
+                        start_line: 17,
+                        end_line: 21,
+                        unit: Some("render_rows".to_string()),
+                        tokens: 39,
+                        canonical: true,
+                    },
+                    Member {
+                        finding_id: "6".repeat(32),
+                        content: "c0".repeat(16),
+                        file: "src/audit.rs".to_string(),
+                        language: "rust".to_string(),
+                        start_line: 11,
+                        end_line: 15,
+                        unit: Some("audit_entries".to_string()),
+                        tokens: 39,
+                        canonical: false,
+                    },
+                ],
             },
-            similarity: None,
-            boilerplate: None,
-            test_code: false,
-            suppressed: None,
-            split_pair: false,
-            members: vec![
-                Member {
-                    finding_id: "5".repeat(32),
-                    content: "c0".repeat(16),
-                    file: "src/render.rs".to_string(),
-                    start_line: 17,
-                    end_line: 21,
-                    unit: Some("render_rows".to_string()),
-                    tokens: 39,
-                    canonical: true,
-                },
-                Member {
-                    finding_id: "6".repeat(32),
-                    content: "c0".repeat(16),
-                    file: "src/audit.rs".to_string(),
-                    start_line: 11,
-                    end_line: 15,
-                    unit: Some("audit_entries".to_string()),
-                    tokens: 39,
-                    canonical: false,
-                },
-            ],
-        }
+            &Weights::default(),
+            20,
+        )
     }
 
     #[test]
@@ -1426,7 +1777,7 @@ pub(super) mod tests {
             .render_text(TextOptions::default(), &mut buffer)
             .unwrap();
         let text = String::from_utf8(buffer).unwrap();
-        assert!(text.contains("type-1 run of 5 statements priority 39.0"));
+        assert!(text.contains("type-1 run of 5 statements priority 0."));
         // What was folded away is stated rather than silently dropped.
         assert!(text.contains(
             "1 of them are runs duplicated inside units that are not clones of each other; \
@@ -1518,6 +1869,7 @@ pub(super) mod tests {
                 clone_type: "type-1".to_string(),
                 scope: SCOPE_FRAGMENT.to_string(),
                 confidence: 1.0,
+                priority: None,
                 members: 2,
                 boilerplate: None,
                 test_code: true,
@@ -1545,6 +1897,7 @@ pub(super) mod tests {
                 clone_type: "type-1".to_string(),
                 scope: SCOPE_FRAGMENT.to_string(),
                 confidence: 1.0,
+                priority: None,
                 members: 2,
                 boilerplate: None,
                 test_code: false,
@@ -1602,14 +1955,14 @@ pub(super) mod tests {
     fn json_view_serializes_the_documented_shape() {
         let value: serde_json::Value =
             serde_json::from_str(&sample_report().to_json().unwrap()).unwrap();
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["schema_version"], 2);
         assert_eq!(value["run"]["mode"], "fast");
         assert_eq!(value["run"]["build_variant"]["normalization_version"], 2);
         assert_eq!(value["summary"]["files"]["total"], 2);
         assert_eq!(value["summary"]["pair_budget_exhausted"], false);
         let group = &value["groups"][0];
         assert_eq!(group["clone_type"], "type-1");
-        assert_eq!(group["priority"]["largest_member_tokens"], 80);
+        assert_eq!(group["priority"]["inputs"]["largest_member_tokens"], 80);
         assert_eq!(group["suppressed"], serde_json::Value::Null);
         assert_eq!(group["members"][0]["canonical"], true);
         let suppressed = &value["groups"][1]["suppressed"];
@@ -1692,6 +2045,18 @@ pub(super) mod tests {
             (
                 &value["groups"][2]["similarity"],
                 &schema["$defs"]["similarity"]["properties"],
+            ),
+            (
+                &value["run"]["ranking"],
+                &schema["$defs"]["ranking"]["properties"],
+            ),
+            (
+                &value["groups"][0]["priority"],
+                &schema["$defs"]["priority"]["properties"],
+            ),
+            (
+                &value["groups"][0]["priority"]["inputs"],
+                &schema["$defs"]["priority_inputs"]["properties"],
             ),
         ];
         for (object, properties) in checks {
@@ -1810,6 +2175,7 @@ pub(super) mod tests {
     fn finding_detail_shares_the_member_shape_across_views() {
         let detail = FindingDetail {
             member: Member {
+                language: "rust".to_string(),
                 finding_id: "ab".repeat(16),
                 content: "c0".repeat(16),
                 file: "src/lib.rs".to_string(),
@@ -1824,6 +2190,7 @@ pub(super) mod tests {
                 clone_type: "type-1".to_string(),
                 scope: "unit".to_string(),
                 confidence: 1.0,
+                priority: None,
                 members: 2,
                 boilerplate: None,
                 test_code: false,
@@ -1854,6 +2221,7 @@ pub(super) mod tests {
     fn a_structural_occurrence_explains_itself_with_the_recorded_evidence() {
         let detail = FindingDetail {
             member: Member {
+                language: "rust".to_string(),
                 finding_id: "ef".repeat(16),
                 content: "c0".repeat(16),
                 file: "src/b.rs".to_string(),
@@ -1868,6 +2236,7 @@ pub(super) mod tests {
                 clone_type: "type-3".to_string(),
                 scope: "unit".to_string(),
                 confidence: 0.87,
+                priority: None,
                 members: 2,
                 boilerplate: Some("macro-repetition".to_string()),
                 test_code: false,

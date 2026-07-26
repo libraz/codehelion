@@ -18,8 +18,8 @@ use codehelion_core::stable_id::{
 };
 use codehelion_core::verify::Confidence;
 use codehelion_store::snapshot::{
-    FeatureRow, FileRow, GroupOrigin, GroupRow, LineageParent, MemberRow, SimilarityBreakdownRow,
-    Snapshot, SuppressionRuleRow, UnitRow,
+    FeatureRow, FileRow, GroupOrigin, GroupRow, LineageParent, MemberRow, PriorityRow,
+    SimilarityBreakdownRow, Snapshot, SuppressionRuleRow, UnitRow,
 };
 use codehelion_store::{Store, StoreError};
 
@@ -71,6 +71,7 @@ fn sample_snapshot<'a>(
         started_at: "2026-07-24T00:00:00Z",
         finished_at: "2026-07-24T00:00:05Z",
         variant,
+        min_clone_tokens: 20,
         detector_versions: detectors,
         units: vec![
             UnitRow {
@@ -107,7 +108,15 @@ fn sample_snapshot<'a>(
             suppress_reason: None,
             boilerplate: None,
             suppressed_by: None,
-            final_priority: 42.0,
+            priority: PriorityRow {
+                clone_confidence: 0.81,
+                maintenance_risk: 0.44,
+                refactoring_difficulty: 0.27,
+                final_priority: 0.52,
+                semantic_confidence: None,
+                source_artifact_confidence: None,
+                savings_confidence: None,
+            },
             similarity: None,
             members: vec![
                 member(1, "src/a.rs", Some(0)),
@@ -528,8 +537,10 @@ fn a_finding_records_the_state_the_run_settled_on() {
     // The sample compares against nothing, which is what a first audit does.
     assert_eq!(findings[0].audit_state, "new");
     assert_eq!(findings[0].group_fingerprint_hex, group_fp(9).to_hex());
-    assert!((findings[0].clone_confidence - 1.0).abs() < f64::EPSILON);
-    assert!((findings[0].final_priority - 42.0).abs() < f64::EPSILON);
+    // The measures the run settled on, not the raw similarity: a finding row
+    // records where the run put it, and why.
+    assert!((findings[0].clone_confidence - 0.81).abs() < f64::EPSILON);
+    assert!((findings[0].final_priority - 0.52).abs() < f64::EPSILON);
     assert!(findings[0].suppression_scope.is_none());
 }
 
@@ -762,6 +773,8 @@ fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
         // migrating forward would try to add one twice.
         conn.execute("DROP TABLE scanned_file", []).unwrap();
         conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
+        conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])
+            .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
             .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN test_code", [])
@@ -813,6 +826,8 @@ fn a_group_recorded_before_the_split_pair_column_reads_as_a_whole_group() {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute("DROP TABLE scanned_file", []).unwrap();
         conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
+        conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])
+            .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
             .unwrap();
         conn.execute("UPDATE schema_meta SET version = 8", [])
@@ -875,6 +890,8 @@ fn a_group_recorded_before_the_test_code_column_is_not_claimed_to_be_test_code()
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute("DROP TABLE scanned_file", []).unwrap();
         conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
+        conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])
+            .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
             .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN test_code", [])

@@ -71,6 +71,34 @@ pub struct MemberRow {
     pub token_count: usize,
 }
 
+/// Where a group's finding was ranked, as separated measures.
+///
+/// Persisted onto the `finding` row, one column per measure. The composed
+/// value is stored beside the measures rather than in place of them, so a
+/// stored run can be asked why a finding was ranked where it was and not only
+/// where that was.
+///
+/// The three reserved measures have no analysis behind them yet and are stored
+/// as null. Null rather than zero: a measure nobody took and a measure that
+/// came out at nothing are different facts about a run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PriorityRow {
+    /// How sure the finding is duplication worth reporting.
+    pub clone_confidence: f64,
+    /// What keeping the copies in step costs.
+    pub maintenance_risk: f64,
+    /// What removing the duplication would cost.
+    pub refactoring_difficulty: f64,
+    /// The composed ranking value.
+    pub final_priority: f64,
+    /// How sure the finding is semantically equivalent. Reserved.
+    pub semantic_confidence: Option<f64>,
+    /// How sure the source is the source of a given artifact. Reserved.
+    pub source_artifact_confidence: Option<f64>,
+    /// How sure the reported savings are. Reserved.
+    pub savings_confidence: Option<f64>,
+}
+
 /// A clone group's similarity breakdown, one measured dimension per field.
 ///
 /// Persisted as one `clone_group_similarity` row. Every dimension stays
@@ -181,9 +209,9 @@ pub struct GroupRow {
     /// Index into [`Snapshot::suppressions`] of the rule that suppressed this
     /// group's finding, if one matched.
     pub suppressed_by: Option<usize>,
-    /// Priority of this group's finding; the inputs it was derived from stay
-    /// available on the group and member rows.
-    pub final_priority: f64,
+    /// Where the group's finding was ranked, and on what grounds. The facts it
+    /// was derived from stay available on the group and member rows.
+    pub priority: PriorityRow,
     /// The similarity breakdown, when the mode measured one (Structural). Fast
     /// groups leave this `None`.
     pub similarity: Option<SimilarityBreakdownRow>,
@@ -366,6 +394,13 @@ pub struct Snapshot<'a> {
     pub finished_at: &'a str,
     /// The build variant the scan ran under.
     pub variant: &'a BuildVariant,
+    /// The shortest clone the run would report, in tokens.
+    ///
+    /// Recorded because it decides what became a finding at all, and because
+    /// the ranking reads every group's size against it: the same group is
+    /// weaker evidence under a high floor than under a low one, and a stored
+    /// ranking cannot be re-derived without knowing which was in force.
+    pub min_clone_tokens: u32,
     /// Active `(component, version)` pairs, e.g. `("frontend.rust",
     /// "rust-lexer-v0")`.
     pub detector_versions: &'a [(String, String)],
@@ -425,8 +460,8 @@ fn write_snapshot(tx: &Transaction<'_>, snapshot: &Snapshot<'_>) -> Result<i64, 
     tx.execute(
         "INSERT INTO scan_run
              (build_variant_id, root_path, tool_version, config_hash,
-              analysis_mode, started_at, finished_at, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'completed')",
+              analysis_mode, started_at, finished_at, min_clone_tokens, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'completed')",
         params![
             variant_id,
             snapshot.root_path,
@@ -435,6 +470,7 @@ fn write_snapshot(tx: &Transaction<'_>, snapshot: &Snapshot<'_>) -> Result<i64, 
             snapshot.variant.mode.name(),
             snapshot.started_at,
             snapshot.finished_at,
+            i64::from(snapshot.min_clone_tokens),
         ],
     )?;
     let run_id = tx.last_insert_rowid();
@@ -636,6 +672,48 @@ fn write_units(
 }
 
 #[allow(clippy::too_many_arguments)] // transaction hand-off, one call site
+/// The audited row for one group in one run: what was found, where the run
+/// ranked it, and what became of it since the tree was last looked at.
+fn write_finding(
+    tx: &Transaction<'_>,
+    run_id: i64,
+    group_row_id: i64,
+    group: &GroupRow,
+    suppression_row_ids: &[i64],
+) -> Result<(), StoreError> {
+    let suppression_row_id = match group.suppressed_by {
+        Some(index) => Some(*suppression_row_ids.get(index).ok_or(
+            StoreError::UnknownSuppressionIndex {
+                index,
+                rules: suppression_row_ids.len(),
+            },
+        )?),
+        None => None,
+    };
+    tx.execute(
+        "INSERT INTO finding
+             (scan_run_id, clone_group_id, audit_state, suppression_id,
+              clone_confidence, maintenance_risk, refactoring_difficulty,
+              final_priority, semantic_confidence,
+              source_artifact_mapping_confidence, savings_confidence)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            run_id,
+            group_row_id,
+            group.history.state.name(),
+            suppression_row_id,
+            group.priority.clone_confidence,
+            group.priority.maintenance_risk,
+            group.priority.refactoring_difficulty,
+            group.priority.final_priority,
+            group.priority.semantic_confidence,
+            group.priority.source_artifact_confidence,
+            group.priority.savings_confidence,
+        ],
+    )?;
+    Ok(())
+}
+
 fn write_group(
     tx: &Transaction<'_>,
     snapshot: &Snapshot<'_>,
@@ -669,31 +747,7 @@ fn write_group(
     )?;
     let group_row_id = tx.last_insert_rowid();
 
-    // The audited row for this group in this run: what was found, and what
-    // became of it since the tree was last looked at.
-    let suppression_row_id = match group.suppressed_by {
-        Some(index) => Some(*suppression_row_ids.get(index).ok_or(
-            StoreError::UnknownSuppressionIndex {
-                index,
-                rules: suppression_row_ids.len(),
-            },
-        )?),
-        None => None,
-    };
-    tx.execute(
-        "INSERT INTO finding
-             (scan_run_id, clone_group_id, audit_state, suppression_id,
-              clone_confidence, final_priority)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            run_id,
-            group_row_id,
-            group.history.state.name(),
-            suppression_row_id,
-            group.score,
-            group.final_priority,
-        ],
-    )?;
+    write_finding(tx, run_id, group_row_id, group, suppression_row_ids)?;
     write_lineage(tx, snapshot, run_id, variant_id, group, group_fp_id)?;
 
     write_group_similarity(tx, group_row_id, group.similarity.as_ref())?;

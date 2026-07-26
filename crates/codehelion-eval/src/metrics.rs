@@ -271,6 +271,99 @@ pub fn adjudicate(results: &DetectionResult, labels: &LabelSet, threshold: f64) 
     adjudication
 }
 
+/// How well a ranking puts the real duplication first.
+///
+/// A report is read from the top, so where a finding sits decides whether it
+/// is read at all. Precision over the whole result set says nothing about
+/// that: two orderings of the same findings score identically on it and are
+/// worth entirely different amounts to a reader.
+///
+/// Accumulates across corpora, because a single labelled project has too few
+/// judged findings for a cut-off of fifty to mean anything. Findings the
+/// labels do not speak about are left out of the ordering entirely rather than
+/// counted against it — an unlabelled finding is an unasked question, and
+/// including it would let a ranking look better by burying its unjudged
+/// findings at the bottom.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RankedVerdicts {
+    /// Every judged finding, as `(score, was it confirmed)`.
+    entries: Vec<(f64, bool)>,
+}
+
+impl RankedVerdicts {
+    /// Add every judged finding in `results`, scored by `score`.
+    ///
+    /// `score` reads a finding and returns the value the ranking under test
+    /// would order by, higher first. Passing a different one is how two
+    /// rankings are compared over the same verdicts.
+    pub fn record(
+        &mut self,
+        results: &DetectionResult,
+        labels: &LabelSet,
+        threshold: f64,
+        score: impl Fn(&Finding) -> f64,
+    ) {
+        for finding in &results.findings {
+            match verdict(finding, labels, threshold) {
+                Verdict::Confirmed => self.entries.push((score(finding), true)),
+                Verdict::Refuted => self.entries.push((score(finding), false)),
+                Verdict::Conflicting | Verdict::Unjudged => {}
+            }
+        }
+    }
+
+    /// Judged findings recorded so far.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether nothing has been recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Share of the top `k` that a label confirmed; `0.0` when nothing was
+    /// recorded. `k` past the end scores every entry.
+    ///
+    /// Ties are broken pessimistically — a refuted finding sorts ahead of a
+    /// confirmed one at the same score — so a ranking cannot be credited for
+    /// an order it did not actually express.
+    #[must_use]
+    pub fn precision_at(&self, k: usize) -> f64 {
+        let mut ordered = self.entries.clone();
+        ordered.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let top = &ordered[..k.min(ordered.len())];
+        ratio(
+            top.iter().filter(|(_, confirmed)| *confirmed).count(),
+            top.len(),
+        )
+    }
+
+    /// Mean average precision: the precision at every position a confirmed
+    /// finding occupies, averaged.
+    ///
+    /// The measure to compare two rankings on, because it reads the whole
+    /// order rather than one cut-off, and a cut-off chosen after seeing the
+    /// results is a way of choosing a winner rather than of measuring one.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // Corpus counts are far below f64's exact range.
+    pub fn mean_average_precision(&self) -> f64 {
+        let mut ordered = self.entries.clone();
+        ordered.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let mut hits = 0usize;
+        let mut total = 0.0;
+        for (position, (_, confirmed)) in ordered.iter().enumerate() {
+            if *confirmed {
+                hits += 1;
+                total += ratio(hits, position + 1);
+            }
+        }
+        if hits == 0 { 0.0 } else { total / hits as f64 }
+    }
+}
+
 /// What the labels say about a single finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Verdict {
@@ -497,6 +590,7 @@ mod tests {
 
     fn finding(id: &str, score: f64, fragments: Vec<Fragment>) -> Finding {
         Finding {
+            size_tokens: 0,
             id: id.to_string(),
             clone_type: CloneType::Type2,
             score,
@@ -758,6 +852,7 @@ mod tests {
             // fragments only.
             findings: vec![
                 Finding {
+                    size_tokens: 0,
                     id: "b2".to_string(),
                     clone_type: CloneType::Type1,
                     score: 1.0,

@@ -513,7 +513,7 @@ fn json_reports_follow_the_versioned_schema() {
     let dir = fixture();
     let value = scan_json(dir.path());
 
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     assert_eq!(value["run"]["mode"], "fast");
     assert_eq!(value["run"]["build_variant"]["mode"], "fast");
     assert!(value["run"]["started_at"].as_str().unwrap().ends_with('Z'));

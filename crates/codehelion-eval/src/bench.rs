@@ -31,7 +31,9 @@ use codehelion_core::stable_id::{
     CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint,
 };
 use codehelion_store::Store;
-use codehelion_store::snapshot::{GroupOrigin, GroupRow, MemberRow, Snapshot, UnitRow};
+use codehelion_store::snapshot::{
+    GroupOrigin, GroupRow, MemberRow, PriorityRow, Snapshot, UnitRow,
+};
 
 /// Deterministic xorshift64* generator; quality is irrelevant here, only
 /// reproducibility across runs and platforms.
@@ -625,7 +627,15 @@ pub fn measure_store_insert(
             suppress_reason: None,
             boilerplate: None,
             suppressed_by: None,
-            final_priority: 100.0,
+            priority: PriorityRow {
+                clone_confidence: 0.9,
+                maintenance_risk: 0.4,
+                refactoring_difficulty: 0.3,
+                final_priority: 0.5,
+                semantic_confidence: None,
+                source_artifact_confidence: None,
+                savings_confidence: None,
+            },
             similarity: None,
             members: (0..members_per_group)
                 .map(|member| {
@@ -653,6 +663,7 @@ pub fn measure_store_insert(
         started_at: "2026-01-01T00:00:00.000000Z",
         finished_at: "2026-01-01T00:00:01.000000Z",
         variant: &variant,
+        min_clone_tokens: 20,
         detector_versions: &[],
         suppressions: Vec::new(),
         units: unit_rows,

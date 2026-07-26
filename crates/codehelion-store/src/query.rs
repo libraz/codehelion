@@ -6,7 +6,7 @@
 //! members by their anchor then row id — the same database always yields the
 //! same output.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use codehelion_core::clone_class::{CloneClass, CloneScope};
@@ -83,6 +83,8 @@ pub struct StoredMember {
     /// finding id is derived from the group fingerprint and moves with it,
     /// while this does not.
     pub content_hex: String,
+    /// Language the occurrence was read as (`rust`, `c`, `cpp`).
+    pub language: String,
     /// Anchor: file path relative to the scan root.
     pub file_path: String,
     /// Anchor: 1-based first line.
@@ -198,10 +200,63 @@ pub struct OccurrenceDetail {
     pub split_pair: bool,
     /// The owning group's similarity breakdown, when the mode measured one.
     pub similarity: Option<StoredSimilarity>,
+    /// Where the run ranked the finding, and the facts it ranked on. Absent
+    /// for a group with no audited finding row.
+    pub priority: Option<StoredPriority>,
     /// The rule that suppressed the finding in this run, if one matched.
     pub suppression: Option<StoredSuppressionRef>,
     /// Row id of the scan run the occurrence belongs to.
     pub scan_run_id: i64,
+}
+
+/// Where a stored run ranked a finding, and what it read to get there.
+///
+/// Read back rather than recomputed. The rules a run ranked under are the
+/// rules that release carried, and re-deriving the number under today's would
+/// answer a question nobody asked — the recorded value is what the run acted
+/// on. Every measure a run did not take is `None`, including the ones a newer
+/// release computes and an older one did not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredPriority {
+    /// How sure the finding was duplication worth reporting.
+    pub clone_confidence: f64,
+    /// What keeping the copies in step was judged to cost.
+    pub maintenance_risk: Option<f64>,
+    /// What removing the duplication was judged to cost.
+    pub refactoring_difficulty: Option<f64>,
+    /// The composed ranking value.
+    pub final_priority: f64,
+    /// How sure the finding is semantically equivalent.
+    pub semantic_confidence: Option<f64>,
+    /// How sure the source is the source of a given artifact.
+    pub source_artifact_confidence: Option<f64>,
+    /// How sure the reported savings are.
+    pub savings_confidence: Option<f64>,
+    /// The group facts the measures were read from.
+    pub facts: StoredRankingFacts,
+}
+
+/// What a stored group looks like to the ranking.
+///
+/// Derived from the group's own rows rather than stored a second time: a copy
+/// of a derivable value is a second answer waiting to disagree with the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredRankingFacts {
+    /// Token count of the smallest occurrence.
+    pub smallest_member_tokens: i64,
+    /// Token count of the largest occurrence.
+    pub largest_member_tokens: i64,
+    /// Occurrences in the group.
+    pub instances: i64,
+    /// Distinct files the occurrences sit in.
+    pub files: i64,
+    /// Distinct directories the occurrences sit in.
+    pub directories: i64,
+    /// Distinct languages the occurrences are written in.
+    pub languages: i64,
+    /// The run's minimum clone length. `None` for a run recorded before runs
+    /// stored the floor they reported under.
+    pub min_clone_tokens: Option<i64>,
 }
 
 /// The suppression rule a finding references.
@@ -646,7 +701,8 @@ impl Store {
     fn group_members(&self, group_row_id: i64) -> Result<Vec<StoredMember>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT lower(hex(m.finding_id)), fr.file_path, fr.start_line, fr.end_line,
-                    fr.token_count, u.name, m.is_canonical, lower(hex(ff.hash))
+                    fr.token_count, u.name, m.is_canonical, lower(hex(ff.hash)),
+                    ff.language
              FROM clone_group_member m
              JOIN fragment fr ON fr.id = m.fragment_id
              JOIN fingerprint ff ON ff.id = fr.fingerprint_id
@@ -731,7 +787,8 @@ impl Store {
                         fr.token_count, u.name, m.is_canonical,
                         lower(hex(gf.hash)), g.clone_type, g.score, g.scan_run_id,
                         g.member_count, g.boilerplate, s.scope, s.pattern, g.id,
-                        g.member_scope, g.test_code, g.split_pair, lower(hex(ff.hash))
+                        g.member_scope, g.test_code, g.split_pair, lower(hex(ff.hash)),
+                        ff.language
                  FROM clone_group_member m
                  JOIN fragment fr ON fr.id = m.fragment_id
                  JOIN fingerprint ff ON ff.id = fr.fingerprint_id
@@ -768,6 +825,7 @@ impl Store {
                             test_code: row.get(17)?,
                             split_pair: row.get(18)?,
                             similarity: None,
+                            priority: None,
                             suppression,
                         },
                         row.get::<_, i64>(15)?,
@@ -779,17 +837,106 @@ impl Store {
             return Ok(None);
         };
         detail.similarity = self.group_similarity(group_row_id)?;
+        detail.priority = self.group_priority(group_row_id, detail.scan_run_id)?;
         Ok(Some(detail))
+    }
+
+    /// Where a run ranked one group's finding, with the facts behind it.
+    fn group_priority(
+        &self,
+        group_row_id: i64,
+        run_id: i64,
+    ) -> Result<Option<StoredPriority>, StoreError> {
+        let facts = self.ranking_facts(group_row_id, run_id)?;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT clone_confidence, maintenance_risk, refactoring_difficulty,
+                        final_priority, semantic_confidence,
+                        source_artifact_mapping_confidence, savings_confidence
+                 FROM finding
+                 WHERE clone_group_id = ?1 AND scan_run_id = ?2",
+                params![group_row_id, run_id],
+                |row| {
+                    Ok(StoredPriority {
+                        clone_confidence: row.get(0)?,
+                        maintenance_risk: row.get(1)?,
+                        refactoring_difficulty: row.get(2)?,
+                        final_priority: row.get(3)?,
+                        semantic_confidence: row.get(4)?,
+                        source_artifact_confidence: row.get(5)?,
+                        savings_confidence: row.get(6)?,
+                        facts,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// One stored group as the ranking reads it.
+    ///
+    /// The directory count is taken in Rust rather than in SQL: splitting a
+    /// path is not something an expression over `TEXT` does readably, and the
+    /// member count of a group is small enough that reading the paths costs
+    /// nothing.
+    fn ranking_facts(
+        &self,
+        group_row_id: i64,
+        run_id: i64,
+    ) -> Result<StoredRankingFacts, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT fr.file_path, fr.token_count, ff.language
+             FROM clone_group_member m
+             JOIN fragment fr ON fr.id = m.fragment_id
+             JOIN fingerprint ff ON ff.id = fr.fingerprint_id
+             WHERE m.clone_group_id = ?1",
+        )?;
+        let rows = statement.query_map(params![group_row_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut tokens: Vec<i64> = Vec::new();
+        let mut files: BTreeSet<String> = BTreeSet::new();
+        let mut directories: BTreeSet<String> = BTreeSet::new();
+        let mut languages: BTreeSet<String> = BTreeSet::new();
+        for row in rows {
+            let (path, token_count, language) = row?;
+            tokens.push(token_count);
+            directories.insert(
+                path.rfind('/')
+                    .map_or_else(String::new, |cut| path[..cut].to_string()),
+            );
+            files.insert(path);
+            languages.insert(language);
+        }
+        let min_clone_tokens = self.conn.query_row(
+            "SELECT min_clone_tokens FROM scan_run WHERE id = ?1",
+            params![run_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        Ok(StoredRankingFacts {
+            smallest_member_tokens: tokens.iter().copied().min().unwrap_or(0),
+            largest_member_tokens: tokens.iter().copied().max().unwrap_or(0),
+            instances: i64::try_from(tokens.len()).unwrap_or(i64::MAX),
+            files: i64::try_from(files.len()).unwrap_or(i64::MAX),
+            directories: i64::try_from(directories.len()).unwrap_or(i64::MAX),
+            languages: i64::try_from(languages.len()).unwrap_or(i64::MAX),
+            min_clone_tokens,
+        })
     }
 }
 
 /// Read one member from a row whose first seven columns are the member's, and
-/// whose `content` column the caller names by index — the two queries that
-/// select members place it differently.
+/// whose content and language columns start at `content` — the two queries
+/// that select members place the pair differently but always adjacently.
 fn map_member(row: &rusqlite::Row<'_>, content: usize) -> Result<StoredMember, rusqlite::Error> {
     Ok(StoredMember {
         finding_hex: row.get(0)?,
         content_hex: row.get(content)?,
+        language: row.get(content + 1)?,
         file_path: row.get(1)?,
         start_line: row.get(2)?,
         end_line: row.get(3)?,

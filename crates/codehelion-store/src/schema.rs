@@ -38,11 +38,11 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
 
 /// Version 1: the full entity set.
 const V1: &str = "
@@ -496,6 +496,22 @@ CREATE TABLE group_lineage_edge (
     PRIMARY KEY (scan_run_id, child_group_fingerprint_id, parent_group_fingerprint_id)
 ) STRICT;
 CREATE INDEX idx_group_lineage_edge_parent ON group_lineage_edge (parent_group_fingerprint_id);
+";
+
+/// Version 13: the length floor a run reported under.
+///
+/// The floor decides which matches become findings at all, and the ranking
+/// reads every group's size against it: a clone sitting on the floor is the
+/// weakest evidence the run could produce, and one at eight times the floor is
+/// not, whatever the floor was set to. Without it stored, a finding's ranking
+/// can be shown but not re-derived, and two runs of the same tree under
+/// different floors look like one run that changed its mind.
+///
+/// Rows written before this migration have no floor to record. It is nullable
+/// for that reason, and read back as absent rather than as the current
+/// default, which would attribute a setting to a run that never used it.
+const V13: &str = "
+ALTER TABLE scan_run ADD COLUMN min_clone_tokens INTEGER;
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

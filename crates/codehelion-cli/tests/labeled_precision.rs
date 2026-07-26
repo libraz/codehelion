@@ -29,7 +29,8 @@ use std::path::{Path, PathBuf};
 use assert_cmd::Command;
 use codehelion_eval::detected;
 use codehelion_eval::labels::LabelSet;
-use codehelion_eval::metrics::{DEFAULT_MATCH_THRESHOLD, SizeSplit, adjudicate};
+use codehelion_eval::metrics::{DEFAULT_MATCH_THRESHOLD, RankedVerdicts, SizeSplit, adjudicate};
+use codehelion_eval::schema::Finding;
 
 /// One labelled corpus and the verdict split it currently produces.
 struct Expected {
@@ -76,6 +77,79 @@ const CORPORA: &[Expected] = &[
     },
 ];
 
+/// Cut-offs the ranking is pinned at, with the share of the top `k` that has
+/// to be a confirmed clone.
+///
+/// Pinned rather than bounded loosely, and pinned below what the ranking
+/// currently reaches, because these numbers move for two different reasons: a
+/// ranking change, which is what they are here to catch, and a detector change
+/// that alters which findings exist to be ranked, which is not. The margin is
+/// what separates the two.
+const PRECISION_AT: &[(usize, f64)] = &[(10, 1.0), (50, 0.86)];
+
+/// Floor the composed ranking has to keep over the whole ordering.
+const MIN_MEAN_AVERAGE_PRECISION: f64 = 0.94;
+
+/// Compare the ranking the tool prints against sorting by size, and complain
+/// when it stops earning its place.
+///
+/// Size is the right baseline: it is what a reader would sort by if the tool
+/// offered nothing, and it is already a strong signal — nothing the labels
+/// refuted in these corpora is long. A ranking that cannot beat it is a
+/// ranking that is only adding opinions.
+///
+/// What this does *not* measure: the labels say whether a finding is real
+/// duplication, and nothing else. Maintenance risk and refactoring difficulty
+/// are statements about a finding that is already real, so no verdict here
+/// speaks about them, and a composition that weighs them cannot be validated
+/// by this test — only kept from doing damage.
+fn report_ranking(ranked: &RankedVerdicts, by_size: &RankedVerdicts, complaints: &mut String) {
+    println!("\nranking over {} judged findings", ranked.len());
+    println!(
+        "{:<22} {:>8} {:>8} {:>8}",
+        "ordered by", "p@10", "p@50", "MAP"
+    );
+    for (name, verdicts) in [("priority", ranked), ("size", by_size)] {
+        println!(
+            "{name:<22} {:>8.3} {:>8.3} {:>8.3}",
+            verdicts.precision_at(10),
+            verdicts.precision_at(50),
+            verdicts.mean_average_precision(),
+        );
+    }
+
+    for &(k, floor) in PRECISION_AT {
+        let reached = ranked.precision_at(k);
+        if reached < floor {
+            writeln!(
+                complaints,
+                "precision@{k} fell to {reached:.4}, below the pinned {floor:.4}",
+            )
+            .expect("writing to a string cannot fail");
+        }
+    }
+    let map = ranked.mean_average_precision();
+    if map < MIN_MEAN_AVERAGE_PRECISION {
+        writeln!(
+            complaints,
+            "mean average precision fell to {map:.4}, below the pinned \
+             {MIN_MEAN_AVERAGE_PRECISION:.4}",
+        )
+        .expect("writing to a string cannot fail");
+    }
+    // The claim the separated measures exist to make good on. If sorting by
+    // size does as well, the composition is decoration.
+    let baseline = by_size.mean_average_precision();
+    if map <= baseline {
+        writeln!(
+            complaints,
+            "the composed ranking scores {map:.4} against {baseline:.4} for a plain \
+             size sort, so it is no longer earning its place",
+        )
+        .expect("writing to a string cannot fail");
+    }
+}
+
 /// Repository root, from this test's manifest directory.
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -114,6 +188,10 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
     let mut complaints = String::new();
     let mut unmaterialized = 0usize;
     let mut sizes = SizeSplit::default();
+    // Two orderings of the same verdicts: the one the tool prints, and the one
+    // anybody would reach for without it.
+    let mut ranked = RankedVerdicts::default();
+    let mut by_size = RankedVerdicts::default();
 
     for expected in CORPORA {
         let corpus = root.join("corpus/labeled").join(expected.name);
@@ -144,6 +222,16 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
 
         let ruled = adjudicate(&result, &labels, DEFAULT_MATCH_THRESHOLD);
         sizes.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
+        ranked.record(&result, &labels, DEFAULT_MATCH_THRESHOLD, |finding| {
+            finding.score
+        });
+        #[allow(clippy::cast_precision_loss)]
+        by_size.record(
+            &result,
+            &labels,
+            DEFAULT_MATCH_THRESHOLD,
+            |finding: &Finding| finding.size_tokens as f64,
+        );
         writeln!(
             table,
             "{:<16} {:>9.4} {:>10} {:>8} {:>9} {:>10}",
@@ -187,6 +275,9 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
         }
     }
 
+    if !ranked.is_empty() {
+        report_ranking(&ranked, &by_size, &mut complaints);
+    }
     println!("{table}");
     // Printed, not asserted. Length is the first knob anyone reaches for when
     // precision is short, and these two ranges are what says whether it can

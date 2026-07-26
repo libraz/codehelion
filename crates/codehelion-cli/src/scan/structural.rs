@@ -29,6 +29,7 @@ use codehelion_core::features::FEATURE_SCHEMA_VERSION;
 use codehelion_core::frontend::Token;
 use codehelion_core::grouping::StructuralGroup;
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
+use codehelion_core::priority::Weights;
 use codehelion_core::stable_id::{self, FP_SCHEMA_VERSION};
 use codehelion_core::structural::{
     self, GroupDetail, RegionOccurrence, StructuralConfig, StructuralRegion, StructuralReport,
@@ -37,7 +38,8 @@ use codehelion_core::structural::{
 use codehelion_core::test_code::TEST_CODE_VERSION;
 use codehelion_core::verify::{SimilarityBreakdown, WEIGHT_VERSION};
 use codehelion_store::snapshot::{
-    FileRow, GroupOrigin, GroupRow, MemberRow, SimilarityBreakdownRow, Snapshot, UnitRow,
+    FileRow, GroupOrigin, GroupRow, MemberRow, PriorityRow, SimilarityBreakdownRow, Snapshot,
+    UnitRow,
 };
 
 use super::{
@@ -152,10 +154,16 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         timed_out,
         changes,
         audit: None,
+        weights: cfg.priority.weights(),
+        min_clone_tokens: u64::from(cfg.min_clone_tokens),
     };
-    let (run_id, audit) = record(&cfg, &inputs, crate::scan::file_rows(&sources))?;
+    // Ranked before recorded: the audit database and the report are two views
+    // of one verdict about where each finding belongs, not two derivations of
+    // it that happen to agree.
+    let groups = build_groups(&inputs);
+    let (run_id, audit) = record(&cfg, &inputs, &groups, crate::scan::file_rows(&sources))?;
     inputs.audit = audit;
-    let mut model = build_report(&inputs, run_id, &discovered);
+    let mut model = build_report(&inputs, run_id, &discovered, groups);
     // Counted against the assembled report rather than the raw analysis: a
     // stale entry is one whose duplication this run does not list.
     model.summary.baseline = baseline
@@ -606,6 +614,10 @@ struct ReportInputs<'a> {
     /// What moved since the previous scan of this tree, when comparable.
     changes: Option<report::TreeChanges>,
     audit: Option<report::AuditSummary>,
+    /// How the run weighs the priority measures against one another.
+    weights: Weights,
+    /// The run's minimum clone length, which the ranking reads sizes against.
+    min_clone_tokens: u64,
 }
 
 impl ReportInputs<'_> {
@@ -615,15 +627,6 @@ impl ReportInputs<'_> {
         let end = unit.token_end.min(tokens.len());
         let start = unit.token_start.min(end);
         &tokens[start..end]
-    }
-
-    /// Ranking value, computed exactly as the Fast path computes it: largest
-    /// member size × extra instances × similarity. The inputs are always
-    /// reported alongside; the collapsed number never replaces them.
-    fn priority(&self, group: &StructuralGroup) -> f64 {
-        let size = u32::try_from(self.largest_member_tokens(group)).unwrap_or(u32::MAX);
-        let extra = u32::try_from(group.members.len().saturating_sub(1)).unwrap_or(u32::MAX);
-        f64::from(size) * f64::from(extra) * group.min_pairwise
     }
 
     /// The configured suppression rules that hid nothing this run, read off
@@ -655,19 +658,6 @@ impl ReportInputs<'_> {
             || (test_code && self.test_code_action == CategoryAction::RankDown)
     }
 
-    /// Token count of the group's largest member.
-    fn largest_member_tokens(&self, group: &StructuralGroup) -> usize {
-        group
-            .members
-            .iter()
-            .map(|&member| {
-                let unit = &self.analysis.units[member];
-                unit.token_end.saturating_sub(unit.token_start)
-            })
-            .max()
-            .unwrap_or(0)
-    }
-
     /// The tokens one occurrence of a duplicated run covers, in its own file.
     fn region_tokens(&self, occurrence: &RegionOccurrence) -> &[Token] {
         let tokens = &self.irs[occurrence.file].tokens;
@@ -687,24 +677,6 @@ impl ReportInputs<'_> {
             pattern: Some(row.pattern.clone()),
         }
     }
-}
-
-/// Token count of the longest occurrence of a duplicated run.
-fn largest_occurrence_tokens(region: &StructuralRegion) -> usize {
-    region
-        .occurrences
-        .iter()
-        .map(|occurrence| occurrence.token_end.saturating_sub(occurrence.token_start))
-        .max()
-        .unwrap_or(0)
-}
-
-/// Ranking value of a duplicated run, on the same scale as a unit-scope
-/// group's: largest occurrence × extra occurrences × similarity.
-fn region_priority(region: &StructuralRegion) -> f64 {
-    let size = u32::try_from(largest_occurrence_tokens(region)).unwrap_or(u32::MAX);
-    let extra = u32::try_from(region.occurrences.len().saturating_sub(1)).unwrap_or(u32::MAX);
-    f64::from(size) * f64::from(extra) * REGION_SIMILARITY
 }
 
 /// Similarity reported for a confirmed duplicated run.
@@ -831,10 +803,12 @@ fn funnel(stats: &structural::StructuralStats) -> Vec<report::FunnelStage> {
 }
 
 /// Assemble the report model both output formats render from.
-fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryReport) -> Report {
-    // Counted off the report entries rather than the analysis, so the summary
-    // cannot disagree with what the views list.
-    let groups = build_groups(inputs);
+fn build_report(
+    inputs: &ReportInputs<'_>,
+    run_id: i64,
+    discovered: &DiscoveryReport,
+    groups: Vec<report::Group>,
+) -> Report {
     let variant = inputs.variant;
 
     Report {
@@ -861,6 +835,11 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
                 .into_iter()
                 .map(|(component, version)| report::DetectorVersion { component, version })
                 .collect(),
+            ranking: report::RankingInfo {
+                recipe: inputs.weights.recipe(),
+                maintenance_risk: inputs.weights.maintenance_risk,
+                refactoring_ease: inputs.weights.refactoring_ease,
+            },
             database: inputs.db_path.display().to_string(),
             run_id,
         },
@@ -961,53 +940,51 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
     let group = &inputs.analysis.groups.groups[index];
     let detail = &inputs.analysis.details[index];
     let suppressed = inputs.group_suppressed[index].map(|rule| inputs.suppression(rule));
-    report::Group {
-        fingerprint: detail.fingerprint.to_hex(),
-        clone_type: group.clone_type.name().to_string(),
-        scope: CloneScope::Unit.name().to_string(),
-        statements: None,
-        confidence: group.min_pairwise,
-        priority: report::Priority {
-            value: inputs.priority(group),
-            largest_member_tokens: u64::try_from(inputs.largest_member_tokens(group))
-                .unwrap_or(u64::MAX),
-            extra_instances: u64::try_from(group.members.len().saturating_sub(1))
-                .unwrap_or(u64::MAX),
-            similarity: group.min_pairwise,
+    report::ranked(
+        report::Group {
+            fingerprint: detail.fingerprint.to_hex(),
+            clone_type: group.clone_type.name().to_string(),
+            scope: CloneScope::Unit.name().to_string(),
+            statements: None,
+            confidence: group.min_pairwise,
+            priority: report::Priority::unranked(),
+            similarity: Some(similarity(group, detail)),
+            boilerplate: detail
+                .boilerplate
+                .map(|category| category.name().to_string()),
+            test_code: detail.test_code,
+            suppressed,
+            split_pair: false,
+            members: group
+                .members
+                .iter()
+                .enumerate()
+                .map(|(position, &member)| {
+                    let unit = &inputs.analysis.units[member];
+                    let file = &inputs.files[unit.file];
+                    report::Member {
+                        finding_id: stable_id::finding_id(
+                            &detail.fingerprint,
+                            Some(&unit.fingerprint),
+                            0,
+                        )
+                        .to_hex(),
+                        content: unit.content.to_hex(),
+                        file: file.relative_path.clone(),
+                        language: file.language.name().to_string(),
+                        start_line: unit.start_line,
+                        end_line: unit.end_line,
+                        unit: unit.name.as_deref().map(ToString::to_string),
+                        tokens: u64::try_from(unit.token_end.saturating_sub(unit.token_start))
+                            .unwrap_or(u64::MAX),
+                        canonical: position == 0,
+                    }
+                })
+                .collect(),
         },
-        similarity: Some(similarity(group, detail)),
-        boilerplate: detail
-            .boilerplate
-            .map(|category| category.name().to_string()),
-        test_code: detail.test_code,
-        suppressed,
-        split_pair: false,
-        members: group
-            .members
-            .iter()
-            .enumerate()
-            .map(|(position, &member)| {
-                let unit = &inputs.analysis.units[member];
-                let file = &inputs.files[unit.file];
-                report::Member {
-                    finding_id: stable_id::finding_id(
-                        &detail.fingerprint,
-                        Some(&unit.fingerprint),
-                        0,
-                    )
-                    .to_hex(),
-                    content: unit.content.to_hex(),
-                    file: file.relative_path.clone(),
-                    start_line: unit.start_line,
-                    end_line: unit.end_line,
-                    unit: unit.name.as_deref().map(ToString::to_string),
-                    tokens: u64::try_from(unit.token_end.saturating_sub(unit.token_start))
-                        .unwrap_or(u64::MAX),
-                    canonical: position == 0,
-                }
-            })
-            .collect(),
-    }
+        &inputs.weights,
+        inputs.min_clone_tokens,
+    )
 }
 
 /// One verified clone pair that no group could hold, as a report entry.
@@ -1025,60 +1002,50 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
         pair.a
     };
     let members: Vec<usize> = vec![pair.canonical, other];
-    let largest = members
-        .iter()
-        .map(|&member| {
-            let unit = &inputs.analysis.units[member];
-            unit.token_end.saturating_sub(unit.token_start)
-        })
-        .max()
-        .unwrap_or(0);
-    report::Group {
-        fingerprint: pair.fingerprint.to_hex(),
-        clone_type: pair.class.name().to_string(),
-        scope: CloneScope::Unit.name().to_string(),
-        statements: None,
-        confidence: pair.similarity,
-        priority: report::Priority {
-            // One extra instance, by construction: the same recipe the groups
-            // are ranked by, applied to a set of two.
-            value: f64::from(u32::try_from(largest).unwrap_or(u32::MAX)) * pair.similarity,
-            largest_member_tokens: u64::try_from(largest).unwrap_or(u64::MAX),
-            extra_instances: 1,
-            similarity: pair.similarity,
+    report::ranked(
+        report::Group {
+            fingerprint: pair.fingerprint.to_hex(),
+            clone_type: pair.class.name().to_string(),
+            scope: CloneScope::Unit.name().to_string(),
+            statements: None,
+            confidence: pair.similarity,
+            priority: report::Priority::unranked(),
+            similarity: None,
+            boilerplate: None,
+            test_code: members
+                .iter()
+                .all(|&member| inputs.analysis.units[member].test_code),
+            suppressed,
+            split_pair: true,
+            members: members
+                .iter()
+                .enumerate()
+                .map(|(position, &member)| {
+                    let unit = &inputs.analysis.units[member];
+                    let file = &inputs.files[unit.file];
+                    report::Member {
+                        finding_id: stable_id::finding_id(
+                            &pair.fingerprint,
+                            Some(&unit.fingerprint),
+                            0,
+                        )
+                        .to_hex(),
+                        content: unit.content.to_hex(),
+                        file: file.relative_path.clone(),
+                        language: file.language.name().to_string(),
+                        start_line: unit.start_line,
+                        end_line: unit.end_line,
+                        unit: unit.name.as_deref().map(ToString::to_string),
+                        tokens: u64::try_from(unit.token_end.saturating_sub(unit.token_start))
+                            .unwrap_or(u64::MAX),
+                        canonical: position == 0,
+                    }
+                })
+                .collect(),
         },
-        similarity: None,
-        boilerplate: None,
-        test_code: members
-            .iter()
-            .all(|&member| inputs.analysis.units[member].test_code),
-        suppressed,
-        split_pair: true,
-        members: members
-            .iter()
-            .enumerate()
-            .map(|(position, &member)| {
-                let unit = &inputs.analysis.units[member];
-                let file = &inputs.files[unit.file];
-                report::Member {
-                    finding_id: stable_id::finding_id(
-                        &pair.fingerprint,
-                        Some(&unit.fingerprint),
-                        0,
-                    )
-                    .to_hex(),
-                    content: unit.content.to_hex(),
-                    file: file.relative_path.clone(),
-                    start_line: unit.start_line,
-                    end_line: unit.end_line,
-                    unit: unit.name.as_deref().map(ToString::to_string),
-                    tokens: u64::try_from(unit.token_end.saturating_sub(unit.token_start))
-                        .unwrap_or(u64::MAX),
-                    canonical: position == 0,
-                }
-            })
-            .collect(),
-    }
+        &inputs.weights,
+        inputs.min_clone_tokens,
+    )
 }
 
 /// One duplicated run as a report entry.
@@ -1089,58 +1056,56 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
 fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
     let region = &inputs.analysis.regions[inputs.regions.reported[index]];
     let ranks = occurrence_ranks(region);
-    report::Group {
-        fingerprint: region.fingerprint.to_hex(),
-        clone_type: region.clone_type.name().to_string(),
-        scope: CloneScope::Fragment.name().to_string(),
-        statements: Some(u64::from(region.statements)),
-        confidence: REGION_SIMILARITY,
-        priority: report::Priority {
-            value: region_priority(region),
-            largest_member_tokens: u64::try_from(largest_occurrence_tokens(region))
-                .unwrap_or(u64::MAX),
-            extra_instances: u64::try_from(region.occurrences.len().saturating_sub(1))
-                .unwrap_or(u64::MAX),
-            similarity: REGION_SIMILARITY,
+    report::ranked(
+        report::Group {
+            fingerprint: region.fingerprint.to_hex(),
+            clone_type: region.clone_type.name().to_string(),
+            scope: CloneScope::Fragment.name().to_string(),
+            statements: Some(u64::from(region.statements)),
+            confidence: REGION_SIMILARITY,
+            priority: report::Priority::unranked(),
+            // Confirmed by content equality, not scored across dimensions: there
+            // is no breakdown to report.
+            similarity: None,
+            // Boilerplate is classified over whole units; a run inside one carries
+            // no such classification.
+            boilerplate: None,
+            test_code: region_test_code(inputs.analysis, region),
+            suppressed: inputs.region_suppressed[index].map(|rule| inputs.suppression(rule)),
+            split_pair: false,
+            members: region
+                .occurrences
+                .iter()
+                .zip(&ranks)
+                .enumerate()
+                .map(|(position, (occurrence, &rank))| {
+                    let unit = &inputs.analysis.units[occurrence.unit];
+                    let file = &inputs.files[occurrence.file];
+                    report::Member {
+                        finding_id: stable_id::finding_id(
+                            &region.fingerprint,
+                            Some(&unit.fingerprint),
+                            rank,
+                        )
+                        .to_hex(),
+                        content: occurrence.content.to_hex(),
+                        file: file.relative_path.clone(),
+                        language: file.language.name().to_string(),
+                        start_line: occurrence.start_line,
+                        end_line: occurrence.end_line,
+                        unit: unit.name.as_deref().map(ToString::to_string),
+                        tokens: u64::try_from(
+                            occurrence.token_end.saturating_sub(occurrence.token_start),
+                        )
+                        .unwrap_or(u64::MAX),
+                        canonical: position == 0,
+                    }
+                })
+                .collect(),
         },
-        // Confirmed by content equality, not scored across dimensions: there
-        // is no breakdown to report.
-        similarity: None,
-        // Boilerplate is classified over whole units; a run inside one carries
-        // no such classification.
-        boilerplate: None,
-        test_code: region_test_code(inputs.analysis, region),
-        suppressed: inputs.region_suppressed[index].map(|rule| inputs.suppression(rule)),
-        split_pair: false,
-        members: region
-            .occurrences
-            .iter()
-            .zip(&ranks)
-            .enumerate()
-            .map(|(position, (occurrence, &rank))| {
-                let unit = &inputs.analysis.units[occurrence.unit];
-                let file = &inputs.files[occurrence.file];
-                report::Member {
-                    finding_id: stable_id::finding_id(
-                        &region.fingerprint,
-                        Some(&unit.fingerprint),
-                        rank,
-                    )
-                    .to_hex(),
-                    content: occurrence.content.to_hex(),
-                    file: file.relative_path.clone(),
-                    start_line: occurrence.start_line,
-                    end_line: occurrence.end_line,
-                    unit: unit.name.as_deref().map(ToString::to_string),
-                    tokens: u64::try_from(
-                        occurrence.token_end.saturating_sub(occurrence.token_start),
-                    )
-                    .unwrap_or(u64::MAX),
-                    canonical: position == 0,
-                }
-            })
-            .collect(),
-    }
+        &inputs.weights,
+        inputs.min_clone_tokens,
+    )
 }
 
 /// Rank of each occurrence within its host unit, in occurrence order.
@@ -1226,9 +1191,10 @@ fn detector_versions() -> Vec<(String, String)> {
 fn record(
     cfg: &Config,
     inputs: &ReportInputs<'_>,
+    ranked: &[report::Group],
     files: Vec<FileRow>,
 ) -> Result<(i64, Option<report::AuditSummary>)> {
-    let (units, mut groups) = snapshot_rows(inputs);
+    let (units, mut groups) = snapshot_rows(inputs, ranked)?;
     let mut store = open_store(inputs.db_path)?;
     let audit =
         crate::scan::attach_history(&store, inputs.root, inputs.variant, &units, &mut groups)?;
@@ -1242,6 +1208,7 @@ fn record(
         started_at: inputs.started_at,
         finished_at: inputs.finished_at,
         variant: inputs.variant,
+        min_clone_tokens: cfg.min_clone_tokens,
         detector_versions: &detector_versions,
         suppressions: inputs.rules.rows.clone(),
         files,
@@ -1257,7 +1224,17 @@ fn record(
 /// member's host is the unit it *is*; a duplicated run's host is the unit it
 /// sits inside, which is a different unit for each occurrence and usually not
 /// a clone of the others.
-fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
+fn snapshot_rows(
+    inputs: &ReportInputs<'_>,
+    ranked: &[report::Group],
+) -> Result<(Vec<UnitRow>, Vec<GroupRow>)> {
+    // The ranking is looked up by fingerprint rather than by position: the
+    // report interleaves duplicated units, duplicated runs and the pairs no
+    // group could hold into one order, and the store keeps them apart.
+    let ranking: BTreeMap<&str, &report::Priority> = ranked
+        .iter()
+        .map(|group| (group.fingerprint.as_str(), &group.priority))
+        .collect();
     let mut host_index: BTreeMap<usize, usize> = BTreeMap::new();
     for group in &inputs.analysis.groups.groups {
         for &member in &group.members {
@@ -1293,11 +1270,11 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
     }
 
     let regions = (0..inputs.regions.reported.len())
-        .map(|index| region_row(inputs, index, &host_index))
-        .collect::<Vec<_>>();
+        .map(|index| region_row(inputs, index, &host_index, &ranking))
+        .collect::<Result<Vec<_>>>()?;
     let split_pairs = (0..inputs.analysis.unrepresented.len())
-        .map(|index| split_pair_row(inputs, index, &host_index))
-        .collect::<Vec<_>>();
+        .map(|index| split_pair_row(inputs, index, &host_index, &ranking))
+        .collect::<Result<Vec<_>>>()?;
     let groups = inputs
         .analysis
         .groups
@@ -1307,7 +1284,7 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
         .map(|(index, group)| {
             let detail = &inputs.analysis.details[index];
             let medoid = &inputs.analysis.units[group.canonical];
-            GroupRow {
+            Ok(GroupRow {
                 fingerprint: detail.fingerprint,
                 history: GroupOrigin::unconnected(&detail.fingerprint),
                 clone_type: group.clone_type,
@@ -1323,7 +1300,7 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
                 suppress_reason: None,
                 boilerplate: detail.boilerplate,
                 suppressed_by: inputs.group_suppressed[index],
-                final_priority: inputs.priority(group),
+                priority: recorded_ranking(&ranking, &detail.fingerprint.to_hex())?,
                 similarity: Some(breakdown_row(group, detail)),
                 members: group
                     .members
@@ -1347,12 +1324,28 @@ fn snapshot_rows(inputs: &ReportInputs<'_>) -> (Vec<UnitRow>, Vec<GroupRow>) {
                         }
                     })
                     .collect(),
-            }
+            })
         })
-        .chain(regions)
-        .chain(split_pairs)
-        .collect();
-    (units, groups)
+        .chain(regions.into_iter().map(Ok))
+        .chain(split_pairs.into_iter().map(Ok))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((units, groups))
+}
+
+/// The ranking the report gave one entry, by its fingerprint.
+///
+/// An entry the report never ranked is a disagreement between what a run shows
+/// and what it records, which is exactly the thing this arrangement exists to
+/// prevent — so it fails the scan rather than storing a placeholder that would
+/// read as a finding nobody thought was worth anything.
+fn recorded_ranking(
+    ranking: &BTreeMap<&str, &report::Priority>,
+    fingerprint: &str,
+) -> Result<PriorityRow> {
+    ranking.get(fingerprint).map_or_else(
+        || bail!("group {fingerprint} was recorded without being ranked"),
+        |priority| Ok(crate::scan::priority_row(priority)),
+    )
 }
 
 /// One duplicated run as a store row. Its entropy is measured over the
@@ -1363,7 +1356,8 @@ fn split_pair_row(
     inputs: &ReportInputs<'_>,
     index: usize,
     host_index: &BTreeMap<usize, usize>,
-) -> GroupRow {
+    ranking: &BTreeMap<&str, &report::Priority>,
+) -> Result<GroupRow> {
     let pair = &inputs.analysis.unrepresented[index];
     let other = if pair.canonical == pair.a {
         pair.b
@@ -1371,15 +1365,7 @@ fn split_pair_row(
         pair.a
     };
     let canonical = &inputs.analysis.units[pair.canonical];
-    let largest = [pair.canonical, other]
-        .iter()
-        .map(|&member| {
-            let unit = &inputs.analysis.units[member];
-            unit.token_end.saturating_sub(unit.token_start)
-        })
-        .max()
-        .unwrap_or(0);
-    GroupRow {
+    Ok(GroupRow {
         fingerprint: pair.fingerprint,
         history: GroupOrigin::unconnected(&pair.fingerprint),
         clone_type: pair.class,
@@ -1391,7 +1377,7 @@ fn split_pair_row(
         suppress_reason: None,
         boilerplate: None,
         suppressed_by: inputs.pair_suppressed[index],
-        final_priority: f64::from(u32::try_from(largest).unwrap_or(u32::MAX)) * pair.similarity,
+        priority: recorded_ranking(ranking, &pair.fingerprint.to_hex())?,
         // The pair's evidence is the judge's verdict on it, which grouping did
         // not re-run against a medoid, so there is no per-dimension row to
         // record without inventing one.
@@ -1413,14 +1399,15 @@ fn split_pair_row(
                 }
             })
             .collect(),
-    }
+    })
 }
 
 fn region_row(
     inputs: &ReportInputs<'_>,
     index: usize,
     host_index: &BTreeMap<usize, usize>,
-) -> GroupRow {
+    ranking: &BTreeMap<&str, &report::Priority>,
+) -> Result<GroupRow> {
     let region = &inputs.analysis.regions[inputs.regions.reported[index]];
     let ranks = occurrence_ranks(region);
     let canonical = region
@@ -1429,7 +1416,7 @@ fn region_row(
         .map_or_else(Vec::new, |occurrence| {
             inputs.region_tokens(occurrence).to_vec()
         });
-    GroupRow {
+    Ok(GroupRow {
         fingerprint: region.fingerprint,
         history: GroupOrigin::unconnected(&region.fingerprint),
         clone_type: region.clone_type,
@@ -1441,7 +1428,7 @@ fn region_row(
         suppress_reason: None,
         boilerplate: None,
         suppressed_by: inputs.region_suppressed[index],
-        final_priority: region_priority(region),
+        priority: recorded_ranking(ranking, &region.fingerprint.to_hex())?,
         similarity: None,
         members: region
             .occurrences
@@ -1466,7 +1453,7 @@ fn region_row(
                 }
             })
             .collect(),
-    }
+    })
 }
 
 /// The persisted form of a group's similarity evidence.

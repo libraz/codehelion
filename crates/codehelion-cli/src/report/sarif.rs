@@ -31,8 +31,8 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::{
-    BuildVariantInfo, DetectorVersion, Group, Member, Priority, Report, SCOPE_FRAGMENT, Similarity,
-    Summary, Suppression, SuppressionKind,
+    BuildVariantInfo, DetectorVersion, Group, Member, Priority, RankingInfo, Report,
+    SCOPE_FRAGMENT, Similarity, Summary, Suppression, SuppressionKind,
 };
 
 /// SARIF version this reporter emits.
@@ -179,6 +179,7 @@ impl<'a> From<&'a Report> for Run<'a> {
                 root: &run.root,
                 build_variant: &run.build_variant,
                 detector_versions: &run.detector_versions,
+                ranking: &run.ranking,
                 summary: &report.summary,
                 database: &run.database,
                 run_id: run.run_id,
@@ -272,6 +273,7 @@ struct RunProperties<'a> {
     root: &'a str,
     build_variant: &'a BuildVariantInfo,
     detector_versions: &'a [DetectorVersion],
+    ranking: &'a RankingInfo,
     summary: &'a Summary,
     database: &'a str,
     run_id: i64,
@@ -367,7 +369,7 @@ fn message_text(group: &Group) -> String {
         "{} {subject}: {} occurrences, {} tokens in the largest",
         group.clone_type,
         group.members.len(),
-        group.priority.largest_member_tokens,
+        group.priority.inputs.largest_member_tokens,
     );
     if let Some(similarity) = &group.similarity {
         text.push_str(". ");
@@ -679,7 +681,10 @@ mod tests {
         assert_eq!(result["ruleIndex"], 2);
         let properties = &result["properties"];
         assert_eq!(properties["clone_type"], "type-3");
-        assert_eq!(properties["priority"]["largest_member_tokens"], 60);
+        assert_eq!(
+            properties["priority"]["inputs"]["largest_member_tokens"],
+            60
+        );
         assert_eq!(properties["similarity"]["composite"], 0.82);
         assert_eq!(
             properties["similarity"]["weight_version"],
@@ -770,7 +775,7 @@ mod tests {
     fn the_run_property_bag_keeps_what_sarif_has_no_field_for() {
         let value = sarif(&sample_report());
         let properties = &value["runs"][0]["properties"];
-        assert_eq!(properties["report_schema_version"], 1);
+        assert_eq!(properties["report_schema_version"], 2);
         assert_eq!(properties["mode"], "fast");
         assert_eq!(properties["build_variant"]["normalization_version"], 2);
         assert_eq!(properties["detector_versions"][0]["component"], "fp-schema");

@@ -131,6 +131,7 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
             finding_id: occurrence.member.finding_hex,
             content: occurrence.member.content_hex,
             file: occurrence.member.file_path,
+            language: occurrence.member.language,
             start_line: line(occurrence.member.start_line),
             end_line: line(occurrence.member.end_line),
             unit: occurrence.member.unit_name,
@@ -142,6 +143,7 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
             clone_type: occurrence.clone_type,
             scope: occurrence.member_scope,
             confidence: occurrence.score,
+            priority: occurrence.priority.as_ref().map(recorded_priority),
             members: u64::try_from(occurrence.member_count).unwrap_or(0),
             boilerplate: occurrence.boilerplate,
             test_code: occurrence.test_code,
@@ -171,6 +173,33 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
         DetailFormat::Text => detail.render_text(out)?,
     }
     Ok(Outcome::Success)
+}
+
+/// A stored ranking as the detail view shows it.
+///
+/// A count that will not fit is reported at the ceiling rather than wrapping:
+/// a group with more occurrences than a `u64` can hold is past anything the
+/// derivation would say about it anyway.
+fn recorded_priority(stored: &codehelion_store::query::StoredPriority) -> report::RecordedPriority {
+    let count = |value: i64| u64::try_from(value).unwrap_or(u64::MAX);
+    report::RecordedPriority {
+        value: stored.final_priority,
+        clone_confidence: stored.clone_confidence,
+        maintenance_risk: stored.maintenance_risk,
+        refactoring_difficulty: stored.refactoring_difficulty,
+        semantic_confidence: stored.semantic_confidence,
+        source_artifact_confidence: stored.source_artifact_confidence,
+        savings_confidence: stored.savings_confidence,
+        inputs: report::RecordedInputs {
+            smallest_member_tokens: count(stored.facts.smallest_member_tokens),
+            largest_member_tokens: count(stored.facts.largest_member_tokens),
+            instances: count(stored.facts.instances),
+            files: count(stored.facts.files),
+            directories: count(stored.facts.directories),
+            languages: count(stored.facts.languages),
+            min_clone_tokens: stored.facts.min_clone_tokens.map(count),
+        },
+    }
 }
 
 /// Append the binary's install channel and location to the doctor report.

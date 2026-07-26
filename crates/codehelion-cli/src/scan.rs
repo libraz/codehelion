@@ -29,10 +29,11 @@ use codehelion_core::engine::{
 use codehelion_core::frontend::{Frontend, Token, Unit};
 use codehelion_core::incremental;
 use codehelion_core::lineage;
+use codehelion_core::priority::Weights;
 use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION, FileContext, GroupIds};
 use codehelion_store::Store;
 use codehelion_store::snapshot::{
-    FileRow, GroupOrigin, GroupRow, LineageParent, MemberRow, Snapshot, UnitRow,
+    FileRow, GroupOrigin, GroupRow, LineageParent, MemberRow, PriorityRow, Snapshot, UnitRow,
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
@@ -119,26 +120,13 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
     let changes = tree_changes(&db_path, &root, &discovered.build_variant, &sources)?;
     let finished_at = rfc3339_now();
-    let (run_id, audit) = record(
-        &root,
-        &cfg,
-        &db_path,
-        &started_at,
-        &finished_at,
-        &discovered.build_variant,
-        &lexed,
-        &contexts,
-        &report,
-        &ids,
-        &rules,
-        &group_suppressed,
-        file_rows(&sources),
-    )?;
-
-    let mut model = build_report(&BuildInputs {
+    let mut inputs = BuildInputs {
         root: &root,
         db_path: &db_path,
-        run_id,
+        // Both filled in from the recording below, which cannot run until the
+        // entries it records the ranking of exist.
+        run_id: 0,
+        audit: None,
         started_at: &started_at,
         finished_at: &finished_at,
         discovered: &discovered,
@@ -151,8 +139,11 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         rules: &rules,
         group_suppressed: &group_suppressed,
         changes,
-        audit,
-    });
+        weights: cfg.priority.weights(),
+        min_clone_tokens: u64::from(cfg.min_clone_tokens),
+    };
+    let groups = rank_and_record(&mut inputs, &cfg, &contexts, file_rows(&sources))?;
+    let mut model = build_report(&inputs, groups);
     // Counted against the assembled report rather than the raw analysis: a
     // stale entry is one whose duplication this run does not list.
     model.summary.baseline = baseline
@@ -244,6 +235,10 @@ struct BuildInputs<'a> {
     group_suppressed: &'a [Option<usize>],
     changes: Option<report::TreeChanges>,
     audit: Option<report::AuditSummary>,
+    /// How the run weighs the priority measures against one another.
+    weights: Weights,
+    /// The run's minimum clone length, which the ranking reads sizes against.
+    min_clone_tokens: u64,
 }
 
 /// The configured suppression rules that hid nothing this run, read off the
@@ -294,10 +289,10 @@ fn funnel(stats: &engine::EngineStats) -> Vec<report::FunnelStage> {
     ]
 }
 
-/// Assemble the report model both output formats render from. Groups are
-/// ordered by priority descending, fingerprint bytes ascending on ties, so
-/// every view is stable across reruns.
-fn build_report(inputs: &BuildInputs<'_>) -> Report {
+/// Assemble the report model both output formats render from, from the groups
+/// the run already ranked. They are ordered here by priority descending,
+/// fingerprint ascending on ties, so every view is stable across reruns.
+fn build_report(inputs: &BuildInputs<'_>, mut groups: Vec<report::Group>) -> Report {
     let count = |language: Language| {
         u64::try_from(
             inputs
@@ -317,14 +312,11 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
         .unwrap_or(u64::MAX)
     };
 
-    let mut order: Vec<usize> = (0..inputs.report.groups.len()).collect();
-    order.sort_by(|a, b| {
-        let (pa, pb) = (
-            final_priority(&inputs.report.groups[*a]),
-            final_priority(&inputs.report.groups[*b]),
-        );
-        pb.total_cmp(&pa)
-            .then_with(|| inputs.ids[*a].fingerprint.cmp(&inputs.ids[*b].fingerprint))
+    groups.sort_by(|a, b| {
+        b.priority
+            .value
+            .total_cmp(&a.priority.value)
+            .then_with(|| a.fingerprint.cmp(&b.fingerprint))
     });
 
     Report {
@@ -379,10 +371,7 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
             split_components: 0,
             pair_budget_exhausted: inputs.report.stats.pair_budget_exhausted,
         },
-        groups: order
-            .iter()
-            .map(|&index| build_group(inputs, index))
-            .collect(),
+        groups,
     }
 }
 
@@ -412,12 +401,17 @@ fn run_info(inputs: &BuildInputs<'_>) -> report::RunInfo {
             .into_iter()
             .map(|(component, version)| report::DetectorVersion { component, version })
             .collect(),
+        ranking: report::RankingInfo {
+            recipe: inputs.weights.recipe(),
+            maintenance_risk: inputs.weights.maintenance_risk,
+            refactoring_ease: inputs.weights.refactoring_ease,
+        },
         database: inputs.db_path.display().to_string(),
         run_id: inputs.run_id,
     }
 }
 
-/// One group of the report model, with its suppression cause resolved.
+/// One group of the report model, ranked, with its suppression cause resolved.
 fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
     let group = &inputs.report.groups[index];
     let suppressed = group.suppressed.map_or_else(
@@ -441,50 +435,49 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
             })
         },
     );
-    report::Group {
-        fingerprint: inputs.ids[index].fingerprint.to_hex(),
-        clone_type: group.clone_type.name().to_string(),
-        scope: CloneScope::Unit.name().to_string(),
-        statements: None,
-        confidence: group.score,
-        priority: report::Priority {
-            value: final_priority(group),
-            largest_member_tokens: u64::try_from(group_size(group)).unwrap_or(u64::MAX),
-            extra_instances: u64::try_from(group.members.len().saturating_sub(1))
-                .unwrap_or(u64::MAX),
-            similarity: group.score,
+    report::ranked(
+        report::Group {
+            fingerprint: inputs.ids[index].fingerprint.to_hex(),
+            clone_type: group.clone_type.name().to_string(),
+            scope: CloneScope::Unit.name().to_string(),
+            statements: None,
+            confidence: group.score,
+            priority: report::Priority::unranked(),
+            // The Fast engine groups on identical content; it scores no
+            // similarity dimensions to report, classifies no shapes and reads no
+            // test marker: all three need Syntax IR, which this mode never builds.
+            similarity: None,
+            boilerplate: None,
+            test_code: false,
+            suppressed,
+            split_pair: false,
+            members: group
+                .members
+                .iter()
+                .zip(&inputs.ids[index].members)
+                .enumerate()
+                .map(|(position, (instance, member_ids))| {
+                    let source = &inputs.lexed[instance.file];
+                    report::Member {
+                        finding_id: member_ids.finding.to_hex(),
+                        content: member_ids.content.to_hex(),
+                        file: source.relative_path.clone(),
+                        language: source.language.name().to_string(),
+                        start_line: instance.start_line,
+                        end_line: instance.end_line,
+                        unit: instance
+                            .unit
+                            .and_then(|unit| source.units[unit].name.clone()),
+                        tokens: u64::try_from(instance.token_end - instance.token_start)
+                            .unwrap_or(u64::MAX),
+                        canonical: position == 0,
+                    }
+                })
+                .collect(),
         },
-        // The Fast engine groups on identical content; it scores no
-        // similarity dimensions to report, classifies no shapes and reads no
-        // test marker: all three need Syntax IR, which this mode never builds.
-        similarity: None,
-        boilerplate: None,
-        test_code: false,
-        suppressed,
-        split_pair: false,
-        members: group
-            .members
-            .iter()
-            .zip(&inputs.ids[index].members)
-            .enumerate()
-            .map(|(position, (instance, member_ids))| {
-                let source = &inputs.lexed[instance.file];
-                report::Member {
-                    finding_id: member_ids.finding.to_hex(),
-                    content: member_ids.content.to_hex(),
-                    file: source.relative_path.clone(),
-                    start_line: instance.start_line,
-                    end_line: instance.end_line,
-                    unit: instance
-                        .unit
-                        .and_then(|unit| source.units[unit].name.clone()),
-                    tokens: u64::try_from(instance.token_end - instance.token_start)
-                        .unwrap_or(u64::MAX),
-                    canonical: position == 0,
-                }
-            })
-            .collect(),
-    }
+        &inputs.weights,
+        inputs.min_clone_tokens,
+    )
 }
 
 /// Render the model in the requested format, to `--output` when given,
@@ -550,13 +543,20 @@ fn group_rule(
     first
 }
 
-/// Final priority: `largest member size × extra instances × similarity` — a
-/// proxy for the tokens duplicated beyond the first instance. The inputs are
-/// always reported alongside; the collapsed number never replaces them.
-fn final_priority(group: &CloneGroup) -> f64 {
-    let size = u32::try_from(group_size(group)).unwrap_or(u32::MAX);
-    let extra = u32::try_from(group.members.len().saturating_sub(1)).unwrap_or(u32::MAX);
-    f64::from(size) * f64::from(extra) * group.score
+/// A report entry's ranking as the audit database records it.
+///
+/// Both analysis modes go through here, so what the store holds is what the
+/// report showed rather than a second derivation of it.
+pub(crate) const fn priority_row(priority: &report::Priority) -> PriorityRow {
+    PriorityRow {
+        clone_confidence: priority.clone_confidence,
+        maintenance_risk: priority.maintenance_risk,
+        refactoring_difficulty: priority.refactoring_difficulty,
+        final_priority: priority.value,
+        semantic_confidence: priority.semantic_confidence,
+        source_artifact_confidence: priority.source_artifact_confidence,
+        savings_confidence: priority.savings_confidence,
+    }
 }
 
 /// Resolve the worker-thread count: flag over configuration over the number
@@ -984,45 +984,55 @@ pub(crate) fn file_rows(units: &[SourceUnit]) -> Vec<FileRow> {
         .collect()
 }
 
-/// Assemble and persist the snapshot; returns the recorded run id.
-#[allow(clippy::too_many_arguments)] // pipeline hand-off, one call site
-fn record(
-    root: &Path,
+/// Rank every entry, persist the snapshot, and fill in what the recording
+/// decided: the run id and what became of the duplication since last time.
+///
+/// The order matters and is the point of the arrangement. The ranking reads
+/// the assembled report entries, and the audit database stores what those
+/// entries say, so a run's two accounts of where a finding belongs are one
+/// account written twice rather than two derivations that happen to agree.
+fn rank_and_record(
+    inputs: &mut BuildInputs<'_>,
     cfg: &Config,
-    db_path: &Path,
-    started_at: &str,
-    finished_at: &str,
-    variant: &BuildVariant,
-    lexed: &[LexedSource],
     contexts: &[FileContext<'_>],
-    report: &EngineReport,
-    ids: &[GroupIds],
-    rules: &suppress::Rules,
-    group_suppressed: &[Option<usize>],
     files: Vec<FileRow>,
-) -> Result<(i64, Option<report::AuditSummary>)> {
-    let (units, mut groups) =
-        snapshot_rows(lexed, contexts, variant, report, ids, group_suppressed);
-    let mut store = open_store(db_path)?;
-    let audit = attach_history(&store, root, variant, &units, &mut groups)?;
+) -> Result<Vec<report::Group>> {
+    let ranked: Vec<report::Group> = (0..inputs.report.groups.len())
+        .map(|index| build_group(inputs, index))
+        .collect();
+    let variant = &inputs.discovered.build_variant;
+    let (units, mut groups) = snapshot_rows(
+        inputs.lexed,
+        contexts,
+        variant,
+        inputs.report,
+        inputs.ids,
+        inputs.group_suppressed,
+        &ranked,
+    );
+    let mut store = open_store(inputs.db_path)?;
+    let audit = attach_history(&store, inputs.root, variant, &units, &mut groups)?;
     let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
     let detector_versions = detector_versions();
-    let root_path = root.to_string_lossy();
+    let root_path = inputs.root.to_string_lossy();
     let snapshot = Snapshot {
         root_path: &root_path,
         tool_version: env!("CARGO_PKG_VERSION"),
         config_hash: config_hash.as_str(),
-        started_at,
-        finished_at,
+        started_at: inputs.started_at,
+        finished_at: inputs.finished_at,
         variant,
+        min_clone_tokens: cfg.min_clone_tokens,
         detector_versions: &detector_versions,
-        suppressions: rules.rows.clone(),
+        suppressions: inputs.rules.rows.clone(),
         units,
         groups,
         features: Vec::new(),
         files,
     };
-    Ok((store.record_snapshot(&snapshot)?, audit))
+    inputs.run_id = store.record_snapshot(&snapshot)?;
+    inputs.audit = audit;
+    Ok(ranked)
 }
 
 /// Open (creating directories and running migrations as needed) the store.
@@ -1037,6 +1047,12 @@ pub(crate) fn open_store(path: &Path) -> Result<Store> {
 }
 
 /// The `(component, version)` pairs recorded with every snapshot.
+///
+/// Only components that decide *what* is found belong here. The ranking recipe
+/// does not: it decides the order findings are read in and moves no stable id,
+/// so listing it would make a baseline recorded under one set of weights read
+/// as unusable under another, having lost nothing it froze. The report states
+/// the recipe, and the run's configuration hash covers the weights.
 fn detector_versions() -> Vec<(String, String)> {
     vec![
         ("fp-schema".to_string(), FP_SCHEMA_VERSION.to_string()),
@@ -1065,6 +1081,10 @@ fn detector_versions() -> Vec<(String, String)> {
 /// once even when several members share it. The unit fingerprint is computed
 /// exactly as the finding ids' host fingerprint was, so the stored unit row
 /// and the finding identity always agree.
+///
+/// `ranked` is the report's own entries in the engine's order, which is where
+/// the recorded ranking comes from: the audit database and the report are two
+/// views of one verdict, not two verdicts that happen to agree.
 fn snapshot_rows(
     lexed: &[LexedSource],
     contexts: &[FileContext<'_>],
@@ -1072,6 +1092,7 @@ fn snapshot_rows(
     report: &EngineReport,
     ids: &[GroupIds],
     group_suppressed: &[Option<usize>],
+    ranked: &[report::Group],
 ) -> (Vec<UnitRow>, Vec<GroupRow>) {
     let mut host_index: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     for group in &report.groups {
@@ -1111,7 +1132,8 @@ fn snapshot_rows(
         .iter()
         .zip(ids)
         .zip(group_suppressed)
-        .map(|((group, group_ids), suppressed_by)| GroupRow {
+        .enumerate()
+        .map(|(index, ((group, group_ids), suppressed_by))| GroupRow {
             fingerprint: group_ids.fingerprint,
             // Overwritten by the comparison against the previous audit, when
             // there is one to compare against.
@@ -1127,7 +1149,7 @@ fn snapshot_rows(
             suppress_reason: group.suppressed.map(|reason| reason.name().to_string()),
             boilerplate: None,
             suppressed_by: *suppressed_by,
-            final_priority: final_priority(group),
+            priority: priority_row(&ranked[index].priority),
             // Fast mode measures no similarity breakdown and classifies no
             // boilerplate shapes.
             similarity: None,
@@ -1149,16 +1171,6 @@ fn snapshot_rows(
         })
         .collect();
     (units, groups)
-}
-
-/// The largest member's token count, used as the group's reported size.
-fn group_size(group: &CloneGroup) -> usize {
-    group
-        .members
-        .iter()
-        .map(|member| member.token_end - member.token_start)
-        .max()
-        .unwrap_or(0)
 }
 
 /// The current time as fixed-width RFC 3339 UTC with microsecond precision.

@@ -108,6 +108,13 @@ pub struct Finding {
     pub clone_type: CloneType,
     /// Detector confidence in `[0.0, 1.0]`; higher is more confident.
     pub score: f64,
+    /// Size of the largest fragment, in tokens.
+    ///
+    /// Carried so a scoring run can compare the detector's own ranking against
+    /// the obvious alternative — sort by size — without going back to the
+    /// report for it. Zero when the source of the result did not state one.
+    #[serde(default)]
+    pub size_tokens: u64,
     /// The fragments this finding relates as clones.
     pub fragments: Vec<Fragment>,
 }

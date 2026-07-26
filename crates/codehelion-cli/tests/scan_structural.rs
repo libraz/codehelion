@@ -162,7 +162,7 @@ fn json_reports_carry_the_breakdown_and_stay_deterministic() {
     assert_eq!(documents[0], documents[1], "reruns agree token for token");
 
     let value = &documents[0];
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     assert_eq!(value["run"]["mode"], "structural");
     assert_eq!(value["run"]["build_variant"]["mode"], "structural");
     assert!(
@@ -1330,10 +1330,198 @@ fn a_pair_no_group_holds_is_reported_and_says_so() {
     // members and is a clone class the judge accepted.
     for pair in groups.iter().filter(|group| group["split_pair"] == true) {
         assert_eq!(pair["members"].as_array().unwrap().len(), 2);
-        assert_eq!(pair["priority"]["extra_instances"], 1);
+        assert_eq!(pair["priority"]["inputs"]["instances"], 2);
         assert!(
             pair["clone_type"].as_str().unwrap().starts_with("type-"),
             "a pair carries the class the judge gave it"
         );
     }
+}
+
+#[test]
+fn every_entry_carries_the_measures_its_place_was_argued_from() {
+    let dir = fixture();
+    let value = scan_json(dir.path());
+
+    // The run says how it weighed the measures, because two reports composed
+    // under different weights are different orderings of the same findings.
+    assert_eq!(value["run"]["ranking"]["maintenance_risk"], 2);
+    assert_eq!(value["run"]["ranking"]["refactoring_ease"], 1);
+
+    let groups = value["groups"].as_array().unwrap();
+    assert!(!groups.is_empty());
+    for group in groups {
+        let priority = &group["priority"];
+        for measure in [
+            "value",
+            "clone_confidence",
+            "maintenance_risk",
+            "refactoring_difficulty",
+        ] {
+            let value = priority[measure].as_f64().unwrap_or_else(|| {
+                panic!("{measure} is a number");
+            });
+            assert!(
+                (0.0..=1.0).contains(&value),
+                "{measure} left its range at {value}"
+            );
+        }
+        // Reserved until a backend measures them. Absent, never zero: zero is
+        // a measurement, and none of these has been taken.
+        for reserved in [
+            "semantic_confidence",
+            "source_artifact_confidence",
+            "savings_confidence",
+        ] {
+            assert!(priority[reserved].is_null(), "{reserved} is not measured");
+        }
+        // The facts, so a reader who disagrees with the placement can see
+        // which input produced it, and reproduce the ranking from the report.
+        let inputs = &priority["inputs"];
+        assert_eq!(inputs["min_clone_tokens"], 20);
+        assert!(inputs["smallest_member_tokens"].as_u64().unwrap() > 0);
+        assert!(
+            inputs["smallest_member_tokens"].as_u64().unwrap()
+                <= inputs["largest_member_tokens"].as_u64().unwrap()
+        );
+        assert!(inputs["instances"].as_u64().unwrap() >= 2);
+        assert_eq!(inputs["languages"], 1);
+        assert!(inputs["churn"].is_null());
+        assert!(inputs["ownership_spread"].is_null());
+    }
+}
+
+#[test]
+fn the_weights_change_the_order_and_nothing_else() {
+    let dir = fixture();
+    let root = dir.path();
+    std::fs::write(root.join("src/c.rs"), OTHER_RS.replace("label", "caption")).unwrap();
+
+    let before = scan_json(root);
+    // Ranking on confidence alone: the maintenance argument stops being heard.
+    std::fs::write(
+        root.join("codehelion.toml"),
+        "[priority]\nmaintenance-risk = 0\nrefactoring-ease = 0\n",
+    )
+    .unwrap();
+    let after = scan_json(root);
+
+    assert_eq!(after["run"]["ranking"]["maintenance_risk"], 0);
+    assert_ne!(
+        before["run"]["ranking"]["recipe"], after["run"]["ranking"]["recipe"],
+        "the recorded recipe names the weights it was composed under"
+    );
+    // The same findings, said the same way: weights decide the order a report
+    // is read in and nothing about what is in it.
+    let names = |value: &serde_json::Value| {
+        let mut ids: Vec<String> = value["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|group| group["fingerprint"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(names(&before), names(&after));
+    for (a, b) in before["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(after["groups"].as_array().unwrap())
+    {
+        assert_eq!(
+            a["priority"]["clone_confidence"],
+            b["priority"]["clone_confidence"]
+        );
+        assert_eq!(
+            a["priority"]["maintenance_risk"],
+            b["priority"]["maintenance_risk"]
+        );
+    }
+}
+
+#[test]
+fn two_runs_of_one_tree_rank_it_identically() {
+    let dir = fixture();
+    let first = scan_json(dir.path());
+    let second = scan_json(dir.path());
+    assert_eq!(first["groups"], second["groups"]);
+}
+
+#[test]
+fn a_ranking_does_not_move_because_something_else_was_found() {
+    // What makes a priority comparable between two runs, and what a
+    // rank-based composition would give up: a finding's place is computed from
+    // its own facts, so it cannot move because the scan found one more group.
+    let dir = fixture();
+    let root = dir.path();
+    let alone = scan_json(root);
+    let before: Vec<(String, f64)> = alone["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|group| {
+            (
+                group["fingerprint"].as_str().unwrap().to_string(),
+                group["priority"]["value"].as_f64().unwrap(),
+            )
+        })
+        .collect();
+
+    std::fs::write(root.join("src/c.rs"), TRIO_A_RS).unwrap();
+    std::fs::write(root.join("src/d.rs"), TRIO_B_RS).unwrap();
+    let crowded = scan_json(root);
+    let after: std::collections::BTreeMap<String, f64> = crowded["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|group| {
+            (
+                group["fingerprint"].as_str().unwrap().to_string(),
+                group["priority"]["value"].as_f64().unwrap(),
+            )
+        })
+        .collect();
+    assert!(after.len() > before.len(), "the second scan found more");
+    for (fingerprint, value) in before {
+        assert_eq!(
+            after.get(&fingerprint),
+            Some(&value),
+            "group {fingerprint} was re-ranked by the arrival of another group"
+        );
+    }
+}
+
+#[test]
+fn explain_says_which_fact_put_the_finding_where_it_is() {
+    let dir = fixture();
+    let root = dir.path();
+    let value = scan_json(root);
+    let finding = value["groups"][0]["members"][0]["finding_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let text = cmd()
+        .current_dir(root)
+        .args(["explain", &finding])
+        .output()
+        .expect("run explain");
+    assert!(text.status.success(), "{text:?}");
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains("priority:"), "{text}");
+    // Each measure names the facts behind it rather than only its value.
+    assert!(
+        text.contains("tokens in the smallest occurrence against a 20-token floor"),
+        "{text}"
+    );
+    assert!(text.contains("maintenance risk"), "{text}");
+    assert!(text.contains("refactoring difficulty"), "{text}");
+    // And says which inputs nobody has measured, so a zero is never inferred
+    // from their absence.
+    assert!(
+        text.contains("not measured by this run, and so not weighed"),
+        "{text}"
+    );
 }

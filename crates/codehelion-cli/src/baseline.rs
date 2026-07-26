@@ -321,6 +321,7 @@ mod tests {
 
     fn member(finding: &str, path: &str, canonical: bool) -> StoredMember {
         StoredMember {
+            language: "rust".to_string(),
             content_hex: "c0".repeat(16),
             finding_hex: finding.to_string(),
             file_path: path.to_string(),

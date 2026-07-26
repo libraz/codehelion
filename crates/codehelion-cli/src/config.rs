@@ -250,6 +250,46 @@ impl Default for Limits {
     }
 }
 
+/// How the separated priority measures are weighed against one another.
+///
+/// Only the composition is configurable. The measures themselves are not: what
+/// a duplication costs to keep and what it costs to remove are questions about
+/// the code, and a setting that changed the answers would make two projects'
+/// reports incomparable. What differs between projects is how much each answer
+/// should count, which is what these are.
+///
+/// Whole numbers, read as shares. Setting both to zero ranks on clone
+/// confidence alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Priority {
+    /// Weight of what keeping the copies in step costs.
+    pub maintenance_risk: u32,
+    /// Weight of how cheap the duplication would be to remove.
+    pub refactoring_ease: u32,
+}
+
+impl Default for Priority {
+    fn default() -> Self {
+        let weights = codehelion_core::priority::Weights::default();
+        Self {
+            maintenance_risk: weights.maintenance_risk,
+            refactoring_ease: weights.refactoring_ease,
+        }
+    }
+}
+
+impl Priority {
+    /// These settings as the ranking reads them.
+    #[must_use]
+    pub const fn weights(&self) -> codehelion_core::priority::Weights {
+        codehelion_core::priority::Weights {
+            maintenance_risk: self.maintenance_risk,
+            refactoring_ease: self.refactoring_ease,
+        }
+    }
+}
+
 /// Effective analysis configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
@@ -266,6 +306,8 @@ pub struct Config {
     pub languages: Languages,
     /// Suppression settings.
     pub suppression: Suppression,
+    /// How the priority measures are weighed against one another.
+    pub priority: Priority,
     /// Resource ceilings.
     pub limits: Limits,
     /// Audit-database location, relative to the scan root unless absolute.
@@ -286,6 +328,7 @@ impl Default for Config {
             literal_normalization: LiteralNormalization::default(),
             languages: Languages::default(),
             suppression: Suppression::default(),
+            priority: Priority::default(),
             limits: Limits::default(),
             database: PathBuf::from(".codehelion/audit.db"),
             jobs: None,
@@ -446,6 +489,17 @@ pub const TEMPLATE: &str = "\
 # forwarding = \"hide\"
 # macro-repetition = \"rank-down\"
 # guarded-dispatch = \"hide\"
+
+# How the separated priority measures are weighed against one another when a
+# report is put in order. Whole numbers, read as shares. Only the composition
+# is settable: what a duplication costs to keep and what it costs to remove
+# are questions about the code, and a setting that changed the answers would
+# make two projects' reports incomparable. Every finding carries all three
+# measures whatever these are set to; setting both to zero orders the report
+# on clone confidence alone.
+# [priority]
+# maintenance-risk = 2
+# refactoring-ease = 1
 
 # Resource ceilings; every ceiling that fires is accounted for in the report.
 # [limits]

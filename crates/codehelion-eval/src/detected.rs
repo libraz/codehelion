@@ -24,7 +24,7 @@ use crate::schema::{CloneType, DetectionResult, Finding, Fragment};
 /// The report's version covers its shape, not its content: findings move with
 /// every detector change, and that is what the harness exists to measure. Only
 /// a change to the document's structure lands here.
-pub const SUPPORTED_REPORT_SCHEMA: u32 = 1;
+pub const SUPPORTED_REPORT_SCHEMA: u32 = 2;
 
 /// What went wrong turning a report into a scorable result.
 #[derive(Debug)]
@@ -104,6 +104,12 @@ struct Group {
 #[derive(Debug, Deserialize)]
 struct Priority {
     value: f64,
+    inputs: PriorityInputs,
+}
+
+#[derive(Debug, Deserialize)]
+struct PriorityInputs {
+    largest_member_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,9 +148,9 @@ pub fn from_report_json(json: &str) -> Result<(DetectionResult, u32), Error> {
             id: group.fingerprint.clone(),
             clone_type: group.clone_type,
             // The ranking the tool would show, which is what precision@k is a
-            // statement about. Priority is unbounded rather than a confidence,
-            // and the metrics read it for order alone.
+            // statement about. The metrics read it for order alone.
             score: group.priority.value,
+            size_tokens: group.priority.inputs.largest_member_tokens,
             fragments: group
                 .members
                 .iter()
@@ -189,7 +195,7 @@ mod tests {
 
     /// A report with one reported group and one the tool suppressed.
     const REPORT: &str = r#"{
-      "schema_version": 1,
+      "schema_version": 2,
       "run": {"id": 1},
       "summary": {
         "files": {"total": 2, "rust": 2, "c": 0, "cpp": 0},
@@ -201,7 +207,7 @@ mod tests {
           "fingerprint": "abc",
           "clone_type": "type-2",
           "scope": "unit",
-          "priority": {"value": 120.5},
+          "priority": {"value": 0.62, "inputs": {"largest_member_tokens": 120}},
           "suppressed": null,
           "members": [
             {"finding_id": "m1", "file": "a.rs", "start_line": 10, "end_line": 24},
@@ -212,7 +218,7 @@ mod tests {
           "fingerprint": "def",
           "clone_type": "type-1",
           "scope": "unit",
-          "priority": {"value": 90.0},
+          "priority": {"value": 0.41, "inputs": {"largest_member_tokens": 90}},
           "suppressed": {"kind": "rule", "detail": "path"},
           "members": [
             {"finding_id": "m3", "file": "c.rs", "start_line": 1, "end_line": 4}
@@ -231,7 +237,8 @@ mod tests {
         let finding = &result.findings[0];
         assert_eq!(finding.id, "abc");
         assert_eq!(finding.clone_type, CloneType::Type2);
-        assert!((finding.score - 120.5).abs() < 1e-9);
+        assert!((finding.score - 0.62).abs() < 1e-9);
+        assert_eq!(finding.size_tokens, 120);
         assert_eq!(
             finding.fragments,
             vec![
@@ -254,14 +261,14 @@ mod tests {
         // The failure this rejects is the one that costs the most: a report
         // whose shape moved on, read as though it had not, quietly scoring
         // whatever still happened to parse.
-        let moved_on = REPORT.replace("\"schema_version\": 1", "\"schema_version\": 2");
+        let moved_on = REPORT.replace("\"schema_version\": 2", "\"schema_version\": 3");
         let error = from_report_json(&moved_on).expect_err("a later version is refused");
-        assert!(matches!(error, Error::Version { found: 2 }));
+        assert!(matches!(error, Error::Version { found: 3 }));
     }
 
     #[test]
     fn a_document_that_is_not_a_report_is_a_parse_error() {
-        let error = from_report_json("{\"schema_version\": 1}").expect_err("no summary");
+        let error = from_report_json("{\"schema_version\": 2}").expect_err("no summary");
         assert!(matches!(error, Error::Parse(_)));
     }
 
