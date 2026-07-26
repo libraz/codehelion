@@ -39,6 +39,35 @@ pub struct RunSummary {
     pub group_count: i64,
 }
 
+/// Where a recorded run came from: enough of its identity to say whether a
+/// judgement made about its results still describes a later run.
+///
+/// A stable id is only meaningful under the conditions it was computed in, so
+/// an artefact derived from a run (a baseline, an exported diff) has to carry
+/// them. The build variant is the decisive one — it folds mode, languages and
+/// normalization version into one fingerprint — but the detector versions are
+/// recorded beside it, because a fingerprint schema change moves every id
+/// without the variant noticing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunOrigin {
+    /// Row id of the run.
+    pub id: i64,
+    /// Scanned root path.
+    pub root_path: String,
+    /// Tool version that wrote the run.
+    pub tool_version: String,
+    /// Analysis mode name.
+    pub analysis_mode: String,
+    /// RFC 3339 finish time.
+    pub finished_at: String,
+    /// The build variant's fingerprint.
+    pub variant_fingerprint: String,
+    /// Normalization version the variant was built under.
+    pub normalization_version: i64,
+    /// Every recorded `(component, version)` pair, ordered by component.
+    pub detector_versions: Vec<(String, String)>,
+}
+
 /// One stored occurrence of a group's content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredMember {
@@ -83,6 +112,9 @@ pub struct StoredGroup {
     pub test_code: bool,
     /// The similarity breakdown, when the mode measured one (Structural).
     pub similarity: Option<StoredSimilarity>,
+    /// The rule that hid the group in its run, when one matched. Absent for a
+    /// group the run reported.
+    pub suppressed_by: Option<StoredSuppressionRef>,
     /// The group's occurrences.
     pub members: Vec<StoredMember>,
 }
@@ -273,22 +305,7 @@ impl Store {
         root_path: &str,
         variant_fingerprint: &str,
     ) -> Result<Option<PreviousTree>, StoreError> {
-        let run: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT r.id
-                 FROM scan_run r
-                 JOIN build_variant v ON v.id = r.build_variant_id
-                 WHERE r.root_path = ?1
-                   AND v.variant_fingerprint = ?2
-                   AND r.status = 'completed'
-                 ORDER BY r.started_at DESC, r.id DESC
-                 LIMIT 1",
-                params![root_path, variant_fingerprint],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(run_id) = run else {
+        let Some(run_id) = self.completed_run_id(root_path, Some(variant_fingerprint))? else {
             return Ok(None);
         };
         let mut stmt = self.conn.prepare(
@@ -309,6 +326,81 @@ impl Store {
         Ok(Some((run_id, tree)))
     }
 
+    /// Row id of the newest completed run over `root_path`, optionally
+    /// narrowed to one build variant.
+    ///
+    /// Narrowing is what makes two runs comparable file by file; leaving it
+    /// open is for the callers that read a run in order to *record* which
+    /// variant it used, and so cannot name it in advance.
+    fn completed_run_id(
+        &self,
+        root_path: &str,
+        variant_fingerprint: Option<&str>,
+    ) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT r.id
+                 FROM scan_run r
+                 JOIN build_variant v ON v.id = r.build_variant_id
+                 WHERE r.root_path = ?1
+                   AND (?2 IS NULL OR v.variant_fingerprint = ?2)
+                   AND r.status = 'completed'
+                 ORDER BY r.started_at DESC, r.id DESC
+                 LIMIT 1",
+                params![root_path, variant_fingerprint],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// The newest completed run over `root_path`, with the identity a
+    /// judgement about its results has to be qualified by.
+    ///
+    /// Unlike [`Self::previous_tree`] this does not narrow to a variant: the
+    /// caller is reading a run in order to record what it was, so the variant
+    /// is an answer rather than a question.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn latest_completed_run(&self, root_path: &str) -> Result<Option<RunOrigin>, StoreError> {
+        let Some(run_id) = self.completed_run_id(root_path, None)? else {
+            return Ok(None);
+        };
+        let mut origin = self.conn.query_row(
+            "SELECT r.root_path, r.tool_version, r.analysis_mode, r.finished_at,
+                    v.variant_fingerprint, v.normalization_version
+             FROM scan_run r
+             JOIN build_variant v ON v.id = r.build_variant_id
+             WHERE r.id = ?1",
+            params![run_id],
+            |row| {
+                Ok(RunOrigin {
+                    id: run_id,
+                    root_path: row.get(0)?,
+                    tool_version: row.get(1)?,
+                    analysis_mode: row.get(2)?,
+                    finished_at: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    variant_fingerprint: row.get(4)?,
+                    normalization_version: row.get(5)?,
+                    detector_versions: Vec::new(),
+                })
+            },
+        )?;
+        let mut stmt = self.conn.prepare(
+            "SELECT d.component, d.version
+             FROM scan_run_detector_version rd
+             JOIN detector_version d ON d.id = rd.detector_version_id
+             WHERE rd.scan_run_id = ?1
+             ORDER BY d.component ASC, d.version ASC",
+        )?;
+        origin.detector_versions = stmt
+            .query_map(params![run_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(Some(origin))
+    }
+
     /// Every clone group of `run_id`, deterministically ordered by
     /// fingerprint bytes, each with its members.
     ///
@@ -319,14 +411,18 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT g.id, lower(hex(f.hash)), g.clone_type, g.score, g.entropy_bits,
                     g.suppress_reason, g.boilerplate, g.member_scope, g.test_code,
-                    g.split_pair
+                    g.split_pair, s.scope, s.pattern
              FROM clone_group g
              JOIN fingerprint f ON f.id = g.group_fingerprint_id
+             LEFT JOIN finding fi ON fi.clone_group_id = g.id
+             LEFT JOIN suppression s ON s.id = fi.suppression_id
              WHERE g.scan_run_id = ?1
              ORDER BY f.hash ASC",
         )?;
         let rows: Vec<(i64, StoredGroup)> = stmt
             .query_map(params![run_id], |row| {
+                let scope: Option<String> = row.get(10)?;
+                let pattern: Option<String> = row.get(11)?;
                 Ok((
                     row.get::<_, i64>(0)?,
                     StoredGroup {
@@ -340,6 +436,9 @@ impl Store {
                         test_code: row.get(8)?,
                         split_pair: row.get(9)?,
                         similarity: None,
+                        suppressed_by: scope
+                            .zip(pattern)
+                            .map(|(scope, pattern)| StoredSuppressionRef { scope, pattern }),
                         members: Vec::new(),
                     },
                 ))

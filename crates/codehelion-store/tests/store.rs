@@ -558,7 +558,49 @@ fn suppressed_findings_reference_a_deduplicated_rule_row() {
         let findings = store.run_findings(run_id).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].suppression_scope.as_deref(), Some("path_glob"));
+        // The group itself says which rule hid it, so reading a run back does
+        // not need a second query to tell a reported group from a hidden one.
+        let hidden = &store.run_groups(run_id).unwrap()[0];
+        let rule = hidden.suppressed_by.as_ref().expect("the rule that hid it");
+        assert_eq!(rule.scope, "path_glob");
+        assert_eq!(rule.pattern, "vendor/**");
     }
+}
+
+#[test]
+fn a_run_read_back_carries_the_conditions_its_ids_were_computed_under() {
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    assert!(
+        store.latest_completed_run("/repo").unwrap().is_none(),
+        "nothing scanned yet"
+    );
+
+    let run_id = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+    let origin = store.latest_completed_run("/repo").unwrap().expect("a run");
+    assert_eq!(origin.id, run_id);
+    assert_eq!(origin.analysis_mode, "structural");
+    assert_eq!(origin.tool_version, "0.1.0");
+    assert_eq!(origin.finished_at, "2026-07-24T00:00:05Z");
+    assert_eq!(origin.variant_fingerprint, variant.fingerprint());
+    assert_eq!(
+        origin.normalization_version,
+        i64::from(variant.normalization_version)
+    );
+    assert_eq!(origin.detector_versions, sorted(detectors.clone()));
+
+    // Another root is another history; this one has none.
+    assert!(store.latest_completed_run("/elsewhere").unwrap().is_none());
+}
+
+/// The detector versions as the query orders them: by component, then version.
+fn sorted(mut versions: Vec<(String, String)>) -> Vec<(String, String)> {
+    versions.sort();
+    versions
 }
 
 #[test]
