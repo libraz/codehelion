@@ -27,7 +27,7 @@ use crate::ir::{IrNode, Shape};
 /// Recorded alongside the other detector versions: a change in what counts as
 /// boilerplate changes which findings a report shows, so results from two
 /// versions are not comparable without saying so.
-pub const BOILERPLATE_VERSION: &str = "boilerplate-v0";
+pub const BOILERPLATE_VERSION: &str = "boilerplate-v1";
 
 /// A recognised boilerplate shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -75,12 +75,23 @@ impl Boilerplate {
 struct Body {
     /// Branches, loops, multi-way conditionals and error handling.
     control: usize,
-    /// Call expressions.
+    /// Call expressions that are not themselves an argument to a call.
+    ///
+    /// Nesting is what separates delegation from work. `f(g(x), h(y))` is one
+    /// delegation whose arguments happen to be computed by call: counting
+    /// three calls there would say a wrapper does three things, when what it
+    /// does is call `f`. Sibling calls are counted apart, because two calls in
+    /// a row are two things done.
     calls: usize,
     /// Macro invocations.
     macros: usize,
     /// Statements other than macro invocations and control flow.
     statements: usize,
+    /// Statements that are not a `return`.
+    ///
+    /// A `return` around the delegation is punctuation, not work; anything
+    /// else in the body is work.
+    working_statements: usize,
 }
 
 /// Classify a unit by the shape of its body, or return `None` when it does
@@ -105,7 +116,8 @@ pub fn classify(unit: &IrNode) -> Option<Boilerplate> {
     }
     match body.calls {
         0 => Some(Boilerplate::TrivialBody),
-        1 if body.statements == 0 => Some(Boilerplate::Forwarding),
+        // One delegation, and nothing around it but a `return`.
+        1 if body.working_statements == 0 => Some(Boilerplate::Forwarding),
         _ => None,
     }
 }
@@ -114,12 +126,21 @@ pub fn classify(unit: &IrNode) -> Option<Boilerplate> {
 fn count(unit: &IrNode) -> Body {
     let mut body = Body::default();
     for child in &unit.children {
-        child.walk(&mut |node| tally(node, &mut body));
+        descend(child, false, &mut body);
     }
     body
 }
 
-const fn tally(node: &IrNode, body: &mut Body) {
+/// Tally `node` and its subtree, remembering whether it sits inside a call.
+fn descend(node: &IrNode, in_call: bool, body: &mut Body) {
+    tally(node, in_call, body);
+    let nested = in_call || node.shape == Shape::Call;
+    for child in &node.children {
+        descend(child, nested, body);
+    }
+}
+
+const fn tally(node: &IrNode, in_call: bool, body: &mut Body) {
     match node.shape {
         Shape::Loop
         | Shape::Branch
@@ -128,9 +149,17 @@ const fn tally(node: &IrNode, body: &mut Body) {
         | Shape::Try
         | Shape::Break
         | Shape::Continue => body.control += 1,
-        Shape::Call => body.calls += 1,
+        Shape::Call => {
+            if !in_call {
+                body.calls += 1;
+            }
+        }
         Shape::MacroCall => body.macros += 1,
-        Shape::Assign | Shape::VarDecl | Shape::Return | Shape::ExprStmt => body.statements += 1,
+        Shape::Return => body.statements += 1,
+        Shape::Assign | Shape::VarDecl | Shape::ExprStmt => {
+            body.statements += 1;
+            body.working_statements += 1;
+        }
         _ => {}
     }
 }
@@ -186,6 +215,74 @@ mod tests {
         // A call plus real work is not a wrapper.
         assert_eq!(classify(&unit(&[Shape::Call, Shape::VarDecl])), None);
         assert_eq!(classify(&unit(&[Shape::Call, Shape::Call])), None);
+    }
+
+    /// A node of `shape` wrapping `children`, for the nesting cases.
+    fn nest(shape: Shape, children: Vec<IrNode>) -> IrNode {
+        IrNode {
+            shape,
+            name: None,
+            token_start: 0,
+            token_end: 0,
+            range: ByteRange { start: 0, end: 0 },
+            children,
+        }
+    }
+
+    fn leaf(shape: Shape) -> IrNode {
+        nest(shape, Vec::new())
+    }
+
+    /// A unit whose body is the given statements, given as whole subtrees.
+    fn unit_of(statements: Vec<IrNode>) -> IrNode {
+        nest(Shape::Function, vec![nest(Shape::Block, statements)])
+    }
+
+    #[test]
+    fn the_arguments_of_a_delegation_are_part_of_it() {
+        // `f(g(x))`: one thing done, by way of another. Counting the inner
+        // call as a second thing said this was not a wrapper, which is how
+        // the commonest wrapper in either language went unrecognised.
+        let delegation = nest(Shape::Call, vec![leaf(Shape::Call)]);
+        assert_eq!(
+            classify(&unit_of(vec![delegation])),
+            Some(Boilerplate::Forwarding)
+        );
+
+        // `return f(g(x), h(y));` — the `return` is punctuation around the
+        // same single delegation.
+        let wrapped = nest(
+            Shape::Return,
+            vec![nest(
+                Shape::Call,
+                vec![leaf(Shape::Call), leaf(Shape::Call)],
+            )],
+        );
+        assert_eq!(
+            classify(&unit_of(vec![wrapped])),
+            Some(Boilerplate::Forwarding)
+        );
+    }
+
+    #[test]
+    fn two_calls_side_by_side_are_two_things_done() {
+        // Nesting is what makes a call part of a delegation. Siblings are not
+        // nested, however deep either of them runs.
+        let body = vec![
+            nest(Shape::Call, vec![leaf(Shape::Call)]),
+            leaf(Shape::Call),
+        ];
+        assert_eq!(classify(&unit_of(body)), None);
+    }
+
+    #[test]
+    fn work_beside_a_delegation_still_disqualifies_it() {
+        // A `return` is punctuation; an assignment is not.
+        let body = vec![
+            nest(Shape::Call, vec![leaf(Shape::Call)]),
+            leaf(Shape::Assign),
+        ];
+        assert_eq!(classify(&unit_of(body)), None);
     }
 
     #[test]
