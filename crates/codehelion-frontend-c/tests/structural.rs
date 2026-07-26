@@ -175,3 +175,123 @@ fn a_case_written_as_a_framework_macro_is_no_unit_in_c() {
         "nothing in the suite reaches a group"
     );
 }
+
+/// One function written twice, once per platform, the way a portable C source
+/// writes it — beside an unguarded pair that really is duplicated.
+const PORTABLE: &str = "\
+#ifdef _WIN32
+int wait_ticks(int ms) {
+    int ticks = ms * 10;
+    int capped = ticks > 1000 ? 1000 : ticks;
+    int slept = capped;
+    return slept;
+}
+#else
+int wait_ticks(int ms) {
+    int ticks = ms * 10;
+    int capped = ticks > 1000 ? 1000 : ticks;
+    int slept = capped;
+    return slept;
+}
+#endif
+
+int scale_a(int v) {
+    int ticks = v * 10;
+    int capped = ticks > 1000 ? 1000 : ticks;
+    int slept = capped;
+    return slept;
+}
+
+int scale_b(int v) {
+    int ticks = v * 10;
+    int capped = ticks > 1000 ? 1000 : ticks;
+    int slept = capped;
+    return slept;
+}
+";
+
+#[test]
+fn the_two_arms_of_one_conditional_are_not_a_clone_pair() {
+    // The guarded pair is identical, so every measure agrees on it — and
+    // reporting it would tell the reader to delete one of two functions only
+    // one of which is ever compiled. The unguarded pair below it is the same
+    // code and is reported, so the drop is about the conditional and not
+    // about the similarity.
+    let files = vec![CStructuralFrontend.parse(PORTABLE)];
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let report = structural::analyze(&files, &variant, &StructuralConfig::default());
+
+    let unit_at_line = |line: u32| {
+        report
+            .units
+            .iter()
+            .position(|unit| unit.start_line == line)
+            .unwrap_or_else(|| panic!("no unit starts at line {line}"))
+    };
+    let (guarded, otherwise) = (unit_at_line(2), unit_at_line(9));
+    let (open_a, open_b) = (unit_at_line(17), unit_at_line(24));
+
+    // Three, not one: the funnel counts proposals, and all three candidate
+    // stages propose this pair — it shares fragments, shingles and a
+    // control-flow skeleton. The `nested` counter beside it counts the same
+    // way.
+    assert_eq!(
+        report.stats.alternative_pairs, 3,
+        "the guarded pair is dropped, and the funnel says so"
+    );
+    for group in &report.groups.groups {
+        assert!(
+            !(group.members.contains(&guarded) && group.members.contains(&otherwise)),
+            "no group holds both arms of one conditional"
+        );
+    }
+    assert!(
+        report
+            .groups
+            .groups
+            .iter()
+            .any(|group| group.members.contains(&open_a) && group.members.contains(&open_b)),
+        "the same code outside any conditional is still a clone"
+    );
+}
+
+/// The same portable pair, in a file the parser cannot follow: the trailing
+/// item is truncated, so error recovery decides where the conditional ends.
+const PORTABLE_BROKEN: &str = "\
+#ifdef _WIN32
+int wait_ticks(int ms) {
+    int ticks = ms * 10;
+    int capped = ticks > 1000 ? 1000 : ticks;
+    int slept = capped;
+    return slept;
+}
+#else
+int wait_ticks(int ms) {
+    int ticks = ms * 10;
+    int capped = ticks > 1000 ? 1000 : ticks;
+    int slept = capped;
+    return slept;
+}
+#endif
+
+int broken(int v) { return v +
+";
+
+#[test]
+fn a_file_the_parser_stumbled_in_excludes_nothing() {
+    // Arms are read off the tree, so a tree the parser guessed at has no arms
+    // worth reading. Dropping a pair hides a finding, so the tool would rather
+    // report the platform pair than invent an exclusion from a broken parse.
+    let files = vec![CStructuralFrontend.parse(PORTABLE_BROKEN)];
+    let variant = BuildVariant::structural(LanguageSelection::default());
+    let report = structural::analyze(&files, &variant, &StructuralConfig::default());
+
+    assert!(
+        !files[0].error_ranges.is_empty(),
+        "the fixture is meant to be a file the parser struggled with"
+    );
+    assert_eq!(
+        report.stats.alternative_pairs, 0,
+        "no exclusion is claimed from a tree the parser guessed at"
+    );
+}

@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::boilerplate::{self, Boilerplate};
 use crate::candidate::{self, CandidateConfig, CandidateStats};
 use crate::clone_class::CloneClass;
+use crate::conditional::ArmPath;
 use crate::control_flow::{self, ControlFlowConfig, ControlFlowStats};
 use crate::discovery::BuildVariant;
 use crate::engine::LiteralNorm;
@@ -224,6 +225,9 @@ pub struct StructuralStats {
     pub region_subsumed: usize,
     /// Candidate pairs dropped because one unit encloses the other.
     pub nested_pairs: usize,
+    /// Candidate pairs dropped because the two units sit under different arms
+    /// of one preprocessor conditional, so no build holds both.
+    pub alternative_pairs: usize,
     /// Distinct unit pairs handed to verification.
     pub unit_pairs: usize,
     /// Unit pairs that verification accepted as clones.
@@ -270,6 +274,8 @@ struct Unit {
     name: Option<Lexeme>,
     boilerplate: Option<Boilerplate>,
     test_code: bool,
+    /// The preprocessor conditionals the unit sits under, if any.
+    arms: ArmPath,
 }
 
 /// Run the structural pipeline over parsed IR files.
@@ -291,7 +297,8 @@ pub fn analyze(
     let candidate = candidate::generate(&feature_files, &config.candidate);
     let near = near_match::generate(&feature_files, &config.near_match);
     let skeleton = control_flow::generate(&feature_files, &config.control_flow);
-    let (pairs, nested_pairs) = lift_to_unit_pairs(&candidate, &near, &skeleton, &units, &offsets);
+    let lifted = lift_to_unit_pairs(&candidate, &near, &skeleton, &units, &offsets);
+    let pairs = lifted.pairs;
 
     // Stage: fold the window seeds into the maximal shared runs they describe,
     // then confirm each candidate run against the tokens it actually covers.
@@ -351,7 +358,8 @@ pub fn analyze(
         regions: regions.len(),
         region_singletons: singletons,
         region_subsumed: subsumed,
-        nested_pairs,
+        nested_pairs: lifted.nested,
+        alternative_pairs: lifted.alternatives,
         unit_pairs: pairs.len(),
         verified_pairs: edges.len(),
         unrepresented_pairs: unrepresented.len(),
@@ -620,6 +628,9 @@ fn unanimous_boilerplate(group: &grouping::StructuralGroup, units: &[Unit]) -> O
 fn flatten_units(files: &[SyntaxIrFile], variant: &BuildVariant) -> (Vec<Unit>, Vec<usize>) {
     let mut units = Vec::new();
     let mut offsets = Vec::with_capacity(files.len());
+    // Conditional identifiers run across the whole corpus rather than per
+    // file, so that two files' conditionals can never be taken for one.
+    let mut next_conditional = 0u32;
     for (file_index, file) in files.iter().enumerate() {
         offsets.push(units.len());
         let mut walk = UnitWalk {
@@ -631,10 +642,12 @@ fn flatten_units(files: &[SyntaxIrFile], variant: &BuildVariant) -> (Vec<Unit>, 
             },
             variant,
             local: 0,
+            next_conditional: &mut next_conditional,
+            trust_arms: file.error_ranges.is_empty(),
             units: &mut units,
         };
         for root in &file.roots {
-            walk.visit(root, false);
+            walk.visit(root, false, &ArmPath::default());
         }
     }
     (units, offsets)
@@ -644,26 +657,42 @@ fn flatten_units(files: &[SyntaxIrFile], variant: &BuildVariant) -> (Vec<Unit>, 
 ///
 /// [`IrNode::walk`] would do for the units themselves, but a unit inherits
 /// facts from the items enclosing it — a function inside a test-only module is
-/// test code without carrying a marker of its own — and a flat visitor has no
-/// ancestors to inherit from. The order matches [`IrNode::walk`]'s, and so
-/// [`features::extract`]'s: pre-order, children in source order.
+/// test code without carrying a marker of its own, and one inside a `#ifdef`
+/// belongs to that arm — and a flat visitor has no ancestors to inherit from.
+/// The order matches [`IrNode::walk`]'s, and so [`features::extract`]'s:
+/// pre-order, children in source order.
 struct UnitWalk<'a> {
     file: usize,
     source: &'a SyntaxIrFile,
     context: FileContext<'a>,
     variant: &'a BuildVariant,
     local: usize,
+    /// Hands out conditional identifiers; shared across every file in a run.
+    next_conditional: &'a mut u32,
+    /// Whether this file parsed cleanly enough for its conditional nesting to
+    /// mean anything.
+    trust_arms: bool,
     units: &'a mut Vec<Unit>,
 }
 
 impl UnitWalk<'_> {
     /// Visit one node, recording it when it is an analysed unit, then its
-    /// children. `test_code` is what the enclosing items established.
-    fn visit(&mut self, node: &IrNode, test_code: bool) {
+    /// children. `test_code` and `arms` are what the enclosing items
+    /// established.
+    fn visit(&mut self, node: &IrNode, test_code: bool, arms: &ArmPath) {
         let end = node.token_end.min(self.source.tokens.len());
         let start = node.token_start.min(end);
         let tokens = &self.source.tokens[start..end];
         let test_code = test_code || test_code::is_marked(self.source.language, tokens);
+        // Only a conditional's own node allocates a path; everything else
+        // keeps the one it was handed. A file the parser stumbled in gets no
+        // path at all: see [`crate::conditional`] for why an invented arm
+        // costs more than a missed one.
+        let descended = self
+            .trust_arms
+            .then(|| arms.descend(&node.shape, self.next_conditional))
+            .flatten();
+        let arms = descended.as_ref().unwrap_or(arms);
 
         if let Some(kind) = unit_kind(&node.shape) {
             let fingerprint =
@@ -688,12 +717,13 @@ impl UnitWalk<'_> {
                 name: node.name.clone(),
                 boilerplate: boilerplate::classify(node),
                 test_code,
+                arms: arms.clone(),
             });
             self.local += 1;
         }
 
         for child in &node.children {
-            self.visit(child, test_code);
+            self.visit(child, test_code, arms);
         }
     }
 }
@@ -738,8 +768,29 @@ fn view<'a>(
     }
 }
 
+/// A candidate pair that is not a statement about any one program, and so is
+/// dropped before it reaches the judge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotAPair {
+    /// One unit encloses the other: one stretch of code seen at two levels.
+    Nested,
+    /// The two sit under different arms of one preprocessor conditional, so
+    /// no build contains both.
+    Alternatives,
+}
+
+/// What the candidate stages proposed, reduced to unit pairs.
+struct LiftedPairs {
+    /// Distinct unit pairs for verification to judge.
+    pairs: BTreeSet<(usize, usize)>,
+    /// Proposals dropped for nesting.
+    nested: usize,
+    /// Proposals dropped for being alternative arms of one conditional.
+    alternatives: usize,
+}
+
 /// Collapse what the three candidate stages proposed into the set of distinct
-/// unit pairs verification will judge, and count the pairs dropped for nesting.
+/// unit pairs verification will judge, counting what was dropped on the way.
 ///
 /// The stages describe candidates differently — a shared fragment, an
 /// overlapping shingle set, a shared skeleton — and they overlap heavily on
@@ -752,9 +803,10 @@ fn lift_to_unit_pairs(
     skeleton: &control_flow::ControlFlowSet,
     units: &[Unit],
     offsets: &[usize],
-) -> (BTreeSet<(usize, usize)>, usize) {
+) -> LiftedPairs {
     let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut nested = 0usize;
+    let mut alternatives = 0usize;
     let places = candidate
         .pairs
         .iter()
@@ -771,15 +823,21 @@ fn lift_to_unit_pairs(
                 .map(|pair| (pair.a.file, pair.a.unit, pair.b.file, pair.b.unit)),
         );
     for (file_a, unit_a, file_b, unit_b) in places {
-        if insert_pair(&mut pairs, units, offsets, file_a, unit_a, file_b, unit_b) {
-            nested += 1;
+        match insert_pair(&mut pairs, units, offsets, file_a, unit_a, file_b, unit_b) {
+            Some(NotAPair::Nested) => nested += 1,
+            Some(NotAPair::Alternatives) => alternatives += 1,
+            None => {}
         }
     }
-    (pairs, nested)
+    LiftedPairs {
+        pairs,
+        nested,
+        alternatives,
+    }
 }
 
 /// Insert a `(file, unit)` pair as a global, ordered unit pair, dropping
-/// self-pairs.
+/// self-pairs and returning why a proposal was not a pair at all.
 fn insert_pair(
     pairs: &mut BTreeSet<(usize, usize)>,
     units: &[Unit],
@@ -788,17 +846,20 @@ fn insert_pair(
     unit_a: usize,
     file_b: usize,
     unit_b: usize,
-) -> bool {
+) -> Option<NotAPair> {
     let a = offsets[file_a] + unit_a;
     let b = offsets[file_b] + unit_b;
     if a == b {
-        return false;
+        return None;
     }
     if encloses(&units[a], &units[b]) {
-        return true;
+        return Some(NotAPair::Nested);
+    }
+    if units[a].arms.excludes(&units[b].arms) {
+        return Some(NotAPair::Alternatives);
     }
     pairs.insert(if a <= b { (a, b) } else { (b, a) });
-    false
+    None
 }
 
 /// Verified clone pairs that no reported group holds both halves of.
