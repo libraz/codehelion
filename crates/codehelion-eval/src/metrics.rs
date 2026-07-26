@@ -12,12 +12,19 @@
 //!
 //! # True/false positives
 //!
-//! Metrics assume a fully-labelled synthetic corpus: every genuine clone is a
-//! labelled `clone_pair`. Under that assumption a finding is a **true
+//! [`evaluate`] assumes a fully-labelled synthetic corpus: every genuine clone
+//! is a labelled `clone_pair`. Under that assumption a finding is a **true
 //! positive** when it covers at least one `clone_pair`, and a **false
 //! positive** otherwise. On partially-labelled real code this over-counts false
-//! positives, so precision figures here are meaningful only against a complete
-//! label set.
+//! positives, so [`Metrics::precision_overall`] is meaningful only against a
+//! complete label set.
+//!
+//! Real code cannot be labelled that way — nobody enumerates every clone in a
+//! tree before measuring one. [`adjudicate`] is the measure for that case: it
+//! scores only the findings a label speaks about, and counts the rest as
+//! [unjudged](Adjudication::unjudged) rather than guessing. What it reports is
+//! "of the findings someone has ruled on, how many were right", which is a
+//! statement a partial label set can support.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -204,6 +211,86 @@ pub fn evaluate(
         true_positives,
         false_positives,
         top_k,
+    }
+}
+
+/// What a partial label set says about one detection run.
+///
+/// Every finding falls into exactly one of confirmed / refuted / conflicting /
+/// unjudged, so the four counts sum to the number of findings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Adjudication {
+    /// Findings covering a labelled `clone_pair` and no labelled `non_clone`.
+    pub confirmed: usize,
+    /// Findings covering a labelled `non_clone` and no labelled `clone_pair`.
+    pub refuted: usize,
+    /// Findings covering both, which means the labels disagree with each other
+    /// rather than with the detector. Non-zero is a corpus defect.
+    pub conflicting: usize,
+    /// Findings no label speaks about. Counted, never guessed at.
+    pub unjudged: usize,
+}
+
+impl Adjudication {
+    /// Findings a label ruled on either way.
+    #[must_use]
+    pub const fn judged(&self) -> usize {
+        self.confirmed + self.refuted
+    }
+
+    /// Confirmed findings over judged ones; `0.0` when nothing was judged.
+    ///
+    /// Unjudged findings are outside both the numerator and the denominator:
+    /// an unlabelled finding is an unasked question, not a wrong answer.
+    #[must_use]
+    pub fn precision(&self) -> f64 {
+        ratio(self.confirmed, self.judged())
+    }
+}
+
+/// Rule `results` against `labels`, scoring only what the labels speak about.
+///
+/// `threshold` is the overlap threshold for the "covers" relation, as in
+/// [`evaluate`].
+#[must_use]
+pub fn adjudicate(results: &DetectionResult, labels: &LabelSet, threshold: f64) -> Adjudication {
+    let mut adjudication = Adjudication {
+        confirmed: 0,
+        refuted: 0,
+        conflicting: 0,
+        unjudged: 0,
+    };
+    for finding in &results.findings {
+        let is_clone = labels
+            .clone_pairs
+            .iter()
+            .any(|pair| matches_pair(finding, pair, threshold));
+        let is_non_clone = labels
+            .non_clones
+            .iter()
+            .any(|non_clone| covers(finding, &non_clone.fragments, threshold));
+        match (is_clone, is_non_clone) {
+            (true, true) => adjudication.conflicting += 1,
+            (true, false) => adjudication.confirmed += 1,
+            (false, true) => adjudication.refuted += 1,
+            (false, false) => adjudication.unjudged += 1,
+        }
+    }
+    adjudication
+}
+
+impl fmt::Display for Adjudication {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "precision (judged only)   {:.4}", self.precision())?;
+        writeln!(
+            f,
+            "confirmed / refuted       {} / {}  (of {} judged)",
+            self.confirmed,
+            self.refuted,
+            self.judged()
+        )?;
+        writeln!(f, "unjudged                  {}", self.unjudged)?;
+        write!(f, "conflicting labels        {}", self.conflicting)
     }
 }
 
@@ -405,6 +492,76 @@ mod tests {
         // Top-2 contains one TP -> 0.5.
         let metrics = evaluate(&results, &labels, 100, DEFAULT_MATCH_THRESHOLD, 2);
         assert!((metrics.precision_at_k - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn adjudication_scores_only_what_the_labels_speak_about() {
+        let (results, labels) = self_test_inputs();
+        // f-001 and f-002 cover clone pair A; f-003 covers the non-clone.
+        let ruled = adjudicate(&results, &labels, DEFAULT_MATCH_THRESHOLD);
+        assert_eq!(ruled.confirmed, 2);
+        assert_eq!(ruled.refuted, 1);
+        assert_eq!(ruled.conflicting, 0);
+        assert_eq!(ruled.unjudged, 0);
+        assert!((ruled.precision() - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_unlabelled_finding_counts_against_nothing() {
+        let (mut results, labels) = self_test_inputs();
+        // A finding in a region no label mentions: not a wrong answer, an
+        // unasked question. `evaluate` would call it a false positive.
+        results.findings.push(finding(
+            "f-004",
+            0.7,
+            vec![fragment("x.rs", 500, 510), fragment("y.rs", 500, 510)],
+        ));
+
+        let ruled = adjudicate(&results, &labels, DEFAULT_MATCH_THRESHOLD);
+        assert_eq!(ruled.unjudged, 1);
+        assert_eq!(ruled.judged(), 3);
+        assert!(
+            (ruled.precision() - 2.0 / 3.0).abs() < 1e-9,
+            "precision is unchanged by a finding nobody ruled on"
+        );
+
+        let metrics = evaluate(&results, &labels, 100, DEFAULT_MATCH_THRESHOLD, 4);
+        assert!(
+            (metrics.precision_overall - 0.5).abs() < 1e-9,
+            "the fully-labelled measure charges the same finding as a miss"
+        );
+    }
+
+    #[test]
+    fn a_finding_both_labels_claim_is_a_corpus_defect() {
+        let (results, mut labels) = self_test_inputs();
+        // Label the region f-003 reports as a clone as well as a non-clone.
+        labels.clone_pairs.push(LabelPair {
+            id: "cp-003".to_string(),
+            clone_type: CloneType::Type1,
+            fragments: vec![fragment("x.rs", 200, 210), fragment("y.rs", 200, 210)],
+        });
+
+        let ruled = adjudicate(&results, &labels, DEFAULT_MATCH_THRESHOLD);
+        assert_eq!(ruled.conflicting, 1);
+        assert_eq!(ruled.refuted, 0, "a conflict is neither verdict");
+        assert_eq!(ruled.confirmed, 2);
+    }
+
+    #[test]
+    fn nothing_judged_is_not_perfect_precision() {
+        let (results, _) = self_test_inputs();
+        let empty = LabelSet {
+            schema_version: 0,
+            language: "rust".to_string(),
+            files: vec![],
+            clone_pairs: vec![],
+            non_clones: vec![],
+        };
+        let ruled = adjudicate(&results, &empty, DEFAULT_MATCH_THRESHOLD);
+        assert_eq!(ruled.judged(), 0);
+        assert_eq!(ruled.unjudged, 3);
+        assert!(ruled.precision().abs() < f64::EPSILON);
     }
 
     #[test]
