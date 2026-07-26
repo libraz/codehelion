@@ -100,9 +100,12 @@ stable_id!(
     FindingId
 );
 stable_id!(
-    /// Identifier tying a clone group's history together across scans even as
-    /// its membership drifts. Defined now so schemas can carry the column;
-    /// population (member-overlap lineage) is a later-phase concern.
+    /// Identifier tying a clone group's history together across scans.
+    ///
+    /// Derived from the group fingerprint the history started at (see
+    /// [`group_lineage_id`]) and carried forward unchanged by every later
+    /// group the lineage reaches, so it survives the membership drift that
+    /// moves the group fingerprint.
     GroupLineageId
 );
 
@@ -366,6 +369,28 @@ pub fn finding_id(
     }
     hasher.write_u32(rank_in_host);
     FindingId(hasher.finish())
+}
+
+/// Identify the history a clone group belongs to, from the group fingerprint
+/// that history started at.
+///
+/// A group fingerprint answers "is this the same duplication?" and moves as
+/// soon as the duplicated content does; a lineage identifier answers "is this
+/// the same history?" and must not. The two therefore cannot be the same
+/// value, and a lineage identifier cannot be derived from the group it
+/// currently names — it is derived once, from the first group the history was
+/// observed at, and inherited unchanged by every successor
+/// [`lineage`](crate::lineage) connects to it.
+///
+/// "First observed" is not "first existing": a duplication that predates the
+/// first scan starts its recorded history at that scan. The identifier says
+/// where the record begins, and claims nothing about what happened before it.
+#[must_use]
+pub fn group_lineage_id(origin: &CloneGroupFingerprint) -> GroupLineageId {
+    let mut hasher = IdHasher::new("lineage");
+    hasher.write_str(FP_SCHEMA_VERSION);
+    hasher.write_bytes(&origin.0);
+    GroupLineageId(hasher.finish())
 }
 
 /// Stable identifiers of one group member, parallel to

@@ -33,6 +33,21 @@ impl CloneClass {
         }
     }
 
+    /// Read back a classification written by [`Self::name`].
+    ///
+    /// `None` for anything else, including a name a newer release writes:
+    /// guessing which class an unknown one resembles would put a finding in a
+    /// category the tool that recorded it did not choose.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "type-1" => Some(Self::Type1),
+            "type-2" => Some(Self::Type2),
+            "type-3" => Some(Self::Type3),
+            _ => None,
+        }
+    }
+
     /// Whether the class asserts equality rather than resemblance.
     ///
     /// Type-1 and Type-2 both mean the copies agree statement for statement,
@@ -69,6 +84,17 @@ impl CloneScope {
             Self::Fragment => "fragment",
         }
     }
+
+    /// Read back a scope written by [`Self::name`], or `None` for anything
+    /// else.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "unit" => Some(Self::Unit),
+            "fragment" => Some(Self::Fragment),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -82,6 +108,20 @@ mod tests {
         assert_eq!(CloneClass::Type3.name(), "type-3");
         assert_eq!(CloneScope::Unit.name(), "unit");
         assert_eq!(CloneScope::Fragment.name(), "fragment");
+    }
+
+    #[test]
+    fn a_recorded_name_reads_back_as_what_wrote_it() {
+        for class in [CloneClass::Type1, CloneClass::Type2, CloneClass::Type3] {
+            assert_eq!(CloneClass::from_name(class.name()), Some(class));
+        }
+        for scope in [CloneScope::Unit, CloneScope::Fragment] {
+            assert_eq!(CloneScope::from_name(scope.name()), Some(scope));
+        }
+        // A name this release does not know stays unknown rather than being
+        // rounded to the nearest one it does.
+        assert_eq!(CloneClass::from_name("type-4"), None);
+        assert_eq!(CloneScope::from_name("statement"), None);
     }
 
     #[test]
