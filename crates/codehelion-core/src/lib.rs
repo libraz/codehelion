@@ -16,6 +16,7 @@ pub mod engine;
 pub mod features;
 pub mod frontend;
 pub mod grouping;
+pub mod incremental;
 pub mod ir;
 pub mod maximal;
 pub mod near_match;

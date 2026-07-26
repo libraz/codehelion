@@ -25,6 +25,16 @@ impl ContentHash {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Take back a hash an earlier scan recorded.
+    ///
+    /// Nothing is re-derived, so this cannot tell whether the string is the
+    /// hash of anything. It exists so a stored fingerprint can be compared
+    /// with a freshly computed one, which is the only thing either is for.
+    #[must_use]
+    pub const fn from_recorded(hex: String) -> Self {
+        Self(hex)
+    }
 }
 
 impl fmt::Display for ContentHash {
