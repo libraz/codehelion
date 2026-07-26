@@ -32,6 +32,16 @@ impl CloneClass {
             Self::Type3 => "type-3",
         }
     }
+
+    /// Whether the class asserts equality rather than resemblance.
+    ///
+    /// Type-1 and Type-2 both mean the copies agree statement for statement,
+    /// verbatim or up to renaming. Type-3 means only that they are alike
+    /// overall, and says nothing about any particular stretch.
+    #[must_use]
+    pub const fn is_exact(self) -> bool {
+        matches!(self, Self::Type1 | Self::Type2)
+    }
 }
 
 /// What the members of a clone group are.

@@ -448,8 +448,13 @@ struct ReportableRegions {
 ///
 /// Three cases deliberately survive the fold, because no unit group implies
 /// them: a run occurring more than once inside the same unit, a run whose host
-/// units are not all members of one group, and a run small enough to name a
-/// place inside its hosts rather than restate them.
+/// units are not all members of one group, and a run inside a *gapped* group
+/// small enough to name a place inside its hosts rather than restate them.
+///
+/// The last of those turns on the covering group being gapped. An exact group
+/// says its members agree statement for statement, which already accounts for
+/// every stretch inside them however short — so a run there is folded on the
+/// same grounds as any other, without consulting its size.
 fn reportable_regions(analysis: &StructuralReport) -> ReportableRegions {
     let mut member_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (index, group) in analysis.groups.groups.iter().enumerate() {
@@ -457,17 +462,20 @@ fn reportable_regions(analysis: &StructuralReport) -> ReportableRegions {
             member_of.entry(member).or_default().push(index);
         }
     }
-    let covers = |hosts: &BTreeSet<usize>| {
-        let Some(first) = hosts.first() else {
-            return false;
-        };
-        member_of.get(first).is_some_and(|groups| {
-            groups.iter().any(|&group| {
+    // The class of a group holding every host, if one does. Among several, the
+    // exact one decides: it is the stronger claim about the same units.
+    let covering_class = |hosts: &BTreeSet<usize>| {
+        let first = hosts.first()?;
+        member_of
+            .get(first)?
+            .iter()
+            .filter(|&&group| {
                 hosts
                     .iter()
                     .all(|host| analysis.groups.groups[group].members.contains(host))
             })
-        })
+            .map(|&group| analysis.groups.groups[group].clone_type)
+            .min()
     };
 
     let mut reported = Vec::new();
@@ -479,10 +487,12 @@ fn reportable_regions(analysis: &StructuralReport) -> ReportableRegions {
             .map(|occurrence| occurrence.unit)
             .collect();
         let one_per_unit = hosts.len() == region.occurrences.len();
-        if one_per_unit && hosts.len() > 1 && covers(&hosts) && !localizes(analysis, region) {
-            folded += 1;
-        } else {
-            reported.push(index);
+        let covered = (one_per_unit && hosts.len() > 1)
+            .then(|| covering_class(&hosts))
+            .flatten();
+        match covered {
+            Some(class) if class.is_exact() || !localizes(analysis, region) => folded += 1,
+            _ => reported.push(index),
         }
     }
     ReportableRegions { reported, folded }
