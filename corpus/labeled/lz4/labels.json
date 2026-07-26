@@ -1,0 +1,815 @@
+{
+  "schema_version": 0,
+  "language": "c",
+  "files": [
+    "lib/lz4.c",
+    "lib/lz4file.c",
+    "lib/lz4frame.c",
+    "lib/lz4hc.c",
+    "lib/xxhash.c"
+  ],
+  "clone_pairs": [
+    {
+      "id": "cp-001",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 451,
+          "end_line": 512
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 911,
+          "end_line": 969
+        }
+      ]
+    },
+    {
+      "id": "cp-002",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 392,
+          "end_line": 416
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 855,
+          "end_line": 879
+        }
+      ]
+    },
+    {
+      "id": "cp-003",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 2719,
+          "end_line": 2732
+        },
+        {
+          "file": "lib/lz4.c",
+          "start_line": 2734,
+          "end_line": 2747
+        }
+      ]
+    },
+    {
+      "id": "cp-004",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 434,
+          "end_line": 444
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 452,
+          "end_line": 462
+        }
+      ]
+    },
+    {
+      "id": "cp-005",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 380,
+          "end_line": 383
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 949,
+          "end_line": 952
+        }
+      ]
+    },
+    {
+      "id": "cp-006",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 437,
+          "end_line": 448
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 898,
+          "end_line": 909
+        }
+      ]
+    },
+    {
+      "id": "cp-007",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 724,
+          "end_line": 728
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 1325,
+          "end_line": 1328
+        }
+      ]
+    },
+    {
+      "id": "cp-008",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 592,
+          "end_line": 599
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 640,
+          "end_line": 647
+        }
+      ]
+    },
+    {
+      "id": "cp-009",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 839,
+          "end_line": 843
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 991,
+          "end_line": 995
+        }
+      ]
+    },
+    {
+      "id": "cp-010",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 1989,
+          "end_line": 1998
+        },
+        {
+          "file": "lib/lz4.c",
+          "start_line": 2001,
+          "end_line": 2010
+        }
+      ]
+    },
+    {
+      "id": "cp-011",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 1912,
+          "end_line": 1915
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 2009,
+          "end_line": 2012
+        }
+      ]
+    },
+    {
+      "id": "cp-012",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 379,
+          "end_line": 383
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 1078,
+          "end_line": 1082
+        }
+      ]
+    },
+    {
+      "id": "cp-013",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 750,
+          "end_line": 753
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 2098,
+          "end_line": 2101
+        }
+      ]
+    },
+    {
+      "id": "cp-014",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 438,
+          "end_line": 443
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 456,
+          "end_line": 461
+        }
+      ]
+    },
+    {
+      "id": "cp-015",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 714,
+          "end_line": 718
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 1315,
+          "end_line": 1319
+        }
+      ]
+    },
+    {
+      "id": "cp-016",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 363,
+          "end_line": 367
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 220,
+          "end_line": 224
+        }
+      ]
+    },
+    {
+      "id": "cp-017",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 1026,
+          "end_line": 1030
+        },
+        {
+          "file": "lib/lz4.c",
+          "start_line": 1051,
+          "end_line": 1055
+        }
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "id": "nc-001",
+      "reason": "self-overlapping-run",
+      "fragments": [
+        {
+          "file": "lib/lz4frame.c",
+          "start_line": 224,
+          "end_line": 227
+        },
+        {
+          "file": "lib/lz4frame.c",
+          "start_line": 225,
+          "end_line": 228
+        }
+      ]
+    },
+    {
+      "id": "nc-002",
+      "reason": "parameterised-dispatch",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 2458,
+          "end_line": 2465
+        },
+        {
+          "file": "lib/lz4.c",
+          "start_line": 2512,
+          "end_line": 2520
+        }
+      ]
+    },
+    {
+      "id": "nc-003",
+      "reason": "parameterised-dispatch",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 515,
+          "end_line": 523
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 546,
+          "end_line": 554
+        }
+      ]
+    },
+    {
+      "id": "nc-004",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 402,
+          "end_line": 405
+        },
+        {
+          "file": "lib/lz4.c",
+          "start_line": 407,
+          "end_line": 410
+        }
+      ]
+    },
+    {
+      "id": "nc-005",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 441,
+          "end_line": 449
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 153,
+          "end_line": 163
+        }
+      ]
+    },
+    {
+      "id": "nc-006",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 2467,
+          "end_line": 2474
+        },
+        {
+          "file": "lib/lz4.c",
+          "start_line": 2522,
+          "end_line": 2531
+        }
+      ]
+    },
+    {
+      "id": "nc-007",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 2569,
+          "end_line": 2573
+        },
+        {
+          "file": "lib/lz4frame.c",
+          "start_line": 575,
+          "end_line": 579
+        }
+      ]
+    },
+    {
+      "id": "nc-008",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 808,
+          "end_line": 818
+        },
+        {
+          "file": "lib/lz4.c",
+          "start_line": 820,
+          "end_line": 830
+        }
+      ]
+    },
+    {
+      "id": "nc-009",
+      "reason": "trivial-factory",
+      "fragments": [
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 1554,
+          "end_line": 1561
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 2150,
+          "end_line": 2156
+        }
+      ]
+    },
+    {
+      "id": "nc-010",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 464,
+          "end_line": 472
+        },
+        {
+          "file": "lib/lz4.c",
+          "start_line": 521,
+          "end_line": 529
+        }
+      ]
+    },
+    {
+      "id": "nc-011",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "lib/lz4frame.c",
+          "start_line": 199,
+          "end_line": 203
+        },
+        {
+          "file": "lib/lz4frame.c",
+          "start_line": 222,
+          "end_line": 226
+        }
+      ]
+    },
+    {
+      "id": "nc-012",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 234,
+          "end_line": 240
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 645,
+          "end_line": 651
+        }
+      ]
+    },
+    {
+      "id": "nc-013",
+      "reason": "trivial-factory",
+      "fragments": [
+        {
+          "file": "lib/lz4frame.c",
+          "start_line": 595,
+          "end_line": 607
+        },
+        {
+          "file": "lib/lz4frame.c",
+          "start_line": 1284,
+          "end_line": 1292
+        }
+      ]
+    },
+    {
+      "id": "nc-014",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 565,
+          "end_line": 570
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 1018,
+          "end_line": 1023
+        }
+      ]
+    },
+    {
+      "id": "nc-015",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 1542,
+          "end_line": 1550
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 1488,
+          "end_line": 1496
+        }
+      ]
+    },
+    {
+      "id": "nc-016",
+      "reason": "self-overlapping-run",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 950,
+          "end_line": 951
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 952,
+          "end_line": 953
+        }
+      ]
+    },
+    {
+      "id": "nc-017",
+      "reason": "self-overlapping-run",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 493,
+          "end_line": 494
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 495,
+          "end_line": 496
+        }
+      ]
+    },
+    {
+      "id": "nc-018",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 278,
+          "end_line": 286
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 688,
+          "end_line": 696
+        }
+      ]
+    },
+    {
+      "id": "nc-019",
+      "reason": "lifecycle-teardown",
+      "fragments": [
+        {
+          "file": "lib/lz4file.c",
+          "start_line": 58,
+          "end_line": 64
+        },
+        {
+          "file": "lib/lz4file.c",
+          "start_line": 202,
+          "end_line": 208
+        }
+      ]
+    },
+    {
+      "id": "nc-020",
+      "reason": "guarded-forwarding",
+      "fragments": [
+        {
+          "file": "lib/lz4frame.c",
+          "start_line": 117,
+          "end_line": 125
+        },
+        {
+          "file": "lib/lz4frame.c",
+          "start_line": 867,
+          "end_line": 873
+        }
+      ]
+    },
+    {
+      "id": "nc-021",
+      "reason": "self-overlapping-run",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 833,
+          "end_line": 834
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 835,
+          "end_line": 836
+        }
+      ]
+    },
+    {
+      "id": "nc-022",
+      "reason": "self-overlapping-run",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 374,
+          "end_line": 375
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 376,
+          "end_line": 377
+        }
+      ]
+    },
+    {
+      "id": "nc-023",
+      "reason": "lifecycle-teardown",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 1575,
+          "end_line": 1581
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 1563,
+          "end_line": 1569
+        }
+      ]
+    },
+    {
+      "id": "nc-024",
+      "reason": "lifecycle-teardown",
+      "fragments": [
+        {
+          "file": "lib/lz4file.c",
+          "start_line": 66,
+          "end_line": 71
+        },
+        {
+          "file": "lib/lz4file.c",
+          "start_line": 210,
+          "end_line": 215
+        }
+      ]
+    },
+    {
+      "id": "nc-025",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 269,
+          "end_line": 275
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 672,
+          "end_line": 678
+        }
+      ]
+    },
+    {
+      "id": "nc-026",
+      "reason": "subsumed-by-unit-clone",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 499,
+          "end_line": 502
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 956,
+          "end_line": 959
+        }
+      ]
+    },
+    {
+      "id": "nc-027",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 247,
+          "end_line": 250
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 658,
+          "end_line": 661
+        }
+      ]
+    },
+    {
+      "id": "nc-028",
+      "reason": "declaration-run",
+      "fragments": [
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 399,
+          "end_line": 402
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 1099,
+          "end_line": 1102
+        }
+      ]
+    },
+    {
+      "id": "nc-029",
+      "reason": "lifecycle-teardown",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 2575,
+          "end_line": 2580
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 2167,
+          "end_line": 2172
+        }
+      ]
+    },
+    {
+      "id": "nc-030",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 2450,
+          "end_line": 2456
+        },
+        {
+          "file": "lib/lz4.c",
+          "start_line": 2503,
+          "end_line": 2510
+        }
+      ]
+    },
+    {
+      "id": "nc-031",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "lib/lz4.c",
+          "start_line": 2768,
+          "end_line": 2771
+        },
+        {
+          "file": "lib/lz4.c",
+          "start_line": 2776,
+          "end_line": 2779
+        }
+      ]
+    },
+    {
+      "id": "nc-032",
+      "reason": "lifecycle-teardown",
+      "fragments": [
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 1563,
+          "end_line": 1569
+        },
+        {
+          "file": "lib/lz4hc.c",
+          "start_line": 2167,
+          "end_line": 2172
+        }
+      ]
+    },
+    {
+      "id": "nc-033",
+      "reason": "lifecycle-teardown",
+      "fragments": [
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 426,
+          "end_line": 430
+        },
+        {
+          "file": "lib/xxhash.c",
+          "start_line": 887,
+          "end_line": 891
+        }
+      ]
+    }
+  ]
+}

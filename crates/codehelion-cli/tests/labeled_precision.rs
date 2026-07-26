@@ -64,6 +64,16 @@ const CORPORA: &[Expected] = &[
         confirmed: 2,
         refuted: 2,
     },
+    Expected {
+        name: "cjson",
+        confirmed: 13,
+        refuted: 12,
+    },
+    Expected {
+        name: "lz4",
+        confirmed: 17,
+        refuted: 33,
+    },
 ];
 
 /// Repository root, from this test's manifest directory.

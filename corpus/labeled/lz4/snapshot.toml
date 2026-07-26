@@ -1,0 +1,14 @@
+# Where this case's sources come from. The sources themselves are not
+# committed: `corpus/scripts/materialize-labeled.sh` fetches them into
+# `corpus/external/` and cuts `snapshot/` from the pinned commit, both of which
+# are git-ignored. The commit is what makes the line ranges in labels.json
+# meaningful, so it is never bumped in place.
+schema_version = 0
+# Fetched on first use. A commit given as a full hash can be fetched on its
+# own; an abbreviated one cannot.
+origin = "https://github.com/lz4/lz4.git"
+commit = "ebb370ca83af193212df4dcbadcc5d87bc0de2f0"
+# The library as it ships, including the hash implementation bundled with it:
+# it is part of what this tree builds, and it is the same kind of hand-written
+# C as the rest.
+paths = ["lib"]

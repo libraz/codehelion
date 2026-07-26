@@ -1,0 +1,412 @@
+{
+  "schema_version": 0,
+  "language": "c",
+  "files": [
+    "cJSON.c",
+    "cJSON_Utils.c"
+  ],
+  "clone_pairs": [
+    {
+      "id": "cp-001",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 2568,
+          "end_line": 2606
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 2608,
+          "end_line": 2646
+        }
+      ]
+    },
+    {
+      "id": "cp-002",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 2097,
+          "end_line": 2107
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 2109,
+          "end_line": 2119
+        }
+      ]
+    },
+    {
+      "id": "cp-003",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 1454,
+          "end_line": 1549
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 1614,
+          "end_line": 1729
+        }
+      ]
+    },
+    {
+      "id": "cp-004",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 2205,
+          "end_line": 2239
+        },
+        {
+          "file": "cJSON_Utils.c",
+          "start_line": 393,
+          "end_line": 427
+        }
+      ]
+    },
+    {
+      "id": "cp-005",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "cJSON_Utils.c",
+          "start_line": 1038,
+          "end_line": 1065
+        },
+        {
+          "file": "cJSON_Utils.c",
+          "start_line": 1067,
+          "end_line": 1094
+        }
+      ]
+    },
+    {
+      "id": "cp-006",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 133,
+          "end_line": 154
+        },
+        {
+          "file": "cJSON_Utils.c",
+          "start_line": 83,
+          "end_line": 109
+        }
+      ]
+    },
+    {
+      "id": "cp-007",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 2478,
+          "end_line": 2493
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 2528,
+          "end_line": 2543
+        }
+      ]
+    },
+    {
+      "id": "cp-008",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 2812,
+          "end_line": 2823
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 2825,
+          "end_line": 2837
+        }
+      ]
+    },
+    {
+      "id": "cp-009",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "cJSON_Utils.c",
+          "start_line": 1281,
+          "end_line": 1294
+        },
+        {
+          "file": "cJSON_Utils.c",
+          "start_line": 1296,
+          "end_line": 1309
+        }
+      ]
+    },
+    {
+      "id": "cp-010",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 2301,
+          "end_line": 2312
+        },
+        {
+          "file": "cJSON_Utils.c",
+          "start_line": 713,
+          "end_line": 727
+        }
+      ]
+    },
+    {
+      "id": "cp-011",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "cJSON_Utils.c",
+          "start_line": 853,
+          "end_line": 867
+        },
+        {
+          "file": "cJSON_Utils.c",
+          "start_line": 943,
+          "end_line": 956
+        }
+      ]
+    },
+    {
+      "id": "cp-012",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 546,
+          "end_line": 550
+        },
+        {
+          "file": "cJSON_Utils.c",
+          "start_line": 112,
+          "end_line": 116
+        }
+      ]
+    },
+    {
+      "id": "cp-013",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 1584,
+          "end_line": 1590
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 1744,
+          "end_line": 1751
+        }
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "id": "nc-001",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 2909,
+          "end_line": 2917
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 2919,
+          "end_line": 2927
+        }
+      ]
+    },
+    {
+      "id": "nc-002",
+      "reason": "trivial-factory",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 2408,
+          "end_line": 2417
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 2419,
+          "end_line": 2428
+        }
+      ]
+    },
+    {
+      "id": "nc-003",
+      "reason": "guarded-forwarding",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 2077,
+          "end_line": 2085
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 2087,
+          "end_line": 2095
+        }
+      ]
+    },
+    {
+      "id": "nc-004",
+      "reason": "subsumed-by-unit-clone",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 2571,
+          "end_line": 2580
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 2611,
+          "end_line": 2620
+        }
+      ]
+    },
+    {
+      "id": "nc-005",
+      "reason": "trivial-factory",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 2495,
+          "end_line": 2505
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 2507,
+          "end_line": 2516
+        }
+      ]
+    },
+    {
+      "id": "nc-006",
+      "reason": "list-walk-idiom",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 1846,
+          "end_line": 1867
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 1869,
+          "end_line": 1886
+        }
+      ]
+    },
+    {
+      "id": "nc-007",
+      "reason": "subsumed-by-unit-clone",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 1535,
+          "end_line": 1546
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 1716,
+          "end_line": 1726
+        }
+      ]
+    },
+    {
+      "id": "nc-008",
+      "reason": "trivial-accessor-pair",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 2256,
+          "end_line": 2261
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 2263,
+          "end_line": 2268
+        }
+      ]
+    },
+    {
+      "id": "nc-009",
+      "reason": "declaration-run",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 1289,
+          "end_line": 1293
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 1315,
+          "end_line": 1319
+        }
+      ]
+    },
+    {
+      "id": "nc-010",
+      "reason": "declaration-run",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 1554,
+          "end_line": 1561
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 1734,
+          "end_line": 1741
+        }
+      ]
+    },
+    {
+      "id": "nc-011",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 99,
+          "end_line": 107
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 109,
+          "end_line": 117
+        }
+      ]
+    },
+    {
+      "id": "nc-012",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "cJSON.c",
+          "start_line": 165,
+          "end_line": 168
+        },
+        {
+          "file": "cJSON.c",
+          "start_line": 173,
+          "end_line": 176
+        }
+      ]
+    }
+  ]
+}
