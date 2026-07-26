@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use codehelion_core::discovery::{BuildVariant, LanguageSelection};
+use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::grouping::GroupingConfig;
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
 use codehelion_core::structural::{self, StructuralConfig, StructuralReport};
@@ -47,7 +47,7 @@ fn analyze() -> StructuralReport {
             CStructuralFrontend.parse(&text)
         })
         .collect();
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     structural::analyze(&files, &variant, &StructuralConfig::default())
 }
 
@@ -157,7 +157,7 @@ fn a_case_written_as_a_framework_macro_is_no_unit_in_c() {
     // case the moment a unit appears — if this assertion ever fails, the
     // grammar started producing one and the classification will be waiting.
     let files = vec![CStructuralFrontend.parse(SUITE)];
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let report = structural::analyze(&files, &variant, &StructuralConfig::default());
 
     let names: Vec<Option<&str>> = report
@@ -218,7 +218,7 @@ fn the_two_arms_of_one_conditional_are_not_a_clone_pair() {
     // code and is reported, so the drop is about the conditional and not
     // about the similarity.
     let files = vec![CStructuralFrontend.parse(PORTABLE)];
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let report = structural::analyze(&files, &variant, &StructuralConfig::default());
 
     let unit_at_line = |line: u32| {
@@ -283,7 +283,7 @@ fn a_file_the_parser_stumbled_in_excludes_nothing() {
     // worth reading. Dropping a pair hides a finding, so the tool would rather
     // report the platform pair than invent an exclusion from a broken parse.
     let files = vec![CStructuralFrontend.parse(PORTABLE_BROKEN)];
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let report = structural::analyze(&files, &variant, &StructuralConfig::default());
 
     assert!(

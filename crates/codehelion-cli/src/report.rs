@@ -83,6 +83,10 @@ pub struct BuildVariantInfo {
     pub mode: String,
     /// Languages enabled for the run.
     pub languages: Vec<String>,
+    /// The language bare `.h` headers were read as, absent when the run
+    /// enumerated neither C nor C++.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<String>,
     /// Normalization ruleset version.
     pub normalization_version: u32,
     /// Stable fingerprint of the variant.
@@ -584,6 +588,14 @@ impl Report {
             "  files: {} analysed (rust {}, c {}, cpp {})",
             summary.files.total, summary.files.rust, summary.files.c, summary.files.cpp,
         )?;
+        // Which grammar read the bare `.h` headers decides what the analysis
+        // could see in them, so a run that read any says so rather than
+        // leaving the reader to infer it from the language counts.
+        if summary.files.c + summary.files.cpp > 0
+            && let Some(headers) = &self.run.build_variant.headers
+        {
+            writeln!(out, "    bare .h headers read as {headers}")?;
+        }
         writeln!(
             out,
             "  excluded: {} generated, {} by glob, {} skipped",
@@ -911,6 +923,7 @@ pub(super) mod tests {
                 build_variant: BuildVariantInfo {
                     mode: "fast".to_string(),
                     languages: vec!["rust".to_string()],
+                    headers: Some("c".to_string()),
                     normalization_version: 2,
                     fingerprint: "aa".repeat(32),
                 },

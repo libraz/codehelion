@@ -67,6 +67,9 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 # literal-normalization = "full"    # "preserve" / "category" / "full"
 # database = ".codehelion/audit.db" # 監査データベースの場所
 
+[languages]
+# headers = "detect"                # 拡張子 ".h" を読む文法。"detect" / "c" / "cpp"
+
 [suppression]
 # paths = []                        # 隠すパス glob。vendor 配下はここへ
 # symbols = []                      # 所属ユニット名に対する glob
@@ -80,6 +83,13 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 # pair-budget = 1000000
 # max-component = 1024
 ```
+
+`.h` は C と C++ が共有する唯一の拡張子で、どちらの文法で読むかがその中身の
+見え方を決めます。C++ ヘッダを C として読むと、エラー回復によって何も宣言
+しない形へ崩れ、本来の重複を隠す一方でクラス本体どうしの重複を捏造します。
+`detect` は拡張子が曖昧でないファイルを数えて多数派に従います。この選択は
+run の build variant に含まれるため、異なる文法で読んだ結果どうしが比較され
+ることはありません。
 
 ## 開発
 

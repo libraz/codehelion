@@ -286,6 +286,7 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
                     .into_iter()
                     .map(|language| language.name().to_string())
                     .collect(),
+                headers: variant.headers.map(|language| language.name().to_string()),
                 normalization_version: variant.normalization_version,
                 fingerprint: variant.fingerprint(),
             },
@@ -531,11 +532,11 @@ pub(crate) fn discover_sources(
             c: cfg.languages.c,
             cpp: cfg.languages.cpp,
         },
+        header_policy: cfg.languages.headers.into(),
         generated_markers: GeneratedMarkers::new(
             cfg.suppression.generated_markers.clone(),
             DEFAULT_SCAN_LINES,
         ),
-        ..DiscoveryConfig::default()
     };
     Ok(discovery::discover(root, &discovery_config)?)
 }

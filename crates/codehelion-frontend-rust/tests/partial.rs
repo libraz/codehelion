@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use codehelion_core::clone_class::CloneClass;
-use codehelion_core::discovery::{BuildVariant, LanguageSelection};
+use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
 use codehelion_core::structural::{
     self, RegionOccurrence, StructuralConfig, StructuralRegion, StructuralReport,
@@ -30,7 +30,7 @@ fn analyze() -> StructuralReport {
         .iter()
         .map(|name| RustStructuralFrontend.parse(&read(name)))
         .collect();
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     structural::analyze(&files, &variant, &StructuralConfig::default())
 }
 

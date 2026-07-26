@@ -1,11 +1,11 @@
 //! Build variants: the first-class context every result is attributed to.
 //!
-//! A [`BuildVariant`] records the analysis mode, the enabled languages and the
-//! normalization ruleset version. Results produced under different variants
-//! must never be compared or merged, so the variant is attached to discovery
-//! output from the start rather than bolted on later. In Fast mode no build
-//! configuration is resolved, so a single implicit variant covers the whole
-//! run.
+//! A [`BuildVariant`] records the analysis mode, the enabled languages, the
+//! grammar bare `.h` headers were read with and the normalization ruleset
+//! version. Results produced under different variants must never be compared
+//! or merged, so the variant is attached to discovery output from the start
+//! rather than bolted on later. In Fast mode no build configuration is
+//! resolved, so a single implicit variant covers the whole run.
 
 use super::language::{Language, LanguageSelection};
 
@@ -46,17 +46,24 @@ pub struct BuildVariant {
     pub mode: AnalysisMode,
     /// Languages enabled for the run.
     pub languages: LanguageSelection,
+    /// The language bare `.h` headers were read as, when C or C++ is enabled
+    /// at all. Two runs that read the same header with different grammars see
+    /// different code in it, so this belongs to the variant rather than
+    /// alongside it.
+    pub headers: Option<Language>,
     /// Normalization ruleset version.
     pub normalization_version: u32,
 }
 
 impl BuildVariant {
-    /// The implicit single variant used by a Fast-mode run over `languages`.
+    /// The implicit single variant used by a Fast-mode run over `languages`,
+    /// reading bare `.h` headers as `headers`.
     #[must_use]
-    pub const fn fast(languages: LanguageSelection) -> Self {
+    pub const fn fast(languages: LanguageSelection, headers: Language) -> Self {
         Self {
             mode: AnalysisMode::Fast,
             languages,
+            headers: Self::headers_of(languages, headers),
             normalization_version: NORMALIZATION_VERSION,
         }
     }
@@ -66,11 +73,23 @@ impl BuildVariant {
     /// so one implicit variant covers the run; only the mode differs, which is
     /// enough to keep Fast and Structural fingerprints in separate spaces.
     #[must_use]
-    pub const fn structural(languages: LanguageSelection) -> Self {
+    pub const fn structural(languages: LanguageSelection, headers: Language) -> Self {
         Self {
             mode: AnalysisMode::Structural,
             languages,
+            headers: Self::headers_of(languages, headers),
             normalization_version: NORMALIZATION_VERSION,
+        }
+    }
+
+    /// The header language worth recording: none when the run enumerates
+    /// neither C nor C++, so that a Rust-only scan keeps one variant whatever
+    /// C or C++ files happen to sit beside it.
+    const fn headers_of(languages: LanguageSelection, headers: Language) -> Option<Language> {
+        if languages.includes(Language::C) || languages.includes(Language::Cpp) {
+            Some(headers)
+        } else {
+            None
         }
     }
 
@@ -88,9 +107,10 @@ impl BuildVariant {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "mode={};languages={};normalization={}",
+            "mode={};languages={};headers={};normalization={}",
             self.mode.name(),
             langs,
+            self.headers.map_or("none", Language::name),
             self.normalization_version,
         )
     }
@@ -110,7 +130,7 @@ mod tests {
 
     #[test]
     fn fast_variant_carries_mode_and_normalization_version() {
-        let variant = BuildVariant::fast(LanguageSelection::default());
+        let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
         assert_eq!(variant.mode, AnalysisMode::Fast);
         assert_eq!(variant.normalization_version, NORMALIZATION_VERSION);
     }
@@ -118,10 +138,11 @@ mod tests {
     #[test]
     fn structural_variant_differs_from_fast_only_in_mode() {
         let languages = LanguageSelection::default();
-        let fast = BuildVariant::fast(languages);
-        let structural = BuildVariant::structural(languages);
+        let fast = BuildVariant::fast(languages, Language::C);
+        let structural = BuildVariant::structural(languages, Language::C);
         assert_eq!(structural.mode, AnalysisMode::Structural);
         assert_eq!(structural.languages, fast.languages);
+        assert_eq!(structural.headers, fast.headers);
         assert_eq!(structural.normalization_version, fast.normalization_version);
         // Distinct modes must land in distinct fingerprint spaces.
         assert_ne!(fast.fingerprint(), structural.fingerprint());
@@ -129,30 +150,66 @@ mod tests {
 
     #[test]
     fn canonical_reflects_enabled_languages_in_fixed_order() {
-        let variant = BuildVariant::fast(LanguageSelection {
-            rust: true,
-            c: false,
-            cpp: true,
-        });
+        let variant = BuildVariant::fast(
+            LanguageSelection {
+                rust: true,
+                c: false,
+                cpp: true,
+            },
+            Language::Cpp,
+        );
         assert_eq!(
             variant.canonical(),
-            "mode=fast;languages=rust,cpp;normalization=2"
+            "mode=fast;languages=rust,cpp;headers=cpp;normalization=2"
         );
     }
 
     #[test]
     fn distinct_variants_have_distinct_fingerprints() {
-        let all = BuildVariant::fast(LanguageSelection::default());
-        let rust_only = BuildVariant::fast(LanguageSelection {
-            rust: true,
-            c: false,
-            cpp: false,
-        });
+        let all = BuildVariant::fast(LanguageSelection::default(), Language::C);
+        let rust_only = BuildVariant::fast(
+            LanguageSelection {
+                rust: true,
+                c: false,
+                cpp: false,
+            },
+            Language::C,
+        );
         assert_ne!(all.fingerprint(), rust_only.fingerprint());
         // Fingerprint is a pure function of the canonical form.
         assert_eq!(
             all.fingerprint(),
-            BuildVariant::fast(LanguageSelection::default()).fingerprint()
+            BuildVariant::fast(LanguageSelection::default(), Language::C).fingerprint()
+        );
+    }
+
+    #[test]
+    fn reading_headers_with_a_different_grammar_is_a_different_variant() {
+        // The two runs see different code in the same header, so their
+        // findings are not comparable and must not share a fingerprint space.
+        let languages = LanguageSelection::default();
+        let as_c = BuildVariant::fast(languages, Language::C);
+        let as_cpp = BuildVariant::fast(languages, Language::Cpp);
+        assert_ne!(as_c, as_cpp);
+        assert_ne!(as_c.fingerprint(), as_cpp.fingerprint());
+    }
+
+    #[test]
+    fn a_run_that_enumerates_no_c_records_no_header_grammar() {
+        // A Rust-only scan reads no headers, so its variant must not move
+        // because the tree happens to hold more `.cpp` than `.c` files.
+        let rust_only = LanguageSelection {
+            rust: true,
+            c: false,
+            cpp: false,
+        };
+        let with_c = BuildVariant::fast(rust_only, Language::C);
+        let with_cpp = BuildVariant::fast(rust_only, Language::Cpp);
+        assert_eq!(with_c.headers, None);
+        assert_eq!(with_c, with_cpp);
+        assert_eq!(
+            with_c.canonical(),
+            "mode=fast;languages=rust;headers=none;normalization=2"
         );
     }
 }

@@ -6,7 +6,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use codehelion_core::clone_class::CloneClass;
-use codehelion_core::discovery::{BuildVariant, LanguageSelection};
+use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::engine::{self, EngineConfig, InputFile};
 use codehelion_core::frontend::{Frontend, LexedFile};
 use codehelion_core::stable_id::{self, FileContext};
@@ -102,7 +102,7 @@ fn ids_of(sources: &[&str]) -> Vec<(String, Vec<String>)> {
         })
         .collect();
     let config = EngineConfig::default();
-    let variant = BuildVariant::fast(LanguageSelection::default());
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let report = engine::detect(&files, &config);
     let ids = stable_id::report_ids(&files, &contexts, &variant, &report, config.literals);
 
@@ -185,7 +185,7 @@ fn type2_members_share_their_normalized_content_fingerprint() {
         })
         .collect();
     let config = EngineConfig::default();
-    let variant = BuildVariant::fast(LanguageSelection::default());
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let report = engine::detect(&files, &config);
     let ids = stable_id::report_ids(&files, &contexts, &variant, &report, config.literals);
 

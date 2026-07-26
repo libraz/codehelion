@@ -5,7 +5,7 @@
 //! grouping together, with real stable fingerprints as the grouping keys.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use codehelion_core::discovery::{BuildVariant, LanguageSelection};
+use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::frontend::UnitKind;
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
 use codehelion_core::structural::{self, StructuralConfig};
@@ -105,7 +105,7 @@ fn parse_all(sources: &[&str]) -> Vec<SyntaxIrFile> {
 }
 
 fn variant() -> BuildVariant {
-    BuildVariant::structural(LanguageSelection::default())
+    BuildVariant::structural(LanguageSelection::default(), Language::C)
 }
 
 #[test]

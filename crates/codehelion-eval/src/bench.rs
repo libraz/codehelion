@@ -616,7 +616,7 @@ pub fn measure_store_insert(
         })
         .collect();
 
-    let variant = BuildVariant::fast(LanguageSelection::default());
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let snapshot = Snapshot {
         root_path: "/synthetic",
         tool_version: "bench",

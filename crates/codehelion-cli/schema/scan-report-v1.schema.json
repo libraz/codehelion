@@ -54,6 +54,11 @@
       "properties": {
         "mode": { "type": "string" },
         "languages": { "type": "array", "items": { "type": "string" } },
+        "headers": {
+          "type": "string",
+          "enum": ["c", "cpp"],
+          "description": "Language bare .h headers were read as. Absent when the run enumerated neither C nor C++."
+        },
         "normalization_version": { "type": "integer" },
         "fingerprint": { "$ref": "#/$defs/hex" }
       }

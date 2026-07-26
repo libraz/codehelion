@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
 
-use super::language::{Classification, HeaderPolicy, LanguageSelection, classify};
+use super::language::{
+    Classification, HeaderEvidence, HeaderPolicy, Language, LanguageSelection, classify,
+};
 
 const CARGO_MANIFEST: &str = "Cargo.toml";
 const COMPILE_COMMANDS: &str = "compile_commands.json";
@@ -25,6 +27,14 @@ pub(super) struct Candidate {
 /// Everything the walk gathered in one pass.
 pub(super) struct WalkOutput {
     pub(super) candidates: Vec<Candidate>,
+    /// What the tree says about the language its bare `.h` headers belong to.
+    ///
+    /// Tallied over every C or C++ file the walk saw, including the ones the
+    /// language selection then excluded: a project's `.cpp` files still say
+    /// its headers are C++ even in a run that analyses only C, and reading
+    /// those headers with the C grammar because the evidence was filtered
+    /// away is the mistake this exists to avoid.
+    pub(super) evidence: HeaderEvidence,
     pub(super) manifests: Vec<PathBuf>,
     pub(super) compile_commands: Option<PathBuf>,
     /// Files skipped because they exceeded the size ceiling.
@@ -46,6 +56,7 @@ pub(super) struct WalkSettings {
 pub(super) fn collect(root: &Path, settings: &WalkSettings) -> WalkOutput {
     let mut output = WalkOutput {
         candidates: Vec::new(),
+        evidence: HeaderEvidence::default(),
         manifests: Vec::new(),
         compile_commands: None,
         too_large: 0,
@@ -88,7 +99,16 @@ pub(super) fn collect(root: &Path, settings: &WalkSettings) -> WalkOutput {
         let Some(classification) = classify(path, settings.header_policy) else {
             continue;
         };
-        if !settings.selection.includes(classification.language) {
+        output.evidence.observe(classification);
+        // A header still awaiting the tree-wide verdict could end up as either
+        // language, so it survives the walk while either one is enabled and is
+        // filtered again once discovery has settled it.
+        let wanted = if classification.provisional {
+            settings.selection.includes(Language::C) || settings.selection.includes(Language::Cpp)
+        } else {
+            settings.selection.includes(classification.language)
+        };
+        if !wanted {
             continue;
         }
         let Ok(metadata) = entry.metadata() else {

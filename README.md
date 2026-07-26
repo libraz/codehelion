@@ -71,6 +71,9 @@ ID you can suppress, baseline or look up later with `explain`.
 # literal-normalization = "full"    # "preserve", "category" or "full"
 # database = ".codehelion/audit.db" # audit-database location
 
+[languages]
+# headers = "detect"                # grammar for a bare ".h": "detect", "c", "cpp"
+
 [suppression]
 # paths = []                        # path globs to hide; vendored trees go here
 # symbols = []                      # globs over the name of the enclosing unit
@@ -84,6 +87,14 @@ ID you can suppress, baseline or look up later with `explain`.
 # pair-budget = 1000000
 # max-component = 1024
 ```
+
+`.h` is the one extension C and C++ share, and the grammar it is read with
+decides what the analysis can see inside it: a C++ header read as C recovers
+into shapes that declare nothing, which both hides its real duplication and
+invents duplication between class bodies. `detect` counts the files whose
+extension is not in doubt and follows the majority. The choice is part of the
+run's build variant, so results read one way are never compared with results
+read the other.
 
 ## Development
 

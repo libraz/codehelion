@@ -469,7 +469,7 @@ mod tests {
     use crate::frontend::{LiteralKind, SourceSpan, TokenKind};
 
     fn variant() -> BuildVariant {
-        BuildVariant::fast(LanguageSelection::default())
+        BuildVariant::fast(LanguageSelection::default(), Language::C)
     }
 
     fn ctx() -> FileContext<'static> {

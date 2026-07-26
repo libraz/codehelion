@@ -224,6 +224,36 @@ fn structural_results_are_a_distinct_build_variant_from_fast() {
 }
 
 #[test]
+fn both_modes_read_a_bare_header_the_same_way() {
+    // The header grammar is settled once, during discovery, and Structural
+    // rebuilds its own variant afterwards. If it rebuilt that variant from
+    // configuration alone it would lose the setting and hand `.h` files to a
+    // different frontend than the one that decided the counts.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::write(root.join("a.cpp"), "int a() { return 1; }\n").unwrap();
+    std::fs::write(root.join("b.cpp"), "int b() { return 2; }\n").unwrap();
+    std::fs::write(root.join("shared.h"), "class Widget { int n_ = 0; };\n").unwrap();
+
+    for mode in ["fast", "structural"] {
+        let output = cmd()
+            .current_dir(root)
+            .args(["scan", ".", "--mode", mode, "--format", "json"])
+            .output()
+            .expect("run scan");
+        assert!(output.status.success(), "{output:?}");
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+        assert_eq!(
+            value["run"]["build_variant"]["headers"], "cpp",
+            "{mode} mode read the header as something else"
+        );
+        assert_eq!(value["summary"]["files"]["c"], 0, "in {mode} mode");
+        assert_eq!(value["summary"]["files"]["cpp"], 3, "in {mode} mode");
+    }
+}
+
+#[test]
 fn rescans_reuse_stable_identifiers() {
     let dir = fixture();
     for _ in 0..2 {

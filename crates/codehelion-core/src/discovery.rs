@@ -22,7 +22,7 @@ pub use build_variant::{AnalysisMode, BuildVariant, NORMALIZATION_VERSION};
 pub use cargo::{CargoLayout, PackageInfo};
 pub use compile_commands::{CompileCommands, CompileCommandsError, CompileEntry};
 pub use generated::{DEFAULT_MARKERS, DEFAULT_SCAN_LINES, GeneratedMarkers};
-pub use language::{Classification, HeaderPolicy, Language, LanguageSelection};
+pub use language::{Classification, HeaderEvidence, HeaderPolicy, Language, LanguageSelection};
 pub use source_unit::{ContentHash, SourceUnit, TargetKind};
 
 use std::path::{Path, PathBuf};
@@ -94,6 +94,10 @@ pub struct DiscoveryReport {
     pub units: Vec<SourceUnit>,
     /// The implicit build variant every unit is attributed to.
     pub build_variant: BuildVariant,
+    /// The language bare `.h` headers were read as: what the configured
+    /// [`HeaderPolicy`] named, or what the tree pointed to when the policy
+    /// left it to detection.
+    pub header_language: Language,
     /// Cargo packages recognised in the tree, ordered by name.
     pub packages: Vec<PackageInfo>,
     /// Relative paths excluded because they are generated, ordered by path.
@@ -140,6 +144,15 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
         selection: config.languages,
     };
     let walked = walk::collect(&root, &settings);
+    // Settle the bare `.h` headers before anything reads them: the grammar a
+    // header is parsed with is part of the build variant, so it is one
+    // decision for the whole run rather than a per-file guess. An explicit
+    // policy is the answer where there is one; detection only fills the gap.
+    let header_language = match config.header_policy {
+        HeaderPolicy::C => Language::C,
+        HeaderPolicy::Cpp => Language::Cpp,
+        HeaderPolicy::Detect => walked.evidence.verdict(),
+    };
     let layout = CargoLayout::from_manifests(&walked.manifests);
     let compile_commands = walked
         .compile_commands
@@ -155,6 +168,12 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
     let mut suppressed_generated = Vec::new();
 
     for candidate in walked.candidates {
+        let classification = candidate.classification.settled(header_language);
+        // The walk let a header through while either C or C++ was enabled,
+        // because it did not yet know which one it was.
+        if !config.languages.includes(classification.language) {
+            continue;
+        }
         let Ok(bytes) = std::fs::read(&candidate.absolute_path) else {
             skipped.unreadable += 1;
             continue;
@@ -176,8 +195,8 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
         units.push(SourceUnit {
             relative_path: candidate.relative_path,
             absolute_path: candidate.absolute_path,
-            language: candidate.classification.language,
-            is_header: candidate.classification.is_header,
+            language: classification.language,
+            is_header: classification.is_header,
             content_hash,
             byte_len: candidate.byte_len,
             package,
@@ -190,7 +209,8 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
 
     Ok(DiscoveryReport {
         units,
-        build_variant: BuildVariant::fast(config.languages),
+        build_variant: BuildVariant::fast(config.languages, header_language),
+        header_language,
         packages: layout.packages(),
         suppressed_generated,
         skipped,
@@ -199,7 +219,7 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use std::fs;
@@ -308,6 +328,95 @@ mod tests {
         };
         let report = discover(&root, &config).unwrap();
         assert!(report.units.iter().all(|u| u.language == Language::Rust));
+    }
+
+    /// A tree holding `names`, each an empty-but-valid source file.
+    fn tree_of(names: &[&str]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        for name in names {
+            fs::write(root.join(name), "int a(void){return 0;}\n").unwrap();
+        }
+        (dir, root)
+    }
+
+    /// The language discovery settled on for `name` in a tree of `names`.
+    fn language_of(names: &[&str], name: &str) -> Language {
+        let (_guard, root) = tree_of(names);
+        let report = discover(&root, &DiscoveryConfig::default()).unwrap();
+        report
+            .units
+            .iter()
+            .find(|unit| unit.relative_path == Path::new(name))
+            .unwrap_or_else(|| panic!("{name} was not discovered"))
+            .language
+    }
+
+    #[test]
+    fn a_bare_header_follows_the_language_the_tree_is_written_in() {
+        assert_eq!(
+            language_of(&["a.cpp", "b.cpp", "x.h"], "x.h"),
+            Language::Cpp
+        );
+        assert_eq!(language_of(&["a.c", "b.c", "x.h"], "x.h"), Language::C);
+    }
+
+    #[test]
+    fn the_settled_header_language_is_reported_and_carried_by_the_variant() {
+        let (_guard, root) = tree_of(&["a.cpp", "x.h"]);
+        let report = discover(&root, &DiscoveryConfig::default()).unwrap();
+        assert_eq!(report.header_language, Language::Cpp);
+        assert_eq!(report.build_variant.headers, Some(Language::Cpp));
+    }
+
+    #[test]
+    fn an_explicit_header_policy_overrides_what_the_tree_suggests() {
+        let (_guard, root) = tree_of(&["a.cpp", "b.cpp", "x.h"]);
+        let config = DiscoveryConfig {
+            header_policy: HeaderPolicy::C,
+            ..DiscoveryConfig::default()
+        };
+        let report = discover(&root, &config).unwrap();
+        let header = report
+            .units
+            .iter()
+            .find(|unit| unit.relative_path == Path::new("x.h"))
+            .unwrap();
+        assert_eq!(
+            header.language,
+            Language::C,
+            "the policy decided, not the tree"
+        );
+        // What the run reports and attributes its results to is the grammar it
+        // used, not the one it would have chosen unaided.
+        assert_eq!(report.header_language, Language::C);
+        assert_eq!(report.build_variant.headers, Some(Language::C));
+    }
+
+    #[test]
+    fn a_header_settled_into_a_disabled_language_is_left_out() {
+        // The walk keeps a `.h` while either C or C++ is enabled, because it
+        // does not yet know which it is. Once settled, the selection applies.
+        let (_guard, root) = tree_of(&["a.cpp", "b.cpp", "x.h", "plain.c"]);
+        let config = DiscoveryConfig {
+            languages: LanguageSelection {
+                rust: true,
+                c: true,
+                cpp: false,
+            },
+            ..DiscoveryConfig::default()
+        };
+        let report = discover(&root, &config).unwrap();
+        let paths: Vec<&Path> = report
+            .units
+            .iter()
+            .map(|unit| unit.relative_path.as_path())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![Path::new("plain.c")],
+            "the header settled on C++, which this run does not analyse"
+        );
     }
 
     #[test]

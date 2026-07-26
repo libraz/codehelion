@@ -10,7 +10,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use codehelion_core::clone_class::CloneClass;
-use codehelion_core::discovery::{BuildVariant, LanguageSelection};
+use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
 use codehelion_core::structural::{self, StructuralConfig, StructuralReport};
 use codehelion_frontend_rust::ir::RustStructuralFrontend;
@@ -98,13 +98,18 @@ fn analyze(sources: &[&str]) -> StructuralReport {
         .iter()
         .map(|source| RustStructuralFrontend.parse(source))
         .collect();
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     structural::analyze(&files, &variant, &StructuralConfig::default())
 }
 
-/// The reported runs as `(clone type, statements, occurrence count)`.
+/// The reported runs as `(clone type, statements, occurrence count)`,
+/// shortest first.
+///
+/// Runs are reported in fingerprint order, which is content-derived and so
+/// carries no meaning a test should assert. Sorting on what the tuples
+/// describe keeps these assertions about which runs were found.
 fn shape(report: &StructuralReport) -> Vec<(CloneClass, u32, usize)> {
-    report
+    let mut shapes: Vec<(CloneClass, u32, usize)> = report
         .regions
         .iter()
         .map(|region| {
@@ -114,7 +119,9 @@ fn shape(report: &StructuralReport) -> Vec<(CloneClass, u32, usize)> {
                 region.occurrences.len(),
             )
         })
-        .collect()
+        .collect();
+    shapes.sort_by_key(|&(class, statements, occurrences)| (statements, occurrences, class.name()));
+    shapes
 }
 
 #[test]

@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use codehelion_core::clone_class::CloneClass;
-use codehelion_core::discovery::{BuildVariant, LanguageSelection};
+use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::features;
 use codehelion_core::ir::{Shape, StructuralFrontend, SyntaxIrFile};
 use codehelion_core::structural::{self, StructuralConfig, StructuralReport};
@@ -45,7 +45,7 @@ fn parse(name: &str) -> SyntaxIrFile {
 
 fn analyze() -> StructuralReport {
     let files: Vec<SyntaxIrFile> = FILES.iter().map(|name| parse(name)).collect();
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     structural::analyze(&files, &variant, &StructuralConfig::default())
 }
 

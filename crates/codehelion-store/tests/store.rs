@@ -117,7 +117,7 @@ fn sample_snapshot<'a>(
 
 #[test]
 fn a_snapshot_round_trips_through_queries() {
-    let variant = BuildVariant::fast(LanguageSelection::default());
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
     let run_id = store
@@ -164,7 +164,7 @@ fn a_snapshot_round_trips_through_queries() {
 
 #[test]
 fn a_structural_group_persists_its_similarity_breakdown() {
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
 
@@ -224,7 +224,7 @@ fn an_unmeasured_api_dimension_round_trips_as_absent() {
     // Two units that call nothing have no call surfaces to compare. The column
     // has to distinguish that from perfect agreement, or reading the row back
     // would invent evidence the run never had.
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
 
@@ -253,7 +253,7 @@ fn an_unmeasured_api_dimension_round_trips_as_absent() {
 
 #[test]
 fn a_suppressed_occurrence_explains_the_rule_that_hid_it() {
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
 
@@ -282,7 +282,7 @@ fn a_suppressed_occurrence_explains_the_rule_that_hid_it() {
 
 #[test]
 fn a_boilerplate_group_records_what_it_is_independently_of_policy() {
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
 
@@ -307,7 +307,7 @@ fn a_boilerplate_group_records_what_it_is_independently_of_policy() {
 
 #[test]
 fn a_failing_snapshot_leaves_no_partial_rows() {
-    let variant = BuildVariant::fast(LanguageSelection::default());
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
 
@@ -337,7 +337,7 @@ fn a_failing_snapshot_leaves_no_partial_rows() {
 
 #[test]
 fn fingerprints_deduplicate_across_scans_but_runs_do_not() {
-    let variant = BuildVariant::fast(LanguageSelection::default());
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
     store
@@ -403,7 +403,7 @@ fn sample_unit_features() -> UnitFeatures {
 
 #[test]
 fn feature_fingerprints_persist_and_deduplicate_across_scans() {
-    let variant = BuildVariant::fast(LanguageSelection::default());
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
 
@@ -457,7 +457,7 @@ fn feature_fingerprints_persist_and_deduplicate_across_scans() {
 
 #[test]
 fn a_feature_referencing_an_unknown_unit_rolls_the_snapshot_back() {
-    let variant = BuildVariant::fast(LanguageSelection::default());
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
 
@@ -478,7 +478,7 @@ fn a_feature_referencing_an_unknown_unit_rolls_the_snapshot_back() {
 
 #[test]
 fn artifact_and_lineage_tables_exist_and_stay_empty() {
-    let variant = BuildVariant::fast(LanguageSelection::default());
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
     store
@@ -505,7 +505,7 @@ fn artifact_and_lineage_tables_exist_and_stay_empty() {
 
 #[test]
 fn findings_start_in_the_new_state() {
-    let variant = BuildVariant::fast(LanguageSelection::default());
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
     let run_id = store
@@ -522,7 +522,7 @@ fn findings_start_in_the_new_state() {
 
 #[test]
 fn suppressed_findings_reference_a_deduplicated_rule_row() {
-    let variant = BuildVariant::fast(LanguageSelection::default());
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
 
@@ -548,7 +548,7 @@ fn suppressed_findings_reference_a_deduplicated_rule_row() {
 
 #[test]
 fn an_unknown_suppression_index_rolls_the_snapshot_back() {
-    let variant = BuildVariant::fast(LanguageSelection::default());
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
 
@@ -567,7 +567,7 @@ fn on_disk_databases_reopen_and_a_newer_schema_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("audit.db");
 
-    let variant = BuildVariant::fast(LanguageSelection::default());
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     {
         let mut store = Store::open(&path).unwrap();
@@ -603,7 +603,7 @@ fn on_disk_databases_reopen_and_a_newer_schema_is_refused() {
 
 #[test]
 fn a_run_duplicated_inside_its_hosts_is_recorded_as_a_fragment_group() {
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
 
@@ -635,7 +635,7 @@ fn a_run_duplicated_inside_its_hosts_is_recorded_as_a_fragment_group() {
 
 #[test]
 fn a_whole_unit_group_records_the_scope_it_was_written_with() {
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
     let run_id = store
@@ -648,7 +648,7 @@ fn a_whole_unit_group_records_the_scope_it_was_written_with() {
 fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("audit.db");
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     {
         let mut store = Store::open(&path).unwrap();
@@ -684,7 +684,7 @@ fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
 
 #[test]
 fn a_pair_no_group_could_hold_records_that_it_is_one() {
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
 
@@ -699,7 +699,7 @@ fn a_pair_no_group_could_hold_records_that_it_is_one() {
 fn a_group_recorded_before_the_split_pair_column_reads_as_a_whole_group() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("audit.db");
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     {
         let mut store = Store::open(&path).unwrap();
@@ -729,7 +729,7 @@ fn a_group_recorded_before_the_split_pair_column_reads_as_a_whole_group() {
 
 #[test]
 fn a_group_wholly_inside_the_suite_records_that_it_is() {
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
 
@@ -747,7 +747,7 @@ fn a_group_wholly_inside_the_suite_records_that_it_is() {
 
 #[test]
 fn a_group_reaching_outside_the_suite_records_that_it_does() {
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
     let run_id = store
@@ -760,7 +760,7 @@ fn a_group_reaching_outside_the_suite_records_that_it_does() {
 fn a_group_recorded_before_the_test_code_column_is_not_claimed_to_be_test_code() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("audit.db");
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     {
         let mut store = Store::open(&path).unwrap();

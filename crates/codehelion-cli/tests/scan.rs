@@ -332,6 +332,75 @@ fn scan_json(root: &Path) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).expect("stdout is one JSON document")
 }
 
+/// A tree of `names`, each holding a small translation unit, plus a bare
+/// header. The header's content is C++ that the C grammar cannot follow, so a
+/// misread shows up as a language count rather than as a silent difference.
+fn header_fixture(names: &[&str]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    for name in names {
+        std::fs::write(root.join(name), MIX_C).unwrap();
+    }
+    std::fs::write(
+        root.join("shared.h"),
+        "namespace demo {\nclass Widget {\n public:\n  int size() const { return n_; }\n\
+         \n private:\n  int n_ = 0;\n};\n}\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// The `(c, cpp)` analysed-file counts and the reported header grammar.
+fn header_reading(root: &Path, config: Option<&str>) -> (u64, u64, String) {
+    if let Some(config) = config {
+        std::fs::write(root.join("codehelion.toml"), config).unwrap();
+    }
+    let value = scan_json(root);
+    let variant = &value["run"]["build_variant"];
+    (
+        value["summary"]["files"]["c"].as_u64().unwrap(),
+        value["summary"]["files"]["cpp"].as_u64().unwrap(),
+        variant["headers"].as_str().unwrap().to_string(),
+    )
+}
+
+#[test]
+fn a_bare_header_is_read_as_the_language_the_tree_is_written_in() {
+    let cpp_tree = header_fixture(&["a.cpp", "b.cpp", "vendored.c"]);
+    assert_eq!(
+        header_reading(cpp_tree.path(), None),
+        (1, 3, "cpp".to_string()),
+        "two C++ sources outvote one C source, so shared.h is C++"
+    );
+
+    let c_tree = header_fixture(&["a.c", "b.c", "fuzz.cc"]);
+    assert_eq!(
+        header_reading(c_tree.path(), None),
+        (3, 1, "c".to_string()),
+        "one vendored C++ harness does not make a C project C++"
+    );
+}
+
+#[test]
+fn the_configured_header_grammar_overrides_the_tree_and_moves_the_variant() {
+    let dir = header_fixture(&["a.cpp", "b.cpp"]);
+    let (_, _, detected) = header_reading(dir.path(), None);
+    assert_eq!(detected, "cpp");
+    let detected_fingerprint = scan_json(dir.path())["run"]["build_variant"]["fingerprint"].clone();
+
+    let (c_files, cpp_files, forced) =
+        header_reading(dir.path(), Some("[languages]\nheaders = \"c\"\n"));
+    assert_eq!(forced, "c", "the configured grammar decides");
+    assert_eq!((c_files, cpp_files), (1, 2), "shared.h is now counted as C");
+
+    // The two runs saw different code in the same header, so their results
+    // must not land in one fingerprint space.
+    assert_ne!(
+        scan_json(dir.path())["run"]["build_variant"]["fingerprint"],
+        detected_fingerprint
+    );
+}
+
 #[test]
 fn the_run_says_how_far_each_stage_of_the_pipeline_narrowed_it() {
     let dir = fixture();

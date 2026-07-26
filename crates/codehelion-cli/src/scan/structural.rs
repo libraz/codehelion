@@ -99,12 +99,17 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         .unzip();
 
     // Discovery reports the Fast variant; the results belong to the
-    // Structural one, and the two never share a fingerprint.
-    let variant = BuildVariant::structural(LanguageSelection {
-        rust: cfg.languages.rust,
-        c: cfg.languages.c,
-        cpp: cfg.languages.cpp,
-    });
+    // Structural one, and the two never share a fingerprint. The header
+    // grammar carries over unchanged: it decided which frontend read every
+    // `.h` above, so it describes these results just as it does Fast's.
+    let variant = BuildVariant::structural(
+        LanguageSelection {
+            rust: cfg.languages.rust,
+            c: cfg.languages.c,
+            cpp: cfg.languages.cpp,
+        },
+        discovered.header_language,
+    );
     let analysis = structural::analyze(&irs, &variant, &structural_config(&cfg));
 
     let mut rules = compile_rules(&cfg, &files, &analysis)?;
@@ -822,6 +827,7 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
                     .into_iter()
                     .map(|language| language.name().to_string())
                     .collect(),
+                headers: variant.headers.map(|language| language.name().to_string()),
                 normalization_version: variant.normalization_version,
                 fingerprint: variant.fingerprint(),
             },

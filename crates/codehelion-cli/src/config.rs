@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use codehelion_core::boilerplate::Boilerplate;
+use codehelion_core::discovery::HeaderPolicy;
 use serde::{Deserialize, Serialize};
 
 /// File name discovered by the upward search.
@@ -35,6 +36,30 @@ pub enum LiteralNormalization {
     Full,
 }
 
+/// Which grammar reads a bare `.h`, the one extension C and C++ share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HeaderGrammar {
+    /// Follow the rest of the tree: whichever of C and C++ more of its
+    /// unambiguously-named files are written in.
+    #[default]
+    Detect,
+    /// Always C.
+    C,
+    /// Always C++.
+    Cpp,
+}
+
+impl From<HeaderGrammar> for HeaderPolicy {
+    fn from(grammar: HeaderGrammar) -> Self {
+        match grammar {
+            HeaderGrammar::Detect => Self::Detect,
+            HeaderGrammar::C => Self::C,
+            HeaderGrammar::Cpp => Self::Cpp,
+        }
+    }
+}
+
 /// Languages the scan analyses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
@@ -45,6 +70,8 @@ pub struct Languages {
     pub c: bool,
     /// Analyse C++ sources.
     pub cpp: bool,
+    /// Which grammar reads a bare `.h`.
+    pub headers: HeaderGrammar,
 }
 
 impl Default for Languages {
@@ -53,6 +80,7 @@ impl Default for Languages {
             rust: true,
             c: true,
             cpp: true,
+            headers: HeaderGrammar::default(),
         }
     }
 }
@@ -368,6 +396,12 @@ pub const TEMPLATE: &str = "\
 # rust = true
 # c = true
 # cpp = true
+# Which grammar reads a bare \".h\", the one extension C and C++ share:
+# \"detect\", \"c\" or \"cpp\". Detection counts the files whose extension is not
+# in doubt and follows the majority, because a C++ project spells its headers
+# \".h\" out of convention. The choice is part of the run's build variant, so
+# changing it puts the results in a separate space from the previous ones.
+# headers = \"detect\"
 
 # [suppression]
 # Globs matched against a file's path, relative to the scan root. A vendored

@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use codehelion_core::discovery::{BuildVariant, LanguageSelection};
+use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::grouping::GroupingConfig;
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
 use codehelion_core::structural::{self, StructuralConfig, StructuralReport, StructuralUnit};
@@ -47,7 +47,7 @@ fn analyze() -> StructuralReport {
             CppStructuralFrontend.parse(&text)
         })
         .collect();
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     structural::analyze(&files, &variant, &StructuralConfig::default())
 }
 
@@ -172,7 +172,7 @@ fn a_namespace_is_not_a_clone_of_the_class_it_holds() {
     // at work that does not exist. The pair is dropped before verification
     // rather than after, so it costs nothing to score either.
     let files = vec![CppStructuralFrontend.parse(WRAPPED)];
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let report = structural::analyze(&files, &variant, &StructuralConfig::default());
 
     assert!(
@@ -222,7 +222,7 @@ fn a_case_written_as_a_framework_macro_is_recognised_as_test_code() {
     // saying what the body is, and it is the only such statement C++ offers:
     // the language has no attribute for it and no container to inherit from.
     let files = vec![CppStructuralFrontend.parse(SUITE)];
-    let variant = BuildVariant::structural(LanguageSelection::default());
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let report = structural::analyze(&files, &variant, &StructuralConfig::default());
 
     let cases: Vec<&StructuralUnit> = report
