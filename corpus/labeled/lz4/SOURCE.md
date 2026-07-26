@@ -38,9 +38,11 @@ most of them:
   (`LZ4_read16/32/64`, `XXH32_*` beside `XXH64_*`).
 - `forwarding-wrapper` — public entry points that pass different constants to
   one generic implementation. Two of these groups hold ten and eleven members.
-- `self-overlapping-run` — a hand-unrolled run of statements matched against a
-  shifted copy of itself, inside a single function. Nothing here is duplicated
-  between two places; the run is matched to itself.
+- `unrolled-repetition` — two stretches of one hand-unrolled run, alike because
+  the run does the same thing eight times over.
 
-The last one is not a judgement call about what is worth reporting: there is no
-second site, so there is no clone. It is the clearest defect the corpus holds.
+A ninth group was a defect rather than a judgement call: a hand-unrolled store
+reported as a clone of itself, the same run at four overlapping offsets inside
+one function. It is gone, and what remains of that shape is the four
+`unrolled-repetition` groups above, which are at least two distinct stretches
+of code.

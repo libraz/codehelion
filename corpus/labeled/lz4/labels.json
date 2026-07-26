@@ -285,22 +285,6 @@
   "non_clones": [
     {
       "id": "nc-001",
-      "reason": "self-overlapping-run",
-      "fragments": [
-        {
-          "file": "lib/lz4frame.c",
-          "start_line": 224,
-          "end_line": 227
-        },
-        {
-          "file": "lib/lz4frame.c",
-          "start_line": 225,
-          "end_line": 228
-        }
-      ]
-    },
-    {
-      "id": "nc-002",
       "reason": "parameterised-dispatch",
       "fragments": [
         {
@@ -316,7 +300,7 @@
       ]
     },
     {
-      "id": "nc-003",
+      "id": "nc-002",
       "reason": "parameterised-dispatch",
       "fragments": [
         {
@@ -332,7 +316,7 @@
       ]
     },
     {
-      "id": "nc-004",
+      "id": "nc-003",
       "reason": "type-specialised-variant",
       "fragments": [
         {
@@ -348,7 +332,7 @@
       ]
     },
     {
-      "id": "nc-005",
+      "id": "nc-004",
       "reason": "type-specialised-variant",
       "fragments": [
         {
@@ -364,7 +348,7 @@
       ]
     },
     {
-      "id": "nc-006",
+      "id": "nc-005",
       "reason": "forwarding-wrapper",
       "fragments": [
         {
@@ -380,7 +364,7 @@
       ]
     },
     {
-      "id": "nc-007",
+      "id": "nc-006",
       "reason": "forwarding-wrapper",
       "fragments": [
         {
@@ -396,7 +380,7 @@
       ]
     },
     {
-      "id": "nc-008",
+      "id": "nc-007",
       "reason": "type-dispatch-accessor",
       "fragments": [
         {
@@ -412,7 +396,7 @@
       ]
     },
     {
-      "id": "nc-009",
+      "id": "nc-008",
       "reason": "trivial-factory",
       "fragments": [
         {
@@ -428,7 +412,7 @@
       ]
     },
     {
-      "id": "nc-010",
+      "id": "nc-009",
       "reason": "type-specialised-variant",
       "fragments": [
         {
@@ -444,7 +428,7 @@
       ]
     },
     {
-      "id": "nc-011",
+      "id": "nc-010",
       "reason": "type-specialised-variant",
       "fragments": [
         {
@@ -460,7 +444,7 @@
       ]
     },
     {
-      "id": "nc-012",
+      "id": "nc-011",
       "reason": "type-specialised-variant",
       "fragments": [
         {
@@ -476,7 +460,7 @@
       ]
     },
     {
-      "id": "nc-013",
+      "id": "nc-012",
       "reason": "trivial-factory",
       "fragments": [
         {
@@ -492,7 +476,7 @@
       ]
     },
     {
-      "id": "nc-014",
+      "id": "nc-013",
       "reason": "type-specialised-variant",
       "fragments": [
         {
@@ -508,7 +492,7 @@
       ]
     },
     {
-      "id": "nc-015",
+      "id": "nc-014",
       "reason": "type-specialised-variant",
       "fragments": [
         {
@@ -524,8 +508,8 @@
       ]
     },
     {
-      "id": "nc-016",
-      "reason": "self-overlapping-run",
+      "id": "nc-015",
+      "reason": "unrolled-repetition",
       "fragments": [
         {
           "file": "lib/xxhash.c",
@@ -540,8 +524,8 @@
       ]
     },
     {
-      "id": "nc-017",
-      "reason": "self-overlapping-run",
+      "id": "nc-016",
+      "reason": "unrolled-repetition",
       "fragments": [
         {
           "file": "lib/xxhash.c",
@@ -556,7 +540,7 @@
       ]
     },
     {
-      "id": "nc-018",
+      "id": "nc-017",
       "reason": "type-specialised-variant",
       "fragments": [
         {
@@ -572,7 +556,7 @@
       ]
     },
     {
-      "id": "nc-019",
+      "id": "nc-018",
       "reason": "lifecycle-teardown",
       "fragments": [
         {
@@ -588,7 +572,7 @@
       ]
     },
     {
-      "id": "nc-020",
+      "id": "nc-019",
       "reason": "guarded-forwarding",
       "fragments": [
         {
@@ -604,8 +588,8 @@
       ]
     },
     {
-      "id": "nc-021",
-      "reason": "self-overlapping-run",
+      "id": "nc-020",
+      "reason": "unrolled-repetition",
       "fragments": [
         {
           "file": "lib/xxhash.c",
@@ -620,8 +604,8 @@
       ]
     },
     {
-      "id": "nc-022",
-      "reason": "self-overlapping-run",
+      "id": "nc-021",
+      "reason": "unrolled-repetition",
       "fragments": [
         {
           "file": "lib/xxhash.c",
@@ -636,7 +620,7 @@
       ]
     },
     {
-      "id": "nc-023",
+      "id": "nc-022",
       "reason": "lifecycle-teardown",
       "fragments": [
         {
@@ -652,7 +636,7 @@
       ]
     },
     {
-      "id": "nc-024",
+      "id": "nc-023",
       "reason": "lifecycle-teardown",
       "fragments": [
         {
@@ -668,7 +652,7 @@
       ]
     },
     {
-      "id": "nc-025",
+      "id": "nc-024",
       "reason": "type-specialised-variant",
       "fragments": [
         {
@@ -684,7 +668,7 @@
       ]
     },
     {
-      "id": "nc-026",
+      "id": "nc-025",
       "reason": "subsumed-by-unit-clone",
       "fragments": [
         {
@@ -700,7 +684,7 @@
       ]
     },
     {
-      "id": "nc-027",
+      "id": "nc-026",
       "reason": "type-specialised-variant",
       "fragments": [
         {
@@ -716,7 +700,7 @@
       ]
     },
     {
-      "id": "nc-028",
+      "id": "nc-027",
       "reason": "declaration-run",
       "fragments": [
         {
@@ -732,7 +716,7 @@
       ]
     },
     {
-      "id": "nc-029",
+      "id": "nc-028",
       "reason": "lifecycle-teardown",
       "fragments": [
         {
@@ -748,7 +732,7 @@
       ]
     },
     {
-      "id": "nc-030",
+      "id": "nc-029",
       "reason": "forwarding-wrapper",
       "fragments": [
         {
@@ -764,7 +748,7 @@
       ]
     },
     {
-      "id": "nc-031",
+      "id": "nc-030",
       "reason": "forwarding-wrapper",
       "fragments": [
         {
@@ -780,7 +764,7 @@
       ]
     },
     {
-      "id": "nc-032",
+      "id": "nc-031",
       "reason": "lifecycle-teardown",
       "fragments": [
         {
@@ -796,7 +780,7 @@
       ]
     },
     {
-      "id": "nc-033",
+      "id": "nc-032",
       "reason": "lifecycle-teardown",
       "fragments": [
         {

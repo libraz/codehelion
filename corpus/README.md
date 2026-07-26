@@ -101,16 +101,14 @@ be counted rather than merely described. The ones in use:
 | `field-mapping-boilerplate` | building a struct out of positional accessors, once per query or row |
 | `declaration-run` | a run of declarations or field assignments carrying no logic |
 | `list-walk-idiom` | a null guard and a linked-list traversal, the idiom rather than shared logic |
-| `self-overlapping-run` | shifted windows of one repeated-statement run inside a single unit, matched against themselves |
+| `unrolled-repetition` | adjacent stretches of one hand-unrolled run, alike because the run repeats one operation |
 | `subsumed-by-unit-clone` | a fragment group whose members all sit inside a unit group the same report already carries |
 
 Extend the table when a case needs a class it does not have; do not reach for
 the nearest existing word.
 
-The last two name defects rather than judgement calls. `self-overlapping-run`
-has no second site at all — the run is matched to a shifted copy of itself, so
-nothing is duplicated between two places. `subsumed-by-unit-clone` is the same
-duplication arriving twice in one report.
+`subsumed-by-unit-clone` names a defect rather than a judgement call: it is the
+same duplication arriving twice in one report.
 
 A group can only be refuted when it is distinguishable from the groups around
 it. Where a redundant report overlaps a real one by more than the match
