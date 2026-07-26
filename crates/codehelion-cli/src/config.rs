@@ -109,7 +109,8 @@ pub struct BoilerplatePolicy {
     /// Bodies that move one value and do nothing else: getters, setters,
     /// stubs. Hidden by default — a duplicated getter is not a finding.
     pub trivial_body: CategoryAction,
-    /// Wrappers that delegate with a single call.
+    /// Wrappers that delegate with a single call. Hidden by default — every
+    /// such group in the labelled corpora turned out to be a lookalike.
     pub forwarding: CategoryAction,
     /// Bodies that are nothing but macro invocations.
     pub macro_repetition: CategoryAction,
@@ -119,9 +120,14 @@ impl Default for BoilerplatePolicy {
     fn default() -> Self {
         Self {
             trivial_body: CategoryAction::Hide,
-            // A run of wrappers or of macro invocations can be worth
-            // consolidating, so it is ranked down rather than hidden.
-            forwarding: CategoryAction::RankDown,
+            // A wrapper looked like something worth consolidating until there
+            // was real code to check it against: across the labelled projects
+            // every group of them was a lookalike, and none was a duplication
+            // anyone could act on. Hidden means set aside, not dropped — the
+            // suppressed section still lists them.
+            forwarding: CategoryAction::Hide,
+            // A run of macro invocations can genuinely be worth consolidating,
+            // so it is ranked down rather than hidden.
             macro_repetition: CategoryAction::RankDown,
         }
     }
@@ -427,7 +433,7 @@ pub const TEMPLATE: &str = "\
 # either way.
 # [suppression.boilerplate]
 # trivial-body = \"hide\"
-# forwarding = \"rank-down\"
+# forwarding = \"hide\"
 # macro-repetition = \"rank-down\"
 
 # Resource ceilings; every ceiling that fires is accounted for in the report.
@@ -497,18 +503,16 @@ mod tests {
     }
 
     #[test]
-    fn boilerplate_policy_defaults_hide_only_the_shape_that_says_nothing() {
+    fn boilerplate_policy_defaults_set_aside_the_shapes_that_say_nothing() {
         let policy = Suppression::default().boilerplate;
         assert_eq!(
             policy.action(Boilerplate::TrivialBody),
             CategoryAction::Hide
         );
-        // A run of wrappers or macro invocations can still be worth
-        // consolidating, so it stays visible.
-        assert_eq!(
-            policy.action(Boilerplate::Forwarding),
-            CategoryAction::RankDown
-        );
+        // A group of wrappers has never been worth acting on in the labelled
+        // projects, so it is set aside rather than merely ranked down.
+        assert_eq!(policy.action(Boilerplate::Forwarding), CategoryAction::Hide);
+        // A run of macro invocations can still be worth consolidating.
         assert_eq!(
             policy.action(Boilerplate::MacroRepetition),
             CategoryAction::RankDown
@@ -518,17 +522,21 @@ mod tests {
     #[test]
     fn a_boilerplate_category_can_be_overridden_on_its_own() {
         let config =
-            Config::from_toml("[suppression.boilerplate]\nmacro-repetition = \"hide\"").unwrap();
+            Config::from_toml("[suppression.boilerplate]\nforwarding = \"report\"").unwrap();
         let policy = &config.suppression.boilerplate;
         assert_eq!(
-            policy.action(Boilerplate::MacroRepetition),
-            CategoryAction::Hide
+            policy.action(Boilerplate::Forwarding),
+            CategoryAction::Report
         );
         // The categories not named keep their defaults, as does the rest of
         // the suppression section.
         assert_eq!(
-            policy.action(Boilerplate::Forwarding),
+            policy.action(Boilerplate::MacroRepetition),
             CategoryAction::RankDown
+        );
+        assert_eq!(
+            policy.action(Boilerplate::TrivialBody),
+            CategoryAction::Hide
         );
         assert_eq!(
             config.suppression.generated_markers,

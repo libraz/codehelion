@@ -52,7 +52,7 @@ const CORPORA: &[Expected] = &[
     Expected {
         name: "fast-yaml-cpp",
         confirmed: 20,
-        refuted: 5,
+        refuted: 3,
     },
     Expected {
         name: "fast-yaml",
@@ -62,17 +62,17 @@ const CORPORA: &[Expected] = &[
     Expected {
         name: "codehelion-store",
         confirmed: 2,
-        refuted: 2,
+        refuted: 0,
     },
     Expected {
         name: "cjson",
         confirmed: 14,
-        refuted: 10,
+        refuted: 9,
     },
     Expected {
         name: "lz4",
         confirmed: 17,
-        refuted: 32,
+        refuted: 28,
     },
 ];
 
