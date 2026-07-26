@@ -435,6 +435,26 @@ pub const fn intersects(a: ByteRange, b: ByteRange) -> bool {
     a.start < b.end && b.start < a.end
 }
 
+/// Whether one run picks up exactly where the other stops, in the same block
+/// of the same unit.
+///
+/// Two runs that tile one stretch of code are that stretch's period, not two
+/// copies of it. A hand-unrolled loop repeats one operation by construction,
+/// and the second half is not a site anyone can be sent to: the duplication is
+/// the whole block, and the whole block is already where the reader is looking.
+///
+/// The question is asked in statements rather than bytes so that a blank line
+/// or a comment between the two halves cannot change the answer, and it is
+/// asked inside one block because adjacency across units means nothing — two
+/// functions are two sites however the file happens to lay them out.
+#[must_use]
+pub const fn adjoins(a: &RegionSide, b: &RegionSide) -> bool {
+    a.file == b.file
+        && a.unit == b.unit
+        && a.run.block == b.run.block
+        && (a.run.end() == b.run.start || b.run.end() == a.run.start)
+}
+
 /// Whether `outer` covers `inner` on both sides, in the same files.
 const fn contains(outer: &CloneRegion, inner: &CloneRegion) -> bool {
     outer.a.file == inner.a.file
@@ -581,6 +601,37 @@ mod tests {
         let set = consolidate(&pairs, &MaximalConfig::default());
         assert_eq!(set.regions.len(), 1);
         assert_eq!(set.stats.self_overlapping, 0);
+    }
+
+    /// The side a window seed describes, for the adjacency questions.
+    fn side(unit: usize, block: u32, start: u32, length: u32) -> RegionSide {
+        RegionSide {
+            file: 0,
+            unit,
+            run: StatementRun {
+                block,
+                start,
+                length,
+            },
+            range: ByteRange {
+                start: usize::try_from(start).unwrap() * 10,
+                end: usize::try_from(start + length).unwrap() * 10,
+            },
+        }
+    }
+
+    #[test]
+    fn a_run_that_continues_another_tiles_one_stretch() {
+        let first = side(0, 0, 0, 4);
+        assert!(adjoins(&first, &side(0, 0, 4, 4)), "end to end, in order");
+        assert!(adjoins(&side(0, 0, 4, 4), &first), "and in either order");
+
+        // One statement between them makes two sites, not one stretch.
+        assert!(!adjoins(&first, &side(0, 0, 5, 4)));
+        // A different block is a different stretch however the indices line up.
+        assert!(!adjoins(&first, &side(0, 1, 4, 4)));
+        // And two units are two sites however the file lays them out.
+        assert!(!adjoins(&first, &side(1, 0, 4, 4)));
     }
 
     #[test]

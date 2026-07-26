@@ -474,3 +474,36 @@ fn a_local_the_callee_answers_through_does_not_make_a_wrapper_into_work() {
     // the IR cannot see that this one is filled with arithmetic.
     assert_eq!(category("mix32"), None);
 }
+
+/// A four-lane accumulator, unrolled by hand the way a hash core is.
+const FOUR_LANE: &str = "\
+static void accumulate(unsigned *v, const unsigned char *p)
+{
+    v[0] = mix(v[0], read32(p)); p += 4;
+    v[1] = mix(v[1], read32(p)); p += 4;
+    v[2] = mix(v[2], read32(p)); p += 4;
+    v[3] = mix(v[3], read32(p)); p += 4;
+}
+";
+
+#[test]
+fn the_halves_of_an_unrolled_run_are_its_period_not_two_copies() {
+    // The first four statements match the next four exactly, and the two
+    // stretches sit end to end. Reported as a pair they say "these lines
+    // duplicate the lines directly below", which sends a reader nowhere: the
+    // repetition is the whole block, and the block is already in front of
+    // them. Only a second site is worth pointing at.
+    let files = vec![CStructuralFrontend.parse(FOUR_LANE)];
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let report = structural::analyze(&files, &variant, &StructuralConfig::default());
+
+    assert!(
+        report.stats.region_adjoining > 0,
+        "the tiling halves have to be recognised, not merely absent"
+    );
+    assert_eq!(
+        report.regions,
+        vec![],
+        "one stretch of code repeating is not two instances of anything"
+    );
+}

@@ -252,6 +252,10 @@ pub struct StructuralStats {
     /// run already covers, which makes them one stretch of code rather than
     /// two instances of it.
     pub region_overlapping: usize,
+    /// Occurrences dropped for continuing a kept occurrence of the same run,
+    /// statement for statement, inside one block. Those tile one stretch of
+    /// code, so the run is that stretch's period rather than a copy of it.
+    pub region_adjoining: usize,
     /// Confirmed runs dropped because a longer run covers every one of their
     /// occurrences and claims at least as much about them.
     pub region_subsumed: usize,
@@ -349,7 +353,7 @@ pub fn analyze(
     // Stage: fold the window seeds into the maximal shared runs they describe,
     // then confirm each candidate run against the tokens it actually covers.
     let candidate_regions = maximal::consolidate(&candidate.pairs, &config.maximal);
-    let (mut confirmed, mut singletons, mut overlapping) = confirm_regions(
+    let (mut confirmed, mut dropped) = confirm_regions(
         &candidate_regions.shared,
         files,
         &offsets,
@@ -358,8 +362,7 @@ pub fn analyze(
     );
     let merged = grow_runs(
         &mut confirmed,
-        &mut singletons,
-        &mut overlapping,
+        &mut dropped,
         files,
         &offsets,
         variant,
@@ -399,8 +402,9 @@ pub fn analyze(
         control_flow: skeleton.stats,
         maximal: candidate_regions.stats,
         regions: regions.len(),
-        region_singletons: singletons,
-        region_overlapping: overlapping,
+        region_singletons: dropped.singletons,
+        region_overlapping: dropped.overlapping,
+        region_adjoining: dropped.adjoining,
         region_subsumed: subsumed,
         region_merged: merged,
         nested_pairs: lifted.nested,
@@ -490,10 +494,9 @@ fn confirm_regions(
     offsets: &[usize],
     variant: &BuildVariant,
     literals: LiteralNorm,
-) -> (Vec<Confirmed>, usize, usize) {
+) -> (Vec<Confirmed>, Dropped) {
     let mut regions = Vec::new();
-    let mut singletons = 0usize;
-    let mut overlapping = 0usize;
+    let mut dropped = Dropped::default();
     for candidate in candidates {
         // Occurrences whose normalized content agrees are the same run up to
         // renaming; that is the coarsest claim this stage is willing to make.
@@ -503,7 +506,7 @@ fn confirm_regions(
             let Some((occurrence, normalized)) =
                 resolve_occurrence(side, files, offsets, variant, literals)
             else {
-                singletons += 1;
+                dropped.singletons += 1;
                 continue;
             };
             classes
@@ -512,11 +515,9 @@ fn confirm_regions(
                 .push((occurrence, side));
         }
         for class in classes.into_values() {
-            let kept = class.len();
-            let class = distinct(class);
-            overlapping += kept - class.len();
+            let class = distinct(class, &mut dropped);
             if class.len() < 2 {
-                singletons += class.len();
+                dropped.singletons += class.len();
                 continue;
             }
             let (occurrences, sides): (Vec<RegionOccurrence>, Vec<RegionSide>) =
@@ -552,11 +553,27 @@ fn confirm_regions(
     regions.dedup_by(|a, b| {
         a.region.fingerprint == b.region.fingerprint && a.region.occurrences == b.region.occurrences
     });
-    (regions, singletons, overlapping)
+    (regions, dropped)
 }
 
-/// Keep one occurrence per stretch of source, dropping any that overlaps one
-/// already kept.
+/// What confirmation set aside, by reason.
+///
+/// Kept apart rather than summed because the three say different things about
+/// the detector: a singleton is a summary that promised more than the code
+/// delivered, while the other two are one stretch of code arriving as several
+/// occurrences of itself.
+#[derive(Debug, Clone, Copy, Default)]
+struct Dropped {
+    /// Occurrences left without a partner holding the same content.
+    singletons: usize,
+    /// Occurrences covering source a kept occurrence already covers.
+    overlapping: usize,
+    /// Occurrences continuing a kept occurrence, statement for statement.
+    adjoining: usize,
+}
+
+/// Keep one occurrence per stretch of source, dropping any that overlaps or
+/// continues one already kept.
 ///
 /// A candidate set is the transitive closure over pairwise matches, so two
 /// occurrences that overlap each other can still arrive together by way of a
@@ -572,15 +589,31 @@ fn confirm_regions(
 /// alone, discards whichever overlapping window happens to sit first — which is
 /// not always the one that holds the shared content.
 ///
+/// Occurrences that merely continue one another are the same case seen from
+/// one step further along: a run whose every window matches the next tiles its
+/// block instead of overlapping inside it. Neither describes two sites, so
+/// neither survives — see [`maximal::adjoins`].
+///
 /// A class left with one occurrence is not a duplication and is dropped by the
 /// caller. `class` must be in occurrence order, which makes the survivor of an
 /// overlapping cluster its first member rather than an artefact of match order.
-fn distinct(class: Vec<(RegionOccurrence, RegionSide)>) -> Vec<(RegionOccurrence, RegionSide)> {
+fn distinct(
+    class: Vec<(RegionOccurrence, RegionSide)>,
+    dropped: &mut Dropped,
+) -> Vec<(RegionOccurrence, RegionSide)> {
     let mut kept: Vec<(RegionOccurrence, RegionSide)> = Vec::with_capacity(class.len());
     for entry in class {
         if kept.iter().any(|(_, other)| {
             other.file == entry.1.file && maximal::intersects(other.range, entry.1.range)
         }) {
+            dropped.overlapping += 1;
+            continue;
+        }
+        if kept
+            .iter()
+            .any(|(_, other)| maximal::adjoins(other, &entry.1))
+        {
+            dropped.adjoining += 1;
             continue;
         }
         kept.push(entry);
@@ -603,8 +636,7 @@ fn distinct(class: Vec<(RegionOccurrence, RegionSide)>) -> Vec<(RegionOccurrence
 /// confirm.
 fn grow_runs(
     confirmed: &mut Vec<Confirmed>,
-    singletons: &mut usize,
-    overlapping: &mut usize,
+    dropped: &mut Dropped,
     files: &[SyntaxIrFile],
     offsets: &[usize],
     variant: &BuildVariant,
@@ -614,10 +646,10 @@ fn grow_runs(
     if candidates.is_empty() {
         return 0;
     }
-    let (grown, dropped, overlapped) =
-        confirm_regions(&candidates, files, offsets, variant, literals);
-    *singletons += dropped;
-    *overlapping += overlapped;
+    let (grown, again) = confirm_regions(&candidates, files, offsets, variant, literals);
+    dropped.singletons += again.singletons;
+    dropped.overlapping += again.overlapping;
+    dropped.adjoining += again.adjoining;
     let before = confirmed.len();
     confirmed.extend(grown);
     confirmed.sort_by_key(|entry| entry.region.fingerprint);

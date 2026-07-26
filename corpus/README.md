@@ -77,6 +77,11 @@ A group left without a verdict fails the harness rather than defaulting either
 way. When the detector starts reporting something new about labelled code, that
 is a verdict waiting to be made.
 
+A verdict whose group the detector no longer reports is kept, not deleted. It
+is scored against nothing — a suppressed or absent group is not a finding
+anyone was shown — but it is the record of why that group should stay away, and
+it is what notices if the group comes back.
+
 A case whose `snapshot/` has not been materialized is reported as unscored, not
 scored as perfect — so a machine without the sources gets no precision figure
 rather than a flattering one.

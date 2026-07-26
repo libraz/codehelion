@@ -72,7 +72,7 @@ const CORPORA: &[Expected] = &[
     Expected {
         name: "lz4",
         confirmed: 17,
-        refuted: 28,
+        refuted: 24,
     },
 ];
 
