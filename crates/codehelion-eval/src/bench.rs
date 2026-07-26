@@ -6,8 +6,9 @@
 //! - [`generate_corpus`] writes a deterministic multi-language source tree
 //!   of a requested size, structurally varied so it does not collapse into
 //!   one clone class, with a controlled fraction of injected clones;
-//! - [`measure_scan`] runs the real `codehelion` binary cold over a corpus
-//!   and records wall time plus peak resident set size;
+//! - [`measure_scan`] runs the real `codehelion` binary over a corpus, with
+//!   or without a previous scan of it on record, and takes wall time plus
+//!   peak resident set size;
 //! - [`measure_store_insert`] times one snapshot insert of synthetic rows,
 //!   isolating the `SQLite` write cost from the rest of the pipeline.
 //!
@@ -393,7 +394,20 @@ fn pick<'a, T>(rng: &mut Rng, items: &'a [T]) -> &'a T {
     &items[usize::try_from(rng.below(items.len() as u64)).unwrap_or(0)]
 }
 
-/// One cold scan of a corpus by the real binary.
+/// What a measured scan knows about the tree before it starts.
+///
+/// The distinction is the audit database, not the file system cache: a warm
+/// scan is one that has a previous scan of the same tree to compare against,
+/// which is the state a periodic audit is almost always in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanStart {
+    /// No previous scan: the database is removed first.
+    Cold,
+    /// The database a previous scan of the same tree left behind.
+    Warm,
+}
+
+/// One scan of a corpus by the real binary.
 #[derive(Debug)]
 pub struct ScanMeasurement {
     /// Wall-clock duration of the whole scan process.
@@ -404,8 +418,8 @@ pub struct ScanMeasurement {
     pub summary: String,
 }
 
-/// Run `binary scan corpus` once, cold (fresh database), under the
-/// platform's `time` wrapper to capture peak memory.
+/// Run `binary scan corpus` once under the platform's `time` wrapper to
+/// capture peak memory, either cold or warm.
 ///
 /// The scan runs verbose so the report carries the candidate pipeline's
 /// stage counts: at this size the question is not only how long a mode takes
@@ -420,12 +434,10 @@ pub fn measure_scan(
     mode: &str,
     jobs: Option<usize>,
     work_dir: &Path,
+    start_state: ScanStart,
 ) -> Result<ScanMeasurement> {
-    let db = work_dir.join("audit.db");
+    let db = prepare_database(work_dir, start_state)?;
     let report = work_dir.join("report.txt");
-    if db.exists() {
-        std::fs::remove_file(&db).with_context(|| format!("removing {}", db.display()))?;
-    }
 
     let mut command = time_wrapped_command(binary);
     command
@@ -462,12 +474,27 @@ pub fn measure_scan(
     })
 }
 
-/// The size lines of a text report, every note it carries, and the whole
-/// candidate-pipeline block.
+/// The audit database to scan into, in the state the requested start calls
+/// for: absent for a cold scan, left as it stands for a warm one.
+///
+/// A warm scan does not require the file to exist — the first scan of a tree
+/// creates it — so the only difference is whether an existing one survives.
+fn prepare_database(work_dir: &Path, start_state: ScanStart) -> Result<PathBuf> {
+    let db = work_dir.join("audit.db");
+    if start_state == ScanStart::Cold && db.exists() {
+        std::fs::remove_file(&db).with_context(|| format!("removing {}", db.display()))?;
+    }
+    Ok(db)
+}
+
+/// The size lines of a text report, what it says moved since the previous
+/// scan, every note it carries, and the whole candidate-pipeline block.
 ///
 /// That is what a timing number needs beside it to mean anything, and the
 /// notes matter most: a run that exhausted its pair budget is fast partly
-/// because it stopped early, which the timing alone would hide.
+/// because it stopped early, which the timing alone would hide. The line
+/// naming the previous run is what distinguishes a warm scan from a cold one
+/// in the output itself, rather than on the harness's word for it.
 #[must_use]
 pub fn summarize(report: &str) -> String {
     let mut kept: Vec<&str> = Vec::new();
@@ -483,6 +510,7 @@ pub fn summarize(report: &str) -> String {
             || line.contains("files:")
             || line.contains("lines:")
             || line.contains("clone groups:")
+            || line.contains("since run ")
             || line.trim_start().starts_with("note:")
         {
             kept.push(line);
@@ -758,6 +786,35 @@ mod tests {
         // The block ends where it ends: findings are not a size measurement.
         assert!(!summary.contains("top groups"));
         assert!(!summary.contains("root:"));
+    }
+
+    #[test]
+    fn a_warm_scan_keeps_the_history_a_cold_scan_throws_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = prepare_database(dir.path(), ScanStart::Cold).unwrap();
+        std::fs::write(&db, b"recorded").unwrap();
+
+        assert_eq!(prepare_database(dir.path(), ScanStart::Warm).unwrap(), db);
+        assert!(db.exists(), "a warm scan scans into what is already there");
+
+        prepare_database(dir.path(), ScanStart::Cold).unwrap();
+        assert!(
+            !db.exists(),
+            "a cold scan starts with no history of the tree"
+        );
+    }
+
+    #[test]
+    fn the_summary_says_what_the_warm_scan_recognised() {
+        let report = "codehelion scan (fast mode)\n  \
+             files: 3 analysed (rust 0, c 3, cpp 0)\n  \
+             lines: 4926; tokens: 20013; lexer diagnostics: 0\n  \
+             since run 1: 3 unchanged, 0 modified, 0 added, 0 removed\n  \
+             clone groups: 2 (type-1 1, type-2 1)\n";
+        let summary = summarize(report);
+        // Without this line a warm number is indistinguishable from a cold
+        // one that happened to run fast.
+        assert!(summary.contains("since run 1: 3 unchanged"));
     }
 
     #[test]

@@ -10,7 +10,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 
 use codehelion_eval::bench::{
-    CorpusSpec, default_binary, generate_corpus, measure_scan, measure_store_insert,
+    CorpusSpec, ScanStart, default_binary, generate_corpus, measure_scan, measure_store_insert,
 };
 
 /// Benchmark harness for the scan paths.
@@ -39,7 +39,7 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         clone_percent: u8,
     },
-    /// Measure cold scans of a corpus with the real binary.
+    /// Measure cold and warm scans of a corpus with the real binary.
     Scan {
         /// Corpus directory to scan.
         #[arg(long)]
@@ -50,7 +50,7 @@ enum Command {
         /// Scan mode to measure.
         #[arg(long, default_value = "fast")]
         mode: String,
-        /// Number of cold runs.
+        /// Number of cold/warm run pairs.
         #[arg(long, default_value_t = 3)]
         runs: u32,
         /// Worker threads to pass through to the scan.
@@ -111,17 +111,32 @@ fn main() -> Result<()> {
             );
             let work = tempfile::tempdir().context("creating a work directory")?;
             println!("scan mode: {mode}");
-            println!("| run | wall_s | max_rss_mib |");
-            println!("| --- | ------ | ----------- |");
-            let mut last_summary = String::new();
-            for run in 1..=runs {
-                let measurement = measure_scan(&binary, &corpus, &mode, jobs, work.path())?;
-                let rss = measurement.max_rss_bytes.map_or_else(
+            // Each run is a pair: one scan with no history of the tree, then
+            // one with the first scan's database in place. What separates
+            // them is what the second knows, which is the whole question a
+            // warm number answers.
+            println!("| run | cold_s | warm_s | cold_rss_mib | warm_rss_mib |");
+            println!("| --- | ------ | ------ | ------------ | ------------ |");
+            let mib = |bytes: Option<u64>| {
+                bytes.map_or_else(
                     || "n/a".to_string(),
                     |bytes| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0)),
+                )
+            };
+            let mut last_summary = String::new();
+            for run in 1..=runs {
+                let cold =
+                    measure_scan(&binary, &corpus, &mode, jobs, work.path(), ScanStart::Cold)?;
+                let warm =
+                    measure_scan(&binary, &corpus, &mode, jobs, work.path(), ScanStart::Warm)?;
+                println!(
+                    "| {run} | {:.2} | {:.2} | {} | {} |",
+                    cold.wall.as_secs_f64(),
+                    warm.wall.as_secs_f64(),
+                    mib(cold.max_rss_bytes),
+                    mib(warm.max_rss_bytes),
                 );
-                println!("| {run} | {:.2} | {rss} |", measurement.wall.as_secs_f64());
-                last_summary = measurement.summary;
+                last_summary = warm.summary;
             }
             if !last_summary.is_empty() {
                 println!("\nreport summary:\n{last_summary}");
