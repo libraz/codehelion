@@ -39,11 +39,11 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
 
 /// Version 1: the full entity set.
 const V1: &str = "
@@ -403,6 +403,37 @@ ALTER TABLE clone_group ADD COLUMN test_code INTEGER NOT NULL DEFAULT 0
 const V9: &str = "
 ALTER TABLE clone_group ADD COLUMN split_pair INTEGER NOT NULL DEFAULT 0
     CHECK (split_pair IN (0, 1));
+";
+
+/// Version 10: a fourth boilerplate shape.
+///
+/// The vocabulary is a `CHECK` rather than a lookup table, so widening it means
+/// rebuilding the table `SQLite` will not alter in place. Every existing value
+/// stays valid — the list only grows — so the rows carry over unchanged.
+const V10: &str = "
+CREATE TABLE clone_group_new (
+    id                   INTEGER PRIMARY KEY,
+    scan_run_id          INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
+    group_fingerprint_id INTEGER NOT NULL REFERENCES fingerprint (id),
+    clone_type           TEXT NOT NULL CHECK (clone_type IN ('type-1', 'type-2', 'type-3', 'restricted-semantic')),
+    member_count         INTEGER NOT NULL,
+    score                REAL NOT NULL,
+    entropy_bits         REAL NOT NULL,
+    suppress_reason      TEXT CHECK (suppress_reason IN ('low-entropy', 'high-frequency')),
+    boilerplate          TEXT CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition', 'guarded-dispatch')),
+    member_scope         TEXT NOT NULL DEFAULT 'unit' CHECK (member_scope IN ('unit', 'fragment')),
+    test_code            INTEGER NOT NULL DEFAULT 0 CHECK (test_code IN (0, 1)),
+    split_pair           INTEGER NOT NULL DEFAULT 0 CHECK (split_pair IN (0, 1))
+) STRICT;
+INSERT INTO clone_group_new
+    SELECT id, scan_run_id, group_fingerprint_id, clone_type, member_count,
+           score, entropy_bits, suppress_reason, boilerplate, member_scope,
+           test_code, split_pair
+    FROM clone_group;
+DROP TABLE clone_group;
+ALTER TABLE clone_group_new RENAME TO clone_group;
+CREATE INDEX idx_clone_group_run ON clone_group (scan_run_id);
+CREATE INDEX idx_clone_group_fp ON clone_group (group_fingerprint_id);
 ";
 
 /// Bring `conn` to the current schema version, applying any pending
