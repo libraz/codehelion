@@ -255,9 +255,9 @@ fn the_two_arms_of_one_conditional_are_not_a_clone_pair() {
     );
 }
 
-/// The same portable pair, in a file the parser cannot follow: the trailing
-/// item is truncated, so error recovery decides where the conditional ends.
-const PORTABLE_BROKEN: &str = "\
+/// The same portable pair, followed by an item the parser cannot follow: the
+/// trailing function is truncated, well after the conditional has closed.
+const BROKEN_AFTERWARDS: &str = "\
 #ifdef _WIN32
 int wait_ticks(int ms) {
     int ticks = ms * 10;
@@ -277,12 +277,54 @@ int wait_ticks(int ms) {
 int broken(int v) { return v +
 ";
 
+/// The same portable pair with the unparsable item moved inside the first arm,
+/// so error recovery is what decides where that arm ends.
+const BROKEN_INSIDE: &str = "\
+#ifdef _WIN32
+int wait_ticks(int ms) {
+    int ticks = ms * 10;
+    int capped = ticks > 1000 ? 1000 : ticks;
+    int slept = capped;
+    return slept;
+}
+int broken(int v) { return v + }
+#else
+int wait_ticks(int ms) {
+    int ticks = ms * 10;
+    int capped = ticks > 1000 ? 1000 : ticks;
+    int slept = capped;
+    return slept;
+}
+#endif
+";
+
 #[test]
-fn a_file_the_parser_stumbled_in_excludes_nothing() {
-    // Arms are read off the tree, so a tree the parser guessed at has no arms
-    // worth reading. Dropping a pair hides a finding, so the tool would rather
-    // report the platform pair than invent an exclusion from a broken parse.
-    let files = vec![CStructuralFrontend.parse(PORTABLE_BROKEN)];
+fn a_stumble_elsewhere_in_the_file_leaves_the_conditional_readable() {
+    // Error recovery is not local to what broke: one truncated item puts an
+    // error region in the file, and a header whose include guard encloses
+    // everything gets one spanning all of it. Neither says anything about a
+    // conditional the parser did read, and refusing that conditional would
+    // report two platform variants as a clone.
+    let files = vec![CStructuralFrontend.parse(BROKEN_AFTERWARDS)];
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let report = structural::analyze(&files, &variant, &StructuralConfig::default());
+
+    assert!(
+        !files[0].error_ranges.is_empty(),
+        "the fixture is meant to be a file the parser struggled with"
+    );
+    assert!(
+        report.stats.alternative_pairs > 0,
+        "the conditional itself parsed, so its arms still rule each other out"
+    );
+}
+
+#[test]
+fn a_stumble_inside_the_conditional_excludes_nothing() {
+    // Arms are read off the tree, so an arm whose end the parser guessed at is
+    // not worth reading. Dropping a pair hides a finding, so the tool would
+    // rather report the platform pair than invent an exclusion.
+    let files = vec![CStructuralFrontend.parse(BROKEN_INSIDE)];
     let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let report = structural::analyze(&files, &variant, &StructuralConfig::default());
 
@@ -292,6 +334,24 @@ fn a_file_the_parser_stumbled_in_excludes_nothing() {
     );
     assert_eq!(
         report.stats.alternative_pairs, 0,
-        "no exclusion is claimed from a tree the parser guessed at"
+        "no exclusion is claimed from an arm the parser guessed at"
+    );
+    // And the pair really is reported: a missed exclusion is meant to cost a
+    // noisy finding, not to be lost somewhere else and look like a clean run.
+    let unit_at_line = |line: u32| {
+        report
+            .units
+            .iter()
+            .position(|unit| unit.start_line == line)
+            .unwrap_or_else(|| panic!("no unit starts at line {line}"))
+    };
+    let (guarded, otherwise) = (unit_at_line(2), unit_at_line(10));
+    assert!(
+        report
+            .groups
+            .groups
+            .iter()
+            .any(|group| group.members.contains(&guarded) && group.members.contains(&otherwise)),
+        "the two arms are reported as the clone they measure as"
     );
 }

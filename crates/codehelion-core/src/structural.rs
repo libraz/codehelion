@@ -860,7 +860,6 @@ fn flatten_units(files: &[SyntaxIrFile], variant: &BuildVariant) -> (Vec<Unit>, 
             variant,
             local: 0,
             next_conditional: &mut next_conditional,
-            trust_arms: file.error_ranges.is_empty(),
             units: &mut units,
         };
         for root in &file.roots {
@@ -886,9 +885,6 @@ struct UnitWalk<'a> {
     local: usize,
     /// Hands out conditional identifiers; shared across every file in a run.
     next_conditional: &'a mut u32,
-    /// Whether this file parsed cleanly enough for its conditional nesting to
-    /// mean anything.
-    trust_arms: bool,
     units: &'a mut Vec<Unit>,
 }
 
@@ -902,13 +898,10 @@ impl UnitWalk<'_> {
         let tokens = &self.source.tokens[start..end];
         let test_code = test_code || test_code::is_marked(self.source.language, tokens);
         // Only a conditional's own node allocates a path; everything else
-        // keeps the one it was handed. A file the parser stumbled in gets no
-        // path at all: see [`crate::conditional`] for why an invented arm
-        // costs more than a missed one.
-        let descended = self
-            .trust_arms
-            .then(|| arms.descend(&node.shape, self.next_conditional))
-            .flatten();
+        // keeps the one it was handed. A conditional the parser stumbled
+        // inside is entered but believed nothing of: see [`crate::conditional`]
+        // for why an invented arm costs more than a missed one.
+        let descended = arms.descend(node, self.next_conditional);
         let arms = descended.as_ref().unwrap_or(arms);
 
         if let Some(kind) = unit_kind(&node.shape) {
