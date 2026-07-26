@@ -21,6 +21,7 @@ pub mod ir;
 pub mod lineage;
 pub mod maximal;
 pub mod near_match;
+pub mod priority;
 pub mod stable_id;
 pub mod structural;
 pub mod test_code;
