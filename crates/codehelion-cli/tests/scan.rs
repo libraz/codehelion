@@ -558,6 +558,13 @@ fn json_reports_are_deterministic_across_reruns() {
         for key in ["started_at", "finished_at", "run_id"] {
             run.insert(key.to_string(), serde_json::Value::Null);
         }
+        // The second run has a first run to compare itself with; what it
+        // found in the sources is what has to agree, not what it knows about
+        // its own history.
+        value["summary"]
+            .as_object_mut()
+            .unwrap()
+            .insert("changes".to_string(), serde_json::Value::Null);
         documents.push(value);
     }
     assert_eq!(documents[0], documents[1]);
@@ -709,4 +716,63 @@ fn doctor_hints_until_the_database_is_gitignored() {
         .assert()
         .success()
         .stdout(predicate::str::contains("hint:").not());
+}
+
+#[test]
+fn a_scan_says_what_moved_since_the_previous_scan_of_the_tree() {
+    let dir = fixture();
+    let root = dir.path();
+
+    // Nothing to compare a first scan with, and saying "5 added" would read
+    // as a tree written from scratch rather than one never scanned before.
+    let first = scan_json(root);
+    assert!(
+        first["summary"].get("changes").is_none(),
+        "a first scan has no run to measure itself against"
+    );
+    let first_run = first["run"]["run_id"].as_i64().expect("a recorded run");
+
+    // One file edited, one added, one deleted.
+    std::fs::write(root.join("src/a.rs"), format!("{CHECKSUM_RS}\n// tail\n")).unwrap();
+    std::fs::write(root.join("src/d.rs"), RENAMED_RS).unwrap();
+    std::fs::remove_file(root.join("src/two.c")).unwrap();
+
+    let second = scan_json(root);
+    let changes = &second["summary"]["changes"];
+    assert_eq!(changes["since_run_id"], first_run);
+    assert_eq!(changes["modified"], 1);
+    assert_eq!(changes["added"], 1);
+    assert_eq!(changes["removed"], 1);
+    assert_eq!(changes["unchanged"], 3, "the files nobody touched");
+
+    // Scanning again without touching anything is the same tree, and says so.
+    let third = scan_json(root);
+    let changes = &third["summary"]["changes"];
+    assert_eq!(changes["modified"], 0);
+    assert_eq!(changes["added"], 0);
+    assert_eq!(changes["removed"], 0);
+    assert_eq!(changes["unchanged"], 5);
+}
+
+#[test]
+fn a_scan_under_different_settings_has_nothing_to_compare_with() {
+    let dir = fixture();
+    let root = dir.path();
+    scan_json(root);
+
+    // A file whose bytes did not move still has to be re-read when the rules
+    // for reading it did, so a run under another variant is not a run this
+    // one can measure itself against.
+    let output = cmd()
+        .current_dir(root)
+        .args(["scan", ".", "--mode", "structural", "--format", "json"])
+        .output()
+        .expect("run scan");
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+    assert!(
+        value["summary"].get("changes").is_none(),
+        "the Fast run is not a baseline for the Structural one"
+    );
 }

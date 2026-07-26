@@ -6,10 +6,19 @@
 //! members by their anchor then row id — the same database always yields the
 //! same output.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
 use codehelion_core::features::FeatureKind;
 use rusqlite::{OptionalExtension, params};
 
 use crate::{Store, StoreError};
+
+/// A recorded run and the tree it read, by path relative to the scan root.
+///
+/// The hashes are hex as stored; turning them back into content fingerprints
+/// is the caller's, because this layer does not depend on how they were made.
+pub type PreviousTree = (i64, BTreeMap<PathBuf, String>);
 
 /// Summary of one recorded scan run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +249,64 @@ impl Store {
             )
             .optional()
             .map_err(StoreError::from)
+    }
+
+    /// The most recent completed run over `root_path` under `variant`, and
+    /// the tree it read.
+    ///
+    /// A run is comparable with this one only when it looked at the same tree
+    /// under the same build variant: a file whose bytes did not move still
+    /// has to be re-analysed when the rules for analysing it did. Both are
+    /// therefore part of the lookup rather than checks made afterwards.
+    ///
+    /// Returns `None` when no such run exists, which is the ordinary state of
+    /// a first scan and not an error. A run that recorded no files — every
+    /// run written before the tree was recorded at all — answers the same
+    /// way, because "read nothing" and "did not say" are not distinguishable
+    /// after the fact and the safe reading is the second.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn previous_tree(
+        &self,
+        root_path: &str,
+        variant_fingerprint: &str,
+    ) -> Result<Option<PreviousTree>, StoreError> {
+        let run: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT r.id
+                 FROM scan_run r
+                 JOIN build_variant v ON v.id = r.build_variant_id
+                 WHERE r.root_path = ?1
+                   AND v.variant_fingerprint = ?2
+                   AND r.status = 'completed'
+                 ORDER BY r.started_at DESC, r.id DESC
+                 LIMIT 1",
+                params![root_path, variant_fingerprint],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(run_id) = run else {
+            return Ok(None);
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT relative_path, content_hash FROM scanned_file
+             WHERE scan_run_id = ?1
+             ORDER BY relative_path",
+        )?;
+        let mut tree = BTreeMap::new();
+        for row in stmt.query_map(params![run_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (path, hash) = row?;
+            tree.insert(PathBuf::from(path), hash);
+        }
+        if tree.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some((run_id, tree)))
     }
 
     /// Every clone group of `run_id`, deterministically ordered by

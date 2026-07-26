@@ -17,7 +17,8 @@ use codehelion_core::stable_id::{
 };
 use codehelion_core::verify::Confidence;
 use codehelion_store::snapshot::{
-    FeatureRow, GroupRow, MemberRow, SimilarityBreakdownRow, Snapshot, SuppressionRuleRow, UnitRow,
+    FeatureRow, FileRow, GroupRow, MemberRow, SimilarityBreakdownRow, Snapshot, SuppressionRuleRow,
+    UnitRow,
 };
 use codehelion_store::{Store, StoreError};
 
@@ -112,6 +113,20 @@ fn sample_snapshot<'a>(
             ],
         }],
         features: Vec::new(),
+        files: vec![
+            FileRow {
+                relative_path: "src/a.rs".to_string(),
+                content_hash: "aa".repeat(32),
+                language: Language::Rust,
+                byte_len: 120,
+            },
+            FileRow {
+                relative_path: "src/b.rs".to_string(),
+                content_hash: "bb".repeat(32),
+                language: Language::Rust,
+                byte_len: 240,
+            },
+        ],
     }
 }
 
@@ -661,8 +676,9 @@ fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
     // which is what migrating forward has to conclude.
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
-        // Every column added at or after that version has to go, or migrating
-        // forward would try to add one twice.
+        // Every column and table added at or after that version has to go, or
+        // migrating forward would try to add one twice.
+        conn.execute("DROP TABLE scanned_file", []).unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
             .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN test_code", [])
@@ -712,6 +728,7 @@ fn a_group_recorded_before_the_split_pair_column_reads_as_a_whole_group() {
     // leave the question open.
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("DROP TABLE scanned_file", []).unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
             .unwrap();
         conn.execute("UPDATE schema_meta SET version = 8", [])
@@ -772,6 +789,7 @@ fn a_group_recorded_before_the_test_code_column_is_not_claimed_to_be_test_code()
     // claim either way. Migrating forward must not invent one.
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("DROP TABLE scanned_file", []).unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
             .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN test_code", [])

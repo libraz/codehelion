@@ -629,6 +629,7 @@ pub fn measure_store_insert(
         units: unit_rows,
         groups: group_rows,
         features: Vec::new(),
+        files: Vec::new(),
     };
 
     let db = work_dir.join("store-bench.db");

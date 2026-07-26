@@ -120,6 +120,18 @@
             "skipped": { "type": "integer" }
           }
         },
+        "changes": {
+          "type": "object",
+          "description": "What moved since the previous scan of this tree under these settings. Absent when there is no run to compare against, which means 'not comparable' rather than 'nothing changed'.",
+          "required": ["since_run_id", "unchanged", "modified", "added", "removed"],
+          "properties": {
+            "since_run_id": { "type": "integer" },
+            "unchanged": { "type": "integer" },
+            "modified": { "type": "integer" },
+            "added": { "type": "integer" },
+            "removed": { "type": "integer" }
+          }
+        },
         "groups": {
           "type": "object",
           "required": ["total", "type_1", "type_2"],

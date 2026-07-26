@@ -119,6 +119,10 @@ pub struct Summary {
     pub unparsed: Option<UnparsedCounts>,
     /// Files the scan dropped, by cause.
     pub excluded: ExcludedCounts,
+    /// What moved since the previous scan of this tree, when there is one to
+    /// compare against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changes: Option<TreeChanges>,
     /// Clone-group counts by type.
     pub groups: GroupCounts,
     /// Suppressed-group counts by mechanism.
@@ -240,6 +244,26 @@ pub struct FileCounts {
     pub c: u64,
     /// C++ files.
     pub cpp: u64,
+}
+
+/// What moved in the tree since the previous scan of it.
+///
+/// Absent when there is no run to compare against: the first scan of a tree,
+/// a scan under settings nothing has been scanned under before, or a database
+/// written before runs recorded the files they read. Absent means "not
+/// comparable", never "nothing changed".
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct TreeChanges {
+    /// Row id of the run this is measured against.
+    pub since_run_id: i64,
+    /// Files present in both scans, hashing the same.
+    pub unchanged: u64,
+    /// Files present in both scans, hashing differently.
+    pub modified: u64,
+    /// Files this scan read and the previous one did not.
+    pub added: u64,
+    /// Files the previous scan read and this one did not.
+    pub removed: u64,
 }
 
 /// Files the scan dropped, by cause. Nothing is omitted silently.
@@ -633,14 +657,11 @@ impl Report {
         Ok(())
     }
 
-    fn render_summary(&self, palette: &Palette, out: &mut impl Write) -> io::Result<()> {
+    /// What the scan read: how much, what was left out, and what moved since
+    /// the last time. Everything here is about the input, before a single
+    /// group is mentioned.
+    fn render_inputs(&self, out: &mut impl Write) -> io::Result<()> {
         let summary = &self.summary;
-        writeln!(
-            out,
-            "{}",
-            palette.bold(&format!("codehelion scan ({} mode)", self.run.mode))
-        )?;
-        writeln!(out, "  root: {}", self.run.root)?;
         writeln!(
             out,
             "  files: {} analysed (rust {}, c {}, cpp {})",
@@ -664,6 +685,32 @@ impl Report {
             "  lines: {}; tokens: {}; lexer diagnostics: {}",
             summary.lines, summary.tokens, summary.lexer_diagnostics,
         )?;
+        // Said only when there is a run to say it against. A first scan
+        // reports nothing here rather than calling every file new, which
+        // would read as a tree that had just been written from scratch.
+        if let Some(changes) = &summary.changes {
+            writeln!(
+                out,
+                "  since run {}: {} unchanged, {} modified, {} added, {} removed",
+                changes.since_run_id,
+                changes.unchanged,
+                changes.modified,
+                changes.added,
+                changes.removed,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn render_summary(&self, palette: &Palette, out: &mut impl Write) -> io::Result<()> {
+        let summary = &self.summary;
+        writeln!(
+            out,
+            "{}",
+            palette.bold(&format!("codehelion scan ({} mode)", self.run.mode))
+        )?;
+        writeln!(out, "  root: {}", self.run.root)?;
+        self.render_inputs(out)?;
         // A recovering parser reports no failure, so the share it could not
         // follow is the only thing separating "little duplication here" from
         // "most of this was never read".
@@ -1022,6 +1069,7 @@ pub(super) mod tests {
                     by_glob: 0,
                     skipped: 0,
                 },
+                changes: None,
                 groups: GroupCounts {
                     total: 2,
                     type_1: 2,

@@ -171,11 +171,15 @@ fn reruns_produce_the_same_log() {
     let mut logs = Vec::new();
     for _ in 0..2 {
         let mut log = scan_sarif(dir.path(), "structural");
-        // Everything except when the scan ran and which snapshot it wrote.
+        // Everything except when the scan ran, which snapshot it wrote, and
+        // what it found to compare itself with. The second run has a first
+        // run behind it and says so; that is the comparison working, not the
+        // results moving.
         let run = &mut log["runs"][0];
         run["invocations"][0]["startTimeUtc"] = Value::Null;
         run["invocations"][0]["endTimeUtc"] = Value::Null;
         run["properties"]["run_id"] = Value::Null;
+        run["properties"]["summary"]["changes"] = Value::Null;
         logs.push(log);
     }
     assert_eq!(logs[0], logs[1], "reruns agree token for token");

@@ -39,11 +39,11 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
 
 /// Version 1: the full entity set.
 const V1: &str = "
@@ -434,6 +434,27 @@ DROP TABLE clone_group;
 ALTER TABLE clone_group_new RENAME TO clone_group;
 CREATE INDEX idx_clone_group_run ON clone_group (scan_run_id);
 CREATE INDEX idx_clone_group_fp ON clone_group (group_fingerprint_id);
+";
+
+/// Version 11: the files a run read, with the hash of what it read.
+///
+/// A run's findings say what was found, not what was looked at, and the
+/// difference is what a later run needs: a file that vanished between two
+/// scans leaves no trace in either set of findings. One row per discovered
+/// file makes the tree a run saw recoverable, so the next scan of it can say
+/// what moved and, later, reuse what did not.
+///
+/// The hash is of bytes and nothing else — no timestamp, no size shortcut — so
+/// the comparison never depends on a filesystem's bookkeeping.
+const V11: &str = "
+CREATE TABLE scanned_file (
+    scan_run_id   INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
+    relative_path TEXT NOT NULL,
+    content_hash  TEXT NOT NULL,
+    language      TEXT NOT NULL CHECK (language IN ('rust', 'c', 'cpp')),
+    byte_len      INTEGER NOT NULL,
+    PRIMARY KEY (scan_run_id, relative_path)
+) STRICT;
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

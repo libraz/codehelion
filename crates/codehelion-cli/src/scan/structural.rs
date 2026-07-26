@@ -36,7 +36,9 @@ use codehelion_core::structural::{
 };
 use codehelion_core::test_code::TEST_CODE_VERSION;
 use codehelion_core::verify::{SimilarityBreakdown, WEIGHT_VERSION};
-use codehelion_store::snapshot::{GroupRow, MemberRow, SimilarityBreakdownRow, Snapshot, UnitRow};
+use codehelion_store::snapshot::{
+    FileRow, GroupRow, MemberRow, SimilarityBreakdownRow, Snapshot, UnitRow,
+};
 
 use super::{
     FileOutcome, as_u64, database_path, discover_sources, effective_jobs, filter_globs,
@@ -119,6 +121,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let suppressed = evaluate_suppression(&cfg, &mut rules, &analysis, &regions);
 
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
+    let changes = crate::scan::tree_changes(&db_path, &root, &variant, &sources)?;
     let finished_at = rfc3339_now();
     let inputs = ReportInputs {
         root: &root,
@@ -141,8 +144,9 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         glob_excluded,
         unreadable,
         timed_out,
+        changes,
     };
-    let run_id = record(&cfg, &inputs)?;
+    let run_id = record(&cfg, &inputs, crate::scan::file_rows(&sources))?;
     let model = build_report(&inputs, run_id, &discovered);
     write_report(args, out, &model)?;
 
@@ -579,6 +583,8 @@ struct ReportInputs<'a> {
     glob_excluded: usize,
     unreadable: u64,
     timed_out: u64,
+    /// What moved since the previous scan of this tree, when comparable.
+    changes: Option<report::TreeChanges>,
 }
 
 impl ReportInputs<'_> {
@@ -874,6 +880,7 @@ fn build_report(inputs: &ReportInputs<'_>, run_id: i64, discovered: &DiscoveryRe
                 by_glob: as_u64(inputs.glob_excluded),
                 skipped: discovered.skipped.total() + inputs.unreadable + inputs.timed_out,
             },
+            changes: inputs.changes,
             groups: report::GroupCounts {
                 total: as_u64(groups.len()),
                 type_1: count_class(CloneClass::Type1),
@@ -1178,7 +1185,7 @@ fn detector_versions() -> Vec<(String, String)> {
 }
 
 /// Assemble and persist the snapshot; returns the recorded run id.
-fn record(cfg: &Config, inputs: &ReportInputs<'_>) -> Result<i64> {
+fn record(cfg: &Config, inputs: &ReportInputs<'_>, files: Vec<FileRow>) -> Result<i64> {
     let (units, groups) = snapshot_rows(inputs);
     let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
     let detector_versions = detector_versions();
@@ -1192,6 +1199,7 @@ fn record(cfg: &Config, inputs: &ReportInputs<'_>) -> Result<i64> {
         variant: inputs.variant,
         detector_versions: &detector_versions,
         suppressions: inputs.rules.rows.clone(),
+        files,
         units,
         groups,
         features: Vec::new(),

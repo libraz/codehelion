@@ -27,9 +27,10 @@ use codehelion_core::engine::{
     self, CloneGroup, EngineConfig, EngineReport, InputFile, LiteralNorm,
 };
 use codehelion_core::frontend::{Frontend, Token, Unit};
+use codehelion_core::incremental;
 use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION, FileContext, GroupIds};
 use codehelion_store::Store;
-use codehelion_store::snapshot::{GroupRow, MemberRow, Snapshot, UnitRow};
+use codehelion_store::snapshot::{FileRow, GroupRow, MemberRow, Snapshot, UnitRow};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::Outcome;
@@ -124,6 +125,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         .collect();
 
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
+    let changes = tree_changes(&db_path, &root, &discovered.build_variant, &sources)?;
     let finished_at = rfc3339_now();
     let run_id = record(
         &root,
@@ -138,6 +140,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         &ids,
         &rules,
         &group_suppressed,
+        file_rows(&sources),
     )?;
 
     let model = build_report(&BuildInputs {
@@ -155,6 +158,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         ids: &ids,
         rules: &rules,
         group_suppressed: &group_suppressed,
+        changes,
     });
     write_report(args, out, &model)?;
 
@@ -186,6 +190,7 @@ struct BuildInputs<'a> {
     ids: &'a [GroupIds],
     rules: &'a suppress::Rules,
     group_suppressed: &'a [Option<usize>],
+    changes: Option<report::TreeChanges>,
 }
 
 /// The configured suppression rules that hid nothing this run, read off the
@@ -315,6 +320,7 @@ fn build_report(inputs: &BuildInputs<'_>) -> Report {
                 by_glob: as_u64(inputs.glob_excluded),
                 skipped: inputs.discovered.skipped.total() + inputs.unreadable + inputs.timed_out,
             },
+            changes: inputs.changes,
             groups: report::GroupCounts {
                 total: as_u64(inputs.report.groups.len()),
                 type_1: count_groups(&|i| inputs.report.groups[i].clone_type == CloneClass::Type1),
@@ -703,6 +709,61 @@ pub(crate) fn database_path(root: &Path, flag: Option<&Path>, cfg: &Config) -> P
     )
 }
 
+/// What moved since the previous scan of this tree, if there was one.
+///
+/// Read before the new run is recorded: afterwards the new run is the latest
+/// one, and the tree would be compared against itself.
+///
+/// # Errors
+///
+/// Returns an error when the audit database cannot be opened or read. That is
+/// not treated as "no previous run": a scan that cannot reach its database is
+/// about to fail recording anyway, and saying so here names the cause.
+pub(crate) fn tree_changes(
+    db_path: &Path,
+    root: &Path,
+    variant: &BuildVariant,
+    sources: &[SourceUnit],
+) -> Result<Option<report::TreeChanges>> {
+    let store = open_store(db_path)?;
+    let root_path = root.to_string_lossy();
+    let Some((since_run_id, recorded)) = store
+        .previous_tree(&root_path, &variant.fingerprint())
+        .with_context(|| format!("reading the previous scan of {root_path}"))?
+    else {
+        return Ok(None);
+    };
+    let previous: incremental::PreviousFiles = recorded
+        .into_iter()
+        .map(|(path, hash)| (path, ContentHash::from_recorded(hash)))
+        .collect();
+    let changes = incremental::compare(&previous, sources);
+    Ok(Some(report::TreeChanges {
+        since_run_id,
+        unchanged: as_u64(changes.unchanged.len()),
+        modified: as_u64(changes.modified.len()),
+        added: as_u64(changes.added.len()),
+        removed: as_u64(changes.removed.len()),
+    }))
+}
+
+/// The tree a scan read, as rows to record beside its findings.
+///
+/// Every discovered file is here, including the ones that yielded no unit: a
+/// later scan compares trees, and a file missing from the record is one it
+/// would call newly added.
+pub(crate) fn file_rows(units: &[SourceUnit]) -> Vec<FileRow> {
+    units
+        .iter()
+        .map(|unit| FileRow {
+            relative_path: unit.relative_path.to_string_lossy().into_owned(),
+            content_hash: unit.content_hash.as_str().to_string(),
+            language: unit.language,
+            byte_len: unit.byte_len,
+        })
+        .collect()
+}
+
 /// Assemble and persist the snapshot; returns the recorded run id.
 #[allow(clippy::too_many_arguments)] // pipeline hand-off, one call site
 fn record(
@@ -718,6 +779,7 @@ fn record(
     ids: &[GroupIds],
     rules: &suppress::Rules,
     group_suppressed: &[Option<usize>],
+    files: Vec<FileRow>,
 ) -> Result<i64> {
     let (units, groups) = snapshot_rows(lexed, contexts, variant, report, ids, group_suppressed);
     let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
@@ -735,6 +797,7 @@ fn record(
         units,
         groups,
         features: Vec::new(),
+        files,
     };
     let mut store = open_store(db_path)?;
     Ok(store.record_snapshot(&snapshot)?)

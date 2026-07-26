@@ -290,6 +290,27 @@ pub struct Snapshot<'a> {
     /// Per-unit candidate-extraction features, referencing [`Self::units`] by
     /// index. Empty in Fast mode, which derives no structural features.
     pub features: Vec<FeatureRow>,
+    /// Every source file the scan read, whether or not anything was found in
+    /// it. A later scan of the same tree compares against this.
+    pub files: Vec<FileRow>,
+}
+
+/// One source file a scan read.
+///
+/// Recorded for every discovered file, including the ones that contributed no
+/// unit: what a run looked at is not derivable from what it found, and the
+/// difference is exactly what a later run has to know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRow {
+    /// Path relative to the scan root.
+    pub relative_path: String,
+    /// Hash of the bytes that were read, as lowercase hex.
+    pub content_hash: String,
+    /// The language the file was analysed as, which for a header is the one
+    /// the tree settled on rather than one the extension implies.
+    pub language: Language,
+    /// Size in bytes.
+    pub byte_len: u64,
 }
 
 impl Store {
@@ -356,7 +377,27 @@ fn write_snapshot(tx: &Transaction<'_>, snapshot: &Snapshot<'_>) -> Result<i64, 
         )?;
     }
     write_features(tx, snapshot, run_id, variant_id, &unit_row_ids)?;
+    write_files(tx, &snapshot.files, run_id)?;
     Ok(run_id)
+}
+
+/// Record the tree the run read, one row per file.
+fn write_files(tx: &Transaction<'_>, files: &[FileRow], run_id: i64) -> Result<(), StoreError> {
+    for file in files {
+        tx.execute(
+            "INSERT INTO scanned_file
+                 (scan_run_id, relative_path, content_hash, language, byte_len)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                run_id,
+                file.relative_path,
+                file.content_hash,
+                file.language.name(),
+                i64::try_from(file.byte_len).unwrap_or(i64::MAX),
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 /// Persist per-unit candidate-extraction features: the scalar `unit_feature`
