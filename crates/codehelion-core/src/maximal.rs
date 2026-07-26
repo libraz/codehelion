@@ -63,6 +63,15 @@ use crate::ir::ByteRange;
 /// Default minimum reportable region length, in statements: the shortest
 /// window length, so the floor never silently discards a run the seed layer
 /// could detect.
+///
+/// It is deliberately not raised past that. Length looks like the obvious way
+/// to shed lookalikes, but the labelled corpora say it does not sort them: a
+/// helper copied verbatim into two files is five lines, while a routine written
+/// once per concrete type is eighty tokens and still nothing anyone should
+/// merge. Calibrated on all but one project, a floor either sits low enough to
+/// remove nothing or high enough to take that project's clearest true copy.
+/// What the short lookalikes have in common is that their bodies follow from
+/// their signatures, and that is not a length.
 pub const DEFAULT_MIN_STATEMENTS: u32 = 4;
 
 /// Default largest source-length ratio between a seed's two sides.
