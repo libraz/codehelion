@@ -321,3 +321,94 @@ fn a_group_of_macro_runs_is_classified_as_boilerplate() {
         }
     }
 }
+
+/// A short routine whose whole body reappears at the head of a much longer
+/// one. The shared statements seed a candidate, but the two functions are
+/// nothing like each other as units.
+const SHORT_HEAD: &str = "\
+fn short_head(seed: u32) -> u32 {
+    let mut acc = seed;
+    let mut count = 0u32;
+    acc = acc.wrapping_add(7);
+    count = count.wrapping_add(3);
+    acc = acc.wrapping_mul(5);
+    count = count.wrapping_mul(2);
+    return acc + count;
+}
+";
+
+const LONG_BODY: &str = "\
+fn long_body(seed: u32, data: &[u32]) -> u32 {
+    let mut acc = seed;
+    let mut count = 0u32;
+    acc = acc.wrapping_add(7);
+    count = count.wrapping_add(3);
+    acc = acc.wrapping_mul(5);
+    count = count.wrapping_mul(2);
+    for value in data {
+        if *value > 10 {
+            acc = acc.wrapping_add(*value);
+        } else if *value > 5 {
+            acc = acc.wrapping_sub(1);
+        } else {
+            acc = acc ^ *value;
+        }
+        count += 1;
+    }
+    while count > 0 {
+        count -= 1;
+        acc = acc.rotate_left(1);
+    }
+    let mut index = 0u32;
+    loop {
+        index += 1;
+        if index > 4 {
+            break;
+        }
+        acc = acc.wrapping_add(index);
+    }
+    for step in 0..8u32 {
+        if step % 2 == 0 {
+            acc = acc.wrapping_sub(step);
+        } else {
+            count = count.wrapping_add(step);
+        }
+    }
+    return acc + count + index;
+}
+";
+
+#[test]
+fn a_pair_too_far_apart_in_shape_never_reaches_verification() {
+    let files = parse_all(&[SHORT_HEAD, LONG_BODY]);
+    let report = structural::analyze(&files, &variant(), &StructuralConfig::default());
+
+    assert!(
+        report.stats.divergent_shape_pairs >= 1,
+        "the shared statements propose the pair, and the shape mixes drop it"
+    );
+    assert!(
+        !report
+            .groups
+            .groups
+            .iter()
+            .any(|group| group.members.contains(&0) && group.members.contains(&1)),
+        "a unit and one five times its size are not copies of each other"
+    );
+}
+
+#[test]
+fn dropping_a_divergent_pair_leaves_the_shared_run_reported() {
+    // The filter withdraws the claim "these two functions are copies", not
+    // the claim "this stretch of statements appears in both".
+    let files = parse_all(&[SHORT_HEAD, LONG_BODY]);
+    let report = structural::analyze(&files, &variant(), &StructuralConfig::default());
+
+    assert!(
+        report.regions.iter().any(|region| {
+            region.occurrences.iter().any(|o| o.file == 0)
+                && region.occurrences.iter().any(|o| o.file == 1)
+        }),
+        "the statements the two share are still reported as a duplicated run"
+    );
+}

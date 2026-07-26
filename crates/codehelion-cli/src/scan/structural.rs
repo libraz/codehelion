@@ -765,7 +765,8 @@ fn funnel(stats: &structural::StructuralStats) -> Vec<report::FunnelStage> {
         .dropping("length_ratio", as_u64(stats.control_flow.filtered_by_size)),
         report::FunnelStage::new("unit pairs", as_u64(stats.unit_pairs))
             .dropping("nested", as_u64(stats.nested_pairs))
-            .dropping("conditional_arms", as_u64(stats.alternative_pairs)),
+            .dropping("conditional_arms", as_u64(stats.alternative_pairs))
+            .dropping("divergent_shapes", as_u64(stats.divergent_shape_pairs)),
         report::FunnelStage::new("verified pairs", as_u64(stats.verified_pairs))
             .dropping("no_group_holds_both", as_u64(stats.unrepresented_pairs)),
         report::FunnelStage::new("components", as_u64(grouping.components)),

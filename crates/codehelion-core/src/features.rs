@@ -317,8 +317,10 @@ pub struct SubtreeFeature {
 /// The count vector is a cheap lower-bound proxy for tree edit distance: two
 /// subtrees within edit distance `d` differ by at most `2 * d` in L1 count
 /// distance, so a large [`CharacteristicVector::l1_distance`] rules a pair
-/// out without touching either tree. Threshold calibration happens against
-/// the corpus later.
+/// out without touching either tree. That is what
+/// [`CharacteristicVector::shape_divergence`] gates candidate pairs on, and
+/// what [`CharacteristicVector::cosine_similarity`] contributes to the
+/// structural dimension of a verdict.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CharacteristicVector {
     /// Node count per shape tag; index = tag, index 0 unused.
@@ -340,6 +342,36 @@ impl CharacteristicVector {
             .zip(other.counts.iter())
             .map(|(&a, &b)| u64::from(a.abs_diff(b)))
             .sum()
+    }
+
+    /// How far apart the two shape mixes are, on a `0.0`–`1.0` scale: the L1
+    /// count distance over the nodes the two units have between them. `0.0`
+    /// when they hold the same shapes in the same numbers, `1.0` when they
+    /// share no shape at all. `0.0` for two empty vectors, which are not
+    /// divergent — they are simply nothing to tell apart.
+    ///
+    /// Size is part of it, and deliberately so: the vectors sum to their unit
+    /// node counts, so the distance is at least `|na - nb| / (na + nb)` and a
+    /// pair whose sizes differ by a factor of `r` scores at least
+    /// `(r - 1) / (r + 1)` before any difference in shape mix is counted.
+    /// A limit of 0.5 therefore says exactly what
+    /// [`max_length_ratio`](crate::near_match::NearMatchConfig::max_length_ratio)'s
+    /// 3.0 says about size, and says it about the shape mix too.
+    #[must_use]
+    pub fn shape_divergence(&self, other: &Self) -> f64 {
+        let span = u64::from(self.node_count) + u64::from(other.node_count);
+        if span == 0 {
+            return 0.0;
+        }
+        // Both vectors sum to at most their node counts, so the distance
+        // cannot exceed the span and the result stays inside the unit range.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "node counts of this size lose nothing a threshold comparison would notice"
+        )]
+        {
+            self.l1_distance(other) as f64 / span as f64
+        }
     }
 
     /// Cosine similarity of the two count vectors, `0.0` when either vector
@@ -978,6 +1010,49 @@ mod tests {
         let zero = CharacteristicVector::default();
         assert!(a.cosine_similarity(&zero).abs() < f64::EPSILON);
         assert!(zero.cosine_similarity(&zero).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn shape_divergence_spans_the_unit_range() {
+        let mut a = CharacteristicVector::default();
+        a.counts[1] = 3;
+        a.counts[2] = 4;
+        a.node_count = 7;
+
+        // The same shapes in the same numbers are not apart at all.
+        assert!(a.shape_divergence(&a).abs() < f64::EPSILON);
+
+        // Nothing to tell apart is not divergence either.
+        let zero = CharacteristicVector::default();
+        assert!(zero.shape_divergence(&zero).abs() < f64::EPSILON);
+
+        // Sharing no shape at all is the far end of the range.
+        let mut disjoint = CharacteristicVector::default();
+        disjoint.counts[3] = 5;
+        disjoint.node_count = 5;
+        assert!((a.shape_divergence(&disjoint) - 1.0).abs() < 1e-9);
+        assert!(
+            (disjoint.shape_divergence(&a) - a.shape_divergence(&disjoint)).abs() < f64::EPSILON,
+            "the measure does not depend on which unit is asked first"
+        );
+    }
+
+    #[test]
+    fn a_threefold_size_difference_alone_reaches_the_default_limit() {
+        // Same shape mix, three times as many of it: the documented floor of
+        // `(r - 1) / (r + 1)` puts the pair at 0.5 before any difference in
+        // mix is counted, which is what `max_length_ratio`'s 3.0 says.
+        let mut small = CharacteristicVector::default();
+        small.counts[1] = 2;
+        small.counts[2] = 2;
+        small.node_count = 4;
+
+        let mut large = CharacteristicVector::default();
+        large.counts[1] = 6;
+        large.counts[2] = 6;
+        large.node_count = 12;
+
+        assert!((small.shape_divergence(&large) - 0.5).abs() < 1e-9);
     }
 
     /// Function -> Block -> [Loop -> Block, Branch -> Block], in either order.

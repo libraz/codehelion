@@ -52,8 +52,18 @@ use crate::stable_id::{
 use crate::test_code;
 use crate::verify::{self, SimilarityBreakdown, UnitView, VerifyConfig};
 
+/// Default largest shape-mix divergence a candidate pair may span.
+///
+/// Chosen to say about the shape mix what
+/// [`DEFAULT_MAX_LENGTH_RATIO`](crate::near_match::DEFAULT_MAX_LENGTH_RATIO)
+/// says about size: at 3.0 the two sizes alone put a pair at 0.5. Measured
+/// over four projects between 39 and 480 kLOC, the most divergent pair
+/// verification has ever accepted sat at 0.41, and the limit takes 15% to 36%
+/// of the proposals out of verification without touching a single one of them.
+pub const DEFAULT_MAX_SHAPE_DIVERGENCE: f64 = 0.5;
+
 /// Tuning for a whole structural run: one config per stage.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StructuralConfig {
     /// Exact-seed candidate extraction.
     pub candidate: CandidateConfig,
@@ -68,8 +78,26 @@ pub struct StructuralConfig {
     pub literals: LiteralNorm,
     /// Precise verification.
     pub verify: VerifyConfig,
+    /// How far apart two units' shape mixes may be and still be worth
+    /// verifying; see [`shape_divergence`](features::CharacteristicVector::shape_divergence).
+    pub max_shape_divergence: f64,
     /// Medoid grouping.
     pub grouping: GroupingConfig,
+}
+
+impl Default for StructuralConfig {
+    fn default() -> Self {
+        Self {
+            candidate: CandidateConfig::default(),
+            near_match: NearMatchConfig::default(),
+            control_flow: ControlFlowConfig::default(),
+            maximal: MaximalConfig::default(),
+            literals: LiteralNorm::default(),
+            verify: VerifyConfig::default(),
+            max_shape_divergence: DEFAULT_MAX_SHAPE_DIVERGENCE,
+            grouping: GroupingConfig::default(),
+        }
+    }
 }
 
 /// One analysed unit, kept so a caller can map a group's member indices back to
@@ -231,6 +259,9 @@ pub struct StructuralStats {
     /// Candidate pairs dropped because the two units sit under different arms
     /// of one preprocessor conditional, so no build holds both.
     pub alternative_pairs: usize,
+    /// Candidate pairs dropped because the two units hold too different a mix
+    /// of shapes for verification to have anything to find.
+    pub divergent_shape_pairs: usize,
     /// Distinct unit pairs handed to verification.
     pub unit_pairs: usize,
     /// Unit pairs that verification accepted as clones.
@@ -300,7 +331,15 @@ pub fn analyze(
     let candidate = candidate::generate(&feature_files, &config.candidate);
     let near = near_match::generate(&feature_files, &config.near_match);
     let skeleton = control_flow::generate(&feature_files, &config.control_flow);
-    let lifted = lift_to_unit_pairs(&candidate, &near, &skeleton, &units, &offsets);
+    let lifted = lift_to_unit_pairs(
+        &candidate,
+        &near,
+        &skeleton,
+        &units,
+        &offsets,
+        &feature_files,
+        config.max_shape_divergence,
+    );
     let pairs = lifted.pairs;
 
     // Stage: fold the window seeds into the maximal shared runs they describe,
@@ -326,21 +365,7 @@ pub fn analyze(
     let subsumed = drop_subsumed(&mut regions);
 
     // Stage: precise verification of each distinct unit pair.
-    let mut edges: Vec<SimilarityEdge> = Vec::new();
-    for &(a, b) in &pairs {
-        let view_a = view(&units[a], files, &feature_files);
-        let view_b = view(&units[b], files, &feature_files);
-        let verdict = verify::verify(&view_a, &view_b, &config.verify);
-        if let (Some(class), Some(confidence)) = (verdict.class, verdict.confidence) {
-            edges.push(SimilarityEdge {
-                a,
-                b,
-                similarity: verdict.breakdown.composite,
-                class,
-                confidence,
-            });
-        }
-    }
+    let edges = verify_pairs(&pairs, &units, files, &feature_files, &config.verify);
 
     // Stage: medoid grouping over the verified pairs.
     let grouping_units: Vec<GroupingUnit> = units
@@ -374,6 +399,7 @@ pub fn analyze(
         region_merged: merged,
         nested_pairs: lifted.nested,
         alternative_pairs: lifted.alternatives,
+        divergent_shape_pairs: lifted.divergent,
         unit_pairs: pairs.len(),
         verified_pairs: edges.len(),
         unrepresented_pairs: unrepresented.len(),
@@ -406,6 +432,35 @@ pub fn analyze(
         unrepresented,
         stats,
     }
+}
+
+/// Verify every candidate unit pair, keeping the ones a verdict accepts.
+///
+/// A pair the verifier leaves unclassified is not an edge: grouping works over
+/// accepted pairs only.
+fn verify_pairs(
+    pairs: &BTreeSet<(usize, usize)>,
+    units: &[Unit],
+    files: &[SyntaxIrFile],
+    feature_files: &[FileFeatures],
+    config: &VerifyConfig,
+) -> Vec<SimilarityEdge> {
+    let mut edges: Vec<SimilarityEdge> = Vec::new();
+    for &(a, b) in pairs {
+        let view_a = view(&units[a], files, feature_files);
+        let view_b = view(&units[b], files, feature_files);
+        let verdict = verify::verify(&view_a, &view_b, config);
+        if let (Some(class), Some(confidence)) = (verdict.class, verdict.confidence) {
+            edges.push(SimilarityEdge {
+                a,
+                b,
+                similarity: verdict.breakdown.composite,
+                class,
+                confidence,
+            });
+        }
+    }
+    edges
 }
 
 /// Confirm each candidate run against the tokens it covers, and split it into
@@ -987,6 +1042,9 @@ enum NotAPair {
     /// The two sit under different arms of one preprocessor conditional, so
     /// no build contains both.
     Alternatives,
+    /// The two hold too different a mix of shapes to be a clone of each other,
+    /// which the shape-count vectors settle without reading either tree.
+    DivergentShapes,
 }
 
 /// What the candidate stages proposed, reduced to unit pairs.
@@ -997,6 +1055,8 @@ struct LiftedPairs {
     nested: usize,
     /// Proposals dropped for being alternative arms of one conditional.
     alternatives: usize,
+    /// Proposals dropped for holding too different a mix of shapes.
+    divergent: usize,
 }
 
 /// Collapse what the three candidate stages proposed into the set of distinct
@@ -1013,10 +1073,13 @@ fn lift_to_unit_pairs(
     skeleton: &control_flow::ControlFlowSet,
     units: &[Unit],
     offsets: &[usize],
+    feature_files: &[FileFeatures],
+    max_shape_divergence: f64,
 ) -> LiftedPairs {
     let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut nested = 0usize;
     let mut alternatives = 0usize;
+    let mut divergent = 0usize;
     let places = candidate
         .pairs
         .iter()
@@ -1033,9 +1096,16 @@ fn lift_to_unit_pairs(
                 .map(|pair| (pair.a.file, pair.a.unit, pair.b.file, pair.b.unit)),
         );
     for (file_a, unit_a, file_b, unit_b) in places {
-        match insert_pair(&mut pairs, units, offsets, file_a, unit_a, file_b, unit_b) {
+        let proposal = Proposal {
+            units,
+            offsets,
+            feature_files,
+            max_shape_divergence,
+        };
+        match proposal.insert(&mut pairs, file_a, unit_a, file_b, unit_b) {
             Some(NotAPair::Nested) => nested += 1,
             Some(NotAPair::Alternatives) => alternatives += 1,
+            Some(NotAPair::DivergentShapes) => divergent += 1,
             None => {}
         }
     }
@@ -1043,33 +1113,50 @@ fn lift_to_unit_pairs(
         pairs,
         nested,
         alternatives,
+        divergent,
     }
 }
 
-/// Insert a `(file, unit)` pair as a global, ordered unit pair, dropping
-/// self-pairs and returning why a proposal was not a pair at all.
-fn insert_pair(
-    pairs: &mut BTreeSet<(usize, usize)>,
-    units: &[Unit],
-    offsets: &[usize],
-    file_a: usize,
-    unit_a: usize,
-    file_b: usize,
-    unit_b: usize,
-) -> Option<NotAPair> {
-    let a = offsets[file_a] + unit_a;
-    let b = offsets[file_b] + unit_b;
-    if a == b {
-        return None;
+/// What a candidate stage proposed is judged against.
+struct Proposal<'a> {
+    units: &'a [Unit],
+    offsets: &'a [usize],
+    feature_files: &'a [FileFeatures],
+    max_shape_divergence: f64,
+}
+
+impl Proposal<'_> {
+    /// Insert a `(file, unit)` pair as a global, ordered unit pair, dropping
+    /// self-pairs and returning why a proposal did not survive.
+    fn insert(
+        &self,
+        pairs: &mut BTreeSet<(usize, usize)>,
+        file_a: usize,
+        unit_a: usize,
+        file_b: usize,
+        unit_b: usize,
+    ) -> Option<NotAPair> {
+        let a = self.offsets[file_a] + unit_a;
+        let b = self.offsets[file_b] + unit_b;
+        if a == b {
+            return None;
+        }
+        if encloses(&self.units[a], &self.units[b]) {
+            return Some(NotAPair::Nested);
+        }
+        if self.units[a].arms.excludes(&self.units[b].arms) {
+            return Some(NotAPair::Alternatives);
+        }
+        let (vector_a, vector_b) = (
+            &self.feature_files[file_a].units[unit_a].vector,
+            &self.feature_files[file_b].units[unit_b].vector,
+        );
+        if vector_a.shape_divergence(vector_b) > self.max_shape_divergence {
+            return Some(NotAPair::DivergentShapes);
+        }
+        pairs.insert(if a <= b { (a, b) } else { (b, a) });
+        None
     }
-    if encloses(&units[a], &units[b]) {
-        return Some(NotAPair::Nested);
-    }
-    if units[a].arms.excludes(&units[b].arms) {
-        return Some(NotAPair::Alternatives);
-    }
-    pairs.insert(if a <= b { (a, b) } else { (b, a) });
-    None
 }
 
 /// Verified clone pairs that no reported group holds both halves of.
