@@ -59,6 +59,11 @@ const CORPORA: &[Expected] = &[
         confirmed: 1,
         refuted: 0,
     },
+    Expected {
+        name: "codehelion-store",
+        confirmed: 2,
+        refuted: 2,
+    },
 ];
 
 /// Repository root, from this test's manifest directory.

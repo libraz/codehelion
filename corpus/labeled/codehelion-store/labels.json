@@ -1,0 +1,77 @@
+{
+  "schema_version": 0,
+  "language": "rust",
+  "files": [
+    "crates/codehelion-store/src/lib.rs",
+    "crates/codehelion-store/src/query.rs",
+    "crates/codehelion-store/src/snapshot.rs"
+  ],
+  "clone_pairs": [
+    {
+      "id": "cp-001",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "crates/codehelion-store/src/snapshot.rs",
+          "start_line": 712,
+          "end_line": 756
+        },
+        {
+          "file": "crates/codehelion-store/src/snapshot.rs",
+          "start_line": 649,
+          "end_line": 666
+        }
+      ]
+    },
+    {
+      "id": "cp-002",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "crates/codehelion-store/src/query.rs",
+          "start_line": 188,
+          "end_line": 212
+        },
+        {
+          "file": "crates/codehelion-store/src/query.rs",
+          "start_line": 342,
+          "end_line": 365
+        }
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "id": "nc-001",
+      "reason": "field-mapping-boilerplate",
+      "fragments": [
+        {
+          "file": "crates/codehelion-store/src/query.rs",
+          "start_line": 354,
+          "end_line": 362
+        },
+        {
+          "file": "crates/codehelion-store/src/query.rs",
+          "start_line": 201,
+          "end_line": 209
+        }
+      ]
+    },
+    {
+      "id": "nc-002",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "crates/codehelion-store/src/lib.rs",
+          "start_line": 90,
+          "end_line": 92
+        },
+        {
+          "file": "crates/codehelion-store/src/lib.rs",
+          "start_line": 99,
+          "end_line": 101
+        }
+      ]
+    }
+  ]
+}

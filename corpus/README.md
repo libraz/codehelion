@@ -85,6 +85,7 @@ be counted rather than merely described. The ones in use:
 | `forwarding-wrapper` | a body that is one delegating call |
 | `const-overload-pair` | the const and non-const overloads of one operation |
 | `trivial-accessor-pair` | two-statement accessors differing in a single operation |
+| `field-mapping-boilerplate` | building a struct out of positional accessors, once per query or row |
 
 Extend the table when a case needs a class it does not have; do not reach for
 the nearest existing word.
