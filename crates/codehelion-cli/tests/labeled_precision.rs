@@ -39,6 +39,18 @@
 //! suite, so the gap is the difference between the two bodies of code rather
 //! than anything the ranking knows. Which is the point of having the column:
 //! where it moves, it says what moved it.
+//!
+//! Added up, ranking down files nineteen confirmed findings below the rest
+//! against nine refuted ones, and the put-forward figure comes out a point
+//! under the overall one. Read as a precision device that is a loss. It is not
+//! read that way here, because these verdicts cannot settle it either way: a
+//! verdict says the duplication is real and worth reporting, and ranking down
+//! does not dispute either — it says to read something else first. Two of every
+//! three findings it sets aside are real, which is what filing rather than
+//! hiding is for. Measuring whether the order is the right one needs a verdict
+//! nobody has written: not whether a finding is worth reporting, but whether it
+//! is the one to do something about. Until that exists, this column says where
+//! the fold falls and not whether it falls in the right place.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::fmt::Write as _;
@@ -310,6 +322,18 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
     );
     let mut complaints = String::new();
     let mut unmaterialized = 0usize;
+    // The same verdicts added up across every case that was scored. Nothing
+    // here is pinned — each corpus's split already is, and this is their sum —
+    // but no per-corpus row asks the question it answers, which is what ranking
+    // a finding down does to the population it is applied to.
+    let mut every = Adjudication {
+        confirmed: 0,
+        refuted: 0,
+        conflicting: 0,
+        unjudged: 0,
+        actionable_confirmed: 0,
+        actionable_refuted: 0,
+    };
     let mut sizes = SizeSplit::default();
     let mut bands = BandSplit::default();
     // Two orderings of the same verdicts: the one the tool prints, and the one
@@ -357,20 +381,12 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
             DEFAULT_MATCH_THRESHOLD,
             |finding: &Finding| finding.size_tokens as f64,
         );
-        writeln!(
-            table,
-            "{:<16} {:>9.4} {:>12.4} {:>10} {:>8} {:>9} {:>10}",
-            expected.name,
-            ruled.precision(),
-            ruled.actionable_precision(),
-            ruled.confirmed,
-            ruled.refuted,
-            ruled.unjudged,
-            ruled.conflicting,
-        )
-        .expect("writing to a string cannot fail");
-
+        row(expected.name, &ruled, &mut table);
+        absorb(&mut every, &ruled);
         compare_verdicts(expected, &ruled, &mut complaints);
+    }
+    if every.judged() > 0 {
+        row("every case", &every, &mut table);
     }
 
     // Every measure below this line accumulates across the whole corpus, so a
@@ -381,6 +397,13 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
         report_ranking(&ranked, &by_size, whole, &mut complaints);
     }
     println!("{table}");
+    if every.judged() > 0 {
+        println!(
+            "ranking down filed {} confirmed and {} refuted below the rest\n",
+            every.confirmed - every.actionable_confirmed,
+            every.refuted - every.actionable_refuted,
+        );
+    }
     // Length is the first knob anyone reaches for when precision is short, and
     // these two ranges are what says whether it can help.
     println!("{sizes}\n");
@@ -397,6 +420,33 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
         );
     }
     assert!(complaints.is_empty(), "\n{complaints}");
+}
+
+/// One line of the corpus table: the two precisions and the counts they are
+/// made of. Shared by the per-corpus rows and the row that adds them up, so the
+/// total is computed the way every other row is.
+fn row(name: &str, ruled: &Adjudication, table: &mut String) {
+    writeln!(
+        table,
+        "{name:<16} {:>9.4} {:>12.4} {:>10} {:>8} {:>9} {:>10}",
+        ruled.precision(),
+        ruled.actionable_precision(),
+        ruled.confirmed,
+        ruled.refuted,
+        ruled.unjudged,
+        ruled.conflicting,
+    )
+    .expect("writing to a string cannot fail");
+}
+
+/// Add one corpus's verdicts to the running total.
+const fn absorb(every: &mut Adjudication, ruled: &Adjudication) {
+    every.confirmed += ruled.confirmed;
+    every.refuted += ruled.refuted;
+    every.conflicting += ruled.conflicting;
+    every.unjudged += ruled.unjudged;
+    every.actionable_confirmed += ruled.actionable_confirmed;
+    every.actionable_refuted += ruled.actionable_refuted;
 }
 
 /// Complain about anything one corpus's verdicts say that the recorded split
