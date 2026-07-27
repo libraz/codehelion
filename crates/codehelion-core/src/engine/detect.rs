@@ -60,6 +60,11 @@ impl PairBudget {
     }
 }
 
+/// Pairs a posting list or fragment class of `len` members holds.
+const fn pairs_within(len: usize) -> usize {
+    len.saturating_mul(len.saturating_sub(1)) / 2
+}
+
 /// Raw token equality: kind and text, ignoring position.
 fn tokens_eq(a: &Token, b: &Token) -> bool {
     a.kind == b.kind && a.text == b.text
@@ -267,6 +272,10 @@ pub(crate) fn raw_pass(
     }
     // Rarest fingerprints first: highest signal per candidate pair.
     kept.sort_by_key(|&(len, h, _)| (len, h));
+    stats.raw_pairs_available += kept
+        .iter()
+        .map(|&(len, _, _)| pairs_within(len))
+        .sum::<usize>();
 
     let mut runs: Vec<Run> = Vec::new();
     'seeding: for &(_, _, postings) in &kept {
@@ -408,6 +417,10 @@ pub(crate) fn fragment_pass(
     }
     stats.fragment_classes = kept.len();
     kept.sort_by_key(|&(len, key, _)| (len, key));
+    stats.fragment_pairs_available += kept
+        .iter()
+        .map(|&(len, _, _)| pairs_within(len))
+        .sum::<usize>();
 
     let mut matches: Vec<FragmentMatch> = Vec::new();
     let mut reference: Vec<NormToken<'_>> = Vec::new();

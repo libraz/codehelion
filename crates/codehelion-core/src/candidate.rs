@@ -132,6 +132,13 @@ pub struct CandidateStats {
     pub stop_postings: usize,
     /// Candidate pairs emitted.
     pub candidate_pairs: usize,
+    /// Pairs the eligible posting lists held in total.
+    ///
+    /// Reported beside the emitted count so a truncated run says how much of
+    /// its work it did. "The budget ran out" is compatible with having skipped
+    /// one candidate and with having skipped nine in ten, and those are not
+    /// the same result to hand someone.
+    pub available_pairs: usize,
     /// Whether the pair budget ran out before all posting lists were paired.
     pub budget_exhausted: bool,
 }
@@ -238,6 +245,10 @@ pub fn generate(files: &[FileFeatures], config: &CandidateConfig) -> CandidateSe
     // budget runs out the frequent lists are the ones left unpaired. The key
     // tiebreak keeps the order total and deterministic.
     eligible.sort_by(|a, b| a.1.len().cmp(&b.1.len()).then_with(|| a.0.cmp(b.0)));
+    stats.available_pairs = eligible
+        .iter()
+        .map(|(_, postings)| pairs_within(postings.len()))
+        .sum();
 
     let mut budget = PairBudget::new(config.pair_budget);
     let mut pairs = Vec::new();
@@ -267,6 +278,11 @@ fn push_occurrence(
     fragment: FragmentRef,
 ) {
     index.entry((kind, hash)).or_default().push(fragment);
+}
+
+/// Pairs a posting list of `len` occurrences holds.
+const fn pairs_within(len: usize) -> usize {
+    len.saturating_mul(len.saturating_sub(1)) / 2
 }
 
 fn clamp_u32(value: usize) -> u32 {

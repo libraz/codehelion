@@ -56,8 +56,11 @@ pub struct EngineConfig {
     /// Longest posting list (raw pass) or fragment class (Type-2 pass) that
     /// still enters pairing; longer ones are dropped and counted.
     pub posting_cap: usize,
-    /// Upper bound on candidate pairs examined across both passes. Pairing is
+    /// Upper bound on candidate pairs examined *by each pass*. Pairing is
     /// rarest-first, so exhaustion sacrifices the lowest-signal candidates.
+    /// The allowance is per pass rather than shared: the raw pass runs first
+    /// and would otherwise be able to spend the whole of it, which stops the
+    /// renamed-copy pass finding anything at all.
     pub pair_budget: usize,
     /// Largest number of consecutive statements cut as one candidate fragment.
     pub max_statement_window: usize,
@@ -180,6 +183,15 @@ pub struct EngineStats {
     pub class_cap_dropped: usize,
     /// Candidate seed pairs examined by the raw pass.
     pub seed_candidates: usize,
+    /// Pairs the raw pass's eligible posting lists held in total.
+    ///
+    /// Reported beside what was examined so a truncated run says how much of
+    /// its work it did. "The budget ran out" is compatible with having skipped
+    /// one candidate and with having skipped nine in ten, and those are not
+    /// the same result to hand someone.
+    pub raw_pairs_available: usize,
+    /// Pairs the fragment pass's eligible classes held in total.
+    pub fragment_pairs_available: usize,
     /// Verified clone pairs across both passes.
     pub pairs: usize,
     /// Members evicted from a class whose normal form did not match its hash.
@@ -219,17 +231,31 @@ pub fn detect(files: &[InputFile<'_>], config: &EngineConfig) -> EngineReport {
         .map(|f| segment::anchor_ids(f.tokens, f.units))
         .collect();
 
-    let mut budget = detect::PairBudget::new(config.pair_budget);
-    let mut pairs = detect::raw_pass(files, &segments, &anchors, config, &mut stats, &mut budget);
+    // One allowance per pass, not one between them. The two passes answer
+    // different questions over different candidate spaces, and the raw pass
+    // runs first: sharing an allowance lets it spend the whole thing and
+    // leave the renamed-copy pass none, which does not slow the mode down —
+    // it turns half of it off, and says only that some budget somewhere ran
+    // out.
+    let mut raw_budget = detect::PairBudget::new(config.pair_budget);
+    let mut fragment_budget = detect::PairBudget::new(config.pair_budget);
+    let mut pairs = detect::raw_pass(
+        files,
+        &segments,
+        &anchors,
+        config,
+        &mut stats,
+        &mut raw_budget,
+    );
     pairs.extend(detect::fragment_pass(
         files,
         &anchors,
         config,
         &mut stats,
-        &mut budget,
+        &mut fragment_budget,
     ));
     stats.pairs = pairs.len();
-    stats.pair_budget_exhausted = budget.exhausted();
+    stats.pair_budget_exhausted = raw_budget.exhausted() || fragment_budget.exhausted();
 
     let groups = group_pairs(&pairs, files, config);
     EngineReport { groups, stats }
@@ -464,6 +490,57 @@ mod tests {
         let report = detect(&files, &config);
         assert!(report.stats.pair_budget_exhausted);
         assert!(report.groups.is_empty());
+    }
+
+    /// The pass that finds renamed copies must not be starved by the pass
+    /// that finds verbatim ones.
+    ///
+    /// The raw pass runs first over a much larger candidate space. Sharing one
+    /// allowance between the two means that on any sizeable tree the raw pass
+    /// spends all of it, and renamed-copy detection — half of what the mode
+    /// claims to do — quietly stops happening. The report would say a budget
+    /// ran out, which reads as "some low-signal candidates were skipped", not
+    /// as "one of the two detectors did not run".
+    #[test]
+    fn spending_the_allowance_on_verbatim_copies_still_leaves_renamed_ones_found() {
+        // Eight copies of one function give the raw pass far more seeds than
+        // the allowance covers; the renamed copy of another function is
+        // reachable only through the fragment pass.
+        let mut sources = vec![
+            quick(&format!("{FN_A} {FN_OTHER}")),
+            quick(&format!("{FN_A_RENAMED} {FN_OTHER}")),
+        ];
+        sources.extend((0..6).map(|_| quick(FN_OTHER)));
+        let units: Vec<Vec<Unit>> = sources
+            .iter()
+            .enumerate()
+            .map(|(index, tokens)| {
+                if index < 2 {
+                    vec![function_unit(0, 26), function_unit(26, tokens.len())]
+                } else {
+                    vec![function_unit(0, tokens.len())]
+                }
+            })
+            .collect();
+        let files: Vec<InputFile<'_>> = sources
+            .iter()
+            .zip(&units)
+            .map(|(tokens, units)| InputFile { tokens, units })
+            .collect();
+        let config = EngineConfig {
+            pair_budget: 20,
+            ..EngineConfig::default()
+        };
+        let report = detect(&files, &config);
+        assert!(
+            report.stats.pair_budget_exhausted,
+            "the allowance has to run out for this to be measuring anything"
+        );
+        let found: Vec<CloneClass> = report.groups.iter().map(|group| group.clone_type).collect();
+        assert!(
+            found.contains(&CloneClass::Type2),
+            "the renamed copy is still found: {found:?}"
+        );
     }
 
     #[test]
