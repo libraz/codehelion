@@ -118,7 +118,11 @@ struct EmittedFunction {
 const CLONE_POOL: usize = 128;
 
 /// Functions per generated file.
-const FUNCTIONS_PER_FILE: u64 = 16;
+///
+/// Chosen against the size of a generated body rather than as a round number:
+/// bodies nest, so a file of sixteen of them runs past a thousand lines, which
+/// is not the shape of a source file anyone writes.
+const FUNCTIONS_PER_FILE: u64 = 6;
 
 /// Files per generated directory.
 const FILES_PER_DIR: u64 = 64;
@@ -236,6 +240,10 @@ struct FnNames {
     slice: String,
     len: String,
     locals: Vec<String>,
+    /// A local array, when the body declared one, for assignment through an
+    /// element. The parameter slice cannot stand in: it is borrowed as
+    /// immutable, and a corpus that does not parse measures nothing.
+    buffer: Option<String>,
     tag: u64,
 }
 
@@ -248,14 +256,20 @@ struct FnNames {
 /// class under literal normalization. The corpus is only ever lexed, so the
 /// code merely has to look real, not compile or terminate.
 ///
-/// That realism is at the token level, which is the level Fast mode works at.
-/// It does not carry over to statement *shape*: every body is built from a
-/// handful of statement forms, so windows of statements collide across
-/// unrelated functions far more than they do in real code. Measured at a
-/// million lines, this corpus proposes seven times the structural candidate
-/// pairs that a real tree a third larger does. Size measurements of the modes
-/// that pair statement shapes need a real tree; this one will overstate their
-/// cost.
+/// Statement *shape* is varied for the same reason, and separately, because
+/// the modes that pair statement windows read a statement as its shape and
+/// the kinds of its first few tokens — never its identifiers. Bodies
+/// therefore mix declarations, assignments through fields and elements,
+/// calls, early returns, multi-way branches and loops carrying exits, and
+/// they nest, so windows are cut from blocks at several depths rather than
+/// from one flat sequence per function.
+///
+/// It still proposes more statement-window candidates per line than real code
+/// does — under three times as many, measured against a real tree a third
+/// larger, where a flat body of six forms proposed nine. Read the corpus as a
+/// stress case for the modes that pair statement shapes, not as a stand-in for
+/// a codebase: an absolute figure taken from it is comparable across runs of
+/// one generator, and to nothing else.
 fn generate_function(language: Language, name: &str, tag: u64, rng: &mut Rng) -> String {
     let rust = language == Language::Rust;
     let scalar_pool = ["seed", "limit", "shift", "mask"];
@@ -269,6 +283,7 @@ fn generate_function(language: Language, name: &str, tag: u64, rng: &mut Rng) ->
         slice: format!("data_{tag}"),
         len: format!("len_{tag}"),
         locals: scalars.clone(),
+        buffer: None,
         tag,
     };
 
@@ -307,9 +322,20 @@ fn generate_function(language: Language, name: &str, tag: u64, rng: &mut Rng) ->
         }
         names.locals.push(local);
     }
-    let count = 6 + rng.below(8);
+    // Most bodies, not all: a form every function has is a form that tells
+    // two functions apart in nothing.
+    if rng.below(3) > 0 {
+        let buffer = format!("buf_{tag}");
+        if rust {
+            let _ = writeln!(body, "    let mut {buffer} = [0u64; 8];");
+        } else {
+            let _ = writeln!(body, "    unsigned long {buffer}[8] = {{0}};");
+        }
+        names.buffer = Some(buffer);
+    }
+    let count = 4 + rng.below(6);
     for _ in 0..count {
-        let statement = generate_statement(rng, &mut names, rust);
+        let statement = generate_statement(rng, &mut names, rust, 0);
         body.push_str(&statement);
         body.push('\n');
     }
@@ -322,55 +348,230 @@ fn generate_function(language: Language, name: &str, tag: u64, rng: &mut Rng) ->
     body
 }
 
+/// Deepest a generated statement nests its own block.
+///
+/// Two is enough to put windows at more than one depth without letting a
+/// single statement grow to the size of a function.
+const MAX_NESTING: u64 = 2;
+
+/// Most locals one generated body carries.
+const LOCAL_POOL: usize = 10;
+
+/// Statement forms that nest nothing, and so stay available at any depth.
+const LEAF_FORMS: u64 = 8;
+
+/// Every statement form, the nesting ones included.
+const ALL_FORMS: u64 = 14;
+
+/// Indentation for a statement at `depth` levels of nesting.
+fn indent(depth: u64) -> String {
+    " ".repeat(usize::try_from(4 + depth * 4).unwrap_or(4))
+}
+
+/// A run of statements, as the body of a nested block.
+///
+/// Long enough to be cut into windows in its own right: windows are four
+/// statements and up, so blocks that never reach four would leave every
+/// window in the corpus coming from one flat sequence per function.
+fn generate_block(rng: &mut Rng, names: &mut FnNames, rust: bool, depth: u64) -> String {
+    let count = 2 + rng.below(5);
+    (0..count)
+        .map(|_| generate_statement(rng, names, rust, depth))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// One random statement over the current locals; may introduce a new local.
-fn generate_statement(rng: &mut Rng, names: &mut FnNames, rust: bool) -> String {
+///
+/// The forms differ in what the statement-window features read: the shape the
+/// parser gives the statement, and the kinds of its first few tokens. A body
+/// of assignments and `if`s is realistic at the token level and uniform at
+/// this one, which is the difference between a corpus that measures Fast and
+/// a corpus that measures the modes pairing statement shapes.
+#[allow(clippy::too_many_lines)] // one arm per statement form; splitting hides the vocabulary
+fn generate_statement(rng: &mut Rng, names: &mut FnNames, rust: bool, depth: u64) -> String {
+    let pad = indent(depth);
     let target = pick(rng, &names.locals).clone();
     let value = generate_expr(rng, &names.locals, 2, rust);
-    match rng.below(6) {
-        0 if names.locals.len() < 10 => {
+    // Nesting stops widening the vocabulary once it is deep enough; below the
+    // limit every form is available.
+    let form = if depth >= MAX_NESTING {
+        rng.below(LEAF_FORMS)
+    } else {
+        rng.below(ALL_FORMS)
+    };
+    match form {
+        // No `if` guard on this arm: an arm that declines falls through to
+        // the catch-all, and the catch-all nests, so a declined arm deep in a
+        // body would recurse without a bottom.
+        0 => {
+            if names.locals.len() >= LOCAL_POOL {
+                return format!("{pad}{target} = {value};");
+            }
             let local = format!("v{}_{}", names.locals.len(), names.tag);
             names.locals.push(local.clone());
-            if rust {
-                format!("    let {local} = {value};")
-            } else {
-                format!("    unsigned long {local} = {value};")
+            // Three spellings of a declaration, because a statement is read as
+            // its shape plus the kinds of its leading tokens, and these three
+            // differ in those kinds: keyword-keyword-name, keyword-name-punct
+            // and keyword-name-punct-name.
+            match rng.below(3) {
+                0 if rust => format!("{pad}let mut {local} = {value};"),
+                0 => format!("{pad}register unsigned long {local} = {value};"),
+                1 if rust => format!("{pad}let {local}: u64 = {value};"),
+                1 => format!("{pad}const unsigned long {local} = {value};"),
+                _ if rust => format!("{pad}let {local} = {value};"),
+                _ => format!("{pad}unsigned long {local} = {value};"),
             }
         }
         1 => {
             let op = pick(rng, COMPOUND_OPS);
-            format!("    {target} {op} {value};")
+            format!("{pad}{target} {op} {value};")
         }
         2 => {
-            let guard = generate_expr(rng, &names.locals, 1, rust);
-            if rust {
-                format!("    if {target} > {guard} {{ {target} = {value}; }}")
-            } else {
-                format!("    if ({target} > {guard}) {{ {target} = {value}; }}")
-            }
+            // Assignment through an element: the leading tokens read
+            // identifier-bracket rather than identifier-operator.
+            let index = generate_expr(rng, &names.locals, 0, rust);
+            format!(
+                "{pad}{}[({index}) & 7] = {value};",
+                names.buffer.clone().unwrap_or_else(|| target.clone())
+            )
         }
         3 => {
-            let item = format!("x_{}", names.tag);
-            if rust {
-                format!(
-                    "    for {item} in {} {{ {target} = {target} ^ (*{item} ^ {value}); }}",
-                    names.slice
-                )
-            } else {
-                format!(
-                    "    for (size_t {item} = 0; {item} < {}; {item}++) {{ {target} = {target} ^ ({}[{item}] ^ {value}); }}",
-                    names.len, names.slice
-                )
-            }
+            // A call in statement position, which is a shape of its own and
+            // the commonest statement in real code that these bodies had none
+            // of. Nothing here is ever compiled or run.
+            let other = pick(rng, &names.locals).clone();
+            format!("{pad}absorb_{}({target}, {other});", names.tag)
         }
         4 => {
-            let guard = generate_expr(rng, &names.locals, 1, rust);
+            let argument = generate_expr(rng, &names.locals, 1, rust);
+            if names.locals.len() >= LOCAL_POOL {
+                return format!("{pad}{target} = blend_{}({argument});", names.tag);
+            }
+            let local = format!("c{}_{}", names.locals.len(), names.tag);
+            names.locals.push(local.clone());
             if rust {
-                format!("    while {target} > {guard} {{ {target} = {value}; }}")
+                format!("{pad}let {local} = blend_{}({argument});", names.tag)
             } else {
-                format!("    while ({target} > {guard}) {{ {target} = {value}; }}")
+                format!(
+                    "{pad}unsigned long {local} = blend_{}({argument});",
+                    names.tag
+                )
             }
         }
-        _ => format!("    {target} = {value};"),
+        5 => format!("{pad}{target} = {value};"),
+        6 => {
+            // A statement that leaves the function, in leaf position. What
+            // follows it is unreachable, which costs nothing: the corpus is
+            // read and never run.
+            format!("{pad}return {value};")
+        }
+        7 => {
+            // A shape each language reaches for and the other does not.
+            if rust {
+                let other = pick(rng, &names.locals).clone();
+                format!("{pad}debug_assert_ne!({target}, {other});")
+            } else {
+                let index = generate_expr(rng, &names.locals, 0, rust);
+                format!(
+                    "{pad}{}[({index}) & 7] |= {value};",
+                    names.buffer.clone().unwrap_or_else(|| target.clone())
+                )
+            }
+        }
+        8 => {
+            let guard = generate_expr(rng, &names.locals, 1, rust);
+            let body = generate_block(rng, names, rust, depth + 1);
+            let head = if rust {
+                format!("{pad}if {target} > {guard} {{")
+            } else {
+                format!("{pad}if ({target} > {guard}) {{")
+            };
+            format!("{head}\n{body}\n{pad}}}")
+        }
+        9 => {
+            let guard = generate_expr(rng, &names.locals, 1, rust);
+            let taken = generate_block(rng, names, rust, depth + 1);
+            let otherwise = generate_block(rng, names, rust, depth + 1);
+            let head = if rust {
+                format!("{pad}if {target} < {guard} {{")
+            } else {
+                format!("{pad}if ({target} < {guard}) {{")
+            };
+            format!("{head}\n{taken}\n{pad}}} else {{\n{otherwise}\n{pad}}}")
+        }
+        10 => {
+            // An early exit: a branch whose body leaves the function.
+            let guard = generate_expr(rng, &names.locals, 1, rust);
+            let head = if rust {
+                format!("{pad}if {target} == {guard} {{")
+            } else {
+                format!("{pad}if ({target} == {guard}) {{")
+            };
+            format!("{head}\n{}return {value};\n{pad}}}", indent(depth + 1))
+        }
+        11 => {
+            let item = format!("x{depth}_{}", names.tag);
+            let body = generate_block(rng, names, rust, depth + 1);
+            let exit = if rng.below(2) == 0 {
+                format!("\n{}break;", indent(depth + 1))
+            } else {
+                String::new()
+            };
+            let head = if rust {
+                format!("{pad}for {item} in {} {{", names.slice)
+            } else {
+                format!(
+                    "{pad}for (size_t {item} = 0; {item} < {}; {item}++) {{",
+                    names.len
+                )
+            };
+            format!("{head}\n{body}{exit}\n{pad}}}")
+        }
+        12 => {
+            let guard = generate_expr(rng, &names.locals, 1, rust);
+            let body = generate_block(rng, names, rust, depth + 1);
+            let head = if rust {
+                format!("{pad}while {target} > {guard} {{")
+            } else {
+                format!("{pad}while ({target} > {guard}) {{")
+            };
+            format!("{head}\n{body}\n{}continue;\n{pad}}}", indent(depth + 1))
+        }
+        _ => {
+            // A multi-way branch. The arms are blocks, so the windows cut
+            // from them sit two levels below the function body.
+            let arms: Vec<String> = (0..3)
+                .map(|arm| {
+                    let body = generate_block(rng, names, rust, depth + 2);
+                    let inner = indent(depth + 1);
+                    if rust {
+                        let label = if arm == 2 {
+                            "_".to_string()
+                        } else {
+                            arm.to_string()
+                        };
+                        format!("{inner}{label} => {{\n{body}\n{inner}}}")
+                    } else {
+                        let label = if arm == 2 {
+                            "default:".to_string()
+                        } else {
+                            format!("case {arm}:")
+                        };
+                        format!(
+                            "{inner}{label} {{\n{body}\n{}break;\n{inner}}}",
+                            indent(depth + 2)
+                        )
+                    }
+                })
+                .collect();
+            let head = if rust {
+                format!("{pad}match {target} & 3 {{")
+            } else {
+                format!("{pad}switch ({target} & 3) {{")
+            };
+            format!("{head}\n{}\n{pad}}}", arms.join("\n"))
+        }
     }
 }
 
@@ -920,9 +1121,11 @@ pub fn default_binary() -> PathBuf {
 mod tests {
     use super::*;
 
+    /// Large enough to reach every language: the mix cycles by file index, so
+    /// a target that fits in a couple of files says nothing about it.
     fn small_spec() -> CorpusSpec {
         CorpusSpec {
-            target_lines: 2_000,
+            target_lines: 8_000,
             seed: 42,
             clone_percent: 20,
         }
@@ -956,7 +1159,7 @@ mod tests {
         let stats_a = generate_corpus(&small_spec(), a.path()).unwrap();
         let stats_b = generate_corpus(&small_spec(), b.path()).unwrap();
         assert_eq!(stats_a, stats_b);
-        assert!(stats_a.lines >= 2_000);
+        assert!(stats_a.lines >= small_spec().target_lines);
         assert!(stats_a.files >= 4, "several files: {}", stats_a.files);
         assert_eq!(tree_digest(a.path()), tree_digest(b.path()));
     }
