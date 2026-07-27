@@ -206,6 +206,8 @@ pub enum BaselineAction {
     Create(BaselineArgs),
     /// Drop the baseline entries the last scan no longer reports.
     Update(BaselineArgs),
+    /// Rewrite a baseline's identifiers onto a run made under changed rules.
+    Migrate(MigrateArgs),
 }
 
 /// Arguments shared by the `baseline` actions.
@@ -220,6 +222,27 @@ pub struct BaselineArgs {
     /// Overwrite an existing baseline file.
     #[arg(long)]
     pub force: bool,
+    /// Audit-database path, overriding the configured location.
+    #[arg(long)]
+    pub db: Option<PathBuf>,
+}
+
+/// Arguments for `baseline migrate`.
+#[derive(Debug, clap::Args)]
+pub struct MigrateArgs {
+    /// Scanned path whose recorded runs the rewrite reads.
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+    /// Baseline file to rewrite.
+    #[arg(long, default_value = BASELINE_FILE_NAME)]
+    pub file: PathBuf,
+    /// Recorded run to rewrite the baseline onto. Defaults to the newest
+    /// completed scan of the path.
+    #[arg(long)]
+    pub to_run: Option<i64>,
+    /// Report what the rewrite would do without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
     /// Audit-database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,

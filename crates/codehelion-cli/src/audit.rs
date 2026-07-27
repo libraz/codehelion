@@ -18,6 +18,15 @@
 //! comparison would report every group as new and every previous group as
 //! resolved without anything having happened.
 //!
+//! Sameness of build variant is necessary and not sufficient. The detector
+//! versions each run recorded are compared too, because a rule can change
+//! without the variant noticing, and a change to how identifiers are made
+//! turns every group into one that went away and one that arrived. That case
+//! is refused rather than reported: it is not a comparison with a caveat, it
+//! is two vocabularies. What differs at any lesser level is carried into the
+//! report, so a reader can tell duplication that moved from grouping rules
+//! that did.
+//!
 //! The judgement itself lives in [`codehelion_core::lineage`]; this module
 //! decides which two results to hand it and how to say what came back.
 
@@ -27,6 +36,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use codehelion_core::clone_class::{CloneClass, CloneScope};
+use codehelion_core::compat::{self, Impact};
 use codehelion_core::lineage::{self, AuditDiff, AuditState, GroupSnapshot, MemberSnapshot};
 use codehelion_core::stable_id::{CloneGroupFingerprint, FragmentFingerprint};
 use codehelion_store::Store;
@@ -53,6 +63,8 @@ struct Side {
     finished_at: String,
     /// The build variant the result belongs to.
     variant_fingerprint: String,
+    /// The detection component versions it was produced under.
+    detector_versions: Vec<(String, String)>,
     /// Its clone groups, as history compares them.
     groups: Vec<GroupSnapshot>,
 }
@@ -90,8 +102,27 @@ pub fn run(args: &AuditArgs, out: &mut impl Write) -> Result<Outcome> {
             current.variant_fingerprint,
         );
     }
+    let drift = compat::drift(&previous.detector_versions, &current.detector_versions);
+    if let Some(blocking) = drift.iter().find(|entry| entry.impact.breaks_identity()) {
+        bail!(
+            "{} and {} name their findings differently ({}), so every group of one \
+             would read as gone and every group of the other as new; \
+             `codehelion baseline migrate` carries a frozen result across a change \
+             like this",
+            previous.source,
+            current.source,
+            blocking.describe(),
+        );
+    }
     let diff = lineage::diff(&previous.groups, &current.groups);
-    let model = build(&root_path, &previous, &current, &diff, args.show_unchanged);
+    let model = build(
+        &root_path,
+        &previous,
+        &current,
+        &diff,
+        args.show_unchanged,
+        &drift,
+    );
     match args.format {
         DetailFormat::Json => writeln!(out, "{}", serde_json::to_string_pretty(&model)?)?,
         DetailFormat::Text => render_text(&model, out)?,
@@ -133,6 +164,7 @@ fn recorded_side(store: &Store, origin: &RunOrigin) -> Result<Side> {
         run_id: Some(origin.id),
         finished_at: origin.finished_at.clone(),
         variant_fingerprint: origin.variant_fingerprint.clone(),
+        detector_versions: origin.detector_versions.clone(),
         groups: store.run_group_snapshots(origin.id)?,
     })
 }
@@ -155,6 +187,16 @@ struct ExportedRun {
     run_id: i64,
     finished_at: String,
     build_variant: ExportedVariant,
+    /// Absent from a report written before the versions travelled with it, in
+    /// which case there is nothing to compare and nothing is claimed.
+    #[serde(default)]
+    detector_versions: Vec<ExportedDetectorVersion>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportedDetectorVersion {
+    component: String,
+    version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -203,6 +245,12 @@ fn exported_side(path: &Path) -> Result<Side> {
         run_id: Some(exported.run.run_id),
         finished_at: exported.run.finished_at,
         variant_fingerprint: exported.run.build_variant.fingerprint,
+        detector_versions: exported
+            .run
+            .detector_versions
+            .into_iter()
+            .map(|entry| (entry.component, entry.version))
+            .collect(),
         groups,
     })
 }
@@ -283,6 +331,11 @@ pub struct AuditReport {
     pub current: ResultRef,
     /// The build variant both belong to.
     pub build_variant: String,
+    /// Version differences between the two results that did not stop the
+    /// comparison, one line each. Empty when the two were produced by the same
+    /// rules, which is the ordinary case.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub version_drift: Vec<String>,
     /// How many groups are in each state, states with no group omitted.
     pub summary: Vec<report::StateCount>,
     /// One entry per group, in state order.
@@ -365,6 +418,7 @@ fn build(
     current: &Side,
     diff: &AuditDiff,
     show_unchanged: bool,
+    drift: &[compat::Drift],
 ) -> AuditReport {
     let index = |groups: &[GroupSnapshot]| -> BTreeMap<String, Vec<Occurrence>> {
         groups
@@ -394,6 +448,7 @@ fn build(
             finished_at: current.finished_at.clone(),
         },
         build_variant: current.variant_fingerprint.clone(),
+        version_drift: drift.iter().map(compat::Drift::describe).collect(),
         summary: report::state_counts(diff),
         entries,
     }
@@ -473,6 +528,16 @@ fn render_text(model: &AuditReport, out: &mut impl Write) -> std::io::Result<()>
         model.previous.finished_at,
     )?;
     writeln!(out, "  build variant: {}", model.build_variant)?;
+    for line in &model.version_drift {
+        writeln!(out, "  version drift: {line}")?;
+    }
+    if model
+        .version_drift
+        .iter()
+        .any(|line| line.ends_with(&format!("({})", Impact::Grouping.name())))
+    {
+        writeln!(out, "    note: {}", Impact::Grouping.consequence())?;
+    }
     writeln!(out)?;
     if model.summary.is_empty() {
         writeln!(out, "  neither result holds any clone group.")?;
@@ -592,6 +657,9 @@ mod tests {
         let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA).unwrap();
         let version = &schema["properties"]["schema_version"]["const"];
         assert_eq!(version.as_u64(), Some(u64::from(SCHEMA_VERSION)));
+        // The schema forbids unknown properties, so a field the code writes
+        // and the document does not describe makes every report invalid.
+        assert!(schema["properties"]["version_drift"].is_object());
     }
 
     #[test]

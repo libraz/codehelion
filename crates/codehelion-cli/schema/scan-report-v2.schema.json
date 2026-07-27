@@ -326,6 +326,10 @@
             "mismatch": {
               "type": "string",
               "description": "Why the baseline covers nothing in this run, present only when it does not describe it: its ids were computed under conditions this run does not share, so none of them can match."
+            },
+            "caveat": {
+              "type": "string",
+              "description": "A difference between this run and the one the baseline was recorded against that leaves its entries matching but explains some of what went stale, such as a change to how occurrences are grouped."
             }
           }
         },

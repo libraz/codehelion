@@ -141,6 +141,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         changes,
         weights: cfg.priority.weights(),
         min_clone_tokens: u64::from(cfg.min_clone_tokens),
+        literals: engine_config.literals,
     };
     let groups = rank_and_record(&mut inputs, &cfg, &contexts, file_rows(&sources))?;
     let mut model = build_report(&inputs, groups);
@@ -189,7 +190,10 @@ fn evaluate_suppression(
         args.baseline.as_deref(),
         &mut rules,
         variant,
-        &detector_versions(),
+        &detector_versions(
+            cfg.priority.weights(),
+            literal_norm(cfg.literal_normalization),
+        ),
     )?;
     let file_suppressions: Vec<suppress::FileSuppression> = lexed
         .iter()
@@ -239,6 +243,8 @@ struct BuildInputs<'a> {
     weights: Weights,
     /// The run's minimum clone length, which the ranking reads sizes against.
     min_clone_tokens: u64,
+    /// The literal strategy the content ids were folded under.
+    literals: LiteralNorm,
 }
 
 /// The configured suppression rules that hid nothing this run, read off the
@@ -397,7 +403,7 @@ fn run_info(inputs: &BuildInputs<'_>) -> report::RunInfo {
             normalization_version: variant.normalization_version,
             fingerprint: variant.fingerprint(),
         },
-        detector_versions: detector_versions()
+        detector_versions: detector_versions(inputs.weights, inputs.literals)
             .into_iter()
             .map(|(component, version)| report::DetectorVersion { component, version })
             .collect(),
@@ -819,6 +825,8 @@ pub(crate) struct ScanBaseline {
     ids: BTreeSet<String>,
     /// Why it does not describe this run, when it does not.
     mismatch: Option<String>,
+    /// What differs without stopping its entries matching.
+    caveat: Option<String>,
 }
 
 /// Load the baseline a scan was given and register it as a suppression rule.
@@ -845,7 +853,7 @@ pub(crate) fn load_baseline(
         return Ok(None);
     };
     let baseline = crate::baseline::Baseline::load(path)?;
-    let mismatch = baseline.mismatch(&variant.fingerprint(), detectors);
+    let fit = baseline.compatibility(&variant.fingerprint(), detectors);
     let ids: BTreeSet<String> = baseline
         .entries
         .iter()
@@ -856,7 +864,8 @@ pub(crate) fn load_baseline(
     Ok(Some(ScanBaseline {
         file,
         ids,
-        mismatch,
+        mismatch: fit.mismatch,
+        caveat: fit.caveat,
     }))
 }
 
@@ -884,6 +893,7 @@ pub(crate) fn baseline_status(
         matched: as_u64(matched),
         stale: as_u64(baseline.ids.len().saturating_sub(matched)),
         mismatch: baseline.mismatch.clone(),
+        caveat: baseline.caveat.clone(),
     }
 }
 
@@ -1013,7 +1023,10 @@ fn rank_and_record(
     let mut store = open_store(inputs.db_path)?;
     let audit = attach_history(&store, inputs.root, variant, &units, &mut groups)?;
     let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
-    let detector_versions = detector_versions();
+    let detector_versions = detector_versions(
+        cfg.priority.weights(),
+        literal_norm(cfg.literal_normalization),
+    );
     let root_path = inputs.root.to_string_lossy();
     let snapshot = Snapshot {
         root_path: &root_path,
@@ -1048,14 +1061,20 @@ pub(crate) fn open_store(path: &Path) -> Result<Store> {
 
 /// The `(component, version)` pairs recorded with every snapshot.
 ///
-/// Only components that decide *what* is found belong here. The ranking recipe
-/// does not: it decides the order findings are read in and moves no stable id,
-/// so listing it would make a baseline recorded under one set of weights read
-/// as unusable under another, having lost nothing it froze. The report states
-/// the recipe, and the run's configuration hash covers the weights.
-fn detector_versions() -> Vec<(String, String)> {
+/// Everything that can differ between two builds and be *seen* in the result
+/// belongs here, including the ranking recipe, which moves no identifier at
+/// all. What a difference costs is not decided by presence in this list but by
+/// [`codehelion_core::compat`], which weighs each component; recording only the
+/// id-moving ones would leave a reader unable to explain a result that changed
+/// for a reason nothing recorded.
+fn detector_versions(weights: Weights, literals: LiteralNorm) -> Vec<(String, String)> {
     vec![
         ("fp-schema".to_string(), FP_SCHEMA_VERSION.to_string()),
+        ("ranking".to_string(), weights.recipe()),
+        (
+            "literals".to_string(),
+            ContentNorm::Normalized(literals).label().to_string(),
+        ),
         (
             "normalization".to_string(),
             NORMALIZATION_VERSION.to_string(),

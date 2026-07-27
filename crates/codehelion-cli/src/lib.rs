@@ -21,6 +21,7 @@ pub mod audit;
 pub mod baseline;
 pub mod cli;
 pub mod config;
+pub mod migrate;
 pub mod report;
 pub mod scan;
 pub mod suppress;
@@ -34,8 +35,8 @@ use codehelion_core::doctor;
 use codehelion_store::Store;
 
 use crate::cli::{
-    BaselineAction, CacheAction, Cli, Command, ConfigAction, DetailFormat, ExplainArgs, Mode,
-    ScanArgs,
+    BaselineAction, CacheAction, Cli, Command, ConfigAction, DetailFormat, ExplainArgs,
+    MigrateArgs, Mode, ScanArgs,
 };
 use crate::config::ConfigSource;
 
@@ -311,6 +312,7 @@ fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
     let (args, create) = match action {
         BaselineAction::Create(args) => (args, true),
         BaselineAction::Update(args) => (args, false),
+        BaselineAction::Migrate(args) => return baseline_migrate(args, out),
     };
     let root = args
         .path
@@ -356,14 +358,17 @@ fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
     }
 
     let existing = baseline::Baseline::load(&args.file)?;
-    if let Some(reason) = existing.mismatch(&origin.variant_fingerprint, &origin.detector_versions)
-    {
+    let fit = existing.compatibility(&origin.variant_fingerprint, &origin.detector_versions);
+    if let Some(reason) = fit.mismatch {
         bail!(
-            "{} does not describe run {}: {}; re-record it with `baseline create --force`",
+            "{} does not describe run {}: {}",
             args.file.display(),
             origin.id,
             reason
         );
+    }
+    if let Some(caveat) = fit.caveat {
+        writeln!(out, "note: {caveat}")?;
     }
     let present: std::collections::BTreeSet<String> = groups
         .iter()
@@ -382,6 +387,227 @@ fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
         writeln!(out, "  resolved: {id}")?;
     }
     Ok(Outcome::Success)
+}
+
+/// Rewrite a baseline's identifiers onto a run made under changed rules, and
+/// carry the recorded history of each group across with them.
+///
+/// Both runs are read out of the audit database rather than rescanned. A
+/// migration is a statement about two results that already exist, and scanning
+/// again here would produce a third one whose relationship to the frozen
+/// judgements is exactly the question being asked.
+///
+/// A project with no baseline still has a history worth carrying, so a missing
+/// file is not an error: the recorded lineage is migrated on its own, and the
+/// two runs to migrate between are then the newest pair, the same ones an
+/// audit would compare.
+fn baseline_migrate(args: &MigrateArgs, out: &mut impl Write) -> Result<Outcome> {
+    let root = args
+        .path
+        .canonicalize()
+        .with_context(|| format!("resolving path {}", args.path.display()))?;
+    let cfg = config::load(None, &root)?.config;
+    let db_path = scan::database_path(&root, args.db.as_deref(), &cfg);
+    if !db_path.is_file() {
+        bail!(
+            "no audit database at {}; run `codehelion scan` first",
+            db_path.display()
+        );
+    }
+    let mut store = scan::open_store(&db_path)?;
+    let existing = args
+        .file
+        .is_file()
+        .then(|| baseline::Baseline::load(&args.file))
+        .transpose()?;
+    let (source, target) = migration_runs(&store, &root, &db_path, args, existing.as_ref())?;
+
+    let drift: Vec<String> =
+        codehelion_core::compat::drift(&source.detector_versions, &target.detector_versions)
+            .iter()
+            .map(codehelion_core::compat::Drift::describe)
+            .collect();
+    let mapping = migrate::by_place(&store.run_groups(source.id)?, &store.run_groups(target.id)?);
+    let rewritten = existing
+        .as_ref()
+        .map(|baseline| baseline.migrated(&mapping, &target, &scan::rfc3339_now(), &drift));
+
+    let verb = if args.dry_run {
+        "would rewrite"
+    } else {
+        "rewriting"
+    };
+    writeln!(out, "{verb} run {} -> run {}", source.id, target.id)?;
+    for line in &drift {
+        writeln!(out, "  version drift: {line}")?;
+    }
+    match (existing.as_ref(), rewritten.as_ref()) {
+        (Some(existing), Some(rewritten)) => {
+            writeln!(
+                out,
+                "  {} of {} entries carried, {} stale",
+                rewritten.entries.len(),
+                existing.entries.len(),
+                rewritten.stale.len() - existing.stale.len(),
+            )?;
+            for entry in rewritten.stale.iter().skip(existing.stale.len()) {
+                writeln!(
+                    out,
+                    "  stale: {} — run {} found no duplication where it stood",
+                    entry.group, target.id
+                )?;
+            }
+        }
+        _ => writeln!(
+            out,
+            "  no baseline at {}; carrying the recorded history only",
+            args.file.display()
+        )?,
+    }
+    if args.dry_run {
+        return Ok(Outcome::Success);
+    }
+
+    if let Some(rewritten) = &rewritten {
+        rewritten.write(&args.file)?;
+    }
+    let adoptions = adoptions(&store, source.id, &mapping)?;
+    let adopted = store.adopt_lineage(target.id, source.id, &adoptions)?;
+    writeln!(
+        out,
+        "  {} of {} groups in run {} now continue a history from before the change",
+        adopted.taken.len(),
+        mapping.continuations.len(),
+        target.id,
+    )?;
+    for id in &adopted.already_connected {
+        writeln!(out, "  already connected: {id}")?;
+    }
+    if rewritten.is_some() {
+        writeln!(out, "wrote {}", args.file.display())?;
+    }
+    Ok(Outcome::Success)
+}
+
+/// Settle which two recorded runs a rewrite is between, and refuse the pairs
+/// it cannot honestly map.
+///
+/// A migration maps one result of a tree onto another result of the *same*
+/// text. Across two different trees it would be answering "what changed in the
+/// code" with a mechanism built for "what changed in the rules", and afterwards
+/// the two answers are indistinguishable.
+fn migration_runs(
+    store: &Store,
+    root: &Path,
+    db_path: &Path,
+    args: &MigrateArgs,
+    existing: Option<&baseline::Baseline>,
+) -> Result<(
+    codehelion_store::query::RunOrigin,
+    codehelion_store::query::RunOrigin,
+)> {
+    let root_path = root.to_string_lossy();
+    let recent = store.completed_runs(&root_path, 2)?;
+    let target = match args.to_run {
+        Some(id) => store
+            .run_origin(id)
+            .with_context(|| format!("reading run {id} from {}", db_path.display()))?,
+        None => recent.first().cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} holds no completed scan of {}; run `codehelion scan` first",
+                db_path.display(),
+                root.display()
+            )
+        })?,
+    };
+    let source = match existing {
+        Some(baseline) => store.run_origin(baseline.from_run).with_context(|| {
+            format!(
+                "{} was recorded from run {}, which {} no longer holds",
+                args.file.display(),
+                baseline.from_run,
+                db_path.display()
+            )
+        })?,
+        None => recent
+            .into_iter()
+            .find(|run| run.id != target.id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "only one scan of {} is recorded (run {}); \
+                     there is no earlier result to carry forward",
+                    root.display(),
+                    target.id
+                )
+            })?,
+    };
+    if source.id == target.id {
+        bail!(
+            "{} already describes run {}: there is nothing to rewrite it onto",
+            args.file.display(),
+            target.id
+        );
+    }
+    let before = store.run_tree(source.id)?;
+    let after = store.run_tree(target.id)?;
+    if before.is_empty() || after.is_empty() {
+        bail!(
+            "run {} or run {} did not record what it read, so this build cannot \
+             establish that both saw the same text; re-record the baseline with \
+             `baseline create --force`",
+            source.id,
+            target.id
+        );
+    }
+    if before != after {
+        bail!(
+            "run {} and run {} read different source; a migration rewrites one \
+             reading of a tree onto another reading of the same text, and the \
+             ordinary `codehelion audit` is what compares two trees",
+            source.id,
+            target.id
+        );
+    }
+    Ok((source, target))
+}
+
+/// Pair each continuing group with the history its predecessor belonged to.
+///
+/// A predecessor whose history the store does not hold is left out rather than
+/// given a fresh one: inventing a history here would record the group as having
+/// existed since the migration, which is the claim the migration exists to
+/// avoid making.
+fn adoptions(
+    store: &Store,
+    previous_run: i64,
+    mapping: &migrate::Mapping,
+) -> Result<Vec<codehelion_store::migrate::LineageAdoption>> {
+    let history = lineage_by_group(store, previous_run)?;
+    Ok(mapping
+        .continuations
+        .iter()
+        .filter_map(|carried| {
+            Some(codehelion_store::migrate::LineageAdoption {
+                group: carried.group.clone(),
+                previous_group: carried.previous_group.clone(),
+                lineage: history.get(&carried.previous_group)?.clone(),
+                shared: carried.shared,
+                overlap: carried.overlap,
+            })
+        })
+        .collect())
+}
+
+/// The history each group of a run belongs to, by hex group fingerprint.
+fn lineage_by_group(
+    store: &Store,
+    run_id: i64,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    Ok(store
+        .run_group_snapshots(run_id)?
+        .into_iter()
+        .filter_map(|group| Some((group.fingerprint.to_hex(), group.lineage?.to_hex())))
+        .collect())
 }
 
 fn config_command(action: &ConfigAction, out: &mut impl Write) -> Result<Outcome> {

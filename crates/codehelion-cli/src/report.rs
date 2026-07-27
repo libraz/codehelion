@@ -348,6 +348,11 @@ pub struct BaselineStatus {
     /// Why the baseline does not describe this run, when it does not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mismatch: Option<String>,
+    /// What the run does differently from the one the baseline was recorded
+    /// against, where the difference leaves the entries matching but explains
+    /// some of what went stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caveat: Option<String>,
 }
 
 /// Files the scan dropped, by cause. Nothing is omitted silently.
@@ -1014,6 +1019,11 @@ impl Report {
             // indistinguishable from a baseline that worked unless it is said.
             if let Some(reason) = &baseline.mismatch {
                 writeln!(out, "    warning: this baseline hid nothing — {reason}")?;
+            }
+            // A stale count that a rule change explains reads as duplication
+            // somebody fixed unless the other reading is offered.
+            if let Some(caveat) = &baseline.caveat {
+                writeln!(out, "    note: {caveat}")?;
             }
         }
         Ok(())
@@ -2018,6 +2028,7 @@ pub(super) mod tests {
             matched: 11,
             stale: 1,
             mismatch: Some("recorded under another build variant".to_string()),
+            caveat: Some("grouped under different rules".to_string()),
         });
         let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
         let checks = [
@@ -2078,6 +2089,7 @@ pub(super) mod tests {
             matched: 0,
             stale: 12,
             mismatch: Some("recorded under build variant aaaa in fast mode".to_string()),
+            caveat: None,
         });
         let mut buffer = Vec::new();
         report
@@ -2096,6 +2108,7 @@ pub(super) mod tests {
             matched: 11,
             stale: 1,
             mismatch: None,
+            caveat: None,
         });
         let mut buffer = Vec::new();
         report

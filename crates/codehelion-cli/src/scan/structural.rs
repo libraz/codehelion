@@ -27,10 +27,10 @@ use codehelion_core::discovery::{
 use codehelion_core::engine::{self, LiteralNorm};
 use codehelion_core::features::FEATURE_SCHEMA_VERSION;
 use codehelion_core::frontend::Token;
-use codehelion_core::grouping::StructuralGroup;
+use codehelion_core::grouping::{GROUPING_VERSION, StructuralGroup};
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
 use codehelion_core::priority::Weights;
-use codehelion_core::stable_id::{self, FP_SCHEMA_VERSION};
+use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION};
 use codehelion_core::structural::{
     self, GroupDetail, RegionOccurrence, StructuralConfig, StructuralRegion, StructuralReport,
     StructuralUnit,
@@ -123,7 +123,10 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         args.baseline.as_deref(),
         &mut rules.rules,
         &variant,
-        &detector_versions(),
+        &detector_versions(
+            cfg.priority.weights(),
+            literal_norm(cfg.literal_normalization),
+        ),
     )?;
     let regions = reportable_regions(&analysis);
     let suppressed = evaluate_suppression(&cfg, &mut rules, &analysis, &regions);
@@ -831,7 +834,7 @@ fn build_report(
                 normalization_version: variant.normalization_version,
                 fingerprint: variant.fingerprint(),
             },
-            detector_versions: detector_versions()
+            detector_versions: detector_versions(inputs.weights, inputs.literals)
                 .into_iter()
                 .map(|(component, version)| report::DetectorVersion { component, version })
                 .collect(),
@@ -1161,9 +1164,20 @@ fn similarity(group: &StructuralGroup, detail: &GroupDetail) -> report::Similari
 /// The `(component, version)` pairs recorded with every structural snapshot.
 /// The frontend versions are the structural parsers', which is what the
 /// fingerprints were derived under.
-fn detector_versions() -> Vec<(String, String)> {
+///
+/// What a difference in any of them costs a recorded result is weighed by
+/// [`codehelion_core::compat`] rather than assumed from being listed: the
+/// grouping rules and the ranking recipe are here because they can be seen in
+/// a result, not because they move an identifier.
+fn detector_versions(weights: Weights, literals: LiteralNorm) -> Vec<(String, String)> {
     vec![
         ("fp-schema".to_string(), FP_SCHEMA_VERSION.to_string()),
+        (
+            "literals".to_string(),
+            ContentNorm::Normalized(literals).label().to_string(),
+        ),
+        ("grouping".to_string(), GROUPING_VERSION.to_string()),
+        ("ranking".to_string(), weights.recipe()),
         (
             "normalization".to_string(),
             NORMALIZATION_VERSION.to_string(),
@@ -1199,7 +1213,10 @@ fn record(
     let audit =
         crate::scan::attach_history(&store, inputs.root, inputs.variant, &units, &mut groups)?;
     let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
-    let detector_versions = detector_versions();
+    let detector_versions = detector_versions(
+        cfg.priority.weights(),
+        literal_norm(cfg.literal_normalization),
+    );
     let root_path = inputs.root.to_string_lossy();
     let snapshot = Snapshot {
         root_path: &root_path,

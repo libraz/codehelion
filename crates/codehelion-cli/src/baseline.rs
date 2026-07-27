@@ -35,25 +35,36 @@
 //! set. A baseline made under different conditions would silently match
 //! nothing — the worst possible failure for a suppression, since it looks
 //! exactly like a suppression that worked. The file therefore records what it
-//! was made under, and [`Baseline::mismatch`] states plainly when a run does
-//! not match.
+//! was made under, and [`Baseline::compatibility`] states plainly when a run
+//! does not match.
+//!
+//! Not every difference is fatal, and treating them alike would be its own
+//! failure: a release that changed the order findings are read in would throw
+//! away every frozen judgement in the project. Which differences matter is
+//! decided by [`codehelion_core::compat`], and the ones that do can be carried
+//! across rather than surrendered — see [`crate::migrate`].
 //!
 //! [`CloneGroupFingerprint`]: codehelion_core::stable_id::CloneGroupFingerprint
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use codehelion_core::compat::{self, Impact};
 use codehelion_store::query::{RunOrigin, StoredGroup};
 use serde::{Deserialize, Serialize};
 
+use crate::migrate::Mapping;
 use crate::report::DetectorVersion;
 
 /// Version of the baseline file schema.
 ///
-/// A change that stops an older file being readable must increment this; the
-/// loader refuses what it does not understand rather than guessing.
-pub const SCHEMA_VERSION: u32 = 1;
+/// A change that stops an older file being readable must increment this. The
+/// loader accepts every version up to this one and refuses only what was
+/// written by a later build: refusing a file it could still read would make
+/// the migration mechanism unreachable for exactly the users who need it,
+/// since the file needing rewriting is by definition the older one.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// A baseline file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +85,34 @@ pub struct Baseline {
     pub detector_versions: Vec<DetectorVersion>,
     /// The frozen findings, ordered by group id.
     pub entries: Vec<Entry>,
+    /// Rewrites this file has been through, oldest first. Absent from a file
+    /// that has never been rewritten.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub migrations: Vec<Migration>,
+    /// Judgements a rewrite could not carry to the new identifiers, kept
+    /// because a frozen finding is a decision somebody made and dropping it
+    /// without saying so loses the decision along with the id. Nothing matches
+    /// on them; they are here to be read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale: Vec<Entry>,
+}
+
+/// One rewrite of a baseline's identifiers onto a run made under changed
+/// rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Migration {
+    /// When it was applied, RFC 3339.
+    pub at: String,
+    /// The run the entries were written in terms of before.
+    pub from_run: i64,
+    /// The run they are written in terms of now.
+    pub to_run: i64,
+    /// Entries whose duplication the newer run found in the same places.
+    pub carried: u64,
+    /// Entries the newer run had nothing standing where they stood.
+    pub stale: u64,
+    /// The version differences that made the rewrite necessary, one line each.
+    pub drift: Vec<String>,
 }
 
 /// The build variant a baseline's ids belong to.
@@ -154,6 +193,8 @@ impl Baseline {
                 })
                 .collect(),
             entries,
+            migrations: Vec::new(),
+            stale: Vec::new(),
         }
     }
 
@@ -162,15 +203,15 @@ impl Baseline {
     /// # Errors
     ///
     /// Returns an error when the file cannot be read, is not valid JSON, or
-    /// carries a schema version this build does not understand.
+    /// was written by a build whose schema this one does not know.
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading baseline {}", path.display()))?;
         let baseline: Self = serde_json::from_str(&text)
             .with_context(|| format!("parsing baseline {}", path.display()))?;
-        if baseline.schema_version != SCHEMA_VERSION {
+        if baseline.schema_version > SCHEMA_VERSION {
             bail!(
-                "baseline {} is schema version {}, and this build reads version {}",
+                "baseline {} is schema version {}, and this build reads up to version {}",
                 path.display(),
                 baseline.schema_version,
                 SCHEMA_VERSION
@@ -227,44 +268,150 @@ impl Baseline {
         (kept, dropped)
     }
 
-    /// Why this baseline does not describe a run under `variant_fingerprint`
-    /// with `detectors`, or `None` when it does.
+    /// How well this baseline describes a run under `variant_fingerprint`
+    /// with `detectors`.
     ///
-    /// Both inputs move every id when they change, so a baseline recorded
-    /// under either is not wrong about the code — it is talking about ids that
-    /// no longer exist, and matching nothing is the expected outcome rather
-    /// than a sign the duplication is gone.
+    /// A build variant moves every id when it changes, so a baseline recorded
+    /// under another one is not wrong about the code — it is talking about ids
+    /// that no longer exist, and matching nothing is the expected outcome
+    /// rather than a sign the duplication is gone.
+    ///
+    /// A detector version difference is weighed rather than counted. Only the
+    /// components that decide what an id *is* stop the entries matching; a
+    /// component that decides how findings are grouped leaves most of them
+    /// intact, and one that decides only how they are displayed leaves all of
+    /// them. Treating the three alike would discard a project's frozen
+    /// judgements over a change that moved nothing.
     #[must_use]
-    pub fn mismatch(
+    pub fn compatibility(
         &self,
         variant_fingerprint: &str,
         detectors: &[(String, String)],
-    ) -> Option<String> {
+    ) -> Compatibility {
         if self.build_variant.fingerprint != variant_fingerprint {
-            return Some(format!(
-                "recorded under build variant {} in {} mode, and this run is variant {}",
-                short(&self.build_variant.fingerprint),
-                self.build_variant.mode,
-                short(variant_fingerprint),
-            ));
+            return Compatibility {
+                mismatch: Some(format!(
+                    "recorded under build variant {} in {} mode, and this run is variant {}",
+                    short(&self.build_variant.fingerprint),
+                    self.build_variant.mode,
+                    short(variant_fingerprint),
+                )),
+                caveat: None,
+            };
         }
-        let now: BTreeSet<(&str, &str)> = detectors
-            .iter()
-            .map(|(component, version)| (component.as_str(), version.as_str()))
-            .collect();
-        let moved: Vec<String> = self
+        let recorded: Vec<(String, String)> = self
             .detector_versions
             .iter()
-            .filter(|recorded| !now.contains(&(&recorded.component, &recorded.version)))
-            .map(|recorded| format!("{} {}", recorded.component, recorded.version))
+            .map(|entry| (entry.component.clone(), entry.version.clone()))
             .collect();
-        (!moved.is_empty()).then(|| {
-            format!(
-                "recorded under detector versions this run does not use ({})",
-                moved.join(", ")
-            )
-        })
+        let drift = compat::drift(&recorded, detectors);
+        let named = |impact: Impact| -> Option<String> {
+            let listed: Vec<String> = drift
+                .iter()
+                .filter(|entry| entry.impact == impact)
+                .map(compat::Drift::describe)
+                .collect();
+            (!listed.is_empty()).then(|| listed.join(", "))
+        };
+        Compatibility {
+            mismatch: named(Impact::Identifiers).map(|listed| {
+                format!(
+                    "recorded under detector versions that name findings differently ({listed}); \
+                     `codehelion baseline migrate` rewrites it onto this run"
+                )
+            }),
+            caveat: named(Impact::Grouping).map(|listed| {
+                format!(
+                    "grouped under different rules ({listed}), \
+                     so an entry whose group gained or lost an occurrence reads as stale"
+                )
+            }),
+        }
     }
+
+    /// Rewrite the entries onto the identifiers a later run uses.
+    ///
+    /// Entries the mapping could not carry move to [`Self::stale`] rather than
+    /// being dropped: the id is what went stale, and the judgement behind it
+    /// is a decision somebody made about their code.
+    ///
+    /// The result describes the later run, and says so — the recorded variant,
+    /// detector versions and originating run all move with the entries. A file
+    /// that claimed to describe the run it no longer speaks the language of
+    /// would fail the very check this exists to satisfy.
+    #[must_use]
+    pub fn migrated(
+        &self,
+        mapping: &Mapping,
+        target: &RunOrigin,
+        at: &str,
+        drift: &[String],
+    ) -> Self {
+        let carried: BTreeMap<&str, &crate::migrate::Carried> = mapping
+            .carried
+            .iter()
+            .map(|entry| (entry.from.as_str(), entry))
+            .collect();
+        let mut entries = Vec::with_capacity(self.entries.len());
+        let mut stale = self.stale.clone();
+        for entry in &self.entries {
+            match carried.get(entry.group.as_str()) {
+                Some(moved) => entries.push(Entry {
+                    group: moved.to.clone(),
+                    findings: moved.findings.clone(),
+                    ..entry.clone()
+                }),
+                None => stale.push(entry.clone()),
+            }
+        }
+        entries.sort_by(|a, b| a.group.cmp(&b.group));
+        entries.dedup_by(|a, b| a.group == b.group);
+        let mut migrations = self.migrations.clone();
+        migrations.push(Migration {
+            at: at.to_string(),
+            from_run: self.from_run,
+            to_run: target.id,
+            carried: as_u64(entries.len()),
+            stale: as_u64(stale.len() - self.stale.len()),
+            drift: drift.to_vec(),
+        });
+        Self {
+            schema_version: SCHEMA_VERSION,
+            created_at: self.created_at.clone(),
+            tool_version: target.tool_version.clone(),
+            root: self.root.clone(),
+            from_run: target.id,
+            build_variant: Provenance {
+                mode: target.analysis_mode.clone(),
+                normalization_version: target.normalization_version,
+                fingerprint: target.variant_fingerprint.clone(),
+            },
+            detector_versions: target
+                .detector_versions
+                .iter()
+                .map(|(component, version)| DetectorVersion {
+                    component: component.clone(),
+                    version: version.clone(),
+                })
+                .collect(),
+            entries,
+            migrations,
+            stale,
+        }
+    }
+}
+
+/// How well a baseline describes a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compatibility {
+    /// Why none of the entries can match, when none can.
+    pub mismatch: Option<String>,
+    /// What differs without stopping the entries matching.
+    pub caveat: Option<String>,
+}
+
+fn as_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 impl Entry {
@@ -422,6 +569,28 @@ mod tests {
     }
 
     #[test]
+    fn a_file_from_an_earlier_schema_still_loads() {
+        // The file that needs rewriting is by definition the older one, so a
+        // loader that refused everything but the current version would put the
+        // migration mechanism out of reach of the users who need it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("baseline.json");
+        let mut baseline = Baseline::from_run(&origin(), &[group("aa11")], "2026-07-27T01:00:00Z");
+        baseline.schema_version = 1;
+        baseline.write(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("migrations") && !text.contains("\"stale\""),
+            "a file with nothing to say about rewrites says nothing: {text}"
+        );
+
+        let loaded = Baseline::load(&path).unwrap();
+        assert_eq!(loaded.entries.len(), 1);
+        assert!(loaded.migrations.is_empty());
+        assert!(loaded.stale.is_empty());
+    }
+
+    #[test]
     fn a_file_from_a_schema_this_build_does_not_read_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("baseline.json");
@@ -438,17 +607,22 @@ mod tests {
         let baseline = Baseline::from_run(&origin(), &[group("aa11")], "2026-07-27T01:00:00Z");
         let detectors = vec![("fp-schema".to_string(), "fp-schema-v1".to_string())];
 
-        assert_eq!(baseline.mismatch("abcdef0123456789", &detectors), None);
+        let fit = baseline.compatibility("abcdef0123456789", &detectors);
+        assert_eq!(fit.mismatch, None);
+        assert_eq!(fit.caveat, None);
 
         let other_variant = baseline
-            .mismatch("999999999999", &detectors)
+            .compatibility("999999999999", &detectors)
+            .mismatch
             .expect("a different variant is a mismatch");
         assert!(other_variant.contains("build variant"));
 
         let bumped = vec![("fp-schema".to_string(), "fp-schema-v2".to_string())];
         let other_detector = baseline
-            .mismatch("abcdef0123456789", &bumped)
+            .compatibility("abcdef0123456789", &bumped)
+            .mismatch
             .expect("a moved fingerprint schema is a mismatch");
-        assert!(other_detector.contains("fp-schema fp-schema-v1"));
+        assert!(other_detector.contains("fp-schema fp-schema-v1 -> fp-schema-v2"));
+        assert!(other_detector.contains("baseline migrate"));
     }
 }

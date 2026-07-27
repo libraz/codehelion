@@ -29,6 +29,13 @@
       "type": "string",
       "description": "Fingerprint of the build variant both results belong to. Results of different variants are never compared."
     },
+    "version_drift": {
+      "type": "array",
+      "description": "Detector component versions that differ between the two results, one line each, omitted when they were produced by the same rules. A difference that would move every identifier is refused rather than listed here, so what appears is a difference the comparison survived.",
+      "items": {
+        "type": "string"
+      }
+    },
     "summary": {
       "type": "array",
       "description": "How many groups are in each state, states holding none omitted.",
