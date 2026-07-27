@@ -59,7 +59,14 @@ pub const DEFAULT_MAX_LENGTH_RATIO: f64 = 3.0;
 pub const DEFAULT_MIN_SHINGLES: usize = 4;
 
 /// Default smallest estimated Jaccard a pair must reach to be emitted. Type-3
-/// edits routinely land here; the threshold is calibrated against the corpus.
+/// edits routinely land here.
+///
+/// Not calibrated against the corpus, and not for want of trying: every value
+/// from 0.1 to one no estimate can reach leaves every corpus this project has
+/// reporting exactly the same groups. Turning the stage off does too. What
+/// this gate is worth is therefore unmeasured rather than measured and small —
+/// the stage exists for gapped clones the exact seeds miss, and the largest
+/// case here is under half a million lines.
 pub const DEFAULT_MIN_ESTIMATED_JACCARD: f64 = 0.3;
 
 /// Default LSH-bucket cap; larger buckets are high-frequency and dropped.

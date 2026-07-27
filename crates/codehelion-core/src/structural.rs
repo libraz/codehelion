@@ -61,6 +61,11 @@ use crate::verify::{self, SimilarityBreakdown, UnitView, VerifyConfig};
 /// over four projects between 39 and 480 kLOC, the most divergent pair
 /// verification has ever accepted sat at 0.41, and the limit takes 15% to 36%
 /// of the proposals out of verification without touching a single one of them.
+///
+/// Removing it entirely changes no group on any corpus this project has, which
+/// is what a gate that only sheds work should do. That is also why the value
+/// is not tuned against results: there are none to tune it on. What would move
+/// it is a measurement of what it costs to keep, not of what it finds.
 pub const DEFAULT_MAX_SHAPE_DIVERGENCE: f64 = 0.5;
 
 /// Tuning for a whole structural run: one config per stage.

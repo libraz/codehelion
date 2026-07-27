@@ -72,7 +72,28 @@ use crate::ir::ByteRange;
 /// remove nothing or high enough to take that project's clearest true copy.
 /// What the short lookalikes have in common is that their bodies follow from
 /// their signatures, and that is not a length.
-pub const DEFAULT_MIN_STATEMENTS: u32 = 4;
+///
+/// Taken from the seed layer rather than written out again, so the two cannot
+/// drift apart. Below the shortest window the setting has nothing to apply to:
+/// a run shorter than any window indexed never becomes a seed, so lowering the
+/// floor recovers nothing. Above it the floor discards runs the seeds did find.
+pub const DEFAULT_MIN_STATEMENTS: u32 = shortest_window();
+
+/// The shortest statement window the seed layer indexes.
+// The window lengths are small literals written next to this, so the cast
+// cannot lose anything; there is no const `TryFrom` to say so instead.
+#[allow(clippy::cast_possible_truncation)]
+const fn shortest_window() -> u32 {
+    let mut shortest = usize::MAX;
+    let mut index = 0;
+    while index < crate::features::WINDOW_LENGTHS.len() {
+        if crate::features::WINDOW_LENGTHS[index] < shortest {
+            shortest = crate::features::WINDOW_LENGTHS[index];
+        }
+        index += 1;
+    }
+    shortest as u32
+}
 
 /// Default largest source-length ratio between a seed's two sides.
 ///
@@ -495,6 +516,19 @@ mod tests {
     use super::*;
     use crate::candidate::FragmentRef;
     use crate::features::FeatureHash;
+
+    /// A run shorter than every indexed window never reaches this stage, so a
+    /// floor below the shortest one would be a setting with nothing to apply
+    /// to. Stated here because the derivation reads as arithmetic otherwise.
+    #[test]
+    fn the_floor_is_the_shortest_run_the_seed_layer_can_offer() {
+        let shortest = crate::features::WINDOW_LENGTHS
+            .iter()
+            .copied()
+            .min()
+            .expect("windows are indexed at some length");
+        assert_eq!(usize::try_from(DEFAULT_MIN_STATEMENTS).unwrap(), shortest);
+    }
 
     /// A window seed at a statement offset, with byte anchors derived from the
     /// offset so ranges stay ordered and non-overlapping between statements.
