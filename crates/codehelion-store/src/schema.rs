@@ -38,11 +38,13 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14];
+const MIGRATIONS: &[&str] = &[
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15,
+];
 
 /// Version 1: the full entity set.
 const V1: &str = "
@@ -532,6 +534,38 @@ ALTER TABLE clone_group ADD COLUMN width_family INTEGER NOT NULL DEFAULT 0
     CHECK (width_family IN (0, 1));
 ";
 
+/// Version 15: a fifth boilerplate shape.
+///
+/// Widening the `CHECK` means rebuilding the table again, the way V10 did.
+/// Every existing value stays valid — the list only grows — so the rows carry
+/// over unchanged, and the columns added since V10 come across with them.
+const V15: &str = "
+CREATE TABLE clone_group_new (
+    id                   INTEGER PRIMARY KEY,
+    scan_run_id          INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
+    group_fingerprint_id INTEGER NOT NULL REFERENCES fingerprint (id),
+    clone_type           TEXT NOT NULL CHECK (clone_type IN ('type-1', 'type-2', 'type-3', 'restricted-semantic')),
+    member_count         INTEGER NOT NULL,
+    score                REAL NOT NULL,
+    entropy_bits         REAL NOT NULL,
+    suppress_reason      TEXT CHECK (suppress_reason IN ('low-entropy', 'high-frequency')),
+    boilerplate          TEXT CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition', 'guarded-dispatch', 'configured-answer')),
+    member_scope         TEXT NOT NULL DEFAULT 'unit' CHECK (member_scope IN ('unit', 'fragment')),
+    test_code            INTEGER NOT NULL DEFAULT 0 CHECK (test_code IN (0, 1)),
+    split_pair           INTEGER NOT NULL DEFAULT 0 CHECK (split_pair IN (0, 1)),
+    width_family         INTEGER NOT NULL DEFAULT 0 CHECK (width_family IN (0, 1))
+) STRICT;
+INSERT INTO clone_group_new
+    SELECT id, scan_run_id, group_fingerprint_id, clone_type, member_count,
+           score, entropy_bits, suppress_reason, boilerplate, member_scope,
+           test_code, split_pair, width_family
+    FROM clone_group;
+DROP TABLE clone_group;
+ALTER TABLE clone_group_new RENAME TO clone_group;
+CREATE INDEX idx_clone_group_run ON clone_group (scan_run_id);
+CREATE INDEX idx_clone_group_fp ON clone_group (group_fingerprint_id);
+";
+
 /// Bring `conn` to the current schema version, applying any pending
 /// forward migrations inside one transaction per step.
 pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
@@ -553,6 +587,28 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
         });
     }
     let start = usize::try_from(found).unwrap_or(usize::MAX);
+    if start >= MIGRATIONS.len() {
+        return Ok(());
+    }
+    // A migration that widens a `CHECK` has to rebuild its table, and with
+    // foreign keys enforced `DROP TABLE` runs an implicit `DELETE FROM` that
+    // fires every `ON DELETE CASCADE` hanging off it. The table comes back
+    // with its rows and the children are gone. Enforcement is therefore off
+    // for the duration and the result is checked instead: the scripts move
+    // rows across by primary key, so nothing they do can orphan a reference
+    // that was whole beforehand, and `foreign_key_check` says so rather than
+    // being taken on trust. It cannot be a transaction-scoped setting —
+    // `foreign_keys` is a no-op inside one.
+    let enforced = conn.pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))?;
+    conn.pragma_update(None, "foreign_keys", false)?;
+    let outcome = apply(conn, start);
+    let checked = outcome.and_then(|()| orphans(conn));
+    conn.pragma_update(None, "foreign_keys", enforced != 0)?;
+    checked
+}
+
+/// Run every migration from `start` onwards, one transaction per step.
+fn apply(conn: &mut Connection, start: usize) -> Result<(), StoreError> {
     for (i, script) in MIGRATIONS.iter().enumerate().skip(start) {
         let tx = conn.transaction()?;
         tx.execute_batch(script)?;
@@ -567,6 +623,18 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Fail when migrating left a reference pointing at a row that is not there.
+fn orphans(conn: &Connection) -> Result<(), StoreError> {
+    let broken: i64 =
+        conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if broken > 0 {
+        return Err(StoreError::MigrationOrphanedRows { rows: broken });
+    }
+    Ok(())
+}
+
 /// The schema version currently recorded in `conn`.
 pub(crate) fn version(conn: &Connection) -> Result<i64, StoreError> {
     Ok(conn.query_row(
@@ -574,4 +642,95 @@ pub(crate) fn version(conn: &Connection) -> Result<i64, StoreError> {
         [],
         |row| row.get(0),
     )?)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// One group with one member, and the chain of rows they need to exist.
+    const SEED: &str = "
+INSERT INTO build_variant VALUES (1, 'v', 'canonical', 'structural', 1);
+INSERT INTO scan_run (id, build_variant_id, root_path, tool_version, config_hash,
+                      analysis_mode, started_at, status)
+    VALUES (1, 1, '/tree', '0.1.0', 'cfg', 'structural', '2026-01-01T00:00:00Z', 'completed');
+INSERT INTO fingerprint (id, kind, hash_algo, hash, normalization_version,
+                         frontend_version, analysis_mode, language, build_variant_id)
+    VALUES (1, 'clone_group', 'blake3', randomblob(16), 1, '', 'structural', '', 1),
+           (2, 'fragment', 'blake3', randomblob(16), 1, 'f1', 'structural', 'rust', 1);
+INSERT INTO fragment (id, scan_run_id, fingerprint_id, fragment_kind, file_path,
+                      start_line, end_line, token_count)
+    VALUES (1, 1, 2, 'function_body', 'src/lib.rs', 1, 9, 40);
+INSERT INTO clone_group (id, scan_run_id, group_fingerprint_id, clone_type,
+                         member_count, score, entropy_bits)
+    VALUES (1, 1, 1, 'type-2', 1, 0.5, 8.0);
+INSERT INTO clone_group_member VALUES (1, 1, randomblob(16), 1);
+";
+
+    /// A database at `version`, seeded with a group and its one member.
+    fn seeded(version: i64) -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1),
+                                       version INTEGER NOT NULL) STRICT;",
+        )
+        .unwrap();
+        apply(&mut conn, 0).unwrap();
+        conn.execute_batch(SEED).unwrap();
+        conn.execute("UPDATE schema_meta SET version = ?1", [version])
+            .unwrap();
+        conn
+    }
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    }
+
+    /// Rebuilding a table under enforced foreign keys deletes everything that
+    /// cascades off it: `DROP TABLE` runs an implicit `DELETE FROM` first. The
+    /// group survives either way — it is the member that says whether the
+    /// rebuild took the rest of the audit with it.
+    #[test]
+    fn rebuilding_a_table_keeps_what_hangs_off_it() {
+        // One version short of current, so the newest migration runs here
+        // whatever it turns out to be, and a later rebuild is covered too.
+        let mut conn = seeded(i64::try_from(MIGRATIONS.len()).unwrap() - 1);
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(count(&conn, "clone_group"), 1);
+        assert_eq!(count(&conn, "clone_group_member"), 1);
+    }
+
+    /// Enforcement is off while migrating, so it has to be back on afterwards.
+    #[test]
+    fn migrating_leaves_foreign_keys_as_it_found_them() {
+        let mut conn = seeded(i64::try_from(MIGRATIONS.len()).unwrap() - 1);
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrate(&mut conn).unwrap();
+        let enforced: i64 = conn
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .unwrap();
+        assert_eq!(enforced, 1);
+    }
+
+    /// A reference left pointing nowhere is reported rather than carried
+    /// forward: with enforcement off, nothing else would notice.
+    #[test]
+    fn a_reference_left_pointing_nowhere_fails_the_migration() {
+        let mut conn = seeded(i64::try_from(MIGRATIONS.len()).unwrap() - 1);
+        // Off first, so the delete leaves the member pointing nowhere
+        // instead of taking it along: a database can arrive in this state,
+        // and migrating it must say so.
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        conn.execute("DELETE FROM fragment", []).unwrap();
+        let error = migrate(&mut conn).unwrap_err();
+        assert!(
+            matches!(error, StoreError::MigrationOrphanedRows { rows } if rows == 1),
+            "unexpected error: {error}"
+        );
+    }
 }

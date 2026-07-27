@@ -43,6 +43,17 @@ pub enum StoreError {
         /// Newest version this build understands.
         supported: i64,
     },
+    /// Migrating left a reference pointing at a row that is not there.
+    ///
+    /// Foreign keys are not enforced while migrations run, because rebuilding
+    /// a table under enforcement destroys everything that cascades off it.
+    /// This is the check that replaces the enforcement, and it fires before
+    /// the database is handed back rather than at the next write.
+    #[error("migrating left {rows} reference(s) pointing at rows that are not there")]
+    MigrationOrphanedRows {
+        /// How many references `foreign_key_check` reported.
+        rows: i64,
+    },
     /// A snapshot member referenced a unit index that does not exist.
     #[error("snapshot member references unit index {index}, but only {units} units were given")]
     UnknownUnitIndex {
