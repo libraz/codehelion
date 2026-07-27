@@ -221,16 +221,21 @@ fn parse_one(source: &SourceUnit, timeout: std::time::Duration) -> FileOutcome<P
 }
 
 /// Build the structural stage configuration from the effective scan
-/// configuration: the candidate ceilings apply to every candidate stage, so
-/// one configured budget bounds the whole funnel.
+/// configuration. An overridden candidate ceiling applies to every candidate
+/// stage, so one configured number bounds the whole funnel; left unset, each
+/// stage keeps the default measured for it.
 fn structural_config(cfg: &Config) -> StructuralConfig {
     let mut config = StructuralConfig::default();
-    config.candidate.posting_cap = cfg.limits.posting_cap;
-    config.candidate.pair_budget = cfg.limits.pair_budget;
-    config.near_match.posting_cap = cfg.limits.posting_cap;
-    config.near_match.pair_budget = cfg.limits.pair_budget;
-    config.control_flow.posting_cap = cfg.limits.posting_cap;
-    config.control_flow.pair_budget = cfg.limits.pair_budget;
+    if let Some(cap) = cfg.limits.posting_cap {
+        config.candidate.posting_cap = cap;
+        config.near_match.posting_cap = cap;
+        config.control_flow.posting_cap = cap;
+    }
+    if let Some(budget) = cfg.limits.pair_budget {
+        config.candidate.pair_budget = budget;
+        config.near_match.pair_budget = budget;
+        config.control_flow.pair_budget = budget;
+    }
     config.grouping.max_component = cfg.limits.max_component;
     config.literals = literal_norm(cfg.literal_normalization);
     config
@@ -1533,5 +1538,59 @@ fn breakdown_row(group: &StructuralGroup, detail: &GroupDetail) -> SimilarityBre
         composite: breakdown.composite,
         min_pairwise: group.min_pairwise,
         confidence_band: group.confidence,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::{Config, StructuralConfig, structural_config};
+
+    /// Structural pairs statement fragments where Fast pairs token windows, and
+    /// the two need different ceilings. Reading one number from the
+    /// configuration for both would hand this mode a limit chosen for the other
+    /// — which is how a ceiling meant as a safety valve becomes a silent cut.
+    #[test]
+    fn an_unset_ceiling_leaves_every_stage_at_its_own_default() {
+        let config = structural_config(&Config::default());
+        let defaults = StructuralConfig::default();
+        assert_eq!(config.candidate.posting_cap, defaults.candidate.posting_cap);
+        assert_eq!(config.candidate.pair_budget, defaults.candidate.pair_budget);
+        assert_eq!(
+            config.near_match.posting_cap,
+            defaults.near_match.posting_cap
+        );
+        assert_eq!(
+            config.control_flow.pair_budget,
+            defaults.control_flow.pair_budget
+        );
+    }
+
+    /// A ceiling that is set bounds the whole funnel, not one stage of it.
+    #[test]
+    fn a_configured_ceiling_reaches_every_candidate_stage() {
+        let cfg = Config {
+            limits: crate::config::Limits {
+                posting_cap: Some(9),
+                pair_budget: Some(11),
+                ..crate::config::Limits::default()
+            },
+            ..Config::default()
+        };
+        let config = structural_config(&cfg);
+        for cap in [
+            config.candidate.posting_cap,
+            config.near_match.posting_cap,
+            config.control_flow.posting_cap,
+        ] {
+            assert_eq!(cap, 9);
+        }
+        for budget in [
+            config.candidate.pair_budget,
+            config.near_match.pair_budget,
+            config.control_flow.pair_budget,
+        ] {
+            assert_eq!(budget, 11);
+        }
     }
 }

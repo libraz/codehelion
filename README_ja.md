@@ -104,8 +104,8 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 [limits]                            # リソース上限。発火時は必ずレポートに計上
 # max-file-bytes = 2097152
 # parse-timeout-ms = 10000
-# posting-cap = 64
-# pair-budget = 1000000
+# posting-cap = 64                  # 未設定ならモードごとの既定値のまま
+# pair-budget = 1000000             # ペア生成 pass ごと。pass 間で共有しない
 # max-component = 1024
 ```
 

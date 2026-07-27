@@ -274,8 +274,11 @@ fn as_u64(value: usize) -> u64 {
 
 /// The Fast pipeline's pass counts, stage by stage: a winnowed fingerprint
 /// index, the seed pairs its posting lists propose, the fragments the
-/// identifier-normalized pass cuts from those seeds, and the pairs that
-/// survive verification.
+/// identifier-normalized pass cuts from those seeds, the pairs that pass
+/// proposes in turn, and the pairs that survive verification.
+///
+/// Both pairing stages carry their own budget accounting, because both hold
+/// their own allowance.
 fn funnel(stats: &engine::EngineStats) -> Vec<report::FunnelStage> {
     vec![
         report::FunnelStage::new("tokens", as_u64(stats.tokens)),
@@ -298,6 +301,17 @@ fn funnel(stats: &engine::EngineStats) -> Vec<report::FunnelStage> {
         report::FunnelStage::new("fragment classes", as_u64(stats.fragment_classes))
             .dropping("class_cap", as_u64(stats.class_cap_dropped))
             .dropping("hash_collision", as_u64(stats.hash_collisions)),
+        // The two passes hold separate allowances, so each says separately how
+        // much of its own search it got through. One combined figure would let
+        // a pass that stopped early hide behind one that finished.
+        report::FunnelStage::new("fragment pairs", as_u64(stats.fragment_candidates)).dropping(
+            "pair_budget",
+            as_u64(
+                stats
+                    .fragment_pairs_available
+                    .saturating_sub(stats.fragment_candidates),
+            ),
+        ),
         report::FunnelStage::new("verified pairs", as_u64(stats.pairs)),
     ]
 }
@@ -583,15 +597,16 @@ pub(crate) fn effective_jobs(flag: Option<usize>, configured: Option<usize>) -> 
 }
 
 /// Build the engine configuration from the effective scan configuration:
-/// detection knobs plus the configured candidate ceilings.
+/// detection knobs plus any candidate ceiling the configuration overrides.
 fn engine_config(cfg: &Config) -> Result<EngineConfig> {
+    let defaults = EngineConfig::default();
     Ok(EngineConfig {
         min_clone_tokens: usize::try_from(cfg.min_clone_tokens)
             .context("min-clone-tokens out of range")?,
         literals: literal_norm(cfg.literal_normalization),
-        posting_cap: cfg.limits.posting_cap,
-        pair_budget: cfg.limits.pair_budget,
-        ..EngineConfig::default()
+        posting_cap: cfg.limits.posting_cap.unwrap_or(defaults.posting_cap),
+        pair_budget: cfg.limits.pair_budget.unwrap_or(defaults.pair_budget),
+        ..defaults
     })
 }
 
@@ -1272,8 +1287,8 @@ mod tests {
     fn engine_config_applies_configured_ceilings() {
         let cfg = Config {
             limits: config::Limits {
-                posting_cap: 5,
-                pair_budget: 7,
+                posting_cap: Some(5),
+                pair_budget: Some(7),
                 ..config::Limits::default()
             },
             ..Config::default()
@@ -1283,6 +1298,16 @@ mod tests {
         assert_eq!(engine.pair_budget, 7);
         // Detection knobs stay at their defaults.
         assert_eq!(engine.min_clone_tokens, 20);
+    }
+
+    /// An unset ceiling leaves the mode at the default measured for it, rather
+    /// than at a number carried over from the configuration type.
+    #[test]
+    fn an_unset_ceiling_leaves_the_engine_at_its_own_default() {
+        let engine = engine_config(&Config::default()).unwrap();
+        let defaults = EngineConfig::default();
+        assert_eq!(engine.posting_cap, defaults.posting_cap);
+        assert_eq!(engine.pair_budget, defaults.pair_budget);
     }
 
     #[test]

@@ -108,8 +108,8 @@ read in leave every identifier alone and cost you nothing.
 [limits]                            # resource ceilings, all reported when hit
 # max-file-bytes = 2097152
 # parse-timeout-ms = 10000
-# posting-cap = 64
-# pair-budget = 1000000
+# posting-cap = 64                  # unset: each mode keeps its own default
+# pair-budget = 1000000             # per pairing pass, not shared between them
 # max-component = 1024
 ```
 

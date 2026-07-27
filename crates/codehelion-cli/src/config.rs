@@ -213,8 +213,16 @@ impl Default for Suppression {
 /// untrusted repository stays bounded in time and memory.
 ///
 /// Every ceiling is accounted for in the report when it fires — oversized
-/// files land in the skipped count, exhausted pairing budgets set the
-/// `pair_budget_exhausted` flag — so nothing is dropped silently.
+/// files land in the skipped count, an exhausted pairing budget states in the
+/// funnel how many candidates it left unexamined — so nothing is dropped
+/// silently.
+///
+/// The two pairing ceilings are overrides rather than values. The modes pair
+/// different things — token-window fingerprints against statement fragments —
+/// and their candidate counts differ by an order of magnitude on the same
+/// tree, so one number set here for both would be chosen for one mode and
+/// merely survived by the other. Left unset, each stays at the default its own
+/// measurements picked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Limits {
@@ -226,10 +234,16 @@ pub struct Limits {
     /// safety valve rather than the primary bound.
     pub parse_timeout_ms: u64,
     /// Longest posting list or fragment class that still enters pairing;
-    /// longer ones are dropped and counted.
-    pub posting_cap: usize,
-    /// Upper bound on candidate pairs examined across both engine passes.
-    pub pair_budget: usize,
+    /// longer ones are dropped and counted. Unset leaves each mode at its own
+    /// default.
+    pub posting_cap: Option<usize>,
+    /// Upper bound on candidate pairs each pairing pass examines. Unset leaves
+    /// each mode at its own default.
+    ///
+    /// The allowance is per pass, not shared between them: the passes search
+    /// different spaces, and one number spent by whichever runs first would
+    /// silence the other.
+    pub pair_budget: Option<usize>,
     /// Largest set of related units compared as one piece when forming
     /// groups; a larger set is cut, and the cut is reported. Comparing a set
     /// costs time quadratic in its size, so without a ceiling a codebase of
@@ -239,12 +253,11 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        let engine = codehelion_core::engine::EngineConfig::default();
         Self {
             max_file_bytes: codehelion_core::discovery::DEFAULT_MAX_FILE_BYTES,
             parse_timeout_ms: 10_000,
-            posting_cap: engine.posting_cap,
-            pair_budget: engine.pair_budget,
+            posting_cap: None,
+            pair_budget: None,
             max_component: codehelion_core::grouping::GroupingConfig::default().max_component,
         }
     }
@@ -507,9 +520,15 @@ pub const TEMPLATE: &str = "\
 # max-file-bytes = 2097152
 # Per-file lexing time ceiling in milliseconds.
 # parse-timeout-ms = 10000
+# The two pairing ceilings below override both modes at once. Left out, each
+# mode keeps the default its own measurements picked — the modes pair different
+# things, and their candidate counts differ by an order of magnitude on the same
+# tree, so a number set here suits one of them and is merely survived by the
+# other. Set them to bound a scan that is taking longer than you will wait; the
+# report then states how many candidates the ceiling left unexamined.
 # Longest posting list or fragment class that still enters pairing.
 # posting-cap = 64
-# Upper bound on candidate pairs examined across both engine passes.
+# Upper bound on candidate pairs each pairing pass examines.
 # pair-budget = 1000000
 # Largest set of related units compared as one piece when forming groups.
 # max-component = 1024
@@ -542,13 +561,14 @@ mod tests {
     #[test]
     fn limit_defaults_match_the_engine_and_discovery_defaults() {
         let limits = Limits::default();
-        let engine = codehelion_core::engine::EngineConfig::default();
         assert_eq!(
             limits.max_file_bytes,
             codehelion_core::discovery::DEFAULT_MAX_FILE_BYTES
         );
-        assert_eq!(limits.posting_cap, engine.posting_cap);
-        assert_eq!(limits.pair_budget, engine.pair_budget);
+        // The pairing ceilings are overrides, not values: unset leaves each
+        // mode at its own default rather than imposing one mode's on both.
+        assert_eq!(limits.posting_cap, None);
+        assert_eq!(limits.pair_budget, None);
         let grouping = codehelion_core::grouping::GroupingConfig::default();
         assert_eq!(limits.max_component, grouping.max_component);
         assert!(

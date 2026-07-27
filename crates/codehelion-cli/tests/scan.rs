@@ -494,20 +494,28 @@ fn configured_pair_budget_exhaustion_is_reported() {
     // not tell a reader whether a handful of low-signal candidates were
     // trimmed or the search never started, and only one of those is a result
     // worth acting on.
-    let seeds = value["summary"]["funnel"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|stage| stage["stage"] == "seed pairs")
-        .expect("the funnel names the seed stage");
-    let unexamined = seeds["dropped"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|drop| drop["cause"] == "pair_budget")
-        .expect("the ceiling accounts for what it stopped");
-    assert!(unexamined["count"].as_u64().unwrap() > 0);
-    assert_eq!(seeds["passed"], 0);
+    //
+    // Both pairing passes are checked, because each holds its own allowance:
+    // a pass whose funnel stage stayed silent would leave its share of the
+    // search unaccounted for while the run as a whole still read as merely
+    // "exhausted".
+    let funnel = value["summary"]["funnel"].as_array().unwrap();
+    for stage_name in ["seed pairs", "fragment pairs"] {
+        let stage = funnel.iter().find(|stage| stage["stage"] == stage_name);
+        assert!(stage.is_some(), "the funnel names the {stage_name} stage");
+        let stage = stage.unwrap();
+        let unexamined = stage["dropped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|drop| drop["cause"] == "pair_budget");
+        assert!(
+            unexamined.is_some(),
+            "{stage_name} accounts for what the ceiling stopped"
+        );
+        assert!(unexamined.unwrap()["count"].as_u64().unwrap() > 0);
+        assert_eq!(stage["passed"], 0);
+    }
 }
 
 /// A ceiling on the whole search must not switch one of the two detectors off.

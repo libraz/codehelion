@@ -1499,18 +1499,30 @@ impl FindingDetail {
 /// a hundred low-signal candidates and one that left nine tenths of the
 /// corpus uncompared both read as "exhausted", and only one of them is a
 /// result worth acting on.
+///
+/// The figure covers the stages the ceiling actually stopped. A pass that
+/// finished its own search is not part of what was cut short, and counting it
+/// in would dilute the share into saying less than it does.
 fn budget_note(funnel: &[FunnelStage]) -> String {
-    let skipped: u64 = funnel
+    // Summed over whichever stages recorded the ceiling firing, rather than
+    // over stage names written down here: each pass holds its own allowance,
+    // and a list of names would let a pass added later go uncounted and read
+    // as complete.
+    let budgeted = funnel
         .iter()
-        .flat_map(|stage| &stage.dropped)
-        .filter(|drop| drop.cause == "pair_budget")
-        .map(|drop| drop.count)
-        .sum();
-    let examined: u64 = funnel
-        .iter()
-        .filter(|stage| stage.stage.ends_with("seed pairs"))
-        .map(|stage| stage.passed)
-        .sum();
+        .filter(|stage| stage.dropped.iter().any(|drop| drop.cause == "pair_budget"));
+    let (examined, skipped) = budgeted.fold((0u64, 0u64), |(examined, skipped), stage| {
+        let dropped: u64 = stage
+            .dropped
+            .iter()
+            .filter(|drop| drop.cause == "pair_budget")
+            .map(|drop| drop.count)
+            .sum();
+        (
+            examined.saturating_add(stage.passed),
+            skipped.saturating_add(dropped),
+        )
+    });
     let total = examined.saturating_add(skipped);
     if total == 0 {
         return "  note: the candidate-pair budget was exhausted; results may be incomplete"
