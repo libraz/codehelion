@@ -101,7 +101,36 @@ struct Group {
     /// Absent for a group whose similarity was never scored.
     #[serde(default)]
     similarity: Option<Similarity>,
+    /// The three report fields the default policy ranks a group down for. See
+    /// [`put_forward`].
+    #[serde(default)]
+    split_pair: bool,
+    #[serde(default)]
+    test_code: bool,
+    #[serde(default)]
+    boilerplate: Option<String>,
     members: Vec<Member>,
+}
+
+/// Boilerplate category the default policy ranks down rather than hides.
+const RANKED_DOWN_BOILERPLATE: &str = "macro-repetition";
+
+/// Whether the report puts a group forward or files it below the findings
+/// that carry behaviour.
+///
+/// The report sorts by this and does not state it, so it is read back from the
+/// three fields the decision is made of. That leaves the default policy
+/// written down twice, which is why the answer is checked against the order
+/// the report actually emitted — everything it puts forward comes first, so a
+/// policy change that moves the fold moves the order with it and the
+/// disagreement is the signal.
+///
+/// A configured run can rank other things down, and this will not know. The
+/// harness scans with the defaults, which is the run the figure describes.
+fn put_forward(group: &Group) -> bool {
+    !(group.split_pair
+        || group.test_code
+        || group.boilerplate.as_deref() == Some(RANKED_DOWN_BOILERPLATE))
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +193,7 @@ pub fn from_report_json(json: &str) -> Result<(DetectionResult, u32), Error> {
                 .similarity
                 .as_ref()
                 .and_then(|similarity| similarity.confidence_band.clone()),
+            actionable: put_forward(group),
             fragments: group
                 .members
                 .iter()
@@ -298,6 +328,57 @@ mod tests {
     fn a_document_that_is_not_a_report_is_a_parse_error() {
         let error = from_report_json("{\"schema_version\": 2}").expect_err("no summary");
         assert!(matches!(error, Error::Parse(_)));
+    }
+
+    #[test]
+    fn a_group_the_report_files_below_the_rest_is_read_as_one() {
+        for (field, value) in [
+            ("\"suppressed\": null,", "\"split_pair\": true,"),
+            ("\"suppressed\": null,", "\"test_code\": true,"),
+            (
+                "\"suppressed\": null,",
+                "\"boilerplate\": \"macro-repetition\",",
+            ),
+        ] {
+            let filed = REPORT.replacen(field, value, 1);
+            let (result, _lines) = from_report_json(&filed).expect("report reads");
+            assert!(
+                !result.findings[0].actionable,
+                "a group carrying {value} was read as one the report puts forward"
+            );
+        }
+        // And a group carrying none of the three is put forward. Without this
+        // the three above would pass on a reader that always answered no.
+        let (result, _lines) = from_report_json(REPORT).expect("report reads");
+        assert!(result.findings[0].actionable);
+    }
+
+    /// The fold this module reads is the one the report drew.
+    ///
+    /// [`put_forward`] restates the default policy, so it can disagree with
+    /// the report that applied it. The report cannot be asked where its fold
+    /// is, but it sorts by it — everything it puts forward comes first — so a
+    /// disagreement shows up as a finding read as filed-below sitting above
+    /// one read as put-forward.
+    #[test]
+    fn the_fold_this_reads_is_where_the_report_put_it() {
+        let ordered = REPORT.replacen(
+            "\"suppressed\": {\"kind\": \"rule\", \"detail\": \"path\"},",
+            "\"suppressed\": null, \"split_pair\": true,",
+            1,
+        );
+        let (result, _lines) = from_report_json(&ordered).expect("report reads");
+        let fold = result
+            .findings
+            .iter()
+            .position(|finding| !finding.actionable)
+            .unwrap_or(result.findings.len());
+        assert!(
+            result.findings[fold..].iter().all(|f| !f.actionable),
+            "the report put a finding forward below one it filed away, so the \
+             policy read here is not the policy it applied"
+        );
+        assert_eq!(fold, 1, "the fixture is meant to have a fold to find");
     }
 
     #[test]

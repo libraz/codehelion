@@ -21,6 +21,17 @@
 //! is anchored to, and `corpus/scripts/materialize-labeled.sh` rebuilds it. A
 //! case without its snapshot is reported as unscored instead of scored as
 //! perfect.
+//!
+//! # What the "put forward" column has said so far
+//!
+//! Ranking a finding down is not, on this evidence, a precision device. The
+//! column moves by a point or two in either direction against the overall
+//! figure — down on two projects, up on one, unchanged on another — which is
+//! what it should do if the findings the report files below the rest are about
+//! as likely to be real as the ones above. That agrees with the reason they
+//! are filed there, which is that a pair says less per finding than a group
+//! does, not that a pair is more often wrong. The column is here so that
+//! reason stays checkable rather than becoming an assumption.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::fmt::Write as _;
@@ -197,8 +208,13 @@ fn scan(corpus: &Path, database: &Path) -> String {
 fn every_labelled_group_still_gets_the_verdict_it_was_given() {
     let root = repo_root();
     let scratch = tempfile::tempdir().expect("temp dir");
-    let mut table =
-        String::from("\ncorpus            precision  confirmed  refuted  unjudged  conflicts\n");
+    // "put forward" is precision over the findings the report asks to be read
+    // first, which is the number a reader's first impression is made of. It
+    // sits beside the overall figure rather than replacing it: the difference
+    // between the two is what ranking a finding down is worth.
+    let mut table = String::from(
+        "\ncorpus            precision  put forward  confirmed  refuted  unjudged  conflicts\n",
+    );
     let mut complaints = String::new();
     let mut unmaterialized = 0usize;
     let mut sizes = SizeSplit::default();
@@ -222,8 +238,8 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
         if !snapshot.is_dir() {
             writeln!(
                 table,
-                "{:<16} {:>9} {:>10} {:>8} {:>9} {:>10}",
-                expected.name, "-", "-", "-", "-", "-"
+                "{:<16} {:>9} {:>12} {:>10} {:>8} {:>9} {:>10}",
+                expected.name, "-", "-", "-", "-", "-", "-"
             )
             .expect("writing to a string cannot fail");
             unmaterialized += 1;
@@ -250,9 +266,10 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
         );
         writeln!(
             table,
-            "{:<16} {:>9.4} {:>10} {:>8} {:>9} {:>10}",
+            "{:<16} {:>9.4} {:>12.4} {:>10} {:>8} {:>9} {:>10}",
             expected.name,
             ruled.precision(),
+            ruled.actionable_precision(),
             ruled.confirmed,
             ruled.refuted,
             ruled.unjudged,

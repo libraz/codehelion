@@ -229,6 +229,11 @@ pub struct Adjudication {
     pub conflicting: usize,
     /// Findings no label speaks about. Counted, never guessed at.
     pub unjudged: usize,
+    /// Of the confirmed, those the report put forward rather than filed below
+    /// the findings that carry behaviour.
+    pub actionable_confirmed: usize,
+    /// Of the refuted, those the report put forward.
+    pub actionable_refuted: usize,
 }
 
 impl Adjudication {
@@ -246,6 +251,21 @@ impl Adjudication {
     pub fn precision(&self) -> f64 {
         ratio(self.confirmed, self.judged())
     }
+
+    /// Precision over the findings the report put forward.
+    ///
+    /// The report keeps some findings without asking for them to be read
+    /// first, and a reader who stops at the fold never meets those. Overall
+    /// precision counts them all the same, which credits or blames the tool
+    /// for rows nobody reached. This is the figure the fold was drawn to
+    /// improve, so it is the one that says whether drawing it worked.
+    #[must_use]
+    pub fn actionable_precision(&self) -> f64 {
+        ratio(
+            self.actionable_confirmed,
+            self.actionable_confirmed + self.actionable_refuted,
+        )
+    }
 }
 
 /// Rule `results` against `labels`, scoring only what the labels speak about.
@@ -259,12 +279,20 @@ pub fn adjudicate(results: &DetectionResult, labels: &LabelSet, threshold: f64) 
         refuted: 0,
         conflicting: 0,
         unjudged: 0,
+        actionable_confirmed: 0,
+        actionable_refuted: 0,
     };
     for finding in &results.findings {
         match verdict(finding, labels, threshold) {
             Verdict::Conflicting => adjudication.conflicting += 1,
-            Verdict::Confirmed => adjudication.confirmed += 1,
-            Verdict::Refuted => adjudication.refuted += 1,
+            Verdict::Confirmed => {
+                adjudication.confirmed += 1;
+                adjudication.actionable_confirmed += usize::from(finding.actionable);
+            }
+            Verdict::Refuted => {
+                adjudication.refuted += 1;
+                adjudication.actionable_refuted += usize::from(finding.actionable);
+            }
             Verdict::Unjudged => adjudication.unjudged += 1,
         }
     }
@@ -669,6 +697,7 @@ mod tests {
             clone_type: CloneType::Type2,
             score,
             band: None,
+            actionable: true,
             fragments,
         }
     }
@@ -932,6 +961,7 @@ mod tests {
                     clone_type: CloneType::Type1,
                     score: 1.0,
                     band: None,
+                    actionable: true,
                     fragments: k2,
                 },
                 finding("b3", 1.0, k3),

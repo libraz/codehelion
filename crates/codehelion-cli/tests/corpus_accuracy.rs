@@ -28,6 +28,7 @@ use assert_cmd::Command;
 use codehelion_eval::detected;
 use codehelion_eval::labels::LabelSet;
 use codehelion_eval::metrics::{DEFAULT_MATCH_THRESHOLD, evaluate};
+use codehelion_eval::schema::CloneType;
 
 /// One corpus and what the detector currently recovers from it.
 struct Expected {
@@ -142,6 +143,13 @@ fn every_corpus_recovers_what_it_did_and_reports_no_labelled_non_clone() {
     let mut table = String::from(
         "\ncorpus            recall  precision  findings/kLOC  FP/kLOC  non-clone hits\n",
     );
+    // Recall split by what the labelled pair was made to be. Overall recall
+    // says how much went missing; this says which kind did, and the kinds are
+    // not interchangeable — a Type-1 copy that goes missing is a broken
+    // detector, while a Type-3 pair that does is the acceptance threshold
+    // doing its job. Printed, not asserted: the per-corpus recall above is the
+    // assertion, and it is the same numbers with the split undone.
+    let mut by_type = String::from("\ncorpus              type-1   type-2   type-3\n");
     let mut complaints = String::new();
 
     for expected in CORPORA {
@@ -168,6 +176,18 @@ fn every_corpus_recovers_what_it_did_and_reports_no_labelled_non_clone() {
             metrics.non_clone_hits,
         )
         .expect("writing to a string cannot fail");
+        write!(by_type, "{:<16}", expected.name).expect("writing to a string cannot fail");
+        for clone_type in [CloneType::Type1, CloneType::Type2, CloneType::Type3] {
+            // A dash rather than a zero where the corpus has no pair of that
+            // type: nothing was recovered because nothing was asked for, and a
+            // zero would read as a failure.
+            match metrics.recall_by_type.get(&clone_type) {
+                Some(recall) => write!(by_type, " {recall:>8.4}"),
+                None => write!(by_type, " {:>8}", "-"),
+            }
+            .expect("writing to a string cannot fail");
+        }
+        by_type.push('\n');
 
         if (metrics.recall_overall - expected.recall).abs() >= 1e-9 {
             writeln!(
@@ -200,6 +220,7 @@ fn every_corpus_recovers_what_it_did_and_reports_no_labelled_non_clone() {
 
     // Printed so a run leaves the figures behind: `make eval` shows this table.
     println!("{table}");
+    println!("{by_type}");
     // Every corpus is scored before anything is asserted: a change to the
     // detector moves several of these at once, and stopping at the first one
     // would hide the rest behind a re-run.

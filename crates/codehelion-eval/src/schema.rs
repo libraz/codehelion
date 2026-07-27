@@ -123,8 +123,25 @@ pub struct Finding {
     /// or a fragment run.
     #[serde(default)]
     pub band: Option<String>,
+    /// Whether the report puts this finding among the ones it asks to be read,
+    /// rather than below them.
+    ///
+    /// Some findings are reported without being put forward: a pair no group
+    /// could hold, a body that is nothing but macro invocations, a group that
+    /// lives wholly in a test suite. They are worth keeping and worth scoring,
+    /// but they are not what a reader is handed, and precision over the ones
+    /// that are is the number a first impression is made of. Defaults to true,
+    /// so a result from a source that does not distinguish them scores as one
+    /// undivided list.
+    #[serde(default = "put_forward")]
+    pub actionable: bool,
     /// The fragments this finding relates as clones.
     pub fragments: Vec<Fragment>,
+}
+
+/// Default for [`Finding::actionable`].
+const fn put_forward() -> bool {
+    true
 }
 
 /// The full output of one detection run over a set of source files.
