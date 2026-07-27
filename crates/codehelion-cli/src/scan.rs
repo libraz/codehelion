@@ -286,7 +286,14 @@ fn funnel(stats: &engine::EngineStats) -> Vec<report::FunnelStage> {
         )
         .dropping("high_frequency", as_u64(stats.stop_fingerprints))
         .dropping("high_frequency_postings", as_u64(stats.stop_postings)),
-        report::FunnelStage::new("seed pairs", as_u64(stats.seed_candidates)),
+        report::FunnelStage::new("seed pairs", as_u64(stats.seed_candidates)).dropping(
+            "pair_budget",
+            as_u64(
+                stats
+                    .raw_pairs_available
+                    .saturating_sub(stats.seed_candidates),
+            ),
+        ),
         report::FunnelStage::new("fragments", as_u64(stats.fragments)),
         report::FunnelStage::new("fragment classes", as_u64(stats.fragment_classes))
             .dropping("class_cap", as_u64(stats.class_cap_dropped))

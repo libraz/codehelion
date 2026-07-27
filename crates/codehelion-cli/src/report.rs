@@ -1107,10 +1107,7 @@ impl Report {
             )?;
         }
         if summary.pair_budget_exhausted {
-            writeln!(
-                out,
-                "  note: the candidate-pair budget was exhausted; results may be incomplete"
-            )?;
+            writeln!(out, "{}", budget_note(&summary.funnel))?;
         }
         Ok(())
     }
@@ -1494,6 +1491,36 @@ impl FindingDetail {
         }
         Ok(())
     }
+}
+
+/// What the exhausted candidate-pair ceiling cost, in the run's own numbers.
+///
+/// How much was skipped, not only that something was: a ceiling that trimmed
+/// a hundred low-signal candidates and one that left nine tenths of the
+/// corpus uncompared both read as "exhausted", and only one of them is a
+/// result worth acting on.
+fn budget_note(funnel: &[FunnelStage]) -> String {
+    let skipped: u64 = funnel
+        .iter()
+        .flat_map(|stage| &stage.dropped)
+        .filter(|drop| drop.cause == "pair_budget")
+        .map(|drop| drop.count)
+        .sum();
+    let examined: u64 = funnel
+        .iter()
+        .filter(|stage| stage.stage.ends_with("seed pairs"))
+        .map(|stage| stage.passed)
+        .sum();
+    let total = examined.saturating_add(skipped);
+    if total == 0 {
+        return "  note: the candidate-pair budget was exhausted; results may be incomplete"
+            .to_string();
+    }
+    format!(
+        "  note: the candidate-pair budget stopped the search after {examined} of {total} \
+         candidate pairs; the {skipped} left unexamined may hold duplication this report does \
+         not list"
+    )
 }
 
 #[cfg(test)]

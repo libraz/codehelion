@@ -757,7 +757,16 @@ fn funnel(stats: &structural::StructuralStats) -> Vec<report::FunnelStage> {
                 "high_frequency_postings",
                 as_u64(stats.candidate.stop_postings),
             ),
-        report::FunnelStage::new("exact seed pairs", as_u64(stats.candidate.candidate_pairs)),
+        report::FunnelStage::new("exact seed pairs", as_u64(stats.candidate.candidate_pairs))
+            .dropping(
+                "pair_budget",
+                as_u64(
+                    stats
+                        .candidate
+                        .available_pairs
+                        .saturating_sub(stats.candidate.candidate_pairs),
+                ),
+            ),
         report::FunnelStage::new("near-match pairs", as_u64(near.candidate_pairs))
             .dropping("too_few_shingles", as_u64(near.skipped_small))
             .dropping("crowded_bucket", as_u64(near.stop_buckets))

@@ -490,6 +490,60 @@ fn configured_pair_budget_exhaustion_is_reported() {
     let value = scan_json(dir.path());
     assert_eq!(value["summary"]["pair_budget_exhausted"], true);
     assert_eq!(value["summary"]["groups"]["total"], 0);
+    // And says how much it did not look at. "The budget ran out" alone does
+    // not tell a reader whether a handful of low-signal candidates were
+    // trimmed or the search never started, and only one of those is a result
+    // worth acting on.
+    let seeds = value["summary"]["funnel"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|stage| stage["stage"] == "seed pairs")
+        .expect("the funnel names the seed stage");
+    let unexamined = seeds["dropped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|drop| drop["cause"] == "pair_budget")
+        .expect("the ceiling accounts for what it stopped");
+    assert!(unexamined["count"].as_u64().unwrap() > 0);
+    assert_eq!(seeds["passed"], 0);
+}
+
+/// A ceiling on the whole search must not switch one of the two detectors off.
+///
+/// The verbatim pass runs first over a far larger candidate space. Sharing one
+/// allowance with the renamed-copy pass means that above a few hundred
+/// thousand lines the first pass spends all of it, and Fast mode silently
+/// becomes verbatim-only — while reporting nothing worse than an exhausted
+/// budget.
+#[test]
+fn a_tight_budget_narrows_both_detectors_rather_than_silencing_one() {
+    let dir = fixture();
+    let full = scan_json(dir.path());
+    let type2 = |value: &serde_json::Value| {
+        value["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|group| group["clone_type"] == "type-2")
+            .count()
+    };
+    assert!(type2(&full) > 0, "the fixture holds a renamed copy");
+
+    // Tight enough that the verbatim pass runs out, wide enough that the
+    // renamed pass could still do its work with an allowance of its own.
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[limits]\npair-budget = 12\n",
+    )
+    .unwrap();
+    let squeezed = scan_json(dir.path());
+    assert_eq!(squeezed["summary"]["pair_budget_exhausted"], true);
+    assert!(
+        type2(&squeezed) > 0,
+        "the renamed copy is still found when the verbatim pass runs out"
+    );
 }
 
 #[test]
