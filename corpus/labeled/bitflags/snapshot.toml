@@ -1,0 +1,15 @@
+# Where this case's sources come from. The sources themselves are not
+# committed: `corpus/scripts/materialize-labeled.sh` fetches them into
+# `corpus/external/` and cuts `snapshot/` from the pinned commit, both of which
+# are git-ignored. The commit is what makes the line ranges in labels.json
+# meaningful, so it is never bumped in place.
+schema_version = 0
+origin = "https://github.com/bitflags/bitflags.git"
+commit = "f92a2921b41644b02ca5d50a6ace542e309e6a6f"
+# The crate, its test modules included. Every other case here leaves the suite
+# out, because a suite repeats itself for reasons that say nothing about the
+# library it covers. This one keeps it: the shape this case exists to rule on —
+# a body that is nothing but a run of macro invocations — is written almost
+# nowhere else, and leaving the suite out would leave the case with nothing to
+# judge.
+paths = ["src"]

@@ -138,6 +138,7 @@ be counted rather than merely described. The ones in use:
 | `validated-setter` | a lock, a validity guard and one field assignment, differing in what is checked and what is set |
 | `mirrored-operation` | a pair of dual operations — push against pop, enqueue against dequeue — alike because each is the other read backwards |
 | `member-call-run` | a short run of calls on the object's own members, alike in shape while the calls have nothing to do with one another |
+| `assertion-run` | a test body that is nothing but a run of checks — assertion macros, or calls into the suite's own case helper — alike because listing checks is all it does |
 
 Extend the table when a case needs a class it does not have; do not reach for
 the nearest existing word.
