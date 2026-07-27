@@ -808,6 +808,7 @@ mod tests {
             roots,
             diagnostics: Vec::new(),
             error_ranges: Vec::new(),
+            test_module: false,
         }
     }
 

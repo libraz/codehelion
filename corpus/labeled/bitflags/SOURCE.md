@@ -71,17 +71,20 @@ a body is only assertion macros there is nothing left for a similarity measure
 to read but their number and their shape, and enough test bodies of a similar
 length will match on that alone.
 
-Two of the four are not marked as test code, so the test-code rule that would
-otherwise have covered them does not fire. That is what makes the class worth
-keeping as its own: on this evidence it is not a redundant spelling of "this is
-a test".
+All four are also test code, so on this project the class ranks down nothing
+the suite rule would not have reached anyway. That is the usual case rather
+than an accident of this one: across the sample of 142 crates, 83 of the 86
+groups the class marks are test code as well. The three that are not are a
+`fmt` written as two `#[cfg]`-alternative bodies and a pair of macro
+definitions, all of them lookalikes too, and all of them the kind of finding
+nothing else here would have filed below the rest.
 
-## A marker that does not reach across files
+## The suite is recognised from one line in the crate root
 
-The two groups just mentioned go unmarked because bitflags writes
-`#[cfg(test)] mod tests;` in one file and the module's body in another, and the
-mark is read from an item's own leading attributes. Every function that carries
-`#[test]` is still recognised; the `#[track_caller] fn case` helpers beside them
-are not, and one unmarked member is enough to leave the group unmarked. The
-verdicts here are unaffected — whether a group is duplication does not depend
-on where a report files it — but the case is the record of the gap.
+bitflags declares `#[cfg(test)] mod tests;` in `lib.rs` and writes the module
+in `tests.rs` and a directory of files beside it, which no other case here
+does. Every group in that tree is test code on the strength of that one line:
+the functions carrying `#[test]` would be recognised without it, but the
+`#[track_caller] fn case` helpers they call carry no marker of their own, and a
+group holding one of those is recognised only by following the declaration to
+the files it names.

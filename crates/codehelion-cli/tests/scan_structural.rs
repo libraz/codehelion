@@ -1103,6 +1103,84 @@ fn a_policy_that_hides_test_code_records_the_marker_that_hid_it() {
     );
 }
 
+/// The crate root, which declares the suite and holds the routine it covers.
+/// `{}` is where the declaration's attribute goes, or does not.
+const SPLIT_ROOT_RS: &str = "pub fn width_of(text: &str) -> usize {
+    text.trim().chars().count()
+}
+
+{}
+mod tests;
+";
+
+/// The suite's own root: nothing but the file it hands on to.
+const SPLIT_SUITE_RS: &str = "mod width;\n";
+
+/// Two helpers of the suite, identical and neither marked: the duplication is
+/// recognisable as test code only through the declaration two files above.
+const SPLIT_CASES_RS: &str = "use super::super::width_of;
+
+#[track_caller]
+fn short_case(input: &str, expected: usize) {
+    let measured = width_of(input);
+    let doubled = measured * 2;
+    assert_eq!(measured, expected);
+    assert_eq!(doubled, expected * 2);
+}
+
+#[track_caller]
+fn long_case(input: &str, expected: usize) {
+    let measured = width_of(input);
+    let doubled = measured * 2;
+    assert_eq!(measured, expected);
+    assert_eq!(doubled, expected * 2);
+}
+";
+
+/// A suite declared in one file and written in two others, optionally marked
+/// as test-only where it is declared.
+fn split_suite_fixture(declared_for_tests: bool) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src/tests")).unwrap();
+    let attribute = if declared_for_tests {
+        "#[cfg(test)]"
+    } else {
+        ""
+    };
+    std::fs::write(
+        root.join("src/lib.rs"),
+        SPLIT_ROOT_RS.replace("{}", attribute),
+    )
+    .unwrap();
+    std::fs::write(root.join("src/tests.rs"), SPLIT_SUITE_RS).unwrap();
+    std::fs::write(root.join("src/tests/width.rs"), SPLIT_CASES_RS).unwrap();
+    dir
+}
+
+#[test]
+fn a_suite_declared_in_one_file_and_written_in_another_is_still_a_suite() {
+    let value = scan_json(split_suite_fixture(true).path());
+    let groups = value["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1, "{groups:#?}");
+    // Neither helper carries a marker; the only one in the tree is on the
+    // declaration in the crate root, two files above them.
+    assert_eq!(groups[0]["test_code"], true);
+    assert_eq!(value["summary"]["groups"]["test_code"], 1);
+}
+
+#[test]
+fn a_suite_is_recognised_from_its_declaration_and_not_from_its_directory() {
+    // The same three files, with the attribute taken off the declaration. A
+    // directory called `tests` is not on its own evidence of anything.
+    let value = scan_json(split_suite_fixture(false).path());
+    let groups = value["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1, "{groups:#?}");
+    assert_eq!(groups[0]["test_code"], false);
+    assert_eq!(value["summary"]["groups"]["test_code"], 0);
+}
+
 /// A measuring routine whose loop is a small part of it.
 const LOCAL_LEFT_RS: &str = "pub fn summarize_left(rows: &[String], width: usize) -> usize {
     let mut total = 0usize;

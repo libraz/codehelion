@@ -35,7 +35,7 @@ use codehelion_core::structural::{
     self, GroupDetail, RegionOccurrence, StructuralConfig, StructuralRegion, StructuralReport,
     StructuralUnit,
 };
-use codehelion_core::test_code::TEST_CODE_VERSION;
+use codehelion_core::test_code::{self, TEST_CODE_VERSION};
 use codehelion_core::verify::{SimilarityBreakdown, WEIGHT_VERSION};
 use codehelion_store::snapshot::{
     FileRow, GroupOrigin, GroupRow, MemberRow, PriorityRow, SimilarityBreakdownRow, Snapshot,
@@ -99,10 +99,11 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
     let (parsed, unreadable, timed_out) =
         map_sources(&sources, jobs, |source| parse_one(source, timeout))?;
-    let (files, irs): (Vec<SourceMeta>, Vec<SyntaxIrFile>) = parsed
+    let (files, mut irs): (Vec<SourceMeta>, Vec<SyntaxIrFile>) = parsed
         .into_iter()
         .map(|source| (source.meta, source.ir))
         .unzip();
+    mark_test_modules(&files, &mut irs);
 
     // Discovery reports the Fast variant; the results belong to the
     // Structural one, and the two never share a fingerprint. The header
@@ -218,6 +219,29 @@ fn parse_one(source: &SourceUnit, timeout: std::time::Duration) -> FileOutcome<P
         },
         ir,
     }))
+}
+
+/// Record which parsed files are the body of a module the tree declares
+/// test-only.
+///
+/// A parse sees one file, and the `#[cfg(test)]` that puts a file in the suite
+/// is written on the declaration in another one. This is where the whole set
+/// is in hand, so it is where the two are put together.
+fn mark_test_modules(files: &[SourceMeta], irs: &mut [SyntaxIrFile]) {
+    let inputs: Vec<test_code::ModuleFile<'_>> = files
+        .iter()
+        .zip(irs.iter())
+        .map(|(file, ir)| test_code::ModuleFile {
+            path: Path::new(&file.relative_path),
+            language: file.language,
+            tokens: &ir.tokens,
+        })
+        .collect();
+    let in_suite = test_code::declared_test_modules(&inputs);
+    drop(inputs);
+    for (ir, marked) in irs.iter_mut().zip(in_suite) {
+        ir.test_module = marked;
+    }
 }
 
 /// Build the structural stage configuration from the effective scan

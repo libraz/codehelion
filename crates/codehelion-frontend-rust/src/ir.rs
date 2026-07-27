@@ -96,6 +96,7 @@ impl StructuralFrontend for RustStructuralFrontend {
             // frontend reports problems through `error_ranges` only.
             diagnostics: Vec::new(),
             error_ranges: builder.error_ranges,
+            test_module: false,
         }
     }
 }

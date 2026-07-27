@@ -337,6 +337,14 @@ pub struct SyntaxIrFile {
     /// Source regions the parser marked as errors. Overlapping nodes are
     /// still emitted; these ranges only lower confidence downstream.
     pub error_ranges: Vec<ByteRange>,
+    /// Whether the file is the body of a module its tree declares test-only.
+    ///
+    /// Not something a parse can answer: the declaration carrying the marker
+    /// is in another file, so this is settled once the whole set is known and
+    /// left here for the walk that reads a unit's markers to start from. A
+    /// frontend leaves it false. See
+    /// [`declared_test_modules`](crate::test_code::declared_test_modules).
+    pub test_module: bool,
 }
 
 impl SyntaxIrFile {
@@ -585,6 +593,7 @@ mod tests {
             roots: vec![root],
             diagnostics: Vec::new(),
             error_ranges: Vec::new(),
+            test_module: false,
         };
 
         let mut seen = Vec::new();
@@ -610,6 +619,7 @@ mod tests {
             roots,
             diagnostics: Vec::new(),
             error_ranges: Vec::new(),
+            test_module: false,
         }
     }
 

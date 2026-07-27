@@ -24,21 +24,21 @@
 //!
 //! # What the "put forward" column has said so far
 //!
-//! Ranking a finding down is not, in general, a precision device. On five of
-//! these projects the column moves by a point or two in either direction
-//! against the overall figure — down on two, up on one, unchanged on two —
-//! which is what it should do if the findings the report files below the rest
-//! are about as likely to be real as the ones above. That agrees with the
-//! reason most of them are filed there: a pair says less per finding than a
-//! group does, and a test suite repeats itself on purpose, neither of which is
-//! a claim that the finding is wrong.
+//! Ranking a finding down is not, in general, a precision device. On seven of
+//! these projects the column moves by a point or two against the overall
+//! figure or not at all — down on two, up on one, unchanged on four — which is
+//! what it should do if the findings the report files below the rest are about
+//! as likely to be real as the ones above. That agrees with the reason they
+//! are filed there: a pair says less per finding than a group does, and a test
+//! suite repeats itself on purpose, neither of which is a claim that the
+//! finding is wrong.
 //!
-//! The sixth project separates the reasons. It is seven points higher put
-//! forward than overall, and it is the one case whose ranking is done by a
-//! boilerplate class rather than by those two: every group it reports whose
-//! members are nothing but runs of macro invocations is a lookalike. So one of
-//! the three reasons a finding is ranked down does predict that it is wrong,
-//! and the column is what tells it apart from the two that do not.
+//! The eighth is eleven points higher put forward than overall, and it is the
+//! only case whose test suite is in scope at all. What the column measures
+//! there is the four groups in the library against the twenty-one in the
+//! suite, so the gap is the difference between the two bodies of code rather
+//! than anything the ranking knows. Which is the point of having the column:
+//! where it moves, it says what moved it.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::fmt::Write as _;

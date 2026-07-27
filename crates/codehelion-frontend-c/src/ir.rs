@@ -309,6 +309,7 @@ pub fn parse_to_ir(
                 start: 0,
                 end: source.len(),
             }],
+            test_module: false,
         };
     };
 
@@ -336,6 +337,7 @@ pub fn parse_to_ir(
         // frontend reports problems through `error_ranges` only.
         diagnostics: Vec::new(),
         error_ranges: builder.error_ranges,
+        test_module: false,
     }
 }
 

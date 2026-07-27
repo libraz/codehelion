@@ -22,6 +22,28 @@
 //! thing two ways invites the two to disagree. A unit inside a marked
 //! container — a module compiled only for tests — is test code too, since it
 //! exists to serve the cases in it.
+//!
+//! # A container the file does not hold
+//!
+//! A Rust module can be declared in one file and written in another:
+//! `#[cfg(test)] mod tests;` beside a `tests.rs`, or a `tests/` directory of
+//! them. The marker is on the declaration, so nothing in the file it governs
+//! carries it, and reading each file alone leaves every helper in that tree
+//! looking like ordinary code — a suite of a hundred cases can come back
+//! unrecognised because its `#[test]` functions were the only ones ever
+//! marked.
+//!
+//! [`declared_test_modules`] closes that by following the declaration to the
+//! file it names, and onwards through whatever that file declares in turn.
+//! This is not the directory convention arriving by another route: what is
+//! read is still the author's own `#[cfg(test)]`, and a `tests` directory
+//! nobody declared that way is still ordinary code. It needs the whole file
+//! set at once, which is why it sits apart from [`is_marked`] rather than
+//! inside it.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 use crate::discovery::Language;
 use crate::frontend::{Token, TokenKind};
@@ -31,7 +53,7 @@ use crate::frontend::{Token, TokenKind};
 /// Recorded alongside the other detector versions: a change in what counts as
 /// test code changes how a report is ordered, so results from two versions are
 /// not comparable without saying so.
-pub const TEST_CODE_VERSION: &str = "test-code-v1";
+pub const TEST_CODE_VERSION: &str = "test-code-v2";
 
 /// The identifier a test attribute is built around.
 ///
@@ -116,15 +138,32 @@ fn opens_a_case(tokens: &[Token]) -> bool {
 fn rust_attributes(tokens: &[Token]) -> impl Iterator<Item = &[Token]> {
     let mut rest = tokens;
     std::iter::from_fn(move || {
-        // `#[attr]` on the item and `#![attr]` on the enclosing scope both
-        // start an attribute; anything else ends the run.
-        let after_hash = after_punctuation(rest, "#")?;
-        let after_bang = after_punctuation(after_hash, "!").unwrap_or(after_hash);
-        let body = after_punctuation(after_bang, "[")?;
-        let end = closing_bracket(body)?;
-        rest = &body[end + 1..];
-        Some(&body[..end])
+        let (body, tail) = leading_attribute(rest)?;
+        rest = tail;
+        Some(body)
     })
+}
+
+/// The body of the leading attribute, without its delimiters, and the tokens
+/// after it.
+///
+/// `#[attr]` on the item and `#![attr]` on the enclosing scope both start an
+/// attribute; anything else ends the run.
+fn leading_attribute(tokens: &[Token]) -> Option<(&[Token], &[Token])> {
+    let after_hash = after_punctuation(tokens, "#")?;
+    let after_bang = after_punctuation(after_hash, "!").unwrap_or(after_hash);
+    let body = after_punctuation(after_bang, "[")?;
+    let end = closing_bracket(body)?;
+    Some((&body[..end], &body[end + 1..]))
+}
+
+/// What an item is left with once its leading attribute run is past.
+fn after_attributes(tokens: &[Token]) -> &[Token] {
+    let mut rest = tokens;
+    while let Some((_, tail)) = leading_attribute(rest) {
+        rest = tail;
+    }
+    rest
 }
 
 /// The tokens after one leading punctuation token with the given text.
@@ -136,16 +175,24 @@ fn after_punctuation<'a>(tokens: &'a [Token], text: &str) -> Option<&'a [Token]>
 /// Index of the `]` that closes the bracket this body sits in, counting nested
 /// pairs, or `None` when the source is truncated before it.
 fn closing_bracket(body: &[Token]) -> Option<usize> {
+    closing(body, "[", "]")
+}
+
+/// Index of the delimiter closing the group this body sits in, counting nested
+/// pairs, or `None` when the source is truncated before it.
+fn closing(body: &[Token], open: &str, close: &str) -> Option<usize> {
     let mut depth = 0usize;
     for (index, token) in body.iter().enumerate() {
         if token.kind != TokenKind::Punctuation {
             continue;
         }
-        match &*token.text {
-            "[" => depth += 1,
-            "]" if depth == 0 => return Some(index),
-            "]" => depth -= 1,
-            _ => {}
+        if &*token.text == open {
+            depth += 1;
+        } else if &*token.text == close {
+            if depth == 0 {
+                return Some(index);
+            }
+            depth -= 1;
         }
     }
     None
@@ -156,6 +203,208 @@ fn names_test(body: &[Token]) -> bool {
     body.iter().any(|token| {
         matches!(token.kind, TokenKind::Identifier | TokenKind::Keyword) && token.text == TEST_IDENT
     })
+}
+
+/// One file, as module resolution needs to see it.
+#[derive(Debug, Clone, Copy)]
+pub struct ModuleFile<'a> {
+    /// Path the file was discovered at. Only its shape matters — the
+    /// directory it sits in and its stem — so any consistent root will do,
+    /// provided every file in the set shares it.
+    pub path: &'a Path,
+    /// Language the file was parsed as. Anything but Rust is passed over.
+    pub language: Language,
+    /// The file's tokens, comments and whitespace already removed.
+    pub tokens: &'a [Token],
+}
+
+/// Which of these files are the body of a module the tree declares test-only.
+///
+/// Returns one flag per input, in the same order. A file is flagged when some
+/// file declares it with `#[cfg(test)] mod <name>;`, and so is everything that
+/// file declares in turn: a test module's own submodules are part of the
+/// suite whether or not anybody repeated the attribute on them.
+///
+/// Only declarations at a file's top level are followed. One written inside an
+/// inline `mod` names a file in a directory nested a further level down, and
+/// resolving that would mean tracking the module path a declaration sits at —
+/// worth doing when a project turns up that needs it, and not before.
+#[must_use]
+pub fn declared_test_modules(files: &[ModuleFile<'_>]) -> Vec<bool> {
+    let mut suite = vec![false; files.len()];
+    let by_path: BTreeMap<&Path, usize> = files
+        .iter()
+        .enumerate()
+        .filter(|(_, file)| file.language == Language::Rust)
+        .map(|(index, file)| (file.path, index))
+        .collect();
+    let declared: Vec<Vec<Declaration<'_>>> = files
+        .iter()
+        .map(|file| {
+            if file.language == Language::Rust {
+                module_declarations(file.tokens)
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
+
+    let mut pending = VecDeque::new();
+    let enter = |name: &str, from: &Path, suite: &mut Vec<bool>, pending: &mut VecDeque<_>| {
+        for candidate in module_bodies(from, name) {
+            if let Some(&index) = by_path.get(candidate.as_path()) {
+                if !suite[index] {
+                    suite[index] = true;
+                    pending.push_back(index);
+                }
+            }
+        }
+    };
+
+    for (index, declarations) in declared.iter().enumerate() {
+        for declaration in declarations.iter().filter(|entry| entry.marked) {
+            enter(
+                declaration.name,
+                files[index].path,
+                &mut suite,
+                &mut pending,
+            );
+        }
+    }
+    // Everything a file already in the suite declares is in it too, marked or
+    // not: the attribute was written once, on the module the rest hang off.
+    while let Some(index) = pending.pop_front() {
+        for declaration in &declared[index] {
+            enter(
+                declaration.name,
+                files[index].path,
+                &mut suite,
+                &mut pending,
+            );
+        }
+    }
+    suite
+}
+
+/// A module declared without a body, and whether its declaration is marked as
+/// test-only.
+struct Declaration<'a> {
+    name: &'a str,
+    marked: bool,
+}
+
+/// The bodiless module declarations at a file's top level.
+fn module_declarations(tokens: &[Token]) -> Vec<Declaration<'_>> {
+    let mut declarations = Vec::new();
+    for item in top_level_items(tokens) {
+        if let Some(name) = bodiless_module(item) {
+            declarations.push(Declaration {
+                name,
+                marked: rust_attributes(item).any(names_test),
+            });
+        }
+    }
+    declarations
+}
+
+/// The file's top-level items, each from its first attribute to the `;` or `}`
+/// that ends it.
+///
+/// Nothing here parses; an item is what lies between two terminators found at
+/// the outermost nesting level — a `;` written there, or the `}` that closes a
+/// body back to it. That is enough for the one shape this reads, and a file it
+/// makes no sense of yields items no other rule matches.
+fn top_level_items(tokens: &[Token]) -> impl Iterator<Item = &[Token]> {
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    std::iter::from_fn(move || {
+        while index < tokens.len() {
+            let token = &tokens[index];
+            index += 1;
+            if token.kind != TokenKind::Punctuation {
+                continue;
+            }
+            let ends = match &*token.text {
+                "{" | "(" | "[" => {
+                    depth += 1;
+                    false
+                }
+                // Only a brace closes an item: the `]` ending an attribute and
+                // the `)` ending a visibility both come back to the outermost
+                // level in the middle of one.
+                "}" | ")" | "]" => {
+                    depth = depth.saturating_sub(1);
+                    depth == 0 && token.text == "}"
+                }
+                ";" => depth == 0,
+                _ => false,
+            };
+            if ends {
+                let item = &tokens[start..index];
+                start = index;
+                return Some(item);
+            }
+        }
+        None
+    })
+}
+
+/// The name of the module this item declares without a body, if that is what
+/// it is.
+///
+/// `mod name;` and nothing else: once the attributes and the visibility are
+/// past, three tokens have to be all that is left, which is what tells a
+/// declaration from a `mod name { .. }` whose contents are right there.
+fn bodiless_module(item: &[Token]) -> Option<&str> {
+    let rest = after_visibility(after_attributes(item));
+    let [keyword, name, terminator] = rest else {
+        return None;
+    };
+    let declares = word_is(keyword, "mod")
+        && name.kind == TokenKind::Identifier
+        && terminator.kind == TokenKind::Punctuation
+        && terminator.text == ";";
+    declares.then(|| &*name.text)
+}
+
+/// What an item is left with once `pub`, with any restriction it carries, is
+/// past.
+fn after_visibility(tokens: &[Token]) -> &[Token] {
+    let Some((first, rest)) = tokens.split_first() else {
+        return tokens;
+    };
+    if !word_is(first, "pub") {
+        return tokens;
+    }
+    let Some(restriction) = after_punctuation(rest, "(") else {
+        return rest;
+    };
+    closing(restriction, "(", ")").map_or(rest, |end| &restriction[end + 1..])
+}
+
+/// Whether a token is the given word, however the frontend classified it.
+fn word_is(token: &Token, word: &str) -> bool {
+    matches!(token.kind, TokenKind::Identifier | TokenKind::Keyword) && token.text == word
+}
+
+/// The files that could hold the body of `name` as declared by `from`.
+///
+/// Rust looks in one place or the other, never both, but which one depends on
+/// where the declaring file itself sits; offering both and taking whichever
+/// exists costs nothing and spares this a rule it would only get wrong.
+fn module_bodies(from: &Path, name: &str) -> [PathBuf; 2] {
+    let directory = from.parent().unwrap_or_else(|| Path::new(""));
+    // A module's own file gives its name to the directory its children live
+    // in — except for the three that stand for a directory already.
+    let base = match from.file_stem().and_then(OsStr::to_str) {
+        Some("mod" | "lib" | "main") | None => directory.to_path_buf(),
+        Some(stem) => directory.join(stem),
+    };
+    [
+        base.join(format!("{name}.rs")),
+        base.join(name).join("mod.rs"),
+    ]
 }
 
 #[cfg(test)]
@@ -316,5 +565,164 @@ mod tests {
     #[test]
     fn an_empty_item_marks_nothing() {
         assert!(!is_marked(Language::Rust, &[]));
+    }
+
+    /// The suite flags for a set of files given as `(path, source pieces)`,
+    /// every one of them Rust.
+    fn suite_over(files: &[(&str, &[&str])]) -> Vec<bool> {
+        let streams: Vec<Vec<Token>> = files.iter().map(|(_, pieces)| tokens(pieces)).collect();
+        let inputs: Vec<ModuleFile<'_>> = files
+            .iter()
+            .zip(&streams)
+            .map(|((path, _), stream)| ModuleFile {
+                path: Path::new(path),
+                language: Language::Rust,
+                tokens: stream,
+            })
+            .collect();
+        declared_test_modules(&inputs)
+    }
+
+    #[test]
+    fn a_declared_test_module_puts_the_file_it_names_in_the_suite() {
+        let suite = suite_over(&[
+            (
+                "src/lib.rs",
+                &["#", "[", "cfg", "(", "test", ")", "]", "mod", "tests", ";"],
+            ),
+            ("src/tests.rs", &["fn", "check", "(", ")", "{", "}"]),
+        ]);
+        assert_eq!(suite, vec![false, true]);
+    }
+
+    #[test]
+    fn a_test_module_hands_the_suite_on_to_what_it_declares() {
+        // Only the first declaration carries the attribute. Everything below
+        // it is the same suite, spelled across as many files as it took.
+        let suite = suite_over(&[
+            (
+                "src/lib.rs",
+                &["#", "[", "cfg", "(", "test", ")", "]", "mod", "tests", ";"],
+            ),
+            ("src/tests.rs", &["mod", "parser", ";"]),
+            ("src/tests/parser.rs", &["fn", "check", "(", ")", "{", "}"]),
+        ]);
+        assert_eq!(suite, vec![false, true, true]);
+    }
+
+    #[test]
+    fn a_declaration_below_the_code_it_covers_is_still_found() {
+        // Where the declaration actually sits: after the routines the suite
+        // exercises, so everything before it has to be walked past first.
+        let suite = suite_over(&[
+            (
+                "src/lib.rs",
+                &[
+                    "pub", "fn", "width", "(", ")", "{", "text", ".", "count", "(", ")", "}", "#",
+                    "[", "cfg", "(", "test", ")", "]", "mod", "tests", ";",
+                ],
+            ),
+            ("src/tests.rs", &["fn", "check", "(", ")", "{", "}"]),
+        ]);
+        assert_eq!(suite, vec![false, true]);
+    }
+
+    #[test]
+    fn a_module_whose_body_is_a_directory_is_found_there() {
+        let suite = suite_over(&[
+            (
+                "src/lib.rs",
+                &["#", "[", "cfg", "(", "test", ")", "]", "mod", "tests", ";"],
+            ),
+            ("src/tests/mod.rs", &["fn", "check", "(", ")", "{", "}"]),
+        ]);
+        assert_eq!(suite, vec![false, true]);
+    }
+
+    #[test]
+    fn a_module_declared_without_the_marker_is_ordinary_code() {
+        let suite = suite_over(&[
+            ("src/lib.rs", &["mod", "parser", ";"]),
+            ("src/parser.rs", &["fn", "check", "(", ")", "{", "}"]),
+        ]);
+        assert_eq!(suite, vec![false, false]);
+    }
+
+    #[test]
+    fn a_directory_named_for_tests_that_nobody_declared_is_ordinary_code() {
+        // The convention is not the evidence. Without the attribute somewhere
+        // in the tree, a `tests` directory is a directory.
+        let suite = suite_over(&[
+            ("src/lib.rs", &["fn", "run", "(", ")", "{", "}"]),
+            ("src/tests/parser.rs", &["fn", "check", "(", ")", "{", "}"]),
+        ]);
+        assert_eq!(suite, vec![false, false]);
+    }
+
+    #[test]
+    fn a_module_written_where_it_is_declared_claims_no_file() {
+        // `mod tests { .. }` is its own body; a file of that name beside it is
+        // a different module, and the marker here says nothing about it.
+        let suite = suite_over(&[
+            (
+                "src/lib.rs",
+                &[
+                    "#", "[", "cfg", "(", "test", ")", "]", "mod", "tests", "{", "fn", "check",
+                    "(", ")", "{", "}", "}",
+                ],
+            ),
+            ("src/tests.rs", &["fn", "other", "(", ")", "{", "}"]),
+        ]);
+        assert_eq!(suite, vec![false, false]);
+    }
+
+    #[test]
+    fn a_declaration_is_read_through_its_visibility() {
+        let suite = suite_over(&[
+            (
+                "src/lib.rs",
+                &[
+                    "#", "[", "cfg", "(", "test", ")", "]", "pub", "(", "crate", ")", "mod",
+                    "tests", ";",
+                ],
+            ),
+            ("src/tests.rs", &["fn", "check", "(", ")", "{", "}"]),
+        ]);
+        assert_eq!(suite, vec![false, true]);
+    }
+
+    #[test]
+    fn a_declaration_the_source_is_truncated_before_marks_nothing() {
+        // The parser is error-tolerant, so an item with no terminator reaches
+        // here. It must end the scan rather than run off the end.
+        let suite = suite_over(&[
+            (
+                "src/lib.rs",
+                &["#", "[", "cfg", "(", "test", ")", "]", "mod", "tests"],
+            ),
+            ("src/tests.rs", &["fn", "check", "(", ")", "{", "}"]),
+        ]);
+        assert_eq!(suite, vec![false, false]);
+    }
+
+    #[test]
+    fn only_rust_files_are_read_for_declarations() {
+        // The syntax belongs to one language. A C++ file whose tokens happen
+        // to spell it is saying something else entirely.
+        let declaration = tokens(&["#", "[", "cfg", "(", "test", ")", "]", "mod", "tests", ";"]);
+        let body = tokens(&["fn", "check", "(", ")", "{", "}"]);
+        let suite = declared_test_modules(&[
+            ModuleFile {
+                path: Path::new("src/lib.rs"),
+                language: Language::Cpp,
+                tokens: &declaration,
+            },
+            ModuleFile {
+                path: Path::new("src/tests.rs"),
+                language: Language::Rust,
+                tokens: &body,
+            },
+        ]);
+        assert_eq!(suite, vec![false, false]);
     }
 }

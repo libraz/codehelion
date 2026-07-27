@@ -1022,8 +1022,11 @@ fn flatten_units(files: &[SyntaxIrFile], variant: &BuildVariant) -> (Vec<Unit>, 
             next_conditional: &mut next_conditional,
             units: &mut units,
         };
+        // A file the tree declares as a test module starts marked: the
+        // attribute saying so is on the declaration, which is in some other
+        // file, so nothing in this one would carry it.
         for root in &file.roots {
-            walk.visit(root, false, &ArmPath::default());
+            walk.visit(root, file.test_module, &ArmPath::default());
         }
     }
     (units, offsets)
