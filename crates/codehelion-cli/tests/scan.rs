@@ -627,27 +627,92 @@ fn json_reports_follow_the_versioned_schema() {
     assert_eq!(stored, reported);
 }
 
+/// A scan report with the fields that legitimately differ between runs
+/// removed, so two of them can be compared whole.
+fn comparable_report(root: &Path, extra: &[&str]) -> serde_json::Value {
+    let mut value = scan_json_with(root, extra);
+    let run = value["run"].as_object_mut().expect("run object");
+    for key in ["started_at", "finished_at", "run_id"] {
+        run.insert(key.to_string(), serde_json::Value::Null);
+    }
+    // A later run has an earlier one to compare itself with; what it found in
+    // the sources is what has to agree, not what it knows about its own
+    // history.
+    let summary = value["summary"].as_object_mut().expect("summary object");
+    for key in ["changes", "audit"] {
+        summary.insert(key.to_string(), serde_json::Value::Null);
+    }
+    value
+}
+
 #[test]
 fn json_reports_are_deterministic_across_reruns() {
     let dir = fixture();
-    let mut documents = Vec::new();
-    for _ in 0..2 {
-        let mut value = scan_json(dir.path());
-        // Null out the only fields that legitimately differ between runs.
-        let run = value["run"].as_object_mut().unwrap();
-        for key in ["started_at", "finished_at", "run_id"] {
-            run.insert(key.to_string(), serde_json::Value::Null);
-        }
-        // The second run has a first run to compare itself with; what it
-        // found in the sources is what has to agree, not what it knows about
-        // its own history.
-        let summary = value["summary"].as_object_mut().unwrap();
-        for key in ["changes", "audit"] {
-            summary.insert(key.to_string(), serde_json::Value::Null);
-        }
-        documents.push(value);
+    let first = comparable_report(dir.path(), &[]);
+    let second = comparable_report(dir.path(), &[]);
+    assert_eq!(first, second);
+}
+
+/// A tree wide enough that the work actually spreads: one file per worker and
+/// then some, in three contents so there is grouping to do rather than one
+/// group of everything.
+fn wide_fixture() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    for index in 0..24 {
+        let (name, body) = match index % 3 {
+            0 => (format!("src/copy{index}.rs"), CHECKSUM_RS),
+            1 => (format!("src/renamed{index}.rs"), RENAMED_RS),
+            _ => (format!("src/mix{index}.c"), MIX_C),
+        };
+        std::fs::write(root.join(name), body).unwrap();
     }
-    assert_eq!(documents[0], documents[1]);
+    dir
+}
+
+#[test]
+fn the_worker_count_does_not_change_what_the_scan_reports() {
+    // Ordering that comes from whichever worker finished first is the failure
+    // this catches, and it is invisible at one thread: a report built by one
+    // worker is in the order the tree was walked whether or not anything
+    // downstream depends on that order. Comparing the documents whole is what
+    // makes the check worth running — a group count would agree while the
+    // members inside the groups shuffled.
+    let dir = wide_fixture();
+    let mut documents = Vec::new();
+    for jobs in ["1", "4", "8"] {
+        for mode in ["fast", "structural"] {
+            documents.push((
+                mode,
+                jobs,
+                comparable_report(dir.path(), &["--jobs", jobs, "--mode", mode]),
+            ));
+        }
+    }
+    for mode in ["fast", "structural"] {
+        let mut same_mode = documents.iter().filter(|(m, _, _)| *m == mode);
+        let (_, first_jobs, first) = same_mode.next().expect("at least one worker count");
+        // An agreement between two empty reports is not the agreement this is
+        // about.
+        let members: usize = first["groups"]
+            .as_array()
+            .expect("groups array")
+            .iter()
+            .map(|group| group["members"].as_array().expect("members array").len())
+            .sum();
+        assert!(
+            members >= 20,
+            "{mode} mode placed {members} members over 24 files, too few for an \
+             ordering to go wrong in",
+        );
+        for (_, jobs, other) in same_mode {
+            assert_eq!(
+                first, other,
+                "{mode} mode reported differently at {jobs} workers than at {first_jobs}",
+            );
+        }
+    }
 }
 
 #[test]
