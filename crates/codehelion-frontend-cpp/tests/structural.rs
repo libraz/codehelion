@@ -131,10 +131,15 @@ fn the_gapped_copy_is_recovered_as_a_pair_beside_the_group_it_cannot_join() {
     let partners: Vec<Place> = report
         .unrepresented
         .iter()
-        .filter(|pair| pair.a == gapped || pair.b == gapped)
-        .map(|pair| {
-            let other = &report.units[if pair.a == gapped { pair.b } else { pair.a }];
-            (FILES[other.file], other.start_line)
+        .filter(|pair| pair.holds(gapped))
+        .flat_map(|pair| {
+            pair.members
+                .iter()
+                .filter(|&&member| member != gapped)
+                .map(|&member| {
+                    let other = &report.units[member];
+                    (FILES[other.file], other.start_line)
+                })
         })
         .collect();
     assert!(

@@ -123,11 +123,14 @@ fn a_pair_no_group_can_hold_is_carried_out_of_the_analysis() {
             .position(|group| group.members.contains(&unit))
     };
     for pair in &report.unrepresented {
+        let held: Vec<Option<usize>> = pair
+            .members
+            .iter()
+            .map(|&member| group_of(member))
+            .collect();
         assert!(
-            group_of(pair.a).is_none()
-                || group_of(pair.b).is_none()
-                || group_of(pair.a) != group_of(pair.b),
-            "a pair both of whose members share a group is represented"
+            held.iter().any(Option::is_none) || held.iter().any(|group| group != &held[0]),
+            "a relation whose every member shares one group is represented"
         );
     }
 
@@ -150,7 +153,7 @@ fn a_pair_no_group_can_hold_is_carried_out_of_the_analysis() {
     let carried = report
         .unrepresented
         .iter()
-        .find(|pair| (pair.a, pair.b) == (seed_unit.min(swapped_unit), seed_unit.max(swapped_unit)))
+        .find(|pair| pair.holds(seed_unit) && pair.holds(swapped_unit))
         .expect("the split pair is carried out of the analysis");
     assert_eq!(carried.class, CloneClass::Type2);
     assert!(

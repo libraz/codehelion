@@ -137,33 +137,51 @@ pub struct StructuralUnit {
     pub content: FragmentFingerprint,
 }
 
-/// A verified clone pair that no reported group could hold.
+/// A verified clone relation between two contents that no reported group
+/// could hold.
 ///
-/// The two members are clones of each other by the judge's own verdict; what
+/// The two contents are clones of each other by the judge's own verdict; what
 /// they are not is members of one set whose every pair is a clone, which is
 /// what a group asserts. Similarity is not transitive, so a unit can be a
 /// clone of two others that are not clones of each other, and a partition into
 /// groups can keep only one of those relations. The other is evidence the
 /// judge accepted, and it leaves the analysis here rather than being dropped.
+///
+/// The entry describes *contents*, not one pair of places. Where a codebase
+/// holds eight copies of one content and eight of another, the judge reaches
+/// the same verdict about all sixty-four crossings of them, and reporting
+/// sixty-four entries states one fact sixty-four times — all of them under one
+/// identity, because a clone id is composed from member content and two
+/// entries over the same two contents cannot differ. So every unit the folded
+/// verdicts touched is a member here, and there is one entry per pair of
+/// contents.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifiedPair {
-    /// Index of the first unit into [`StructuralReport::units`].
-    pub a: usize,
-    /// Index of the second unit into [`StructuralReport::units`].
-    pub b: usize,
-    /// Which of the two is the canonical instance, chosen by content so the
-    /// choice does not depend on where either unit was found.
+    /// Every unit the folded verdicts touched, in unit-index order.
+    pub members: Vec<usize>,
+    /// Which member is the canonical instance. Which *content* is canonical
+    /// follows content order, so it does not depend on where either was found;
+    /// among the occurrences of that content the first in member order stands
+    /// for it, and they are interchangeable by construction.
     pub canonical: usize,
-    /// The pair's stable, position-free clone id, composed exactly as a
-    /// group's is: a pair is a group of two, and nothing about its identity
-    /// should say otherwise.
+    /// The relation's stable, position-free clone id, composed exactly as a
+    /// group's is: a pair is a group of two contents, and nothing about its
+    /// identity should say otherwise.
     pub fingerprint: CloneGroupFingerprint,
-    /// The pair's composite similarity.
+    /// The strongest composite similarity among the folded verdicts.
     pub similarity: f64,
-    /// What the judge classified the pair as.
+    /// What the judge classified the relation as.
     pub class: CloneClass,
     /// The judge's confidence in that classification.
     pub confidence: verify::Confidence,
+}
+
+impl VerifiedPair {
+    /// Whether `unit` is one of the members.
+    #[must_use]
+    pub fn holds(&self, unit: usize) -> bool {
+        self.members.binary_search(&unit).is_ok()
+    }
 }
 
 /// Reporting detail for one clone group, parallel to the group at the same
@@ -1264,35 +1282,66 @@ fn unrepresented_pairs(
             group_of.insert(member, index);
         }
     }
-    let mut pairs: Vec<VerifiedPair> = edges
-        .iter()
-        .filter(
-            |edge| match (group_of.get(&edge.a), group_of.get(&edge.b)) {
-                (Some(a), Some(b)) => a != b,
-                _ => true,
-            },
-        )
-        .map(|edge| {
-            // Which half is canonical follows content, not position: the two
-            // are peers, and an index would make the id depend on walk order.
-            let (canonical, other) = if units[edge.a].content <= units[edge.b].content {
-                (edge.a, edge.b)
-            } else {
-                (edge.b, edge.a)
-            };
+    // Fold the surviving verdicts by the pair of contents they are about. Two
+    // verdicts over the same two contents are one fact: the judge compares
+    // normalized content, so where it accepted one crossing it accepts every
+    // crossing of those contents, and the entries would be indistinguishable
+    // anyway — their ids are composed from content alone.
+    let mut folded: BTreeMap<(FragmentFingerprint, FragmentFingerprint, CloneClass), Folded> =
+        BTreeMap::new();
+    for edge in edges.iter().filter(
+        |edge| match (group_of.get(&edge.a), group_of.get(&edge.b)) {
+            (Some(a), Some(b)) => a != b,
+            _ => true,
+        },
+    ) {
+        // Which content is canonical follows content, not position: the two
+        // are peers, and an index would make the id depend on walk order.
+        let (canonical, other) = if units[edge.a].content <= units[edge.b].content {
+            (edge.a, edge.b)
+        } else {
+            (edge.b, edge.a)
+        };
+        let entry = folded
+            .entry((units[canonical].content, units[other].content, edge.class))
+            .or_insert_with(|| Folded {
+                members: BTreeSet::new(),
+                similarity: edge.similarity,
+                confidence: edge.confidence,
+            });
+        entry.members.insert(edge.a);
+        entry.members.insert(edge.b);
+        // The reported evidence is the strongest crossing the judge accepted;
+        // the weaker ones say the same thing about the same two contents.
+        if edge.similarity > entry.similarity {
+            entry.similarity = edge.similarity;
+            entry.confidence = edge.confidence;
+        }
+    }
+
+    let mut pairs: Vec<VerifiedPair> = folded
+        .into_iter()
+        .map(|((canonical_content, other_content, class), entry)| {
+            let members: Vec<usize> = entry.members.into_iter().collect();
+            // Any occurrence of the canonical content stands for it; the first
+            // in member order is the deterministic choice.
+            let canonical = members
+                .iter()
+                .copied()
+                .find(|&member| units[member].content == canonical_content)
+                .unwrap_or(members[0]);
             VerifiedPair {
-                a: edge.a,
-                b: edge.b,
+                members,
                 canonical,
                 fingerprint: stable_id::structural_clone_group_fingerprint(
                     variant,
-                    edge.class,
-                    &units[canonical].content,
-                    &[units[canonical].content, units[other].content],
+                    class,
+                    &canonical_content,
+                    &[canonical_content, other_content],
                 ),
-                similarity: edge.similarity,
-                class: edge.class,
-                confidence: edge.confidence,
+                similarity: entry.similarity,
+                class,
+                confidence: entry.confidence,
             }
         })
         .collect();
@@ -1302,9 +1351,16 @@ fn unrepresented_pairs(
         right
             .similarity
             .total_cmp(&left.similarity)
-            .then_with(|| (left.a, left.b).cmp(&(right.a, right.b)))
+            .then_with(|| left.members.cmp(&right.members))
     });
     pairs
+}
+
+/// Verdicts accumulated for one pair of contents.
+struct Folded {
+    members: BTreeSet<usize>,
+    similarity: f64,
+    confidence: verify::Confidence,
 }
 
 /// Whether one of the two units contains the other.
