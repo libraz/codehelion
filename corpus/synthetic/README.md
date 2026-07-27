@@ -66,6 +66,16 @@ Within a case:
   `counterpart`, with a *different* function the variant carries, which is how
   a genuine negative pair is expressed.
 
+## What reads the labels
+
+Two harnesses. One scores a scan against them — how much of what is labelled is
+recovered, how much of what is reported is labelled. The other edits the corpus
+with them: the pairs that share a seed fragment are one unit written several
+times, so removing all of them and leaving the seed's text in a file of its own
+is an extraction the labels define rather than a script hard-codes. Scanning
+either side of that edit and auditing one against the other is how the audit
+states are checked at corpus scale rather than on a two-file fixture.
+
 ## Generating and checking
 
 The generator is the `codehelion-corpus-gen` binary in the `codehelion-eval`

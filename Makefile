@@ -39,6 +39,7 @@ doc: ## Build docs, failing on warnings
 eval: ## Show detection accuracy over the committed corpora
 	$(CARGO) test -p codehelion-cli --test corpus_accuracy -- --nocapture
 	$(CARGO) test -p codehelion-cli --test labeled_precision -- --nocapture
+	$(CARGO) test -p codehelion-cli --test refactoring -- --nocapture
 
 .PHONY: check
 check: format-check lint test doc ## Run every CI check locally
