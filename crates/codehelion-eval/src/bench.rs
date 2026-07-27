@@ -247,6 +247,15 @@ struct FnNames {
 /// unlike template-based generation, which collapses into one giant clone
 /// class under literal normalization. The corpus is only ever lexed, so the
 /// code merely has to look real, not compile or terminate.
+///
+/// That realism is at the token level, which is the level Fast mode works at.
+/// It does not carry over to statement *shape*: every body is built from a
+/// handful of statement forms, so windows of statements collide across
+/// unrelated functions far more than they do in real code. Measured at a
+/// million lines, this corpus proposes seven times the structural candidate
+/// pairs that a real tree a third larger does. Size measurements of the modes
+/// that pair statement shapes need a real tree; this one will overstate their
+/// cost.
 fn generate_function(language: Language, name: &str, tag: u64, rng: &mut Rng) -> String {
     let rust = language == Language::Rust;
     let scalar_pool = ["seed", "limit", "shift", "mask"];
@@ -416,20 +425,147 @@ pub struct ScanMeasurement {
     pub wall: Duration,
     /// Peak resident set size in bytes, when the platform reports it.
     pub max_rss_bytes: Option<u64>,
+    /// Source lines the scan analysed.
+    pub lines: u64,
+    /// Candidate pairs the pairing passes examined.
+    pub examined_pairs: u64,
+    /// Candidate pairs a spent allowance left unexamined.
+    pub skipped_pairs: u64,
     /// The scan report's summary lines, for context next to the numbers.
     pub summary: String,
+}
+
+impl ScanMeasurement {
+    /// Share of the candidate pairs a spent allowance left unexamined, in
+    /// `0.0..=1.0`. Zero when nothing was cut, including when there was
+    /// nothing to cut.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // ratio of display-scale counts
+    pub fn truncation_share(&self) -> f64 {
+        let total = self.examined_pairs.saturating_add(self.skipped_pairs);
+        if total == 0 {
+            return 0.0;
+        }
+        self.skipped_pairs as f64 / total as f64
+    }
+}
+
+/// What a scan of a given size is expected to cost, and what it is expected to
+/// have done for the cost.
+///
+/// Three of the four are the size targets the tool holds itself to: a hundred
+/// thousand lines in seconds, a million in tens of seconds, and peak memory
+/// under two gigabytes at a million lines. Between and beyond those two named
+/// sizes the allowance is scaled linearly, which is what the measurements
+/// show the cost doing — memory has run 730 to 850 bytes per line across four
+/// tree sizes.
+///
+/// The fourth is not a cost. At the size the targets name, the search is
+/// expected to have finished rather than to have been cut short by an
+/// allowance — because a run that reaches a time target by abandoning three
+/// quarters of its candidates has not met the target, it has changed the
+/// question. Without this condition a timing regression can always be fixed by
+/// lowering a ceiling, and the report would get quieter while looking faster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Slo {
+    /// Wall-clock time the scan is allowed at the measured size.
+    pub wall: Duration,
+    /// Peak resident bytes the scan is allowed at the measured size.
+    pub max_rss_bytes: u64,
+}
+
+/// Lines by which the "in seconds" target is stated.
+const SMALL_TREE_LINES: u64 = 100_000;
+
+/// Seconds allowed at [`SMALL_TREE_LINES`] and below.
+const SMALL_TREE_SECONDS: u64 = 10;
+
+/// Lines by which the "tens of seconds" and memory targets are stated.
+const LARGE_TREE_LINES: u64 = 1_000_000;
+
+/// Seconds allowed at [`LARGE_TREE_LINES`].
+const LARGE_TREE_SECONDS: u64 = 60;
+
+/// Peak resident bytes allowed at [`LARGE_TREE_LINES`].
+const LARGE_TREE_RSS_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+impl Slo {
+    /// The allowance for a tree of `lines` source lines.
+    #[must_use]
+    pub const fn for_lines(lines: u64) -> Self {
+        // Scaled from the larger named size, floored at the smaller one, so a
+        // tree measured at neither still gets an allowance derived from the
+        // stated targets rather than from whatever it happened to cost.
+        let scaled_seconds = LARGE_TREE_SECONDS.saturating_mul(lines) / LARGE_TREE_LINES;
+        let seconds = if lines <= SMALL_TREE_LINES || scaled_seconds < SMALL_TREE_SECONDS {
+            SMALL_TREE_SECONDS
+        } else {
+            scaled_seconds
+        };
+        let scaled_rss = LARGE_TREE_RSS_BYTES.saturating_mul(lines) / LARGE_TREE_LINES;
+        Self {
+            wall: Duration::from_secs(seconds),
+            max_rss_bytes: if scaled_rss < LARGE_TREE_RSS_BYTES {
+                LARGE_TREE_RSS_BYTES
+            } else {
+                scaled_rss
+            },
+        }
+    }
+
+    /// Every way `measurement` fell short of this allowance, as sentences.
+    ///
+    /// Empty means it met all of them. Every shortfall is reported rather than
+    /// the first, because a run that is both slow and truncated has two
+    /// problems and fixing the one that surfaced first would hide the other.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // display-scale counts and ratios
+    pub fn shortfalls(&self, measurement: &ScanMeasurement) -> Vec<String> {
+        let mut missed = Vec::new();
+        if measurement.wall > self.wall {
+            missed.push(format!(
+                "took {:.1}s against an allowance of {}s at {} lines",
+                measurement.wall.as_secs_f64(),
+                self.wall.as_secs(),
+                measurement.lines,
+            ));
+        }
+        if let Some(rss) = measurement.max_rss_bytes
+            && rss > self.max_rss_bytes
+        {
+            let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+            missed.push(format!(
+                "peaked at {:.0} MiB against an allowance of {:.0} MiB",
+                mib(rss),
+                mib(self.max_rss_bytes),
+            ));
+        }
+        if measurement.skipped_pairs > 0 {
+            missed.push(format!(
+                "examined {} of {} candidate pairs; the allowance stopped the search \
+                 {:.0}% short",
+                measurement.examined_pairs,
+                measurement.examined_pairs + measurement.skipped_pairs,
+                measurement.truncation_share() * 100.0,
+            ));
+        }
+        missed
+    }
 }
 
 /// Run `binary scan corpus` once under the platform's `time` wrapper to
 /// capture peak memory, either cold or warm.
 ///
-/// The scan runs verbose so the report carries the candidate pipeline's
-/// stage counts: at this size the question is not only how long a mode takes
-/// but which stage the time went into.
+/// The report is taken as JSON, so the pipeline's stage counts are read as
+/// numbers rather than scraped back out of the text the tool printed for
+/// people. At this size the question is not only how long a mode takes but
+/// which stage the time went into, and whether it got to the end of the work
+/// at all.
 ///
 /// # Errors
 ///
-/// Returns an error when the scan cannot be spawned or exits non-zero.
+/// Returns an error when the scan cannot be spawned, exits non-zero, or
+/// writes a report this harness cannot read.
 pub fn measure_scan(
     binary: &Path,
     corpus: &Path,
@@ -439,14 +575,13 @@ pub fn measure_scan(
     start_state: ScanStart,
 ) -> Result<ScanMeasurement> {
     let db = prepare_database(work_dir, start_state)?;
-    let report = work_dir.join("report.txt");
+    let report = work_dir.join("report.json");
 
     let mut command = time_wrapped_command(binary);
     command
         .arg("scan")
         .arg(corpus)
-        .args(["--mode", mode])
-        .arg("--verbose")
+        .args(["--mode", mode, "--format", "json"])
         .arg("--db")
         .arg(&db)
         .arg("--output")
@@ -468,12 +603,62 @@ pub fn measure_scan(
         );
     }
     let max_rss_bytes = parse_max_rss(&String::from_utf8_lossy(&output.stderr));
-    let summary = summarize(&std::fs::read_to_string(&report).unwrap_or_default());
+    let text = std::fs::read_to_string(&report)
+        .with_context(|| format!("reading {}", report.display()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", report.display()))?;
+    let counted = count_pipeline(&value);
     Ok(ScanMeasurement {
         wall,
         max_rss_bytes,
-        summary,
+        lines: counted.lines,
+        examined_pairs: counted.examined_pairs,
+        skipped_pairs: counted.skipped_pairs,
+        summary: summarize(&value),
     })
+}
+
+/// The numbers a size measurement needs from a scan report.
+struct PipelineCounts {
+    lines: u64,
+    examined_pairs: u64,
+    skipped_pairs: u64,
+}
+
+/// Read the analysed size and the pairing stages' own accounting out of a
+/// report.
+///
+/// Only the stages that recorded the allowance running out are counted, and
+/// they are found by that record rather than by name: each pairing pass holds
+/// its own allowance, and a list of stage names written down here would let a
+/// pass added later go uncounted and read as complete.
+fn count_pipeline(report: &serde_json::Value) -> PipelineCounts {
+    let summary = &report["summary"];
+    let mut counts = PipelineCounts {
+        lines: summary["lines"].as_u64().unwrap_or(0),
+        examined_pairs: 0,
+        skipped_pairs: 0,
+    };
+    let Some(funnel) = summary["funnel"].as_array() else {
+        return counts;
+    };
+    for stage in funnel {
+        let skipped: u64 = stage["dropped"].as_array().map_or(0, |drops| {
+            drops
+                .iter()
+                .filter(|drop| drop["cause"] == "pair_budget")
+                .filter_map(|drop| drop["count"].as_u64())
+                .sum()
+        });
+        if skipped == 0 {
+            continue;
+        }
+        counts.examined_pairs = counts
+            .examined_pairs
+            .saturating_add(stage["passed"].as_u64().unwrap_or(0));
+        counts.skipped_pairs = counts.skipped_pairs.saturating_add(skipped);
+    }
+    counts
 }
 
 /// The audit database to scan into, in the state the requested start calls
@@ -489,36 +674,68 @@ fn prepare_database(work_dir: &Path, start_state: ScanStart) -> Result<PathBuf> 
     Ok(db)
 }
 
-/// The size lines of a text report, what it says moved since the previous
-/// scan, every note it carries, and the whole candidate-pipeline block.
+/// The size of what was scanned, what came of it, and the whole candidate
+/// pipeline stage by stage.
 ///
 /// That is what a timing number needs beside it to mean anything, and the
-/// notes matter most: a run that exhausted its pair budget is fast partly
-/// because it stopped early, which the timing alone would hide. The line
-/// naming the previous run is what distinguishes a warm scan from a cold one
-/// in the output itself, rather than on the harness's word for it.
+/// drops matter most: a run that exhausted an allowance is fast partly
+/// because it stopped early, which the timing alone would hide.
 #[must_use]
-pub fn summarize(report: &str) -> String {
-    let mut kept: Vec<&str> = Vec::new();
-    let mut in_pipeline = false;
-    for line in report.lines() {
-        if line.starts_with("candidate pipeline:") {
-            in_pipeline = true;
-        } else if in_pipeline && line.trim().is_empty() {
-            in_pipeline = false;
-            continue;
-        }
-        if in_pipeline
-            || line.contains("files:")
-            || line.contains("lines:")
-            || line.contains("clone groups:")
-            || line.contains("since run ")
-            || line.trim_start().starts_with("note:")
-        {
-            kept.push(line);
+pub fn summarize(report: &serde_json::Value) -> String {
+    let summary = &report["summary"];
+    let count = |path: &str, key: &str| summary[path][key].as_u64().unwrap_or(0);
+    let mut out = format!(
+        "files: {} analysed; lines: {}; tokens: {}",
+        count("files", "total"),
+        summary["lines"].as_u64().unwrap_or(0),
+        summary["tokens"].as_u64().unwrap_or(0),
+    );
+    // What the scan recognised of the tree, when it had a previous run to
+    // compare against. Without it a warm number is indistinguishable from a
+    // cold one that happened to run fast.
+    if let Some(changes) = summary["changes"].as_object() {
+        let field = |key: &str| changes.get(key).and_then(serde_json::Value::as_u64);
+        let _ = write!(
+            out,
+            "\nsince run {}: {} unchanged, {} modified, {} added, {} removed",
+            field("since_run_id").unwrap_or(0),
+            field("unchanged").unwrap_or(0),
+            field("modified").unwrap_or(0),
+            field("added").unwrap_or(0),
+            field("removed").unwrap_or(0),
+        );
+    }
+    let _ = write!(out, "\nclone groups: {}", count("groups", "total"));
+    if let Some(funnel) = summary["funnel"].as_array() {
+        out.push_str("\ncandidate pipeline:");
+        for stage in funnel {
+            let _ = write!(
+                out,
+                "\n  {:<18} {:>12}",
+                stage["stage"].as_str().unwrap_or("?"),
+                stage["passed"].as_u64().unwrap_or(0),
+            );
+            let drops: Vec<String> = stage["dropped"]
+                .as_array()
+                .map(|drops| {
+                    drops
+                        .iter()
+                        .map(|drop| {
+                            format!(
+                                "{} {}",
+                                drop["cause"].as_str().unwrap_or("?"),
+                                drop["count"].as_u64().unwrap_or(0)
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !drops.is_empty() {
+                let _ = write!(out, "  (dropped: {})", drops.join(", "));
+            }
         }
     }
-    kept.join("\n")
+    out
 }
 
 /// The command that runs `binary` under a resource-reporting wrapper where
@@ -780,24 +997,93 @@ mod tests {
         assert_eq!(parse_max_rss("no such line"), None);
     }
 
+    /// A report with two pairing stages, the second of which ran out.
+    fn truncated_report() -> serde_json::Value {
+        serde_json::json!({
+            "summary": {
+                "files": {"total": 400},
+                "lines": 100_000,
+                "tokens": 900_000,
+                "groups": {"total": 12},
+                "funnel": [
+                    {"stage": "seed pairs", "passed": 4_000, "dropped": []},
+                    {"stage": "fragment pairs", "passed": 40, "dropped": [
+                        {"cause": "pair_budget", "count": 60},
+                    ]},
+                ],
+            }
+        })
+    }
+
     #[test]
     fn the_summary_keeps_the_sizes_and_the_whole_pipeline_block() {
-        let report = "codehelion scan (structural mode)\n  \
-             root: /corpus\n  files: 400 analysed (rust 240, c 80, cpp 80)\n  \
-             lines: 100000; tokens: 900000; lexer diagnostics: 0\n  \
-             clone groups: 12 (type-1 4, type-2 5, type-3 3)\n\n\
-             note: the candidate-pair budget was exhausted; results may be incomplete\n\n\
-             candidate pipeline:\n  units  2000\n  verified pairs  40  (dropped: length ratio 3)\n\n\
-             top groups by priority:\n  [1] type-3\n";
-        let summary = summarize(report);
+        let summary = summarize(&truncated_report());
         assert!(summary.contains("files: 400 analysed"));
         assert!(summary.contains("clone groups: 12"));
-        assert!(summary.contains("verified pairs  40  (dropped: length ratio 3)"));
+        assert!(summary.contains("seed pairs"));
         // A run that stopped early is fast for a reason the timing hides.
-        assert!(summary.contains("candidate-pair budget was exhausted"));
-        // The block ends where it ends: findings are not a size measurement.
-        assert!(!summary.contains("top groups"));
-        assert!(!summary.contains("root:"));
+        assert!(summary.contains("pair_budget 60"));
+    }
+
+    /// Only the stages the ceiling stopped are counted. A pass that finished
+    /// its own search would otherwise dilute the share, and the number is
+    /// there to say how much of the search was abandoned.
+    #[test]
+    fn the_pipeline_counts_cover_the_stages_the_ceiling_stopped() {
+        let counted = count_pipeline(&truncated_report());
+        assert_eq!(counted.lines, 100_000);
+        assert_eq!(counted.examined_pairs, 40);
+        assert_eq!(counted.skipped_pairs, 60);
+    }
+
+    fn measurement(wall_secs: u64, rss: Option<u64>, lines: u64, skipped: u64) -> ScanMeasurement {
+        ScanMeasurement {
+            wall: Duration::from_secs(wall_secs),
+            max_rss_bytes: rss,
+            lines,
+            examined_pairs: 1_000,
+            skipped_pairs: skipped,
+            summary: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_allowance_scales_from_the_two_named_sizes() {
+        assert_eq!(Slo::for_lines(1_000).wall, Duration::from_secs(10));
+        assert_eq!(Slo::for_lines(100_000).wall, Duration::from_secs(10));
+        assert_eq!(Slo::for_lines(1_000_000).wall, Duration::from_secs(60));
+        assert_eq!(Slo::for_lines(2_000_000).wall, Duration::from_secs(120));
+        // Memory is floored at the figure it is stated by, never scaled below.
+        assert_eq!(
+            Slo::for_lines(10_000).max_rss_bytes,
+            Slo::for_lines(1_000_000).max_rss_bytes
+        );
+    }
+
+    /// A scan that reached its time by abandoning most of its candidates has
+    /// changed the question rather than answered it faster, so the search
+    /// finishing is part of the target and not a footnote to it.
+    #[test]
+    fn a_fast_run_that_stopped_early_still_misses_the_target() {
+        let slo = Slo::for_lines(1_000_000);
+        let quick = measurement(5, Some(1_000_000_000), 1_000_000, 0);
+        assert!(slo.shortfalls(&quick).is_empty());
+
+        let truncated = measurement(5, Some(1_000_000_000), 1_000_000, 3_000);
+        let missed = slo.shortfalls(&truncated);
+        assert_eq!(missed.len(), 1, "{missed:?}");
+        assert!(missed[0].contains("examined 1000 of 4000"));
+        assert!(missed[0].contains("75%"));
+    }
+
+    /// Every shortfall is reported, not the first: a run that is both slow and
+    /// truncated has two problems, and fixing the one that surfaced would hide
+    /// the other behind a re-run.
+    #[test]
+    fn every_missed_target_is_named() {
+        let slo = Slo::for_lines(1_000_000);
+        let bad = measurement(300, Some(8_000_000_000), 1_000_000, 9_000);
+        assert_eq!(slo.shortfalls(&bad).len(), 3);
     }
 
     #[test]
@@ -818,12 +1104,20 @@ mod tests {
 
     #[test]
     fn the_summary_says_what_the_warm_scan_recognised() {
-        let report = "codehelion scan (fast mode)\n  \
-             files: 3 analysed (rust 0, c 3, cpp 0)\n  \
-             lines: 4926; tokens: 20013; lexer diagnostics: 0\n  \
-             since run 1: 3 unchanged, 0 modified, 0 added, 0 removed\n  \
-             clone groups: 2 (type-1 1, type-2 1)\n";
-        let summary = summarize(report);
+        let report = serde_json::json!({
+            "summary": {
+                "files": {"total": 3},
+                "lines": 4_926,
+                "tokens": 20_013,
+                "groups": {"total": 2},
+                "changes": {
+                    "since_run_id": 1, "unchanged": 3,
+                    "modified": 0, "added": 0, "removed": 0,
+                },
+                "funnel": [],
+            }
+        });
+        let summary = summarize(&report);
         // Without this line a warm number is indistinguishable from a cold
         // one that happened to run fast.
         assert!(summary.contains("since run 1: 3 unchanged"));

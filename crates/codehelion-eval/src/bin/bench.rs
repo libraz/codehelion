@@ -10,7 +10,8 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 
 use codehelion_eval::bench::{
-    CorpusSpec, ScanStart, default_binary, generate_corpus, measure_scan, measure_store_insert,
+    CorpusSpec, ScanMeasurement, ScanStart, Slo, default_binary, generate_corpus, measure_scan,
+    measure_store_insert,
 };
 
 /// Benchmark harness for the scan paths.
@@ -56,6 +57,10 @@ enum Command {
         /// Worker threads to pass through to the scan.
         #[arg(long)]
         jobs: Option<usize>,
+        /// Judge the last run against the size targets and exit non-zero if
+        /// it misses any of them.
+        #[arg(long)]
+        check_slo: bool,
     },
     /// Time one snapshot insert of synthetic rows.
     Store {
@@ -69,6 +74,44 @@ enum Command {
         #[arg(long, default_value_t = 3)]
         members: usize,
     },
+}
+
+/// Peak memory as a display string, or `n/a` where the platform does not
+/// report it.
+#[allow(clippy::cast_precision_loss)] // display-only conversion
+fn mib(bytes: Option<u64>) -> String {
+    bytes.map_or_else(
+        || "n/a".to_string(),
+        |bytes| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0)),
+    )
+}
+
+/// Say how the measured scan stood against the targets for its size, and fail
+/// the run when asked to hold it to them.
+///
+/// Judged on the cold run: a periodic audit of a tree nobody has scanned
+/// before is the case the targets are about, and it is the slower of the two.
+fn report_slo(measurement: &ScanMeasurement, enforce: bool) -> Result<()> {
+    let slo = Slo::for_lines(measurement.lines);
+    let missed = slo.shortfalls(measurement);
+    if missed.is_empty() {
+        println!(
+            "\nsize targets met at {} lines: {:.1}s of {}s, {} MiB of {} MiB, \
+             whole search completed",
+            measurement.lines,
+            measurement.wall.as_secs_f64(),
+            slo.wall.as_secs(),
+            mib(measurement.max_rss_bytes),
+            mib(Some(slo.max_rss_bytes)),
+        );
+        return Ok(());
+    }
+    println!("\nsize targets missed at {} lines:", measurement.lines);
+    for shortfall in &missed {
+        println!("  {shortfall}");
+    }
+    ensure!(!enforce, "the scan missed {} size target(s)", missed.len());
+    Ok(())
 }
 
 #[allow(clippy::cast_precision_loss)] // float conversions are display-only
@@ -101,6 +144,7 @@ fn main() -> Result<()> {
             mode,
             runs,
             jobs,
+            check_slo,
         } => {
             ensure!(runs > 0, "at least one run is required");
             let binary = binary.unwrap_or_else(default_binary);
@@ -117,13 +161,7 @@ fn main() -> Result<()> {
             // warm number answers.
             println!("| run | cold_s | warm_s | cold_rss_mib | warm_rss_mib |");
             println!("| --- | ------ | ------ | ------------ | ------------ |");
-            let mib = |bytes: Option<u64>| {
-                bytes.map_or_else(
-                    || "n/a".to_string(),
-                    |bytes| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0)),
-                )
-            };
-            let mut last_summary = String::new();
+            let mut last = None;
             for run in 1..=runs {
                 let cold =
                     measure_scan(&binary, &corpus, &mode, jobs, work.path(), ScanStart::Cold)?;
@@ -136,10 +174,11 @@ fn main() -> Result<()> {
                     mib(cold.max_rss_bytes),
                     mib(warm.max_rss_bytes),
                 );
-                last_summary = warm.summary;
+                last = Some(cold);
             }
-            if !last_summary.is_empty() {
-                println!("\nreport summary:\n{last_summary}");
+            if let Some(last) = last {
+                println!("\nreport summary:\n{}", last.summary);
+                report_slo(&last, check_slo)?;
             }
         }
         Command::Store {
