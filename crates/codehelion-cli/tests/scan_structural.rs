@@ -1636,3 +1636,101 @@ fn one_relation_seen_in_many_places_is_reported_once() {
         1
     );
 }
+
+/// Two functions copied whole, each holding a nested helper.
+///
+/// The shape that produces a crossing nothing can act on: the helpers are
+/// copies of each other and so are their parents, which leaves each helper
+/// agreeing with the *other* parent as well — not because it was copied there
+/// but because its own twin lives inside it.
+const NESTED_TWINS_RS: &str = "\
+fn build_index(rows: &[u64]) -> (u64, usize) {
+    fn fold(rows: &[u64], seed: u64) -> u64 {
+        let mut acc = seed;
+        for row in rows {
+            acc = acc.wrapping_mul(31).wrapping_add(*row);
+            if *row == 0 {
+                acc = acc.rotate_left(7);
+            }
+            acc ^= acc >> 13;
+        }
+        return acc;
+    }
+    return (fold(rows, 17), rows.len());
+}
+
+fn build_table(rows: &[u64]) -> (u64, usize) {
+    fn fold(rows: &[u64], seed: u64) -> u64 {
+        let mut acc = seed;
+        for row in rows {
+            acc = acc.wrapping_mul(31).wrapping_add(*row);
+            if *row == 0 {
+                acc = acc.rotate_left(7);
+            }
+            acc ^= acc >> 13;
+        }
+        return acc;
+    }
+    return (fold(rows, 17), rows.len());
+}
+";
+
+/// A crossing two reported groups already account for is not a third finding.
+///
+/// A helper nested in one function and copied into another agrees with that
+/// other function too, over the stretch its own twin occupies there. The
+/// verdict is not wrong — the tokens do line up — but the report has already
+/// said it twice, once for the pair of helpers and once for the pair of
+/// parents, and stating it a third time at a two-to-one size ratio points a
+/// reader at work that does not exist. Both real groups have to survive:
+/// dropping the crossing must not cost the facts it was derived from.
+#[test]
+fn a_crossing_two_groups_already_account_for_is_not_reported_again() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/nested.rs"), NESTED_TWINS_RS).unwrap();
+
+    let value = scan_json(root);
+    let groups = value["groups"].as_array().unwrap();
+    let units: Vec<&str> = groups
+        .iter()
+        .filter(|group| group["split_pair"] == false)
+        .map(|group| group["members"][0]["unit"].as_str().unwrap())
+        .collect();
+    assert!(
+        units.contains(&"fold"),
+        "the two nested helpers are no longer grouped: {units:?}"
+    );
+    assert!(
+        units.iter().any(|unit| unit.starts_with("build_")),
+        "the two parents are no longer grouped: {units:?}"
+    );
+    let crossings: Vec<&serde_json::Value> = groups
+        .iter()
+        .filter(|group| group["split_pair"] == true)
+        .collect();
+    assert!(
+        crossings.is_empty(),
+        "a helper is still reported against the parent that holds its twin: {crossings:#?}"
+    );
+    // And the run says how many it left out, so the drop is a number in the
+    // funnel rather than findings that quietly went missing.
+    let verified = value["summary"]["funnel"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|stage| stage["stage"] == "verified pairs")
+        .expect("the funnel reports the verified-pair stage");
+    assert_eq!(
+        verified["dropped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|drop| drop["cause"] == "a_group_says_it_already")
+            .map(|drop| drop["count"].as_u64().unwrap()),
+        Some(2),
+        "expected both crossings counted: {verified:#?}"
+    );
+}

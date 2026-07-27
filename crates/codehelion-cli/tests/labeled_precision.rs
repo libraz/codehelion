@@ -79,8 +79,8 @@ const CORPORA: &[Expected] = &[
     },
     Expected {
         name: "serde-json",
-        confirmed: 45,
-        refuted: 36,
+        confirmed: 44,
+        refuted: 30,
     },
 ];
 

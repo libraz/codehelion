@@ -796,7 +796,8 @@ fn funnel(stats: &structural::StructuralStats) -> Vec<report::FunnelStage> {
             .dropping("conditional_arms", as_u64(stats.alternative_pairs))
             .dropping("divergent_shapes", as_u64(stats.divergent_shape_pairs)),
         report::FunnelStage::new("verified pairs", as_u64(stats.verified_pairs))
-            .dropping("no_group_holds_both", as_u64(stats.unrepresented_pairs)),
+            .dropping("no_group_holds_both", as_u64(stats.unrepresented_pairs))
+            .dropping("a_group_says_it_already", as_u64(stats.described_pairs)),
         report::FunnelStage::new("components", as_u64(grouping.components)),
         report::FunnelStage::new("unit groups", as_u64(grouping.groups))
             .dropping("outside_the_medoid", as_u64(grouping.medoid_ejections))

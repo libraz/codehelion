@@ -31,8 +31,8 @@ the same to a reader.
 
 ## What the verdicts show
 
-Forty-five of the eighty-one reported groups are clones worth reporting and
-thirty-six are lookalikes. The classes that account for the lookalikes:
+Forty-four of the seventy-four reported groups are clones worth reporting and
+thirty are lookalikes. The classes that account for the lookalikes:
 
 - `type-specialised-variant` (11) — one routine per integer or float width.
   Two of these groups hold eleven and twelve members: every `serialize_i8`
@@ -44,8 +44,9 @@ thirty-six are lookalikes. The classes that account for the lookalikes:
 - `exhaustive-match-table` (3) — two matches that enumerate a type's cases,
   alike in having one arm per case rather than in what the arms do. This class
   is new here: the C cases have no enum big enough to produce it.
-- `nested-inside-copy` (6) — also new here, and the one class that is a defect
-  rather than a judgement call. See below.
+- `nested-inside-copy` (6) — new here, and the one class that was a defect
+  rather than a judgement call. No longer reported; the labels stay as the
+  guard. See below.
 
 What separates a confirmed clone from `type-specialised-variant` is not size
 but whether the likeness is the type system's doing. `do_deserialize_i128`
@@ -56,28 +57,33 @@ two be separate functions.
 
 ## `nested-inside-copy`
 
-Six split pairs relate a nested visitor method to a whole function that
+Six split pairs related a nested visitor method to a whole function that
 contains a copy of it. `raw.rs` has two `Deserialize` impls whose bodies are
 identical but for a type name, each holding its own `visit_map`. The report
-already states both facts: one group for the two outer functions, one for the
-two inner ones. The six split pairs then relate one file's inner function to
-the other's outer function, at a two-to-one token ratio, and claim eighty-four
-per cent similarity — which is true only because the smaller side is contained
-in the larger side's twin.
+already stated both facts: one group for the two outer functions, one for the
+two inner ones. The six split pairs then related one file's inner function to
+the other's outer function, at a two-to-one token ratio, and claimed
+eighty-four per cent similarity — which was true only because the smaller side
+is contained in the larger side's twin.
 
-They are labelled rather than fixed, as the corpus's working rule requires: the
-verdicts are the evidence any fix has to be measured against, and a fix that
-suppresses them has to be shown not to cost the two real groups they derive
-from.
+They were labelled before being fixed, as the corpus's working rule requires,
+and the labels are what the fix was measured against: the six are gone, both
+groups they derived from are still reported, and the only other finding the
+change removed is the one described next. The verdicts remain as the guard —
+if a crossing of this shape comes back, it comes back as a refuted finding
+rather than as an unexplained rise in the count.
 
 ## Verdicts that could not be separated
 
-Three findings describe one duplication in `de.rs`: the pair of outer
+Three findings once described one duplication in `de.rs`: the pair of outer
 `next_element_seed` / `next_key_seed`, the pair of nested `has_next_element` /
-`has_next_key`, and a split pair crossing the two. Every one of them overlaps
-the others by more than the match threshold, so no set of verdicts can rule on
-them separately. All three are recorded as what the underlying duplication is,
-which is a real clone.
+`has_next_key`, and a split pair crossing the two. Every one of them overlapped
+the others by more than the match threshold, so no set of verdicts could rule
+on them separately, and all three were recorded as what the underlying
+duplication is, which is a real clone. The crossing is the same shape as
+`nested-inside-copy` and left with them, which is why the confirmed count is
+one lower than the verdicts: the duplication it described is still reported, by
+the two groups that remain.
 
 One group holds two identical `deserialize_enum` bodies and a third member,
 `visit_str`, that shares only their shape. It is confirmed, because the

@@ -294,6 +294,10 @@ pub struct StructuralStats {
     pub verified_pairs: usize,
     /// Verified pairs no reported group holds both halves of.
     pub unrepresented_pairs: usize,
+    /// Verified pairs left out of that carry-out because a group already
+    /// relates their two sides, one of them holding a unit nested inside the
+    /// other side.
+    pub described_pairs: usize,
     /// Grouping statistics.
     pub grouping: GroupingStats,
 }
@@ -410,7 +414,7 @@ pub fn analyze(
         .map(|group| group_detail(group, &units, files, &feature_files, variant, config))
         .collect();
 
-    let unrepresented = unrepresented_pairs(&edges, &groups, &units, variant);
+    let (unrepresented, described_pairs) = unrepresented_pairs(&edges, &groups, &units, variant);
 
     let stats = StructuralStats {
         files: files.len(),
@@ -431,6 +435,7 @@ pub fn analyze(
         unit_pairs: pairs.len(),
         verified_pairs: edges.len(),
         unrepresented_pairs: unrepresented.len(),
+        described_pairs,
         grouping: groups.stats.clone(),
     };
 
@@ -1270,12 +1275,17 @@ impl Proposal<'_> {
 /// it is carried out separately rather than dropped: two units that are copies
 /// of each other remain worth knowing about whether or not a larger set formed
 /// around them.
+///
+/// Not every surviving verdict is such a relation. A crossing whose two sides
+/// the report already relates through a group is not a second fact about the
+/// code, and it is returned as a count rather than an entry — see
+/// [`already_described`].
 fn unrepresented_pairs(
     edges: &[SimilarityEdge],
     groups: &GroupingSet,
     units: &[Unit],
     variant: &BuildVariant,
-) -> Vec<VerifiedPair> {
+) -> (Vec<VerifiedPair>, usize) {
     let mut group_of: BTreeMap<usize, usize> = BTreeMap::new();
     for (index, group) in groups.groups.iter().enumerate() {
         for &member in &group.members {
@@ -1308,9 +1318,14 @@ fn unrepresented_pairs(
                 members: BTreeSet::new(),
                 similarity: edge.similarity,
                 confidence: edge.confidence,
+                described: true,
             });
         entry.members.insert(edge.a);
         entry.members.insert(edge.b);
+        // One crossing the report does not already account for is enough to
+        // make the pair worth carrying: the entry stands for every crossing of
+        // those two contents, and the derived ones say nothing against it.
+        entry.described &= already_described(edge, &group_of, groups, units);
         // The reported evidence is the strongest crossing the judge accepted;
         // the weaker ones say the same thing about the same two contents.
         if edge.similarity > entry.similarity {
@@ -1318,9 +1333,11 @@ fn unrepresented_pairs(
             entry.confidence = edge.confidence;
         }
     }
+    let described = folded.values().filter(|entry| entry.described).count();
 
     let mut pairs: Vec<VerifiedPair> = folded
         .into_iter()
+        .filter(|(_, entry)| !entry.described)
         .map(|((canonical_content, other_content, class), entry)| {
             let members: Vec<usize> = entry.members.into_iter().collect();
             // Any occurrence of the canonical content stands for it; the first
@@ -1353,7 +1370,7 @@ fn unrepresented_pairs(
             .total_cmp(&left.similarity)
             .then_with(|| left.members.cmp(&right.members))
     });
-    pairs
+    (pairs, described)
 }
 
 /// Verdicts accumulated for one pair of contents.
@@ -1361,6 +1378,40 @@ struct Folded {
     members: BTreeSet<usize>,
     similarity: f64,
     confidence: verify::Confidence,
+    described: bool,
+}
+
+/// Whether a group the report already states puts the crossing's two sides in
+/// the same relation, at one remove.
+///
+/// A unit that is a copy of something nested inside another unit is, by that
+/// much, a copy of the other unit too — the smaller side matches the part of
+/// the larger side that its own twin occupies. The judge sees the agreement
+/// and accepts it, and the arithmetic is honest: two thirds of the tokens do
+/// line up. But the report has already said both halves of it, once as the
+/// group holding the two nested units and once as the group holding their
+/// parents, and the crossing adds only that one of them is bigger. Carried out
+/// as a pair it reads as a third duplication, at a size ratio no reader can
+/// act on, so it is counted and left out.
+///
+/// The relation has to come from a group rather than from another pair: a
+/// group is the report's strong claim, and deriving one pair from another
+/// would let two crossings excuse each other.
+fn already_described(
+    edge: &SimilarityEdge,
+    group_of: &BTreeMap<usize, usize>,
+    groups: &GroupingSet,
+    units: &[Unit],
+) -> bool {
+    let nested_peer = |side: usize, other: usize| {
+        group_of
+            .get(&side)
+            .map(|&index| groups.groups[index].members.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .any(|&peer| peer != other && encloses(&units[peer], &units[other]))
+    };
+    nested_peer(edge.a, edge.b) || nested_peer(edge.b, edge.a)
 }
 
 /// Whether one of the two units contains the other.
