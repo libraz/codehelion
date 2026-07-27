@@ -13,18 +13,37 @@
 //! already answered: whether every change is the same width being swapped for
 //! another, and whether any of them changed a literal rather than a name.
 //!
+//! # How the two occurrences are lined up
+//!
+//! By the very thing normalization kept. Two tokens may stand in the same place
+//! when they are the same kind — [`TokenKind::tag`] decides that, and it is the
+//! detector's own answer to what counts as the same token once the spelling is
+//! gone. So the alignment is computed over the normalized run and the
+//! substitutions are read off the raw one: exactly the two halves of what a
+//! Type-2 match is.
+//!
+//! Where an occurrence has tokens the other does not, those are edits rather
+//! than substitutions, and [`Witness::edits`] counts them. Nothing here decides
+//! what an edit means; a rule reading a witness does.
+//!
 //! # What it does not do
 //!
-//! It aligns by position and gives up when the two token runs are different
-//! lengths. A Type-3 pair needs a real alignment, and reading a witness off a
-//! rough one would invent substitutions that nobody wrote. Being unable to say
-//! is recorded as [`None`], never as an empty witness.
+//! It gives up on a pair too large to align, because the alignment is quadratic
+//! and a bound that is never hit is a bound nobody has tested. Being unable to
+//! say is recorded as [`None`], never as an empty witness.
 
 use crate::frontend::{LiteralKind, Token, TokenKind};
 
 /// Version of the witness rules, for recording alongside the other detector
 /// versions when something acts on one.
-pub const SUBSTITUTION_VERSION: &str = "substitution-v1";
+pub const SUBSTITUTION_VERSION: &str = "substitution-v2";
+
+/// Largest product of the two token counts an alignment is computed for.
+///
+/// The table is one `u32` per cell, so this is four megabytes at the top end,
+/// spent on a pair of four-hundred-line bodies. Above it the answer is that
+/// nobody looked, which is what [`None`] says.
+const ALIGNMENT_LIMIT: usize = 1 << 20;
 
 /// The integer widths a type is spelled with.
 ///
@@ -50,6 +69,14 @@ pub struct Change {
 pub struct Witness {
     /// Each distinct change, in the order first seen.
     pub changes: Vec<Change>,
+    /// Tokens on either side that had no counterpart in the other.
+    ///
+    /// A substitution is one token standing where another stood. These are the
+    /// rest: the statement one occurrence has and the other does not, the cast
+    /// added on one side only. Counted rather than described, because a rule
+    /// over a witness cares whether the two bodies do the same work, and that
+    /// question is answered by there being none of these.
+    pub edits: usize,
 }
 
 impl Witness {
@@ -92,32 +119,94 @@ impl Witness {
     }
 }
 
-/// The substitutions turning `left` into `right`, or `None` when the two runs
-/// cannot be lined up.
+/// The substitutions turning `left` into `right`, or `None` when the pair is
+/// too large to align.
 ///
-/// Alignment is positional, so the runs must be the same length. Tokens whose
-/// kind differs are a change like any other; what matters downstream is which
-/// text became which, not what the lexer called it.
+/// The alignment is the one that pairs off the most tokens, counting an
+/// identical token for twice what a merely same-kind one is worth, so a name
+/// that did not change is never passed over in favour of one that did. Tokens
+/// left unpaired are counted in [`Witness::edits`]; paired tokens whose text
+/// differs are the substitutions.
 #[must_use]
 pub fn witness(left: &[Token], right: &[Token]) -> Option<Witness> {
-    if left.len() != right.len() {
+    let (rows, columns) = (left.len(), right.len());
+    if rows.checked_mul(columns)? > ALIGNMENT_LIMIT {
         return None;
     }
-    let mut changes: Vec<Change> = Vec::new();
-    for (from, to) in left.iter().zip(right) {
-        if from.text == to.text {
-            continue;
-        }
-        let change = Change {
-            from: from.text.to_string(),
-            to: to.text.to_string(),
-            literal: is_literal(from.kind) || is_literal(to.kind),
-        };
-        if !changes.contains(&change) {
-            changes.push(change);
+    let stride = columns + 1;
+
+    // score[i][j] is the best total over the suffixes starting at i and j.
+    // Filled backwards so the traceback can read it forwards.
+    let mut score = vec![0u32; (rows + 1) * stride];
+    for i in (0..rows).rev() {
+        for j in (0..columns).rev() {
+            let paired = pairing(&left[i], &right[j]);
+            let best = score[(i + 1) * stride + j].max(score[i * stride + j + 1]);
+            score[i * stride + j] = if paired > 0 {
+                best.max(score[(i + 1) * stride + j + 1] + paired)
+            } else {
+                best
+            };
         }
     }
-    Some(Witness { changes })
+
+    let mut changes: Vec<Change> = Vec::new();
+    let mut edits = 0usize;
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < rows && j < columns {
+        let paired = pairing(&left[i], &right[j]);
+        let here = score[i * stride + j];
+        if paired > 0 && here == score[(i + 1) * stride + j + 1] + paired {
+            note(&mut changes, &left[i], &right[j]);
+            i += 1;
+            j += 1;
+        } else if here == score[(i + 1) * stride + j] {
+            i += 1;
+            edits += 1;
+        } else {
+            j += 1;
+            edits += 1;
+        }
+    }
+    // Whatever either run has left over was paired with nothing.
+    edits += (rows - i) + (columns - j);
+    Some(Witness { changes, edits })
+}
+
+/// What pairing these two tokens is worth: nothing unless they are the same
+/// kind, and one more when they are also the same text.
+///
+/// The two numbers are three and two rather than two and one so that the count
+/// of pairings decides first and the identical text only breaks a tie: two
+/// same-kind pairings are worth four and one identical pairing three, so
+/// nothing is ever left unpaired to keep a name intact. That order is the
+/// careful one. Reading a differing name as a substitution puts one more
+/// change in front of a rule that has to explain every one of them, where
+/// reading it as an insertion beside a deletion puts none.
+fn pairing(left: &Token, right: &Token) -> u32 {
+    if left.kind.tag() != right.kind.tag() {
+        0
+    } else if left.text == right.text {
+        3
+    } else {
+        2
+    }
+}
+
+/// Record the change between two paired tokens, unless they are the same text
+/// or the change is already known.
+fn note(changes: &mut Vec<Change>, from: &Token, to: &Token) {
+    if from.text == to.text {
+        return;
+    }
+    let change = Change {
+        from: from.text.to_string(),
+        to: to.text.to_string(),
+        literal: is_literal(from.kind) || is_literal(to.kind),
+    };
+    if !changes.contains(&change) {
+        changes.push(change);
+    }
 }
 
 const fn is_literal(kind: TokenKind) -> bool {
@@ -163,10 +252,18 @@ mod tests {
     }
 
     #[test]
-    fn runs_of_different_lengths_have_no_witness() {
+    fn a_token_with_no_counterpart_is_an_edit_and_not_a_change() {
         let left = tokens(&[name("a")]);
         let right = tokens(&[name("a"), name("b")]);
-        assert_eq!(witness(&left, &right), None);
+        let witness = witness(&left, &right).unwrap();
+        assert!(witness.changes.is_empty(), "nothing was substituted");
+        assert_eq!(witness.edits, 1);
+    }
+
+    #[test]
+    fn a_pair_too_large_to_align_has_no_witness() {
+        let long = tokens(&vec![name("a"); 1100]);
+        assert_eq!(witness(&long, &long), None);
     }
 
     #[test]
@@ -174,9 +271,55 @@ mod tests {
         let left = tokens(&[name("a"), name("b")]);
         let witness = witness(&left, &left).unwrap();
         assert!(witness.changes.is_empty());
+        assert_eq!(witness.edits, 0);
         // No change is not one width apart: they are the same text, which is
         // what a verbatim copy is.
         assert_eq!(witness.one_width_apart(), None);
+    }
+
+    #[test]
+    fn two_runs_of_one_shape_are_read_as_substitutions_throughout() {
+        // Keeping the `b` would mean leaving a token unpaired on each side. The
+        // alignment does not: same shape, both names changed, which is the
+        // reading a rule over the changes has to answer for.
+        let left = tokens(&[name("b"), name("x")]);
+        let right = tokens(&[name("y"), name("b")]);
+        let witness = witness(&left, &right).unwrap();
+        assert_eq!(witness.edits, 0);
+        assert_eq!(witness.changes.len(), 2);
+    }
+
+    #[test]
+    fn an_identical_name_settles_which_of_two_alignments_is_read() {
+        // Either `b` or `c` can be dropped to line these up. Dropping `b`
+        // leaves `c` against `c`; dropping `c` leaves `b` against `c` and
+        // invents a substitution nobody wrote.
+        let left = tokens(&[name("a"), name("b"), name("c")]);
+        let right = tokens(&[name("a"), name("c")]);
+        let witness = witness(&left, &right).unwrap();
+        assert!(witness.changes.is_empty());
+        assert_eq!(witness.edits, 1);
+    }
+
+    #[test]
+    fn a_width_swap_survives_an_edit_beside_it() {
+        // The 64-bit routine has a step the 32-bit one does not. The names are
+        // still one width apart; the extra work is an edit, and what that is
+        // worth is not this module's question.
+        let left = tokens(&[name("U32"), name("read32")]);
+        let right = tokens(&[name("U64"), name("read64"), name("finalize")]);
+        let witness = witness(&left, &right).unwrap();
+        assert_eq!(witness.one_width_apart(), Some(("32", "64")));
+        assert_eq!(witness.edits, 1);
+    }
+
+    #[test]
+    fn a_kind_that_differs_is_not_paired_off() {
+        let left = tokens(&[name("value")]);
+        let right = tokens(&[number("7")]);
+        let witness = witness(&left, &right).unwrap();
+        assert!(witness.changes.is_empty(), "a name did not become a number");
+        assert_eq!(witness.edits, 2);
     }
 
     #[test]
