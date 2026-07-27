@@ -439,6 +439,7 @@ pub(crate) fn fragment_pass(
                 if !budget.take() {
                     break 'pairing;
                 }
+                stats.fragment_candidates += 1;
                 let (fa, sa, ea) = verified[x];
                 let (fb, sb, eb) = verified[y];
                 if fa == fb && sa < eb && sb < ea {

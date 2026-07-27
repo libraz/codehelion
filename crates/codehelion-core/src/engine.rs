@@ -190,6 +190,8 @@ pub struct EngineStats {
     /// one candidate and with having skipped nine in ten, and those are not
     /// the same result to hand someone.
     pub raw_pairs_available: usize,
+    /// Candidate fragment pairs examined by the fragment pass.
+    pub fragment_candidates: usize,
     /// Pairs the fragment pass's eligible classes held in total.
     pub fragment_pairs_available: usize,
     /// Verified clone pairs across both passes.
