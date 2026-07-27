@@ -27,6 +27,10 @@ Semantic モードと任意のコンパイル成果物解析は後続リリー�
   測定なしとして報告します。
 - **ローカル監査履歴** — 各スキャンは SQLite データベースへスナップショットされます。
   text / JSON / SARIF レポートは export であり、正本はデータベースです。
+  `audit` は前回スキャンから各グループがどうなったかを報告します。
+- **分離された優先度指標** — clone confidence・maintenance risk・refactoring difficulty
+  を並べて報告し、不透明な単一スコアで順序を決めません。各指標は導出に使った
+  入力値とともに表示されます。
 - **決定的な出力** — 同一入力からはバイト単位で一致するレポートが得られます。
 - **可視化された上限** — 発火したリソース上限（ファイルサイズ・parse timeout・
   候補 budget）はすべてレポートに計上され、黙って適用されることはありません。
@@ -48,14 +52,31 @@ codehelion scan --mode structural           # gapped（Type-3）クローンも�
 codehelion scan --format json --output report.json path/to/repo
 codehelion scan --format sarif --output report.sarif   # SARIF 2.1.0 ログ
 codehelion scan --verbose     # 全クローングループと全メンバーを列挙
+codehelion audit              # 前回から重複がどうなったかを報告
 codehelion explain <ID>       # 監査データベースから finding を表示
 codehelion baseline           # 既知 finding の baseline を管理
+codehelion cache status       # 監査データベースの場所とサイズ
 codehelion config init        # コメント付き codehelion.toml テンプレートを生成
 codehelion doctor             # 利用可能な解析コンポーネントを表示
 ```
 
 検出結果はクローングループにまとめられ、グループとメンバーそれぞれが安定 ID を
 持ちます。この ID で suppression・baseline 登録・`explain` での後日参照ができます。
+
+`codehelion audit` は記録済みの 2 つのスキャンを比較し、各グループが新規なのか、
+変化していないのか、解消されたのか、出現数が増減したのか、移動したのか、内容が
+乖離したのか、クローン種別が変わったのかを報告します。グループは行番号ではなく
+内容で対応付けるため、ファイルの再インデントやクローン直上へのコメント追加で
+履歴が途切れることはありません。
+
+判断済みの finding は `codehelion baseline create` で凍結でき、以降のスキャンは
+その後に現れたものだけを報告します。リリースで ID の作り方そのものが変わると
+（リテラル畳み込み方式の変更、正規化規則の更新など）記録済みの ID はすべて動き、
+何も一致しなくなった baseline は正常に抑止できた baseline と見分けがつきません。
+そのためこの種の変更は黙って適用せず報告し、`codehelion baseline migrate` が
+凍結済みの判断と履歴を新しい ID の上へ書き換えます。引き継げなかった項目は
+破棄せず 1 件ずつ名指しします。読む順序だけを変える変更では ID は 1 つも動かず、
+利用者側のコストはゼロです。
 
 ## 設定
 
@@ -69,6 +90,10 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 
 [languages]
 # headers = "detect"                # 拡張子 ".h" を読む文法。"detect" / "c" / "cpp"
+
+[priority]                          # 整数シェアとして読む
+# maintenance-risk = 2              # 設定できるのは合成のみ。重複が何を要求するかは
+# refactoring-ease = 1              # コード側の性質であり設定で変えない
 
 [suppression]
 # paths = []                        # 隠すパス glob。vendor 配下はここへ

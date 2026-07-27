@@ -30,7 +30,10 @@ analysis arrive in later releases.
   mode cannot measure is reported as absent rather than guessed.
 - **Local audit history** — every scan is snapshotted into a SQLite database;
   text, JSON and SARIF reports are exports, the database is the canonical
-  record.
+  record. `audit` reports what became of each group since the previous scan.
+- **Separated priority measures** — findings are ordered by clone confidence,
+  maintenance risk and refactoring difficulty reported side by side, never by
+  one opaque score, and every measure shows the inputs it was derived from.
 - **Deterministic output** — the same input produces byte-identical reports.
 - **Visible limits** — every resource ceiling that fires (file size, parse
   timeout, candidate budget) is counted in the report, never silently applied.
@@ -52,14 +55,32 @@ codehelion scan --mode structural           # also detect gapped (Type-3) clones
 codehelion scan --format json --output report.json path/to/repo
 codehelion scan --format sarif --output report.sarif   # SARIF 2.1.0 log
 codehelion scan --verbose     # list every clone group and member
+codehelion audit              # what became of the duplication since last time
 codehelion explain <ID>       # show a finding from the audit database
 codehelion baseline           # manage accepted-findings baselines
+codehelion cache status       # audit-database location and size
 codehelion config init        # write a commented codehelion.toml template
 codehelion doctor             # report available analysis components
 ```
 
 Findings are grouped into clone groups; each group and member carries a stable
 ID you can suppress, baseline or look up later with `explain`.
+
+`codehelion audit` compares two recorded scans and says what each group did:
+whether it is new, unchanged, resolved, gained or lost occurrences, moved,
+drifted apart or changed clone type. Groups are connected by content, not by
+line number, so reindenting a file or adding a comment above a clone leaves the
+history intact.
+
+Once a finding is accepted, `codehelion baseline create` freezes it and later
+scans report only what came after. When a release changes the rules that make
+identifiers — a different literal-folding strategy, a new normalization — every
+recorded ID moves, and a baseline that silently matched nothing would look
+exactly like one that worked. Such a change is reported rather than applied
+quietly, and `codehelion baseline migrate` rewrites the frozen judgements and
+the history onto the new identifiers, naming any entry it could not carry
+across instead of dropping it. Changes that only affect the order findings are
+read in leave every identifier alone and cost you nothing.
 
 ## Configuration
 
@@ -73,6 +94,10 @@ ID you can suppress, baseline or look up later with `explain`.
 
 [languages]
 # headers = "detect"                # grammar for a bare ".h": "detect", "c", "cpp"
+
+[priority]                          # whole numbers, read as shares
+# maintenance-risk = 2              # only the composition is settable; what a
+# refactoring-ease = 1              # duplication costs is a question about the code
 
 [suppression]
 # paths = []                        # path globs to hide; vendored trees go here
