@@ -546,6 +546,82 @@ fn one_member_that_is_a_plain_copy_stops_the_group_being_a_family() {
     );
 }
 
+/// Two units whose answer a feature flag picks. Nothing in either body chooses
+/// between the two returns, because the attribute that does never reaches the
+/// IR — which is what makes them alike, and what makes the likeness worthless.
+const FLAGGED_A: &str = "pub fn entries(map: &Map) -> usize {
+    #[cfg(feature = \"ordered\")]
+    return map.ordered_len();
+    #[cfg(not(feature = \"ordered\"))]
+    return map.plain_len();
+}
+";
+
+const FLAGGED_B: &str = "pub fn slots(map: &Map) -> usize {
+    #[cfg(feature = \"ordered\")]
+    return map.ordered_slots();
+    #[cfg(not(feature = \"ordered\"))]
+    return map.plain_slots();
+}
+";
+
+#[test]
+fn a_body_the_build_configuration_answers_for_is_named_and_withheld() {
+    let dir = fixture();
+    std::fs::write(dir.path().join("src/entries.rs"), FLAGGED_A).unwrap();
+    std::fs::write(dir.path().join("src/slots.rs"), FLAGGED_B).unwrap();
+    let value = scan_json(dir.path());
+    let groups = value["groups"].as_array().unwrap();
+
+    let configured = groups
+        .iter()
+        .find(|group| group["boilerplate"] == serde_json::json!("configured-answer"))
+        .expect("two bodies a feature flag answers for");
+    assert!(
+        configured["suppressed"].is_object(),
+        "hidden by default, and the suppressed section still lists it"
+    );
+
+    let store = open_store(dir.path());
+    let run = store.latest_run().unwrap().expect("a recorded run");
+    let stored = store.run_groups(run.id).unwrap();
+    assert!(
+        stored
+            .iter()
+            .any(|group| group.boilerplate.as_deref() == Some("configured-answer")),
+        "what the group is was recorded, not only what the report did with it"
+    );
+}
+
+#[test]
+fn an_arm_that_does_work_is_not_the_configuration_answering() {
+    let dir = fixture();
+    // The same pair of arms, with one of them computing its answer. That work
+    // is written once per configuration, which is duplication worth reading.
+    let working = FLAGGED_A.replace(
+        "    #[cfg(feature = \"ordered\")]",
+        "    let scale = map.scale();\n    #[cfg(feature = \"ordered\")]",
+    );
+    std::fs::write(dir.path().join("src/entries.rs"), &working).unwrap();
+    std::fs::write(
+        dir.path().join("src/slots.rs"),
+        working
+            .replace("entries", "slots")
+            .replace("_len", "_slots"),
+    )
+    .unwrap();
+    let value = scan_json(dir.path());
+
+    assert!(
+        value["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|group| group["boilerplate"] != serde_json::json!("configured-answer")),
+        "an arm that computes is not an answer the build picked"
+    );
+}
+
 fn fixture_with_boilerplate() -> tempfile::TempDir {
     let dir = fixture();
     std::fs::write(dir.path().join("src/dump_a.rs"), DUMP_A).unwrap();

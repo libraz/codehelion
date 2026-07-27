@@ -120,23 +120,23 @@ const CORPORA: &[Expected] = &[
     Expected {
         name: "lz4",
         confirmed: 17,
-        refuted: 17,
+        refuted: 16,
         forward_confirmed: 17,
-        forward_refuted: 16,
+        forward_refuted: 15,
     },
     Expected {
         name: "serde-json",
         confirmed: 44,
-        refuted: 22,
+        refuted: 21,
         forward_confirmed: 39,
-        forward_refuted: 22,
+        forward_refuted: 21,
     },
     Expected {
         name: "spdlog",
         confirmed: 21,
-        refuted: 18,
+        refuted: 17,
         forward_confirmed: 21,
-        forward_refuted: 18,
+        forward_refuted: 17,
     },
     Expected {
         name: "bitflags",
@@ -176,13 +176,13 @@ const ORDERINGS: &[Ordering] = &[
         name: "priority",
         at_10: 1.0,
         at_50: 0.96,
-        map: 0.9333,
+        map: 0.9338,
     },
     Ordering {
         name: "size",
         at_10: 0.9,
         at_50: 0.94,
-        map: 0.8556,
+        map: 0.8586,
     },
 ];
 
@@ -193,7 +193,7 @@ const ORDERINGS: &[Ordering] = &[
 /// one silently redistributes every finding here. What the numbers say about
 /// the bands themselves is argued from the table, not from this assertion.
 const BANDS: &[(&str, usize, usize)] = &[
-    ("high", 64, 60),
+    ("high", 64, 57),
     ("medium", 15, 3),
     ("low", 14, 5),
     ("(unscored)", 42, 6),

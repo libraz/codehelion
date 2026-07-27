@@ -30,7 +30,7 @@ use crate::ir::{IrNode, Shape};
 /// Recorded alongside the other detector versions: a change in what counts as
 /// boilerplate changes which findings a report shows, so results from two
 /// versions are not comparable without saying so.
-pub const BOILERPLATE_VERSION: &str = "boilerplate-v4";
+pub const BOILERPLATE_VERSION: &str = "boilerplate-v5";
 
 /// A recognised boilerplate shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -49,6 +49,9 @@ pub enum Boilerplate {
     /// One guard and then an answer on each side of it, with nothing else:
     /// the unit chooses between two results rather than producing one.
     GuardedDispatch,
+    /// Several answers with nothing in the code choosing between them: the
+    /// build configuration picks one and the rest are never compiled.
+    ConfiguredAnswer,
 }
 
 impl Boilerplate {
@@ -60,17 +63,19 @@ impl Boilerplate {
             Self::Forwarding => "forwarding",
             Self::MacroRepetition => "macro-repetition",
             Self::GuardedDispatch => "guarded-dispatch",
+            Self::ConfiguredAnswer => "configured-answer",
         }
     }
 
     /// Every category, in the order reports and configuration list them.
     #[must_use]
-    pub const fn all() -> [Self; 4] {
+    pub const fn all() -> [Self; 5] {
         [
             Self::TrivialBody,
             Self::Forwarding,
             Self::MacroRepetition,
             Self::GuardedDispatch,
+            Self::ConfiguredAnswer,
         ]
     }
 
@@ -149,6 +154,9 @@ pub fn classify(unit: &IrNode) -> Option<Boilerplate> {
     if body.macros > 0 {
         return None;
     }
+    if configured(&body) {
+        return Some(Boilerplate::ConfiguredAnswer);
+    }
     match body.calls {
         // Nothing is delegated, so the one statement is the whole body.
         0 if body.statements <= 1 => Some(Boilerplate::TrivialBody),
@@ -156,6 +164,28 @@ pub fn classify(unit: &IrNode) -> Option<Boilerplate> {
         1 if body.work == 0 => Some(Boilerplate::Forwarding),
         _ => None,
     }
+}
+
+/// Whether the body hands back more than one answer with nothing choosing
+/// between them.
+///
+/// A unit cannot return twice. Where the grammar shows two returns and no
+/// branch, loop or guard, something outside the grammar removed the choice:
+/// `#if` and `#ifdef` in C and C++, `#[cfg]` in Rust. Only one answer is
+/// compiled, and which one is a property of the build rather than of the code.
+///
+/// That makes two such units alike for a reason no reader can act on. They
+/// carry the same platform split, or the same feature flag, and the answer
+/// each spells is the one the other could not use. Consolidating them would
+/// mean deleting a configuration, not a duplicate.
+///
+/// The shape is the one [`dispatch`] asks for with the guard taken away, and
+/// bounded for the same reason: no local, no assignment, no bare expression,
+/// and no more calls than there are answers, so nothing happens here besides
+/// producing each answer. Anything more and the arms are doing work, which is
+/// work written once per configuration and worth reading.
+const fn configured(body: &Body) -> bool {
+    body.returns >= 2 && body.work == 0 && body.declarations == 0 && body.calls <= body.returns
 }
 
 /// Classify a body that branches, which is only boilerplate in one shape.
@@ -508,6 +538,69 @@ mod tests {
             classify(&unit_of(dispatched)),
             Some(Boilerplate::GuardedDispatch)
         );
+    }
+
+    #[test]
+    fn two_answers_and_no_guard_are_the_build_configuration_choosing() {
+        // `#ifdef _WIN32 return f(x); #else return g(x); #endif` — the
+        // directive leaves no node, so what reaches here is two returns and
+        // nothing between them.
+        let configured = vec![
+            nest(Shape::Return, vec![leaf(Shape::Call)]),
+            nest(Shape::Return, vec![leaf(Shape::Call)]),
+        ];
+        assert_eq!(
+            classify(&unit_of(configured)),
+            Some(Boilerplate::ConfiguredAnswer)
+        );
+
+        // A third arm, and an answer that calls nothing, are the same shape.
+        let three = vec![
+            leaf(Shape::Return),
+            leaf(Shape::Return),
+            leaf(Shape::Return),
+        ];
+        assert_eq!(
+            classify(&unit_of(three)),
+            Some(Boilerplate::ConfiguredAnswer)
+        );
+    }
+
+    #[test]
+    fn arms_that_do_something_are_written_once_per_configuration() {
+        // A local in one arm is work the other arm does differently, which is
+        // what a reader would want to see duplicated.
+        let declaring = vec![
+            leaf(Shape::VarDecl),
+            nest(Shape::Return, vec![leaf(Shape::Call)]),
+            nest(Shape::Return, vec![leaf(Shape::Call)]),
+        ];
+        assert_eq!(classify(&unit_of(declaring)), None);
+
+        let assigning = vec![
+            leaf(Shape::Assign),
+            leaf(Shape::Return),
+            leaf(Shape::Return),
+        ];
+        assert_eq!(classify(&unit_of(assigning)), None);
+
+        // More calls than answers means an arm is computing one.
+        let computing = vec![
+            nest(Shape::Return, vec![leaf(Shape::Call)]),
+            nest(
+                Shape::Return,
+                vec![leaf(Shape::Call), leaf(Shape::Call), leaf(Shape::Call)],
+            ),
+        ];
+        assert_eq!(classify(&unit_of(computing)), None);
+    }
+
+    #[test]
+    fn one_answer_is_not_a_configuration() {
+        // A body with a single return is whatever else it is; nothing chose
+        // it. `return f(x);` stays a wrapper.
+        let single = vec![nest(Shape::Return, vec![leaf(Shape::Call)])];
+        assert_eq!(classify(&unit_of(single)), Some(Boilerplate::Forwarding));
     }
 
     #[test]

@@ -117,6 +117,10 @@ pub struct BoilerplatePolicy {
     /// Bodies that are one guard and an answer on each side of it. Hidden by
     /// default, on the same evidence as the wrappers.
     pub guarded_dispatch: CategoryAction,
+    /// Bodies whose answer the build configuration picks. Hidden by default —
+    /// what two of them share is a platform split or a feature flag, which is
+    /// not duplication anyone can remove.
+    pub configured_answer: CategoryAction,
 }
 
 impl Default for BoilerplatePolicy {
@@ -138,6 +142,11 @@ impl Default for BoilerplatePolicy {
             // reads a field, so this is the category to raise to "report"
             // first when a real duplication goes missing.
             guarded_dispatch: CategoryAction::Hide,
+            // Every body this reaches across the labelled projects is one
+            // routine written per platform or per feature flag, in all three
+            // languages. None of them is a duplicate a reader could remove,
+            // and none was ever ruled a clone worth reporting.
+            configured_answer: CategoryAction::Hide,
         }
     }
 }
@@ -151,6 +160,7 @@ impl BoilerplatePolicy {
             Boilerplate::Forwarding => self.forwarding,
             Boilerplate::MacroRepetition => self.macro_repetition,
             Boilerplate::GuardedDispatch => self.guarded_dispatch,
+            Boilerplate::ConfiguredAnswer => self.configured_answer,
         }
     }
 }
@@ -518,6 +528,7 @@ pub const TEMPLATE: &str = "\
 # forwarding = \"hide\"
 # macro-repetition = \"rank-down\"
 # guarded-dispatch = \"hide\"
+# configured-answer = \"hide\"
 
 # How the separated priority measures are weighed against one another when a
 # report is put in order. Whole numbers, read as shares. Only the composition
