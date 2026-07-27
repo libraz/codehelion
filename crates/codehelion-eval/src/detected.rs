@@ -182,6 +182,8 @@ struct Member {
     file: String,
     start_line: u32,
     end_line: u32,
+    #[serde(default)]
+    tokens: u64,
 }
 
 /// A scan report, read as a scorable detection result.
@@ -237,6 +239,7 @@ pub fn from_report_json(json: &str) -> Result<(DetectionResult, u32), Error> {
                             file: member.file.clone(),
                             start_line: member.start_line,
                             end_line: member.end_line,
+                            tokens: member.tokens,
                         })
                         .collect(),
                 },
@@ -331,11 +334,13 @@ mod tests {
                     file: "a.rs".to_string(),
                     start_line: 10,
                     end_line: 24,
+                    tokens: 0,
                 },
                 Fragment {
                     file: "b.rs".to_string(),
                     start_line: 5,
                     end_line: 19,
+                    tokens: 0,
                 },
             ]
         );

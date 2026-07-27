@@ -891,6 +891,7 @@ mod tests {
             file: file.to_string(),
             start_line: start,
             end_line: end,
+            tokens: 0,
         }
     }
 

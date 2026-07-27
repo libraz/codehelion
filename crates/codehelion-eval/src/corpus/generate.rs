@@ -779,11 +779,13 @@ fn resolve_pairs(
                         file: seed_file.to_string(),
                         start_line: pair.seed_start,
                         end_line: pair.seed_end,
+                        tokens: 0,
                     },
                     Fragment {
                         file: pair.variant_file.clone(),
                         start_line: start,
                         end_line: end,
+                        tokens: 0,
                     },
                 ],
             })
@@ -833,11 +835,13 @@ fn resolve_non_clones(
                         file: seed_file.to_string(),
                         start_line: function.start_line,
                         end_line: function.end_line,
+                        tokens: 0,
                     },
                     Fragment {
                         file: spec.variant.clone(),
                         start_line: start,
                         end_line: end,
+                        tokens: 0,
                     },
                 ],
             })
@@ -878,11 +882,13 @@ fn resolve_transplant_non_clones(
                         file: seed_file.to_string(),
                         start_line: entry.seed_start,
                         end_line: entry.seed_end,
+                        tokens: 0,
                     },
                     Fragment {
                         file: entry.variant_file.clone(),
                         start_line: start,
                         end_line: end,
+                        tokens: 0,
                     },
                 ],
             })
@@ -1029,11 +1035,13 @@ fn twice(x: i32) -> i32 {
                     file: "seed.rs".to_string(),
                     start_line: 3,
                     end_line: 6,
+                    tokens: 0,
                 },
                 Fragment {
                     file: "v2.rs".to_string(),
                     start_line: 4,
                     end_line: 7,
+                    tokens: 0,
                 },
             ]
         );
@@ -1333,11 +1341,13 @@ fn host(items: &[i32]) -> i32 {
                     file: "seed.rs".to_string(),
                     start_line: 4,
                     end_line: 8,
+                    tokens: 0,
                 },
                 Fragment {
                     file: "partial.rs".to_string(),
                     start_line: 6,
                     end_line: 10,
+                    tokens: 0,
                 },
             ]
         );
@@ -1392,11 +1402,13 @@ fn host(items: &[i32]) -> i32 {
                     file: "seed.rs".to_string(),
                     start_line: 4,
                     end_line: 8,
+                    tokens: 0,
                 },
                 Fragment {
                     file: "partial.rs".to_string(),
                     start_line: 6,
                     end_line: 10,
+                    tokens: 0,
                 },
             ]
         );

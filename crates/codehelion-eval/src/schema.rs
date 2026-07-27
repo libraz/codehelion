@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 /// Schema version of the [`DetectionResult`] documents this crate produces.
 pub const SCHEMA_VERSION: u32 = 0;
 
+/// Whether a count is zero, for leaving unstated counts out of the JSON.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde requires this signature.
+const fn is_zero(count: &u64) -> bool {
+    *count == 0
+}
+
 /// An inclusive source line range within a single file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fragment {
@@ -18,6 +24,19 @@ pub struct Fragment {
     pub start_line: u32,
     /// Last line of the range (inclusive, 1-based).
     pub end_line: u32,
+    /// Tokens the detector counted in this fragment, where the source of the
+    /// result stated one; `0` otherwise.
+    ///
+    /// A line range is not a token span. Anything reading a fragment's tokens
+    /// back out of the sources is guessing at where the detector drew the
+    /// edges, and this is what says whether the guess landed.
+    ///
+    /// Left out of the JSON when it is zero, which is what a hand-written label
+    /// carries: a label states which lines are the same code, and how many
+    /// tokens a detector counted there is the detector's fact, not the
+    /// corpus's.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tokens: u64,
 }
 
 impl Fragment {
@@ -287,6 +306,7 @@ mod tests {
             file: "a.rs".to_string(),
             start_line: 10,
             end_line: 20,
+            tokens: 0,
         };
         assert!((a.overlap(&a) - 1.0).abs() < 1e-9);
     }
@@ -297,11 +317,13 @@ mod tests {
             file: "a.rs".to_string(),
             start_line: 10,
             end_line: 20,
+            tokens: 0,
         };
         let b = Fragment {
             file: "a.rs".to_string(),
             start_line: 30,
             end_line: 40,
+            tokens: 0,
         };
         assert!(a.overlap(&b).abs() < 1e-9);
     }
@@ -314,11 +336,13 @@ mod tests {
             file: "a.rs".to_string(),
             start_line: 1,
             end_line: 10,
+            tokens: 0,
         };
         let b = Fragment {
             file: "a.rs".to_string(),
             start_line: 6,
             end_line: 15,
+            tokens: 0,
         };
         assert!((a.overlap(&b) - 1.0 / 3.0).abs() < 1e-9);
     }
@@ -329,11 +353,13 @@ mod tests {
             file: "a.rs".to_string(),
             start_line: 10,
             end_line: 20,
+            tokens: 0,
         };
         let b = Fragment {
             file: "b.rs".to_string(),
             start_line: 10,
             end_line: 20,
+            tokens: 0,
         };
         assert!(a.overlap(&b).abs() < 1e-9);
     }
@@ -344,6 +370,7 @@ mod tests {
             file: "a.rs".to_string(),
             start_line: 20,
             end_line: 10,
+            tokens: 0,
         };
         assert_eq!(f.line_count(), 0);
     }

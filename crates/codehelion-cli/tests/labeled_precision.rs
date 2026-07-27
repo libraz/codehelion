@@ -588,11 +588,19 @@ fn witness_for(snapshot: &Path, finding: &Finding) -> Option<Witness> {
     substitution::witness(&tokens_of(snapshot, left)?, &tokens_of(snapshot, right)?)
 }
 
-/// The tokens of one fragment, lexed the way the scan lexed them.
+/// The tokens of one fragment, lexed the way the scan lexed them, or `None`
+/// when the lines do not yield the tokens the scan counted.
 ///
 /// A bare `.h` is read as C++, which lexes C too. A scan settles the question
 /// from the rest of the tree; here the answer only has to produce the same
 /// lexemes, and for these files either grammar does.
+///
+/// The line range is not where the detector drew the edges — it works in token
+/// spans and reports the lines those happen to cover — so taking whole lines
+/// can pick up a token either side. The count the report states is what says
+/// so, and a fragment whose count disagrees is one this cannot speak about.
+/// Without the check the disagreement is invisible and every number read off
+/// these tokens is quietly about a different span.
 fn tokens_of(snapshot: &Path, fragment: &Fragment) -> Option<Vec<Token>> {
     let path = snapshot.join(&fragment.file);
     let source = std::fs::read_to_string(&path).ok()?;
@@ -601,15 +609,12 @@ fn tokens_of(snapshot: &Path, fragment: &Fragment) -> Option<Vec<Token>> {
         "c" => codehelion_frontend_c::CFrontend.lex(&source),
         _ => codehelion_frontend_cpp::CppFrontend.lex(&source),
     };
-    Some(
-        lexed
-            .tokens
-            .into_iter()
-            .filter(|token| {
-                (fragment.start_line..=fragment.end_line).contains(&token.span.start_line)
-            })
-            .collect(),
-    )
+    let tokens: Vec<Token> = lexed
+        .tokens
+        .into_iter()
+        .filter(|token| (fragment.start_line..=fragment.end_line).contains(&token.span.start_line))
+        .collect();
+    (tokens.len() as u64 == fragment.tokens).then_some(tokens)
 }
 
 /// One line of the corpus table: the two precisions and the counts they are
