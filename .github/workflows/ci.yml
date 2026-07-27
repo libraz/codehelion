@@ -28,6 +28,22 @@ jobs:
       - name: Test
         run: cargo test --all-targets --all-features
 
+  accuracy:
+    name: detection accuracy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The labelled cases record a commit, not the code it names: the sources
+      # belong to the projects they came from and are fetched here rather than
+      # committed. Without this step the accuracy run still passes, with every
+      # labelled case reported as unscored — which is the point of the step.
+      - name: Materialize the labelled corpora
+        run: corpus/scripts/materialize-labeled.sh
+      - name: Measure
+        run: make eval
+
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest
