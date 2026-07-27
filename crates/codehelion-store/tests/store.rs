@@ -17,6 +17,7 @@ use codehelion_core::stable_id::{
     CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint, group_lineage_id,
 };
 use codehelion_core::verify::Confidence;
+use codehelion_store::migrate::LineageAdoption;
 use codehelion_store::snapshot::{
     FeatureRow, FileRow, GroupOrigin, GroupRow, LineageParent, MemberRow, PriorityRow,
     SimilarityBreakdownRow, Snapshot, SuppressionRuleRow, UnitRow,
@@ -907,4 +908,180 @@ fn a_group_recorded_before_the_test_code_column_is_not_claimed_to_be_test_code()
     );
     let run = store.latest_run().unwrap().expect("the recorded run");
     assert!(!store.run_groups(run.id).unwrap()[0].test_code);
+}
+
+/// A run of the same tree under rules that named every group differently.
+fn renamed_snapshot<'a>(
+    variant: &'a BuildVariant,
+    detectors: &'a [(String, String)],
+) -> Snapshot<'a> {
+    let mut snapshot = sample_snapshot(variant, detectors);
+    snapshot.started_at = "2026-07-25T00:00:00Z";
+    snapshot.finished_at = "2026-07-25T00:00:05Z";
+    snapshot.groups[0].fingerprint = group_fp(77);
+    snapshot.groups[0].history = GroupOrigin::unconnected(&group_fp(77));
+    for (index, member) in snapshot.groups[0].members.iter_mut().enumerate() {
+        // Content ids moved with the rule change, exactly as group ids did;
+        // placement is all the two runs still have in common.
+        member.content = frag_fp(70 + u8::try_from(index).unwrap());
+        member.finding = finding(170 + u8::try_from(index).unwrap());
+    }
+    snapshot
+}
+
+#[test]
+fn a_history_carries_across_a_change_that_moved_every_identifier() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let before = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+    let after = store
+        .record_snapshot(&renamed_snapshot(&variant, &detectors))
+        .unwrap();
+
+    let history = group_lineage_id(&group_fp(9));
+    // The comparison could connect nothing: the two runs share no identifier.
+    assert_eq!(
+        store.run_group_snapshots(after).unwrap()[0].lineage,
+        Some(group_lineage_id(&group_fp(77)))
+    );
+
+    let adopted = store
+        .adopt_lineage(
+            after,
+            before,
+            &[LineageAdoption {
+                group: group_fp(77).to_hex(),
+                previous_group: group_fp(9).to_hex(),
+                lineage: history.to_hex(),
+                shared: 2,
+                overlap: 1.0,
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(adopted.taken, vec![group_fp(77).to_hex()]);
+    assert!(adopted.already_connected.is_empty());
+    assert!(adopted.unknown.is_empty());
+    assert_eq!(
+        store.run_group_snapshots(after).unwrap()[0].lineage,
+        Some(history),
+        "the newer run now belongs to the history the older one started"
+    );
+}
+
+#[test]
+fn a_group_the_comparison_already_connected_is_left_as_it_was() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let before = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+
+    let evidence = group_lineage_id(&group_fp(9));
+    let mut snapshot = renamed_snapshot(&variant, &detectors);
+    snapshot.groups[0].history = GroupOrigin {
+        state: AuditState::Expanded,
+        lineage: evidence,
+        parents: vec![LineageParent {
+            fingerprint: group_fp(9),
+            lineage: evidence,
+            primary: true,
+            shared_content: 2,
+            overlap: 1.0,
+        }],
+    };
+    let after = store.record_snapshot(&snapshot).unwrap();
+
+    // Matched on content, so the rule change did not touch it. A migration
+    // must not replace an answer the evidence supported with one from
+    // placement.
+    let invented = group_lineage_id(&group_fp(123));
+    let adopted = store
+        .adopt_lineage(
+            after,
+            before,
+            &[LineageAdoption {
+                group: group_fp(77).to_hex(),
+                previous_group: group_fp(9).to_hex(),
+                lineage: invented.to_hex(),
+                shared: 1,
+                overlap: 0.5,
+            }],
+        )
+        .unwrap();
+
+    assert!(adopted.taken.is_empty());
+    assert_eq!(adopted.already_connected, vec![group_fp(77).to_hex()]);
+    assert_eq!(
+        store.run_group_snapshots(after).unwrap()[0].lineage,
+        Some(evidence)
+    );
+}
+
+#[test]
+fn a_group_a_run_does_not_hold_is_named_rather_than_passed_over() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let before = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+    let after = store
+        .record_snapshot(&renamed_snapshot(&variant, &detectors))
+        .unwrap();
+
+    let adopted = store
+        .adopt_lineage(
+            after,
+            before,
+            &[LineageAdoption {
+                group: group_fp(200).to_hex(),
+                previous_group: group_fp(9).to_hex(),
+                lineage: group_lineage_id(&group_fp(9)).to_hex(),
+                shared: 2,
+                overlap: 1.0,
+            }],
+        )
+        .unwrap();
+
+    assert!(adopted.taken.is_empty());
+    assert_eq!(adopted.unknown, vec![group_fp(200).to_hex()]);
+}
+
+#[test]
+fn a_malformed_identifier_stops_the_rewrite_rather_than_half_applying_it() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let before = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+    let after = store
+        .record_snapshot(&renamed_snapshot(&variant, &detectors))
+        .unwrap();
+
+    let error = store
+        .adopt_lineage(
+            after,
+            before,
+            &[LineageAdoption {
+                group: group_fp(77).to_hex(),
+                previous_group: group_fp(9).to_hex(),
+                lineage: "not-a-lineage".to_string(),
+                shared: 2,
+                overlap: 1.0,
+            }],
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, StoreError::MalformedId { .. }));
+    assert_eq!(
+        store.run_group_snapshots(after).unwrap()[0].lineage,
+        Some(group_lineage_id(&group_fp(77))),
+        "a rewrite that could not finish left nothing behind"
+    );
 }

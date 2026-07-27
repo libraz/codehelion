@@ -9,12 +9,15 @@
 //!
 //! - [`schema`] — the DDL and the forward-only migration mechanism,
 //! - [`snapshot`] — the write path: one scan, one atomic transaction,
-//! - [`query`] — the read path: every SQL query as a typed function.
+//! - [`query`] — the read path: every SQL query as a typed function,
+//! - [`migrate`] — rewriting recorded history when the rules that make
+//!   identifiers change under it.
 //!
 //! Opening a database migrates it forward when it is older and refuses it
 //! when it is newer than this build supports; downgrade is unsupported by
 //! design.
 
+pub mod migrate;
 pub mod query;
 pub mod schema;
 pub mod snapshot;

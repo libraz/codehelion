@@ -373,6 +373,29 @@ impl Store {
         let Some(run_id) = self.completed_run_id(root_path, Some(variant_fingerprint))? else {
             return Ok(None);
         };
+        let tree: BTreeMap<PathBuf, String> = self
+            .run_tree(run_id)?
+            .into_iter()
+            .map(|(path, hash)| (PathBuf::from(path), hash))
+            .collect();
+        if tree.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some((run_id, tree)))
+    }
+
+    /// The files one run read, by path relative to the scan root, each with
+    /// the hash of what it held.
+    ///
+    /// Empty for a run that recorded no files, which is every run written
+    /// before the tree was recorded at all. "Read nothing" and "did not say"
+    /// are not distinguishable after the fact, so a caller that needs the
+    /// difference has to decide what an empty answer means to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn run_tree(&self, run_id: i64) -> Result<BTreeMap<String, String>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT relative_path, content_hash FROM scanned_file
              WHERE scan_run_id = ?1
@@ -383,12 +406,9 @@ impl Store {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })? {
             let (path, hash) = row?;
-            tree.insert(PathBuf::from(path), hash);
+            tree.insert(path, hash);
         }
-        if tree.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some((run_id, tree)))
+        Ok(tree)
     }
 
     /// Row id of the newest completed run over `root_path` under `variant`,
@@ -457,7 +477,12 @@ impl Store {
     /// The identity of one run by row id: the conditions its stable ids were
     /// computed under, which every judgement about its results is qualified
     /// by.
-    fn run_origin(&self, run_id: i64) -> Result<RunOrigin, StoreError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error, including the case of a run id
+    /// this database does not hold.
+    pub fn run_origin(&self, run_id: i64) -> Result<RunOrigin, StoreError> {
         let mut origin = self.conn.query_row(
             "SELECT r.root_path, r.tool_version, r.analysis_mode, r.finished_at,
                     v.variant_fingerprint, v.normalization_version
@@ -947,7 +972,7 @@ fn map_member(row: &rusqlite::Row<'_>, content: usize) -> Result<StoredMember, r
 }
 
 /// Parse a 32-digit hex identifier into its 16 bytes.
-fn parse_hex_id(hex: &str) -> Result<[u8; 16], StoreError> {
+pub(crate) fn parse_hex_id(hex: &str) -> Result<[u8; 16], StoreError> {
     let malformed = || StoreError::MalformedId {
         id: hex.to_string(),
     };
