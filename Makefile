@@ -40,6 +40,7 @@ eval: ## Show detection accuracy over the committed corpora
 	$(CARGO) test -p codehelion-cli --test corpus_accuracy -- --nocapture
 	$(CARGO) test -p codehelion-cli --test labeled_precision -- --nocapture
 	$(CARGO) test -p codehelion-cli --test refactoring -- --nocapture
+	$(CARGO) test -p codehelion-cli --test candidate_stages -- --nocapture
 
 .PHONY: check
 check: format-check lint test doc ## Run every CI check locally
