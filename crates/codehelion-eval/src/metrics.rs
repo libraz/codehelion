@@ -498,6 +498,84 @@ impl fmt::Display for BandSplit {
     }
 }
 
+/// How far a rule reads off the [substitution
+/// witness](codehelion_core::substitution::Witness) gets, and what it costs.
+///
+/// The rule: every name that differs between two occurrences differs by the
+/// same integer width, and no constant changed. That is a set of routines
+/// written once per width — the shape a typed language forces on a library and
+/// the commonest thing this detector is wrong about — and it is invisible to
+/// every measure the report carries, because normalization erased the names
+/// before anything looked at them.
+///
+/// Recorded rather than acted on. What a rule of this kind has to clear is not
+/// a precision figure but a counterexample: nothing it reaches may be a clone
+/// somebody confirmed, and that has to hold on a project it was not read from.
+/// Both numbers are here so the first can be checked on every run and the
+/// second by holding a case out.
+///
+/// A pair whose occurrences cannot be lined up is counted apart. It is not
+/// evidence either way, and folding it into the total would let a change that
+/// breaks alignment read as a rule that stopped firing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WidthFamily {
+    /// Confirmed findings the rule reaches. Every one is a counterexample.
+    pub confirmed: usize,
+    /// Refuted findings the rule reaches.
+    pub refuted: usize,
+    /// Judged findings whose occurrences could not be lined up.
+    pub unalignable: usize,
+    /// Judged findings the rule was asked about and did not reach.
+    pub untouched: usize,
+}
+
+impl WidthFamily {
+    /// Add every judged finding in `results`, asking `witness` for the
+    /// substitutions behind each one.
+    ///
+    /// The witness comes from the caller because it takes the source the
+    /// finding was read from, which scoring does not otherwise open.
+    pub fn record(
+        &mut self,
+        results: &DetectionResult,
+        labels: &LabelSet,
+        threshold: f64,
+        mut witness: impl FnMut(&Finding) -> Option<codehelion_core::substitution::Witness>,
+    ) {
+        for finding in &results.findings {
+            let confirmed = match verdict(finding, labels, threshold) {
+                Verdict::Confirmed => true,
+                Verdict::Refuted => false,
+                Verdict::Conflicting | Verdict::Unjudged => continue,
+            };
+            let Some(witness) = witness(finding) else {
+                self.unalignable += 1;
+                continue;
+            };
+            if witness.one_width_apart().is_some() && !witness.touches_a_literal() {
+                if confirmed {
+                    self.confirmed += 1;
+                } else {
+                    self.refuted += 1;
+                }
+            } else {
+                self.untouched += 1;
+            }
+        }
+    }
+}
+
+impl fmt::Display for WidthFamily {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "written once per width: {} refuted reached, {} confirmed reached, \
+             {} not reached, {} could not be lined up",
+            self.refuted, self.confirmed, self.untouched, self.unalignable
+        )
+    }
+}
+
 /// Where the judged findings sit on each similarity axis, split by verdict.
 ///
 /// The sibling of [`SizeSplit`], for the other obvious knob. Length is the

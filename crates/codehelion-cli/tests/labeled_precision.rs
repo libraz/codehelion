@@ -57,13 +57,15 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
+use codehelion_core::frontend::{Frontend, Token};
+use codehelion_core::substitution::{self, Witness};
 use codehelion_eval::detected;
 use codehelion_eval::labels::LabelSet;
 use codehelion_eval::metrics::{
     Adjudication, AxisSplit, BandSplit, DEFAULT_MATCH_THRESHOLD, RankedVerdicts, SizeSplit,
-    adjudicate,
+    WidthFamily, adjudicate,
 };
-use codehelion_eval::schema::Finding;
+use codehelion_eval::schema::{DetectionResult, Finding, Fragment};
 
 /// One labelled corpus and the verdict split it currently produces.
 struct Expected {
@@ -366,6 +368,9 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
     };
     let mut sizes = SizeSplit::default();
     let mut axes = AxisSplit::default();
+    // Which corpora the "written once per width" rule reaches, and in total.
+    let mut widths = String::from("\nwritten once per width\n");
+    let mut every_width = WidthFamily::default();
     let mut bands = BandSplit::default();
     // Two orderings of the same verdicts: the one the tool prints, and the one
     // anybody would reach for without it.
@@ -384,12 +389,7 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
         // the script rebuilds them. Say so rather than passing quietly.
         let snapshot = corpus.join("snapshot");
         if !snapshot.is_dir() {
-            writeln!(
-                table,
-                "{:<16} {:>9} {:>12} {:>10} {:>8} {:>9} {:>10}",
-                expected.name, "-", "-", "-", "-", "-", "-"
-            )
-            .expect("writing to a string cannot fail");
+            unscored_row(expected.name, &mut table);
             unmaterialized += 1;
             continue;
         }
@@ -402,6 +402,15 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
         let ruled = adjudicate(&result, &labels, DEFAULT_MATCH_THRESHOLD);
         sizes.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
         axes.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
+        width_family(
+            expected.name,
+            &snapshot,
+            &result,
+            &labels,
+            &mut every_width,
+            &mut widths,
+            &mut complaints,
+        );
         bands.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
         ranked.record(&result, &labels, DEFAULT_MATCH_THRESHOLD, |finding| {
             finding.score
@@ -442,6 +451,8 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
     // Similarity is the second, and it is the more tempting of the two because
     // the numbers are already there.
     println!("{axes}\n");
+    print!("{widths}");
+    println!("{every_width}\n");
     print!("{bands}");
     if whole {
         compare_bands(&bands, &mut complaints);
@@ -456,6 +467,131 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
         );
     }
     assert!(complaints.is_empty(), "\n{complaints}");
+}
+
+/// What the "written once per width" rule reaches in each corpus, as last
+/// measured. A corpus it reaches nothing in is absent.
+///
+/// The rule is a candidate, not something the detector acts on, and this is
+/// what stands between it and being one. Two facts have to hold before a rule
+/// that sets duplication aside is worth having, and neither is a precision
+/// figure: it must reach no finding somebody confirmed, and it must reach
+/// findings in a project whose examples it was not read from. The first is
+/// asserted for every corpus on every run. The second is why this is a list
+/// rather than a total — the rule was read from these two, in two languages by
+/// two authors, and each reaches five the other did not supply.
+const WIDTH_FAMILY: &[(&str, usize)] = &[("lz4", 5), ("serde-json", 5)];
+
+/// The row for a corpus whose sources are not on this machine. Dashes, not
+/// zeroes: nothing was measured, which is not the same as measuring nothing.
+fn unscored_row(name: &str, table: &mut String) {
+    writeln!(
+        table,
+        "{name:<16} {:>9} {:>12} {:>10} {:>8} {:>9} {:>10}",
+        "-", "-", "-", "-", "-", "-"
+    )
+    .expect("writing to a string cannot fail");
+}
+
+/// Score one corpus against the width-family rule: add it to the total, put it
+/// in the printed list if it reached anything, and complain if it should not
+/// have.
+///
+/// Kept per corpus and not only in total. A rule read off the substitutions is
+/// a rule read off the projects it was written from, and the only thing that
+/// says otherwise is it reaching findings in a project that supplied none of
+/// the examples.
+fn width_family(
+    name: &'static str,
+    snapshot: &Path,
+    result: &DetectionResult,
+    labels: &LabelSet,
+    every: &mut WidthFamily,
+    listing: &mut String,
+    complaints: &mut String,
+) {
+    let mut reached = WidthFamily::default();
+    reached.record(result, labels, DEFAULT_MATCH_THRESHOLD, |finding| {
+        witness_for(snapshot, finding)
+    });
+    if reached.refuted > 0 || reached.confirmed > 0 {
+        writeln!(
+            listing,
+            "{name:<16} {:>3} refuted, {:>3} confirmed",
+            reached.refuted, reached.confirmed,
+        )
+        .expect("writing to a string cannot fail");
+    }
+    compare_width_family(name, &reached, complaints);
+    every.refuted += reached.refuted;
+    every.confirmed += reached.confirmed;
+    every.untouched += reached.untouched;
+    every.unalignable += reached.unalignable;
+}
+
+/// Complain when the rule reaches a real clone, or reaches a different number
+/// of lookalikes than it did.
+fn compare_width_family(name: &str, reached: &WidthFamily, complaints: &mut String) {
+    // A confirmed finding inside the rule is not a number to write down. It is
+    // the rule being wrong about a clone somebody read and kept.
+    if reached.confirmed > 0 {
+        writeln!(
+            complaints,
+            "{name}: the width-family rule reaches {} finding(s) a label confirmed",
+            reached.confirmed,
+        )
+        .expect("writing to a string cannot fail");
+    }
+    let recorded = WIDTH_FAMILY
+        .iter()
+        .find(|&&(corpus, _)| corpus == name)
+        .map_or(0, |&(_, count)| count);
+    if reached.refuted != recorded {
+        writeln!(
+            complaints,
+            "{name}: the width-family rule reaches {} refuted finding(s), recorded as {recorded}",
+            reached.refuted,
+        )
+        .expect("writing to a string cannot fail");
+    }
+}
+
+/// The substitutions between a finding's first two occurrences, read from the
+/// sources it was found in.
+///
+/// The report does not carry them — normalization erases the names before
+/// anything writes a report — so measuring what a rule over them would reach
+/// means going back to the code. Positional alignment gives up on occurrences
+/// of different length, which is what the `None` says.
+fn witness_for(snapshot: &Path, finding: &Finding) -> Option<Witness> {
+    let [left, right, ..] = finding.fragments.as_slice() else {
+        return None;
+    };
+    substitution::witness(&tokens_of(snapshot, left)?, &tokens_of(snapshot, right)?)
+}
+
+/// The tokens of one fragment, lexed the way the scan lexed them.
+///
+/// A bare `.h` is read as C++, which lexes C too. A scan settles the question
+/// from the rest of the tree; here the answer only has to produce the same
+/// lexemes, and for these files either grammar does.
+fn tokens_of(snapshot: &Path, fragment: &Fragment) -> Option<Vec<Token>> {
+    let path = snapshot.join(&fragment.file);
+    let source = std::fs::read_to_string(&path).ok()?;
+    let lexed = match path.extension().and_then(std::ffi::OsStr::to_str)? {
+        "rs" => codehelion_frontend_rust::RustFrontend.lex(&source),
+        "c" => codehelion_frontend_c::CFrontend.lex(&source),
+        _ => codehelion_frontend_cpp::CppFrontend.lex(&source),
+    };
+    Some(
+        lexed
+            .tokens
+            .into_iter()
+            .filter(|token| {
+                (fragment.start_line..=fragment.end_line).contains(&token.span.start_line)
+            })
+            .collect(),
+    )
 }
 
 /// One line of the corpus table: the two precisions and the counts they are
