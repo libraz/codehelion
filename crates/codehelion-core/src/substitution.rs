@@ -108,6 +108,22 @@ impl Witness {
             })
     }
 
+    /// Whether these two occurrences read as one routine written once per
+    /// width.
+    ///
+    /// The two questions above, asked together, which is the only way either is
+    /// worth asking. Kept here rather than at each call site so the rule the
+    /// engine acts on and the rule the corpus is measured against cannot drift
+    /// apart.
+    ///
+    /// Nothing is asked about [`Self::edits`]: a routine written for the wider
+    /// type does work the narrower one has no need of, and bounding that would
+    /// mean choosing a number no measurement over real code has supported.
+    #[must_use]
+    pub fn written_once_per_width(&self) -> bool {
+        self.one_width_apart().is_some() && !self.touches_a_literal()
+    }
+
     /// Whether any change replaced a literal.
     ///
     /// A changed constant is a changed answer. Two bodies alike but for the

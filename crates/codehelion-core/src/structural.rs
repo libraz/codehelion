@@ -49,6 +49,7 @@ use crate::near_match::{self, NearMatchConfig, NearMatchStats};
 use crate::stable_id::{
     self, CloneGroupFingerprint, ContentNorm, FileContext, FragmentFingerprint, UnitFingerprint,
 };
+use crate::substitution;
 use crate::test_code;
 use crate::verify::{self, SimilarityBreakdown, UnitView, VerifyConfig};
 
@@ -201,6 +202,13 @@ pub struct GroupDetail {
     /// the suite is duplication between test and tested code, which is the
     /// interesting case and must not be ranked with the suite.
     pub test_code: bool,
+    /// Whether the group reads as one routine written once per integer width.
+    ///
+    /// A [`Boilerplate`] category is a judgement about one body, aggregated to
+    /// the group only when every member agrees. This is not: it is a statement
+    /// about how two bodies differ, which no member can carry on its own, so it
+    /// sits beside the category rather than inside it.
+    pub width_family: bool,
 }
 
 /// One occurrence of a duplicated statement run, resolved against the source
@@ -982,7 +990,45 @@ fn group_detail(
         member_breakdowns,
         boilerplate: unanimous_boilerplate(group, units),
         test_code: group.members.iter().all(|&member| units[member].test_code),
+        width_family: written_once_per_width(group, units, files),
     }
+}
+
+/// Whether every member differs from the medoid by one integer width and
+/// nothing else.
+///
+/// Asked of each member against the medoid rather than of one pair, because the
+/// answer decides what the whole group is. A family written for four widths
+/// gives four different swaps against the same medoid and each is one, which is
+/// the point; a group where one member is a real copy and another a width
+/// variant is not a family and must not read as one.
+///
+/// A group whose members are the same text answers no. Nothing was substituted,
+/// so nothing says the two were written per width — that is a plain copy.
+fn written_once_per_width(
+    group: &grouping::StructuralGroup,
+    units: &[Unit],
+    files: &[SyntaxIrFile],
+) -> bool {
+    let medoid = unit_tokens(&units[group.canonical], files);
+    let mut compared = 0usize;
+    for &member in &group.members {
+        if member == group.canonical {
+            continue;
+        }
+        compared += 1;
+        let alike = substitution::witness(medoid, unit_tokens(&units[member], files))
+            .is_some_and(|witness| witness.written_once_per_width());
+        if !alike {
+            return false;
+        }
+    }
+    compared > 0
+}
+
+/// The tokens one unit covers, in its file's stream.
+fn unit_tokens<'a>(unit: &Unit, files: &'a [SyntaxIrFile]) -> &'a [Token] {
+    &files[unit.file].tokens[unit.tokens.0..unit.tokens.1]
 }
 
 /// The boilerplate category every member of a group shares, or `None` when
