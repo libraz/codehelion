@@ -1,0 +1,660 @@
+{
+  "schema_version": 0,
+  "language": "cpp",
+  "files": [
+    "include/spdlog/async_logger-inl.h",
+    "include/spdlog/common.h",
+    "include/spdlog/details/file_helper-inl.h",
+    "include/spdlog/details/mpmc_blocking_q.h",
+    "include/spdlog/details/os-inl.h",
+    "include/spdlog/details/registry-inl.h",
+    "include/spdlog/details/tcp_client-windows.h",
+    "include/spdlog/details/tcp_client.h",
+    "include/spdlog/details/udp_client-windows.h",
+    "include/spdlog/logger-inl.h",
+    "include/spdlog/logger.h",
+    "include/spdlog/pattern_formatter-inl.h",
+    "include/spdlog/sinks/android_sink.h",
+    "include/spdlog/sinks/base_sink-inl.h",
+    "include/spdlog/sinks/basic_file_sink-inl.h",
+    "include/spdlog/sinks/daily_file_sink.h",
+    "include/spdlog/sinks/hourly_file_sink.h",
+    "include/spdlog/sinks/null_sink.h",
+    "include/spdlog/sinks/qt_sinks.h",
+    "include/spdlog/sinks/ringbuffer_sink.h",
+    "include/spdlog/sinks/rotating_file_sink-inl.h",
+    "include/spdlog/sinks/stdout_sinks-inl.h",
+    "include/spdlog/sinks/syslog_sink.h",
+    "include/spdlog/sinks/systemd_sink.h",
+    "include/spdlog/sinks/tcp_sink.h",
+    "include/spdlog/sinks/wincolor_sink-inl.h"
+  ],
+  "clone_pairs": [
+    {
+      "id": "cp-001",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "include/spdlog/pattern_formatter-inl.h",
+          "start_line": 269,
+          "end_line": 278
+        },
+        {
+          "file": "include/spdlog/pattern_formatter-inl.h",
+          "start_line": 500,
+          "end_line": 509
+        }
+      ]
+    },
+    {
+      "id": "cp-002",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/syslog_sink.h",
+          "start_line": 43,
+          "end_line": 56
+        },
+        {
+          "file": "include/spdlog/sinks/systemd_sink.h",
+          "start_line": 50,
+          "end_line": 63
+        }
+      ]
+    },
+    {
+      "id": "cp-003",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/tcp_client-windows.h",
+          "start_line": 35,
+          "end_line": 42
+        },
+        {
+          "file": "include/spdlog/details/udp_client-windows.h",
+          "start_line": 39,
+          "end_line": 46
+        }
+      ]
+    },
+    {
+      "id": "cp-004",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/daily_file_sink.h",
+          "start_line": 127,
+          "end_line": 144
+        },
+        {
+          "file": "include/spdlog/sinks/hourly_file_sink.h",
+          "start_line": 101,
+          "end_line": 118
+        }
+      ]
+    },
+    {
+      "id": "cp-005",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "include/spdlog/logger.h",
+          "start_line": 185,
+          "end_line": 196
+        },
+        {
+          "file": "include/spdlog/logger.h",
+          "start_line": 169,
+          "end_line": 183
+        }
+      ]
+    },
+    {
+      "id": "cp-006",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/tcp_client-windows.h",
+          "start_line": 148,
+          "end_line": 153
+        },
+        {
+          "file": "include/spdlog/details/tcp_client.h",
+          "start_line": 118,
+          "end_line": 123
+        }
+      ]
+    },
+    {
+      "id": "cp-007",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "include/spdlog/logger.h",
+          "start_line": 115,
+          "end_line": 124
+        },
+        {
+          "file": "include/spdlog/logger.h",
+          "start_line": 101,
+          "end_line": 113
+        }
+      ]
+    },
+    {
+      "id": "cp-008",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "include/spdlog/pattern_formatter-inl.h",
+          "start_line": 417,
+          "end_line": 422
+        },
+        {
+          "file": "include/spdlog/pattern_formatter-inl.h",
+          "start_line": 386,
+          "end_line": 391
+        }
+      ]
+    },
+    {
+      "id": "cp-009",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/daily_file_sink.h",
+          "start_line": 166,
+          "end_line": 182
+        },
+        {
+          "file": "include/spdlog/sinks/hourly_file_sink.h",
+          "start_line": 139,
+          "end_line": 155
+        }
+      ]
+    },
+    {
+      "id": "cp-010",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "include/spdlog/async_logger-inl.h",
+          "start_line": 73,
+          "end_line": 78
+        },
+        {
+          "file": "include/spdlog/logger-inl.h",
+          "start_line": 148,
+          "end_line": 153
+        }
+      ]
+    },
+    {
+      "id": "cp-011",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/daily_file_sink.h",
+          "start_line": 146,
+          "end_line": 149
+        },
+        {
+          "file": "include/spdlog/sinks/hourly_file_sink.h",
+          "start_line": 120,
+          "end_line": 123
+        }
+      ]
+    },
+    {
+      "id": "cp-012",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/hourly_file_sink.h",
+          "start_line": 125,
+          "end_line": 135
+        },
+        {
+          "file": "include/spdlog/sinks/daily_file_sink.h",
+          "start_line": 151,
+          "end_line": 162
+        }
+      ]
+    },
+    {
+      "id": "cp-013",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "include/spdlog/logger-inl.h",
+          "start_line": 135,
+          "end_line": 141
+        },
+        {
+          "file": "include/spdlog/async_logger-inl.h",
+          "start_line": 54,
+          "end_line": 66
+        }
+      ]
+    },
+    {
+      "id": "cp-014",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "include/spdlog/pattern_formatter-inl.h",
+          "start_line": 770,
+          "end_line": 779
+        },
+        {
+          "file": "include/spdlog/pattern_formatter-inl.h",
+          "start_line": 692,
+          "end_line": 701
+        }
+      ]
+    },
+    {
+      "id": "cp-015",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/ringbuffer_sink.h",
+          "start_line": 30,
+          "end_line": 40
+        },
+        {
+          "file": "include/spdlog/sinks/ringbuffer_sink.h",
+          "start_line": 42,
+          "end_line": 54
+        }
+      ]
+    },
+    {
+      "id": "cp-016",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "include/spdlog/pattern_formatter-inl.h",
+          "start_line": 177,
+          "end_line": 181
+        },
+        {
+          "file": "include/spdlog/pattern_formatter-inl.h",
+          "start_line": 160,
+          "end_line": 164
+        }
+      ]
+    },
+    {
+      "id": "cp-017",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/udp_client-windows.h",
+          "start_line": 31,
+          "end_line": 37
+        },
+        {
+          "file": "include/spdlog/details/tcp_client-windows.h",
+          "start_line": 27,
+          "end_line": 33
+        }
+      ]
+    },
+    {
+      "id": "cp-018",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/registry-inl.h",
+          "start_line": 149,
+          "end_line": 155
+        },
+        {
+          "file": "include/spdlog/details/registry-inl.h",
+          "start_line": 157,
+          "end_line": 163
+        }
+      ]
+    },
+    {
+      "id": "cp-019",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/tcp_client-windows.h",
+          "start_line": 142,
+          "end_line": 145
+        },
+        {
+          "file": "include/spdlog/details/tcp_client.h",
+          "start_line": 112,
+          "end_line": 115
+        }
+      ]
+    },
+    {
+      "id": "cp-020",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/registry-inl.h",
+          "start_line": 132,
+          "end_line": 139
+        },
+        {
+          "file": "include/spdlog/details/registry-inl.h",
+          "start_line": 141,
+          "end_line": 147
+        }
+      ]
+    },
+    {
+      "id": "cp-021",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/registry-inl.h",
+          "start_line": 173,
+          "end_line": 179
+        },
+        {
+          "file": "include/spdlog/details/registry-inl.h",
+          "start_line": 181,
+          "end_line": 186
+        }
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "id": "nc-001",
+      "reason": "dispatch-table-entry",
+      "fragments": [
+        {
+          "file": "include/spdlog/pattern_formatter-inl.h",
+          "start_line": 109,
+          "end_line": 112
+        },
+        {
+          "file": "include/spdlog/pattern_formatter-inl.h",
+          "start_line": 602,
+          "end_line": 605
+        }
+      ]
+    },
+    {
+      "id": "nc-002",
+      "reason": "validated-setter",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/rotating_file_sink-inl.h",
+          "start_line": 93,
+          "end_line": 99
+        },
+        {
+          "file": "include/spdlog/sinks/rotating_file_sink-inl.h",
+          "start_line": 78,
+          "end_line": 84
+        }
+      ]
+    },
+    {
+      "id": "nc-003",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/os-inl.h",
+          "start_line": 87,
+          "end_line": 96
+        },
+        {
+          "file": "include/spdlog/details/os-inl.h",
+          "start_line": 103,
+          "end_line": 112
+        }
+      ]
+    },
+    {
+      "id": "nc-004",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/null_sink.h",
+          "start_line": 28,
+          "end_line": 32
+        },
+        {
+          "file": "include/spdlog/sinks/null_sink.h",
+          "start_line": 35,
+          "end_line": 39
+        }
+      ]
+    },
+    {
+      "id": "nc-005",
+      "reason": "mirrored-operation",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/mpmc_blocking_q.h",
+          "start_line": 31,
+          "end_line": 38
+        },
+        {
+          "file": "include/spdlog/details/mpmc_blocking_q.h",
+          "start_line": 82,
+          "end_line": 90
+        }
+      ]
+    },
+    {
+      "id": "nc-006",
+      "reason": "mirrored-operation",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/mpmc_blocking_q.h",
+          "start_line": 97,
+          "end_line": 102
+        },
+        {
+          "file": "include/spdlog/details/mpmc_blocking_q.h",
+          "start_line": 140,
+          "end_line": 146
+        }
+      ]
+    },
+    {
+      "id": "nc-007",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "include/spdlog/async_logger-inl.h",
+          "start_line": 80,
+          "end_line": 84
+        },
+        {
+          "file": "include/spdlog/logger-inl.h",
+          "start_line": 117,
+          "end_line": 121
+        }
+      ]
+    },
+    {
+      "id": "nc-008",
+      "reason": "getter-boilerplate",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/wincolor_sink-inl.h",
+          "start_line": 89,
+          "end_line": 93
+        },
+        {
+          "file": "include/spdlog/sinks/wincolor_sink-inl.h",
+          "start_line": 44,
+          "end_line": 48
+        }
+      ]
+    },
+    {
+      "id": "nc-009",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/android_sink.h",
+          "start_line": 77,
+          "end_line": 80
+        },
+        {
+          "file": "include/spdlog/sinks/android_sink.h",
+          "start_line": 83,
+          "end_line": 86
+        }
+      ]
+    },
+    {
+      "id": "nc-010",
+      "reason": "getter-boilerplate",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/stdout_sinks-inl.h",
+          "start_line": 89,
+          "end_line": 93
+        },
+        {
+          "file": "include/spdlog/sinks/stdout_sinks-inl.h",
+          "start_line": 83,
+          "end_line": 86
+        }
+      ]
+    },
+    {
+      "id": "nc-011",
+      "reason": "guarded-forwarding",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/qt_sinks.h",
+          "start_line": 32,
+          "end_line": 38
+        },
+        {
+          "file": "include/spdlog/sinks/tcp_sink.h",
+          "start_line": 61,
+          "end_line": 66
+        }
+      ]
+    },
+    {
+      "id": "nc-012",
+      "reason": "guarded-forwarding",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/file_helper-inl.h",
+          "start_line": 77,
+          "end_line": 81
+        },
+        {
+          "file": "include/spdlog/details/file_helper-inl.h",
+          "start_line": 71,
+          "end_line": 75
+        }
+      ]
+    },
+    {
+      "id": "nc-013",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/os-inl.h",
+          "start_line": 396,
+          "end_line": 402
+        },
+        {
+          "file": "include/spdlog/details/os-inl.h",
+          "start_line": 355,
+          "end_line": 361
+        }
+      ]
+    },
+    {
+      "id": "nc-014",
+      "reason": "getter-boilerplate",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/base_sink-inl.h",
+          "start_line": 56,
+          "end_line": 59
+        },
+        {
+          "file": "include/spdlog/logger-inl.h",
+          "start_line": 112,
+          "end_line": 114
+        }
+      ]
+    },
+    {
+      "id": "nc-015",
+      "reason": "member-call-run",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/registry-inl.h",
+          "start_line": 197,
+          "end_line": 201
+        },
+        {
+          "file": "include/spdlog/sinks/basic_file_sink-inl.h",
+          "start_line": 36,
+          "end_line": 40
+        }
+      ]
+    },
+    {
+      "id": "nc-016",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "include/spdlog/common.h",
+          "start_line": 345,
+          "end_line": 348
+        },
+        {
+          "file": "include/spdlog/common.h",
+          "start_line": 356,
+          "end_line": 359
+        }
+      ]
+    },
+    {
+      "id": "nc-017",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/os-inl.h",
+          "start_line": 98,
+          "end_line": 101
+        },
+        {
+          "file": "include/spdlog/details/os-inl.h",
+          "start_line": 524,
+          "end_line": 527
+        }
+      ]
+    },
+    {
+      "id": "nc-018",
+      "reason": "getter-boilerplate",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/registry-inl.h",
+          "start_line": 118,
+          "end_line": 121
+        },
+        {
+          "file": "include/spdlog/details/registry-inl.h",
+          "start_line": 241,
+          "end_line": 244
+        }
+      ]
+    }
+  ]
+}

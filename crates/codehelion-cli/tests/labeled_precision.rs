@@ -93,6 +93,11 @@ const CORPORA: &[Expected] = &[
         confirmed: 44,
         refuted: 30,
     },
+    Expected {
+        name: "spdlog",
+        confirmed: 21,
+        refuted: 18,
+    },
 ];
 
 /// Cut-offs the ranking is pinned at, with the share of the top `k` that has

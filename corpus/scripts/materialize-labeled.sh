@@ -26,9 +26,12 @@ read_key() {
 }
 
 read_paths() {
-  # Values of the `paths = ["a", "b"]` array in a snapshot.toml.
-  sed -n 's/^paths[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "$1" |
-    tr ',' '\n' | tr -d ' "' | grep -v '^$'
+  # Values of the `paths = ["a", "b"]` array in a snapshot.toml. The array may
+  # span lines: a case that names its files one by one is more readable that
+  # way, and a git pathspec wildcard is not a substitute because it crosses
+  # directory boundaries.
+  sed -n '/^paths[[:space:]]*=[[:space:]]*\[/,/\]/p' "$1" |
+    tr ',' '\n' | sed -n 's/.*"\([^"]*\)".*/\1/p'
 }
 
 fetch_origin() {

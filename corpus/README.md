@@ -134,6 +134,10 @@ be counted rather than merely described. The ones in use:
 | `unrolled-repetition` | adjacent stretches of one hand-unrolled run, alike because the run repeats one operation |
 | `exhaustive-match-table` | two matches that enumerate a type's cases, alike in having one arm per case rather than in what the arms do |
 | `nested-inside-copy` | a unit nested inside one member of a real group, related to the other member because that member contains a copy of it |
+| `dispatch-table-entry` | one small unit per case in a hand-written dispatch table, alike because each is the shortest spelling its case has |
+| `validated-setter` | a lock, a validity guard and one field assignment, differing in what is checked and what is set |
+| `mirrored-operation` | a pair of dual operations — push against pop, enqueue against dequeue — alike because each is the other read backwards |
+| `member-call-run` | a short run of calls on the object's own members, alike in shape while the calls have nothing to do with one another |
 
 Extend the table when a case needs a class it does not have; do not reach for
 the nearest existing word.
