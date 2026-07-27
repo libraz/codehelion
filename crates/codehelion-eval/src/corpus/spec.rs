@@ -114,7 +114,8 @@ pub struct VariantSpec {
 ///   `literals` (whole-literal substitution). Line structure is preserved, so
 ///   ranges map line-for-line.
 /// - **type-3** — additionally statement-level [`EditOp::InsertAfter`],
-///   [`EditOp::InsertBefore`] and [`EditOp::Delete`], plus fragment
+///   [`EditOp::InsertBefore`], [`EditOp::Delete`] and [`EditOp::Replace`],
+///   plus fragment
 ///   [`transplants`](Self::transplants), with an optional
 ///   [`target_change_rate`](Self::target_change_rate) that the generator
 ///   compares against the achieved rate.
@@ -213,6 +214,20 @@ pub enum EditOp {
     Delete {
         /// Trimmed text of the line to delete.
         anchor: String,
+    },
+    /// Replace the anchor line with the given lines.
+    ///
+    /// Not the same edit as a delete beside an insert, and the difference is
+    /// what the alignment sees. Deleting one statement and inserting another
+    /// elsewhere leaves two gaps that an alignment can close separately;
+    /// replacing one in place leaves the sequence the same length with a
+    /// different statement at that position, which is the commonest real
+    /// Type-3 edit and the one the other two cannot produce.
+    Replace {
+        /// Trimmed text of the line to replace.
+        anchor: String,
+        /// Lines to put in its place, written exactly as they should appear.
+        lines: Vec<String>,
     },
 }
 

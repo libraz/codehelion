@@ -72,6 +72,11 @@ const CORPORA: &[Expected] = &[
         shortfall: "",
     },
     Expected {
+        name: "rust-replaced",
+        recall: 1.0,
+        shortfall: "",
+    },
+    Expected {
         name: "rust-negative",
         recall: 1.0,
         shortfall: "",

@@ -338,7 +338,10 @@ fn validate_item(
     let has_statement_edit = item_spec.edits.iter().any(|edit| {
         matches!(
             edit,
-            EditOp::InsertAfter { .. } | EditOp::InsertBefore { .. } | EditOp::Delete { .. }
+            EditOp::InsertAfter { .. }
+                | EditOp::InsertBefore { .. }
+                | EditOp::Delete { .. }
+                | EditOp::Replace { .. }
         )
     });
     if effective == CloneType::Type1 && has_substitution {
@@ -348,7 +351,7 @@ fn validate_item(
     }
     if effective != CloneType::Type3 {
         if has_statement_edit {
-            return disallowed("statement insertion/deletion requires type-3");
+            return disallowed("statement insertion, deletion or replacement requires type-3");
         }
         if !item_spec.transplants.is_empty() {
             return disallowed("transplanting a fragment inserts statements and requires type-3");
@@ -619,6 +622,16 @@ fn apply_edit(
             let index = find_anchor(lines, anchor, variant, item)?;
             let removed = lines.remove(index);
             Ok(u32::from(is_statement(removed.text.trim())))
+        }
+        EditOp::Replace { anchor, lines: new } => {
+            let index = find_anchor(lines, anchor, variant, item)?;
+            let removed = lines.remove(index);
+            // The statement that went and the statements that arrived both
+            // count. A replacement is one edit to write and two changes to
+            // the sequence, and a rate that counted it once would understate
+            // how far the variant had moved.
+            Ok(u32::from(is_statement(removed.text.trim()))
+                .saturating_add(insert_lines(lines, index, new)))
         }
     }
 }
@@ -1101,6 +1114,54 @@ fn twice(x: i32) -> i32 {
         let pair = &corpus.labels.clone_pairs[0];
         assert_eq!(pair.fragments[1].start_line, 4);
         assert_eq!(pair.fragments[1].end_line, 6);
+    }
+
+    #[test]
+    fn replace_leaves_the_range_alone_and_counts_both_sides() {
+        // The edit a delete beside an insert cannot express: the sequence
+        // keeps its length and one position holds something else. Both the
+        // statement that went and the one that arrived count towards the
+        // change rate, or a variant with every statement swapped would score
+        // the same as one with half of them removed.
+        let mut spec = base_spec();
+        spec.variants.push(VariantSpec {
+            file: "v3.rs".to_string(),
+            clone_type: CloneType::Type3,
+            header_comment: "Type-3 variant.".to_string(),
+            items: vec![ItemSpec {
+                edits: vec![EditOp::Replace {
+                    anchor: "let y = x * 2;".to_string(),
+                    lines: vec!["    let y = x + x;".to_string()],
+                }],
+                ..item("fn twice")
+            }],
+        });
+        let corpus = generate(&spec, SEED).expect("generates");
+        assert_eq!(corpus.change_rates[0].changed_statements, 2);
+        let pair = &corpus.labels.clone_pairs[0];
+        assert_eq!(pair.fragments[1].start_line, 4);
+        assert_eq!(pair.fragments[1].end_line, 7);
+        assert!(corpus.files["v3.rs"].contains("let y = x + x;"));
+        assert!(!corpus.files["v3.rs"].contains("let y = x * 2;"));
+    }
+
+    #[test]
+    fn a_replacement_needs_the_type_that_allows_statement_edits() {
+        let mut spec = base_spec();
+        spec.variants.push(VariantSpec {
+            file: "v1.rs".to_string(),
+            clone_type: CloneType::Type1,
+            header_comment: "Type-1 variant.".to_string(),
+            items: vec![ItemSpec {
+                edits: vec![EditOp::Replace {
+                    anchor: "let y = x * 2;".to_string(),
+                    lines: vec!["    let y = x + x;".to_string()],
+                }],
+                ..item("fn twice")
+            }],
+        });
+        let error = generate(&spec, SEED).expect_err("a type-1 variant refuses it");
+        assert!(matches!(error, Error::DisallowedEdit { .. }));
     }
 
     #[test]

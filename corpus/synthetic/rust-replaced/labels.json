@@ -1,0 +1,61 @@
+{
+  "schema_version": 0,
+  "language": "rust",
+  "files": [
+    "seed.rs",
+    "replaced_10.rs",
+    "replaced_20.rs",
+    "replaced_40.rs"
+  ],
+  "clone_pairs": [
+    {
+      "id": "cp-001",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 7,
+          "end_line": 29
+        },
+        {
+          "file": "replaced_10.rs",
+          "start_line": 4,
+          "end_line": 26
+        }
+      ]
+    },
+    {
+      "id": "cp-002",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 7,
+          "end_line": 29
+        },
+        {
+          "file": "replaced_20.rs",
+          "start_line": 4,
+          "end_line": 26
+        }
+      ]
+    },
+    {
+      "id": "cp-003",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "seed.rs",
+          "start_line": 7,
+          "end_line": 29
+        },
+        {
+          "file": "replaced_40.rs",
+          "start_line": 4,
+          "end_line": 26
+        }
+      ]
+    }
+  ],
+  "non_clones": []
+}

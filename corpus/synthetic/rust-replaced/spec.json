@@ -1,0 +1,56 @@
+{
+  "schema_version": 0,
+  "language": "rust",
+  "seed": "seed.rs",
+  "variants": [
+    {
+      "file": "replaced_10.rs",
+      "type": "type-3",
+      "header_comment": "Type-3 variant of seed.rs with ~10% of its statements replaced in place.",
+      "items": [
+        {
+          "item": "fn summarise",
+          "labelled": true,
+          "target_change_rate": 0.10,
+          "edits": [
+            { "op": "replace", "anchor": "spread += value * value;", "lines": ["        spread += value + value;"] }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "replaced_20.rs",
+      "type": "type-3",
+      "header_comment": "Type-3 variant of seed.rs with ~20% of its statements replaced in place.",
+      "items": [
+        {
+          "item": "fn summarise",
+          "labelled": true,
+          "target_change_rate": 0.20,
+          "edits": [
+            { "op": "replace", "anchor": "spread += value * value;", "lines": ["        spread += value + value;"] },
+            { "op": "replace", "anchor": "total += spread / 4;", "lines": ["    total = total + spread;"] }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "replaced_40.rs",
+      "type": "type-3",
+      "header_comment": "Type-3 variant of seed.rs with ~40% of its statements replaced in place.",
+      "items": [
+        {
+          "item": "fn summarise",
+          "labelled": true,
+          "target_change_rate": 0.40,
+          "edits": [
+            { "op": "replace", "anchor": "spread += value * value;", "lines": ["        spread += value + value;"] },
+            { "op": "replace", "anchor": "total += spread / 4;", "lines": ["    total = total + spread;"] },
+            { "op": "replace", "anchor": "total += peak;", "lines": ["    total = total - peak;"] },
+            { "op": "replace", "anchor": "total -= width;", "lines": ["    total = total / width;"] }
+          ]
+        }
+      ]
+    }
+  ]
+}

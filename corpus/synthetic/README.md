@@ -24,6 +24,12 @@ mutation spec, the generated variant sources and the generated `labels.json`:
   one that does all of it at once. One axis per variant, so a dimension can be
   read in isolation, and the composites land on both sides of the Type-3
   acceptance threshold.
+- `rust-replaced/` — the same graded idea along the axis the graded case cannot
+  reach: statements replaced *in place* (~10/20/40%), so the sequence keeps its
+  length and one position holds something else. Deleting a statement and
+  inserting another elsewhere leaves two gaps an alignment can close
+  separately; a replacement leaves none, which is the commonest real Type-3
+  edit.
 - `rust-literals/` — per-category Type-2 variants (integer, float, string, char
   literal changed one at a time) for literal-normalization measurement.
 - `rust-partial/` — donor fragments transplanted into unrelated host functions
@@ -42,7 +48,9 @@ Within a case:
 
 - `spec.json` declares, per variant, the clone type and the edits
   (comment/whitespace for Type-1, identifier/literal substitution for Type-2,
-  statement insert/delete with a target change rate for Type-3). A per-item
+  statement insert/delete/replace with a target change rate for Type-3; a
+  replacement counts twice, once for the statement that went and once for the
+  one that arrived). A per-item
   `type` override marks an item a variant leaves untouched (an unmutated item is
   a Type-1 clone of the seed). An item may also declare `transplants`, each
   copying a donor item's fragment (anchored `from`..`to`) into the item after an
