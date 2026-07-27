@@ -189,6 +189,19 @@ pub struct Suppression {
     /// there are groups. Ranked down by default: reported, but below the
     /// groups, which say more per finding.
     pub split_pairs: CategoryAction,
+    /// What to do with a group whose members differ by one integer width and
+    /// nothing else.
+    ///
+    /// A typed language makes an author write the same routine once per width,
+    /// and what comes out is duplication nobody can remove without a way to
+    /// write the family once. Hidden by default: across every labelled project
+    /// the rule has been measured against it has reached lookalikes only, never
+    /// a clone anybody confirmed, in two languages by different authors.
+    ///
+    /// Raise it to `report` on a codebase that does have such a way — a macro,
+    /// a generic, a template — because there collapsing the family is exactly
+    /// the change worth making.
+    pub width_family: CategoryAction,
 }
 
 impl Default for Suppression {
@@ -205,6 +218,7 @@ impl Default for Suppression {
             boilerplate: BoilerplatePolicy::default(),
             test_code: CategoryAction::RankDown,
             split_pairs: CategoryAction::RankDown,
+            width_family: CategoryAction::Hide,
         }
     }
 }
@@ -645,6 +659,18 @@ mod tests {
         assert_eq!(config.suppression.test_code, CategoryAction::Hide);
         // Setting one policy leaves the other alone.
         assert_eq!(config.suppression.boilerplate, BoilerplatePolicy::default());
+    }
+
+    #[test]
+    fn a_width_family_is_hidden_by_default_and_can_be_reported() {
+        // Nobody can collapse a family the language made them write, so the
+        // default withholds it. A project with a macro or a generic to hand
+        // can ask for it back, which is the case the setting exists for.
+        assert_eq!(Suppression::default().width_family, CategoryAction::Hide);
+
+        let config = Config::from_toml("[suppression]\nwidth-family = \"report\"").unwrap();
+        assert_eq!(config.suppression.width_family, CategoryAction::Report);
+        assert_eq!(config.suppression.test_code, CategoryAction::RankDown);
     }
 
     #[test]

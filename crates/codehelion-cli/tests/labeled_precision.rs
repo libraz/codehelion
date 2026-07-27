@@ -120,16 +120,16 @@ const CORPORA: &[Expected] = &[
     Expected {
         name: "lz4",
         confirmed: 17,
-        refuted: 21,
+        refuted: 17,
         forward_confirmed: 17,
-        forward_refuted: 20,
+        forward_refuted: 16,
     },
     Expected {
         name: "serde-json",
         confirmed: 44,
-        refuted: 29,
+        refuted: 22,
         forward_confirmed: 39,
-        forward_refuted: 29,
+        forward_refuted: 22,
     },
     Expected {
         name: "spdlog",
@@ -175,14 +175,14 @@ const ORDERINGS: &[Ordering] = &[
     Ordering {
         name: "priority",
         at_10: 1.0,
-        at_50: 0.92,
-        map: 0.8994,
+        at_50: 0.96,
+        map: 0.9333,
     },
     Ordering {
         name: "size",
         at_10: 0.9,
         at_50: 0.94,
-        map: 0.8318,
+        map: 0.8556,
     },
 ];
 
@@ -193,7 +193,7 @@ const ORDERINGS: &[Ordering] = &[
 /// one silently redistributes every finding here. What the numbers say about
 /// the bands themselves is argued from the table, not from this assertion.
 const BANDS: &[(&str, usize, usize)] = &[
-    ("high", 64, 71),
+    ("high", 64, 60),
     ("medium", 15, 3),
     ("low", 14, 5),
     ("(unscored)", 42, 6),
@@ -489,7 +489,7 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
 /// threshold, and no threshold over this corpus has ever separated the two
 /// populations. This says how far apart the rule has actually been seen to
 /// reach, so reaching further is a change somebody reads.
-const WIDTH_FAMILY: &[(&str, usize, usize)] = &[("lz4", 6, 57), ("serde-json", 8, 5)];
+const WIDTH_FAMILY: &[(&str, usize, usize)] = &[("lz4", 5, 57), ("serde-json", 7, 5)];
 
 /// The row for a corpus whose sources are not on this machine. Dashes, not
 /// zeroes: nothing was measured, which is not the same as measuring nothing.

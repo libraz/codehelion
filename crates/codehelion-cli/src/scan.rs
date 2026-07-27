@@ -473,9 +473,12 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
             // The Fast engine groups on identical content; it scores no
             // similarity dimensions to report, classifies no shapes and reads no
             // test marker: all three need Syntax IR, which this mode never builds.
+            // Members of identical content differ in nothing, so no substitution
+            // could say they were written per width either.
             similarity: None,
             boilerplate: None,
             test_code: false,
+            width_family: false,
             suppressed,
             split_pair: false,
             members: group
@@ -1189,6 +1192,7 @@ fn snapshot_rows(
             entropy_bits: group.entropy_bits,
             suppress_reason: group.suppressed.map(|reason| reason.name().to_string()),
             boilerplate: None,
+            width_family: false,
             suppressed_by: *suppressed_by,
             priority: priority_row(&ranked[index].priority),
             // Fast mode measures no similarity breakdown and classifies no

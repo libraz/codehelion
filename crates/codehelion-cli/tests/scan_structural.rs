@@ -461,6 +461,91 @@ const DUMP_B: &str = "pub fn dump_limits(limits: &Limits) {
 }
 ";
 
+/// Two folds of the same shape, one per integer width — what a language
+/// without a way to write the family once forces an author to type twice.
+/// Every name that differs does so by the width, and no constant moves.
+const FOLD_32: &str = "pub fn fold_u32(bytes: &[u8]) -> u32 {
+    let mut acc: u32 = 0;
+    for byte in bytes {
+        acc = acc.rotate_left(5);
+        acc ^= u32::from(*byte);
+        acc = acc.wrapping_mul(31);
+    }
+    acc
+}
+";
+
+const FOLD_64: &str = "pub fn fold_u64(bytes: &[u8]) -> u64 {
+    let mut acc: u64 = 0;
+    for byte in bytes {
+        acc = acc.rotate_left(5);
+        acc ^= u64::from(*byte);
+        acc = acc.wrapping_mul(31);
+    }
+    acc
+}
+";
+
+#[test]
+fn a_family_written_once_per_width_is_named_and_withheld() {
+    let dir = fixture();
+    std::fs::write(dir.path().join("src/fold32.rs"), FOLD_32).unwrap();
+    std::fs::write(dir.path().join("src/fold64.rs"), FOLD_64).unwrap();
+    let value = scan_json(dir.path());
+    let groups = value["groups"].as_array().unwrap();
+
+    let family = groups
+        .iter()
+        .find(|group| group["width_family"] == serde_json::json!(true))
+        .expect("the two folds are one family");
+    // Hidden, and the rule that hid it says which judgement it was rather
+    // than leaving the reader to guess from the shape of the members.
+    assert_eq!(family["suppressed"]["pattern"], "width-family");
+    // Nothing else in the fixture reads as one: the claim is about these two
+    // bodies, not about anything that merely looks alike.
+    assert_eq!(
+        groups
+            .iter()
+            .filter(|group| group["width_family"] == serde_json::json!(true))
+            .count(),
+        1
+    );
+
+    let store = open_store(dir.path());
+    let run = store.latest_run().unwrap().expect("a recorded run");
+    let stored = store.run_groups(run.id).unwrap();
+    assert!(
+        stored.iter().any(|group| group.width_family),
+        "what the group is was recorded, not only what the report did with it"
+    );
+}
+
+#[test]
+fn one_member_that_is_a_plain_copy_stops_the_group_being_a_family() {
+    let dir = fixture();
+    std::fs::write(dir.path().join("src/fold32.rs"), FOLD_32).unwrap();
+    std::fs::write(dir.path().join("src/fold64.rs"), FOLD_64).unwrap();
+    // The same routine again under a name that has nothing to do with a width.
+    // Two of the three members are still a width apart; the group is not, and
+    // hiding it would hide a copy somebody made by hand.
+    std::fs::write(
+        dir.path().join("src/digest.rs"),
+        FOLD_32.replace("fold_u32", "digest_bytes"),
+    )
+    .unwrap();
+    let value = scan_json(dir.path());
+
+    let family = value["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["width_family"] == serde_json::json!(true));
+    assert!(
+        family.is_none(),
+        "a group holding a hand-made copy is not one routine written per width"
+    );
+}
+
 fn fixture_with_boilerplate() -> tempfile::TempDir {
     let dir = fixture();
     std::fs::write(dir.path().join("src/dump_a.rs"), DUMP_A).unwrap();

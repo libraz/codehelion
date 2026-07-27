@@ -206,6 +206,11 @@ pub struct GroupRow {
     /// A recorded fact about the code, independent of what policy does with
     /// it.
     pub boilerplate: Option<Boilerplate>,
+    /// Whether the members differ from each other by one integer width and
+    /// nothing else. Recorded on the same footing as `boilerplate`, and kept
+    /// apart from it because it describes how the members differ rather than
+    /// what any one of them does.
+    pub width_family: bool,
     /// Index into [`Snapshot::suppressions`] of the rule that suppressed this
     /// group's finding, if one matched.
     pub suppressed_by: Option<usize>,
@@ -729,8 +734,8 @@ fn write_group(
         "INSERT INTO clone_group
              (scan_run_id, group_fingerprint_id, clone_type, member_scope,
               member_count, score, entropy_bits, suppress_reason, boilerplate,
-              test_code, split_pair)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+              test_code, split_pair, width_family)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             run_id,
             group_fp_id,
@@ -743,6 +748,7 @@ fn write_group(
             group.boilerplate.map(Boilerplate::name),
             group.test_code,
             group.split_pair,
+            group.width_family,
         ],
     )?;
     let group_row_id = tx.last_insert_rowid();

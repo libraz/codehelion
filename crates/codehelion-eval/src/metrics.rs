@@ -514,9 +514,10 @@ impl fmt::Display for BandSplit {
 /// Both numbers are here so the first can be checked on every run and the
 /// second by holding a case out.
 ///
-/// A pair whose occurrences cannot be lined up is counted apart. It is not
-/// evidence either way, and folding it into the total would let a change that
-/// breaks alignment read as a rule that stopped firing.
+/// Which findings the rule reaches is read from the result rather than worked
+/// out again here, so what is scored is the rule the detector applies. Only the
+/// gap is measured from the sources, and a finding the gap could not be read
+/// from is counted apart: it is still reached, and its verdict still counts.
 ///
 /// The rule says nothing about how much work one occurrence does that the other
 /// does not: a routine written for the wider type routinely has a step the
@@ -531,7 +532,7 @@ pub struct WidthFamily {
     pub confirmed: usize,
     /// Refuted findings the rule reaches.
     pub refuted: usize,
-    /// Judged findings whose occurrences could not be lined up.
+    /// Findings the rule reached whose gap could not be read here.
     pub unalignable: usize,
     /// Judged findings the rule was asked about and did not reach.
     pub untouched: usize,
@@ -540,11 +541,14 @@ pub struct WidthFamily {
 }
 
 impl WidthFamily {
-    /// Add every judged finding in `results`, asking `witness` for the
-    /// substitutions behind each one.
+    /// Add every judged finding in `results`, asking `witness` how far apart
+    /// the ones the detector reached actually are.
     ///
-    /// The witness comes from the caller because it takes the source the
-    /// finding was read from, which scoring does not otherwise open.
+    /// Which findings the rule reaches is read from the result, so this scores
+    /// the rule the detector applies rather than a second implementation of it.
+    /// The witness is only for the gap, and it comes from the caller because it
+    /// takes the source the finding was read from, which scoring does not
+    /// otherwise open.
     pub fn record(
         &mut self,
         results: &DetectionResult,
@@ -552,25 +556,27 @@ impl WidthFamily {
         threshold: f64,
         mut witness: impl FnMut(&Finding) -> Option<codehelion_core::substitution::Witness>,
     ) {
-        for finding in &results.findings {
+        // Both lists, because acting on the rule moves everything it reaches
+        // out of the first one. A measurement that only read what the report
+        // shows would answer "nothing" the moment the rule was turned on.
+        for finding in results.findings.iter().chain(&results.withheld) {
             let confirmed = match verdict(finding, labels, threshold) {
                 Verdict::Confirmed => true,
                 Verdict::Refuted => false,
                 Verdict::Conflicting | Verdict::Unjudged => continue,
             };
-            let Some(witness) = witness(finding) else {
-                self.unalignable += 1;
-                continue;
-            };
-            if witness.one_width_apart().is_some() && !witness.touches_a_literal() {
-                self.most_edits = self.most_edits.max(witness.edits);
-                if confirmed {
-                    self.confirmed += 1;
-                } else {
-                    self.refuted += 1;
-                }
-            } else {
+            if !finding.width_family {
                 self.untouched += 1;
+                continue;
+            }
+            match witness(finding) {
+                Some(witness) => self.most_edits = self.most_edits.max(witness.edits),
+                None => self.unalignable += 1,
+            }
+            if confirmed {
+                self.confirmed += 1;
+            } else {
+                self.refuted += 1;
             }
         }
     }
@@ -581,7 +587,7 @@ impl fmt::Display for WidthFamily {
         write!(
             f,
             "written once per width: {} refuted reached, {} confirmed reached, \
-             {} not reached, {} could not be lined up, widest gap {} token(s)",
+             {} not reached, {} reached with no gap read, widest gap {} token(s)",
             self.refuted, self.confirmed, self.untouched, self.unalignable, self.most_edits
         )
     }
@@ -897,6 +903,7 @@ mod tests {
             band: None,
             actionable: true,
             axes: Axes::default(),
+            width_family: false,
             fragments,
         }
     }
@@ -928,6 +935,7 @@ mod tests {
                     vec![fragment("x.rs", 200, 210), fragment("y.rs", 200, 210)],
                 ),
             ],
+            withheld: Vec::new(),
         };
         let labels = LabelSet {
             schema_version: 0,
@@ -1125,11 +1133,13 @@ mod tests {
             schema_version: 0,
             language: "rust".to_string(),
             findings: vec![finding("f-a", 1.0, vec![fragment("x.rs", 1, 10)])],
+            withheld: Vec::new(),
         };
         let b = DetectionResult {
             schema_version: 0,
             language: "rust".to_string(),
             findings: vec![finding("f-b", 1.0, vec![fragment("x.rs", 50, 60)])],
+            withheld: Vec::new(),
         };
         let s = stability(&a, &b);
         assert!(!s.identical);
@@ -1147,6 +1157,7 @@ mod tests {
             schema_version: 0,
             language: "rust".to_string(),
             findings: vec![finding("a1", 1.0, k1), finding("a2", 1.0, k2.clone())],
+            withheld: Vec::new(),
         };
         let b = DetectionResult {
             schema_version: 0,
@@ -1162,10 +1173,12 @@ mod tests {
                     band: None,
                     actionable: true,
                     axes: Axes::default(),
+                    width_family: false,
                     fragments: k2,
                 },
                 finding("b3", 1.0, k3),
             ],
+            withheld: Vec::new(),
         };
         let s = stability(&a, &b);
         assert!(!s.identical);
@@ -1178,6 +1191,7 @@ mod tests {
             schema_version: 0,
             language: "rust".to_string(),
             findings: vec![],
+            withheld: Vec::new(),
         };
         let s = stability(&empty, &empty);
         assert!(s.identical);

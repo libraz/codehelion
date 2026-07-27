@@ -491,6 +491,7 @@ mod tests {
             boilerplate: None,
             split_pair: false,
             test_code: false,
+            width_family: false,
             similarity: None,
             suppressed_by: None,
             members: vec![

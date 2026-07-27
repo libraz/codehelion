@@ -150,6 +150,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         region_suppressed: &suppressed.regions,
         boilerplate: &cfg.suppression.boilerplate,
         test_code_action: cfg.suppression.test_code,
+        width_family_action: cfg.suppression.width_family,
         pair_suppressed: &suppressed.pairs,
         split_pairs_action: cfg.suppression.split_pairs,
         literals: literal_norm(cfg.literal_normalization),
@@ -377,6 +378,7 @@ fn evaluate_suppression(
     regions: &ReportableRegions,
 ) -> SuppressionVerdicts {
     let hidden = hidden_boilerplate(&mut rules.rules, &cfg.suppression.boilerplate, analysis);
+    let hidden_width_family = hidden_width_family(&mut rules.rules, cfg, analysis);
     let hidden_test_code = hidden_test_code(&mut rules.rules, cfg, analysis, regions);
     let local_units = local_unit_indices(analysis);
     // Most specific rule first: a clone id names this exact group, a path or
@@ -399,6 +401,7 @@ fn evaluate_suppression(
                         .boilerplate
                         .and_then(|category| hidden.get(&category).copied())
                 })
+                .or_else(|| hidden_width_family.filter(|_| analysis.details[index].width_family))
                 .or_else(|| {
                     rules
                         .rules
@@ -471,6 +474,29 @@ fn hidden_boilerplate(
         hidden.insert(category, index);
     }
     hidden
+}
+
+/// Register the rule hiding groups written once per integer width, when the
+/// policy hides them *and* this run found one, returning the rule index.
+///
+/// Recorded under the same scope as a boilerplate shape. What the two have in
+/// common is the part a reader needs: the tool judged the code's shape rather
+/// than being told about it by a path, a marker or a baseline. That this one
+/// reads the shape off the members' tokens instead of their trees is a detail
+/// of how, and the reason on the row says which judgement it was.
+fn hidden_width_family(
+    rules: &mut suppress::Rules,
+    cfg: &Config,
+    analysis: &StructuralReport,
+) -> Option<usize> {
+    if cfg.suppression.width_family != CategoryAction::Hide {
+        return None;
+    }
+    analysis
+        .details
+        .iter()
+        .any(|detail| detail.width_family)
+        .then(|| rules.add_shape_rule("width-family", "one routine per integer width"))
 }
 
 /// Register the rule hiding test-suite duplication, when the policy hides it
@@ -635,6 +661,8 @@ struct ReportInputs<'a> {
     boilerplate: &'a BoilerplatePolicy,
     /// What the report does with a group living wholly in a test suite.
     test_code_action: CategoryAction,
+    /// What the report does with a group written once per integer width.
+    width_family_action: CategoryAction,
     /// The rule hiding each verified pair no group could hold, parallel to
     /// the analysis's own list of them.
     pair_suppressed: &'a [Option<usize>],
@@ -686,10 +714,16 @@ impl ReportInputs<'_> {
     /// Whether an entry is reported below every group that carries behaviour:
     /// its shape is boilerplate the policy ranks down, or it lives wholly in a
     /// test suite the policy ranks down.
-    fn ranked_down(&self, boilerplate: Option<Boilerplate>, test_code: bool) -> bool {
+    fn ranked_down(
+        &self,
+        boilerplate: Option<Boilerplate>,
+        test_code: bool,
+        width_family: bool,
+    ) -> bool {
         boilerplate
             .is_some_and(|category| self.boilerplate.action(category) == CategoryAction::RankDown)
             || (test_code && self.test_code_action == CategoryAction::RankDown)
+            || (width_family && self.width_family_action == CategoryAction::RankDown)
     }
 
     /// The tokens one occurrence of a duplicated run covers, in its own file.
@@ -735,7 +769,7 @@ fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
         .map(|index| {
             let detail = &inputs.analysis.details[index];
             (
-                inputs.ranked_down(detail.boilerplate, detail.test_code),
+                inputs.ranked_down(detail.boilerplate, detail.test_code, detail.width_family),
                 build_group(inputs, index),
             )
         })
@@ -745,7 +779,7 @@ fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
         // suite's repetition as much as a duplicated test function is.
         .chain((0..inputs.regions.reported.len()).map(|index| {
             let region = build_region(inputs, index);
-            (inputs.ranked_down(None, region.test_code), region)
+            (inputs.ranked_down(None, region.test_code, false), region)
         }))
         // A pair no group could hold says less per finding than a group does
         // — two members rather than a set — and there are more of them than
@@ -754,7 +788,7 @@ fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
         .chain((0..inputs.analysis.unrepresented.len()).map(|index| {
             let pair = build_split_pair(inputs, index);
             let ranked_down = inputs.split_pairs_action == CategoryAction::RankDown
-                || inputs.ranked_down(None, pair.test_code);
+                || inputs.ranked_down(None, pair.test_code, false);
             (ranked_down, pair)
         }))
         .collect();
@@ -997,6 +1031,7 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                 .boilerplate
                 .map(|category| category.name().to_string()),
             test_code: detail.test_code,
+            width_family: detail.width_family,
             suppressed,
             split_pair: false,
             members: group
@@ -1060,6 +1095,9 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             test_code: members
                 .iter()
                 .all(|&member| inputs.analysis.units[member].test_code),
+            // Read off the group's medoid, which a split pair does not have:
+            // it exists because no group could hold both its members.
+            width_family: false,
             suppressed,
             split_pair: true,
             members: members
@@ -1119,6 +1157,8 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             // no such classification.
             boilerplate: None,
             test_code: region_test_code(inputs.analysis, region),
+            // Runs inside two units say nothing about how the units differ.
+            width_family: false,
             suppressed: inputs.region_suppressed[index].map(|rule| inputs.suppression(rule)),
             split_pair: false,
             members: region
@@ -1386,6 +1426,7 @@ fn snapshot_rows(
                 // The structural funnel marks no noise category yet.
                 suppress_reason: None,
                 boilerplate: detail.boilerplate,
+                width_family: detail.width_family,
                 suppressed_by: inputs.group_suppressed[index],
                 priority: recorded_ranking(&ranking, &detail.fingerprint.to_hex())?,
                 similarity: Some(breakdown_row(group, detail)),
@@ -1461,6 +1502,7 @@ fn split_pair_row(
         entropy_bits: engine::content_entropy_bits(inputs.unit_tokens(canonical), inputs.literals),
         suppress_reason: None,
         boilerplate: None,
+        width_family: false,
         suppressed_by: inputs.pair_suppressed[index],
         priority: recorded_ranking(ranking, &pair.fingerprint.to_hex())?,
         // The pair's evidence is the judge's verdict on it, which grouping did
@@ -1521,6 +1563,7 @@ fn region_row(
         entropy_bits: engine::content_entropy_bits(&canonical, inputs.literals),
         suppress_reason: None,
         boilerplate: None,
+        width_family: false,
         suppressed_by: inputs.region_suppressed[index],
         priority: recorded_ranking(ranking, &region.fingerprint.to_hex())?,
         similarity: None,

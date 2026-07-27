@@ -1044,6 +1044,7 @@ pub fn measure_store_insert(
             entropy_bits: 24.0,
             suppress_reason: None,
             boilerplate: None,
+            width_family: false,
             suppressed_by: None,
             priority: PriorityRow {
                 clone_confidence: 0.9,

@@ -108,6 +108,7 @@ fn sample_snapshot<'a>(
             entropy_bits: 4.2,
             suppress_reason: None,
             boilerplate: None,
+            width_family: false,
             suppressed_by: None,
             priority: PriorityRow {
                 clone_confidence: 0.81,

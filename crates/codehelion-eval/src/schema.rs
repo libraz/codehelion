@@ -173,6 +173,14 @@ pub struct Finding {
     /// The similarity measures behind the score, where the source stated any.
     #[serde(default)]
     pub axes: Axes,
+    /// Whether the detector read the finding as one routine written once per
+    /// integer width.
+    ///
+    /// Carried so a scoring run measures the rule the detector actually
+    /// applies. Recomputing it here from the sources would measure a second
+    /// implementation of the same idea, and the two would drift.
+    #[serde(default)]
+    pub width_family: bool,
     /// The fragments this finding relates as clones.
     pub fragments: Vec<Fragment>,
 }
@@ -192,6 +200,16 @@ pub struct DetectionResult {
     pub language: String,
     /// Every clone the detector reported.
     pub findings: Vec<Finding>,
+    /// Every clone the detector found and withheld.
+    ///
+    /// Scoring leaves these out — crediting or blaming a tool for a finding it
+    /// did not show anybody would say nothing about what it shows. But a rule
+    /// that hides a class of finding is a claim about that class, and once the
+    /// rule is on, the findings that would test the claim are exactly the ones
+    /// missing from `findings`. Kept here so the claim stays measurable after
+    /// it is acted on, which is when it matters.
+    #[serde(default)]
+    pub withheld: Vec<Finding>,
 }
 
 impl DetectionResult {

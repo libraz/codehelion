@@ -38,11 +38,11 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14];
 
 /// Version 1: the full entity set.
 const V1: &str = "
@@ -512,6 +512,24 @@ CREATE INDEX idx_group_lineage_edge_parent ON group_lineage_edge (parent_group_f
 /// default, which would attribute a setting to a run that never used it.
 const V13: &str = "
 ALTER TABLE scan_run ADD COLUMN min_clone_tokens INTEGER;
+";
+
+/// Version 14: whether a group's members differ by one integer width and
+/// nothing else.
+///
+/// Stored beside `boilerplate` and for the same reason: what a group is and
+/// what a report does with it are separate decisions, and only the first
+/// belongs in an audit record. A column rather than a `boilerplate` value —
+/// that vocabulary classifies one body, and this is a statement about how two
+/// bodies differ, which no member carries alone.
+///
+/// Rows written before this migration were never asked, and `0` is what a group
+/// that was asked and said no records. The difference does not matter to any
+/// reader: the answer is recomputed on every scan, and no query treats the
+/// column as history.
+const V14: &str = "
+ALTER TABLE clone_group ADD COLUMN width_family INTEGER NOT NULL DEFAULT 0
+    CHECK (width_family IN (0, 1));
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

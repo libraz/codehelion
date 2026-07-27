@@ -109,6 +109,10 @@ struct Group {
     test_code: bool,
     #[serde(default)]
     boilerplate: Option<String>,
+    /// Whether the detector read the group as one routine written once per
+    /// integer width.
+    #[serde(default)]
+    width_family: bool,
     members: Vec<Member>,
 }
 
@@ -198,47 +202,55 @@ pub fn from_report_json(json: &str) -> Result<(DetectionResult, u32), Error> {
         });
     }
 
-    let findings = report
+    // A suppressed group is not something the report puts in front of anyone,
+    // so scoring it would credit or blame the tool for a finding it withheld.
+    // The two lists are read the same way and kept apart.
+    let (withheld, findings) = report
         .groups
         .iter()
-        // A suppressed group is not something the report puts in front of
-        // anyone, so scoring it would credit or blame the tool for a finding
-        // it withheld.
-        .filter(|group| group.suppressed.is_none())
-        .map(|group| Finding {
-            id: group.fingerprint.clone(),
-            clone_type: group.clone_type,
-            // The ranking the tool would show, which is what precision@k is a
-            // statement about. The metrics read it for order alone.
-            score: group.priority.value,
-            size_tokens: group.priority.inputs.largest_member_tokens,
-            band: group
-                .similarity
-                .as_ref()
-                .and_then(|similarity| similarity.confidence_band.clone()),
-            actionable: put_forward(group),
-            axes: group
-                .similarity
-                .as_ref()
-                .map(Similarity::axes)
-                .unwrap_or_default(),
-            fragments: group
-                .members
-                .iter()
-                .map(|member| Fragment {
-                    file: member.file.clone(),
-                    start_line: member.start_line,
-                    end_line: member.end_line,
-                })
-                .collect(),
+        .map(|group| {
+            (
+                group.suppressed.is_some(),
+                Finding {
+                    id: group.fingerprint.clone(),
+                    clone_type: group.clone_type,
+                    // The ranking the tool would show, which is what
+                    // precision@k is a statement about. The metrics read it for
+                    // order alone.
+                    score: group.priority.value,
+                    size_tokens: group.priority.inputs.largest_member_tokens,
+                    band: group
+                        .similarity
+                        .as_ref()
+                        .and_then(|similarity| similarity.confidence_band.clone()),
+                    actionable: put_forward(group),
+                    axes: group
+                        .similarity
+                        .as_ref()
+                        .map(Similarity::axes)
+                        .unwrap_or_default(),
+                    width_family: group.width_family,
+                    fragments: group
+                        .members
+                        .iter()
+                        .map(|member| Fragment {
+                            file: member.file.clone(),
+                            start_line: member.start_line,
+                            end_line: member.end_line,
+                        })
+                        .collect(),
+                },
+            )
         })
-        .collect();
+        .partition::<Vec<_>, _>(|(hidden, _)| *hidden);
+    let strip = |list: Vec<(bool, Finding)>| list.into_iter().map(|(_, f)| f).collect();
 
     Ok((
         DetectionResult {
             schema_version: crate::schema::SCHEMA_VERSION,
             language: language_of(&report.summary.files),
-            findings,
+            findings: strip(findings),
+            withheld: strip(withheld),
         },
         report.summary.lines,
     ))

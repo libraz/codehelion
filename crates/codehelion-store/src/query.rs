@@ -122,6 +122,9 @@ pub struct StoredGroup {
     pub split_pair: bool,
     /// Whether every member is test code.
     pub test_code: bool,
+    /// Whether the members differ from each other by one integer width and
+    /// nothing else.
+    pub width_family: bool,
     /// The similarity breakdown, when the mode measured one (Structural).
     pub similarity: Option<StoredSimilarity>,
     /// The rule that hid the group in its run, when one matched. Absent for a
@@ -650,7 +653,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT g.id, lower(hex(f.hash)), g.clone_type, g.score, g.entropy_bits,
                     g.suppress_reason, g.boilerplate, g.member_scope, g.test_code,
-                    g.split_pair, s.scope, s.pattern
+                    g.split_pair, s.scope, s.pattern, g.width_family
              FROM clone_group g
              JOIN fingerprint f ON f.id = g.group_fingerprint_id
              LEFT JOIN finding fi ON fi.clone_group_id = g.id
@@ -674,6 +677,7 @@ impl Store {
                         boilerplate: row.get(6)?,
                         test_code: row.get(8)?,
                         split_pair: row.get(9)?,
+                        width_family: row.get(12)?,
                         similarity: None,
                         suppressed_by: scope
                             .zip(pattern)

@@ -492,6 +492,13 @@ pub struct Group {
     /// test code: that duplication crosses the boundary, which is the case
     /// worth reading.
     pub test_code: bool,
+    /// Whether the members differ from each other by one integer width and
+    /// nothing else: one routine the type system made the author write once
+    /// per width. Stated separately from `boilerplate` because it is a
+    /// statement about how the members differ rather than about what any one
+    /// of them does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub width_family: bool,
     /// Whether this is a pair reported on its own because no group could hold
     /// both its members.
     ///
@@ -1631,6 +1638,7 @@ pub(super) mod tests {
                 similarity: None,
                 boilerplate: None,
                 test_code: false,
+                width_family: false,
                 suppressed: None,
                 split_pair: false,
                 members: (0..7)
@@ -1665,6 +1673,7 @@ pub(super) mod tests {
                 similarity: None,
                 boilerplate: None,
                 test_code: false,
+                width_family: false,
                 suppressed: Some(Suppression {
                     kind: SuppressionKind::Rule,
                     reason: None,
@@ -1726,6 +1735,7 @@ pub(super) mod tests {
                 }),
                 boilerplate: None,
                 test_code: false,
+                width_family: false,
                 suppressed: None,
                 split_pair: false,
                 members: vec![
@@ -1772,6 +1782,7 @@ pub(super) mod tests {
                 similarity: None,
                 boilerplate: None,
                 test_code: false,
+                width_family: false,
                 suppressed: None,
                 split_pair: false,
                 members: vec![
