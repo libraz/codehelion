@@ -470,17 +470,26 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
 }
 
 /// What the "written once per width" rule reaches in each corpus, as last
-/// measured. A corpus it reaches nothing in is absent.
+/// measured: the refuted findings, and the largest gap in unpaired tokens any
+/// of them spans. A corpus it reaches nothing in is absent.
 ///
 /// The rule is a candidate, not something the detector acts on, and this is
 /// what stands between it and being one. Two facts have to hold before a rule
 /// that sets duplication aside is worth having, and neither is a precision
 /// figure: it must reach no finding somebody confirmed, and it must reach
 /// findings in a project whose examples it was not read from. The first is
-/// asserted for every corpus on every run. The second is why this is a list
-/// rather than a total — the rule was read from these two, in two languages by
-/// two authors, and each reaches five the other did not supply.
-const WIDTH_FAMILY: &[(&str, usize)] = &[("lz4", 5), ("serde-json", 5)];
+/// asserted for every corpus on every run, over every judged finding. The
+/// second is why this is a list rather than a total — the rule was read from
+/// these two, in two languages by two authors, and each reaches findings the
+/// other did not supply.
+///
+/// The second number is there in place of a bound. A routine written for the
+/// wider type does work the narrower one does not, so the rule does not ask the
+/// two occurrences to be the same size; what it would take to ask that is a
+/// threshold, and no threshold over this corpus has ever separated the two
+/// populations. This says how far apart the rule has actually been seen to
+/// reach, so reaching further is a change somebody reads.
+const WIDTH_FAMILY: &[(&str, usize, usize)] = &[("lz4", 6, 57), ("serde-json", 8, 5)];
 
 /// The row for a corpus whose sources are not on this machine. Dashes, not
 /// zeroes: nothing was measured, which is not the same as measuring nothing.
@@ -517,8 +526,8 @@ fn width_family(
     if reached.refuted > 0 || reached.confirmed > 0 {
         writeln!(
             listing,
-            "{name:<16} {:>3} refuted, {:>3} confirmed",
-            reached.refuted, reached.confirmed,
+            "{name:<16} {:>3} refuted, {:>3} confirmed, widest gap {:>3}",
+            reached.refuted, reached.confirmed, reached.most_edits,
         )
         .expect("writing to a string cannot fail");
     }
@@ -527,10 +536,11 @@ fn width_family(
     every.confirmed += reached.confirmed;
     every.untouched += reached.untouched;
     every.unalignable += reached.unalignable;
+    every.most_edits = every.most_edits.max(reached.most_edits);
 }
 
 /// Complain when the rule reaches a real clone, or reaches a different number
-/// of lookalikes than it did.
+/// of lookalikes than it did, or reaches further apart than it has.
 fn compare_width_family(name: &str, reached: &WidthFamily, complaints: &mut String) {
     // A confirmed finding inside the rule is not a number to write down. It is
     // the rule being wrong about a clone somebody read and kept.
@@ -542,15 +552,23 @@ fn compare_width_family(name: &str, reached: &WidthFamily, complaints: &mut Stri
         )
         .expect("writing to a string cannot fail");
     }
-    let recorded = WIDTH_FAMILY
+    let (recorded, gap) = WIDTH_FAMILY
         .iter()
-        .find(|&&(corpus, _)| corpus == name)
-        .map_or(0, |&(_, count)| count);
+        .find(|&&(corpus, _, _)| corpus == name)
+        .map_or((0, 0), |&(_, count, gap)| (count, gap));
     if reached.refuted != recorded {
         writeln!(
             complaints,
             "{name}: the width-family rule reaches {} refuted finding(s), recorded as {recorded}",
             reached.refuted,
+        )
+        .expect("writing to a string cannot fail");
+    }
+    if reached.most_edits != gap {
+        writeln!(
+            complaints,
+            "{name}: the widest gap the width-family rule spans is {} token(s), recorded as {gap}",
+            reached.most_edits,
         )
         .expect("writing to a string cannot fail");
     }
@@ -561,8 +579,8 @@ fn compare_width_family(name: &str, reached: &WidthFamily, complaints: &mut Stri
 ///
 /// The report does not carry them — normalization erases the names before
 /// anything writes a report — so measuring what a rule over them would reach
-/// means going back to the code. Positional alignment gives up on occurrences
-/// of different length, which is what the `None` says.
+/// means going back to the code. A pair too large to align has no witness,
+/// which is what the `None` says.
 fn witness_for(snapshot: &Path, finding: &Finding) -> Option<Witness> {
     let [left, right, ..] = finding.fragments.as_slice() else {
         return None;

@@ -517,6 +517,14 @@ impl fmt::Display for BandSplit {
 /// A pair whose occurrences cannot be lined up is counted apart. It is not
 /// evidence either way, and folding it into the total would let a change that
 /// breaks alignment read as a rule that stopped firing.
+///
+/// The rule says nothing about how much work one occurrence does that the other
+/// does not: a routine written for the wider type routinely has a step the
+/// narrower one has no need of. Bounding that would mean choosing a number, and
+/// three separate attempts to find a number that tells these two populations
+/// apart have come to nothing. [`Self::most_edits`] is what stands in for it —
+/// not a bound but the largest gap the rule has been seen to span, so a rule
+/// that starts reaching further apart says so instead of doing it quietly.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WidthFamily {
     /// Confirmed findings the rule reaches. Every one is a counterexample.
@@ -527,6 +535,8 @@ pub struct WidthFamily {
     pub unalignable: usize,
     /// Judged findings the rule was asked about and did not reach.
     pub untouched: usize,
+    /// The most unpaired tokens any finding the rule reached carried.
+    pub most_edits: usize,
 }
 
 impl WidthFamily {
@@ -553,6 +563,7 @@ impl WidthFamily {
                 continue;
             };
             if witness.one_width_apart().is_some() && !witness.touches_a_literal() {
+                self.most_edits = self.most_edits.max(witness.edits);
                 if confirmed {
                     self.confirmed += 1;
                 } else {
@@ -570,8 +581,8 @@ impl fmt::Display for WidthFamily {
         write!(
             f,
             "written once per width: {} refuted reached, {} confirmed reached, \
-             {} not reached, {} could not be lined up",
-            self.refuted, self.confirmed, self.untouched, self.unalignable
+             {} not reached, {} could not be lined up, widest gap {} token(s)",
+            self.refuted, self.confirmed, self.untouched, self.unalignable, self.most_edits
         )
     }
 }
