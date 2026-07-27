@@ -17,7 +17,7 @@ use std::fmt;
 
 use serde::Deserialize;
 
-use crate::schema::{CloneType, DetectionResult, Finding, Fragment};
+use crate::schema::{Axes, CloneType, DetectionResult, Finding, Fragment};
 
 /// Report schema version this adapter reads.
 ///
@@ -137,6 +137,29 @@ fn put_forward(group: &Group) -> bool {
 struct Similarity {
     #[serde(default)]
     confidence_band: Option<String>,
+    #[serde(default)]
+    lexical: Option<f64>,
+    #[serde(default)]
+    structural: Option<f64>,
+    #[serde(default)]
+    control_flow: Option<f64>,
+    #[serde(default)]
+    api: Option<f64>,
+    #[serde(default)]
+    composite: Option<f64>,
+}
+
+impl Similarity {
+    /// The axes, in the shape scoring reads them.
+    const fn axes(&self) -> Axes {
+        Axes {
+            lexical: self.lexical,
+            structural: self.structural,
+            control_flow: self.control_flow,
+            api: self.api,
+            composite: self.composite,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,6 +217,11 @@ pub fn from_report_json(json: &str) -> Result<(DetectionResult, u32), Error> {
                 .as_ref()
                 .and_then(|similarity| similarity.confidence_band.clone()),
             actionable: put_forward(group),
+            axes: group
+                .similarity
+                .as_ref()
+                .map(Similarity::axes)
+                .unwrap_or_default(),
             fragments: group
                 .members
                 .iter()

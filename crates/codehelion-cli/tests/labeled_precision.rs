@@ -60,7 +60,8 @@ use assert_cmd::Command;
 use codehelion_eval::detected;
 use codehelion_eval::labels::LabelSet;
 use codehelion_eval::metrics::{
-    Adjudication, BandSplit, DEFAULT_MATCH_THRESHOLD, RankedVerdicts, SizeSplit, adjudicate,
+    Adjudication, AxisSplit, BandSplit, DEFAULT_MATCH_THRESHOLD, RankedVerdicts, SizeSplit,
+    adjudicate,
 };
 use codehelion_eval::schema::Finding;
 
@@ -205,6 +206,35 @@ const BANDS: &[(&str, usize, usize)] = &[
 /// printed and re-argued from memory.
 const SIZES: (u32, u32, u32, u32, usize) = (4, 96, 3, 23, 97);
 
+/// What a floor on each similarity axis could remove without hiding a real
+/// clone, as last measured.
+///
+/// A similarity floor is the second thing anyone reaches for when precision is
+/// short, and the answer has had to be worked out by hand from a report three
+/// times: for length, for the confidence band, and for these. Zero means the
+/// lowest confirmed finding on that axis sits at or below every refuted one, so
+/// no floor can cut a lookalike without cutting a real clone first.
+///
+/// Four of the five are zero. The composite is not, and it is the reason to
+/// record these rather than assert a rule about them: nine refuted findings sit
+/// below the lowest confirmed one, in a band three hundredths wide. That is a
+/// gap in this sample, not a separation — held out of the training set,
+/// serde-json contributes both the finding that sets the floor and two more the
+/// floor learned without it would hide, which is the same shape the length
+/// floor turned out to have. Leave-one-case-out is what says so, and it is not
+/// something a pin can run.
+///
+/// A move here is a change to explain. A rise means the populations are pulling
+/// apart on that axis and somebody should re-run leave-one-case-out; a fall
+/// means a real clone has appeared below where they were.
+const FLOORS: &[(&str, usize)] = &[
+    ("lexical", 0),
+    ("structural", 0),
+    ("control flow", 0),
+    ("api", 0),
+    ("composite", 9),
+];
+
 /// Whether two measurements differ once rounded the way they are printed,
 /// which is the width anybody copying a new value back into this file reads.
 fn moved(actual: f64, pinned: f64) -> bool {
@@ -335,6 +365,7 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
         actionable_refuted: 0,
     };
     let mut sizes = SizeSplit::default();
+    let mut axes = AxisSplit::default();
     let mut bands = BandSplit::default();
     // Two orderings of the same verdicts: the one the tool prints, and the one
     // anybody would reach for without it.
@@ -370,6 +401,7 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
 
         let ruled = adjudicate(&result, &labels, DEFAULT_MATCH_THRESHOLD);
         sizes.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
+        axes.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
         bands.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
         ranked.record(&result, &labels, DEFAULT_MATCH_THRESHOLD, |finding| {
             finding.score
@@ -407,10 +439,14 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
     // Length is the first knob anyone reaches for when precision is short, and
     // these two ranges are what says whether it can help.
     println!("{sizes}\n");
+    // Similarity is the second, and it is the more tempting of the two because
+    // the numbers are already there.
+    println!("{axes}\n");
     print!("{bands}");
     if whole {
         compare_bands(&bands, &mut complaints);
         compare_sizes(&sizes, &mut complaints);
+        compare_floors(&axes, &mut complaints);
     } else {
         println!(
             "\n{unmaterialized} of {} labelled corpora have no snapshot and were not scored, \
@@ -521,6 +557,26 @@ fn compare_bands(bands: &BandSplit, complaints: &mut String) {
         if !BANDS.iter().any(|&(recorded, _, _)| recorded == name) {
             writeln!(complaints, "band {name} is not one of the recorded bands")
                 .expect("writing to a string cannot fail");
+        }
+    }
+}
+
+/// Complain when a similarity axis has started to sort the verdicts, or has
+/// stopped being measured.
+fn compare_floors(axes: &AxisSplit, complaints: &mut String) {
+    for &(axis, recorded) in FLOORS {
+        match axes.floor_that_costs_nothing(axis) {
+            Some((_, removed)) if removed == recorded => {}
+            Some((floor, removed)) => writeln!(
+                complaints,
+                "a floor of {floor:.2} on {axis} would now remove {removed} refuted \
+                 finding(s) for free, recorded as {recorded}",
+            )
+            .expect("writing to a string cannot fail"),
+            // An axis nothing carries any more is not an axis that separates
+            // nothing; it is one nobody can ask about.
+            None => writeln!(complaints, "no finding was scored on {axis}")
+                .expect("writing to a string cannot fail"),
         }
     }
 }

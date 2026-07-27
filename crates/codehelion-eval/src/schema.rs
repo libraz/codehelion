@@ -97,6 +97,41 @@ impl CloneType {
     }
 }
 
+/// The similarity measures a detector scored a finding on, where it scored any.
+///
+/// Carried so a scoring run can ask whether a floor on one of them would sort
+/// the verdicts. That question has been put to length, to the confidence band
+/// and to these, and each time it was answered by hand from a report and then
+/// forgotten. An axis a detector does not measure is absent, which is not the
+/// same as measuring zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Axes {
+    /// Agreement of the token sequences after normalization.
+    pub lexical: Option<f64>,
+    /// Agreement of the syntax structure.
+    pub structural: Option<f64>,
+    /// Agreement of the control flow.
+    pub control_flow: Option<f64>,
+    /// Agreement of what the fragments call.
+    pub api: Option<f64>,
+    /// The composed measure the detector judges on.
+    pub composite: Option<f64>,
+}
+
+impl Axes {
+    /// Every axis by name, in the order a report lists them.
+    #[must_use]
+    pub const fn named(&self) -> [(&'static str, Option<f64>); 5] {
+        [
+            ("lexical", self.lexical),
+            ("structural", self.structural),
+            ("control flow", self.control_flow),
+            ("api", self.api),
+            ("composite", self.composite),
+        ]
+    }
+}
+
 /// A single reported clone: a set of fragments the detector considers mutually
 /// cloned, with a confidence score.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -135,6 +170,9 @@ pub struct Finding {
     /// undivided list.
     #[serde(default = "put_forward")]
     pub actionable: bool,
+    /// The similarity measures behind the score, where the source stated any.
+    #[serde(default)]
+    pub axes: Axes,
     /// The fragments this finding relates as clones.
     pub fragments: Vec<Fragment>,
 }

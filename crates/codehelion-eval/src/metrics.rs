@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::labels::LabelSet;
-use crate::schema::{CloneType, DetectionResult, Finding, Fragment};
+use crate::schema::{Axes, CloneType, DetectionResult, Finding, Fragment};
 
 /// Default line-overlap threshold at or above which two fragments are
 /// considered the same code region.
@@ -498,6 +498,115 @@ impl fmt::Display for BandSplit {
     }
 }
 
+/// Where the judged findings sit on each similarity axis, split by verdict.
+///
+/// The sibling of [`SizeSplit`], for the other obvious knob. Length is the
+/// first thing anyone reaches for when precision is short; a similarity floor
+/// is the second, and it is more tempting because the detector already
+/// computes the numbers. The question is the same one — would a floor drop the
+/// lookalikes without dropping real clones — and so is the way to answer it:
+/// look at both populations on one axis and see whether they separate.
+///
+/// [`Self::floor_that_costs_nothing`] is the answer in one number per axis. A
+/// floor above the lowest confirmed finding is a floor that hides real
+/// duplication, so the highest usable one is that finding's value, and what it
+/// removes is what the axis is worth as a filter.
+///
+/// An axis a finding was not scored on is left out of that axis and counted in
+/// no other: a split pair has no similarity, and treating its absence as zero
+/// would put it under every floor.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AxisSplit {
+    /// Per axis name, the values of the confirmed findings, ascending.
+    confirmed: BTreeMap<&'static str, Vec<f64>>,
+    /// The same for the refuted ones.
+    refuted: BTreeMap<&'static str, Vec<f64>>,
+}
+
+impl AxisSplit {
+    /// Add every judged finding in `results` to the split.
+    ///
+    /// Accumulates, so one split can span several corpora.
+    pub fn record(&mut self, results: &DetectionResult, labels: &LabelSet, threshold: f64) {
+        for finding in &results.findings {
+            let side = match verdict(finding, labels, threshold) {
+                Verdict::Confirmed => &mut self.confirmed,
+                Verdict::Refuted => &mut self.refuted,
+                Verdict::Conflicting | Verdict::Unjudged => continue,
+            };
+            for (name, value) in finding.axes.named() {
+                if let Some(value) = value {
+                    side.entry(name).or_default().push(value);
+                }
+            }
+        }
+        for values in self.confirmed.values_mut().chain(self.refuted.values_mut()) {
+            values.sort_by(f64::total_cmp);
+        }
+    }
+
+    /// The highest floor on `axis` that removes no confirmed finding, and how
+    /// many refuted ones it would remove.
+    ///
+    /// `None` where no finding was scored on the axis at all. A count of zero
+    /// says the axis is worthless as a filter: the lowest real clone sits at or
+    /// below every lookalike, so nothing can be cut without cutting it.
+    #[must_use]
+    pub fn floor_that_costs_nothing(&self, axis: &str) -> Option<(f64, usize)> {
+        let &floor = self.confirmed.get(axis)?.first()?;
+        let removed = self
+            .refuted
+            .get(axis)
+            .map_or(0, |values| values.iter().filter(|&&v| v < floor).count());
+        Some((floor, removed))
+    }
+
+    /// The axes anything was scored on, in report order.
+    #[must_use]
+    pub fn axes(&self) -> Vec<&'static str> {
+        Axes::default()
+            .named()
+            .iter()
+            .map(|&(name, _)| name)
+            .filter(|name| self.confirmed.contains_key(name) || self.refuted.contains_key(name))
+            .collect()
+    }
+}
+
+impl fmt::Display for AxisSplit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "{:<14}{:>18}{:>18}{:>8}{:>13}",
+            "axis", "confirmed", "refuted", "floor", "it removes"
+        )?;
+        let span = |values: Option<&Vec<f64>>| match values.map(Vec::as_slice) {
+            Some([first, .., last]) => {
+                format!("{first:.2}-{last:.2} (n={})", values.map_or(0, Vec::len))
+            }
+            Some([only]) => format!("{only:.2} (n=1)"),
+            _ => "none".to_owned(),
+        };
+        for axis in self.axes() {
+            let (floor, removed) = self.floor_that_costs_nothing(axis).map_or_else(
+                || ("-".to_owned(), "-".to_owned()),
+                |(floor, removed)| (format!("{floor:.2}"), removed.to_string()),
+            );
+            writeln!(
+                f,
+                "{axis:<14}{:>18}{:>18}{floor:>8}{removed:>13}",
+                span(self.confirmed.get(axis)),
+                span(self.refuted.get(axis)),
+            )?;
+        }
+        write!(
+            f,
+            "the floor is the lowest confirmed finding; what it removes is what \
+             the axis is worth as a filter"
+        )
+    }
+}
+
 /// How large the judged findings are, measured in lines of their smallest
 /// member and split by verdict.
 ///
@@ -698,6 +807,7 @@ mod tests {
             score,
             band: None,
             actionable: true,
+            axes: Axes::default(),
             fragments,
         }
     }
@@ -962,6 +1072,7 @@ mod tests {
                     score: 1.0,
                     band: None,
                     actionable: true,
+                    axes: Axes::default(),
                     fragments: k2,
                 },
                 finding("b3", 1.0, k3),
