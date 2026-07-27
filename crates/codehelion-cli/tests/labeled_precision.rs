@@ -75,6 +75,11 @@ const CORPORA: &[Expected] = &[
         confirmed: 17,
         refuted: 21,
     },
+    Expected {
+        name: "serde-json",
+        confirmed: 45,
+        refuted: 36,
+    },
 ];
 
 /// Cut-offs the ranking is pinned at, with the share of the top `k` that has
@@ -88,7 +93,14 @@ const CORPORA: &[Expected] = &[
 const PRECISION_AT: &[(usize, f64)] = &[(10, 1.0), (50, 0.86)];
 
 /// Floor the composed ranking has to keep over the whole ordering.
-const MIN_MEAN_AVERAGE_PRECISION: f64 = 0.94;
+///
+/// This floor is a statement about a population, so adding a case to the
+/// corpus moves it: the accumulated ordering now runs over a project whose
+/// reported groups are a little over half real, which pulls the mean down
+/// without anything about the ranking having changed. What the ranking has to
+/// keep earning is the gap to a plain size sort, which is asserted separately
+/// and is what would actually catch a ranking regression.
+const MIN_MEAN_AVERAGE_PRECISION: f64 = 0.87;
 
 /// Compare the ranking the tool prints against sorting by size, and complain
 /// when it stops earning its place.

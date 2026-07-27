@@ -132,6 +132,8 @@ be counted rather than merely described. The ones in use:
 | `declaration-run` | a run of declarations or field assignments carrying no logic |
 | `list-walk-idiom` | a null guard and a linked-list traversal, the idiom rather than shared logic |
 | `unrolled-repetition` | adjacent stretches of one hand-unrolled run, alike because the run repeats one operation |
+| `exhaustive-match-table` | two matches that enumerate a type's cases, alike in having one arm per case rather than in what the arms do |
+| `nested-inside-copy` | a unit nested inside one member of a real group, related to the other member because that member contains a copy of it |
 
 Extend the table when a case needs a class it does not have; do not reach for
 the nearest existing word.

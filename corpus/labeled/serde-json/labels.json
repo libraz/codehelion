@@ -1,0 +1,1288 @@
+{
+  "schema_version": 0,
+  "language": "rust",
+  "files": [
+    "src/de.rs",
+    "src/error.rs",
+    "src/lexical/math.rs",
+    "src/lexical/num.rs",
+    "src/lexical/shift.rs",
+    "src/map.rs",
+    "src/number.rs",
+    "src/raw.rs",
+    "src/read.rs",
+    "src/ser.rs",
+    "src/value/de.rs",
+    "src/value/index.rs",
+    "src/value/mod.rs",
+    "src/value/ser.rs"
+  ],
+  "clone_pairs": [
+    {
+      "id": "cp-001",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/raw.rs",
+          "start_line": 386,
+          "end_line": 412
+        },
+        {
+          "file": "src/raw.rs",
+          "start_line": 356,
+          "end_line": 382
+        }
+      ]
+    },
+    {
+      "id": "cp-002",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 234,
+          "end_line": 265
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 770,
+          "end_line": 801
+        }
+      ]
+    },
+    {
+      "id": "cp-003",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 599,
+          "end_line": 618
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 1109,
+          "end_line": 1128
+        }
+      ]
+    },
+    {
+      "id": "cp-004",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 243,
+          "end_line": 259
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 328,
+          "end_line": 344
+        }
+      ]
+    },
+    {
+      "id": "cp-005",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 350,
+          "end_line": 370
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 879,
+          "end_line": 899
+        }
+      ]
+    },
+    {
+      "id": "cp-006",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 2027,
+          "end_line": 2040
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 1984,
+          "end_line": 1997
+        }
+      ]
+    },
+    {
+      "id": "cp-007",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 589,
+          "end_line": 608
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 751,
+          "end_line": 770
+        }
+      ]
+    },
+    {
+      "id": "cp-008",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 687,
+          "end_line": 695
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 1195,
+          "end_line": 1203
+        }
+      ]
+    },
+    {
+      "id": "cp-009",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 636,
+          "end_line": 644
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 1144,
+          "end_line": 1152
+        }
+      ]
+    },
+    {
+      "id": "cp-010",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/raw.rs",
+          "start_line": 418,
+          "end_line": 445
+        },
+        {
+          "file": "src/number.rs",
+          "start_line": 467,
+          "end_line": 494
+        }
+      ]
+    },
+    {
+      "id": "cp-011",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 1883,
+          "end_line": 1893
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 1841,
+          "end_line": 1851
+        }
+      ]
+    },
+    {
+      "id": "cp-012",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 283,
+          "end_line": 304
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 348,
+          "end_line": 369
+        }
+      ]
+    },
+    {
+      "id": "cp-013",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 834,
+          "end_line": 850
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 779,
+          "end_line": 795
+        }
+      ]
+    },
+    {
+      "id": "cp-014",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 2017,
+          "end_line": 2025
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 1974,
+          "end_line": 1982
+        }
+      ]
+    },
+    {
+      "id": "cp-015",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 382,
+          "end_line": 408
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 320,
+          "end_line": 346
+        }
+      ]
+    },
+    {
+      "id": "cp-016",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 576,
+          "end_line": 597
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 1086,
+          "end_line": 1107
+        }
+      ]
+    },
+    {
+      "id": "cp-017",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 752,
+          "end_line": 768
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 731,
+          "end_line": 747
+        }
+      ]
+    },
+    {
+      "id": "cp-018",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 646,
+          "end_line": 651
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 697,
+          "end_line": 702
+        }
+      ]
+    },
+    {
+      "id": "cp-019",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/de.rs",
+          "start_line": 763,
+          "end_line": 809
+        },
+        {
+          "file": "src/de.rs",
+          "start_line": 567,
+          "end_line": 621
+        }
+      ]
+    },
+    {
+      "id": "cp-020",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/de.rs",
+          "start_line": 388,
+          "end_line": 416
+        },
+        {
+          "file": "src/de.rs",
+          "start_line": 356,
+          "end_line": 386
+        }
+      ]
+    },
+    {
+      "id": "cp-021",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 668,
+          "end_line": 680
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 514,
+          "end_line": 526
+        }
+      ]
+    },
+    {
+      "id": "cp-022",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/de.rs",
+          "start_line": 1937,
+          "end_line": 1962
+        },
+        {
+          "file": "src/de.rs",
+          "start_line": 1990,
+          "end_line": 2018
+        }
+      ]
+    },
+    {
+      "id": "cp-023",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 1049,
+          "end_line": 1056
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 523,
+          "end_line": 530
+        }
+      ]
+    },
+    {
+      "id": "cp-024",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/de.rs",
+          "start_line": 740,
+          "end_line": 761
+        },
+        {
+          "file": "src/de.rs",
+          "start_line": 1001,
+          "end_line": 1024
+        }
+      ]
+    },
+    {
+      "id": "cp-025",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 490,
+          "end_line": 512
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 619,
+          "end_line": 643
+        }
+      ]
+    },
+    {
+      "id": "cp-026",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/raw.rs",
+          "start_line": 538,
+          "end_line": 546
+        },
+        {
+          "file": "src/raw.rs",
+          "start_line": 563,
+          "end_line": 571
+        }
+      ]
+    },
+    {
+      "id": "cp-027",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 671,
+          "end_line": 685
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 1179,
+          "end_line": 1193
+        }
+      ]
+    },
+    {
+      "id": "cp-028",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/number.rs",
+          "start_line": 385,
+          "end_line": 395
+        },
+        {
+          "file": "src/raw.rs",
+          "start_line": 345,
+          "end_line": 352
+        }
+      ]
+    },
+    {
+      "id": "cp-029",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/de.rs",
+          "start_line": 2287,
+          "end_line": 2301
+        },
+        {
+          "file": "src/de.rs",
+          "start_line": 1721,
+          "end_line": 1735
+        }
+      ]
+    },
+    {
+      "id": "cp-030",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/read.rs",
+          "start_line": 840,
+          "end_line": 848
+        },
+        {
+          "file": "src/read.rs",
+          "start_line": 850,
+          "end_line": 858
+        }
+      ]
+    },
+    {
+      "id": "cp-031",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/lexical/shift.rs",
+          "start_line": 9,
+          "end_line": 16
+        },
+        {
+          "file": "src/lexical/shift.rs",
+          "start_line": 39,
+          "end_line": 46
+        }
+      ]
+    },
+    {
+      "id": "cp-032",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/de.rs",
+          "start_line": 1737,
+          "end_line": 1767
+        },
+        {
+          "file": "src/de.rs",
+          "start_line": 1788,
+          "end_line": 1818
+        }
+      ]
+    },
+    {
+      "id": "cp-033",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/de.rs",
+          "start_line": 623,
+          "end_line": 636
+        },
+        {
+          "file": "src/de.rs",
+          "start_line": 876,
+          "end_line": 897
+        }
+      ]
+    },
+    {
+      "id": "cp-034",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/number.rs",
+          "start_line": 480,
+          "end_line": 489
+        },
+        {
+          "file": "src/raw.rs",
+          "start_line": 431,
+          "end_line": 440
+        }
+      ]
+    },
+    {
+      "id": "cp-035",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/number.rs",
+          "start_line": 444,
+          "end_line": 455
+        },
+        {
+          "file": "src/raw.rs",
+          "start_line": 399,
+          "end_line": 408
+        }
+      ]
+    },
+    {
+      "id": "cp-036",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/read.rs",
+          "start_line": 384,
+          "end_line": 397
+        },
+        {
+          "file": "src/read.rs",
+          "start_line": 642,
+          "end_line": 655
+        }
+      ]
+    },
+    {
+      "id": "cp-037",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 857,
+          "end_line": 877
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 327,
+          "end_line": 348
+        }
+      ]
+    },
+    {
+      "id": "cp-038",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 845,
+          "end_line": 849
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 790,
+          "end_line": 794
+        }
+      ]
+    },
+    {
+      "id": "cp-039",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/de.rs",
+          "start_line": 1737,
+          "end_line": 1767
+        },
+        {
+          "file": "src/de.rs",
+          "start_line": 1820,
+          "end_line": 1866
+        }
+      ]
+    },
+    {
+      "id": "cp-040",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/de.rs",
+          "start_line": 1788,
+          "end_line": 1818
+        },
+        {
+          "file": "src/de.rs",
+          "start_line": 1820,
+          "end_line": 1866
+        }
+      ]
+    },
+    {
+      "id": "cp-041",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/de.rs",
+          "start_line": 1524,
+          "end_line": 1551
+        },
+        {
+          "file": "src/de.rs",
+          "start_line": 1633,
+          "end_line": 1661
+        }
+      ]
+    },
+    {
+      "id": "cp-042",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/de.rs",
+          "start_line": 899,
+          "end_line": 930
+        },
+        {
+          "file": "src/de.rs",
+          "start_line": 1633,
+          "end_line": 1661
+        }
+      ]
+    },
+    {
+      "id": "cp-043",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/de.rs",
+          "start_line": 319,
+          "end_line": 343
+        },
+        {
+          "file": "src/de.rs",
+          "start_line": 1633,
+          "end_line": 1661
+        }
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "id": "nc-001",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 902,
+          "end_line": 917
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 953,
+          "end_line": 968
+        }
+      ]
+    },
+    {
+      "id": "nc-002",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 1021,
+          "end_line": 1040
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 1042,
+          "end_line": 1061
+        }
+      ]
+    },
+    {
+      "id": "nc-003",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "src/value/ser.rs",
+          "start_line": 532,
+          "end_line": 538
+        },
+        {
+          "file": "src/value/ser.rs",
+          "start_line": 540,
+          "end_line": 546
+        }
+      ]
+    },
+    {
+      "id": "nc-004",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "src/number.rs",
+          "start_line": 312,
+          "end_line": 321
+        },
+        {
+          "file": "src/number.rs",
+          "start_line": 162,
+          "end_line": 171
+        }
+      ]
+    },
+    {
+      "id": "nc-005",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 1577,
+          "end_line": 1585
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 1566,
+          "end_line": 1574
+        }
+      ]
+    },
+    {
+      "id": "nc-006",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "src/lexical/num.rs",
+          "start_line": 392,
+          "end_line": 405
+        },
+        {
+          "file": "src/lexical/num.rs",
+          "start_line": 335,
+          "end_line": 348
+        }
+      ]
+    },
+    {
+      "id": "nc-007",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 154,
+          "end_line": 166
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 168,
+          "end_line": 180
+        }
+      ]
+    },
+    {
+      "id": "nc-008",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "src/number.rs",
+          "start_line": 216,
+          "end_line": 224
+        },
+        {
+          "file": "src/number.rs",
+          "start_line": 151,
+          "end_line": 159
+        }
+      ]
+    },
+    {
+      "id": "nc-009",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "src/number.rs",
+          "start_line": 323,
+          "end_line": 339
+        },
+        {
+          "file": "src/number.rs",
+          "start_line": 183,
+          "end_line": 199
+        }
+      ]
+    },
+    {
+      "id": "nc-010",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 60,
+          "end_line": 66
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 47,
+          "end_line": 53
+        }
+      ]
+    },
+    {
+      "id": "nc-011",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "src/lexical/math.rs",
+          "start_line": 153,
+          "end_line": 158
+        },
+        {
+          "file": "src/lexical/math.rs",
+          "start_line": 180,
+          "end_line": 185
+        }
+      ]
+    },
+    {
+      "id": "nc-012",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 2228,
+          "end_line": 2236
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 2212,
+          "end_line": 2220
+        }
+      ]
+    },
+    {
+      "id": "nc-013",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 2263,
+          "end_line": 2274
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 2244,
+          "end_line": 2255
+        }
+      ]
+    },
+    {
+      "id": "nc-014",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "src/lexical/math.rs",
+          "start_line": 619,
+          "end_line": 625
+        },
+        {
+          "file": "src/lexical/math.rs",
+          "start_line": 348,
+          "end_line": 354
+        }
+      ]
+    },
+    {
+      "id": "nc-015",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "src/map.rs",
+          "start_line": 178,
+          "end_line": 188
+        },
+        {
+          "file": "src/map.rs",
+          "start_line": 945,
+          "end_line": 951
+        }
+      ]
+    },
+    {
+      "id": "nc-016",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "src/value/ser.rs",
+          "start_line": 331,
+          "end_line": 337
+        },
+        {
+          "file": "src/value/ser.rs",
+          "start_line": 380,
+          "end_line": 386
+        }
+      ]
+    },
+    {
+      "id": "nc-017",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "src/lexical/math.rs",
+          "start_line": 236,
+          "end_line": 241
+        },
+        {
+          "file": "src/lexical/math.rs",
+          "start_line": 220,
+          "end_line": 225
+        }
+      ]
+    },
+    {
+      "id": "nc-018",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "src/ser.rs",
+          "start_line": 2195,
+          "end_line": 2204
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 2175,
+          "end_line": 2184
+        }
+      ]
+    },
+    {
+      "id": "nc-019",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "src/de.rs",
+          "start_line": 223,
+          "end_line": 225
+        },
+        {
+          "file": "src/de.rs",
+          "start_line": 235,
+          "end_line": 237
+        }
+      ]
+    },
+    {
+      "id": "nc-020",
+      "reason": "trivial-factory",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 1456,
+          "end_line": 1462
+        },
+        {
+          "file": "src/number.rs",
+          "start_line": 517,
+          "end_line": 523
+        }
+      ]
+    },
+    {
+      "id": "nc-021",
+      "reason": "trivial-factory",
+      "fragments": [
+        {
+          "file": "src/value/ser.rs",
+          "start_line": 708,
+          "end_line": 714
+        },
+        {
+          "file": "src/value/ser.rs",
+          "start_line": 388,
+          "end_line": 394
+        }
+      ]
+    },
+    {
+      "id": "nc-022",
+      "reason": "trivial-factory",
+      "fragments": [
+        {
+          "file": "src/de.rs",
+          "start_line": 247,
+          "end_line": 251
+        },
+        {
+          "file": "src/de.rs",
+          "start_line": 240,
+          "end_line": 244
+        }
+      ]
+    },
+    {
+      "id": "nc-023",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 1009,
+          "end_line": 1023
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 371,
+          "end_line": 380
+        }
+      ]
+    },
+    {
+      "id": "nc-024",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 472,
+          "end_line": 480
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 970,
+          "end_line": 978
+        }
+      ]
+    },
+    {
+      "id": "nc-025",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 556,
+          "end_line": 561
+        },
+        {
+          "file": "src/map.rs",
+          "start_line": 679,
+          "end_line": 684
+        }
+      ]
+    },
+    {
+      "id": "nc-026",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/read.rs",
+          "start_line": 138,
+          "end_line": 143
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 511,
+          "end_line": 516
+        }
+      ]
+    },
+    {
+      "id": "nc-027",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 366,
+          "end_line": 371
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 708,
+          "end_line": 713
+        }
+      ]
+    },
+    {
+      "id": "nc-028",
+      "reason": "exhaustive-match-table",
+      "fragments": [
+        {
+          "file": "src/number.rs",
+          "start_line": 38,
+          "end_line": 45
+        },
+        {
+          "file": "src/error.rs",
+          "start_line": 54,
+          "end_line": 82
+        }
+      ]
+    },
+    {
+      "id": "nc-029",
+      "reason": "exhaustive-match-table",
+      "fragments": [
+        {
+          "file": "src/value/index.rs",
+          "start_line": 147,
+          "end_line": 156
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 820,
+          "end_line": 832
+        }
+      ]
+    },
+    {
+      "id": "nc-030",
+      "reason": "exhaustive-match-table",
+      "fragments": [
+        {
+          "file": "src/number.rs",
+          "start_line": 799,
+          "end_line": 807
+        },
+        {
+          "file": "src/number.rs",
+          "start_line": 373,
+          "end_line": 383
+        }
+      ]
+    },
+    {
+      "id": "nc-031",
+      "reason": "nested-inside-copy",
+      "fragments": [
+        {
+          "file": "src/raw.rs",
+          "start_line": 369,
+          "end_line": 378
+        },
+        {
+          "file": "src/raw.rs",
+          "start_line": 386,
+          "end_line": 412
+        }
+      ]
+    },
+    {
+      "id": "nc-032",
+      "reason": "nested-inside-copy",
+      "fragments": [
+        {
+          "file": "src/raw.rs",
+          "start_line": 356,
+          "end_line": 382
+        },
+        {
+          "file": "src/raw.rs",
+          "start_line": 399,
+          "end_line": 408
+        }
+      ]
+    },
+    {
+      "id": "nc-033",
+      "reason": "nested-inside-copy",
+      "fragments": [
+        {
+          "file": "src/number.rs",
+          "start_line": 444,
+          "end_line": 455
+        },
+        {
+          "file": "src/raw.rs",
+          "start_line": 386,
+          "end_line": 412
+        }
+      ]
+    },
+    {
+      "id": "nc-034",
+      "reason": "nested-inside-copy",
+      "fragments": [
+        {
+          "file": "src/number.rs",
+          "start_line": 444,
+          "end_line": 455
+        },
+        {
+          "file": "src/raw.rs",
+          "start_line": 356,
+          "end_line": 382
+        }
+      ]
+    },
+    {
+      "id": "nc-035",
+      "reason": "nested-inside-copy",
+      "fragments": [
+        {
+          "file": "src/number.rs",
+          "start_line": 467,
+          "end_line": 494
+        },
+        {
+          "file": "src/raw.rs",
+          "start_line": 431,
+          "end_line": 440
+        }
+      ]
+    },
+    {
+      "id": "nc-036",
+      "reason": "nested-inside-copy",
+      "fragments": [
+        {
+          "file": "src/number.rs",
+          "start_line": 480,
+          "end_line": 489
+        },
+        {
+          "file": "src/raw.rs",
+          "start_line": 418,
+          "end_line": 445
+        }
+      ]
+    }
+  ]
+}
