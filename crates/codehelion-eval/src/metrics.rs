@@ -396,6 +396,80 @@ pub fn verdict(finding: &Finding, labels: &LabelSet, threshold: f64) -> Verdict 
     }
 }
 
+/// What each confidence band is worth, as the share of its findings the
+/// verdicts confirmed.
+///
+/// The band says how far past the acceptance threshold a pair's composite
+/// similarity sits. Whether that predicts a finding worth reporting is a
+/// separate question, and the only way to answer it is to count. It is
+/// answered here rather than left to the band's name, which reads like a
+/// prediction and is not one.
+///
+/// Findings the detector never scored — split pairs and fragment runs — are
+/// counted under their own key, so the table accounts for every judged
+/// finding rather than quietly dropping the unbanded ones.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BandSplit {
+    /// Confirmed and refuted counts per band, keyed by the band's name.
+    pub bands: BTreeMap<String, (usize, usize)>,
+}
+
+impl BandSplit {
+    /// Name a finding without a band is counted under.
+    const UNSCORED: &'static str = "(unscored)";
+
+    /// Add every judged finding in `results` to the split.
+    ///
+    /// Accumulates, so one split can span several corpora.
+    pub fn record(&mut self, results: &DetectionResult, labels: &LabelSet, threshold: f64) {
+        for finding in &results.findings {
+            let band = finding
+                .band
+                .clone()
+                .unwrap_or_else(|| Self::UNSCORED.into());
+            let entry = self.bands.entry(band).or_insert((0, 0));
+            match verdict(finding, labels, threshold) {
+                Verdict::Confirmed => entry.0 += 1,
+                Verdict::Refuted => entry.1 += 1,
+                Verdict::Conflicting | Verdict::Unjudged => {}
+            }
+        }
+    }
+}
+
+impl fmt::Display for BandSplit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "{:<12}{:>10}{:>9}{:>11}",
+            "band", "confirmed", "refuted", "precision"
+        )?;
+        // Strongest band first, whatever order the names sort in: the point of
+        // the table is the trend across bands, and it is unreadable if the
+        // rows arrive alphabetically.
+        let order = ["high", "medium", "low", Self::UNSCORED];
+        let ranked = order
+            .iter()
+            .filter_map(|name| self.bands.get_key_value(*name))
+            .chain(
+                self.bands
+                    .iter()
+                    .filter(|(name, _)| !order.contains(&name.as_str())),
+            );
+        for (name, &(confirmed, refuted)) in ranked {
+            let judged = confirmed + refuted;
+            #[allow(clippy::cast_precision_loss)] // counts this size are exact in f64
+            let precision = if judged == 0 {
+                0.0
+            } else {
+                confirmed as f64 / judged as f64
+            };
+            writeln!(f, "{name:<12}{confirmed:>10}{refuted:>9}{precision:>11.4}")?;
+        }
+        Ok(())
+    }
+}
+
 /// How large the judged findings are, measured in lines of their smallest
 /// member and split by verdict.
 ///
@@ -594,6 +668,7 @@ mod tests {
             id: id.to_string(),
             clone_type: CloneType::Type2,
             score,
+            band: None,
             fragments,
         }
     }
@@ -856,6 +931,7 @@ mod tests {
                     id: "b2".to_string(),
                     clone_type: CloneType::Type1,
                     score: 1.0,
+                    band: None,
                     fragments: k2,
                 },
                 finding("b3", 1.0, k3),

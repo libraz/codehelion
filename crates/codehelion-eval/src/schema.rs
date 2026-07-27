@@ -115,6 +115,14 @@ pub struct Finding {
     /// report for it. Zero when the source of the result did not state one.
     #[serde(default)]
     pub size_tokens: u64,
+    /// Confidence band the detector put the finding in, when it stated one.
+    ///
+    /// Carried so a scoring run can say what a band is worth against the
+    /// verdicts, which is a different question from what the band measures.
+    /// Absent for a finding whose similarity was never scored — a split pair
+    /// or a fragment run.
+    #[serde(default)]
+    pub band: Option<String>,
     /// The fragments this finding relates as clones.
     pub fragments: Vec<Fragment>,
 }

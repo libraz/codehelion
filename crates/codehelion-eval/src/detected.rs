@@ -98,7 +98,16 @@ struct Group {
     /// rule. Its shape does not matter here, only whether there is one.
     #[serde(default)]
     suppressed: Option<serde_json::Value>,
+    /// Absent for a group whose similarity was never scored.
+    #[serde(default)]
+    similarity: Option<Similarity>,
     members: Vec<Member>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Similarity {
+    #[serde(default)]
+    confidence_band: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,6 +160,10 @@ pub fn from_report_json(json: &str) -> Result<(DetectionResult, u32), Error> {
             // statement about. The metrics read it for order alone.
             score: group.priority.value,
             size_tokens: group.priority.inputs.largest_member_tokens,
+            band: group
+                .similarity
+                .as_ref()
+                .and_then(|similarity| similarity.confidence_band.clone()),
             fragments: group
                 .members
                 .iter()
@@ -208,6 +221,7 @@ mod tests {
           "clone_type": "type-2",
           "scope": "unit",
           "priority": {"value": 0.62, "inputs": {"largest_member_tokens": 120}},
+          "similarity": {"composite": 0.91, "confidence_band": "high"},
           "suppressed": null,
           "members": [
             {"finding_id": "m1", "file": "a.rs", "start_line": 10, "end_line": 24},
@@ -239,6 +253,7 @@ mod tests {
         assert_eq!(finding.clone_type, CloneType::Type2);
         assert!((finding.score - 0.62).abs() < 1e-9);
         assert_eq!(finding.size_tokens, 120);
+        assert_eq!(finding.band.as_deref(), Some("high"));
         assert_eq!(
             finding.fragments,
             vec![
@@ -254,6 +269,19 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_finding_the_detector_never_scored_carries_no_band() {
+        // Split pairs and fragment runs reach the report without a similarity
+        // breakdown. Reading them as an absent band rather than as a failure
+        // is what lets the band table account for every judged finding.
+        let unscored = REPORT.replace(
+            r#""similarity": {"composite": 0.91, "confidence_band": "high"},"#,
+            "",
+        );
+        let (result, _lines) = from_report_json(&unscored).expect("report reads");
+        assert_eq!(result.findings[0].band, None);
     }
 
     #[test]

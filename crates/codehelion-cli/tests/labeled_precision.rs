@@ -29,7 +29,9 @@ use std::path::{Path, PathBuf};
 use assert_cmd::Command;
 use codehelion_eval::detected;
 use codehelion_eval::labels::LabelSet;
-use codehelion_eval::metrics::{DEFAULT_MATCH_THRESHOLD, RankedVerdicts, SizeSplit, adjudicate};
+use codehelion_eval::metrics::{
+    BandSplit, DEFAULT_MATCH_THRESHOLD, RankedVerdicts, SizeSplit, adjudicate,
+};
 use codehelion_eval::schema::Finding;
 
 /// One labelled corpus and the verdict split it currently produces.
@@ -200,6 +202,7 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
     let mut complaints = String::new();
     let mut unmaterialized = 0usize;
     let mut sizes = SizeSplit::default();
+    let mut bands = BandSplit::default();
     // Two orderings of the same verdicts: the one the tool prints, and the one
     // anybody would reach for without it.
     let mut ranked = RankedVerdicts::default();
@@ -234,6 +237,7 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
 
         let ruled = adjudicate(&result, &labels, DEFAULT_MATCH_THRESHOLD);
         sizes.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
+        bands.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
         ranked.record(&result, &labels, DEFAULT_MATCH_THRESHOLD, |finding| {
             finding.score
         });
@@ -295,6 +299,11 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
     // precision is short, and these two ranges are what says whether it can
     // help: they answer the question in one command instead of by intuition.
     println!("{sizes}\n");
+    // Printed for the same reason, and pinned to nothing. What a band is worth
+    // against the verdicts is a property of the labelled projects, so an
+    // assertion here would be a claim about them; what it is here to do is
+    // keep the band's name from standing in for a number nobody measured.
+    print!("{bands}");
     if unmaterialized > 0 {
         println!(
             "{unmaterialized} of {} labelled corpora have no snapshot and were not scored.\n\

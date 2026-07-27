@@ -162,14 +162,23 @@ impl Default for VerifyConfig {
     }
 }
 
-/// Confidence band of a clone finding.
+/// How far past the acceptance threshold a finding's composite similarity
+/// sits.
+///
+/// It bands one number and says nothing beyond it. In particular it is not a
+/// prediction that the finding is worth acting on, and over hand-labelled real
+/// code it runs the other way: the shapes that are alike without being worth
+/// reporting — one routine per integer width, one accessor per variant — are
+/// alike almost exactly, so they land in the top band. The labelled corpora
+/// print the band's measured precision beside this ordering rather than
+/// leaving the names to imply one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confidence {
-    /// Strong evidence.
+    /// The two agree well clear of the threshold.
     High,
-    /// Moderate evidence.
+    /// The two agree, with room between the score and the threshold.
     Medium,
-    /// Weak evidence, near the acceptance threshold.
+    /// The two agree just past the threshold.
     Low,
 }
 
