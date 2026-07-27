@@ -13,12 +13,15 @@
 //! scanned alone may land in different groups when their neighbours are there
 //! too. That is why this runs over whole corpora and not over pairs.
 //!
-//! What is asserted and what is only printed differs by how much the corpora
-//! can support. Recall and the labelled non-clones are ground truth: the
-//! corpora were built around those pairs and every one of them is labelled.
-//! Precision is not — a corpus labels the clones it was built around, not
-//! every clone in the file, so an unlabelled true copy counts against
-//! precision. Those figures are printed for the record and left unasserted.
+//! Every figure it prints is also pinned, but not every pin means the same
+//! thing. Recall and the labelled non-clones are ground truth: the corpora were
+//! built around those pairs and every one of them is labelled, so those numbers
+//! are what they ought to be. Precision and the per-kLOC rates are not — a
+//! corpus labels the clones it was built around, not every clone in the file,
+//! so an unlabelled true copy counts against precision and no value is the
+//! right one. They are recorded rather than judged: the pin says the figure has
+//! not moved since somebody last looked, and a move is a change to explain
+//! rather than a failure to fix.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::fmt::Write as _;
@@ -36,54 +39,102 @@ struct Expected {
     name: &'static str,
     /// Fraction of labelled clone pairs recovered.
     recall: f64,
+    /// The same, split by the clone type the labelled pair was made to be:
+    /// Type-1, Type-2, Type-3. `None` where the corpus holds no pair of that
+    /// type, which is not the same as recovering none.
+    by_type: [Option<f64>; 3],
+    /// Share of what was reported that a label calls a clone.
+    precision: f64,
+    /// Findings per thousand source lines.
+    findings_per_kloc: f64,
+    /// Findings per thousand source lines that no label calls a clone.
+    false_positives_per_kloc: f64,
     /// Why it is not 1.0, when it is not.
     shortfall: &'static str,
 }
 
-/// The committed corpora, with the recall each currently reaches.
+/// The committed corpora, with what the detector currently reaches on each.
 ///
 /// These are pinned rather than bounded: a number that moves either way is
 /// something to look at. A rise is a gap closed and belongs in the table; a
 /// fall is a regression, and the corpora are small enough that any fall is one
 /// specific labelled pair going missing.
+///
+/// Recall is pinned as a claim — the corpora were built around those pairs, so
+/// the number ought to be what it is. The rest are pinned as measurements: a
+/// generated corpus labels the clones it was built around and nothing else, so
+/// a true copy nobody labelled counts against precision, and no value here is
+/// the right one. What they are for is that a change cannot move them quietly.
 const CORPORA: &[Expected] = &[
     Expected {
         name: "rust",
+        by_type: [Some(1.0), Some(1.0), Some(1.0)],
+        precision: 1.0,
+        findings_per_kloc: 21.58,
+        false_positives_per_kloc: 0.00,
         recall: 1.0,
         shortfall: "",
     },
     Expected {
         name: "c",
+        by_type: [Some(1.0), Some(1.0), Some(1.0)],
+        precision: 1.0,
+        findings_per_kloc: 22.22,
+        false_positives_per_kloc: 0.00,
         recall: 1.0,
         shortfall: "",
     },
     Expected {
         name: "cpp",
+        by_type: [Some(1.0), Some(1.0), Some(1.0)],
+        precision: 1.0,
+        findings_per_kloc: 21.58,
+        false_positives_per_kloc: 0.00,
         recall: 1.0,
         shortfall: "",
     },
     Expected {
         name: "rust-graded",
+        by_type: [None, None, Some(1.0)],
+        precision: 0.25,
+        findings_per_kloc: 22.99,
+        false_positives_per_kloc: 17.24,
         recall: 1.0,
         shortfall: "",
     },
     Expected {
         name: "rust-literals",
+        by_type: [None, Some(1.0), None],
+        precision: 1.0,
+        findings_per_kloc: 11.63,
+        false_positives_per_kloc: 0.00,
         recall: 1.0,
         shortfall: "",
     },
     Expected {
         name: "rust-replaced",
+        by_type: [None, None, Some(1.0)],
+        precision: 1.0,
+        findings_per_kloc: 9.35,
+        false_positives_per_kloc: 0.00,
         recall: 1.0,
         shortfall: "",
     },
     Expected {
         name: "rust-negative",
+        by_type: [Some(1.0), None, None],
+        precision: 1.0,
+        findings_per_kloc: 36.36,
+        false_positives_per_kloc: 0.00,
         recall: 1.0,
         shortfall: "",
     },
     Expected {
         name: "rust-partial",
+        by_type: [Some(1.0), Some(0.0), None],
+        precision: 1.0 / 3.0,
+        findings_per_kloc: 16.57,
+        false_positives_per_kloc: 11.05,
         recall: 1.0 / 2.0,
         shortfall: "the renamed three-statement transplant is shorter than the \
                     shortest statement window, so no seed can propose it. \
@@ -97,6 +148,10 @@ const CORPORA: &[Expected] = &[
     },
     Expected {
         name: "rust-divergent",
+        by_type: [None, Some(1.0), Some(0.75)],
+        precision: 2.0 / 3.0,
+        findings_per_kloc: 16.95,
+        false_positives_per_kloc: 5.65,
         recall: 4.0 / 5.0,
         shortfall: "the remaining labelled pair is the seed against the variant \
                     that disturbs control flow and the call surface at once, \
@@ -106,6 +161,20 @@ const CORPORA: &[Expected] = &[
                     reported on its own because no group can hold both halves",
     },
 ];
+
+/// Whether a per-type recall is what was recorded, absence included.
+fn same_measure(measured: Option<f64>, recorded: Option<f64>) -> bool {
+    match (measured, recorded) {
+        (Some(left), Some(right)) => (left - right).abs() < 1e-9,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// A per-type recall as the table shows it.
+fn show(recall: Option<f64>) -> String {
+    recall.map_or_else(|| "absent".to_owned(), |value| format!("{value:.4}"))
+}
 
 /// Repository root, from this test's manifest directory.
 fn repo_root() -> PathBuf {
@@ -147,8 +216,9 @@ fn every_corpus_recovers_what_it_did_and_reports_no_labelled_non_clone() {
     // says how much went missing; this says which kind did, and the kinds are
     // not interchangeable — a Type-1 copy that goes missing is a broken
     // detector, while a Type-3 pair that does is the acceptance threshold
-    // doing its job. Printed, not asserted: the per-corpus recall above is the
-    // assertion, and it is the same numbers with the split undone.
+    // doing its job. Pinned separately from the total, because two pairs of
+    // different types changing state in opposite directions leaves the total
+    // where it was.
     let mut by_type = String::from("\ncorpus              type-1   type-2   type-3\n");
     let mut complaints = String::new();
 
@@ -177,17 +247,54 @@ fn every_corpus_recovers_what_it_did_and_reports_no_labelled_non_clone() {
         )
         .expect("writing to a string cannot fail");
         write!(by_type, "{:<16}", expected.name).expect("writing to a string cannot fail");
-        for clone_type in [CloneType::Type1, CloneType::Type2, CloneType::Type3] {
+        let types = [CloneType::Type1, CloneType::Type2, CloneType::Type3];
+        for (clone_type, recorded) in types.into_iter().zip(expected.by_type) {
+            let measured = metrics.recall_by_type.get(&clone_type).copied();
             // A dash rather than a zero where the corpus has no pair of that
             // type: nothing was recovered because nothing was asked for, and a
             // zero would read as a failure.
-            match metrics.recall_by_type.get(&clone_type) {
+            match measured {
                 Some(recall) => write!(by_type, " {recall:>8.4}"),
                 None => write!(by_type, " {:>8}", "-"),
             }
             .expect("writing to a string cannot fail");
+            if !same_measure(measured, recorded) {
+                writeln!(
+                    complaints,
+                    "{}: {clone_type:?} recall is {}, recorded as {}",
+                    expected.name,
+                    show(measured),
+                    show(recorded),
+                )
+                .expect("writing to a string cannot fail");
+            }
         }
         by_type.push('\n');
+
+        for (what, measured, recorded) in [
+            ("precision", metrics.precision_overall, expected.precision),
+            (
+                "findings per kLOC",
+                metrics.findings_per_kloc,
+                expected.findings_per_kloc,
+            ),
+            (
+                "false positives per kLOC",
+                metrics.false_positives_per_kloc,
+                expected.false_positives_per_kloc,
+            ),
+        ] {
+            // Compared at the width the table prints, which is what anybody
+            // copying a new value back into it would be reading.
+            if format!("{measured:.2}") != format!("{recorded:.2}") {
+                writeln!(
+                    complaints,
+                    "{}: {what} is {measured:.4}, recorded as {recorded:.4}",
+                    expected.name,
+                )
+                .expect("writing to a string cannot fail");
+            }
+        }
 
         if (metrics.recall_overall - expected.recall).abs() >= 1e-9 {
             writeln!(

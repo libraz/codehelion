@@ -3,8 +3,8 @@
 //! The synthetic corpora answer "how much of what is there does it find". They
 //! cannot answer "how much of what it reports is real", because a generated
 //! corpus labels the clones it was built around and nothing else, so every
-//! unlabelled true copy counts against precision. That is why
-//! `corpus_accuracy.rs` prints precision and asserts nothing about it.
+//! unlabelled true copy counts against precision. `corpus_accuracy.rs` records
+//! its precision so a move is seen, and claims nothing about the value.
 //!
 //! These corpora answer the second question instead. They are snapshots of real
 //! projects, and what is labelled is what the detector reported: every group is
@@ -48,7 +48,7 @@ use assert_cmd::Command;
 use codehelion_eval::detected;
 use codehelion_eval::labels::LabelSet;
 use codehelion_eval::metrics::{
-    BandSplit, DEFAULT_MATCH_THRESHOLD, RankedVerdicts, SizeSplit, adjudicate,
+    Adjudication, BandSplit, DEFAULT_MATCH_THRESHOLD, RankedVerdicts, SizeSplit, adjudicate,
 };
 use codehelion_eval::schema::Finding;
 
@@ -60,6 +60,10 @@ struct Expected {
     confirmed: usize,
     /// Groups ruled a lookalike that must not be reported.
     refuted: usize,
+    /// Of the confirmed groups, the ones the report puts forward.
+    forward_confirmed: usize,
+    /// Of the refuted groups, the ones the report puts forward.
+    forward_refuted: usize,
 }
 
 /// The labelled corpora, with the split each currently reaches.
@@ -74,66 +78,129 @@ const CORPORA: &[Expected] = &[
         name: "fast-yaml-cpp",
         confirmed: 20,
         refuted: 2,
+        forward_confirmed: 19,
+        forward_refuted: 2,
     },
     Expected {
         name: "fast-yaml",
         confirmed: 1,
         refuted: 0,
+        forward_confirmed: 1,
+        forward_refuted: 0,
     },
     Expected {
         name: "codehelion-store",
         confirmed: 2,
         refuted: 0,
+        forward_confirmed: 2,
+        forward_refuted: 0,
     },
     Expected {
         name: "cjson",
         confirmed: 14,
         refuted: 6,
+        forward_confirmed: 14,
+        forward_refuted: 6,
     },
     Expected {
         name: "lz4",
         confirmed: 17,
         refuted: 21,
+        forward_confirmed: 17,
+        forward_refuted: 20,
     },
     Expected {
         name: "serde-json",
         confirmed: 44,
         refuted: 30,
+        forward_confirmed: 39,
+        forward_refuted: 30,
     },
     Expected {
         name: "spdlog",
         confirmed: 21,
         refuted: 18,
+        forward_confirmed: 21,
+        forward_refuted: 18,
     },
     Expected {
         name: "bitflags",
         confirmed: 16,
         refuted: 9,
+        forward_confirmed: 3,
+        forward_refuted: 1,
     },
 ];
 
-/// Cut-offs the ranking is pinned at, with the share of the top `k` that has
-/// to be a confirmed clone.
-///
-/// Pinned rather than bounded loosely, and pinned below what the ranking
-/// currently reaches, because these numbers move for two different reasons: a
-/// ranking change, which is what they are here to catch, and a detector change
-/// that alters which findings exist to be ranked, which is not. The margin is
-/// what separates the two.
-const PRECISION_AT: &[(usize, f64)] = &[(10, 1.0), (50, 0.86)];
+/// What one ordering of the verdicts currently measures.
+struct Ordering {
+    /// How the findings were sorted.
+    name: &'static str,
+    /// Share of the top ten that a label confirmed.
+    at_10: f64,
+    /// Share of the top fifty that a label confirmed.
+    at_50: f64,
+    /// Mean average precision over the whole ordering.
+    map: f64,
+}
 
-/// Floor the composed ranking has to keep over the whole ordering.
+/// The two orderings, as last measured over the whole labelled corpus.
 ///
-/// This floor is a statement about a population, so adding a case to the
-/// corpus moves it: the accumulated ordering now runs over a project whose
-/// reported groups are a little over half real, which pulls the mean down
-/// without anything about the ranking having changed. What the ranking has to
-/// keep earning is the gap to a plain size sort, which is asserted separately
-/// and is what would actually catch a ranking regression.
-const MIN_MEAN_AVERAGE_PRECISION: f64 = 0.87;
+/// Recorded, not bounded. A floor with margin under it answers "is this still
+/// acceptable", which nobody can settle in advance; these answer "is this
+/// still what it was", which is a fact. Any move fails, and the failure states
+/// the measurement to write here instead — so the number changes when somebody
+/// decides it should, and the decision is in the diff beside the change that
+/// caused it.
+///
+/// Both orderings are pinned, including the size sort that exists as a
+/// baseline: it moves only when the population does, so a move in the baseline
+/// alone says the corpus changed rather than the ranking.
+const ORDERINGS: &[Ordering] = &[
+    Ordering {
+        name: "priority",
+        at_10: 1.0,
+        at_50: 0.92,
+        map: 0.8994,
+    },
+    Ordering {
+        name: "size",
+        at_10: 0.9,
+        at_50: 0.94,
+        map: 0.8318,
+    },
+];
+
+/// The verdicts under each confidence band, as last measured.
+///
+/// Pinned for what a move would mean rather than for the values being right:
+/// which band a finding lands in is a boundary the detector draws, and moving
+/// one silently redistributes every finding here. What the numbers say about
+/// the bands themselves is argued from the table, not from this assertion.
+const BANDS: &[(&str, usize, usize)] = &[
+    ("high", 64, 72),
+    ("medium", 15, 3),
+    ("low", 14, 5),
+    ("(unscored)", 42, 6),
+];
+
+/// The length spans of the two verdict populations, as last measured: the
+/// shortest and longest confirmed finding, the same for refuted, and how many
+/// confirmed findings a length floor clearing every refuted one would take.
+///
+/// The last number is the one with an argument attached — it is the price of a
+/// length floor, and it is why there is not one — so it is pinned rather than
+/// printed and re-argued from memory.
+const SIZES: (u32, u32, u32, u32, usize) = (4, 96, 3, 23, 97);
+
+/// Whether two measurements differ once rounded the way they are printed,
+/// which is the width anybody copying a new value back into this file reads.
+fn moved(actual: f64, pinned: f64) -> bool {
+    format!("{actual:.4}") != format!("{pinned:.4}")
+}
 
 /// Compare the ranking the tool prints against sorting by size, and complain
-/// when it stops earning its place.
+/// when either has moved or when the composition stops earning its place.
 ///
 /// Size is the right baseline: it is what a reader would sort by if the tool
 /// offered nothing, and it is already a strong signal — nothing the labels
@@ -145,40 +212,49 @@ const MIN_MEAN_AVERAGE_PRECISION: f64 = 0.87;
 /// are statements about a finding that is already real, so no verdict here
 /// speaks about them, and a composition that weighs them cannot be validated
 /// by this test — only kept from doing damage.
-fn report_ranking(ranked: &RankedVerdicts, by_size: &RankedVerdicts, complaints: &mut String) {
+fn report_ranking(
+    ranked: &RankedVerdicts,
+    by_size: &RankedVerdicts,
+    pinned: bool,
+    complaints: &mut String,
+) {
     println!("\nranking over {} judged findings", ranked.len());
     println!(
         "{:<22} {:>8} {:>8} {:>8}",
         "ordered by", "p@10", "p@50", "MAP"
     );
-    for (name, verdicts) in [("priority", ranked), ("size", by_size)] {
+    let measured = [("priority", ranked), ("size", by_size)];
+    for (name, verdicts) in measured {
         println!(
-            "{name:<22} {:>8.3} {:>8.3} {:>8.3}",
+            "{name:<22} {:>8.4} {:>8.4} {:>8.4}",
             verdicts.precision_at(10),
             verdicts.precision_at(50),
             verdicts.mean_average_precision(),
         );
     }
-
-    for &(k, floor) in PRECISION_AT {
-        let reached = ranked.precision_at(k);
-        if reached < floor {
-            writeln!(
-                complaints,
-                "precision@{k} fell to {reached:.4}, below the pinned {floor:.4}",
-            )
-            .expect("writing to a string cannot fail");
+    if pinned {
+        for (expected, (_, verdicts)) in ORDERINGS.iter().zip(measured) {
+            for (what, actual, was) in [
+                ("precision@10", verdicts.precision_at(10), expected.at_10),
+                ("precision@50", verdicts.precision_at(50), expected.at_50),
+                (
+                    "mean average precision",
+                    verdicts.mean_average_precision(),
+                    expected.map,
+                ),
+            ] {
+                if moved(actual, was) {
+                    writeln!(
+                        complaints,
+                        "{what} ordered by {} is {actual:.4}, recorded as {was:.4}",
+                        expected.name,
+                    )
+                    .expect("writing to a string cannot fail");
+                }
+            }
         }
     }
     let map = ranked.mean_average_precision();
-    if map < MIN_MEAN_AVERAGE_PRECISION {
-        writeln!(
-            complaints,
-            "mean average precision fell to {map:.4}, below the pinned \
-             {MIN_MEAN_AVERAGE_PRECISION:.4}",
-        )
-        .expect("writing to a string cannot fail");
-    }
     // The claim the separated measures exist to make good on. If sorting by
     // size does as well, the composition is decoration.
     let baseline = by_size.mean_average_precision();
@@ -294,56 +370,130 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
         )
         .expect("writing to a string cannot fail");
 
-        if ruled.confirmed != expected.confirmed || ruled.refuted != expected.refuted {
-            writeln!(
-                complaints,
-                "{}: {} confirmed and {} refuted, expected {} and {}",
-                expected.name, ruled.confirmed, ruled.refuted, expected.confirmed, expected.refuted,
-            )
-            .expect("writing to a string cannot fail");
-        }
-        // Every group in these corpora was ruled on when the labels were
-        // written. One without a verdict is a group the detector has started
-        // reporting since, and it needs reading rather than counting.
-        if ruled.unjudged > 0 {
-            writeln!(
-                complaints,
-                "{}: {} reported group(s) carry no verdict — read them and label them",
-                expected.name, ruled.unjudged,
-            )
-            .expect("writing to a string cannot fail");
-        }
-        // Two labels claiming one finding is the corpus disagreeing with
-        // itself, which no detector change can fix.
-        if ruled.conflicting > 0 {
-            writeln!(
-                complaints,
-                "{}: {} finding(s) are labelled both a clone and a non-clone",
-                expected.name, ruled.conflicting,
-            )
-            .expect("writing to a string cannot fail");
-        }
+        compare_verdicts(expected, &ruled, &mut complaints);
     }
 
+    // Every measure below this line accumulates across the whole corpus, so a
+    // partial set produces a number that is not the recorded one and is not a
+    // regression either. Print it, compare nothing.
+    let whole = unmaterialized == 0;
     if !ranked.is_empty() {
-        report_ranking(&ranked, &by_size, &mut complaints);
+        report_ranking(&ranked, &by_size, whole, &mut complaints);
     }
     println!("{table}");
-    // Printed, not asserted. Length is the first knob anyone reaches for when
-    // precision is short, and these two ranges are what says whether it can
-    // help: they answer the question in one command instead of by intuition.
+    // Length is the first knob anyone reaches for when precision is short, and
+    // these two ranges are what says whether it can help.
     println!("{sizes}\n");
-    // Printed for the same reason, and pinned to nothing. What a band is worth
-    // against the verdicts is a property of the labelled projects, so an
-    // assertion here would be a claim about them; what it is here to do is
-    // keep the band's name from standing in for a number nobody measured.
     print!("{bands}");
-    if unmaterialized > 0 {
+    if whole {
+        compare_bands(&bands, &mut complaints);
+        compare_sizes(&sizes, &mut complaints);
+    } else {
         println!(
-            "{unmaterialized} of {} labelled corpora have no snapshot and were not scored.\n\
+            "\n{unmaterialized} of {} labelled corpora have no snapshot and were not scored, \
+             so the measures over the whole corpus were printed and not compared.\n\
              Run corpus/scripts/materialize-labeled.sh to cut them from their pinned commits.",
             CORPORA.len(),
         );
     }
     assert!(complaints.is_empty(), "\n{complaints}");
+}
+
+/// Complain about anything one corpus's verdicts say that the recorded split
+/// does not.
+fn compare_verdicts(expected: &Expected, ruled: &Adjudication, complaints: &mut String) {
+    if ruled.confirmed != expected.confirmed || ruled.refuted != expected.refuted {
+        writeln!(
+            complaints,
+            "{}: {} confirmed and {} refuted, expected {} and {}",
+            expected.name, ruled.confirmed, ruled.refuted, expected.confirmed, expected.refuted,
+        )
+        .expect("writing to a string cannot fail");
+    }
+    // The same split over the findings the report puts forward, which is what
+    // makes the "put forward" column a measurement rather than a printed
+    // number: the ranking cannot move a finding across the fold without one of
+    // these two changing.
+    if ruled.actionable_confirmed != expected.forward_confirmed
+        || ruled.actionable_refuted != expected.forward_refuted
+    {
+        writeln!(
+            complaints,
+            "{}: {} confirmed and {} refuted put forward, expected {} and {}",
+            expected.name,
+            ruled.actionable_confirmed,
+            ruled.actionable_refuted,
+            expected.forward_confirmed,
+            expected.forward_refuted,
+        )
+        .expect("writing to a string cannot fail");
+    }
+    // Every group in these corpora was ruled on when the labels were written.
+    // One without a verdict is a group the detector has started reporting
+    // since, and it needs reading rather than counting.
+    if ruled.unjudged > 0 {
+        writeln!(
+            complaints,
+            "{}: {} reported group(s) carry no verdict — read them and label them",
+            expected.name, ruled.unjudged,
+        )
+        .expect("writing to a string cannot fail");
+    }
+    // Two labels claiming one finding is the corpus disagreeing with itself,
+    // which no detector change can fix.
+    if ruled.conflicting > 0 {
+        writeln!(
+            complaints,
+            "{}: {} finding(s) are labelled both a clone and a non-clone",
+            expected.name, ruled.conflicting,
+        )
+        .expect("writing to a string cannot fail");
+    }
+}
+
+/// Complain about any band whose verdicts are not what was recorded.
+fn compare_bands(bands: &BandSplit, complaints: &mut String) {
+    for &(name, confirmed, refuted) in BANDS {
+        let measured = bands.bands.get(name).copied().unwrap_or((0, 0));
+        if measured != (confirmed, refuted) {
+            writeln!(
+                complaints,
+                "band {name} holds {} confirmed and {} refuted, recorded as {confirmed} and \
+                 {refuted}",
+                measured.0, measured.1,
+            )
+            .expect("writing to a string cannot fail");
+        }
+    }
+    // A band nobody recorded is a band the detector started using, which is a
+    // boundary change rather than a number to add.
+    for name in bands.bands.keys() {
+        if !BANDS.iter().any(|&(recorded, _, _)| recorded == name) {
+            writeln!(complaints, "band {name} is not one of the recorded bands")
+                .expect("writing to a string cannot fail");
+        }
+    }
+}
+
+/// Complain when either verdict population has changed length.
+fn compare_sizes(sizes: &SizeSplit, complaints: &mut String) {
+    let span = |lines: &[u32]| (lines.first().copied(), lines.last().copied());
+    let measured = (
+        span(&sizes.confirmed),
+        span(&sizes.refuted),
+        sizes.confirmed_within_refuted_range(),
+    );
+    let (low_confirmed, high_confirmed, low_refuted, high_refuted, within) = SIZES;
+    let recorded = (
+        (Some(low_confirmed), Some(high_confirmed)),
+        (Some(low_refuted), Some(high_refuted)),
+        within,
+    );
+    if measured != recorded {
+        writeln!(
+            complaints,
+            "the length spans are {measured:?}, recorded as {recorded:?}"
+        )
+        .expect("writing to a string cannot fail");
+    }
 }
