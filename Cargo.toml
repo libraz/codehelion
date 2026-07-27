@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+# Named rather than a bare `crates/*`: a scan run rooted at `crates/` drops its
+# audit database in `crates/.codehelion/`, and a glob that picks that up fails
+# the whole workspace with a missing manifest.
+members = ["crates/codehelion-*"]
 
 [workspace.package]
 version = "0.1.0"
