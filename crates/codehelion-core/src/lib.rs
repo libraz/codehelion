@@ -8,6 +8,7 @@
 pub mod boilerplate;
 pub mod candidate;
 pub mod clone_class;
+pub mod compat;
 pub mod conditional;
 pub mod control_flow;
 pub mod discovery;

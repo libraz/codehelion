@@ -35,6 +35,15 @@ use std::collections::BTreeMap;
 use crate::clone_class::CloneClass;
 use crate::verify::Confidence;
 
+/// Version of the rules that decide which occurrences sit in one group.
+///
+/// Recorded beside every run so a later one can say whether two results were
+/// grouped alike. Bumping it does not move a member's content id — the same
+/// code still hashes the same — but it can move a group's, because a group
+/// fingerprint folds in the set of contents its members hold. Any change to
+/// medoid selection, the cohesion floors or the refinement order must bump it.
+pub const GROUPING_VERSION: &str = "grouping-v1";
+
 /// Tuning for grouping. Similarities are in `[0, 1]`; the defaults are
 /// provisional and calibrated against the chain corpus.
 #[derive(Debug, Clone, PartialEq)]
