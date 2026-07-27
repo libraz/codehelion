@@ -30,7 +30,7 @@ use codehelion_core::frontend::Token;
 use codehelion_core::grouping::{GROUPING_VERSION, StructuralGroup};
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
 use codehelion_core::priority::Weights;
-use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION};
+use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION, UnitFingerprint};
 use codehelion_core::structural::{
     self, GroupDetail, RegionOccurrence, StructuralConfig, StructuralRegion, StructuralReport,
     StructuralUnit,
@@ -397,10 +397,12 @@ fn evaluate_suppression(
             rules
                 .rules
                 .clone_id_rule(&pair.fingerprint.to_hex())
-                .or_else(|| rules.group_rule([pair.a, pair.b].into_iter(), analysis, &local_units))
+                .or_else(|| rules.group_rule(pair.members.iter().copied(), analysis, &local_units))
                 .or_else(|| {
                     hidden_test_code.filter(|_| {
-                        analysis.units[pair.a].test_code && analysis.units[pair.b].test_code
+                        pair.members
+                            .iter()
+                            .all(|&member| analysis.units[member].test_code)
                     })
                 })
                 .or_else(|| rules.rules.baseline_rule(&pair.fingerprint.to_hex()))
@@ -961,15 +963,19 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             members: group
                 .members
                 .iter()
+                .zip(ranks_within_host(member_hosts(
+                    &inputs.analysis.units,
+                    &group.members,
+                )))
                 .enumerate()
-                .map(|(position, &member)| {
+                .map(|(position, (&member, rank))| {
                     let unit = &inputs.analysis.units[member];
                     let file = &inputs.files[unit.file];
                     report::Member {
                         finding_id: stable_id::finding_id(
                             &detail.fingerprint,
                             Some(&unit.fingerprint),
-                            0,
+                            rank,
                         )
                         .to_hex(),
                         content: unit.content.to_hex(),
@@ -990,21 +996,18 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
     )
 }
 
-/// One verified clone pair that no group could hold, as a report entry.
+/// One verified clone relation that no group could hold, as a report entry.
 ///
-/// It is shaped exactly like a two-member group, because that is what it is:
-/// a set whose every member is a copy of every other, with two members in it.
-/// What sets it apart is that its members appear in other findings too, which
-/// `split_pair` says outright.
+/// It is shaped exactly like a group, because that is what it is: a set whose
+/// every member is a copy of every other. What sets it apart is that its
+/// members appear in other findings too, which `split_pair` says outright.
+/// Where the same two contents recur across the tree the entry carries every
+/// occurrence of both, since that is one relation observed many times rather
+/// than many relations.
 fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
     let pair = &inputs.analysis.unrepresented[index];
     let suppressed = inputs.pair_suppressed[index].map(|rule| inputs.suppression(rule));
-    let other = if pair.canonical == pair.a {
-        pair.b
-    } else {
-        pair.a
-    };
-    let members: Vec<usize> = vec![pair.canonical, other];
+    let members = &pair.members;
     report::ranked(
         report::Group {
             fingerprint: pair.fingerprint.to_hex(),
@@ -1022,15 +1025,18 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             split_pair: true,
             members: members
                 .iter()
-                .enumerate()
-                .map(|(position, &member)| {
+                .zip(ranks_within_host(member_hosts(
+                    &inputs.analysis.units,
+                    members,
+                )))
+                .map(|(&member, rank)| {
                     let unit = &inputs.analysis.units[member];
                     let file = &inputs.files[unit.file];
                     report::Member {
                         finding_id: stable_id::finding_id(
                             &pair.fingerprint,
                             Some(&unit.fingerprint),
-                            0,
+                            rank,
                         )
                         .to_hex(),
                         content: unit.content.to_hex(),
@@ -1041,7 +1047,7 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                         unit: unit.name.as_deref().map(ToString::to_string),
                         tokens: u64::try_from(unit.token_end.saturating_sub(unit.token_start))
                             .unwrap_or(u64::MAX),
-                        canonical: position == 0,
+                        canonical: member == pair.canonical,
                     }
                 })
                 .collect(),
@@ -1058,7 +1064,7 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
 /// clones of each other, which is the whole point of reporting the run.
 fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
     let region = &inputs.analysis.regions[inputs.regions.reported[index]];
-    let ranks = occurrence_ranks(region);
+    let ranks = ranks_within_host(occurrence_hosts(&inputs.analysis.units, region));
     report::ranked(
         report::Group {
             fingerprint: region.fingerprint.to_hex(),
@@ -1111,23 +1117,47 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
     )
 }
 
-/// Rank of each occurrence within its host unit, in occurrence order.
+/// Rank of each occurrence within its host, in occurrence order.
 ///
-/// A run can occur twice inside one unit — a stretch duplicated within the
-/// same function — and a finding identifier is derived from the group and the
-/// host unit, so the rank is what keeps the two identifiers apart.
-fn occurrence_ranks(region: &StructuralRegion) -> Vec<u32> {
-    let mut next: BTreeMap<usize, u32> = BTreeMap::new();
-    region
-        .occurrences
-        .iter()
-        .map(|occurrence| {
-            let slot = next.entry(occurrence.unit).or_insert(0);
+/// A finding is told apart from its siblings by its host's fingerprint plus
+/// its rank within that host, so the rank has to count per *fingerprint* and
+/// not per host: a unit fingerprint is raw content, so the same function
+/// copied unchanged into eight files carries one fingerprint across all eight,
+/// and counting per host would hand all eight occurrences rank zero and one
+/// identifier between them. Counting per fingerprint also keeps the case the
+/// rank was introduced for — one run duplicated twice inside a single unit —
+/// since those two share a host and therefore a fingerprint.
+fn ranks_within_host(hosts: impl IntoIterator<Item = UnitFingerprint>) -> Vec<u32> {
+    let mut next: BTreeMap<UnitFingerprint, u32> = BTreeMap::new();
+    hosts
+        .into_iter()
+        .map(|host| {
+            let slot = next.entry(host).or_insert(0);
             let rank = *slot;
             *slot = slot.saturating_add(1);
             rank
         })
         .collect()
+}
+
+/// The host fingerprints of a group's members, in member order.
+fn member_hosts<'a>(
+    units: &'a [StructuralUnit],
+    members: &'a [usize],
+) -> impl Iterator<Item = UnitFingerprint> + 'a {
+    members.iter().map(|&member| units[member].fingerprint)
+}
+
+/// The host fingerprints of a duplicated run's occurrences, in occurrence
+/// order.
+fn occurrence_hosts<'a>(
+    units: &'a [StructuralUnit],
+    region: &'a StructuralRegion,
+) -> impl Iterator<Item = UnitFingerprint> + 'a {
+    region
+        .occurrences
+        .iter()
+        .map(|occurrence| units[occurrence.unit].fingerprint)
 }
 
 /// A group's reported similarity: the medoid-to-member breakdown of its
@@ -1266,8 +1296,9 @@ fn snapshot_rows(
     // A pair no group could hold reaches units no group holds, so its members
     // need recording as much as a group's do.
     for pair in &inputs.analysis.unrepresented {
-        host_index.entry(pair.a).or_insert(0);
-        host_index.entry(pair.b).or_insert(0);
+        for &member in &pair.members {
+            host_index.entry(member).or_insert(0);
+        }
     }
     let mut units = Vec::with_capacity(host_index.len());
     for (row, (unit_index, slot)) in host_index.iter_mut().enumerate() {
@@ -1376,18 +1407,16 @@ fn split_pair_row(
     ranking: &BTreeMap<&str, &report::Priority>,
 ) -> Result<GroupRow> {
     let pair = &inputs.analysis.unrepresented[index];
-    let other = if pair.canonical == pair.a {
-        pair.b
-    } else {
-        pair.a
-    };
     let canonical = &inputs.analysis.units[pair.canonical];
     Ok(GroupRow {
         fingerprint: pair.fingerprint,
         history: GroupOrigin::unconnected(&pair.fingerprint),
         clone_type: pair.class,
         member_scope: CloneScope::Unit,
-        test_code: canonical.test_code && inputs.analysis.units[other].test_code,
+        test_code: pair
+            .members
+            .iter()
+            .all(|&member| inputs.analysis.units[member].test_code),
         split_pair: true,
         score: pair.similarity,
         entropy_bits: engine::content_entropy_bits(inputs.unit_tokens(canonical), inputs.literals),
@@ -1399,14 +1428,23 @@ fn split_pair_row(
         // not re-run against a medoid, so there is no per-dimension row to
         // record without inventing one.
         similarity: None,
-        members: [pair.canonical, other]
+        members: pair
+            .members
             .iter()
-            .map(|&member| {
+            .zip(ranks_within_host(member_hosts(
+                &inputs.analysis.units,
+                &pair.members,
+            )))
+            .map(|(&member, rank)| {
                 let unit = &inputs.analysis.units[member];
                 let file = &inputs.files[unit.file];
                 MemberRow {
                     content: unit.content,
-                    finding: stable_id::finding_id(&pair.fingerprint, Some(&unit.fingerprint), 0),
+                    finding: stable_id::finding_id(
+                        &pair.fingerprint,
+                        Some(&unit.fingerprint),
+                        rank,
+                    ),
                     language: file.language,
                     host_unit: Some(host_index[&member]),
                     file_path: file.relative_path.clone(),
@@ -1426,7 +1464,7 @@ fn region_row(
     ranking: &BTreeMap<&str, &report::Priority>,
 ) -> Result<GroupRow> {
     let region = &inputs.analysis.regions[inputs.regions.reported[index]];
-    let ranks = occurrence_ranks(region);
+    let ranks = ranks_within_host(occurrence_hosts(&inputs.analysis.units, region));
     let canonical = region
         .occurrences
         .first()

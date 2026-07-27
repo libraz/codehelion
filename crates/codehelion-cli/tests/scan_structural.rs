@@ -1525,3 +1525,114 @@ fn explain_says_which_fact_put_the_finding_where_it_is() {
         "{text}"
     );
 }
+
+/// A tree holding several copies of a family of functions that are clones of
+/// one another, but not transitively so.
+///
+/// This is what a dependency directory looks like when it carries a library at
+/// more than one version, or a project that keeps one algorithm per target
+/// architecture: the same handful of shapes, over and over. Similarity is not
+/// transitive, so no one group can hold the whole family, and the verdicts
+/// left over recur once per crossing of the copies — the same fact, with many
+/// places to say it about.
+fn fixture_with_repeated_copies(copies: usize) -> tempfile::TempDir {
+    const FAMILY: [&str; 6] = [
+        "seed",
+        "calls_swapped",
+        "rewritten",
+        "guard_added",
+        "loop_nested",
+        "exits_removed",
+    ];
+    let corpus = Path::new("../../corpus/synthetic/rust-divergent");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    for copy in 0..copies {
+        for member in FAMILY {
+            let text = std::fs::read_to_string(corpus.join(format!("{member}.rs")))
+                .unwrap_or_else(|e| panic!("reading the divergence corpus: {e}"));
+            std::fs::write(root.join(format!("src/{member}_{copy}.rs")), text).unwrap();
+        }
+    }
+    dir
+}
+
+/// Every identifier a report hands out has to name one thing.
+///
+/// A reader freezes a finding by its clone id and follows it by its finding
+/// id. Two rows under one clone id means freezing either hides both; two
+/// occurrences under one finding id means neither can be suppressed or
+/// followed on its own. Neither failure announces itself — a baseline that
+/// hides more than it was pointed at looks exactly like one that worked.
+#[test]
+fn every_identifier_a_report_hands_out_names_one_thing() {
+    let dir = fixture_with_repeated_copies(6);
+    let value = scan_json(dir.path());
+    let groups = value["groups"].as_array().unwrap();
+    assert!(groups.len() > 1, "the fixture reports several findings");
+
+    let clone_ids: Vec<&str> = groups
+        .iter()
+        .map(|group| group["fingerprint"].as_str().unwrap())
+        .collect();
+    let distinct: std::collections::BTreeSet<&str> = clone_ids.iter().copied().collect();
+    assert_eq!(
+        clone_ids.len(),
+        distinct.len(),
+        "{} of {} rows share a clone id with another row",
+        clone_ids.len() - distinct.len(),
+        clone_ids.len()
+    );
+
+    let finding_ids: Vec<&str> = groups
+        .iter()
+        .flat_map(|group| group["members"].as_array().unwrap())
+        .map(|member| member["finding_id"].as_str().unwrap())
+        .collect();
+    let distinct: std::collections::BTreeSet<&str> = finding_ids.iter().copied().collect();
+    assert_eq!(
+        finding_ids.len(),
+        distinct.len(),
+        "{} of {} occurrences share a finding id with another occurrence",
+        finding_ids.len() - distinct.len(),
+        finding_ids.len()
+    );
+}
+
+/// The same relation observed in many places is one finding, not many.
+///
+/// Six copies of one shape against six of another is thirty-six crossings and
+/// one fact. Reported one crossing at a time it fills the report with rows
+/// that differ in nothing a reader can act on — and, since a clone id is
+/// composed from member content, all thirty-six carry the same id anyway.
+#[test]
+fn one_relation_seen_in_many_places_is_reported_once() {
+    let copies = 6;
+    let dir = fixture_with_repeated_copies(copies);
+    let value = scan_json(dir.path());
+    let split: Vec<&serde_json::Value> = value["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|group| group["split_pair"] == true)
+        .collect();
+    assert_eq!(
+        split.len(),
+        1,
+        "the relation between the two shapes is stated {} times",
+        split.len()
+    );
+    // And it carries every place it was seen rather than one representative
+    // pair, so a reader who acts on it knows the whole extent of the work.
+    let members = split[0]["members"].as_array().unwrap();
+    assert_eq!(members.len(), copies * 2);
+    assert_eq!(
+        members
+            .iter()
+            .filter(|member| member["canonical"] == true)
+            .count(),
+        1
+    );
+}
