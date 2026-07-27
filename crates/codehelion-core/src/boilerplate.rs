@@ -30,7 +30,7 @@ use crate::ir::{IrNode, Shape};
 /// Recorded alongside the other detector versions: a change in what counts as
 /// boilerplate changes which findings a report shows, so results from two
 /// versions are not comparable without saying so.
-pub const BOILERPLATE_VERSION: &str = "boilerplate-v3";
+pub const BOILERPLATE_VERSION: &str = "boilerplate-v4";
 
 /// A recognised boilerplate shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -97,7 +97,14 @@ struct Body {
     /// does is call `f`. Sibling calls are counted apart, because two calls in
     /// a row are two things done.
     calls: usize,
-    /// Macro invocations.
+    /// Macro invocations that are not themselves an argument to a call.
+    ///
+    /// Counted the way calls are, and for the same reason. `f(tri!(g(x)))` is
+    /// one delegation whose argument happens to be spelled with a macro;
+    /// counting the macro would say the body does something besides call `f`,
+    /// when handing the argument over is all it does. A macro standing on its
+    /// own is still counted: nothing here can see what it expands to, so a
+    /// statement that is one is a statement whose contents are unknown.
     macros: usize,
     /// Statements other than macro invocations and control flow.
     statements: usize,
@@ -218,7 +225,11 @@ fn tally(node: &IrNode, in_call: bool, body: &mut Body) {
                 body.calls += 1;
             }
         }
-        Shape::MacroCall => body.macros += 1,
+        Shape::MacroCall => {
+            if !in_call {
+                body.macros += 1;
+            }
+        }
         Shape::Return => {
             body.statements += 1;
             body.returns += 1;
@@ -395,6 +406,40 @@ mod tests {
             classify(&unit_of(vec![wrapped])),
             Some(Boilerplate::Forwarding)
         );
+    }
+
+    #[test]
+    fn a_macro_inside_a_delegation_is_part_of_it() {
+        // `Ok(tri!(self.peek()).unwrap_or(b'\0'))` — a wrapper whose argument
+        // is spelled with a macro. Counting the macro as something the body
+        // does besides delegate is the same mistake counting the inner call
+        // would be, and it was made only for macros.
+        let delegation = nest(
+            Shape::Call,
+            vec![nest(Shape::Call, vec![leaf(Shape::MacroCall)])],
+        );
+        assert_eq!(
+            classify(&unit_of(vec![delegation])),
+            Some(Boilerplate::Forwarding)
+        );
+
+        // Standing on its own it is still counted: nothing here can see what a
+        // macro expands to, so a statement that is one is a statement whose
+        // contents are unknown.
+        let body = vec![leaf(Shape::Call), leaf(Shape::MacroCall)];
+        assert_eq!(classify(&unit_of(body)), None);
+    }
+
+    #[test]
+    fn a_repetition_of_macros_cannot_hide_inside_a_call() {
+        // The repetition rule asks for no calls at all, and a macro counts as
+        // nested only under one. So the two rules cannot reach the same body,
+        // and relaxing the macro count leaves the repetition rule where it was.
+        let body = vec![
+            nest(Shape::Call, vec![leaf(Shape::MacroCall)]),
+            nest(Shape::Call, vec![leaf(Shape::MacroCall)]),
+        ];
+        assert_eq!(classify(&unit_of(body)), None);
     }
 
     #[test]

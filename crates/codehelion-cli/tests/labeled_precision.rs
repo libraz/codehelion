@@ -124,9 +124,9 @@ const CORPORA: &[Expected] = &[
     Expected {
         name: "serde-json",
         confirmed: 44,
-        refuted: 30,
+        refuted: 29,
         forward_confirmed: 39,
-        forward_refuted: 30,
+        forward_refuted: 29,
     },
     Expected {
         name: "spdlog",
@@ -190,7 +190,7 @@ const ORDERINGS: &[Ordering] = &[
 /// one silently redistributes every finding here. What the numbers say about
 /// the bands themselves is argued from the table, not from this assertion.
 const BANDS: &[(&str, usize, usize)] = &[
-    ("high", 64, 72),
+    ("high", 64, 71),
     ("medium", 15, 3),
     ("low", 14, 5),
     ("(unscored)", 42, 6),
