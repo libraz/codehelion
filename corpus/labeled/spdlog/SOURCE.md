@@ -36,7 +36,10 @@ hand-written formatter dispatch table of about thirty small classes.
 ## What the verdicts show
 
 Twenty-one of the thirty-nine reported groups are clones worth reporting and
-eighteen are lookalikes. The classes that account for the lookalikes:
+eighteen are lookalikes. One of the eighteen is no longer reported — a shape
+the tool now recognises and withholds — so what a scan puts up for scoring
+today is twenty-one against seventeen. The classes that account for the
+lookalikes:
 
 - `getter-boilerplate` (4) — a lock and one assignment, or a lock and one
   return. One group holds five of them, drawn from three unrelated classes.
@@ -44,7 +47,11 @@ eighteen are lookalikes. The classes that account for the lookalikes:
   wide `to_string_view`, the SFINAE pair selected on a log-id constant, and
   `clone` written once in the base class and once in the derived one.
 - `forwarding-wrapper` (3) — `localtime` beside `gmtime`, and the pair of
-  one-line platform conditionals that stand for `isatty` and `getpid`.
+  one-line platform conditionals that stand for `isatty` and `getpid`. That
+  pair is now withheld: each body is two `return`s under `#ifdef _WIN32` with
+  nothing choosing between them, so what the two share is the platform split
+  and not a duplicate. Its label stays as the guard that notices if it comes
+  back.
 - `guarded-forwarding` (2), `mirrored-operation` (2), and one each of
   `dispatch-table-entry`, `validated-setter` and `member-call-run`.
 

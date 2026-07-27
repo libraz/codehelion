@@ -32,9 +32,9 @@ the same to a reader.
 ## What the verdicts show
 
 Forty-four of the groups reported here are clones worth reporting and thirty
-are lookalikes. Eight of the thirty are no longer reported at all — one a
-defect that was fixed, seven shapes the tool now recognises and withholds — so
-what a scan puts up for scoring today is forty-four against twenty-two. The
+are lookalikes. Nine of the thirty are no longer reported at all — one a
+defect that was fixed, eight shapes the tool now recognises and withholds — so
+what a scan puts up for scoring today is forty-four against twenty-one. The
 classes that account for the lookalikes:
 
 - `type-specialised-variant` (11) — one routine per integer or float width.
@@ -46,7 +46,10 @@ classes that account for the lookalikes:
   delegating call, or a non-mutating wrapper over the in-place operation. One
   of the eight is a wrapper whose argument is spelled with a macro, and it is
   now classified and withheld rather than reported; its label stays as the
-  guard that notices if it comes back.
+  guard that notices if it comes back. So is a second, which is not a wrapper
+  at all: `Map::remove` and `remove_entry` each hold two `return`s under
+  opposite `#[cfg(feature = "preserve_order")]` attributes, so which answer
+  exists is a build setting and never both.
 - `type-dispatch-accessor` (5) — a match that extracts one variant and falls
   back. One group holds nineteen of them.
 - `exhaustive-match-table` (3) — two matches that enumerate a type's cases,
