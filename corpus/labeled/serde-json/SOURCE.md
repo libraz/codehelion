@@ -32,14 +32,16 @@ the same to a reader.
 ## What the verdicts show
 
 Forty-four of the groups reported here are clones worth reporting and thirty
-are lookalikes. Two of the thirty are no longer reported at all — one a defect
-that was fixed, one a shape the classifier now recognises — so what a scan puts
-up for scoring today is forty-four against twenty-nine. The classes that
-account for the lookalikes:
+are lookalikes. Eight of the thirty are no longer reported at all — one a
+defect that was fixed, seven shapes the tool now recognises and withholds — so
+what a scan puts up for scoring today is forty-four against twenty-two. The
+classes that account for the lookalikes:
 
 - `type-specialised-variant` (11) — one routine per integer or float width.
   Two of these groups hold eleven and twelve members: every `serialize_i8`
-  through `serialize_u128`, and every `write_i8` through `write_f64`.
+  through `serialize_u128`, and every `write_i8` through `write_f64`. Seven of
+  the eleven are now read as a family and withheld; their labels stay as the
+  guard that notices if one comes back.
 - `forwarding-wrapper` (8) — an entry point whose body is a buffer and one
   delegating call, or a non-mutating wrapper over the in-place operation. One
   of the eight is a wrapper whose argument is spelled with a macro, and it is

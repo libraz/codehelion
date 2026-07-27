@@ -35,7 +35,9 @@ self-authored case in this corpus reaches. The three classes that account for
 most of them:
 
 - `type-specialised-variant` — the same routine written once per integer width
-  (`LZ4_read16/32/64`, `XXH32_*` beside `XXH64_*`).
+  (`LZ4_read16/32/64`, `XXH32_*` beside `XXH64_*`). Five of these are now read
+  as a family and withheld; their labels stay as the guard that notices if one
+  comes back.
 - `forwarding-wrapper` — public entry points that pass different constants to
   one generic implementation. Two of these groups hold ten and eleven members.
 - `unrolled-repetition` — two stretches of one hand-unrolled run, alike because
