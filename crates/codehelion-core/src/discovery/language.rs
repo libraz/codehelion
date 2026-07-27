@@ -20,6 +20,10 @@
 //! run, not one per file: a header's language is part of the build variant
 //! every result is attributed to, and two copies of the same code must not
 //! land in different languages because one of them happened to parse better.
+//!
+//! A header-only library offers no such files at all, and it is the case where
+//! guessing costs the most: every line of the project is in the headers. There
+//! the headers are read for something only C++ spells — see [`speaks_cpp`].
 
 use std::path::Path;
 
@@ -100,19 +104,129 @@ impl HeaderEvidence {
         }
     }
 
-    /// The language to read bare `.h` headers as.
+    /// The language to read bare `.h` headers as, when the tree says.
     ///
     /// C++ only when the tree holds strictly more unambiguous C++ files than C
-    /// ones, so a tree that offers no evidence — no C or C++ sources at all —
-    /// settles on C, the narrower of the two grammars.
+    /// ones. [`None`] when it holds neither, which is not a tie to be broken
+    /// but a question this tally cannot answer: a header-only library has no
+    /// files outside the headers, so there is nothing here to read the headers
+    /// against.
     #[must_use]
-    pub const fn verdict(self) -> Language {
-        if self.cpp > self.c {
-            Language::Cpp
-        } else {
-            Language::C
+    pub const fn verdict(self) -> Option<Language> {
+        match (self.c, self.cpp) {
+            (0, 0) => None,
+            (c, cpp) if cpp > c => Some(Language::Cpp),
+            _ => Some(Language::C),
         }
     }
+}
+
+/// Whether `source` spells something only C++ has.
+///
+/// The fallback for a tree whose extensions settle nothing. It is a spelling
+/// check and not a parse: comments and literals are skipped, and what is left
+/// is searched for four constructs C has no reading of — a scope resolution,
+/// a template's angle bracket, a named namespace, and an include of a standard
+/// header without an extension.
+///
+/// One header saying C++ settles the whole run, because the two mistakes are
+/// not the same size. C++ is nearly a superset, so a C header read with the
+/// C++ grammar parses; a C++ header read with the C grammar does not, and the
+/// error recovery spreads the damage past the construct that caused it. Where
+/// the evidence is this thin, the reading that survives being wrong is the one
+/// to take.
+pub(super) fn speaks_cpp(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let rest = &bytes[index..];
+        match rest {
+            [b'/', b'/', ..] => index += skip_until(rest, b"\n"),
+            [b'/', b'*', ..] => index += skip_until(&rest[2..], b"*/") + 2,
+            [b'"', ..] => index += skip_literal(rest, b'"'),
+            [b'\'', ..] => index += skip_literal(rest, b'\''),
+            [b':', b':', ..] => return true,
+            [b'#', ..] => {
+                let line = &rest[..skip_until(rest, b"\n")];
+                if bare_standard_include(line) {
+                    return true;
+                }
+                index += line.len();
+            }
+            [first, ..] if first.is_ascii_alphabetic() || *first == b'_' => {
+                let word = word_at(rest);
+                // `template` and `namespace` are ordinary identifiers in C, so
+                // it is what follows that makes them C++: an angle bracket
+                // opening a parameter list, a name or a brace opening a scope.
+                let after = rest[word.len()..]
+                    .iter()
+                    .position(|byte| !byte.is_ascii_whitespace())
+                    .map(|offset| rest[word.len() + offset]);
+                match (word, after) {
+                    (b"template", Some(b'<')) => return true,
+                    (b"namespace", Some(byte))
+                        if byte.is_ascii_alphabetic() || byte == b'_' || byte == b'{' =>
+                    {
+                        return true;
+                    }
+                    _ => {}
+                }
+                index += word.len();
+            }
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+/// Bytes up to and including the first `needle`, or all of `bytes`.
+fn skip_until(bytes: &[u8], needle: &[u8]) -> usize {
+    bytes
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map_or(bytes.len(), |offset| offset + needle.len())
+}
+
+/// Bytes of the literal starting at `bytes[0]`, closing on an unescaped
+/// `quote`. An unterminated literal swallows the rest, which is the reading
+/// that cannot loop.
+fn skip_literal(bytes: &[u8], quote: u8) -> usize {
+    let mut index = 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            byte if byte == quote => return index + 1,
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// The identifier at the start of `bytes`.
+fn word_at(bytes: &[u8]) -> &[u8] {
+    let end = bytes
+        .iter()
+        .position(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'_'))
+        .unwrap_or(bytes.len());
+    &bytes[..end]
+}
+
+/// Whether a preprocessor line includes an angle-bracketed header with no
+/// extension: `<memory>` is a C++ standard header, `<string.h>` is C's.
+fn bare_standard_include(line: &[u8]) -> bool {
+    let Some(open) = line.iter().position(|byte| *byte == b'<') else {
+        return false;
+    };
+    let Some(close) = line[open..].iter().position(|byte| *byte == b'>') else {
+        return false;
+    };
+    let name = &line[open + 1..open + close];
+    !name.is_empty()
+        && !name.contains(&b'.')
+        && !name.contains(&b'/')
+        && name
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
 }
 
 /// The languages a discovery run is allowed to enumerate.
@@ -307,7 +421,7 @@ mod tests {
     }
 
     /// Tally `names` the way discovery does, and return the verdict.
-    fn verdict_over(names: &[&str]) -> Language {
+    fn verdict_over(names: &[&str]) -> Option<Language> {
         let mut evidence = HeaderEvidence::default();
         for name in names {
             if let Some(classification) = classify_str(name, HeaderPolicy::Detect) {
@@ -321,7 +435,7 @@ mod tests {
     fn a_tree_written_mostly_in_cpp_reads_its_bare_headers_as_cpp() {
         assert_eq!(
             verdict_over(&["a.cpp", "b.cc", "c.hpp", "vendored.c", "x.h", "y.h"]),
-            Language::Cpp
+            Some(Language::Cpp)
         );
     }
 
@@ -330,19 +444,21 @@ mod tests {
         // Two vendored C++ fuzz harnesses do not make a C project C++.
         assert_eq!(
             verdict_over(&["a.c", "b.c", "c.c", "fuzz.cc", "bench.cc", "a.h"]),
-            Language::C
+            Some(Language::C)
         );
     }
 
     #[test]
-    fn a_tree_with_nothing_to_go_on_reads_its_bare_headers_as_c() {
+    fn a_tree_with_nothing_to_go_on_leaves_the_question_open() {
         // No C or C++ translation unit anywhere: a lone header in a Rust
-        // tree, or a header-only library shipped by itself. C is the narrower
-        // grammar, so it is the one that claims least.
-        assert_eq!(verdict_over(&["main.rs", "lib.rs", "a.h"]), Language::C);
-        assert_eq!(verdict_over(&[]), Language::C);
-        // A tie is not evidence either.
-        assert_eq!(verdict_over(&["a.c", "b.cpp"]), Language::C);
+        // tree, or a header-only library shipped by itself. The tally has
+        // nothing to say, and saying so is what sends the caller to read the
+        // headers instead of settling them by default.
+        assert_eq!(verdict_over(&["main.rs", "lib.rs", "a.h"]), None);
+        assert_eq!(verdict_over(&[]), None);
+        // A tie between translation units is evidence, and it reads as C: a
+        // project with as many C files as C++ ones is not a C++ project.
+        assert_eq!(verdict_over(&["a.c", "b.cpp"]), Some(Language::C));
     }
 
     #[test]
@@ -354,7 +470,39 @@ mod tests {
         for name in ["a.cpp", "one.h", "two.h", "three.h", "four.h"] {
             evidence.observe(classify_str(name, HeaderPolicy::Detect).expect("classified"));
         }
-        assert_eq!(evidence.verdict(), Language::Cpp);
+        assert_eq!(evidence.verdict(), Some(Language::Cpp));
+    }
+
+    #[test]
+    fn a_header_that_spells_something_only_cpp_has_is_read_as_cpp() {
+        for source in [
+            "namespace spdlog {\nint f(void);\n}\n",
+            "template <typename T>\nT identity(T value) { return value; }\n",
+            "int width = detail::pad_to(8);\n",
+            "#include <memory>\n",
+        ] {
+            assert!(speaks_cpp(source), "missed C++ in {source:?}");
+        }
+    }
+
+    #[test]
+    fn a_c_header_is_not_talked_into_cpp_by_its_prose() {
+        for source in [
+            // The words are all C++, and every one of them is in a comment,
+            // a string or a name C is entitled to use.
+            "/* A class of namespace, template :: style. */\nint f(void);\n",
+            "// namespace ::template\nint f(void);\n",
+            "static const char *doc = \"namespace x { template <int> };\";\n",
+            "#include <string.h>\n#include <sys/types.h>\n",
+            "struct s { int template; int namespace; };\n",
+            // A bitfield's colon, twice, is not a scope resolution.
+            "struct s { unsigned a : 1; unsigned b : 1; };\n",
+            // An unterminated literal must not read past itself into a
+            // verdict, and must not loop.
+            "static const char *unclosed = \"namespace\n",
+        ] {
+            assert!(!speaks_cpp(source), "read C++ into {source:?}");
+        }
     }
 
     #[test]

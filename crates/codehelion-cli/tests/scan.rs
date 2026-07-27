@@ -399,6 +399,39 @@ fn a_bare_header_is_read_as_the_language_the_tree_is_written_in() {
     );
 }
 
+/// A header-only library is the case with nothing to vote, and the case where
+/// getting it wrong costs everything.
+///
+/// There is no `.cpp` to outvote a `.c` because there are no translation units
+/// at all — every line the run will read is in the headers. Settling that by
+/// default would read a whole C++ project with the C grammar, which does not
+/// merely skip the C++ declarations: error recovery reshapes what surrounds
+/// them, so most of the project stops being analysed at all.
+#[test]
+fn a_library_that_is_nothing_but_headers_is_read_by_what_the_headers_say() {
+    let cpp_only = header_fixture(&[]);
+    assert_eq!(
+        header_reading(cpp_only.path(), None),
+        (0, 1, "cpp".to_string()),
+        "the header declares a namespace and a class, and nothing else speaks"
+    );
+
+    // And a C library shipped the same way stays C: the check is for what only
+    // C++ can spell, not for a C++-looking word.
+    let c_only = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        c_only.path().join("mixer.h"),
+        "/* Widgets of every class, in the namespace sense. */\n#include <string.h>\n\
+         static int mixer_width(const char *s) { return (int) strlen(s); }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        header_reading(c_only.path(), None),
+        (1, 0, "c".to_string()),
+        "the C++ words are all in a comment"
+    );
+}
+
 #[test]
 fn the_configured_header_grammar_overrides_the_tree_and_moves_the_variant() {
     let dir = header_fixture(&["a.cpp", "b.cpp"]);

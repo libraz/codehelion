@@ -151,7 +151,10 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
     let header_language = match config.header_policy {
         HeaderPolicy::C => Language::C,
         HeaderPolicy::Cpp => Language::Cpp,
-        HeaderPolicy::Detect => walked.evidence.verdict(),
+        HeaderPolicy::Detect => walked
+            .evidence
+            .verdict()
+            .unwrap_or_else(|| headers_read_alone(&walked.candidates)),
     };
     let layout = CargoLayout::from_manifests(&walked.manifests);
     let compile_commands = walked
@@ -216,6 +219,31 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
         skipped,
         compile_commands,
     })
+}
+
+/// Settle bare `.h` headers from the headers themselves, for a tree that has
+/// nothing else to settle them from.
+///
+/// Reached only when no `.c`, `.cpp` or unambiguously-extended header was
+/// found at all, which in practice means a header-only library: every line the
+/// run will read is in these files, so the grammar is the whole result rather
+/// than a detail of it. Each header's head is read for a C++-only spelling and
+/// the first one that speaks decides — `language::speaks_cpp` says why one is
+/// enough, and why C is the answer when none of them says otherwise.
+fn headers_read_alone(candidates: &[walk::Candidate]) -> Language {
+    for candidate in candidates {
+        if !candidate.classification.provisional {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&candidate.absolute_path) else {
+            continue;
+        };
+        let head = &bytes[..bytes.len().min(HEAD_BYTES)];
+        if language::speaks_cpp(&String::from_utf8_lossy(head)) {
+            return Language::Cpp;
+        }
+    }
+    Language::C
 }
 
 #[cfg(test)]

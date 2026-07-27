@@ -117,7 +117,9 @@ read in leave every identifier alone and cost you nothing.
 decides what the analysis can see inside it: a C++ header read as C recovers
 into shapes that declare nothing, which both hides its real duplication and
 invents duplication between class bodies. `detect` counts the files whose
-extension is not in doubt and follows the majority. The choice is part of the
+extension is not in doubt and follows the majority; where a tree has none —
+a header-only library — it reads the headers themselves for something only C++
+spells, and one of them saying so settles the run. The choice is part of the
 run's build variant, so results read one way are never compared with results
 read the other.
 
