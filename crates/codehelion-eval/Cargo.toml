@@ -38,6 +38,12 @@ tempfile = "3"
 
 [dev-dependencies]
 assert_cmd = "2"
+# The frontends are here rather than above because only the `ir-dump` example
+# parses: the harness scores what a scan reported and never parses anything
+# itself.
+codehelion-frontend-c = { version = "0.1.0", path = "../codehelion-frontend-c" }
+codehelion-frontend-cpp = { version = "0.1.0", path = "../codehelion-frontend-cpp" }
+codehelion-frontend-rust = { version = "0.1.0", path = "../codehelion-frontend-rust" }
 predicates = "3"
 
 [lints]
