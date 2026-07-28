@@ -1283,8 +1283,9 @@ impl Report {
             writeln!(
                 out,
                 "  note: {} set(s) of related units were too large to compare as one and were \
-                 cut; clones of each other may be reported as separate groups",
+                 cut; clones of each other may be reported as separate groups{}",
                 summary.split_components,
+                severed_note(&summary.funnel),
             )?;
         }
         if summary.pair_budget_exhausted {
@@ -1714,6 +1715,28 @@ fn budget_note(funnel: &[FunnelStage]) -> String {
          candidate pairs; the {skipped} left unexamined may hold duplication this report does \
          not list"
     )
+}
+
+/// What a cut kept from being reported, appended to the note about the cut.
+///
+/// Two units the cut put in different pieces were never weighed against each
+/// other, so a relation between them is not carried out as a pair — it would
+/// restate the same set once per crossing, and a set large enough to be cut is
+/// large enough for that to be the whole report. The count says how much was
+/// held back, which is the difference between a coarser answer and a quieter
+/// one. Empty when nothing was held back, so the note stays one sentence in
+/// the case where the cut cost nothing.
+fn severed_note(funnel: &[FunnelStage]) -> String {
+    let severed: u64 = funnel
+        .iter()
+        .flat_map(|stage| stage.dropped.iter())
+        .filter(|drop| drop.cause == "the_ceiling_cut_the_set")
+        .map(|drop| drop.count)
+        .sum();
+    if severed == 0 {
+        return String::new();
+    }
+    format!(", and {severed} verified pair(s) across the cut are counted rather than listed")
 }
 
 #[cfg(test)]

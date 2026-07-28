@@ -80,6 +80,13 @@ pub struct GroupingConfig {
     /// still cohesive. What is lost is the chance that two members landing in
     /// different pieces would have grouped. The cut is by stable key, so it is
     /// deterministic, and the count of components it fired on is reported.
+    ///
+    /// Which members the cut put apart is reported too, through
+    /// [`GroupingSet::severed_by_the_ceiling`]. A caller that carries out the
+    /// verified relations no group expresses needs it: a relation across the
+    /// cut is not one refinement weighed and declined, and carrying it out
+    /// would restate the set once per crossing — at the size that makes this
+    /// ceiling fire, that is the whole report.
     pub max_component: usize,
 }
 
@@ -174,8 +181,33 @@ pub struct GroupingStats {
 pub struct GroupingSet {
     /// Cohesive groups, ordered by their medoid's key.
     pub groups: Vec<StructuralGroup>,
+    /// Which piece each unit of a cut component landed in.
+    ///
+    /// Empty unless [`GroupingConfig::max_component`] fired. Units of a
+    /// component small enough to refine whole are absent, because nothing
+    /// about them was decided by the ceiling.
+    piece_of: BTreeMap<usize, u32>,
     /// What grouping saw and did.
     pub stats: GroupingStats,
+}
+
+impl GroupingSet {
+    /// Whether the component ceiling is why these two were never weighed
+    /// against each other.
+    ///
+    /// Two units in one component that the ceiling cut into pieces, and in
+    /// different pieces, were never candidates for the same group — not
+    /// because refinement judged them apart but because refinement never saw
+    /// them together. A caller carrying out the relations no group expresses
+    /// has to tell that apart from the ones a group declined to hold, which
+    /// are a fact about the code rather than about a ceiling.
+    #[must_use]
+    pub fn severed_by_the_ceiling(&self, a: usize, b: usize) -> bool {
+        match (self.piece_of.get(&a), self.piece_of.get(&b)) {
+            (Some(left), Some(right)) => left != right,
+            _ => false,
+        }
+    }
 }
 
 /// Group verified pairs into cohesive clone groups.
@@ -199,8 +231,20 @@ pub fn group(
     stats.components = components.len();
 
     let mut groups = Vec::new();
+    // Which piece a unit landed in, recorded only where the ceiling cut, so a
+    // relation the cut prevented can later be told from one refinement weighed
+    // and declined.
+    let mut piece_of: BTreeMap<usize, u32> = BTreeMap::new();
+    let mut next_piece = 0u32;
     for component in &components {
+        let cut = component.len() > piece_limit(config);
         for piece in refinable_pieces(component, units, config, &mut stats) {
+            if cut {
+                for &member in &piece {
+                    piece_of.insert(member, next_piece);
+                }
+                next_piece += 1;
+            }
             refine_component(&piece, units, &sim, config, &mut groups, &mut stats);
         }
     }
@@ -213,7 +257,23 @@ pub fn group(
             .then(left.members.len().cmp(&right.members.len()))
     });
     stats.groups = groups.len();
-    GroupingSet { groups, stats }
+    GroupingSet {
+        groups,
+        piece_of,
+        stats,
+    }
+}
+
+/// The largest set refinement runs on as one piece.
+///
+/// At least two, because a ceiling of one would cut every pair apart and leave
+/// nothing that could group at all.
+const fn piece_limit(config: &GroupingConfig) -> usize {
+    if config.max_component > 2 {
+        config.max_component
+    } else {
+        2
+    }
 }
 
 /// Symmetric similarity lookup over the verified edges. Absent pairs read as
@@ -335,7 +395,7 @@ fn refinable_pieces(
     config: &GroupingConfig,
     stats: &mut GroupingStats,
 ) -> Vec<Vec<usize>> {
-    let limit = config.max_component.max(2);
+    let limit = piece_limit(config);
     if component.len() <= limit {
         return vec![component.to_vec()];
     }
@@ -702,6 +762,40 @@ mod tests {
         assert_eq!(set.stats.oversized_components, 0);
         assert_eq!(set.groups.len(), 1);
         assert_eq!(set.groups[0].members.len(), 4);
+        assert!(
+            !set.severed_by_the_ceiling(0, 3),
+            "nothing was cut, so nothing was severed"
+        );
+    }
+
+    #[test]
+    fn the_cut_says_which_pairs_it_kept_from_ever_meeting() {
+        // Ten mutual clones under a ceiling of four: cut into three pieces, so
+        // members of different pieces were never weighed against each other.
+        // A caller carrying out the relations no group holds has to tell that
+        // apart from a relation refinement considered and declined.
+        let units = units(10);
+        let config = GroupingConfig {
+            max_component: 4,
+            ..GroupingConfig::default()
+        };
+        let set = group(&units, &clique(10), &config);
+
+        let piece_of = |unit: usize| {
+            set.groups
+                .iter()
+                .position(|group| group.members.contains(&unit))
+                .expect("every member is grouped")
+        };
+        for left in 0..10 {
+            for right in (left + 1)..10 {
+                assert_eq!(
+                    set.severed_by_the_ceiling(left, right),
+                    piece_of(left) != piece_of(right),
+                    "{left} and {right}"
+                );
+            }
+        }
     }
 
     #[test]

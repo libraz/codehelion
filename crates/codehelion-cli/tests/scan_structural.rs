@@ -2092,3 +2092,82 @@ fn a_tighter_ceiling_never_makes_the_report_longer() {
     // above is not monotone merely by finding nothing throughout.
     assert!(previous < 8, "{ceilings}");
 }
+
+/// A ceiling that cuts a set apart must not then report the cut as findings.
+///
+/// Refinement runs on sets, and comparing a set costs time quadratic in its
+/// size, so a set past the ceiling is cut into pieces and each piece refined on
+/// its own. Two members in different pieces are then never weighed against each
+/// other — and the relation between them, which verification had already
+/// accepted, comes back out as a pair no group holds both halves of. The
+/// ceiling exists so that a repository of thousands of interchangeable units
+/// cannot make a scan expensive; reporting what it severed would move that
+/// expense onto the reader, one pair at a time, at the size of the set squared.
+///
+/// So the severed relations are counted under a cause of their own instead of
+/// being listed. What the ceiling costs is a coarser partition, which is the
+/// price it was always documented to charge; what it must not cost is a report
+/// made of the same duplication restated.
+#[test]
+fn a_set_the_ceiling_cut_is_not_reported_as_the_pairs_it_severed() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).expect("create src");
+    for index in 0..8 {
+        std::fs::write(src.join(format!("m{index}.rs")), family_member(index))
+            .expect("write source");
+    }
+
+    let whole = scan_json(dir.path());
+    // Whole-unit findings only: the statement run the eight share is a
+    // sub-unit view of the same code, and the ceiling is about sets of units.
+    let units = |value: &serde_json::Value| {
+        value["groups"]
+            .as_array()
+            .expect("the report lists its groups")
+            .iter()
+            .filter(|group| group["scope"] == "unit")
+            .count()
+    };
+    assert_eq!(
+        units(&whole),
+        1,
+        "the family is one group when nothing cuts"
+    );
+
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[limits]\nmax-component = 3\n",
+    )
+    .expect("write the ceiling");
+    let cut = scan_json(dir.path());
+    assert_eq!(cut["summary"]["split_components"], 1, "{cut:#?}");
+
+    // Three pieces, so three groups: the coarser partition is what the ceiling
+    // charges. Anything beyond that would be the severed relations coming back
+    // as rows, and twenty-one of the twenty-eight verified pairs are severed.
+    assert_eq!(units(&cut), 3, "{cut:#?}");
+    assert!(
+        cut["groups"]
+            .as_array()
+            .expect("groups")
+            .iter()
+            .all(|group| group["split_pair"] == false),
+        "{cut:#?}"
+    );
+
+    // And the count is stated rather than left to be noticed.
+    let verified = cut["summary"]["funnel"]
+        .as_array()
+        .expect("a funnel")
+        .iter()
+        .find(|stage| stage["stage"] == "verified pairs")
+        .expect("the funnel names the verification stage");
+    let severed = verified["dropped"]
+        .as_array()
+        .expect("the stage accounts for what it dropped")
+        .iter()
+        .find(|drop| drop["cause"] == "the_ceiling_cut_the_set")
+        .expect("the cut is named as a cause");
+    assert!(severed["count"].as_u64().expect("a count") > 0, "{cut:#?}");
+}

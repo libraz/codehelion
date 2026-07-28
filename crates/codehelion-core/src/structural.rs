@@ -311,6 +311,10 @@ pub struct StructuralStats {
     /// relates their two sides, one of them holding a unit nested inside the
     /// other side.
     pub described_pairs: usize,
+    /// Verified pairs left out because the component ceiling cut their two
+    /// sides into separate pieces, so no group was ever in a position to hold
+    /// both. Zero unless [`GroupingConfig::max_component`] fired.
+    pub severed_pairs: usize,
     /// Grouping statistics.
     pub grouping: GroupingStats,
 }
@@ -427,7 +431,8 @@ pub fn analyze(
         .map(|group| group_detail(group, &units, files, &feature_files, variant, config))
         .collect();
 
-    let (unrepresented, described_pairs) = unrepresented_pairs(&edges, &groups, &units, variant);
+    let (unrepresented, described_pairs, severed_pairs) =
+        unrepresented_pairs(&edges, &groups, &units, variant);
 
     let stats = StructuralStats {
         files: files.len(),
@@ -449,6 +454,7 @@ pub fn analyze(
         verified_pairs: edges.len(),
         unrepresented_pairs: unrepresented.len(),
         described_pairs,
+        severed_pairs,
         grouping: groups.stats.clone(),
     };
 
@@ -1330,22 +1336,37 @@ impl Proposal<'_> {
 /// of each other remain worth knowing about whether or not a larger set formed
 /// around them.
 ///
-/// Not every surviving verdict is such a relation. A crossing whose two sides
-/// the report already relates through a group is not a second fact about the
-/// code, and it is returned as a count rather than an entry — see
-/// [`already_described`].
+/// Not every surviving verdict is such a relation. Two are returned as counts
+/// rather than entries:
+///
+/// - a crossing whose two sides the report already relates through a group is
+///   not a second fact about the code — see [`already_described`];
+/// - a crossing the component ceiling severed is not a fact about the code at
+///   all. Where a set was too large to refine whole it was cut, and two units
+///   in different pieces were never weighed against each other. Carrying those
+///   out reads as "these are copies and no group holds them", which is true of
+///   the relation and false about why: nothing declined to hold them. The set
+///   that made the ceiling fire is one of thousands of interchangeable units,
+///   so what this spares the reader is the whole of that set restated one pair
+///   at a time — the ceiling exists to keep such a repository from making the
+///   scan expensive, and listing its severed pairs would move that expense
+///   onto the person reading the result.
 fn unrepresented_pairs(
     edges: &[SimilarityEdge],
     groups: &GroupingSet,
     units: &[Unit],
     variant: &BuildVariant,
-) -> (Vec<VerifiedPair>, usize) {
+) -> (Vec<VerifiedPair>, usize, usize) {
     let mut group_of: BTreeMap<usize, usize> = BTreeMap::new();
     for (index, group) in groups.groups.iter().enumerate() {
         for &member in &group.members {
             group_of.insert(member, index);
         }
     }
+    let severed = edges
+        .iter()
+        .filter(|edge| groups.severed_by_the_ceiling(edge.a, edge.b))
+        .count();
     // Fold the surviving verdicts by the pair of contents they are about. Two
     // verdicts over the same two contents are one fact: the judge compares
     // normalized content, so where it accepted one crossing it accepts every
@@ -1353,12 +1374,13 @@ fn unrepresented_pairs(
     // anyway — their ids are composed from content alone.
     let mut folded: BTreeMap<(FragmentFingerprint, FragmentFingerprint, CloneClass), Folded> =
         BTreeMap::new();
-    for edge in edges.iter().filter(
-        |edge| match (group_of.get(&edge.a), group_of.get(&edge.b)) {
-            (Some(a), Some(b)) => a != b,
-            _ => true,
-        },
-    ) {
+    for edge in edges.iter().filter(|edge| {
+        !groups.severed_by_the_ceiling(edge.a, edge.b)
+            && match (group_of.get(&edge.a), group_of.get(&edge.b)) {
+                (Some(a), Some(b)) => a != b,
+                _ => true,
+            }
+    }) {
         // Which content is canonical follows content, not position: the two
         // are peers, and an index would make the id depend on walk order.
         let (canonical, other) = if units[edge.a].content <= units[edge.b].content {
@@ -1424,7 +1446,7 @@ fn unrepresented_pairs(
             .total_cmp(&left.similarity)
             .then_with(|| left.members.cmp(&right.members))
     });
-    (pairs, described)
+    (pairs, described, severed)
 }
 
 /// Verdicts accumulated for one pair of contents.
