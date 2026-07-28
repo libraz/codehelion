@@ -697,7 +697,7 @@ pub(crate) fn discover_sources(
         },
         header_policy: cfg.languages.headers.into(),
         generated_markers: GeneratedMarkers::new(
-            cfg.suppression.generated_markers.clone(),
+            &cfg.suppression.generated_markers,
             DEFAULT_SCAN_LINES,
         ),
     };

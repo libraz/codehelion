@@ -106,7 +106,9 @@ read in leave every identifier alone and cost you nothing.
 # paths = []                        # path globs to hide; vendored trees go here
 # symbols = []                      # globs over the name of the enclosing unit
 # clone-ids = []                    # stable clone ids (hex, prefix allowed)
-# generated-markers = ["@generated", "DO NOT EDIT"]
+# generated-markers = ["@generated", "do not edit", "automatically generated"]
+                                    # banners flagging machine output, matched
+                                    # without regard to case; replaces defaults
 
 [limits]                            # resource ceilings, all reported when hit
 # max-file-bytes = 2097152

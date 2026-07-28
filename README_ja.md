@@ -101,7 +101,9 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 # paths = []                        # 隠すパス glob。vendor 配下はここへ
 # symbols = []                      # 所属ユニット名に対する glob
 # clone-ids = []                    # 安定クローン ID（hex、前方一致可）
-# generated-markers = ["@generated", "DO NOT EDIT"]
+# generated-markers = ["@generated", "do not edit", "automatically generated"]
+                                    # 生成物を示すバナー。大文字小文字は無視。
+                                    # 設定すると既定値を置き換える
 
 [limits]                            # リソース上限。発火時は必ずレポートに計上
 # max-file-bytes = 2097152
