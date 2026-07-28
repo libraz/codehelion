@@ -46,6 +46,7 @@ use super::{
     FileOutcome, ScanBaseline, as_u64, database_path, discover_sources, effective_jobs,
     filter_globs, literal_norm, map_sources, open_store, rfc3339_now, write_report,
 };
+
 use crate::Outcome;
 use crate::cli::ScanArgs;
 use crate::config::{self, BoilerplatePolicy, CategoryAction, Config};
@@ -1390,63 +1391,73 @@ fn snapshot_rows(
     let split_pairs = (0..inputs.analysis.unrepresented.len())
         .map(|index| split_pair_row(inputs, index, &host_index, &ranking))
         .collect::<Result<Vec<_>>>()?;
-    let groups = inputs
-        .analysis
-        .groups
-        .groups
-        .iter()
-        .enumerate()
-        .map(|(index, group)| {
-            let detail = &inputs.analysis.details[index];
-            let medoid = &inputs.analysis.units[group.canonical];
-            Ok(GroupRow {
-                fingerprint: detail.fingerprint,
-                history: GroupOrigin::unconnected(&detail.fingerprint),
-                clone_type: group.clone_type,
-                member_scope: CloneScope::Unit,
-                statements: None,
-                test_code: detail.test_code,
-                split_pair: false,
-                score: group.min_pairwise,
-                entropy_bits: engine::content_entropy_bits(
-                    inputs.unit_tokens(medoid),
-                    inputs.literals,
-                ),
-                // The structural funnel marks no noise category yet.
-                suppress_reason: None,
-                boilerplate: detail.boilerplate,
-                width_family: detail.width_family,
-                suppressed_by: inputs.group_suppressed[index],
-                priority: recorded_ranking(&ranking, &detail.fingerprint.to_hex())?,
-                similarity: Some(breakdown_row(group, detail)),
-                members: group
-                    .members
-                    .iter()
-                    .map(|&member| {
-                        let unit = &inputs.analysis.units[member];
-                        let file = &inputs.files[unit.file];
-                        MemberRow {
-                            content: unit.content,
-                            finding: stable_id::finding_id(
-                                &detail.fingerprint,
-                                Some(&unit.fingerprint),
-                                0,
-                            ),
-                            language: file.language,
-                            host_unit: Some(host_index[&member]),
-                            file_path: file.relative_path.clone(),
-                            start_line: unit.start_line,
-                            end_line: unit.end_line,
-                            token_count: unit.token_end.saturating_sub(unit.token_start),
-                        }
-                    })
-                    .collect(),
-            })
-        })
+    let groups = (0..inputs.analysis.groups.groups.len())
+        .map(|index| unit_group_row(inputs, index, &host_index, &ranking))
         .chain(regions.into_iter().map(Ok))
         .chain(split_pairs.into_iter().map(Ok))
         .collect::<Result<Vec<_>>>()?;
     Ok((units, groups))
+}
+
+/// One duplicated-unit group as a store row, with its occurrences.
+///
+/// The rank is what tells two occurrences of one group apart when their
+/// enclosing units share a fingerprint, which is every verbatim copy: without
+/// it the whole group would be recorded under the canonical instance's
+/// identifier and `explain` could answer about none of the others.
+fn unit_group_row(
+    inputs: &ReportInputs<'_>,
+    index: usize,
+    host_index: &BTreeMap<usize, usize>,
+    ranking: &BTreeMap<&str, &report::Priority>,
+) -> Result<GroupRow> {
+    let group = &inputs.analysis.groups.groups[index];
+    let detail = &inputs.analysis.details[index];
+    let medoid = &inputs.analysis.units[group.canonical];
+    Ok(GroupRow {
+        fingerprint: detail.fingerprint,
+        history: GroupOrigin::unconnected(&detail.fingerprint),
+        clone_type: group.clone_type,
+        member_scope: CloneScope::Unit,
+        statements: None,
+        test_code: detail.test_code,
+        split_pair: false,
+        score: group.min_pairwise,
+        entropy_bits: engine::content_entropy_bits(inputs.unit_tokens(medoid), inputs.literals),
+        // The structural funnel marks no noise category yet.
+        suppress_reason: None,
+        boilerplate: detail.boilerplate,
+        width_family: detail.width_family,
+        suppressed_by: inputs.group_suppressed[index],
+        priority: recorded_ranking(ranking, &detail.fingerprint.to_hex())?,
+        similarity: Some(breakdown_row(group, detail)),
+        members: group
+            .members
+            .iter()
+            .zip(ranks_within_host(member_hosts(
+                &inputs.analysis.units,
+                &group.members,
+            )))
+            .map(|(&member, rank)| {
+                let unit = &inputs.analysis.units[member];
+                let file = &inputs.files[unit.file];
+                MemberRow {
+                    content: unit.content,
+                    finding: stable_id::finding_id(
+                        &detail.fingerprint,
+                        Some(&unit.fingerprint),
+                        rank,
+                    ),
+                    language: file.language,
+                    host_unit: Some(host_index[&member]),
+                    file_path: file.relative_path.clone(),
+                    start_line: unit.start_line,
+                    end_line: unit.end_line,
+                    token_count: unit.token_end.saturating_sub(unit.token_start),
+                }
+            })
+            .collect(),
+    })
 }
 
 /// The ranking the report gave one entry, by its fingerprint.

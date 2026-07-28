@@ -1973,3 +1973,36 @@ fn a_crossing_two_groups_already_account_for_is_not_reported_again() {
         "expected both crossings counted: {verified:#?}"
     );
 }
+
+/// Two copies of one function have the same content and therefore the same
+/// unit fingerprint, so what tells their occurrences apart is the rank the
+/// identifier carries. A report that prints one id and a database that holds
+/// another leave `explain` unable to answer about a finding the report named.
+#[test]
+fn every_occurrence_the_report_names_can_be_explained() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).expect("create src");
+    // Three verbatim copies: one group whose members share a fingerprint.
+    for name in ["a.rs", "b.rs", "c.rs"] {
+        std::fs::write(src.join(name), ALPHA_RS).expect("write source");
+    }
+
+    let value = scan_json(dir.path());
+    let members = value["groups"][0]["members"]
+        .as_array()
+        .expect("the group lists its occurrences");
+    assert_eq!(members.len(), 3, "{value:#?}");
+
+    for member in members {
+        let id = member["finding_id"].as_str().expect("a finding id");
+        cmd()
+            .current_dir(dir.path())
+            .args(["explain", id])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                member["file"].as_str().expect("a file path"),
+            ));
+    }
+}
