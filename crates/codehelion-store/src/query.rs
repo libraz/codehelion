@@ -72,6 +72,32 @@ pub struct RunOrigin {
     pub detector_versions: Vec<(String, String)>,
 }
 
+/// What a recorded run was told to do, as opposed to what it found.
+///
+/// Everything here is an input: the tree, the settings, the release. Two runs
+/// that agree on all of it and read the same bytes have the same answer, which
+/// is what lets one of them be reported again instead of recomputed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRecord {
+    /// Row id of the run.
+    pub id: i64,
+    /// Scanned root path.
+    pub root_path: String,
+    /// Tool version that wrote the run.
+    pub tool_version: String,
+    /// Hash of the effective configuration it ran under.
+    pub config_hash: String,
+    /// Analysis mode name.
+    pub analysis_mode: String,
+    /// RFC 3339 start time.
+    pub started_at: String,
+    /// RFC 3339 finish time.
+    pub finished_at: String,
+    /// The shortest clone the run would report. `None` for a run recorded
+    /// before runs stored the floor they reported under.
+    pub min_clone_tokens: Option<i64>,
+}
+
 /// One stored occurrence of a group's content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredMember {
@@ -462,6 +488,63 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?)
+    }
+
+    /// What the newest completed run over `root_path` under `variant` was told
+    /// to do, or `None` when there is no such run or it never finished.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn previous_run_record(
+        &self,
+        root_path: &str,
+        variant_fingerprint: &str,
+    ) -> Result<Option<RunRecord>, StoreError> {
+        let Some(run_id) = self.completed_run_id(root_path, Some(variant_fingerprint))? else {
+            return Ok(None);
+        };
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT root_path, tool_version, config_hash, analysis_mode,
+                        started_at, finished_at, min_clone_tokens
+                 FROM scan_run WHERE id = ?1 AND finished_at IS NOT NULL",
+                params![run_id],
+                |row| {
+                    Ok(RunRecord {
+                        id: run_id,
+                        root_path: row.get(0)?,
+                        tool_version: row.get(1)?,
+                        config_hash: row.get(2)?,
+                        analysis_mode: row.get(3)?,
+                        started_at: row.get(4)?,
+                        finished_at: row.get(5)?,
+                        min_clone_tokens: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// How many files of each language a run read, by language name.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn run_language_counts(&self, run_id: i64) -> Result<BTreeMap<String, u64>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT language, count(*) FROM scanned_file
+             WHERE scan_run_id = ?1 GROUP BY language ORDER BY language",
+        )?;
+        let mut counts = BTreeMap::new();
+        for row in stmt.query_map(params![run_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })? {
+            let (language, count) = row?;
+            counts.insert(language, u64::try_from(count).unwrap_or(0));
+        }
+        Ok(counts)
     }
 
     /// The newest completed run over `root_path`, with the identity a

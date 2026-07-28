@@ -135,7 +135,7 @@ fn rescans_reuse_stable_identifiers() {
     for _ in 0..2 {
         cmd()
             .current_dir(dir.path())
-            .args(["scan", "."])
+            .args(["scan", ".", "--no-reuse"])
             .assert()
             .success();
     }
@@ -339,10 +339,14 @@ fn scan_json(root: &Path) -> serde_json::Value {
 }
 
 /// The same, with extra arguments appended to the scan.
+///
+/// Always analyses: these tests are about what the analysis produces, and a
+/// scan that reports a recorded run again would be testing the database
+/// instead. The reuse path has its own tests.
 fn scan_json_with(root: &Path, extra: &[&str]) -> serde_json::Value {
     let output = cmd()
         .current_dir(root)
-        .args(["scan", ".", "--format", "json"])
+        .args(["scan", ".", "--format", "json", "--no-reuse"])
         .args(extra)
         .output()
         .expect("run scan");
@@ -1167,4 +1171,126 @@ fn recording_a_baseline_needs_a_scan_and_refuses_to_overwrite_silently() {
         ])
         .assert()
         .success();
+}
+
+/// The reuse path's own tests: a tree nobody touched is reported from the
+/// recorded run rather than analysed again, and every input that could change
+/// the answer defeats that.
+mod reuse {
+    use super::{cmd, fixture};
+    use std::path::Path;
+
+    /// Scan and parse, letting the reuse decision take its course.
+    fn scan(root: &Path, extra: &[&str]) -> serde_json::Value {
+        let output = cmd()
+            .current_dir(root)
+            .args(["scan", ".", "--format", "json"])
+            .args(extra)
+            .output()
+            .expect("run scan");
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice(&output.stdout).expect("stdout is one JSON document")
+    }
+
+    fn reused(value: &serde_json::Value) -> bool {
+        value["run"]["reused"] == serde_json::json!(true)
+    }
+
+    /// The report a reused run produces is the report an analysis produces:
+    /// everything but the run's own metadata and what it says about *this*
+    /// invocation's comparisons.
+    fn findings(mut value: serde_json::Value) -> serde_json::Value {
+        let run = value["run"].as_object_mut().expect("run object");
+        for key in ["started_at", "finished_at", "run_id", "reused"] {
+            run.remove(key);
+        }
+        let summary = value["summary"].as_object_mut().expect("summary object");
+        for key in ["changes", "audit"] {
+            summary.remove(key);
+        }
+        value
+    }
+
+    #[test]
+    fn an_untouched_tree_is_reported_from_the_run_that_read_it() {
+        let dir = fixture();
+        let analysed = scan(dir.path(), &["--no-reuse"]);
+        assert!(!reused(&analysed));
+
+        let again = scan(dir.path(), &[]);
+        assert!(reused(&again), "{again:#?}");
+        assert_eq!(again["run"]["run_id"], analysed["run"]["run_id"]);
+        assert_eq!(findings(again), findings(analysed));
+    }
+
+    #[test]
+    fn reporting_a_run_again_records_no_second_run() {
+        let dir = fixture();
+        scan(dir.path(), &["--no-reuse"]);
+        scan(dir.path(), &[]);
+        scan(dir.path(), &[]);
+
+        let store = super::open_store(dir.path());
+        let latest = store.latest_run().unwrap().expect("a recorded run");
+        assert_eq!(latest.id, 1, "the reused scans recorded nothing");
+    }
+
+    #[test]
+    fn a_file_that_moved_is_analysed_again() {
+        let dir = fixture();
+        scan(dir.path(), &[]);
+        std::fs::write(
+            dir.path().join("src/new.rs"),
+            "pub fn added() -> u8 { 1 }\n",
+        )
+        .unwrap();
+        assert!(!reused(&scan(dir.path(), &[])));
+    }
+
+    #[test]
+    fn a_changed_setting_is_analysed_again() {
+        let dir = fixture();
+        scan(dir.path(), &[]);
+        assert!(reused(&scan(dir.path(), &[])));
+
+        std::fs::write(
+            dir.path().join("codehelion.toml"),
+            "min-clone-tokens = 25\n",
+        )
+        .unwrap();
+        assert!(!reused(&scan(dir.path(), &[])));
+    }
+
+    /// A baseline is not part of the configuration, so the run has to record
+    /// which frozen set it was reported against: the same tree under two
+    /// baselines is two different reports.
+    #[test]
+    fn a_different_frozen_set_is_analysed_again() {
+        let dir = fixture();
+        scan(dir.path(), &[]);
+        cmd()
+            .current_dir(dir.path())
+            .args(["baseline", "create", "."])
+            .assert()
+            .success();
+
+        let with = ["--baseline", "codehelion-baseline.json"];
+        assert!(!reused(&scan(dir.path(), &with)), "a baseline came in");
+        assert!(reused(&scan(dir.path(), &with)), "the same baseline again");
+        assert!(!reused(&scan(dir.path(), &[])), "the baseline went away");
+    }
+
+    /// A mode is a different reading of the same bytes, so one mode's run says
+    /// nothing about another's.
+    #[test]
+    fn another_mode_is_analysed_rather_than_answered_from_this_one() {
+        let dir = fixture();
+        scan(dir.path(), &[]);
+        assert!(!reused(&scan(dir.path(), &["--mode", "structural"])));
+        assert!(reused(&scan(dir.path(), &["--mode", "structural"])));
+        assert!(
+            reused(&scan(dir.path(), &[])),
+            "the Fast run is still there"
+        );
+    }
 }

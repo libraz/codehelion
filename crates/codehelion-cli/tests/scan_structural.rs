@@ -79,10 +79,22 @@ fn open_store(root: &Path) -> Store {
 
 /// Run `scan --mode structural --format json` in `root` and parse the
 /// produced document.
+///
+/// Always analyses: these tests are about what the analysis produces, and a
+/// scan that reports a recorded run again would be testing the database
+/// instead. The reuse path has its own tests.
 fn scan_json(root: &Path) -> serde_json::Value {
     let output = cmd()
         .current_dir(root)
-        .args(["scan", ".", "--mode", "structural", "--format", "json"])
+        .args([
+            "scan",
+            ".",
+            "--mode",
+            "structural",
+            "--format",
+            "json",
+            "--no-reuse",
+        ])
         .output()
         .expect("run scan");
     assert!(output.status.success(), "{output:?}");
@@ -304,7 +316,7 @@ fn rescans_reuse_stable_identifiers() {
     for _ in 0..2 {
         cmd()
             .current_dir(dir.path())
-            .args(["scan", ".", "--mode", "structural"])
+            .args(["scan", ".", "--mode", "structural", "--no-reuse"])
             .assert()
             .success();
     }

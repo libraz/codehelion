@@ -32,6 +32,7 @@ Semantic モードと任意のコンパイル成果物解析は後続リリー�
   を並べて報告し、不透明な単一スコアで順序を決めません。各指標は導出に使った
   入力値とともに表示されます。
 - **決定的な出力** — 同一入力からはバイト単位で一致するレポートが得られます。
+  誰も触っていないツリーは再解析せず、それを読んだ記録済み run から報告します。
 - **可視化された上限** — 発火したリソース上限（ファイルサイズ・parse timeout・
   候補 budget）はすべてレポートに計上され、黙って適用されることはありません。
 
@@ -52,6 +53,7 @@ codehelion scan --mode structural           # gapped（Type-3）クローンも�
 codehelion scan --format json --output report.json path/to/repo
 codehelion scan --format sarif --output report.sarif   # SARIF 2.1.0 ログ
 codehelion scan --verbose     # 全クローングループと全メンバーを列挙
+codehelion scan --no-reuse    # 同一ツリーの記録があっても解析し直す
 codehelion audit              # 前回から重複がどうなったかを報告
 codehelion explain <ID>       # 監査データベースから finding を表示
 codehelion baseline           # 既知 finding の baseline を管理

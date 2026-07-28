@@ -20,8 +20,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use codehelion_core::clone_class::CloneScope;
 use codehelion_core::discovery::{
-    self, BuildVariant, ContentHash, DEFAULT_SCAN_LINES, DiscoveryConfig, DiscoveryReport,
-    GeneratedMarkers, Language, LanguageSelection, NORMALIZATION_VERSION, SourceUnit,
+    self, AnalysisMode, BuildVariant, ContentHash, DEFAULT_SCAN_LINES, DiscoveryConfig,
+    DiscoveryReport, GeneratedMarkers, Language, LanguageSelection, NORMALIZATION_VERSION,
+    SourceUnit,
 };
 use codehelion_core::engine::{
     self, CloneGroup, EngineConfig, EngineReport, InputFile, LiteralNorm,
@@ -42,6 +43,7 @@ use crate::Outcome;
 use crate::cli::{Format, ScanArgs};
 use crate::config::{self, Config, LiteralNormalization};
 use crate::report::{self, Report};
+use crate::reuse;
 use crate::suppress;
 
 /// One lexed source file, ready for the engine.
@@ -83,6 +85,20 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let mut discovered = discover_sources(&root, &cfg, args.no_ignore)?;
     let sources = std::mem::take(&mut discovered.units);
     let (sources, glob_excluded) = filter_globs(&cfg, sources)?;
+
+    let db_path = database_path(&root, args.db.as_deref(), &cfg);
+    if let Some(model) = reusable(
+        args,
+        &cfg,
+        &root,
+        &db_path,
+        &discovered.build_variant,
+        &sources,
+    )? {
+        write_report(args, out, &model)?;
+        return Ok(outcome(args, &model));
+    }
+
     let lex_timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
     let (lexed, unreadable, timed_out) = lex_sources(&sources, jobs, lex_timeout)?;
 
@@ -118,7 +134,6 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         groups: group_suppressed,
     } = suppression;
 
-    let db_path = database_path(&root, args.db.as_deref(), &cfg);
     let changes = tree_changes(&db_path, &root, &discovered.build_variant, &sources)?;
     let finished_at = rfc3339_now();
     let mut inputs = BuildInputs {
@@ -140,6 +155,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         rules: &rules,
         group_suppressed: &group_suppressed,
         changes,
+        suppression: &cfg.suppression,
         weights: cfg.priority.weights(),
         min_clone_tokens: u64::from(cfg.min_clone_tokens),
         literals: engine_config.literals,
@@ -154,6 +170,49 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         .map(|baseline| baseline_status(baseline, &model.groups));
     write_report(args, out, &model)?;
     Ok(outcome(args, &model))
+}
+
+/// The recorded run to report again instead of scanning, or `None` when this
+/// invocation has to do the work.
+///
+/// Called once discovery has read and hashed the tree and before anything is
+/// parsed, which is where the cost is. Both modes ask the same question, and
+/// the variant they pass is what keeps their answers apart.
+///
+/// # Errors
+///
+/// Returns an error when the baseline or the audit database cannot be read.
+pub(crate) fn reusable(
+    args: &ScanArgs,
+    cfg: &Config,
+    root: &Path,
+    db_path: &Path,
+    variant: &BuildVariant,
+    sources: &[SourceUnit],
+) -> Result<Option<Report>> {
+    if args.no_reuse {
+        return Ok(None);
+    }
+    let literals = literal_norm(cfg.literal_normalization);
+    let versions = match variant.mode {
+        AnalysisMode::Structural => structural::detector_versions(cfg.priority.weights(), literals),
+        _ => detector_versions(cfg.priority.weights(), literals),
+    };
+    let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
+    reuse::recorded(&reuse::Request {
+        root,
+        db_path,
+        variant,
+        config_hash: config_hash.as_str(),
+        detector_versions: &versions,
+        baseline_digest: reuse::baseline_ids(args.baseline.as_deref())?
+            .as_ref()
+            .map(reuse::baseline_digest),
+        weights: cfg.priority.weights(),
+        suppression: &cfg.suppression,
+        min_clone_tokens: u64::from(cfg.min_clone_tokens),
+        sources,
+    })
 }
 
 /// What a finished scan exits with: findings present only when the caller
@@ -247,6 +306,9 @@ struct BuildInputs<'a> {
     group_suppressed: &'a [Option<usize>],
     changes: Option<report::TreeChanges>,
     audit: Option<report::AuditSummary>,
+    /// What the report does with each classification a group can carry, which
+    /// is what decides where a classified group is listed.
+    suppression: &'a config::Suppression,
     /// How the run weighs the priority measures against one another.
     weights: Weights,
     /// The run's minimum clone length, which the ranking reads sizes against.
@@ -383,19 +445,13 @@ fn build_summary(
 }
 
 /// Assemble the report model both output formats render from, from the groups
-/// the run already ranked. They are ordered here by priority descending,
-/// fingerprint ascending on ties, so every view is stable across reruns.
+/// the run already ranked, in the order every view shows them in.
 fn build_report(
     inputs: &BuildInputs<'_>,
     stored: &SummaryRow,
     mut groups: Vec<report::Group>,
 ) -> Report {
-    groups.sort_by(|a, b| {
-        b.priority
-            .value
-            .total_cmp(&a.priority.value)
-            .then_with(|| a.fingerprint.cmp(&b.fingerprint))
-    });
+    report::order(&mut groups, inputs.suppression);
     Report {
         schema_version: report::SCHEMA_VERSION,
         run: run_info(inputs),
@@ -436,6 +492,7 @@ fn run_info(inputs: &BuildInputs<'_>) -> report::RunInfo {
             refactoring_ease: inputs.weights.refactoring_ease,
         },
         database: inputs.db_path.display().to_string(),
+        reused: false,
         run_id: inputs.run_id,
     }
 }

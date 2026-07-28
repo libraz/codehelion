@@ -123,6 +123,9 @@ pub struct ScanArgs {
     /// Hide the findings this baseline file froze, reporting what came after.
     #[arg(long)]
     pub baseline: Option<PathBuf>,
+    /// Analyse the tree even when a recorded run already read exactly it.
+    #[arg(long)]
+    pub no_reuse: bool,
     /// Also list suppressed groups, with the reason each was hidden.
     #[arg(long)]
     pub show_suppressed: bool,

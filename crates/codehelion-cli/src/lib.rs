@@ -23,6 +23,7 @@ pub mod cli;
 pub mod config;
 pub mod migrate;
 pub mod report;
+pub mod reuse;
 pub mod scan;
 pub mod suppress;
 
@@ -691,6 +692,7 @@ mod tests {
             jobs: None,
             db: None,
             baseline: None,
+            no_reuse: false,
             show_suppressed: false,
             verbose: false,
             fail_on_findings: false,

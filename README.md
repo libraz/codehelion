@@ -34,7 +34,9 @@ analysis arrive in later releases.
 - **Separated priority measures** — findings are ordered by clone confidence,
   maintenance risk and refactoring difficulty reported side by side, never by
   one opaque score, and every measure shows the inputs it was derived from.
-- **Deterministic output** — the same input produces byte-identical reports.
+- **Deterministic output** — the same input produces byte-identical reports, and
+  a tree nobody touched is reported from the run that read it rather than
+  analysed again.
 - **Visible limits** — every resource ceiling that fires (file size, parse
   timeout, candidate budget) is counted in the report, never silently applied.
 
@@ -55,6 +57,7 @@ codehelion scan --mode structural           # also detect gapped (Type-3) clones
 codehelion scan --format json --output report.json path/to/repo
 codehelion scan --format sarif --output report.sarif   # SARIF 2.1.0 log
 codehelion scan --verbose     # list every clone group and member
+codehelion scan --no-reuse    # analyse even if a recorded run read exactly this tree
 codehelion audit              # what became of the duplication since last time
 codehelion explain <ID>       # show a finding from the audit database
 codehelion baseline           # manage accepted-findings baselines

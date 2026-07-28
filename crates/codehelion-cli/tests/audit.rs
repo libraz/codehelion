@@ -104,10 +104,15 @@ fn fixture() -> tempfile::TempDir {
     dir
 }
 
+/// Scan and record, whether or not the tree moved.
+///
+/// These tests are about the comparison between two recorded runs, so they
+/// need two of them even where a scan would otherwise report the first one
+/// again — which is exactly the case one of them is about.
 fn scan(root: &Path) {
     cmd()
         .current_dir(root)
-        .args(["scan", "."])
+        .args(["scan", ".", "--no-reuse"])
         .assert()
         .success();
 }
@@ -115,7 +120,7 @@ fn scan(root: &Path) {
 fn scan_structural(root: &Path) {
     cmd()
         .current_dir(root)
-        .args(["scan", ".", "--mode", "structural"])
+        .args(["scan", ".", "--mode", "structural", "--no-reuse"])
         .assert()
         .success();
 }

@@ -71,10 +71,12 @@ fn set_literals(root: &Path, strategy: &str) {
     .unwrap();
 }
 
+/// Scan and record, whether or not the tree moved: a migration rewrites one
+/// run's identifiers onto another's, so both have to exist as runs.
 fn scan(root: &Path) -> Value {
     let output = cmd()
         .current_dir(root)
-        .args(["scan", ".", "--format", "json"])
+        .args(["scan", ".", "--format", "json", "--no-reuse"])
         .assert()
         .success()
         .get_output()
@@ -93,6 +95,7 @@ fn scan_with_baseline(root: &Path) -> Value {
             "json",
             "--baseline",
             "codehelion-baseline.json",
+            "--no-reuse",
         ])
         .assert()
         .success()

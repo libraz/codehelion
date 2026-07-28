@@ -83,6 +83,10 @@
           "type": "integer",
           "description": "Row id of the recorded scan run."
         },
+        "reused": {
+          "type": "boolean",
+          "description": "Present and true when this is a recorded run's report, shown again because nothing it read has changed. The timestamps and the run id are that run's, and no new run was recorded. Absent from a scan that analysed the tree."
+        },
         "ranking": {
           "$ref": "#/$defs/ranking"
         }

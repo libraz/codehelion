@@ -33,7 +33,7 @@ use codehelion_core::priority::Weights;
 use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION, UnitFingerprint};
 use codehelion_core::structural::{
     self, GroupDetail, RegionOccurrence, StructuralConfig, StructuralRegion, StructuralReport,
-    StructuralUnit,
+    StructuralUnit, VerifiedPair,
 };
 use codehelion_core::test_code::{self, TEST_CODE_VERSION};
 use codehelion_core::verify::{SimilarityBreakdown, WEIGHT_VERSION};
@@ -97,6 +97,25 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let mut discovered = discover_sources(&root, &cfg, args.no_ignore)?;
     let sources = std::mem::take(&mut discovered.units);
     let (sources, glob_excluded) = filter_globs(&cfg, sources)?;
+
+    // Discovery reports the Fast variant; the results belong to the
+    // Structural one, and the two never share a fingerprint. The header
+    // grammar carries over unchanged: it decided which frontend read every
+    // `.h` below, so it describes these results just as it does Fast's.
+    let variant = BuildVariant::structural(
+        LanguageSelection {
+            rust: cfg.languages.rust,
+            c: cfg.languages.c,
+            cpp: cfg.languages.cpp,
+        },
+        discovered.header_language,
+    );
+    let db_path = database_path(&root, args.db.as_deref(), &cfg);
+    if let Some(model) = crate::scan::reusable(args, &cfg, &root, &db_path, &variant, &sources)? {
+        write_report(args, out, &model)?;
+        return Ok(crate::scan::outcome(args, &model));
+    }
+
     let timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
     let (parsed, unreadable, timed_out) =
         map_sources(&sources, jobs, |source| parse_one(source, timeout))?;
@@ -106,18 +125,6 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         .unzip();
     mark_test_modules(&files, &mut irs);
 
-    // Discovery reports the Fast variant; the results belong to the
-    // Structural one, and the two never share a fingerprint. The header
-    // grammar carries over unchanged: it decided which frontend read every
-    // `.h` above, so it describes these results just as it does Fast's.
-    let variant = BuildVariant::structural(
-        LanguageSelection {
-            rust: cfg.languages.rust,
-            c: cfg.languages.c,
-            cpp: cfg.languages.cpp,
-        },
-        discovered.header_language,
-    );
     let analysis = structural::analyze(&irs, &variant, &structural_config(&cfg));
 
     let mut rules = compile_rules(&cfg, &files, &analysis)?;
@@ -133,7 +140,6 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let regions = reportable_regions(&analysis);
     let suppressed = evaluate_suppression(&cfg, &mut rules, &analysis, &regions);
 
-    let db_path = database_path(&root, args.db.as_deref(), &cfg);
     let changes = crate::scan::tree_changes(&db_path, &root, &variant, &sources)?;
     let finished_at = rfc3339_now();
     let mut inputs = ReportInputs {
@@ -149,11 +155,8 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         group_suppressed: &suppressed.groups,
         regions: &regions,
         region_suppressed: &suppressed.regions,
-        boilerplate: &cfg.suppression.boilerplate,
-        test_code_action: cfg.suppression.test_code,
-        width_family_action: cfg.suppression.width_family,
+        suppression: &cfg.suppression,
         pair_suppressed: &suppressed.pairs,
-        split_pairs_action: cfg.suppression.split_pairs,
         literals: literal_norm(cfg.literal_normalization),
         glob_excluded,
         unreadable,
@@ -659,17 +662,13 @@ struct ReportInputs<'a> {
     regions: &'a ReportableRegions,
     /// The rule hiding each listed run, parallel to [`Self::regions`].
     region_suppressed: &'a [Option<usize>],
-    /// What the report does with each recognised boilerplate shape.
-    boilerplate: &'a BoilerplatePolicy,
-    /// What the report does with a group living wholly in a test suite.
-    test_code_action: CategoryAction,
-    /// What the report does with a group written once per integer width.
-    width_family_action: CategoryAction,
+    /// What the report does with each classification a group can carry:
+    /// boilerplate shape, test-suite residence, width family, and being a
+    /// pair no group could hold.
+    suppression: &'a config::Suppression,
     /// The rule hiding each verified pair no group could hold, parallel to
     /// the analysis's own list of them.
     pair_suppressed: &'a [Option<usize>],
-    /// What the report does with such a pair.
-    split_pairs_action: CategoryAction,
     /// Literal strategy the group content is scored under.
     literals: LiteralNorm,
     glob_excluded: usize,
@@ -713,21 +712,6 @@ impl ReportInputs<'_> {
             .collect()
     }
 
-    /// Whether an entry is reported below every group that carries behaviour:
-    /// its shape is boilerplate the policy ranks down, or it lives wholly in a
-    /// test suite the policy ranks down.
-    fn ranked_down(
-        &self,
-        boilerplate: Option<Boilerplate>,
-        test_code: bool,
-        width_family: bool,
-    ) -> bool {
-        boilerplate
-            .is_some_and(|category| self.boilerplate.action(category) == CategoryAction::RankDown)
-            || (test_code && self.test_code_action == CategoryAction::RankDown)
-            || (width_family && self.width_family_action == CategoryAction::RankDown)
-    }
-
     /// The tokens one occurrence of a duplicated run covers, in its own file.
     fn region_tokens(&self, occurrence: &RegionOccurrence) -> &[Token] {
         let tokens = &self.irs[occurrence.file].tokens;
@@ -767,40 +751,23 @@ const REGION_SIMILARITY: f64 = 1.0;
 /// the same attention and a reader wants the biggest duplication first
 /// whichever shape it has.
 fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
-    let mut entries: Vec<(bool, report::Group)> = (0..inputs.analysis.groups.groups.len())
-        .map(|index| {
-            let detail = &inputs.analysis.details[index];
-            (
-                inputs.ranked_down(detail.boilerplate, detail.test_code, detail.width_family),
-                build_group(inputs, index),
-            )
-        })
+    let mut entries: Vec<report::Group> = (0..inputs.analysis.groups.groups.len())
+        .map(|index| build_group(inputs, index))
         // A run carries no boilerplate classification: the classifier reads
         // whole units, so no run is ever ranked down for its shape. Where it
         // sits is another matter — a run duplicated across a suite is the
         // suite's repetition as much as a duplicated test function is.
-        .chain((0..inputs.regions.reported.len()).map(|index| {
-            let region = build_region(inputs, index);
-            (inputs.ranked_down(None, region.test_code, false), region)
-        }))
+        .chain((0..inputs.regions.reported.len()).map(|index| build_region(inputs, index)))
         // A pair no group could hold says less per finding than a group does
         // — two members rather than a set — and there are more of them than
         // there are groups, so the policy ranks them down by default rather
         // than letting them crowd the top of the report.
-        .chain((0..inputs.analysis.unrepresented.len()).map(|index| {
-            let pair = build_split_pair(inputs, index);
-            let ranked_down = inputs.split_pairs_action == CategoryAction::RankDown
-                || inputs.ranked_down(None, pair.test_code, false);
-            (ranked_down, pair)
-        }))
+        .chain(
+            (0..inputs.analysis.unrepresented.len()).map(|index| build_split_pair(inputs, index)),
+        )
         .collect();
-    entries.sort_by(|(a_ranked_down, a), (b_ranked_down, b)| {
-        a_ranked_down
-            .cmp(b_ranked_down)
-            .then_with(|| b.priority.value.total_cmp(&a.priority.value))
-            .then_with(|| a.fingerprint.cmp(&b.fingerprint))
-    });
-    entries.into_iter().map(|(_, group)| group).collect()
+    report::order(&mut entries, inputs.suppression);
+    entries
 }
 
 /// The structural pipeline's pass counts, stage by stage.
@@ -922,6 +889,7 @@ fn build_report(
             },
             database: inputs.db_path.display().to_string(),
             run_id,
+            reused: false,
         },
         summary: build_summary(inputs, stored, &groups),
         groups,
@@ -1057,6 +1025,19 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
     )
 }
 
+/// A split pair's occurrences with the canonical instance first.
+///
+/// [`VerifiedPair::members`] is in unit-index order and has to stay that way —
+/// membership is answered by binary search over it — while a group lists its
+/// canonical instance first and the audit database records whichever it was
+/// handed first as the canonical one. Ordering here is what keeps the report
+/// and the recorded rows saying the same thing about the same pair.
+fn pair_members(pair: &VerifiedPair) -> Vec<usize> {
+    let mut members = vec![pair.canonical];
+    members.extend(pair.members.iter().filter(|&&m| m != pair.canonical));
+    members
+}
+
 /// One verified clone relation that no group could hold, as a report entry.
 ///
 /// It is shaped exactly like a group, because that is what it is: a set whose
@@ -1068,7 +1049,7 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
 fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
     let pair = &inputs.analysis.unrepresented[index];
     let suppressed = inputs.pair_suppressed[index].map(|rule| inputs.suppression(rule));
-    let members = &pair.members;
+    let members = &pair_members(pair);
     report::ranked(
         report::Group {
             fingerprint: pair.fingerprint.to_hex(),
@@ -1093,7 +1074,8 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                     &inputs.analysis.units,
                     members,
                 )))
-                .map(|(&member, rank)| {
+                .enumerate()
+                .map(|(position, (&member, rank))| {
                     let unit = &inputs.analysis.units[member];
                     let file = &inputs.files[unit.file];
                     report::Member {
@@ -1111,7 +1093,7 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                         unit: unit.name.as_deref().map(ToString::to_string),
                         tokens: u64::try_from(unit.token_end.saturating_sub(unit.token_start))
                             .unwrap_or(u64::MAX),
-                        canonical: member == pair.canonical,
+                        canonical: position == 0,
                     }
                 })
                 .collect(),
@@ -1265,7 +1247,7 @@ fn similarity(group: &StructuralGroup, detail: &GroupDetail) -> report::Similari
 /// [`codehelion_core::compat`] rather than assumed from being listed: the
 /// grouping rules and the ranking recipe are here because they can be seen in
 /// a result, not because they move an identifier.
-fn detector_versions(weights: Weights, literals: LiteralNorm) -> Vec<(String, String)> {
+pub(crate) fn detector_versions(weights: Weights, literals: LiteralNorm) -> Vec<(String, String)> {
     vec![
         ("fp-schema".to_string(), FP_SCHEMA_VERSION.to_string()),
         (
@@ -1510,12 +1492,11 @@ fn split_pair_row(
         // not re-run against a medoid, so there is no per-dimension row to
         // record without inventing one.
         similarity: None,
-        members: pair
-            .members
+        members: pair_members(pair)
             .iter()
             .zip(ranks_within_host(member_hosts(
                 &inputs.analysis.units,
-                &pair.members,
+                &pair_members(pair),
             )))
             .map(|(&member, rank)| {
                 let unit = &inputs.analysis.units[member];

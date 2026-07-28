@@ -214,6 +214,27 @@ pub struct Suppression {
     pub width_family: CategoryAction,
 }
 
+impl Suppression {
+    /// Whether a group is reported below every group that carries behaviour.
+    ///
+    /// Read from the classifications a group carries rather than from where it
+    /// came from in the pipeline, so that a report assembled by a scan and one
+    /// rebuilt from a recorded run put the same findings in the same order.
+    #[must_use]
+    pub fn ranks_down(
+        &self,
+        boilerplate: Option<Boilerplate>,
+        test_code: bool,
+        width_family: bool,
+        split_pair: bool,
+    ) -> bool {
+        boilerplate.is_some_and(|shape| self.boilerplate.action(shape) == CategoryAction::RankDown)
+            || (test_code && self.test_code == CategoryAction::RankDown)
+            || (width_family && self.width_family == CategoryAction::RankDown)
+            || (split_pair && self.split_pairs == CategoryAction::RankDown)
+    }
+}
+
 impl Default for Suppression {
     fn default() -> Self {
         Self {

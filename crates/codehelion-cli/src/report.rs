@@ -22,11 +22,14 @@ pub mod sarif;
 
 use std::io::{self, Write};
 
+use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::lineage::{AuditDiff, AuditState};
 use codehelion_core::priority::{self, GroupFacts, Weights};
 use codehelion_store::snapshot::{FunnelDropRow, FunnelStageRow, SummaryRow, UnusedRuleRow};
 use serde::{Deserialize, Serialize};
+
+use crate::config::Suppression as SuppressionConfig;
 
 /// Version of the JSON report format.
 pub const SCHEMA_VERSION: u32 = 2;
@@ -80,6 +83,15 @@ pub struct RunInfo {
     pub database: String,
     /// Row id of the recorded scan run.
     pub run_id: i64,
+    /// Whether this is a recorded run's report, shown again because nothing
+    /// the run read has changed since.
+    ///
+    /// The timestamps and the run id are that run's, not this invocation's,
+    /// and no new run was recorded — there was nothing to record. Absent from
+    /// the JSON of a scan that analysed the tree, which is every scan that
+    /// does not say otherwise.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reused: bool,
 }
 
 /// The build variant a scan's results belong to.
@@ -223,6 +235,37 @@ impl FunnelDrop {
     pub fn label(&self) -> String {
         self.cause.replace('_', " ")
     }
+}
+
+/// Put the entries in the order every view of a report shows them in.
+///
+/// Three keys, in this order: whether the configuration ranks the entry down,
+/// then priority descending, then fingerprint ascending. The first is what
+/// keeps boilerplate and test-suite repetition below the code under test
+/// without changing what either of them scored; the last makes ties come out
+/// the same on every machine.
+///
+/// One function rather than one per pipeline: the order is a property of the
+/// report, and a scan that assembled its entries and a run rebuilt from the
+/// database have to agree about it.
+pub fn order(groups: &mut [Group], suppression: &SuppressionConfig) {
+    let ranked_down = |group: &Group| {
+        suppression.ranks_down(
+            group
+                .boilerplate
+                .as_deref()
+                .and_then(Boilerplate::from_name),
+            group.test_code,
+            group.width_family,
+            group.split_pair,
+        )
+    };
+    groups.sort_by(|a, b| {
+        ranked_down(a)
+            .cmp(&ranked_down(b))
+            .then_with(|| b.priority.value.total_cmp(&a.priority.value))
+            .then_with(|| a.fingerprint.cmp(&b.fingerprint))
+    });
 }
 
 /// The run's funnel in the shape the audit database stores it.
@@ -1166,6 +1209,15 @@ impl Report {
             palette.bold(&format!("codehelion scan ({} mode)", self.run.mode))
         )?;
         writeln!(out, "  root: {}", self.run.root)?;
+        // Said before anything it qualifies: every number below belongs to
+        // that run, and the reader is looking at a date rather than at now.
+        if self.run.reused {
+            writeln!(
+                out,
+                "  reporting run {} again, finished {}: nothing it read has changed since",
+                self.run.run_id, self.run.finished_at,
+            )?;
+        }
         self.render_inputs(out)?;
         // A recovering parser reports no failure, so the share it could not
         // follow is the only thing separating "little duplication here" from
@@ -1698,6 +1750,7 @@ pub(super) mod tests {
                 },
                 database: ".codehelion/audit.db".to_string(),
                 run_id: 1,
+                reused: false,
             },
             summary: Summary {
                 audit: None,
