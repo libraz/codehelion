@@ -1,0 +1,11 @@
+[package]
+name = "labelled-derive"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# No dependencies on purpose. A fixture that needs a registry to build cannot
+# be used to test a helper on a machine without one, and the point here is the
+# expansion, not the parsing.
+[lib]
+proc-macro = true

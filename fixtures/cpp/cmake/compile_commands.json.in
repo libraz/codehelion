@@ -1,0 +1,28 @@
+[
+  {
+    "directory": "@DIRECTORY@",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-I@DIRECTORY@/src",
+      "-c",
+      "-o",
+      "CMakeFiles/geometry.dir/src/geometry.cpp.o",
+      "@DIRECTORY@/src/geometry.cpp"
+    ],
+    "file": "@DIRECTORY@/src/geometry.cpp"
+  },
+  {
+    "directory": "@DIRECTORY@",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-I@DIRECTORY@/src",
+      "-c",
+      "-o",
+      "CMakeFiles/shapes.dir/src/main.cpp.o",
+      "@DIRECTORY@/src/main.cpp"
+    ],
+    "file": "@DIRECTORY@/src/main.cpp"
+  }
+]

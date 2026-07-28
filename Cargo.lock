@@ -330,6 +330,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "codehelion-fixtures"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "codehelion-frontend-c"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,14 @@
+[workspace]
+
+[package]
+name = "counters"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = []
+# Widens the counter. The point of the fixture: the same source text resolves
+# to a different type depending on this, so a reading that ignores the feature
+# set reports one answer for two different programs.
+wide = []

@@ -1,0 +1,29 @@
+[
+  {
+    "directory": "@DIRECTORY@",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-I@DIRECTORY@/include",
+      "-c",
+      "-o",
+      "CMakeFiles/narrow.dir/src/narrow.cpp.o",
+      "@DIRECTORY@/src/narrow.cpp"
+    ],
+    "file": "@DIRECTORY@/src/narrow.cpp"
+  },
+  {
+    "directory": "@DIRECTORY@",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-DACCUM_WIDTH=64",
+      "-I@DIRECTORY@/include",
+      "-c",
+      "-o",
+      "CMakeFiles/wide.dir/src/wide.cpp.o",
+      "@DIRECTORY@/src/wide.cpp"
+    ],
+    "file": "@DIRECTORY@/src/wide.cpp"
+  }
+]
