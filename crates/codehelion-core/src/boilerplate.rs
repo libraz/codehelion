@@ -22,6 +22,27 @@
 //! still analysed, still verified and still grouped. Whether a category is
 //! excluded from reports, ranked down or shown as-is is a presentation
 //! decision, so a user can always see what was set aside and why.
+//!
+//! # Where the counting stops
+//!
+//! Every rule below is a function of what the body counts, and that is a
+//! coarse reading: how many calls, not which; how many locals, not what they
+//! hold. The labelled corpora have reached the end of it. Bodies ruled
+//! opposite ways come out counted identically, and not in far-apart projects —
+//! one logging library declares a helper that takes a time point, converts it
+//! and hands the result to a call, and declares an overload that takes the
+//! current time, and hands that to a call. The first is copied into two sinks
+//! and is duplication worth removing; the second wraps its own sibling and is
+//! not. Two statements each, one delegation each, the same counts.
+//!
+//! So a rule reaching further than these does not buy coverage at the cost of
+//! accuracy — it trades a lookalike for a real finding, one for one. The
+//! categories here are the shapes no confirmed duplication was found in, and
+//! reaching past them needs something these counts do not carry: which callee
+//! is called, or where a local's value goes. Another bound on the same numbers
+//! will not do it. The `boilerplate-screen` example prints the counts for
+//! every labelled unit, which is how a proposed rule is weighed against what
+//! it would cost before it is written.
 
 use crate::ir::{IrNode, Shape};
 
