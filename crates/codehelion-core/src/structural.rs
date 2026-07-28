@@ -1195,6 +1195,8 @@ fn view<'a>(
         statements: &unit.statements,
         tokens: &files[unit.file].tokens,
         features: &feature_files[unit.file].units[unit.local],
+        // Structural mode runs no compiler, so nothing resolved a type here.
+        types: None,
     }
 }
 

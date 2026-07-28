@@ -76,11 +76,13 @@ fn negative_verdicts() -> Vec<(String, Verdict)> {
                     statements: &first.1,
                     tokens: &file.tokens,
                     features: &extracted.units[i],
+                    types: None,
                 },
                 &UnitView {
                     statements: &second.1,
                     tokens: &file.tokens,
                     features: &extracted.units[j],
+                    types: None,
                 },
                 &VerifyConfig::default(),
             );

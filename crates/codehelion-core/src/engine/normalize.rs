@@ -55,7 +55,7 @@
 //! actually arrives is mostly the boilerplate above. The judged share of a
 //! biased sample is not this mode's precision.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::frontend::{LiteralKind, Token, TokenKind};
 
@@ -112,8 +112,73 @@ fn punct_text(token: &Token) -> Option<&str> {
     (token.kind == TokenKind::Punctuation).then_some(token.text.as_str())
 }
 
+/// What a compiler resolved the names in a file to, by the byte each name
+/// starts at.
+///
+/// The preservation rules above are lexical guesses at a question a compiler
+/// answers outright, and they are wrong in both directions: a local closure
+/// named like a method is preserved when it should be renamed, and a
+/// lowercase free function from another crate is renamed when it should be
+/// preserved. Where a compiler has spoken, its answer replaces the guess —
+/// in both directions, because correcting only the misses would leave the
+/// over-preservation the guess causes, which is the half that costs recall.
+///
+/// Byte offsets rather than indices: the resolution is about a file, and a
+/// fragment is a slice of one. A token's own start byte survives being sliced
+/// out; its position in the slice does not.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Resolution {
+    external: BTreeSet<usize>,
+    local: BTreeSet<usize>,
+}
+
+impl Resolution {
+    /// Nothing resolved yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that the name starting at `start_byte` was resolved, and whether
+    /// its definition is outside the code being scanned.
+    pub fn insert(&mut self, start_byte: usize, external: bool) {
+        if external {
+            self.local.remove(&start_byte);
+            self.external.insert(start_byte);
+        } else {
+            self.external.remove(&start_byte);
+            self.local.insert(start_byte);
+        }
+    }
+
+    /// Whether nothing was resolved, in which case normalizing with this is
+    /// the same as normalizing without it.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.external.is_empty() && self.local.is_empty()
+    }
+
+    /// What was resolved about the name starting at `start_byte`, or `None`
+    /// when nothing was.
+    fn verdict(&self, start_byte: usize) -> Option<bool> {
+        if self.external.contains(&start_byte) {
+            Some(true)
+        } else if self.local.contains(&start_byte) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+}
+
 /// Whether the identifier at `i` is preserved rather than renamed.
-fn is_preserved(tokens: &[Token], i: usize) -> bool {
+///
+/// A compiler's answer wins where there is one; the lexical rules are what
+/// remains when nothing resolved this name.
+fn is_preserved(tokens: &[Token], i: usize, resolved: Option<&Resolution>) -> bool {
+    if let Some(verdict) = resolved.and_then(|r| r.verdict(tokens[i].span.start_byte)) {
+        return verdict;
+    }
     if tokens[i]
         .text
         .chars()
@@ -151,11 +216,29 @@ pub fn normalize_into<'a>(
     literals: LiteralNorm,
     out: &mut Vec<NormToken<'a>>,
 ) {
+    normalize_resolved_into(tokens, literals, None, out);
+}
+
+/// [`normalize_into`] with what a compiler resolved about the names.
+///
+/// Passing `None` is the modes that run no compiler, and produces exactly
+/// what [`normalize_into`] does. Passing a [`Resolution`] produces a different
+/// normal form for the same tokens, which is why the analysis mode is part of
+/// every fingerprint's context: the two are not comparable and must never
+/// merge on an equal hash.
+pub fn normalize_resolved_into<'a>(
+    tokens: &'a [Token],
+    literals: LiteralNorm,
+    resolved: Option<&Resolution>,
+    out: &mut Vec<NormToken<'a>>,
+) {
     out.clear();
     let mut names: BTreeMap<&str, u32> = BTreeMap::new();
     out.extend(tokens.iter().enumerate().map(|(i, token)| {
         let atom = match token.kind {
-            TokenKind::Identifier if is_preserved(tokens, i) => NormAtom::Text(&token.text),
+            TokenKind::Identifier if is_preserved(tokens, i, resolved) => {
+                NormAtom::Text(&token.text)
+            }
             TokenKind::Identifier | TokenKind::Lifetime => {
                 let next = u32::try_from(names.len()).unwrap_or(u32::MAX);
                 let n = *names.entry(token.text.as_str()).or_insert(next);
@@ -374,5 +457,113 @@ mod tests {
         let n = normalize(&a, LiteralNorm::Full);
         assert_eq!(n[0].atom, NormAtom::Text("return"));
         assert_eq!(n[1].atom, NormAtom::Text(";"));
+    }
+
+    /// The same tokens, laid out at distinct byte offsets so a resolution can
+    /// name one of them.
+    fn placed(spec: &[(TokenKind, &str)]) -> Vec<Token> {
+        let mut at = 0;
+        spec.iter()
+            .map(|(kind, text)| {
+                let start = at;
+                at += text.len() + 1;
+                Token {
+                    kind: *kind,
+                    text: (*text).into(),
+                    span: SourceSpan {
+                        start_byte: start,
+                        end_byte: start + text.len(),
+                        start_line: 1,
+                        start_column: u32::try_from(start).unwrap() + 1,
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn normalized<'a>(tokens: &'a [Token], resolved: Option<&Resolution>) -> Vec<NormToken<'a>> {
+        let mut out = Vec::new();
+        normalize_resolved_into(tokens, LiteralNorm::Full, resolved, &mut out);
+        out
+    }
+
+    /// The lexical rules preserve a lowercase name only next to `::`, `.`,
+    /// `->` or `!`. A free function imported from another crate is none of
+    /// those, and renaming it lets two fragments that call different libraries
+    /// normalize equal. A compiler knows better.
+    #[test]
+    fn a_name_the_rules_would_rename_is_preserved_when_it_is_resolved_external() {
+        let tokens = placed(&[(Id, "encode"), (Pu, "("), (Id, "value"), (Pu, ")")]);
+        assert_eq!(normalized(&tokens, None)[0].atom, NormAtom::Renamed(0));
+
+        let mut resolution = Resolution::new();
+        resolution.insert(tokens[0].span.start_byte, true);
+        let resolved = normalized(&tokens, Some(&resolution));
+        assert_eq!(resolved[0].atom, NormAtom::Text("encode"));
+        // The name beside it was not resolved, so the rules still decide it.
+        assert_eq!(resolved[2].atom, NormAtom::Renamed(0));
+    }
+
+    /// And the other direction, which is the half that costs recall: the rules
+    /// preserve anything capitalised or reached through a member access, so a
+    /// local binding shaped like one is never renamed and two fragments that
+    /// differ only in that name stop matching.
+    #[test]
+    fn a_name_the_rules_would_preserve_is_renamed_when_it_is_resolved_local() {
+        let tokens = placed(&[(Id, "Buffer"), (Pu, "."), (Id, "len")]);
+        let guessed = normalized(&tokens, None);
+        assert_eq!(guessed[0].atom, NormAtom::Text("Buffer"));
+        assert_eq!(guessed[2].atom, NormAtom::Text("len"));
+
+        let mut resolution = Resolution::new();
+        resolution.insert(tokens[0].span.start_byte, false);
+        let resolved = normalized(&tokens, Some(&resolution));
+        assert_eq!(resolved[0].atom, NormAtom::Renamed(0));
+        assert_eq!(resolved[2].atom, NormAtom::Text("len"));
+    }
+
+    /// Two fragments a compiler resolved the same way normalize equal even
+    /// where the lexical rules keep them apart — which is the point of asking a
+    /// compiler at all.
+    ///
+    /// This is the shape the member-access rule is known to lose: two walks
+    /// over one container that differ only in which link field they follow are
+    /// copies of each other, and the rules read `.next` and `.prev` as
+    /// different code because they cannot tell a field from an API.
+    #[test]
+    fn two_fragments_resolved_alike_normalize_alike() {
+        let a = placed(&[(Id, "node"), (Pu, "."), (Id, "next")]);
+        let b = placed(&[(Id, "node"), (Pu, "."), (Id, "prev")]);
+        assert_ne!(normalized(&a, None), normalized(&b, None));
+
+        let mut ra = Resolution::new();
+        ra.insert(a[2].span.start_byte, false);
+        let mut rb = Resolution::new();
+        rb.insert(b[2].span.start_byte, false);
+        assert_eq!(normalized(&a, Some(&ra)), normalized(&b, Some(&rb)));
+    }
+
+    /// A resolution that says nothing changes nothing, so the modes that run no
+    /// compiler are unaffected by the path existing.
+    #[test]
+    fn an_empty_resolution_normalizes_exactly_as_no_resolution_does() {
+        let tokens = placed(&[(Id, "Value"), (Pu, "::"), (Id, "from"), (Id, "x")]);
+        let empty = Resolution::new();
+        assert!(empty.is_empty());
+        assert_eq!(normalized(&tokens, Some(&empty)), normalized(&tokens, None));
+    }
+
+    /// The last word about one name wins; a resolution cannot hold both
+    /// answers about the same place at once.
+    #[test]
+    fn resolving_one_name_twice_keeps_the_later_answer() {
+        let tokens = placed(&[(Id, "encode")]);
+        let mut resolution = Resolution::new();
+        resolution.insert(tokens[0].span.start_byte, true);
+        resolution.insert(tokens[0].span.start_byte, false);
+        assert_eq!(
+            normalized(&tokens, Some(&resolution))[0].atom,
+            NormAtom::Renamed(0)
+        );
     }
 }

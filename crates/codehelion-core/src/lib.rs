@@ -27,4 +27,5 @@ pub mod stable_id;
 pub mod structural;
 pub mod substitution;
 pub mod test_code;
+pub mod types;
 pub mod verify;

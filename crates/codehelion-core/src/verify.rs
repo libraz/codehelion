@@ -15,9 +15,12 @@
 //!   folded with the characteristic-vector cosine and the subtree overlap;
 //! - **control flow** — the approximate control-flow profiles (a syntactic
 //!   approximation, refined by a real CFG in Semantic mode);
-//! - **type** — unavailable in Structural mode: there are no resolved types, so
-//!   this dimension is `None` and the classification's confidence is penalised
-//!   accordingly rather than guessing;
+//! - **type** — how much the two units' resolved types agree, as
+//!   [`crate::types::TypeEvidence`]. Unavailable in Structural mode, which
+//!   resolves no types: the dimension is then `None` and the classification's
+//!   confidence is penalised accordingly rather than guessing. Supplying
+//!   evidence for both sides is what lifts that penalty, and only a compiler
+//!   can supply it;
 //! - **api** — how much the two call-name multisets overlap; unavailable when
 //!   neither unit calls anything, since two empty call surfaces are an absence
 //!   of evidence rather than agreement.
@@ -58,6 +61,7 @@ use crate::clone_class::CloneClass;
 use crate::features::{ApiCallFeature, CfgFeature, SubtreeFeature, UnitFeatures};
 use crate::frontend::Token;
 use crate::ir::{IrNode, Shape, StatementSummary};
+use crate::types::TypeEvidence;
 
 /// Version of the composite-weight recipe and judgment rules. Bump it when any
 /// weight default or classification rule changes, since findings change with
@@ -265,6 +269,12 @@ pub struct UnitView<'a> {
     pub tokens: &'a [Token],
     /// The unit's extracted features.
     pub features: &'a UnitFeatures,
+    /// The types a compiler resolved inside the unit, when one did.
+    ///
+    /// `None` in the modes that run no compiler, which is a different claim
+    /// from empty evidence: absent means nobody looked, and empty means
+    /// somebody looked and found nothing to compare.
+    pub types: Option<&'a TypeEvidence>,
 }
 
 /// The outcome of verifying a candidate pair.
@@ -343,8 +353,13 @@ fn measure(a: &UnitView<'_>, b: &UnitView<'_>, config: &VerifyConfig) -> Verdict
     );
     let control_flow = cfg_similarity(&a.features.cfg, &b.features.cfg);
     let api = api_similarity(&a.features.api, &b.features.api);
-    // No resolved types in Structural mode: the dimension is absent, not zero.
-    let type_similarity = None;
+    // Absent unless a compiler resolved types for both sides. Structural mode
+    // resolves none, and the dimension is then missing rather than zero: a
+    // zero would say the two units' types disagree, which nothing measured.
+    let type_similarity = a
+        .types
+        .zip(b.types)
+        .and_then(|(a, b)| TypeEvidence::agreement(a, b));
 
     let composite = composite(
         &config.weights,
@@ -731,6 +746,7 @@ mod tests {
     };
     use crate::frontend::Lexeme;
     use crate::ir::ByteRange;
+    use crate::types::TypeTag;
 
     /// A statement with no text of its own. Enough for the tests that only
     /// exercise alignment, which reads shapes and never the tokens.
@@ -757,6 +773,18 @@ mod tests {
                 statements: &self.summaries,
                 tokens: &self.tokens,
                 features,
+                types: None,
+            }
+        }
+
+        fn view_typed<'a>(
+            &'a self,
+            features: &'a UnitFeatures,
+            types: &'a TypeEvidence,
+        ) -> UnitView<'a> {
+            UnitView {
+                types: Some(types),
+                ..self.view(features)
             }
         }
     }
@@ -1027,6 +1055,67 @@ mod tests {
         assert_eq!(verdict.alignment.only_b, vec![0]);
         assert_eq!(verdict.alignment.matched.len(), 3);
         assert!(verdict.breakdown.type_similarity.is_none());
+    }
+
+    /// The same pair with a compiler's answer about its types. The dimension
+    /// appears, and the cap that stood in for it is lifted: the band was
+    /// lowered because nothing had looked, not because something had looked and
+    /// disagreed.
+    #[test]
+    fn resolved_types_supply_the_dimension_that_was_standing_in_for_them() {
+        let a = statements(&[(3, &["if"]), (12, &["let"]), (4, &["return"])]);
+        let b = statements(&[
+            (11, &["loop"]),
+            (3, &["if"]),
+            (12, &["let"]),
+            (4, &["return"]),
+        ]);
+        let fa = features(counts(6), &[1, 2, 3, 4], 9, &["push", "len"]);
+        let fb = features(counts(7), &[1, 2, 3, 5], 8, &["push", "len", "clear"]);
+        let same = TypeEvidence::from_tags([TypeTag::Integer, TypeTag::Sequence]);
+
+        let untyped = verify(&a.view(&fa), &b.view(&fb), &VerifyConfig::default());
+        let typed = verify(
+            &a.view_typed(&fa, &same),
+            &b.view_typed(&fb, &same),
+            &VerifyConfig::default(),
+        );
+        assert_eq!(typed.class, Some(CloneClass::Type3));
+        assert_eq!(typed.breakdown.type_similarity, Some(1.0));
+        assert_eq!(typed.confidence, Some(Confidence::High));
+        assert_ne!(untyped.confidence, typed.confidence);
+    }
+
+    /// Evidence that disagrees is evidence: it lowers the composite rather than
+    /// leaving the dimension out, which is the whole difference between a
+    /// measurement and its absence.
+    #[test]
+    fn types_that_disagree_are_not_the_same_as_types_nobody_resolved() {
+        let a = statements(&[(3, &["if"]), (12, &["let"]), (4, &["return"])]);
+        let b = statements(&[
+            (11, &["loop"]),
+            (3, &["if"]),
+            (12, &["let"]),
+            (4, &["return"]),
+        ]);
+        let fa = features(counts(6), &[1, 2, 3, 4], 9, &["push", "len"]);
+        let fb = features(counts(7), &[1, 2, 3, 5], 8, &["push", "len", "clear"]);
+        let numbers = TypeEvidence::from_tags([TypeTag::Integer, TypeTag::Integer]);
+        let maps = TypeEvidence::from_tags([TypeTag::Mapping, TypeTag::Mapping]);
+
+        let untyped = verify(&a.view(&fa), &b.view(&fb), &VerifyConfig::default());
+        let disagreeing = verify(
+            &a.view_typed(&fa, &numbers),
+            &b.view_typed(&fb, &maps),
+            &VerifyConfig::default(),
+        );
+        assert_eq!(disagreeing.breakdown.type_similarity, Some(0.0));
+        assert!(
+            disagreeing.breakdown.composite < untyped.breakdown.composite,
+            "{} !< {}",
+            disagreeing.breakdown.composite,
+            untyped.breakdown.composite
+        );
     }
 
     /// A sequence of `len` statements whose shapes cycle, so that alignment is
