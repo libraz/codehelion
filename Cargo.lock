@@ -303,6 +303,7 @@ name = "codehelion-core"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "codehelion-fixtures",
  "ignore",
  "serde",
  "serde_json",

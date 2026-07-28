@@ -17,6 +17,9 @@ thiserror = "2"
 toml = "0.8"
 
 [dev-dependencies]
+# Test scaffolding only, and itself free of codehelion dependencies: the
+# fixtures are projects this crate is judged against, not code it links.
+codehelion-fixtures = { version = "0.1.0", path = "../codehelion-fixtures" }
 tempfile = "3"
 
 [lints]

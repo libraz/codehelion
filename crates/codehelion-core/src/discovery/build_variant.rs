@@ -7,6 +7,9 @@
 //! rather than bolted on later. In Fast mode no build configuration is
 //! resolved, so a single implicit variant covers the whole run.
 
+use std::collections::BTreeMap;
+
+use super::build_config::BuildConfiguration;
 use super::language::{Language, LanguageSelection};
 
 /// Version of the lexing/normalization ruleset.
@@ -53,6 +56,14 @@ pub struct BuildVariant {
     pub headers: Option<Language>,
     /// Normalization ruleset version.
     pub normalization_version: u32,
+    /// What the compiler was told, for the runs that resolved it.
+    ///
+    /// `None` in Fast and Structural mode, which read source and ask no
+    /// compiler anything: there is no build configuration to differ over, so a
+    /// single implicit variant covers the run. Absent rather than empty,
+    /// because an empty configuration would claim a compiler was invoked with
+    /// no arguments.
+    pub build: Option<BuildConfiguration>,
 }
 
 impl BuildVariant {
@@ -65,6 +76,7 @@ impl BuildVariant {
             languages,
             headers: Self::headers_of(languages, headers),
             normalization_version: NORMALIZATION_VERSION,
+            build: None,
         }
     }
 
@@ -79,6 +91,28 @@ impl BuildVariant {
             languages,
             headers: Self::headers_of(languages, headers),
             normalization_version: NORMALIZATION_VERSION,
+            build: None,
+        }
+    }
+
+    /// The variant a semantic run analyses one unit under.
+    ///
+    /// Unlike Fast and Structural, semantic mode has as many variants as the
+    /// project has build configurations: a crate under two feature sets and a
+    /// header under two sets of defines are different programs that happen to
+    /// share their text.
+    #[must_use]
+    pub const fn semantic(
+        languages: LanguageSelection,
+        headers: Language,
+        build: BuildConfiguration,
+    ) -> Self {
+        Self {
+            mode: AnalysisMode::Semantic,
+            languages,
+            headers: Self::headers_of(languages, headers),
+            normalization_version: NORMALIZATION_VERSION,
+            build: Some(build),
         }
     }
 
@@ -97,6 +131,14 @@ impl BuildVariant {
     ///
     /// Two variants are equal exactly when their canonical strings match, which
     /// makes this string safe to use as a grouping key or fingerprint input.
+    ///
+    /// A resolved build configuration is appended as its fingerprint rather
+    /// than its own canonical form: compiler arguments are arbitrary text and
+    /// would otherwise be free to contain this string's own separators. It is
+    /// appended only when there is one, so that the modes which resolve no
+    /// build configuration keep the identity they had before the field
+    /// existed — an audit database written by an earlier build still lines up
+    /// with one written by this one.
     #[must_use]
     pub fn canonical(&self) -> String {
         let langs = self
@@ -106,13 +148,18 @@ impl BuildVariant {
             .map(Language::name)
             .collect::<Vec<_>>()
             .join(",");
-        format!(
+        let mut canonical = format!(
             "mode={};languages={};headers={};normalization={}",
             self.mode.name(),
             langs,
             self.headers.map_or("none", Language::name),
             self.normalization_version,
-        )
+        );
+        if let Some(build) = &self.build {
+            canonical.push_str(";build=");
+            canonical.push_str(&build.fingerprint());
+        }
+        canonical
     }
 
     /// A stable hex fingerprint of this variant.
@@ -124,8 +171,46 @@ impl BuildVariant {
     }
 }
 
+/// One variant and everything analysed under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Partition<T> {
+    /// The variant these were analysed under.
+    pub variant: BuildVariant,
+    /// The units, in the order they were given.
+    pub units: Vec<T>,
+}
+
+/// Groups units by the variant they were analysed under.
+///
+/// Clone comparison runs inside one partition by default. Two units compiled
+/// differently are not two spellings of one thing: the text they share may
+/// resolve to different types, take different branches of a header, or exist in
+/// only one of the two builds, and a duplication reported across them cannot be
+/// removed by editing either one.
+///
+/// Keyed by variant fingerprint so that the grouping is stable across runs and
+/// independent of the order units were discovered in.
+#[must_use]
+pub fn partition<T>(
+    units: impl IntoIterator<Item = (BuildVariant, T)>,
+) -> BTreeMap<String, Partition<T>> {
+    let mut partitions: BTreeMap<String, Partition<T>> = BTreeMap::new();
+    for (variant, unit) in units {
+        partitions
+            .entry(variant.fingerprint())
+            .or_insert_with(|| Partition {
+                variant,
+                units: Vec::new(),
+            })
+            .units
+            .push(unit);
+    }
+    partitions
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::build_config::CppBuild;
     use super::*;
 
     #[test]
@@ -210,6 +295,107 @@ mod tests {
         assert_eq!(
             with_c.canonical(),
             "mode=fast;languages=rust;headers=none;normalization=2"
+        );
+    }
+
+    /// A mode that resolves no build configuration must keep the identity it
+    /// had before variants could carry one, or every stored run stops lining up
+    /// with the runs that follow it.
+    #[test]
+    fn a_run_that_resolved_no_build_configuration_is_identified_as_it_always_was() {
+        let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+        assert_eq!(variant.build, None);
+        assert!(
+            !variant.canonical().contains("build="),
+            "{}",
+            variant.canonical()
+        );
+    }
+
+    #[test]
+    fn two_builds_of_one_source_tree_are_two_variants() {
+        let languages = LanguageSelection::default();
+        let narrow = BuildVariant::semantic(
+            languages,
+            Language::Cpp,
+            BuildConfiguration::Cpp(Box::new(CppBuild {
+                compiler: "clang++".into(),
+                ..CppBuild::default()
+            })),
+        );
+        let wide = BuildVariant::semantic(
+            languages,
+            Language::Cpp,
+            BuildConfiguration::Cpp(Box::new(CppBuild {
+                compiler: "clang++".into(),
+                macros: vec!["-DACCUM_WIDTH=64".into()],
+                ..CppBuild::default()
+            })),
+        );
+        assert_ne!(narrow, wide);
+        assert_ne!(narrow.fingerprint(), wide.fingerprint());
+    }
+
+    /// The languages are separate identity spaces one level down as well, so a
+    /// Rust variant and a C++ variant cannot collide by having equally empty
+    /// build configurations.
+    #[test]
+    fn a_rust_variant_and_a_cpp_variant_are_never_the_same_variant() {
+        let languages = LanguageSelection::default();
+        let rust = BuildVariant::semantic(
+            languages,
+            Language::Cpp,
+            BuildConfiguration::Rust(Box::default()),
+        );
+        let cpp = BuildVariant::semantic(
+            languages,
+            Language::Cpp,
+            BuildConfiguration::Cpp(Box::default()),
+        );
+        assert_ne!(rust.fingerprint(), cpp.fingerprint());
+    }
+
+    #[test]
+    fn units_are_grouped_by_the_variant_they_were_analysed_under() {
+        let languages = LanguageSelection::default();
+        let variant = |macros: Vec<String>| {
+            BuildVariant::semantic(
+                languages,
+                Language::Cpp,
+                BuildConfiguration::Cpp(Box::new(CppBuild {
+                    compiler: "clang++".into(),
+                    macros,
+                    ..CppBuild::default()
+                })),
+            )
+        };
+        let narrow = variant(Vec::new());
+        let wide = variant(vec!["-DACCUM_WIDTH=64".into()]);
+        let partitions = partition([
+            (narrow.clone(), "narrow.cpp"),
+            (wide.clone(), "wide.cpp"),
+            (narrow.clone(), "also-narrow.cpp"),
+        ]);
+        assert_eq!(partitions.len(), 2);
+        assert_eq!(
+            partitions[&narrow.fingerprint()].units,
+            vec!["narrow.cpp", "also-narrow.cpp"]
+        );
+        assert_eq!(partitions[&wide.fingerprint()].units, vec!["wide.cpp"]);
+    }
+
+    /// The grouping is a property of the variants, not of the order units
+    /// happened to be discovered in.
+    #[test]
+    fn the_grouping_does_not_depend_on_the_order_units_arrive_in() {
+        let languages = LanguageSelection::default();
+        let fast = BuildVariant::fast(languages, Language::C);
+        let structural = BuildVariant::structural(languages, Language::C);
+        let forwards = partition([(fast.clone(), 1), (structural.clone(), 2)]);
+        let backwards = partition([(structural, 2), (fast, 1)]);
+        assert_eq!(
+            forwards.keys().collect::<Vec<_>>(),
+            backwards.keys().collect::<Vec<_>>()
         );
     }
 }
