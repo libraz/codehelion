@@ -8,7 +8,9 @@
 //! the per-group `CloneGroupSimilarity` breakdown, and the per-run report
 //! tables `RunSummary`, `RunFunnelStage`, `RunFunnelDrop` and
 //! `RunUnusedSuppression`, which hold what a report says about a run beyond
-//! the findings it lists.
+//! the findings it lists, and the `compiler_*` tables holding what a compiler
+//! helper answered about each unit — including the units it could not answer
+//! for, which is an outcome rather than a gap.
 //! The artifact tables are created empty in this release — the schema is the
 //! contract, population comes with the features that need them.
 //!
@@ -41,12 +43,12 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17,
 ];
 
 /// Version 1: the full entity set.
@@ -627,6 +629,234 @@ CREATE TABLE run_unused_suppression (
     scope       TEXT NOT NULL,
     pattern     TEXT NOT NULL,
     PRIMARY KEY (scan_run_id, ordinal)
+) STRICT;
+";
+
+/// Version 17: what a compiler was asked about, and what it answered.
+///
+/// A `compiler_unit` row exists for every unit a run put to a helper,
+/// including the ones nothing could answer for. A unit nobody could analyse is
+/// an ordinary outcome of scanning a real project — a crate whose build script
+/// would have to run, a file no compile command mentions — and recording it as
+/// an absence of rows would make it indistinguishable from a unit nobody
+/// asked about. `unavailable_reason` says which, and the row carries no
+/// payload; a row with a `schema_version` carries one and no reason.
+///
+/// The same distinction repeats inside an answer. An empty control-flow graph
+/// and a helper that builds none produce the same zero block rows, as do an
+/// effect summary that found nothing and one nobody computed, so `has_cfg`,
+/// `effects_computed` and `data_flow_computed` are stored: the emptiness is
+/// visible either way, and only these say whether anyone looked.
+/// `compiler_call_candidate` is there for the same reason — a dynamic call
+/// whose candidate set is empty is a different fact from an unresolved one,
+/// and both would otherwise be a call with no candidate rows.
+///
+/// Nothing here has a foreign key into `source_unit`. A compiler unit is a
+/// translation unit or a crate and a source unit is a function; one covers many
+/// of the other, and the relation between a resolved symbol and the unit it
+/// sits inside is containment of one anchor in another. Materialising it as a
+/// key would assert a correspondence that does not exist, and computing it
+/// from line anchors at write time would store an inference beside the fact it
+/// was inferred from. The anchor columns are indexed instead, so the join is
+/// available to whoever wants it and is not asserted by whoever does not.
+///
+/// `instantiation_key` is indexed without the unit in front of it, because the
+/// family it names is exactly the thing that spans units: one generic
+/// definition and every place it was instantiated. That is the query the
+/// expansion/definition anchoring exists to serve — one definition with twenty
+/// expansions rather than twenty clones — and scoping the index to a unit would
+/// answer it only within a file.
+const V17: &str = "
+CREATE TABLE compiler_helper (
+    id              INTEGER PRIMARY KEY,
+    scan_run_id     INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    version         TEXT NOT NULL,
+    protocol_min    INTEGER NOT NULL,
+    protocol_max    INTEGER NOT NULL,
+    protocol_agreed INTEGER NOT NULL,
+    UNIQUE (scan_run_id, name, version)
+) STRICT;
+
+CREATE TABLE compiler_helper_capability (
+    compiler_helper_id INTEGER NOT NULL REFERENCES compiler_helper (id) ON DELETE CASCADE,
+    capability         TEXT NOT NULL,
+    PRIMARY KEY (compiler_helper_id, capability)
+) STRICT;
+
+CREATE TABLE compiler_helper_toolchain (
+    compiler_helper_id INTEGER NOT NULL REFERENCES compiler_helper (id) ON DELETE CASCADE,
+    toolchain          TEXT NOT NULL,
+    PRIMARY KEY (compiler_helper_id, toolchain)
+) STRICT;
+
+CREATE TABLE compiler_unit (
+    id                 INTEGER PRIMARY KEY,
+    scan_run_id        INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
+    build_variant_id   INTEGER NOT NULL REFERENCES build_variant (id),
+    compiler_helper_id INTEGER REFERENCES compiler_helper (id),
+    unit_name          TEXT NOT NULL,
+    file_path          TEXT NOT NULL,
+    variant_key        TEXT NOT NULL,
+    schema_version     TEXT,
+    unavailable_reason TEXT CHECK (unavailable_reason IN
+                           ('requires_execution', 'no_build_information', 'toolchain_mismatch',
+                            'helper_timed_out', 'helper_died', 'unreadable_schema',
+                            'not_supported')),
+    has_cfg            INTEGER NOT NULL CHECK (has_cfg IN (0, 1)),
+    effects_computed   INTEGER NOT NULL CHECK (effects_computed IN (0, 1)),
+    data_flow_computed INTEGER NOT NULL CHECK (data_flow_computed IN (0, 1)),
+    UNIQUE (scan_run_id, unit_name, file_path, variant_key),
+    CHECK ((schema_version IS NULL) <> (unavailable_reason IS NULL)),
+    CHECK (unavailable_reason IS NULL
+           OR (has_cfg = 0 AND effects_computed = 0 AND data_flow_computed = 0))
+) STRICT;
+CREATE INDEX idx_compiler_unit_run ON compiler_unit (scan_run_id);
+CREATE INDEX idx_compiler_unit_file ON compiler_unit (file_path);
+
+CREATE TABLE compiler_type (
+    compiler_unit_id INTEGER NOT NULL REFERENCES compiler_unit (id) ON DELETE CASCADE,
+    type_index       INTEGER NOT NULL,
+    display          TEXT NOT NULL,
+    category         TEXT NOT NULL CHECK (category IN
+                         ('integer', 'float', 'boolean', 'character', 'text', 'handle',
+                          'sequence', 'mapping', 'tuple', 'record', 'enumeration',
+                          'interface', 'callable', 'parameter', 'nothing', 'unresolved')),
+    definition       TEXT,
+    PRIMARY KEY (compiler_unit_id, type_index)
+) STRICT;
+CREATE INDEX idx_compiler_type_category ON compiler_type (category);
+
+CREATE TABLE compiler_type_argument (
+    compiler_unit_id INTEGER NOT NULL,
+    type_index       INTEGER NOT NULL,
+    position         INTEGER NOT NULL,
+    argument_index   INTEGER NOT NULL,
+    PRIMARY KEY (compiler_unit_id, type_index, position),
+    FOREIGN KEY (compiler_unit_id, type_index)
+        REFERENCES compiler_type (compiler_unit_id, type_index) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE compiler_symbol (
+    id                    INTEGER PRIMARY KEY,
+    compiler_unit_id      INTEGER NOT NULL REFERENCES compiler_unit (id) ON DELETE CASCADE,
+    ordinal               INTEGER NOT NULL,
+    symbol_id             TEXT NOT NULL,
+    name                  TEXT NOT NULL,
+    symbol_kind           TEXT NOT NULL CHECK (symbol_kind IN
+                              ('function', 'type', 'field', 'variant', 'binding',
+                               'constant', 'namespace', 'other')),
+    type_index            INTEGER,
+    external              INTEGER NOT NULL CHECK (external IN (0, 1)),
+    expansion_file        TEXT NOT NULL,
+    expansion_start_byte  INTEGER NOT NULL,
+    expansion_end_byte    INTEGER NOT NULL,
+    expansion_start_line  INTEGER NOT NULL,
+    definition_file       TEXT,
+    definition_start_byte INTEGER,
+    definition_end_byte   INTEGER,
+    definition_start_line INTEGER,
+    UNIQUE (compiler_unit_id, ordinal),
+    CHECK ((definition_file IS NULL) = (definition_start_byte IS NULL)
+       AND (definition_file IS NULL) = (definition_end_byte IS NULL)
+       AND (definition_file IS NULL) = (definition_start_line IS NULL))
+) STRICT;
+CREATE INDEX idx_compiler_symbol_id ON compiler_symbol (symbol_id);
+CREATE INDEX idx_compiler_symbol_site ON compiler_symbol (expansion_file, expansion_start_byte);
+
+CREATE TABLE compiler_call (
+    id                    INTEGER PRIMARY KEY,
+    compiler_unit_id      INTEGER NOT NULL REFERENCES compiler_unit (id) ON DELETE CASCADE,
+    ordinal               INTEGER NOT NULL,
+    resolution            TEXT NOT NULL CHECK (resolution IN
+                              ('static', 'dynamic', 'unresolved')),
+    target_symbol         TEXT,
+    expansion_file        TEXT NOT NULL,
+    expansion_start_byte  INTEGER NOT NULL,
+    expansion_end_byte    INTEGER NOT NULL,
+    expansion_start_line  INTEGER NOT NULL,
+    definition_file       TEXT,
+    definition_start_byte INTEGER,
+    definition_end_byte   INTEGER,
+    definition_start_line INTEGER,
+    UNIQUE (compiler_unit_id, ordinal),
+    CHECK ((resolution = 'static') = (target_symbol IS NOT NULL))
+) STRICT;
+CREATE INDEX idx_compiler_call_target ON compiler_call (target_symbol);
+
+CREATE TABLE compiler_call_candidate (
+    compiler_call_id INTEGER NOT NULL REFERENCES compiler_call (id) ON DELETE CASCADE,
+    position         INTEGER NOT NULL,
+    symbol           TEXT NOT NULL,
+    PRIMARY KEY (compiler_call_id, position)
+) STRICT;
+CREATE INDEX idx_compiler_call_candidate_symbol ON compiler_call_candidate (symbol);
+
+CREATE TABLE compiler_block (
+    compiler_unit_id      INTEGER NOT NULL REFERENCES compiler_unit (id) ON DELETE CASCADE,
+    block_index           INTEGER NOT NULL,
+    length                INTEGER NOT NULL,
+    expansion_file        TEXT NOT NULL,
+    expansion_start_byte  INTEGER NOT NULL,
+    expansion_end_byte    INTEGER NOT NULL,
+    expansion_start_line  INTEGER NOT NULL,
+    definition_file       TEXT,
+    definition_start_byte INTEGER,
+    definition_end_byte   INTEGER,
+    definition_start_line INTEGER,
+    PRIMARY KEY (compiler_unit_id, block_index)
+) STRICT;
+
+CREATE TABLE compiler_edge (
+    compiler_unit_id INTEGER NOT NULL REFERENCES compiler_unit (id) ON DELETE CASCADE,
+    ordinal          INTEGER NOT NULL,
+    from_block       INTEGER NOT NULL,
+    to_block         INTEGER NOT NULL,
+    edge_kind        TEXT NOT NULL CHECK (edge_kind IN
+                         ('flow', 'taken', 'not_taken', 'unwind', 'return')),
+    PRIMARY KEY (compiler_unit_id, ordinal)
+) STRICT;
+
+CREATE TABLE compiler_instantiation (
+    id                    INTEGER PRIMARY KEY,
+    compiler_unit_id      INTEGER NOT NULL REFERENCES compiler_unit (id) ON DELETE CASCADE,
+    ordinal               INTEGER NOT NULL,
+    definition            TEXT NOT NULL,
+    instantiation_key     TEXT NOT NULL,
+    expansion_file        TEXT NOT NULL,
+    expansion_start_byte  INTEGER NOT NULL,
+    expansion_end_byte    INTEGER NOT NULL,
+    expansion_start_line  INTEGER NOT NULL,
+    definition_file       TEXT,
+    definition_start_byte INTEGER,
+    definition_end_byte   INTEGER,
+    definition_start_line INTEGER,
+    UNIQUE (compiler_unit_id, ordinal)
+) STRICT;
+CREATE INDEX idx_compiler_instantiation_key ON compiler_instantiation (instantiation_key);
+
+CREATE TABLE compiler_instantiation_argument (
+    compiler_instantiation_id INTEGER NOT NULL
+                                  REFERENCES compiler_instantiation (id) ON DELETE CASCADE,
+    position                  INTEGER NOT NULL,
+    type_index                INTEGER NOT NULL,
+    PRIMARY KEY (compiler_instantiation_id, position)
+) STRICT;
+
+CREATE TABLE compiler_effect (
+    compiler_unit_id INTEGER NOT NULL REFERENCES compiler_unit (id) ON DELETE CASCADE,
+    ordinal          INTEGER NOT NULL,
+    effect_kind      TEXT NOT NULL CHECK (effect_kind IN ('write', 'interaction')),
+    subject          TEXT NOT NULL,
+    PRIMARY KEY (compiler_unit_id, ordinal)
+) STRICT;
+
+CREATE TABLE compiler_data_flow (
+    compiler_unit_id INTEGER NOT NULL REFERENCES compiler_unit (id) ON DELETE CASCADE,
+    ordinal          INTEGER NOT NULL,
+    source_symbol    TEXT NOT NULL,
+    sink_symbol      TEXT NOT NULL,
+    PRIMARY KEY (compiler_unit_id, ordinal)
 ) STRICT;
 ";
 

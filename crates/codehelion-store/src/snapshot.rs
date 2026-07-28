@@ -27,6 +27,7 @@ use codehelion_core::stable_id::{
 use codehelion_core::verify::Confidence;
 use rusqlite::{OptionalExtension, Transaction, params};
 
+use crate::compiler::{CompilerHelperRow, CompilerUnitRow};
 use crate::{Store, StoreError};
 
 /// One source unit observed by the scan.
@@ -425,6 +426,16 @@ pub struct Snapshot<'a> {
     /// Every source file the scan read, whether or not anything was found in
     /// it. A later scan of the same tree compares against this.
     pub files: Vec<FileRow>,
+    /// The compiler helpers that took part, referenced by
+    /// [`CompilerUnitRow::helper`]. Empty in the modes that ask no compiler
+    /// anything.
+    pub compiler_helpers: Vec<CompilerHelperRow>,
+    /// Every unit a compiler was asked about, answered or not.
+    ///
+    /// Part of the snapshot rather than a later write, so that a run and what
+    /// a compiler said about it arrive together: a run recorded without its
+    /// compiler rows would read as one that never asked.
+    pub compiler_units: Vec<CompilerUnitRow>,
     /// What the run reported about itself beyond the groups it found.
     pub summary: SummaryRow,
 }
@@ -575,15 +586,7 @@ fn write_snapshot(tx: &Transaction<'_>, snapshot: &Snapshot<'_>) -> Result<i64, 
     let run_id = tx.last_insert_rowid();
 
     for (component, version) in snapshot.detector_versions {
-        tx.execute(
-            "INSERT OR IGNORE INTO detector_version (component, version) VALUES (?1, ?2)",
-            params![component, version],
-        )?;
-        tx.execute(
-            "INSERT OR IGNORE INTO scan_run_detector_version (scan_run_id, detector_version_id)
-             SELECT ?1, id FROM detector_version WHERE component = ?2 AND version = ?3",
-            params![run_id, component, version],
-        )?;
+        record_detector_version(tx, run_id, component, version)?;
     }
 
     let suppression_row_ids = write_suppressions(tx, &snapshot.suppressions)?;
@@ -602,8 +605,35 @@ fn write_snapshot(tx: &Transaction<'_>, snapshot: &Snapshot<'_>) -> Result<i64, 
     }
     write_features(tx, snapshot, run_id, variant_id, &unit_row_ids)?;
     write_files(tx, &snapshot.files, run_id)?;
+    // The compiler IR names its own schema, and every distinct one a run holds
+    // becomes a declared detector version of that run: the per-unit column
+    // says what each answer was written against, and nothing at run level
+    // would otherwise say that this run holds compiler IR at all.
+    for schema in crate::compiler::write(tx, snapshot, run_id, variant_id)? {
+        record_detector_version(tx, run_id, "compiler_ir", &schema)?;
+    }
     write_summary(tx, &snapshot.summary, run_id)?;
     Ok(run_id)
+}
+
+/// Declare `component` at `version` for `run_id`, reusing the existing row
+/// when the pair has been recorded before.
+fn record_detector_version(
+    tx: &Transaction<'_>,
+    run_id: i64,
+    component: &str,
+    version: &str,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO detector_version (component, version) VALUES (?1, ?2)",
+        params![component, version],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO scan_run_detector_version (scan_run_id, detector_version_id)
+         SELECT ?1, id FROM detector_version WHERE component = ?2 AND version = ?3",
+        params![run_id, component, version],
+    )?;
+    Ok(())
 }
 
 /// Record what the run reported about itself: the source it read, the funnel

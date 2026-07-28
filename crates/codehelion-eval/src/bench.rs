@@ -1090,6 +1090,8 @@ pub fn measure_store_insert(
         groups: group_rows,
         features: Vec::new(),
         files: Vec::new(),
+        compiler_helpers: Vec::new(),
+        compiler_units: Vec::new(),
         summary: SummaryRow::default(),
     };
 

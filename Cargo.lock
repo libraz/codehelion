@@ -377,6 +377,7 @@ name = "codehelion-store"
 version = "0.1.0"
 dependencies = [
  "codehelion-core",
+ "codehelion-helper",
  "rusqlite",
  "tempfile",
  "thiserror",

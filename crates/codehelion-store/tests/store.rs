@@ -142,6 +142,8 @@ fn sample_snapshot<'a>(
                 byte_len: 240,
             },
         ],
+        compiler_helpers: Vec::new(),
+        compiler_units: Vec::new(),
         summary: sample_summary(),
     }
 }
@@ -193,14 +195,31 @@ fn sample_summary() -> SummaryRow {
     }
 }
 
-/// Strip what the newest migration added, so a database wound back to an older
-/// version migrates forward *through* that step instead of meeting a column it
-/// already has.
+/// Strip everything the migrations after version 15 added, so a database wound
+/// back to 15 migrates forward *through* those steps instead of meeting a table
+/// or column it already has.
 ///
-/// Each test below winds back to the version its case is about and undoes the
-/// steps in between; this is the one every such test has to undo.
-fn undo_newest(conn: &rusqlite::Connection) {
+/// A test that winds a database back has to undo every step in between, so
+/// every migration appended after 15 belongs here.
+fn undo_since_fifteen(conn: &rusqlite::Connection) {
     for table in [
+        // Version 17.
+        "compiler_data_flow",
+        "compiler_effect",
+        "compiler_instantiation_argument",
+        "compiler_instantiation",
+        "compiler_edge",
+        "compiler_block",
+        "compiler_call_candidate",
+        "compiler_call",
+        "compiler_symbol",
+        "compiler_type_argument",
+        "compiler_type",
+        "compiler_unit",
+        "compiler_helper_toolchain",
+        "compiler_helper_capability",
+        "compiler_helper",
+        // Version 16.
         "run_summary",
         "run_funnel_stage",
         "run_funnel_drop",
@@ -291,7 +310,7 @@ fn a_run_recorded_before_summaries_were_stored_has_none() {
     }
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
-        undo_newest(&conn);
+        undo_since_fifteen(&conn);
         conn.execute("UPDATE schema_meta SET version = 15", [])
             .unwrap();
     }
@@ -884,7 +903,7 @@ fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
         let conn = rusqlite::Connection::open(&path).unwrap();
         // Every column and table added at or after that version has to go, or
         // migrating forward would try to add one twice.
-        undo_newest(&conn);
+        undo_since_fifteen(&conn);
         conn.execute("DROP TABLE scanned_file", []).unwrap();
         conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
         conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])
@@ -938,7 +957,7 @@ fn a_group_recorded_before_the_split_pair_column_reads_as_a_whole_group() {
     // leave the question open.
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
-        undo_newest(&conn);
+        undo_since_fifteen(&conn);
         conn.execute("DROP TABLE scanned_file", []).unwrap();
         conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
         conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])
@@ -1003,7 +1022,7 @@ fn a_group_recorded_before_the_test_code_column_is_not_claimed_to_be_test_code()
     // claim either way. Migrating forward must not invent one.
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
-        undo_newest(&conn);
+        undo_since_fifteen(&conn);
         conn.execute("DROP TABLE scanned_file", []).unwrap();
         conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
         conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])

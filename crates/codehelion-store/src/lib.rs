@@ -10,6 +10,8 @@
 //! - [`schema`] — the DDL and the forward-only migration mechanism,
 //! - [`snapshot`] — the write path: one scan, one atomic transaction,
 //! - [`query`] — the read path: every SQL query as a typed function,
+//! - [`compiler`] — both directions for the compiler IR, whose shape is
+//!   defined by the helper protocol rather than here,
 //! - [`migrate`] — rewriting recorded history when the rules that make
 //!   identifiers change under it.
 //!
@@ -17,6 +19,7 @@
 //! when it is newer than this build supports; downgrade is unsupported by
 //! design.
 
+pub mod compiler;
 pub mod migrate;
 pub mod query;
 pub mod schema;
@@ -61,6 +64,17 @@ pub enum StoreError {
         index: usize,
         /// Number of units in the snapshot.
         units: usize,
+    },
+    /// A snapshot's compiler result named a helper that is not in the
+    /// snapshot.
+    #[error(
+        "snapshot compiler unit references helper {index}, but only {helpers} helpers were given"
+    )]
+    UnknownHelperIndex {
+        /// The out-of-range index.
+        index: usize,
+        /// Number of helpers in the snapshot.
+        helpers: usize,
     },
     /// A snapshot group referenced a suppression-rule index that does not
     /// exist.
@@ -173,6 +187,16 @@ mod tests {
             "feature_occurrence",
             "unit_feature",
             "clone_group_similarity",
+            "compiler_helper",
+            "compiler_unit",
+            "compiler_type",
+            "compiler_symbol",
+            "compiler_call",
+            "compiler_block",
+            "compiler_edge",
+            "compiler_instantiation",
+            "compiler_effect",
+            "compiler_data_flow",
         ] {
             let count: i64 = store
                 .conn

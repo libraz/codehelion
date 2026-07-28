@@ -1144,6 +1144,10 @@ fn rank_and_record(
         groups,
         features: Vec::new(),
         files,
+        // No compiler was asked anything: this mode reads source and nothing
+        // else, and an empty list is the whole truth about it.
+        compiler_helpers: Vec::new(),
+        compiler_units: Vec::new(),
         summary: summary.clone(),
     };
     inputs.run_id = store.record_snapshot(&snapshot)?;

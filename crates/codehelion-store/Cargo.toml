@@ -10,6 +10,10 @@ description = "Local SQLite audit storage for the codehelion source-audit tool."
 
 [dependencies]
 codehelion-core = { version = "0.1.0", path = "../codehelion-core" }
+# For the compiler-IR shape only. The helper crate holds the wire contract and
+# the code that runs a helper; nothing here runs one, and the ban on spawning
+# processes (clippy.toml) still applies to every line of this crate.
+codehelion-helper = { version = "0.1.0", path = "../codehelion-helper" }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 thiserror = "2"
 

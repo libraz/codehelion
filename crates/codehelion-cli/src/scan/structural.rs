@@ -1312,6 +1312,10 @@ fn record(
         units,
         groups,
         features: Vec::new(),
+        // No compiler was asked anything: this mode reads source and nothing
+        // else, and an empty list is the whole truth about it.
+        compiler_helpers: Vec::new(),
+        compiler_units: Vec::new(),
         summary: summary.clone(),
     };
     Ok((store.record_snapshot(&snapshot)?, audit))
