@@ -23,6 +23,8 @@ use std::io::{Read, Write};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ir::{CompilerIr, Unavailability, UnitRef};
+
 /// The protocol revision this build speaks.
 ///
 /// Bumped when a change would make an older peer misread a message. Additive
@@ -190,8 +192,23 @@ pub struct Request {
 pub enum RequestBody {
     /// Identify yourself and say what you can do.
     Handshake(ClientIdentity),
+    /// Analyze one unit and return what the compiler knows about it.
+    Analyze(Analyze),
     /// Finish outstanding work and exit.
     Shutdown,
+}
+
+/// One unit to analyze, and what is wanted from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Analyze {
+    /// Which unit.
+    pub unit: UnitRef,
+    /// What to spend time on.
+    ///
+    /// Never more than the helper offered at handshake. Asking for less than it
+    /// can do is how a run that needs only types avoids paying for a
+    /// control-flow graph nobody will read.
+    pub want: Vec<Capability>,
 }
 
 /// Who is connecting, and which revisions it can speak.
@@ -222,6 +239,18 @@ pub struct Response {
 pub enum ResponseBody {
     /// Who the helper is and what it can do.
     Handshake(Box<HelperIdentity>),
+    /// What the compiler knows about the unit.
+    Analyzed(Box<CompilerIr>),
+    /// Nothing can be known about the unit, and why.
+    ///
+    /// Distinct from [`ResponseBody::Failed`]: the helper is working, and this
+    /// unit is one it cannot analyze. A scan carries on and says so.
+    Unavailable {
+        /// Which unit.
+        unit: UnitRef,
+        /// Why it cannot be analyzed.
+        reason: Unavailability,
+    },
     /// Shutdown acknowledged.
     Shutdown,
     /// The request could not be answered.

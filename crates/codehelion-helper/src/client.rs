@@ -15,6 +15,7 @@
 //! sentence that explains the failure is almost always there and is lost the
 //! moment the process is reaped.
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
@@ -27,9 +28,10 @@ use std::time::Duration;
 #[allow(clippy::disallowed_types)]
 use std::process::{Child, ChildStdin, Command, Stdio};
 
+use crate::ir::{CompilerIr, Unavailability, UnitRef};
 use crate::protocol::{
-    Capability, ClientIdentity, FrameError, HelperIdentity, PROTOCOL_VERSION, Request, RequestBody,
-    Response, ResponseBody, VersionRange, read_frame, write_frame,
+    Analyze, Capability, ClientIdentity, FrameError, HelperIdentity, PROTOCOL_VERSION, Request,
+    RequestBody, Response, ResponseBody, VersionRange, read_frame, write_frame,
 };
 
 /// How long a request waits before the helper is treated as unresponsive.
@@ -267,6 +269,48 @@ impl Helper {
         Ok(())
     }
 
+    /// Ask for one unit's compiler IR.
+    ///
+    /// `want` is narrowed to what the helper said it can do, so a request never
+    /// asks for something the handshake already ruled out.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the helper cannot be written to, does not answer in time, dies,
+    /// or answers something other than what was asked.
+    pub fn analyze(
+        &mut self,
+        unit: &UnitRef,
+        want: &[Capability],
+    ) -> Result<Analysis, HelperError> {
+        let want = want
+            .iter()
+            .copied()
+            .filter(|capability| self.offers(*capability))
+            .collect();
+        let id = self.send(RequestBody::Analyze(Analyze {
+            unit: unit.clone(),
+            want,
+        }))?;
+        match self.receive(id)? {
+            ResponseBody::Analyzed(ir) => {
+                if ir.is_readable() {
+                    Ok(Analysis::Done(ir))
+                } else {
+                    // A helper from another schema is not a helper that failed:
+                    // it answered, and the answer cannot be read. Saying which
+                    // is what lets `doctor` tell someone to update the helper
+                    // rather than to debug their project.
+                    Ok(Analysis::Missing(Unavailability::UnreadableSchema))
+                }
+            }
+            ResponseBody::Unavailable { reason, .. } => Ok(Analysis::Missing(reason)),
+            _ => Err(HelperError::Died {
+                stderr: vec!["the helper answered an analysis with something else".into()],
+            }),
+        }
+    }
+
     /// Send the handshake and take what comes back.
     fn shake_hands(&mut self) -> Result<(), HelperError> {
         let ours = VersionRange::exactly(PROTOCOL_VERSION);
@@ -357,6 +401,163 @@ impl Helper {
         } else {
             HelperError::Frame(error)
         }
+    }
+}
+
+/// What came back from asking about one unit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Analysis {
+    /// The compiler IR for the unit.
+    Done(Box<CompilerIr>),
+    /// There is none, and why.
+    Missing(Unavailability),
+}
+
+/// How many times a helper may be restarted before a run stops trying.
+pub const DEFAULT_MAX_RESTARTS: u32 = 3;
+
+/// A helper kept running across many units, restarted when it breaks.
+///
+/// A compiler helper analyzing a real project will meet input that kills it —
+/// that is what compilers do on the code that finds their bugs. Handing that
+/// failure to the caller as an error would end a scan on its first bad file, so
+/// this owns the recovery instead: the helper is restarted, the unit that broke
+/// it is tried once more, and if it breaks the helper again that unit is set
+/// aside and the rest of the project is analyzed.
+///
+/// Setting the unit aside rather than the helper is the important half. A crash
+/// says something about the pair, and only re-running the same input tells you
+/// which of the two it was about.
+#[derive(Debug)]
+pub struct Supervisor {
+    program: PathBuf,
+    args: Vec<String>,
+    timeout: Duration,
+    max_restarts: u32,
+    restarts: u32,
+    helper: Option<Helper>,
+    /// Units that have already broken a helper once.
+    poisoned: BTreeSet<UnitRef>,
+    /// Whether a helper has ever been started, which is what tells a first
+    /// start apart from a restart.
+    started: bool,
+    /// Set once restarts run out: the helper is not started again.
+    given_up: bool,
+}
+
+impl Supervisor {
+    /// Supervise the helper at `program`, started with `args`.
+    #[must_use]
+    pub const fn new(program: PathBuf, args: Vec<String>, timeout: Duration) -> Self {
+        Self {
+            program,
+            args,
+            timeout,
+            max_restarts: DEFAULT_MAX_RESTARTS,
+            restarts: 0,
+            helper: None,
+            poisoned: BTreeSet::new(),
+            started: false,
+            given_up: false,
+        }
+    }
+
+    /// Allow at most `restarts` restarts before giving up on the helper.
+    #[must_use]
+    pub const fn with_max_restarts(mut self, restarts: u32) -> Self {
+        self.max_restarts = restarts;
+        self
+    }
+
+    /// How many times the helper has been restarted.
+    #[must_use]
+    pub const fn restarts(&self) -> u32 {
+        self.restarts
+    }
+
+    /// Whether `unit` has been set aside as one the helper cannot survive.
+    #[must_use]
+    pub fn has_set_aside(&self, unit: &UnitRef) -> bool {
+        self.poisoned.contains(unit)
+    }
+
+    /// Get one unit's compiler IR, restarting and retrying as needed.
+    ///
+    /// Never fails: every way this can go wrong is a reason the unit has no
+    /// compiler IR, which is a result a scan can report and carry on from.
+    pub fn analyze(&mut self, unit: &UnitRef, want: &[Capability]) -> Analysis {
+        if self.given_up {
+            return Analysis::Missing(Unavailability::HelperDied);
+        }
+        if self.poisoned.contains(unit) {
+            // It broke a helper twice already. Asking again costs another
+            // restart and answers nothing new.
+            return Analysis::Missing(Unavailability::HelperDied);
+        }
+        match self.attempt(unit, want) {
+            Ok(analysis) => analysis,
+            Err(first) => {
+                if !unavailability(&first).worth_retrying() {
+                    return Analysis::Missing(unavailability(&first));
+                }
+                self.helper = None;
+                match self.attempt(unit, want) {
+                    Ok(analysis) => analysis,
+                    Err(second) => {
+                        // Twice on the same unit: the unit is what the helper
+                        // cannot survive, so it is the unit that is set aside.
+                        self.poisoned.insert(unit.clone());
+                        self.helper = None;
+                        Analysis::Missing(unavailability(&second))
+                    }
+                }
+            }
+        }
+    }
+
+    /// One attempt, starting the helper if it is not running.
+    fn attempt(&mut self, unit: &UnitRef, want: &[Capability]) -> Result<Analysis, HelperError> {
+        if self.helper.is_none() {
+            if self.started {
+                if self.restarts >= self.max_restarts {
+                    self.given_up = true;
+                    return Ok(Analysis::Missing(Unavailability::HelperDied));
+                }
+                self.restarts = self.restarts.saturating_add(1);
+            }
+            self.started = true;
+            let arguments: Vec<&str> = self.args.iter().map(String::as_str).collect();
+            self.helper = Some(
+                Helper::start_with(&self.program, &arguments, self.timeout).inspect_err(|_| {
+                    // A helper that will not start will not start for the next
+                    // unit either, so the run stops asking rather than paying a
+                    // process spawn per file to be told the same thing.
+                    self.given_up = true;
+                })?,
+            );
+        }
+        let Some(helper) = self.helper.as_mut() else {
+            return Ok(Analysis::Missing(Unavailability::HelperDied));
+        };
+        helper.analyze(unit, want)
+    }
+
+    /// Stop the helper, if one is running.
+    pub fn shutdown(&mut self) {
+        if let Some(helper) = self.helper.take() {
+            let _ = helper.shutdown();
+        }
+    }
+}
+
+/// The reason a unit has no IR, given how talking to the helper went.
+const fn unavailability(error: &HelperError) -> Unavailability {
+    match error {
+        HelperError::TimedOut { .. } => Unavailability::HelperTimedOut,
+        HelperError::NoCommonProtocol { .. } | HelperError::MissingRequiredCapability { .. } => {
+            Unavailability::ToolchainMismatch
+        }
+        _ => Unavailability::HelperDied,
     }
 }
 

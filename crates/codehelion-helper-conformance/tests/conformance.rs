@@ -8,10 +8,11 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use codehelion_helper::client::{Helper, HelperError, MAX_DIAGNOSTIC_LINES};
+use codehelion_helper::client::{Analysis, Helper, HelperError, MAX_DIAGNOSTIC_LINES, Supervisor};
+use codehelion_helper::ir::{TypeCategory, Unavailability, UnitRef};
 use codehelion_helper::protocol::{Capability, PROTOCOL_VERSION};
 
 /// A deadline short enough that a hung helper does not hold up the suite, and
@@ -145,4 +146,133 @@ fn dropping_a_helper_takes_its_process_with_it() {
     let second = start("deaf", Duration::from_millis(200));
     assert!(matches!(second, Err(HelperError::TimedOut { .. })));
     assert!(started.elapsed() < SHORT * 2);
+}
+
+/// A unit to ask about, named so tests can tell them apart.
+fn unit(file: &str) -> UnitRef {
+    UnitRef {
+        unit: "mock-crate".into(),
+        file: file.into(),
+        variant: "variant-0".into(),
+    }
+}
+
+fn supervisor(behaviour: &str, restarts: u32) -> Supervisor {
+    Supervisor::new(
+        PathBuf::from(MOCK),
+        vec![behaviour.to_owned()],
+        Duration::from_millis(500),
+    )
+    .with_max_restarts(restarts)
+}
+
+#[test]
+fn an_analysis_comes_back_anchored_where_it_reads() {
+    let mut helper = start("well-behaved", SHORT).expect("it answers");
+    let asked = unit("src/lib.rs");
+    let Analysis::Done(ir) = helper
+        .analyze(&asked, &[Capability::Types])
+        .expect("the mock analyzes")
+    else {
+        panic!("the mock had an answer");
+    };
+    assert!(ir.is_readable());
+    assert_eq!(ir.unit, asked);
+    let symbol = ir.symbols.first().expect("one symbol");
+    assert_eq!(symbol.anchor.expansion.file, "src/lib.rs");
+    assert!(!symbol.anchor.is_expanded());
+    assert_eq!(
+        ir.types
+            .get(symbol.type_index.expect("a type") as usize)
+            .expect("that type")
+            .category,
+        TypeCategory::Integer
+    );
+    helper.shutdown().expect("it goes");
+}
+
+#[test]
+fn a_unit_nobody_can_analyze_is_an_answer_rather_than_a_failure() {
+    let mut helper = start("needs-execution", SHORT).expect("it answers");
+    let outcome = helper
+        .analyze(&unit("build.rs"), &[Capability::Types])
+        .expect("saying no is not an error");
+    assert_eq!(
+        outcome,
+        Analysis::Missing(Unavailability::RequiresExecution)
+    );
+}
+
+#[test]
+fn an_answer_in_a_schema_nobody_reads_is_not_read() {
+    let mut helper = start("wrong-schema", SHORT).expect("it answers");
+    let outcome = helper
+        .analyze(&unit("src/lib.rs"), &[Capability::Types])
+        .expect("it answered, after all");
+    // Not `Done` with unreadable contents, and not a dead helper either: the
+    // helper works and needs updating, which is a different thing to tell
+    // someone.
+    assert_eq!(outcome, Analysis::Missing(Unavailability::UnreadableSchema));
+}
+
+#[test]
+fn the_unit_that_kills_a_helper_is_set_aside_and_the_rest_go_on() {
+    let mut supervisor = supervisor("allergic", 8);
+    // The first good unit works.
+    assert!(matches!(
+        supervisor.analyze(&unit("src/good.rs"), &[Capability::Types]),
+        Analysis::Done(_)
+    ));
+    // The bad one kills the helper. It is tried once more — a crash says
+    // something about the pair, and only a retry says which half — and then
+    // set aside.
+    assert!(matches!(
+        supervisor.analyze(&unit("src/poison.rs"), &[Capability::Types]),
+        Analysis::Missing(Unavailability::HelperDied)
+    ));
+    assert!(supervisor.has_set_aside(&unit("src/poison.rs")));
+    assert_eq!(supervisor.restarts(), 1, "one retry, so one restart");
+    // And the project is still analyzable.
+    assert!(matches!(
+        supervisor.analyze(&unit("src/also-good.rs"), &[Capability::Types]),
+        Analysis::Done(_)
+    ));
+    supervisor.shutdown();
+}
+
+#[test]
+fn a_unit_already_set_aside_is_not_paid_for_twice() {
+    let mut supervisor = supervisor("allergic", 8);
+    assert!(matches!(
+        supervisor.analyze(&unit("src/poison.rs"), &[Capability::Types]),
+        Analysis::Missing(Unavailability::HelperDied)
+    ));
+    let after_first = supervisor.restarts();
+    assert!(matches!(
+        supervisor.analyze(&unit("src/poison.rs"), &[Capability::Types]),
+        Analysis::Missing(Unavailability::HelperDied)
+    ));
+    assert_eq!(
+        supervisor.restarts(),
+        after_first,
+        "asking again must not cost another restart"
+    );
+    supervisor.shutdown();
+}
+
+#[test]
+fn a_helper_that_keeps_dying_is_given_up_on_rather_than_restarted_forever() {
+    let mut supervisor = supervisor("allergic", 1);
+    for file in ["src/poison-a.rs", "src/poison-b.rs", "src/poison-c.rs"] {
+        assert!(matches!(
+            supervisor.analyze(&unit(file), &[Capability::Types]),
+            Analysis::Missing(_)
+        ));
+    }
+    assert!(
+        supervisor.restarts() <= 1,
+        "restarted {} times against a budget of one",
+        supervisor.restarts()
+    );
+    supervisor.shutdown();
 }

@@ -21,7 +21,9 @@
 #![doc(html_root_url = "https://docs.rs/codehelion-helper")]
 
 pub mod client;
+pub mod ir;
 pub mod protocol;
 
-pub use client::{DEFAULT_TIMEOUT, Helper, HelperError, locate};
+pub use client::{Analysis, DEFAULT_TIMEOUT, Helper, HelperError, Supervisor, locate};
+pub use ir::{COMPILER_IR_SCHEMA_VERSION, CompilerIr, Unavailability, UnitRef};
 pub use protocol::{Absence, Capability, HelperIdentity, PROTOCOL_VERSION, VersionRange};

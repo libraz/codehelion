@@ -18,11 +18,18 @@
 //! mock-helper confused          # answers a request nobody made
 //! mock-helper refuses           # answers with a failure
 //! mock-helper chatty            # floods its standard error, then exits
+//! mock-helper needs-execution   # analyzes nothing: it would have to run code
+//! mock-helper wrong-schema      # answers in a schema nobody reads
+//! mock-helper allergic          # dies on any unit whose file is named `poison`
 //! ```
 
 use std::io::Read;
 use std::time::Duration;
 
+use codehelion_helper::ir::{
+    Anchor, CompilerIr, ResolvedSymbol, ResolvedType, SourceRange, SymbolKind, TypeCategory,
+    Unavailability, UnitRef,
+};
 use codehelion_helper::protocol::{
     Capability, Failure, HelperIdentity, PROTOCOL_VERSION, Request, RequestBody, Response,
     ResponseBody, VersionRange, read_frame, write_frame,
@@ -68,6 +75,22 @@ fn main() {
             RequestBody::Handshake(_) => {
                 ResponseBody::Handshake(Box::new(identity(behaviour.as_str())))
             }
+            RequestBody::Analyze(analyze) if behaviour == "needs-execution" => {
+                ResponseBody::Unavailable {
+                    unit: analyze.unit,
+                    reason: Unavailability::RequiresExecution,
+                }
+            }
+            RequestBody::Analyze(analyze) => {
+                if behaviour == "allergic" && analyze.unit.file.contains("poison") {
+                    std::process::exit(6);
+                }
+                let mut ir = analyzed(analyze.unit);
+                if behaviour == "wrong-schema" {
+                    ir.schema_version = "compiler-ir-from-the-future".into();
+                }
+                ResponseBody::Analyzed(Box::new(ir))
+            }
             RequestBody::Shutdown => ResponseBody::Shutdown,
         };
         let shutting_down = matches!(body, ResponseBody::Shutdown);
@@ -83,6 +106,33 @@ fn main() {
             return;
         }
     }
+}
+
+/// A small but complete answer: one symbol of one type, anchored where it
+/// reads and remembering where it was written.
+fn analyzed(unit: UnitRef) -> CompilerIr {
+    let range = SourceRange {
+        file: unit.file.clone(),
+        start_byte: 0,
+        end_byte: 32,
+        start_line: 1,
+    };
+    let mut ir = CompilerIr::empty(unit);
+    ir.types.push(ResolvedType {
+        display: "u64".into(),
+        category: TypeCategory::Integer,
+        arguments: Vec::new(),
+        definition: None,
+    });
+    ir.symbols.push(ResolvedSymbol {
+        id: "mock::counted".into(),
+        name: "counted".into(),
+        kind: SymbolKind::Function,
+        anchor: Anchor::written_here(range),
+        type_index: Some(0),
+        external: false,
+    });
+    ir
 }
 
 /// What this mock claims to be, under the named behaviour.
