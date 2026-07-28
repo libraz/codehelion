@@ -13,7 +13,8 @@ the code it analyses.
 
 The current release ships two build-free analysis modes. **Fast** is
 token-level Type-1 (identical) and Type-2 (renamed identifiers / changed
-literals) detection that scans hundreds of thousands of lines in seconds.
+literals) detection that scans hundreds of thousands of lines in seconds and
+millions in a couple of minutes.
 **Structural** adds syntax-structural Type-3 detection — clones that differ by
 added, removed or changed statements — and reports the per-dimension similarity
 each finding was judged on. Semantic analysis and optional compiled-artifact
@@ -39,6 +40,9 @@ analysis arrive in later releases.
   analysed again.
 - **Visible limits** — every resource ceiling that fires (file size, parse
   timeout, candidate budget) is counted in the report, never silently applied.
+  On a tree large enough for the candidate budget to stop the search, the
+  report says how many pairs it left unexamined rather than presenting a
+  partial answer as a complete one.
 
 ## Installation
 
