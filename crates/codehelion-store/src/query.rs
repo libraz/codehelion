@@ -3,8 +3,8 @@
 //! SQL strings live here and nowhere else, so the CLI layer talks in domain
 //! types. Result ordering is deterministic everywhere: groups order by their
 //! fingerprint bytes (priority ordering joins in with the priority stage),
-//! members by their anchor then row id — the same database always yields the
-//! same output.
+//! members in the order the run recorded them — the same database always
+//! yields the same output.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -15,6 +15,7 @@ use codehelion_core::lineage::{Anchor, GroupSnapshot, MemberSnapshot};
 use codehelion_core::stable_id::{CloneGroupFingerprint, FragmentFingerprint, GroupLineageId};
 use rusqlite::{OptionalExtension, params};
 
+use crate::snapshot::{FunnelDropRow, FunnelStageRow, SummaryRow, UnparsedRow, UnusedRuleRow};
 use crate::{Store, StoreError};
 
 /// A recorded run and the tree it read, by path relative to the scan root.
@@ -125,6 +126,9 @@ pub struct StoredGroup {
     /// Whether the members differ from each other by one integer width and
     /// nothing else.
     pub width_family: bool,
+    /// Statements each member covers, for a fragment-scope group; `None` for a
+    /// whole-unit group, and for a row written before runs recorded it.
+    pub statements: Option<i64>,
     /// The similarity breakdown, when the mode measured one (Structural).
     pub similarity: Option<StoredSimilarity>,
     /// The rule that hid the group in its run, when one matched. Absent for a
@@ -653,7 +657,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT g.id, lower(hex(f.hash)), g.clone_type, g.score, g.entropy_bits,
                     g.suppress_reason, g.boilerplate, g.member_scope, g.test_code,
-                    g.split_pair, s.scope, s.pattern, g.width_family
+                    g.split_pair, s.scope, s.pattern, g.width_family, g.statements
              FROM clone_group g
              JOIN fingerprint f ON f.id = g.group_fingerprint_id
              LEFT JOIN finding fi ON fi.clone_group_id = g.id
@@ -678,6 +682,7 @@ impl Store {
                         test_code: row.get(8)?,
                         split_pair: row.get(9)?,
                         width_family: row.get(12)?,
+                        statements: row.get(13)?,
                         similarity: None,
                         suppressed_by: scope
                             .zip(pattern)
@@ -695,6 +700,122 @@ impl Store {
             groups.push(group);
         }
         Ok(groups)
+    }
+
+    /// What the run reported about itself beyond its findings, or `None` for a
+    /// run recorded before runs stored it.
+    ///
+    /// Absent means the run cannot be described again, not that it measured
+    /// nothing — a caller rebuilding a report from a stored run has to treat
+    /// the two differently.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn run_summary_row(&self, run_id: i64) -> Result<Option<SummaryRow>, StoreError> {
+        let summary = self
+            .conn
+            .query_row(
+                "SELECT lines, tokens, lexer_diagnostics, unparsed_files,
+                        unparsed_tokens, excluded_generated, excluded_by_glob,
+                        excluded_skipped, folded_runs, subsumed_runs,
+                        split_components, pair_budget_exhausted, baseline_digest
+                 FROM run_summary WHERE scan_run_id = ?1",
+                params![run_id],
+                |row| {
+                    let count = |value: i64| u64::try_from(value).unwrap_or(0);
+                    let files: Option<i64> = row.get(3)?;
+                    let tokens: Option<i64> = row.get(4)?;
+                    Ok(SummaryRow {
+                        lines: count(row.get(0)?),
+                        tokens: count(row.get(1)?),
+                        lexer_diagnostics: count(row.get(2)?),
+                        unparsed: files.zip(tokens).map(|(files, tokens)| UnparsedRow {
+                            files: count(files),
+                            tokens: count(tokens),
+                        }),
+                        excluded_generated: count(row.get(5)?),
+                        excluded_by_glob: count(row.get(6)?),
+                        excluded_skipped: count(row.get(7)?),
+                        folded_runs: count(row.get(8)?),
+                        subsumed_runs: count(row.get(9)?),
+                        split_components: count(row.get(10)?),
+                        pair_budget_exhausted: row.get(11)?,
+                        baseline_digest: row.get(12)?,
+                        funnel: Vec::new(),
+                        unused_suppressions: Vec::new(),
+                    })
+                },
+            )
+            .optional()?;
+        let Some(mut summary) = summary else {
+            return Ok(None);
+        };
+        summary.funnel = self.run_funnel(run_id)?;
+        summary.unused_suppressions = self.run_unused_suppressions(run_id)?;
+        Ok(Some(summary))
+    }
+
+    /// The run's candidate pipeline, stage by stage in run order, each stage
+    /// carrying what it dropped.
+    fn run_funnel(&self, run_id: i64) -> Result<Vec<FunnelStageRow>, StoreError> {
+        let mut stages = self
+            .conn
+            .prepare(
+                "SELECT position, name, passed FROM run_funnel_stage
+                 WHERE scan_run_id = ?1 ORDER BY position ASC",
+            )?
+            .query_map(params![run_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    FunnelStageRow {
+                        name: row.get(1)?,
+                        passed: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                        dropped: Vec::new(),
+                    },
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let drops = self
+            .conn
+            .prepare(
+                "SELECT position, cause, dropped FROM run_funnel_drop
+                 WHERE scan_run_id = ?1 ORDER BY position ASC, ordinal ASC",
+            )?
+            .query_map(params![run_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    FunnelDropRow {
+                        cause: row.get(1)?,
+                        count: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                    },
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (position, drop) in drops {
+            if let Some((_, stage)) = stages.iter_mut().find(|(at, _)| *at == position) {
+                stage.dropped.push(drop);
+            }
+        }
+        Ok(stages.into_iter().map(|(_, stage)| stage).collect())
+    }
+
+    /// The configured rules the run found nothing for, in the order it named
+    /// them.
+    fn run_unused_suppressions(&self, run_id: i64) -> Result<Vec<UnusedRuleRow>, StoreError> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT scope, pattern FROM run_unused_suppression
+                 WHERE scan_run_id = ?1 ORDER BY ordinal ASC",
+            )?
+            .query_map(params![run_id], |row| {
+                Ok(UnusedRuleRow {
+                    scope: row.get(0)?,
+                    pattern: row.get(1)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?)
     }
 
     /// The similarity breakdown of one group row, or `None` when the mode
@@ -726,7 +847,12 @@ impl Store {
             .optional()?)
     }
 
-    /// The members of one group row, ordered by anchor then row id.
+    /// The members of one group row, in the order the run recorded them.
+    ///
+    /// Fragment rows are written as the run listed the occurrences, so their
+    /// row ids carry that order and the canonical instance comes first. Any
+    /// other ordering would be this layer's opinion rather than the run's, and
+    /// a report rebuilt from these rows has to list what the run listed.
     fn group_members(&self, group_row_id: i64) -> Result<Vec<StoredMember>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT lower(hex(m.finding_id)), fr.file_path, fr.start_line, fr.end_line,
@@ -737,7 +863,7 @@ impl Store {
              JOIN fingerprint ff ON ff.id = fr.fingerprint_id
              LEFT JOIN source_unit u ON u.id = fr.source_unit_id
              WHERE m.clone_group_id = ?1
-             ORDER BY fr.file_path ASC, fr.start_line ASC, fr.id ASC",
+             ORDER BY fr.id ASC",
         )?;
         let members = stmt
             .query_map(params![group_row_id], |row| map_member(row, 7))?

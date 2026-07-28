@@ -211,6 +211,9 @@ pub struct GroupRow {
     /// apart from it because it describes how the members differ rather than
     /// what any one of them does.
     pub width_family: bool,
+    /// Statements each member covers, for a group whose members are runs
+    /// inside units; `None` for a whole-unit group, whose extent is the unit.
+    pub statements: Option<u32>,
     /// Index into [`Snapshot::suppressions`] of the rule that suppressed this
     /// group's finding, if one matched.
     pub suppressed_by: Option<usize>,
@@ -422,6 +425,97 @@ pub struct Snapshot<'a> {
     /// Every source file the scan read, whether or not anything was found in
     /// it. A later scan of the same tree compares against this.
     pub files: Vec<FileRow>,
+    /// What the run reported about itself beyond the groups it found.
+    pub summary: SummaryRow,
+}
+
+/// What a run's report says that its findings do not.
+///
+/// Everything here is a measurement of the run rather than of a group: how
+/// much source went in, what each stage of the pipeline passed on, what was
+/// dropped and why. A stage that discarded every candidate leaves no row
+/// anywhere else, so without these a stored run can be listed again but not
+/// described again.
+///
+/// Counts that *are* derivable from the stored groups — how many are Type-1,
+/// how many are suppressed, how many live in tests — are deliberately absent:
+/// a copy of a derivable value is a second answer waiting to disagree with
+/// the first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SummaryRow {
+    /// Source lines across the analysed files.
+    pub lines: u64,
+    /// Tokens across the analysed files.
+    pub tokens: u64,
+    /// Lexer diagnostics emitted while reading the sources.
+    pub lexer_diagnostics: u64,
+    /// Files holding tokens the parser could not attach to any structure, and
+    /// how many such tokens there are. `None` in a mode that does not parse,
+    /// which has nothing to report rather than nothing to report *yet*.
+    pub unparsed: Option<UnparsedRow>,
+    /// Files dropped for carrying a generated-code marker.
+    pub excluded_generated: u64,
+    /// Files dropped by the configured include/exclude globs.
+    pub excluded_by_glob: u64,
+    /// Files dropped for any other cause (size, binary content, read errors).
+    pub excluded_skipped: u64,
+    /// Duplicated runs left out because a reported whole-unit group already
+    /// covers them.
+    pub folded_runs: u64,
+    /// Duplicated runs left out because a longer run covers every one of their
+    /// occurrences.
+    pub subsumed_runs: u64,
+    /// Groups of related units cut because they were too large to refine as
+    /// one piece.
+    pub split_components: u64,
+    /// Whether a candidate stage ran out of budget, making the result
+    /// potentially incomplete.
+    pub pair_budget_exhausted: bool,
+    /// Digest of the frozen finding set the run was reported against, when it
+    /// was given a baseline.
+    pub baseline_digest: Option<String>,
+    /// What each stage of the candidate pipeline passed on, in run order.
+    pub funnel: Vec<FunnelStageRow>,
+    /// Configured suppression rules that hid nothing in the run.
+    pub unused_suppressions: Vec<UnusedRuleRow>,
+}
+
+/// How much of the source the parser could not follow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnparsedRow {
+    /// Files holding at least one unattached token.
+    pub files: u64,
+    /// How many such tokens there are.
+    pub tokens: u64,
+}
+
+/// One stage of the candidate pipeline, with what it dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunnelStageRow {
+    /// The stage's name, as the report prints it.
+    pub name: String,
+    /// How many items the stage passed on.
+    pub passed: u64,
+    /// What the stage dropped, by cause. Empty when it dropped nothing.
+    pub dropped: Vec<FunnelDropRow>,
+}
+
+/// Items one stage dropped for one reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunnelDropRow {
+    /// Why they were dropped, as a `snake_case` cause.
+    pub cause: String,
+    /// How many.
+    pub count: u64,
+}
+
+/// One configured suppression rule that matched nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnusedRuleRow {
+    /// Rule scope (`path_glob`, `symbol_pattern`, `stable_clone_id`).
+    pub scope: String,
+    /// The pattern as configured.
+    pub pattern: String,
 }
 
 /// One source file a scan read.
@@ -508,7 +602,77 @@ fn write_snapshot(tx: &Transaction<'_>, snapshot: &Snapshot<'_>) -> Result<i64, 
     }
     write_features(tx, snapshot, run_id, variant_id, &unit_row_ids)?;
     write_files(tx, &snapshot.files, run_id)?;
+    write_summary(tx, &snapshot.summary, run_id)?;
     Ok(run_id)
+}
+
+/// Record what the run reported about itself: the source it read, the funnel
+/// it narrowed through, and the rules that hid nothing.
+fn write_summary(
+    tx: &Transaction<'_>,
+    summary: &SummaryRow,
+    run_id: i64,
+) -> Result<(), StoreError> {
+    let count = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+    tx.execute(
+        "INSERT INTO run_summary
+             (scan_run_id, lines, tokens, lexer_diagnostics, unparsed_files,
+              unparsed_tokens, excluded_generated, excluded_by_glob,
+              excluded_skipped, folded_runs, subsumed_runs, split_components,
+              pair_budget_exhausted, baseline_digest)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            run_id,
+            count(summary.lines),
+            count(summary.tokens),
+            count(summary.lexer_diagnostics),
+            summary.unparsed.map(|row| count(row.files)),
+            summary.unparsed.map(|row| count(row.tokens)),
+            count(summary.excluded_generated),
+            count(summary.excluded_by_glob),
+            count(summary.excluded_skipped),
+            count(summary.folded_runs),
+            count(summary.subsumed_runs),
+            count(summary.split_components),
+            summary.pair_budget_exhausted,
+            summary.baseline_digest,
+        ],
+    )?;
+    for (position, stage) in summary.funnel.iter().enumerate() {
+        let position = i64::try_from(position).unwrap_or(i64::MAX);
+        tx.execute(
+            "INSERT INTO run_funnel_stage (scan_run_id, position, name, passed)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![run_id, position, stage.name, count(stage.passed)],
+        )?;
+        for (ordinal, drop) in stage.dropped.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO run_funnel_drop
+                     (scan_run_id, position, ordinal, cause, dropped)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    run_id,
+                    position,
+                    i64::try_from(ordinal).unwrap_or(i64::MAX),
+                    drop.cause,
+                    count(drop.count),
+                ],
+            )?;
+        }
+    }
+    for (ordinal, rule) in summary.unused_suppressions.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO run_unused_suppression (scan_run_id, ordinal, scope, pattern)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                run_id,
+                i64::try_from(ordinal).unwrap_or(i64::MAX),
+                rule.scope,
+                rule.pattern,
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 /// Record the tree the run read, one row per file.
@@ -734,8 +898,8 @@ fn write_group(
         "INSERT INTO clone_group
              (scan_run_id, group_fingerprint_id, clone_type, member_scope,
               member_count, score, entropy_bits, suppress_reason, boilerplate,
-              test_code, split_pair, width_family)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              test_code, split_pair, width_family, statements)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             run_id,
             group_fp_id,
@@ -749,6 +913,7 @@ fn write_group(
             group.test_code,
             group.split_pair,
             group.width_family,
+            group.statements,
         ],
     )?;
     let group_row_id = tx.last_insert_rowid();

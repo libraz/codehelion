@@ -19,8 +19,9 @@ use codehelion_core::stable_id::{
 use codehelion_core::verify::Confidence;
 use codehelion_store::migrate::LineageAdoption;
 use codehelion_store::snapshot::{
-    FeatureRow, FileRow, GroupOrigin, GroupRow, LineageParent, MemberRow, PriorityRow,
-    SimilarityBreakdownRow, Snapshot, SuppressionRuleRow, UnitRow,
+    FeatureRow, FileRow, FunnelDropRow, FunnelStageRow, GroupOrigin, GroupRow, LineageParent,
+    MemberRow, PriorityRow, SimilarityBreakdownRow, Snapshot, SummaryRow, SuppressionRuleRow,
+    UnitRow, UnparsedRow, UnusedRuleRow,
 };
 use codehelion_store::{Store, StoreError};
 
@@ -103,6 +104,7 @@ fn sample_snapshot<'a>(
             clone_type: CloneClass::Type1,
             split_pair: false,
             member_scope: CloneScope::Unit,
+            statements: None,
             test_code: false,
             score: 1.0,
             entropy_bits: 4.2,
@@ -140,7 +142,74 @@ fn sample_snapshot<'a>(
                 byte_len: 240,
             },
         ],
+        summary: sample_summary(),
     }
+}
+
+/// A summary with every field distinguishable from every other, so a
+/// round-trip that swaps two of them fails instead of passing.
+fn sample_summary() -> SummaryRow {
+    SummaryRow {
+        lines: 310,
+        tokens: 1_400,
+        lexer_diagnostics: 2,
+        unparsed: Some(UnparsedRow {
+            files: 1,
+            tokens: 35,
+        }),
+        excluded_generated: 3,
+        excluded_by_glob: 4,
+        excluded_skipped: 5,
+        folded_runs: 6,
+        subsumed_runs: 7,
+        split_components: 8,
+        pair_budget_exhausted: true,
+        baseline_digest: Some("cc".repeat(32)),
+        funnel: vec![
+            FunnelStageRow {
+                name: "tokens".to_string(),
+                passed: 1_400,
+                dropped: Vec::new(),
+            },
+            FunnelStageRow {
+                name: "seed pairs".to_string(),
+                passed: 12,
+                dropped: vec![
+                    FunnelDropRow {
+                        cause: "pair_budget".to_string(),
+                        count: 9,
+                    },
+                    FunnelDropRow {
+                        cause: "high_frequency".to_string(),
+                        count: 4,
+                    },
+                ],
+            },
+        ],
+        unused_suppressions: vec![UnusedRuleRow {
+            scope: "path_glob".to_string(),
+            pattern: "vendor/**".to_string(),
+        }],
+    }
+}
+
+/// Strip what the newest migration added, so a database wound back to an older
+/// version migrates forward *through* that step instead of meeting a column it
+/// already has.
+///
+/// Each test below winds back to the version its case is about and undoes the
+/// steps in between; this is the one every such test has to undo.
+fn undo_newest(conn: &rusqlite::Connection) {
+    for table in [
+        "run_summary",
+        "run_funnel_stage",
+        "run_funnel_drop",
+        "run_unused_suppression",
+    ] {
+        conn.execute(&format!("DROP TABLE {table}"), []).unwrap();
+    }
+    conn.execute("ALTER TABLE clone_group DROP COLUMN statements", [])
+        .unwrap();
 }
 
 #[test]
@@ -188,6 +257,48 @@ fn a_snapshot_round_trips_through_queries() {
         store.occurrence("not-hex"),
         Err(StoreError::MalformedId { .. })
     ));
+}
+
+/// What a run reported about itself has to come back the way it went in,
+/// stage order and drop order included: a report rebuilt from these rows is
+/// compared byte for byte against the one the scan printed.
+#[test]
+fn what_a_run_reported_about_itself_comes_back_as_it_went_in() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let run_id = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+
+    let read = store.run_summary_row(run_id).unwrap().expect("a summary");
+    assert_eq!(read, sample_summary());
+}
+
+/// A run recorded before summaries were stored is not describable again, and
+/// that is a different answer from a run whose every count came out at zero.
+#[test]
+fn a_run_recorded_before_summaries_were_stored_has_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.db");
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    {
+        let mut store = Store::open(&path).unwrap();
+        store
+            .record_snapshot(&sample_snapshot(&variant, &detectors))
+            .unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        undo_newest(&conn);
+        conn.execute("UPDATE schema_meta SET version = 15", [])
+            .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let run = store.latest_run().unwrap().expect("the recorded run");
+    assert!(store.run_summary_row(run.id).unwrap().is_none());
 }
 
 #[test]
@@ -773,6 +884,7 @@ fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
         let conn = rusqlite::Connection::open(&path).unwrap();
         // Every column and table added at or after that version has to go, or
         // migrating forward would try to add one twice.
+        undo_newest(&conn);
         conn.execute("DROP TABLE scanned_file", []).unwrap();
         conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
         conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])
@@ -826,6 +938,7 @@ fn a_group_recorded_before_the_split_pair_column_reads_as_a_whole_group() {
     // leave the question open.
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
+        undo_newest(&conn);
         conn.execute("DROP TABLE scanned_file", []).unwrap();
         conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
         conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])
@@ -890,6 +1003,7 @@ fn a_group_recorded_before_the_test_code_column_is_not_claimed_to_be_test_code()
     // claim either way. Migrating forward must not invent one.
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
+        undo_newest(&conn);
         conn.execute("DROP TABLE scanned_file", []).unwrap();
         conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
         conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])

@@ -5,7 +5,10 @@
 //! `Finding`, `Suppression`, `Artifact`, `ArtifactSymbol`,
 //! `SourceArtifactMapping` and `DetectorVersion`, plus the candidate-index
 //! feature tables `FeatureFingerprint`, `FeatureOccurrence` and `UnitFeature`,
-//! and the per-group `CloneGroupSimilarity` breakdown.
+//! the per-group `CloneGroupSimilarity` breakdown, and the per-run report
+//! tables `RunSummary`, `RunFunnelStage`, `RunFunnelDrop` and
+//! `RunUnusedSuppression`, which hold what a report says about a run beyond
+//! the findings it lists.
 //! The artifact tables are created empty in this release — the schema is the
 //! contract, population comes with the features that need them.
 //!
@@ -38,12 +41,12 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 16;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16,
 ];
 
 /// Version 1: the full entity set.
@@ -566,6 +569,67 @@ CREATE INDEX idx_clone_group_run ON clone_group (scan_run_id);
 CREATE INDEX idx_clone_group_fp ON clone_group (group_fingerprint_id);
 ";
 
+/// Version 16: what a run reported beyond its findings.
+///
+/// A run's rows say what was found and what was read; a report also says how
+/// much source that was, what the pipeline dropped on the way, and which
+/// configured rule hid nothing. None of it is derivable from the findings —
+/// a stage that discarded everything leaves no row anywhere — so a stored run
+/// could be listed again but not described again.
+///
+/// The funnel is two tables rather than one with a nullable cause: a stage
+/// and a reason for leaving it are different things, and a stage that dropped
+/// nothing has no drop row rather than a row saying nothing was dropped.
+///
+/// `baseline_digest` names the frozen set a run was reported against. Two runs
+/// of one tree under one configuration still differ when different findings
+/// were frozen, and the baseline file is not part of the configuration hash.
+const V16: &str = "
+ALTER TABLE clone_group ADD COLUMN statements INTEGER;
+
+CREATE TABLE run_summary (
+    scan_run_id           INTEGER PRIMARY KEY REFERENCES scan_run (id) ON DELETE CASCADE,
+    lines                 INTEGER NOT NULL,
+    tokens                INTEGER NOT NULL,
+    lexer_diagnostics     INTEGER NOT NULL,
+    unparsed_files        INTEGER,
+    unparsed_tokens       INTEGER,
+    excluded_generated    INTEGER NOT NULL,
+    excluded_by_glob      INTEGER NOT NULL,
+    excluded_skipped      INTEGER NOT NULL,
+    folded_runs           INTEGER NOT NULL,
+    subsumed_runs         INTEGER NOT NULL,
+    split_components      INTEGER NOT NULL,
+    pair_budget_exhausted INTEGER NOT NULL CHECK (pair_budget_exhausted IN (0, 1)),
+    baseline_digest       TEXT
+) STRICT;
+
+CREATE TABLE run_funnel_stage (
+    scan_run_id INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL,
+    name        TEXT NOT NULL,
+    passed      INTEGER NOT NULL,
+    PRIMARY KEY (scan_run_id, position)
+) STRICT;
+
+CREATE TABLE run_funnel_drop (
+    scan_run_id INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL,
+    ordinal     INTEGER NOT NULL,
+    cause       TEXT NOT NULL,
+    dropped     INTEGER NOT NULL,
+    PRIMARY KEY (scan_run_id, position, ordinal)
+) STRICT;
+
+CREATE TABLE run_unused_suppression (
+    scan_run_id INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
+    ordinal     INTEGER NOT NULL,
+    scope       TEXT NOT NULL,
+    pattern     TEXT NOT NULL,
+    PRIMARY KEY (scan_run_id, ordinal)
+) STRICT;
+";
+
 /// Bring `conn` to the current schema version, applying any pending
 /// forward migrations inside one transaction per step.
 pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
@@ -609,17 +673,24 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
 
 /// Run every migration from `start` onwards, one transaction per step.
 fn apply(conn: &mut Connection, start: usize) -> Result<(), StoreError> {
-    for (i, script) in MIGRATIONS.iter().enumerate().skip(start) {
-        let tx = conn.transaction()?;
-        tx.execute_batch(script)?;
-        let next = i64::try_from(i + 1).unwrap_or(i64::MAX);
-        tx.execute(
-            "INSERT INTO schema_meta (id, version) VALUES (1, ?1)
-             ON CONFLICT (id) DO UPDATE SET version = excluded.version",
-            [next],
-        )?;
-        tx.commit()?;
+    for step in start..MIGRATIONS.len() {
+        apply_one(conn, step)?;
     }
+    Ok(())
+}
+
+/// Migrate version `step` to `step + 1` in one transaction, recording the new
+/// version with the change it describes.
+fn apply_one(conn: &mut Connection, step: usize) -> Result<(), StoreError> {
+    let tx = conn.transaction()?;
+    tx.execute_batch(MIGRATIONS[step])?;
+    let next = i64::try_from(step + 1).unwrap_or(i64::MAX);
+    tx.execute(
+        "INSERT INTO schema_meta (id, version) VALUES (1, ?1)
+         ON CONFLICT (id) DO UPDATE SET version = excluded.version",
+        [next],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -668,7 +739,14 @@ INSERT INTO clone_group (id, scan_run_id, group_fingerprint_id, clone_type,
 INSERT INTO clone_group_member VALUES (1, 1, randomblob(16), 1);
 ";
 
-    /// A database at `version`, seeded with a group and its one member.
+    /// A database genuinely at `version`, seeded with a group and its one
+    /// member.
+    ///
+    /// The migrations up to `version` are the ones that run: winding the
+    /// recorded version back after applying all of them would leave a database
+    /// that has already seen the step under test, and a step that cannot be
+    /// applied twice — adding a column, say — would fail for that reason
+    /// rather than for the reason the test is about.
     fn seeded(version: i64) -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -676,10 +754,11 @@ INSERT INTO clone_group_member VALUES (1, 1, randomblob(16), 1);
                                        version INTEGER NOT NULL) STRICT;",
         )
         .unwrap();
-        apply(&mut conn, 0).unwrap();
+        let stop = usize::try_from(version).unwrap();
+        for step in 0..stop {
+            apply_one(&mut conn, step).unwrap();
+        }
         conn.execute_batch(SEED).unwrap();
-        conn.execute("UPDATE schema_meta SET version = ?1", [version])
-            .unwrap();
         conn
     }
 

@@ -32,7 +32,7 @@ use codehelion_core::stable_id::{
 };
 use codehelion_store::Store;
 use codehelion_store::snapshot::{
-    GroupOrigin, GroupRow, MemberRow, PriorityRow, Snapshot, UnitRow,
+    GroupOrigin, GroupRow, MemberRow, PriorityRow, Snapshot, SummaryRow, UnitRow,
 };
 
 /// Deterministic xorshift64* generator; quality is irrelevant here, only
@@ -1039,6 +1039,7 @@ pub fn measure_store_insert(
             clone_type: CloneClass::Type1,
             split_pair: false,
             member_scope: CloneScope::Unit,
+            statements: None,
             test_code: false,
             score: 1.0,
             entropy_bits: 24.0,
@@ -1089,6 +1090,7 @@ pub fn measure_store_insert(
         groups: group_rows,
         features: Vec::new(),
         files: Vec::new(),
+        summary: SummaryRow::default(),
     };
 
     let db = work_dir.join("store-bench.db");

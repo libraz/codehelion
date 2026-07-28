@@ -25,6 +25,7 @@ use std::io::{self, Write};
 use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::lineage::{AuditDiff, AuditState};
 use codehelion_core::priority::{self, GroupFacts, Weights};
+use codehelion_store::snapshot::{FunnelDropRow, FunnelStageRow, SummaryRow, UnusedRuleRow};
 use serde::{Deserialize, Serialize};
 
 /// Version of the JSON report format.
@@ -224,6 +225,117 @@ impl FunnelDrop {
     }
 }
 
+/// The run's funnel in the shape the audit database stores it.
+#[must_use]
+pub fn stored_funnel(funnel: &[FunnelStage]) -> Vec<FunnelStageRow> {
+    funnel
+        .iter()
+        .map(|stage| FunnelStageRow {
+            name: stage.stage.clone(),
+            passed: stage.passed,
+            dropped: stage
+                .dropped
+                .iter()
+                .map(|drop| FunnelDropRow {
+                    cause: drop.cause.clone(),
+                    count: drop.count,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// The rules that hid nothing, in the shape the audit database stores them.
+#[must_use]
+pub fn stored_rules(rules: &[UnusedRule]) -> Vec<UnusedRuleRow> {
+    rules
+        .iter()
+        .map(|rule| UnusedRuleRow {
+            scope: rule.scope.clone(),
+            pattern: rule.pattern.clone(),
+        })
+        .collect()
+}
+
+/// The summary a stored row and the groups it belongs to describe together.
+///
+/// Everything a group carries is counted off `groups` and everything else is
+/// read from `stored`; nothing is held in both places. What a run measured
+/// about its comparisons — the tree changes, the audit states, what a baseline
+/// hid — is left absent here, because those are statements about *this*
+/// invocation rather than about the recorded run.
+#[must_use]
+pub fn restored(files: FileCounts, stored: &SummaryRow, groups: &[Group]) -> Summary {
+    let count = |predicate: &dyn Fn(&Group) -> bool| {
+        u64::try_from(groups.iter().filter(|group| predicate(group)).count()).unwrap_or(u64::MAX)
+    };
+    let suppressed_as = |kind: SuppressionKind| {
+        count(&|group| {
+            group
+                .suppressed
+                .as_ref()
+                .is_some_and(|suppression| suppression.kind == kind)
+        })
+    };
+    Summary {
+        files,
+        lines: stored.lines,
+        tokens: stored.tokens,
+        lexer_diagnostics: stored.lexer_diagnostics,
+        unparsed: stored
+            .unparsed
+            .map(|row| UnparsedCounts::from_counts(row.files, row.tokens, stored.tokens)),
+        excluded: ExcludedCounts {
+            generated: stored.excluded_generated,
+            by_glob: stored.excluded_by_glob,
+            skipped: stored.excluded_skipped,
+        },
+        changes: None,
+        audit: None,
+        baseline: None,
+        groups: GroupCounts {
+            total: u64::try_from(groups.len()).unwrap_or(u64::MAX),
+            type_1: count(&|group| group.clone_type == CloneClass::Type1.name()),
+            type_2: count(&|group| group.clone_type == CloneClass::Type2.name()),
+            type_3: count(&|group| group.clone_type == CloneClass::Type3.name()),
+            fragment_scope: count(&|group| group.scope == CloneScope::Fragment.name()),
+            folded_runs: stored.folded_runs,
+            subsumed_runs: stored.subsumed_runs,
+            test_code: count(&|group| group.test_code),
+        },
+        suppressed: SuppressedCounts {
+            noise: suppressed_as(SuppressionKind::Noise),
+            by_rule: suppressed_as(SuppressionKind::Rule),
+        },
+        unused_suppressions: stored
+            .unused_suppressions
+            .iter()
+            .map(|rule| UnusedRule {
+                scope: rule.scope.clone(),
+                pattern: rule.pattern.clone(),
+            })
+            .collect(),
+        funnel: stored
+            .funnel
+            .iter()
+            .map(|stage| FunnelStage {
+                stage: stage.name.clone(),
+                passed: stage.passed,
+                dropped: stage
+                    .dropped
+                    .iter()
+                    .map(|drop| FunnelDrop {
+                        cause: drop.cause.clone(),
+                        count: drop.count,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        split_components: stored.split_components,
+        pair_budget_exhausted: stored.pair_budget_exhausted,
+    }
+}
+
 /// One configured suppression rule that matched nothing.
 #[derive(Debug, Serialize)]
 pub struct UnusedRule {
@@ -405,16 +517,26 @@ impl UnparsedCounts {
                 unparsed += tokens;
             }
         }
+        Self::from_counts(files, unparsed, total)
+    }
+
+    /// The same tally from counts already taken, as a stored run carries them.
+    ///
+    /// The share is recomputed rather than stored: it is a ratio of two numbers
+    /// on the row, and a third column holding their quotient is one more thing
+    /// that can disagree with them.
+    #[must_use]
+    pub fn from_counts(files: u64, tokens: u64, total: u64) -> Self {
         // Ratios of counts this size lose nothing that a report shows.
         #[allow(clippy::cast_precision_loss)]
         let share = if total == 0 {
             0.0
         } else {
-            ((unparsed as f64 / total as f64) * 10_000.0).round() / 10_000.0
+            ((tokens as f64 / total as f64) * 10_000.0).round() / 10_000.0
         };
         Self {
             files,
-            tokens: unparsed,
+            tokens,
             share,
         }
     }
@@ -749,7 +871,7 @@ pub fn ranked(mut group: Group, weights: &Weights, min_clone_tokens: u64) -> Gro
 }
 
 /// Which mechanism suppressed a group.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SuppressionKind {
     /// The engine marked the group as noise.

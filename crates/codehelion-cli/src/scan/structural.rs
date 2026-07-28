@@ -19,7 +19,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use codehelion_core::boilerplate::{BOILERPLATE_VERSION, Boilerplate};
-use codehelion_core::clone_class::{CloneClass, CloneScope};
+use codehelion_core::clone_class::CloneScope;
 use codehelion_core::discovery::{
     BuildVariant, ContentHash, DiscoveryReport, Language, LanguageSelection, NORMALIZATION_VERSION,
     SourceUnit,
@@ -39,12 +39,12 @@ use codehelion_core::test_code::{self, TEST_CODE_VERSION};
 use codehelion_core::verify::{SimilarityBreakdown, WEIGHT_VERSION};
 use codehelion_store::snapshot::{
     FileRow, GroupOrigin, GroupRow, MemberRow, PriorityRow, SimilarityBreakdownRow, Snapshot,
-    UnitRow,
+    SummaryRow, UnitRow, UnparsedRow,
 };
 
 use super::{
-    FileOutcome, as_u64, database_path, discover_sources, effective_jobs, filter_globs,
-    literal_norm, map_sources, open_store, rfc3339_now, write_report,
+    FileOutcome, ScanBaseline, as_u64, database_path, discover_sources, effective_jobs,
+    filter_globs, literal_norm, map_sources, open_store, rfc3339_now, write_report,
 };
 use crate::Outcome;
 use crate::cli::ScanArgs;
@@ -166,26 +166,27 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     // of one verdict about where each finding belongs, not two derivations of
     // it that happen to agree.
     let groups = build_groups(&inputs);
-    let (run_id, audit) = record(&cfg, &inputs, &groups, crate::scan::file_rows(&sources))?;
+    let stored = summary_row(
+        &inputs,
+        &discovered,
+        baseline.as_ref().map(ScanBaseline::digest),
+    );
+    let (run_id, audit) = record(
+        &cfg,
+        &inputs,
+        &groups,
+        crate::scan::file_rows(&sources),
+        &stored,
+    )?;
     inputs.audit = audit;
-    let mut model = build_report(&inputs, run_id, &discovered, groups);
+    let mut model = build_report(&inputs, run_id, &stored, groups);
     // Counted against the assembled report rather than the raw analysis: a
     // stale entry is one whose duplication this run does not list.
     model.summary.baseline = baseline
         .as_ref()
         .map(|baseline| crate::scan::baseline_status(baseline, &model.groups));
     write_report(args, out, &model)?;
-
-    let visible = model
-        .groups
-        .iter()
-        .filter(|group| group.suppressed.is_none())
-        .count();
-    if args.fail_on_findings && visible > 0 {
-        Ok(Outcome::FindingsPresent)
-    } else {
-        Ok(Outcome::Success)
-    }
+    Ok(crate::scan::outcome(args, &model))
 }
 
 /// Read and parse one source file, enforcing the per-file time ceiling.
@@ -884,7 +885,7 @@ fn funnel(stats: &structural::StructuralStats) -> Vec<report::FunnelStage> {
 fn build_report(
     inputs: &ReportInputs<'_>,
     run_id: i64,
-    discovered: &DiscoveryReport,
+    stored: &SummaryRow,
     groups: Vec<report::Group>,
 ) -> Report {
     let variant = inputs.variant;
@@ -921,17 +922,60 @@ fn build_report(
             database: inputs.db_path.display().to_string(),
             run_id,
         },
-        summary: summary(inputs, &groups, discovered),
+        summary: build_summary(inputs, stored, &groups),
         groups,
     }
 }
 
-/// The summary block of the report: everything the run measured, counted off
-/// the assembled entries so the totals cannot disagree with the listing.
-fn summary(
+/// What the run reported about itself beyond the groups it found, in the shape
+/// the audit database stores.
+///
+/// Built before the snapshot is written and read back out of it by
+/// [`build_summary`], so the recorded run and the printed report carry one set
+/// of numbers rather than two derivations that happen to agree.
+fn summary_row(
     inputs: &ReportInputs<'_>,
-    groups: &[report::Group],
     discovered: &DiscoveryReport,
+    baseline_digest: Option<String>,
+) -> SummaryRow {
+    let stats = &inputs.analysis.stats;
+    let tokens = as_u64(inputs.irs.iter().map(|ir| ir.tokens.len()).sum::<usize>());
+    let unparsed = report::UnparsedCounts::new(
+        inputs.files.iter().map(|file| file.unaccounted_tokens),
+        tokens,
+    );
+    SummaryRow {
+        lines: inputs.files.iter().map(|file| file.lines).sum(),
+        tokens,
+        lexer_diagnostics: as_u64(inputs.files.iter().map(|file| file.diagnostics).sum()),
+        unparsed: Some(UnparsedRow {
+            files: unparsed.files,
+            tokens: unparsed.tokens,
+        }),
+        excluded_generated: as_u64(discovered.suppressed_generated.len()),
+        excluded_by_glob: as_u64(inputs.glob_excluded),
+        excluded_skipped: discovered.skipped.total() + inputs.unreadable + inputs.timed_out,
+        folded_runs: as_u64(inputs.regions.folded),
+        subsumed_runs: as_u64(stats.region_subsumed),
+        split_components: as_u64(stats.grouping.oversized_components),
+        // Any candidate stage exhausting its budget makes the result
+        // potentially incomplete.
+        pair_budget_exhausted: stats.candidate.budget_exhausted
+            || stats.near_match.budget_exhausted
+            || stats.control_flow.budget_exhausted,
+        baseline_digest,
+        funnel: report::stored_funnel(&funnel(stats)),
+        unused_suppressions: report::stored_rules(&inputs.unused_suppressions()),
+    }
+}
+
+/// The summary block of the report: everything the run measured, counted off
+/// the assembled entries and the stored row so the totals cannot disagree with
+/// the listing or with the database.
+fn build_summary(
+    inputs: &ReportInputs<'_>,
+    stored: &SummaryRow,
+    groups: &[report::Group],
 ) -> report::Summary {
     let count = |language: Language| {
         as_u64(
@@ -942,74 +986,16 @@ fn summary(
                 .count(),
         )
     };
-    let count_class = |class: CloneClass| {
-        as_u64(
-            groups
-                .iter()
-                .filter(|g| g.clone_type == class.name())
-                .count(),
-        )
+    let files = report::FileCounts {
+        total: as_u64(inputs.files.len()),
+        rust: count(Language::Rust),
+        c: count(Language::C),
+        cpp: count(Language::Cpp),
     };
-    let stats = &inputs.analysis.stats;
-    report::Summary {
-        files: report::FileCounts {
-            total: as_u64(inputs.files.len()),
-            rust: count(Language::Rust),
-            c: count(Language::C),
-            cpp: count(Language::Cpp),
-        },
-        lines: inputs.files.iter().map(|file| file.lines).sum(),
-        tokens: as_u64(inputs.irs.iter().map(|ir| ir.tokens.len()).sum::<usize>()),
-        lexer_diagnostics: as_u64(inputs.files.iter().map(|file| file.diagnostics).sum()),
-        unparsed: Some(report::UnparsedCounts::new(
-            inputs.files.iter().map(|file| file.unaccounted_tokens),
-            as_u64(inputs.irs.iter().map(|ir| ir.tokens.len()).sum::<usize>()),
-        )),
-        excluded: report::ExcludedCounts {
-            generated: as_u64(discovered.suppressed_generated.len()),
-            by_glob: as_u64(inputs.glob_excluded),
-            skipped: discovered.skipped.total() + inputs.unreadable + inputs.timed_out,
-        },
-        changes: inputs.changes,
-        audit: inputs.audit.clone(),
-        // Filled in after the groups are assembled, which is what a
-        // stale entry has to be counted against.
-        baseline: None,
-        groups: report::GroupCounts {
-            total: as_u64(groups.len()),
-            type_1: count_class(CloneClass::Type1),
-            type_2: count_class(CloneClass::Type2),
-            type_3: count_class(CloneClass::Type3),
-            fragment_scope: as_u64(
-                groups
-                    .iter()
-                    .filter(|group| group.scope == CloneScope::Fragment.name())
-                    .count(),
-            ),
-            folded_runs: as_u64(inputs.regions.folded),
-            subsumed_runs: as_u64(stats.region_subsumed),
-            test_code: as_u64(groups.iter().filter(|group| group.test_code).count()),
-        },
-        suppressed: report::SuppressedCounts {
-            // The funnel marks no group as noise yet; suppression here is
-            // rule-driven only.
-            noise: 0,
-            by_rule: as_u64(
-                groups
-                    .iter()
-                    .filter(|group| group.suppressed.is_some())
-                    .count(),
-            ),
-        },
-        unused_suppressions: inputs.unused_suppressions(),
-        funnel: funnel(stats),
-        split_components: as_u64(stats.grouping.oversized_components),
-        // Any candidate stage exhausting its budget makes the result
-        // potentially incomplete.
-        pair_budget_exhausted: stats.candidate.budget_exhausted
-            || stats.near_match.budget_exhausted
-            || stats.control_flow.budget_exhausted,
-    }
+    let mut summary = report::restored(files, stored, groups);
+    summary.changes = inputs.changes;
+    summary.audit.clone_from(&inputs.audit);
+    summary
 }
 
 /// One group of the report model, with its similarity evidence and its
@@ -1316,6 +1302,7 @@ fn record(
     inputs: &ReportInputs<'_>,
     ranked: &[report::Group],
     files: Vec<FileRow>,
+    summary: &SummaryRow,
 ) -> Result<(i64, Option<report::AuditSummary>)> {
     let (units, mut groups) = snapshot_rows(inputs, ranked)?;
     let mut store = open_store(inputs.db_path)?;
@@ -1341,6 +1328,7 @@ fn record(
         units,
         groups,
         features: Vec::new(),
+        summary: summary.clone(),
     };
     Ok((store.record_snapshot(&snapshot)?, audit))
 }
@@ -1416,6 +1404,7 @@ fn snapshot_rows(
                 history: GroupOrigin::unconnected(&detail.fingerprint),
                 clone_type: group.clone_type,
                 member_scope: CloneScope::Unit,
+                statements: None,
                 test_code: detail.test_code,
                 split_pair: false,
                 score: group.min_pairwise,
@@ -1493,6 +1482,7 @@ fn split_pair_row(
         history: GroupOrigin::unconnected(&pair.fingerprint),
         clone_type: pair.class,
         member_scope: CloneScope::Unit,
+        statements: None,
         test_code: pair
             .members
             .iter()
@@ -1557,6 +1547,7 @@ fn region_row(
         history: GroupOrigin::unconnected(&region.fingerprint),
         clone_type: region.clone_type,
         member_scope: CloneScope::Fragment,
+        statements: Some(region.statements),
         test_code: region_test_code(inputs.analysis, region),
         split_pair: false,
         score: REGION_SIMILARITY,

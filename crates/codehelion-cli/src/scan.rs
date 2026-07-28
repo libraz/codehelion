@@ -18,7 +18,7 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use codehelion_core::clone_class::{CloneClass, CloneScope};
+use codehelion_core::clone_class::CloneScope;
 use codehelion_core::discovery::{
     self, BuildVariant, ContentHash, DEFAULT_SCAN_LINES, DiscoveryConfig, DiscoveryReport,
     GeneratedMarkers, Language, LanguageSelection, NORMALIZATION_VERSION, SourceUnit,
@@ -33,7 +33,8 @@ use codehelion_core::priority::Weights;
 use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION, FileContext, GroupIds};
 use codehelion_store::Store;
 use codehelion_store::snapshot::{
-    FileRow, GroupOrigin, GroupRow, LineageParent, MemberRow, PriorityRow, Snapshot, UnitRow,
+    FileRow, GroupOrigin, GroupRow, LineageParent, MemberRow, PriorityRow, Snapshot, SummaryRow,
+    UnitRow,
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
@@ -143,24 +144,31 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         min_clone_tokens: u64::from(cfg.min_clone_tokens),
         literals: engine_config.literals,
     };
-    let groups = rank_and_record(&mut inputs, &cfg, &contexts, file_rows(&sources))?;
-    let mut model = build_report(&inputs, groups);
+    let stored = summary_row(&inputs, baseline.as_ref().map(ScanBaseline::digest));
+    let groups = rank_and_record(&mut inputs, &cfg, &contexts, file_rows(&sources), &stored)?;
+    let mut model = build_report(&inputs, &stored, groups);
     // Counted against the assembled report rather than the raw analysis: a
     // stale entry is one whose duplication this run does not list.
     model.summary.baseline = baseline
         .as_ref()
         .map(|baseline| baseline_status(baseline, &model.groups));
     write_report(args, out, &model)?;
+    Ok(outcome(args, &model))
+}
 
+/// What a finished scan exits with: findings present only when the caller
+/// asked to be told by the status, and only counting what the report shows —
+/// a suppressed group is one the reader said not to be told about.
+pub(crate) fn outcome(args: &ScanArgs, model: &Report) -> Outcome {
     let visible = model
         .groups
         .iter()
         .filter(|group| group.suppressed.is_none())
         .count();
     if args.fail_on_findings && visible > 0 {
-        Ok(Outcome::FindingsPresent)
+        Outcome::FindingsPresent
     } else {
-        Ok(Outcome::Success)
+        Outcome::Success
     }
 }
 
@@ -316,10 +324,42 @@ fn funnel(stats: &engine::EngineStats) -> Vec<report::FunnelStage> {
     ]
 }
 
-/// Assemble the report model both output formats render from, from the groups
-/// the run already ranked. They are ordered here by priority descending,
-/// fingerprint ascending on ties, so every view is stable across reruns.
-fn build_report(inputs: &BuildInputs<'_>, mut groups: Vec<report::Group>) -> Report {
+/// What the run reported about itself beyond the groups it found, in the shape
+/// the audit database stores.
+///
+/// Built before the snapshot is written and read back out of it by
+/// [`build_summary`], so the recorded run and the printed report carry one set
+/// of numbers rather than two derivations that happen to agree.
+fn summary_row(inputs: &BuildInputs<'_>, baseline_digest: Option<String>) -> SummaryRow {
+    SummaryRow {
+        lines: inputs.lexed.iter().map(|file| file.lines).sum(),
+        tokens: as_u64(inputs.report.stats.tokens),
+        lexer_diagnostics: as_u64(inputs.lexed.iter().map(|file| file.diagnostics).sum()),
+        // Fast mode lexes and does not parse, so it has nothing to report
+        // here; a zero would read as "the parser followed everything".
+        unparsed: None,
+        excluded_generated: as_u64(inputs.discovered.suppressed_generated.len()),
+        excluded_by_glob: as_u64(inputs.glob_excluded),
+        excluded_skipped: inputs.discovered.skipped.total() + inputs.unreadable + inputs.timed_out,
+        // The Fast engine compares whole units, so it folds and subsumes no
+        // runs, and its equivalence classes need no refinement to bound.
+        folded_runs: 0,
+        subsumed_runs: 0,
+        split_components: 0,
+        pair_budget_exhausted: inputs.report.stats.pair_budget_exhausted,
+        baseline_digest,
+        funnel: report::stored_funnel(&funnel(&inputs.report.stats)),
+        unused_suppressions: report::stored_rules(&unused_suppressions(inputs)),
+    }
+}
+
+/// The summary block, counted off the assembled entries and the stored row so
+/// that neither the listing nor the database can disagree with it.
+fn build_summary(
+    inputs: &BuildInputs<'_>,
+    stored: &SummaryRow,
+    groups: &[report::Group],
+) -> report::Summary {
     let count = |language: Language| {
         u64::try_from(
             inputs
@@ -330,74 +370,36 @@ fn build_report(inputs: &BuildInputs<'_>, mut groups: Vec<report::Group>) -> Rep
         )
         .unwrap_or(u64::MAX)
     };
-    let count_groups = |predicate: &dyn Fn(usize) -> bool| {
-        u64::try_from(
-            (0..inputs.report.groups.len())
-                .filter(|i| predicate(*i))
-                .count(),
-        )
-        .unwrap_or(u64::MAX)
+    let files = report::FileCounts {
+        total: as_u64(inputs.lexed.len()),
+        rust: count(Language::Rust),
+        c: count(Language::C),
+        cpp: count(Language::Cpp),
     };
+    let mut summary = report::restored(files, stored, groups);
+    summary.changes = inputs.changes;
+    summary.audit.clone_from(&inputs.audit);
+    summary
+}
 
+/// Assemble the report model both output formats render from, from the groups
+/// the run already ranked. They are ordered here by priority descending,
+/// fingerprint ascending on ties, so every view is stable across reruns.
+fn build_report(
+    inputs: &BuildInputs<'_>,
+    stored: &SummaryRow,
+    mut groups: Vec<report::Group>,
+) -> Report {
     groups.sort_by(|a, b| {
         b.priority
             .value
             .total_cmp(&a.priority.value)
             .then_with(|| a.fingerprint.cmp(&b.fingerprint))
     });
-
     Report {
         schema_version: report::SCHEMA_VERSION,
         run: run_info(inputs),
-        summary: report::Summary {
-            files: report::FileCounts {
-                total: as_u64(inputs.lexed.len()),
-                rust: count(Language::Rust),
-                c: count(Language::C),
-                cpp: count(Language::Cpp),
-            },
-            lines: inputs.lexed.iter().map(|file| file.lines).sum(),
-            tokens: as_u64(inputs.report.stats.tokens),
-            lexer_diagnostics: as_u64(inputs.lexed.iter().map(|file| file.diagnostics).sum()),
-            // Fast mode lexes and does not parse, so it has nothing to report
-            // here; a zero would read as "the parser followed everything".
-            unparsed: None,
-            excluded: report::ExcludedCounts {
-                generated: as_u64(inputs.discovered.suppressed_generated.len()),
-                by_glob: as_u64(inputs.glob_excluded),
-                skipped: inputs.discovered.skipped.total() + inputs.unreadable + inputs.timed_out,
-            },
-            changes: inputs.changes,
-            audit: inputs.audit.clone(),
-            // Filled in after the groups are assembled, which is what a
-            // stale entry has to be counted against.
-            baseline: None,
-            groups: report::GroupCounts {
-                total: as_u64(inputs.report.groups.len()),
-                type_1: count_groups(&|i| inputs.report.groups[i].clone_type == CloneClass::Type1),
-                type_2: count_groups(&|i| inputs.report.groups[i].clone_type == CloneClass::Type2),
-                // The Fast engine matches identical content only.
-                type_3: 0,
-                // The Fast engine compares whole units only.
-                fragment_scope: 0,
-                folded_runs: 0,
-                subsumed_runs: 0,
-                test_code: 0,
-            },
-            suppressed: report::SuppressedCounts {
-                noise: count_groups(&|i| inputs.report.groups[i].suppressed.is_some()),
-                by_rule: count_groups(&|i| {
-                    inputs.report.groups[i].suppressed.is_none()
-                        && inputs.group_suppressed[i].is_some()
-                }),
-            },
-            unused_suppressions: unused_suppressions(inputs),
-            funnel: funnel(&inputs.report.stats),
-            // The Fast engine reports equivalence classes, which need no
-            // refinement and so have nothing to bound.
-            split_components: 0,
-            pair_budget_exhausted: inputs.report.stats.pair_budget_exhausted,
-        },
+        summary: build_summary(inputs, stored, &groups),
         groups,
     }
 }
@@ -854,6 +856,23 @@ pub(crate) struct ScanBaseline {
     caveat: Option<String>,
 }
 
+impl ScanBaseline {
+    /// A digest of the frozen set, for recording which one a run was reported
+    /// against.
+    ///
+    /// Over the ids alone: the file's path and the order its entries are
+    /// written in change nothing about what is hidden, and two runs given the
+    /// same frozen set under two names report the same findings.
+    pub(crate) fn digest(&self) -> String {
+        let mut joined = String::new();
+        for id in &self.ids {
+            joined.push_str(id);
+            joined.push('\n');
+        }
+        ContentHash::of(joined.as_bytes()).as_str().to_string()
+    }
+}
+
 /// Load the baseline a scan was given and register it as a suppression rule.
 ///
 /// A baseline recorded under conditions this run does not share is loaded and
@@ -1031,6 +1050,7 @@ fn rank_and_record(
     cfg: &Config,
     contexts: &[FileContext<'_>],
     files: Vec<FileRow>,
+    summary: &SummaryRow,
 ) -> Result<Vec<report::Group>> {
     let ranked: Vec<report::Group> = (0..inputs.report.groups.len())
         .map(|index| build_group(inputs, index))
@@ -1067,6 +1087,7 @@ fn rank_and_record(
         groups,
         features: Vec::new(),
         files,
+        summary: summary.clone(),
     };
     inputs.run_id = store.record_snapshot(&snapshot)?;
     inputs.audit = audit;
@@ -1184,6 +1205,9 @@ fn snapshot_rows(
             history: GroupOrigin::unconnected(&group_ids.fingerprint),
             clone_type: group.clone_type,
             member_scope: CloneScope::Unit,
+            // A whole unit's extent is the unit; only a run inside one has a
+            // statement count to record.
+            statements: None,
             // Fast mode compares tokens without a syntax tree, so it never
             // sees the attribute that marks a test.
             split_pair: false,

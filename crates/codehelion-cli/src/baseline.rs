@@ -492,6 +492,7 @@ mod tests {
             split_pair: false,
             test_code: false,
             width_family: false,
+            statements: None,
             similarity: None,
             suppressed_by: None,
             members: vec![
