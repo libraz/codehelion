@@ -1,0 +1,175 @@
+{
+  "schema_version": "compiler-ir-v0",
+  "unit": {
+    "unit": "render",
+    "file": "src/render.rs",
+    "variant": "target=host"
+  },
+  "symbols": [
+    {
+      "id": "crate::render",
+      "name": "render",
+      "kind": "function",
+      "anchor": {
+        "expansion": {
+          "file": "src/render.rs",
+          "start_byte": 0,
+          "end_byte": 64,
+          "start_line": 1
+        },
+        "definition": null
+      },
+      "type_index": 1,
+      "external": false
+    },
+    {
+      "id": "std::fmt::Display::fmt",
+      "name": "fmt",
+      "kind": "other",
+      "anchor": {
+        "expansion": {
+          "file": "src/render.rs",
+          "start_byte": 128,
+          "end_byte": 192,
+          "start_line": 5
+        },
+        "definition": {
+          "file": "src/macros.rs",
+          "start_byte": 32,
+          "end_byte": 96,
+          "start_line": 2
+        }
+      },
+      "type_index": null,
+      "external": true
+    }
+  ],
+  "types": [
+    {
+      "display": "String",
+      "category": "text",
+      "arguments": [],
+      "definition": "alloc::string::String"
+    },
+    {
+      "display": "Vec<String>",
+      "category": "sequence",
+      "arguments": [
+        0
+      ],
+      "definition": "alloc::vec::Vec"
+    }
+  ],
+  "calls": [
+    {
+      "anchor": {
+        "expansion": {
+          "file": "src/render.rs",
+          "start_byte": 192,
+          "end_byte": 256,
+          "start_line": 7
+        },
+        "definition": null
+      },
+      "target": {
+        "resolution": "static",
+        "symbol": "crate::escape"
+      }
+    },
+    {
+      "anchor": {
+        "expansion": {
+          "file": "src/render.rs",
+          "start_byte": 256,
+          "end_byte": 320,
+          "start_line": 9
+        },
+        "definition": null
+      },
+      "target": {
+        "resolution": "dynamic",
+        "candidates": [
+          "crate::Html"
+        ]
+      }
+    },
+    {
+      "anchor": {
+        "expansion": {
+          "file": "src/render.rs",
+          "start_byte": 320,
+          "end_byte": 384,
+          "start_line": 11
+        },
+        "definition": null
+      },
+      "target": {
+        "resolution": "unresolved"
+      }
+    }
+  ],
+  "cfg": {
+    "blocks": [
+      {
+        "anchor": {
+          "expansion": {
+            "file": "src/render.rs",
+            "start_byte": 0,
+            "end_byte": 64,
+            "start_line": 1
+          },
+          "definition": null
+        },
+        "length": 4
+      }
+    ],
+    "edges": [
+      {
+        "from": 0,
+        "to": 0,
+        "kind": "return"
+      }
+    ]
+  },
+  "instantiations": [
+    {
+      "anchor": {
+        "expansion": {
+          "file": "src/render.rs",
+          "start_byte": 384,
+          "end_byte": 448,
+          "start_line": 13
+        },
+        "definition": {
+          "file": "src/generic.rs",
+          "start_byte": 96,
+          "end_byte": 160,
+          "start_line": 4
+        }
+      },
+      "definition": "crate::Buffer::push",
+      "instantiation_key": "crate::Buffer::push<String>",
+      "arguments": [
+        0
+      ]
+    }
+  ],
+  "effects": {
+    "computed": true,
+    "writes": [
+      "crate::COUNTER"
+    ],
+    "interactions": [
+      "file"
+    ]
+  },
+  "data_flow": {
+    "computed": true,
+    "flows": [
+      [
+        "input",
+        "output"
+      ]
+    ]
+  }
+}

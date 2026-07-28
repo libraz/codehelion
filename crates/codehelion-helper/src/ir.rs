@@ -127,6 +127,31 @@ pub enum TypeCategory {
     Unresolved,
 }
 
+impl TypeCategory {
+    /// Stable lowercase identifier, the same spelling this serializes as.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Integer => "integer",
+            Self::Float => "float",
+            Self::Boolean => "boolean",
+            Self::Character => "character",
+            Self::Text => "text",
+            Self::Handle => "handle",
+            Self::Sequence => "sequence",
+            Self::Mapping => "mapping",
+            Self::Tuple => "tuple",
+            Self::Record => "record",
+            Self::Enumeration => "enumeration",
+            Self::Interface => "interface",
+            Self::Callable => "callable",
+            Self::Parameter => "parameter",
+            Self::Nothing => "nothing",
+            Self::Unresolved => "unresolved",
+        }
+    }
+}
+
 /// A name the compiler resolved to a definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedSymbol {
@@ -170,6 +195,23 @@ pub enum SymbolKind {
     /// Something this build has no name for.
     #[serde(other)]
     Other,
+}
+
+impl SymbolKind {
+    /// Stable lowercase identifier, the same spelling this serializes as.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Function => "function",
+            Self::Type => "type",
+            Self::Field => "field",
+            Self::Variant => "variant",
+            Self::Binding => "binding",
+            Self::Constant => "constant",
+            Self::Namespace => "namespace",
+            Self::Other => "other",
+        }
+    }
 }
 
 /// A type as the compiler resolved it.
@@ -259,6 +301,20 @@ pub enum EdgeKind {
     Unwind,
     /// Control returned to the caller.
     Return,
+}
+
+impl EdgeKind {
+    /// Stable lowercase identifier, the same spelling this serializes as.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Flow => "flow",
+            Self::Taken => "taken",
+            Self::NotTaken => "not_taken",
+            Self::Unwind => "unwind",
+            Self::Return => "return",
+        }
+    }
 }
 
 /// Where an instantiated body came from.
@@ -399,6 +455,20 @@ pub enum Unavailability {
 }
 
 impl Unavailability {
+    /// Stable lowercase identifier, the same spelling this serializes as.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::RequiresExecution => "requires_execution",
+            Self::NoBuildInformation => "no_build_information",
+            Self::ToolchainMismatch => "toolchain_mismatch",
+            Self::HelperTimedOut => "helper_timed_out",
+            Self::HelperDied => "helper_died",
+            Self::UnreadableSchema => "unreadable_schema",
+            Self::NotSupported => "not_supported",
+        }
+    }
+
     /// Whether trying the same unit again could plausibly go differently.
     ///
     /// A helper that died might have died on this input in particular, and

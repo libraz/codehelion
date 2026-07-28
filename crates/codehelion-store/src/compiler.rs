@@ -244,13 +244,9 @@ fn write_unit_row(
             ir.effects.computed,
             ir.data_flow.computed,
         ),
-        CompilerOutcome::Unavailable { reason, .. } => (
-            None,
-            Some(unavailability_name(*reason)),
-            false,
-            false,
-            false,
-        ),
+        CompilerOutcome::Unavailable { reason, .. } => {
+            (None, Some(reason.name()), false, false, false)
+        }
     };
     tx.execute(
         "INSERT INTO compiler_unit
@@ -305,7 +301,7 @@ fn write_types(
                 unit_id,
                 index,
                 resolved.display,
-                category_name(resolved.category),
+                resolved.category.name(),
                 resolved.definition,
             ],
         )?;
@@ -340,7 +336,7 @@ fn write_symbols(
                 index_of(ordinal),
                 symbol.id,
                 symbol.name,
-                symbol_kind_name(symbol.kind),
+                symbol.kind.name(),
                 symbol.type_index.map(i64::from),
                 i64::from(symbol.external),
                 cells.file,
@@ -436,7 +432,7 @@ fn write_cfg(tx: &Transaction<'_>, cfg: &ControlFlowGraph, unit_id: i64) -> Resu
                 index_of(ordinal),
                 i64::from(edge.from),
                 i64::from(edge.to),
-                edge_kind_name(edge.kind),
+                edge.kind.name(),
             ],
         )?;
     }
@@ -577,62 +573,6 @@ const fn capability_name(capability: Capability) -> &'static str {
         Capability::TemplateInstantiation => "template_instantiation",
         Capability::OverloadResolution => "overload_resolution",
         Capability::Unknown => "unknown",
-    }
-}
-
-const fn unavailability_name(reason: Unavailability) -> &'static str {
-    match reason {
-        Unavailability::RequiresExecution => "requires_execution",
-        Unavailability::NoBuildInformation => "no_build_information",
-        Unavailability::ToolchainMismatch => "toolchain_mismatch",
-        Unavailability::HelperTimedOut => "helper_timed_out",
-        Unavailability::HelperDied => "helper_died",
-        Unavailability::UnreadableSchema => "unreadable_schema",
-        Unavailability::NotSupported => "not_supported",
-    }
-}
-
-const fn category_name(category: TypeCategory) -> &'static str {
-    match category {
-        TypeCategory::Integer => "integer",
-        TypeCategory::Float => "float",
-        TypeCategory::Boolean => "boolean",
-        TypeCategory::Character => "character",
-        TypeCategory::Text => "text",
-        TypeCategory::Handle => "handle",
-        TypeCategory::Sequence => "sequence",
-        TypeCategory::Mapping => "mapping",
-        TypeCategory::Tuple => "tuple",
-        TypeCategory::Record => "record",
-        TypeCategory::Enumeration => "enumeration",
-        TypeCategory::Interface => "interface",
-        TypeCategory::Callable => "callable",
-        TypeCategory::Parameter => "parameter",
-        TypeCategory::Nothing => "nothing",
-        TypeCategory::Unresolved => "unresolved",
-    }
-}
-
-const fn symbol_kind_name(kind: SymbolKind) -> &'static str {
-    match kind {
-        SymbolKind::Function => "function",
-        SymbolKind::Type => "type",
-        SymbolKind::Field => "field",
-        SymbolKind::Variant => "variant",
-        SymbolKind::Binding => "binding",
-        SymbolKind::Constant => "constant",
-        SymbolKind::Namespace => "namespace",
-        SymbolKind::Other => "other",
-    }
-}
-
-const fn edge_kind_name(kind: EdgeKind) -> &'static str {
-    match kind {
-        EdgeKind::Flow => "flow",
-        EdgeKind::Taken => "taken",
-        EdgeKind::NotTaken => "not_taken",
-        EdgeKind::Unwind => "unwind",
-        EdgeKind::Return => "return",
     }
 }
 
