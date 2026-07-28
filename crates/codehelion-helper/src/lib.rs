@@ -23,7 +23,9 @@
 pub mod client;
 pub mod ir;
 pub mod protocol;
+pub mod server;
 
 pub use client::{Analysis, DEFAULT_TIMEOUT, Helper, HelperError, Supervisor, locate};
 pub use ir::{COMPILER_IR_SCHEMA_VERSION, CompilerIr, Unavailability, UnitRef};
 pub use protocol::{Absence, Capability, HelperIdentity, PROTOCOL_VERSION, VersionRange};
+pub use server::{Answer, Backend, serve};
