@@ -27,6 +27,33 @@
 //! These are lexical heuristics; a local binding that happens to match one
 //! (say, a closure named like a method) is preserved conservatively, trading
 //! a little recall for not conflating different APIs.
+//!
+//! ## What the member-access rule costs, measured
+//!
+//! The third rule is the one that gives up the most, and it earns it. Dropping
+//! it alone — still preserving types, paths and macro names — was run against
+//! the labelled corpora: seventy groups appear that this mode did not report
+//! before. Reading them, most are the families the labels already call
+//! something other than duplication: exhaustive match tables dispatching to one
+//! method per variant, forwarding split by a compile-time flag, option parsers
+//! reading one named field per line, and operations mirrored over a start and
+//! an end. Those all have one shape and differ only in which member they name,
+//! which is exactly what this rule refuses to look past.
+//!
+//! It does lose real clones. Functions that walk a container by different link
+//! fields — first versus last, next versus previous — are labelled clones of
+//! each other, and this mode does not report them because `->next` and
+//! `->prev` survive normalization as different text. Structural mode reports
+//! all of them in one group, because its features read shape and token kinds
+//! and never read identifiers at all. That is the division the two modes are
+//! for: this one is the cheap screen and pays for its speed in recall.
+//!
+//! A caution about the figure that measurement produces. The labels rule on
+//! about a seventh of what this mode reports, and that seventh is the part
+//! Structural also flagged — so it is where the genuine clones concentrate.
+//! Judged precision therefore *rises* when the rule is dropped, while what
+//! actually arrives is mostly the boilerplate above. The judged share of a
+//! biased sample is not this mode's precision.
 
 use std::collections::BTreeMap;
 
