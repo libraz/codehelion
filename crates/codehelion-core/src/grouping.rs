@@ -29,6 +29,33 @@
 //! module is a pure, deterministic function of its inputs: components,
 //! candidate medoids under sampling, and every output collection are ordered by
 //! stable key, never by discovery order.
+//!
+//! # What this asks of the stages above
+//!
+//! Reading an absent edge as a similarity of zero is the same as saying the two
+//! were weighed and found apart. That holds while the stages above are complete
+//! *per set*: a family they decline to propose at all is a family nothing here
+//! claims anything about, and a family they propose is one every pair of which
+//! they proposed. It stops holding the moment a ceiling leaves a family half
+//! proposed — then a set of copies arrives looking like a set that disagrees,
+//! refinement breaks it up, and the comparisons that did survive are carried
+//! out one at a time as pairs no group holds both halves of. One duplication
+//! comes back as many, and the report grows as the allowance shrinks.
+//!
+//! So a ceiling upstream of here has to cut between sets and never inside one.
+//! Two have been found doing otherwise — the candidate-pair budget, which used
+//! to stop in the middle of a posting list, and this module's own
+//! [`GroupingConfig::max_component`], which cuts a component it cannot refine
+//! whole. The first was changed to stop between posting lists; the second
+//! cannot be, since cutting is the whole point of it, so it reports which
+//! members it put apart ([`GroupingSet::severed_by_the_ceiling`]) and the
+//! caller counts those relations rather than stating them.
+//!
+//! A ceiling that drops a whole set is fine and needs none of this: the
+//! high-frequency posting cap drops entire lists, and lowering it onto the
+//! labelled corpora only ever costs findings, never multiplies them. The
+//! distinction is not how much a ceiling removes but whether what it leaves is
+//! a set that was compared with itself.
 
 use std::collections::BTreeMap;
 

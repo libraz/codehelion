@@ -2045,7 +2045,26 @@ fn family_member(index: usize) -> String {
     )
 }
 
-/// Raising the candidate ceiling must never shorten the report.
+/// One member of a smaller family, shaped unlike the first.
+///
+/// Three of these, against eight of the other, so a cap between the two sizes
+/// drops one family and keeps the other — without a second size, every posting
+/// cap either keeps everything or drops everything and the sweep below says
+/// nothing about the settings between.
+fn smaller_family_member(index: usize) -> String {
+    format!(
+        "pub fn narrow{index}(text{index}: &str) -> usize {{
+    let mut width{index} = 0usize;
+    while width{index} < text{index}.len() {{
+        width{index} = width{index}.saturating_add(2);
+    }}
+    return width{index};
+}}
+"
+    )
+}
+
+/// Tightening a ceiling must never lengthen the report.
 ///
 /// Grouping reads a pair nothing proposed as a pair that is not similar, which
 /// is sound while the stage above it finished and is not once a ceiling cut a
@@ -2056,8 +2075,11 @@ fn family_member(index: usize) -> String {
 /// handed more rows, saying less, exactly when the tool is under pressure.
 ///
 /// So the property worth holding is not how much a squeezed run finds but that
-/// squeezing it cannot inflate it. Ceilings are spent a posting list at a time,
-/// and this is what says so from outside.
+/// squeezing it cannot inflate it, and it is worth holding for every ceiling
+/// rather than the one that was found breaking it. Both of these spend
+/// themselves a whole posting list at a time — one by refusing a list it cannot
+/// pair entirely, the other by dropping a list outright — and this is what says
+/// so from outside.
 #[test]
 fn a_tighter_ceiling_never_makes_the_report_longer() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -2067,30 +2089,42 @@ fn a_tighter_ceiling_never_makes_the_report_longer() {
         std::fs::write(src.join(format!("m{index}.rs")), family_member(index))
             .expect("write source");
     }
-
-    let mut previous = usize::MAX;
-    let mut ceilings = String::new();
-    for budget in [100_000usize, 400, 200, 100, 60, 40, 20, 10] {
+    for index in 0..3 {
         std::fs::write(
-            dir.path().join("codehelion.toml"),
-            format!("[limits]\npair-budget = {budget}\n"),
+            src.join(format!("n{index}.rs")),
+            smaller_family_member(index),
         )
-        .expect("write the ceiling");
-        let value = scan_json(dir.path());
-        let groups = value["groups"]
-            .as_array()
-            .expect("the report lists its groups")
-            .len();
-        let _ = writeln!(ceilings, "  ceiling {budget}: {groups} groups");
-        assert!(
-            groups <= previous,
-            "a tighter ceiling reported more groups\n{ceilings}"
-        );
-        previous = groups;
+        .expect("write source");
     }
-    // And the family is found at all when the allowance is there, so the run
-    // above is not monotone merely by finding nothing throughout.
-    assert!(previous < 8, "{ceilings}");
+
+    for (limit, settings) in [
+        ("pair-budget", [100_000usize, 400, 200, 100, 60, 40, 20, 10]),
+        ("posting-cap", [1024, 32, 16, 8, 6, 5, 4, 2]),
+    ] {
+        let mut previous = usize::MAX;
+        let mut ceilings = String::new();
+        for setting in settings {
+            std::fs::write(
+                dir.path().join("codehelion.toml"),
+                format!("[limits]\n{limit} = {setting}\n"),
+            )
+            .expect("write the ceiling");
+            let value = scan_json(dir.path());
+            let groups = value["groups"]
+                .as_array()
+                .expect("the report lists its groups")
+                .len();
+            let _ = writeln!(ceilings, "  {limit} {setting}: {groups} groups");
+            assert!(
+                groups <= previous,
+                "a tighter ceiling reported more groups\n{ceilings}"
+            );
+            previous = groups;
+        }
+        // And the family is found at all where the allowance is there, so the
+        // run above is not monotone merely by finding nothing throughout.
+        assert!(previous < 8, "{ceilings}");
+    }
 }
 
 /// A ceiling that cuts a set apart must not then report the cut as findings.
