@@ -143,6 +143,15 @@ be counted rather than merely described. The ones in use:
 Extend the table when a case needs a class it does not have; do not reach for
 the nearest existing word.
 
+Every entry names what a body does, never where it sits. A trait or interface
+implementation is a place: two implementations of one trait are alike in being
+that trait, which says nothing about whether their duplication is worth
+removing. Where the labels hold enough of them to compare, the resemblance runs
+the other way — among pairs whose two sides implement the same trait, the
+confirmed outnumber the refuted better than five to one, because a trait is
+what a shared implementation should have been written against. Label such a
+pair by what its body does.
+
 A run inside units the same report already groups is not automatically a
 lookalike. It is one when the group is exact, because "these functions are
 copies" accounts for every stretch inside them. It is a finding of its own when
