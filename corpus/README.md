@@ -159,6 +159,16 @@ the group is gapped: a group at 0.79 says its members are alike overall and
 nothing about where they agree exactly, so a stretch they share verbatim is
 something only the run can state.
 
+Two findings can carry opposite verdicts on identical code shape, so a rule
+written over shape alone cannot be the arbiter. The `cjson` case holds the
+demonstration: `cJSON_CreateNull` and `cJSON_CreateTrue` are refuted, while
+`cJSON_AddNullToObject` and its siblings are confirmed, and both families are
+one local acquired by a call, populated, and handed back — same syntax tree,
+same substitution between the two sides, same author, same file. What separates
+them is how much they repeat besides the constant that varies, and that is a
+question about length, which the ranges above say cannot be filtered on. Weigh
+a proposed suppression rule against this pair before measuring anything else.
+
 A group can only be refuted when it is distinguishable from the groups around
 it. Where a redundant report overlaps a real one by more than the match
 threshold, no pair of verdicts can separate them, and both are recorded as what
