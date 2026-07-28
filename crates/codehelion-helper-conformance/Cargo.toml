@@ -1,0 +1,19 @@
+[package]
+name = "codehelion-helper-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A deliberately misbehaving helper, and the proof that the client survives it."
+# Nothing here ships: the mock exists so the client's failure paths can be
+# exercised against a real process, and a released artifact set is no place for
+# a program whose purpose is to go wrong.
+publish = false
+
+[dependencies]
+codehelion-helper = { version = "0.1.0", path = "../codehelion-helper" }
+
+[lints]
+workspace = true

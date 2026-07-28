@@ -357,6 +357,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "codehelion-helper"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "codehelion-helper-conformance"
+version = "0.1.0"
+dependencies = [
+ "codehelion-helper",
+]
+
+[[package]]
 name = "codehelion-store"
 version = "0.1.0"
 dependencies = [
