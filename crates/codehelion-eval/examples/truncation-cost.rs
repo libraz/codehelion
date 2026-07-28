@@ -31,6 +31,12 @@
 //! `--limit` names any key of the configuration's `[limits]` table, so a
 //! ceiling nobody has questioned yet can be questioned without writing a second
 //! harness.
+//!
+//! `--mode` picks the mode scanned. The labels are line ranges rather than
+//! fingerprints, so they rule on any mode's report — but they were cut against
+//! Structural output, so Fast leaves most of its groups unjudged and its
+//! judged share is a biased sample of what it found. Read a Fast row as a
+//! comparison against another Fast row, never as a precision figure.
 
 // Like the benchmark harness, this drives the compiled `codehelion` binary
 // rather than running inside it; it is not part of the scan path the
@@ -60,11 +66,16 @@ fn main() {
     let mut cases: Vec<PathBuf> = Vec::new();
     let mut binary = PathBuf::from("target/release/codehelion");
     let mut limit = DEFAULT_LIMIT.to_string();
+    let mut mode = "structural".to_string();
     let mut values: Vec<usize> = Vec::new();
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--bin" => match arguments.next() {
                 Some(path) => binary = PathBuf::from(path),
+                None => usage(),
+            },
+            "--mode" => match arguments.next() {
+                Some(name) => mode = name,
                 None => usage(),
             },
             "--limit" => match arguments.next() {
@@ -95,14 +106,14 @@ fn main() {
 
     println!("case\t{limit}\texhausted\tgroups\tconfirmed\trefuted\tunjudged\tconflicting");
     for case in &cases {
-        run_case(case, &binary, &limit, &values, scratch.path());
+        run_case(case, &binary, &mode, &limit, &values, scratch.path());
     }
 }
 
 fn usage() -> ! {
     eprintln!(
         "usage: truncation-cost <labelled-case-dir>... [--bin <codehelion>] \
-         [--limit pair-budget] [--values 500,200,50]"
+         [--mode structural] [--limit pair-budget] [--values 500,200,50]"
     );
     std::process::exit(2);
 }
@@ -113,7 +124,7 @@ fn parse_values(list: &str) -> Vec<usize> {
         .collect()
 }
 
-fn run_case(case: &Path, binary: &Path, limit: &str, values: &[usize], scratch: &Path) {
+fn run_case(case: &Path, binary: &Path, mode: &str, limit: &str, values: &[usize], scratch: &Path) {
     let name = case.file_name().map_or_else(
         || case.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
@@ -136,7 +147,7 @@ fn run_case(case: &Path, binary: &Path, limit: &str, values: &[usize], scratch: 
     }
 
     for setting in std::iter::once(None).chain(values.iter().copied().map(Some)) {
-        let Some(report) = scan(binary, &snapshot, limit, setting, scratch, &name) else {
+        let Some(report) = scan(binary, &snapshot, mode, limit, setting, scratch, &name) else {
             continue;
         };
         let Ok((result, _lines)) = detected::from_report_json(&report) else {
@@ -160,10 +171,11 @@ fn run_case(case: &Path, binary: &Path, limit: &str, values: &[usize], scratch: 
     }
 }
 
-/// Scan `snapshot` in Structural mode, optionally with one ceiling lowered.
+/// Scan `snapshot` in `mode`, optionally with one ceiling lowered.
 fn scan(
     binary: &Path,
     snapshot: &Path,
+    mode: &str,
     limit: &str,
     setting: Option<usize>,
     scratch: &Path,
@@ -173,7 +185,7 @@ fn scan(
     command
         .arg("scan")
         .arg(snapshot)
-        .args(["--mode", "structural", "--format", "json"])
+        .args(["--mode", mode, "--format", "json"])
         .arg("--db")
         .arg(scratch.join(format!("{name}.db")));
     if let Some(value) = setting {
