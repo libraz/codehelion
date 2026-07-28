@@ -4,6 +4,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
+use codehelion_core::engine::normalize::Resolution;
+use codehelion_core::types::{TypeEvidence, TypeTag};
 use codehelion_helper::ir::{
     Anchor, BasicBlock, CallSite, CallTarget, CompilerIr, ControlFlowGraph, DataFlowSummary, Edge,
     EdgeKind, EffectSummary, Instantiation, ResolvedSymbol, ResolvedType, SourceRange, SymbolKind,
@@ -33,6 +35,25 @@ fn peek(path: &Path) -> Connection {
     conn.pragma_update(None, "foreign_keys", true).unwrap();
     conn
 }
+
+/// Every table the compiler IR writes into, parents before children.
+const COMPILER_TABLES: [&str; 15] = [
+    "compiler_helper",
+    "compiler_helper_capability",
+    "compiler_helper_toolchain",
+    "compiler_unit",
+    "compiler_type",
+    "compiler_type_argument",
+    "compiler_symbol",
+    "compiler_call",
+    "compiler_call_candidate",
+    "compiler_block",
+    "compiler_edge",
+    "compiler_instantiation",
+    "compiler_instantiation_argument",
+    "compiler_effect",
+    "compiler_data_flow",
+];
 
 fn count(conn: &Connection, table: &str) -> i64 {
     conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
@@ -645,25 +666,106 @@ fn deleting_a_run_takes_its_compiler_rows_with_it() {
     let conn = peek(&path);
     conn.execute("DELETE FROM scan_run WHERE id = ?1", [run])
         .unwrap();
-    for table in [
-        "compiler_helper",
-        "compiler_helper_capability",
-        "compiler_helper_toolchain",
-        "compiler_unit",
-        "compiler_type",
-        "compiler_type_argument",
-        "compiler_symbol",
-        "compiler_call",
-        "compiler_call_candidate",
-        "compiler_block",
-        "compiler_edge",
-        "compiler_instantiation",
-        "compiler_instantiation_argument",
-        "compiler_effect",
-        "compiler_data_flow",
-    ] {
+    for table in COMPILER_TABLES {
         assert_eq!(count(&conn, table), 0, "{table} outlived its run");
     }
+}
+
+/// What storing an analysis is for: the engine's type dimension and its
+/// answer about which names are external both come out of a stored answer,
+/// and the analysis crate that consumes them never learns that a compiler
+/// exists. That is the sense in which the dimension's input is replaceable —
+/// anything able to produce the tags can supply it.
+#[test]
+fn a_stored_analysis_supplies_evidence_the_engine_cannot_obtain_itself() {
+    let (_dir, mut store, _path) = on_disk();
+    let variant = variant();
+    let run = store
+        .record_snapshot(&snapshot(
+            "/tree",
+            &variant,
+            vec![helper_row()],
+            vec![answered(full_analysis(unit_ref("render", "src/render.rs")))],
+        ))
+        .unwrap();
+    let mut stored = store.run_compiler_units(run).unwrap();
+    let CompilerOutcome::Analyzed(ir) = stored.remove(0).outcome else {
+        panic!("expected an analysis")
+    };
+
+    // One tag per typed symbol, not one per distinct type: the evidence is
+    // about what the unit works with, and a type used ten times is ten facts.
+    let evidence = TypeEvidence::from_tags(ir.symbols.iter().filter_map(|symbol| {
+        let index = usize::try_from(symbol.type_index?).ok()?;
+        TypeTag::from_category(ir.types.get(index)?.category.name())
+    }));
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence.agreement(&evidence), Some(1.0));
+
+    // And the compiler's verdict on each name, keyed by where the name sits.
+    let mut resolution = Resolution::new();
+    for symbol in &ir.symbols {
+        let start = usize::try_from(symbol.anchor.expansion.start_byte).unwrap();
+        resolution.insert(start, symbol.external);
+    }
+    assert!(!resolution.is_empty());
+}
+
+/// The same answer stored twice is stored identically, row for row. Anything
+/// that reached a hash map's iteration order or a timestamp on the way in
+/// would show up here as two databases that hold the same analysis and do not
+/// agree about it.
+#[test]
+fn storing_one_answer_twice_writes_the_same_rows_both_times() {
+    let rows = || {
+        let (dir, mut store, path) = on_disk();
+        store
+            .record_snapshot(&snapshot(
+                "/tree",
+                &variant(),
+                vec![helper_row()],
+                vec![
+                    answered(full_analysis(unit_ref("render", "src/render.rs"))),
+                    unavailable(
+                        unit_ref("build-script", "build.rs"),
+                        Unavailability::RequiresExecution,
+                        None,
+                    ),
+                ],
+            ))
+            .unwrap();
+        drop(store);
+        let conn = peek(&path);
+        let dumped = dump(&conn);
+        drop(dir);
+        dumped
+    };
+    assert_eq!(rows(), rows());
+}
+
+/// Every compiler row in the database, as text, in a fixed order.
+fn dump(conn: &Connection) -> Vec<String> {
+    let mut out = Vec::new();
+    for table in COMPILER_TABLES {
+        let mut statement = conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
+        let columns = statement.column_count();
+        let mut rows: Vec<String> = statement
+            .query_map([], |row| {
+                let mut cells = Vec::with_capacity(columns);
+                for index in 0..columns {
+                    cells.push(format!("{:?}", row.get_ref(index)?));
+                }
+                Ok(cells.join("|"))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        rows.sort();
+        for row in rows {
+            out.push(format!("{table}: {row}"));
+        }
+    }
+    out
 }
 
 /// Every compiler-IR schema version `run` declares as a detector version.
