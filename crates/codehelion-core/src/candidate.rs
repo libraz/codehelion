@@ -275,6 +275,17 @@ pub fn generate(files: &[FileFeatures], config: &CandidateConfig) -> CandidateSe
     // tiebreak keeps the order total and deterministic. Shortest-first is also
     // what lets the budget stop between lists without scanning further: the
     // first list too big to fit is the smallest of the ones remaining.
+    //
+    // Most lists hold exactly two fragments, so the allowance nearly always
+    // runs out inside one length and the key tiebreak is what actually decides
+    // the last of them. Deciding it by how much matched instead — the window
+    // length or subtree node count the hash covers — was measured against the
+    // labelled corpora, in both directions, and neither is a win: longest-first
+    // loses a tenth of the confirmed findings once the ceiling bites hard,
+    // because long windows crowd into one family and buying more of them buys
+    // redundancy rather than reach; shortest-first buys reach at a worse rate
+    // than it costs precision. Length of list, not length of match, is the
+    // axis that carries the signal, and it is already the primary key.
     eligible.sort_by(|a, b| a.1.len().cmp(&b.1.len()).then_with(|| a.0.cmp(b.0)));
     stats.available_pairs = eligible
         .iter()
