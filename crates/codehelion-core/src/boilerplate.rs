@@ -35,14 +35,21 @@
 //! and is duplication worth removing; the second wraps its own sibling and is
 //! not. Two statements each, one delegation each, the same counts.
 //!
+//! Nor is it only the far apart that collide. An XML parser declares four
+//! integer parsers and two floating-point ones next to each other, each a
+//! guard on one call's result; the integer ones repeat a policy about how a
+//! leading `0x` is spelled and the floating-point ones repeat nothing, and the
+//! policy lives inside an argument expression. Counted, all six are the same
+//! body.
+//!
 //! So a rule reaching further than these does not buy coverage at the cost of
 //! accuracy — it trades a lookalike for a real finding, one for one. The
 //! categories here are the shapes no confirmed duplication was found in, and
 //! reaching past them needs something these counts do not carry: which callee
-//! is called, or where a local's value goes. Another bound on the same numbers
-//! will not do it. The `boilerplate-screen` example prints the counts for
-//! every labelled unit, which is how a proposed rule is weighed against what
-//! it would cost before it is written.
+//! is called, where a local's value goes, or what an argument holds. Another
+//! bound on the same numbers will not do it. The `boilerplate-screen` example
+//! prints the counts for every labelled unit, which is how a proposed rule is
+//! weighed against what it would cost before it is written.
 
 use crate::ir::{IrNode, Shape};
 
