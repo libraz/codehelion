@@ -38,6 +38,13 @@
 //!   and posting lists are paired rarest-first so exhaustion sacrifices the
 //!   lowest-signal candidates.
 //!
+//! As in [`crate::candidate`], the budget stops between posting lists and never
+//! inside one: a list compared only in part reaches grouping as a family whose
+//! members disagree, and comes back out as the stray pairs the ceiling allowed
+//! rather than as the one group it is. What a list costs is counted after the
+//! length-ratio gate, so a list of widely differing sizes is charged for the
+//! few pairs it really contributes.
+//!
 //! Output is a pure function of the input: the index is ordered, pairing is
 //! deterministic, and the emitted pairs are sorted.
 
@@ -178,20 +185,40 @@ pub fn generate(files: &[FileFeatures], config: &ControlFlowConfig) -> ControlFl
 
     let mut pairs = Vec::new();
     let mut remaining = config.pair_budget;
-    'lists: for (&hash, postings) in eligible {
+    for (&hash, postings) in eligible {
+        // Price the whole list before taking any of it: what it costs is what
+        // survives the length-ratio gate. Counting rather than collecting keeps
+        // the refused lists free — the pass walks every list, and a scan of
+        // millions cannot afford an allocation per list it does not use.
+        let mut wanted = 0usize;
+        let mut filtered = 0usize;
         for (i, &a) in postings.iter().enumerate() {
             for &b in &postings[i + 1..] {
-                if !a.within_length_ratio(b, config.max_length_ratio) {
-                    stats.filtered_by_size += 1;
-                    continue;
+                if a.within_length_ratio(b, config.max_length_ratio) {
+                    wanted += 1;
+                } else {
+                    filtered += 1;
                 }
-                if remaining == 0 {
-                    stats.budget_exhausted = true;
-                    break 'lists;
+            }
+        }
+        // Unlike the exact-seed stage, a longer list here can cost less than a
+        // shorter one, because the gate removes more of its pairs. So the first
+        // list that does not fit is not necessarily the last that could:
+        // refusing one list goes on to the next rather than ending the pass.
+        if wanted > remaining {
+            stats.budget_exhausted = true;
+            continue;
+        }
+        remaining -= wanted;
+        // Neither the gate's count nor the pairs are charged for a list that
+        // was refused: a list nobody paired filtered nothing.
+        stats.filtered_by_size += filtered;
+        for (i, &a) in postings.iter().enumerate() {
+            for &b in &postings[i + 1..] {
+                if a.within_length_ratio(b, config.max_length_ratio) {
+                    let (a, b) = if a <= b { (a, b) } else { (b, a) };
+                    pairs.push(ControlFlowPair { a, b, hash });
                 }
-                remaining -= 1;
-                let (a, b) = if a <= b { (a, b) } else { (b, a) };
-                pairs.push(ControlFlowPair { a, b, hash });
             }
         }
     }
@@ -310,8 +337,10 @@ mod tests {
     }
 
     #[test]
-    fn the_pair_budget_truncates_and_records_it() {
-        // One skeleton over four units => C(4,2) = 6 pairs, budget 2.
+    fn the_pair_budget_refuses_a_list_it_cannot_pair_whole() {
+        // One skeleton over four units => C(4,2) = 6 pairs, budget 2. Taking
+        // two of them would hand grouping four units compared to each other in
+        // part, which reads there as four units that disagree.
         let files = vec![file(vec![
             unit(1, 4, 20),
             unit(1, 4, 20),
@@ -323,8 +352,38 @@ mod tests {
             ..ControlFlowConfig::default()
         };
         let set = generate(&files, &config);
-        assert_eq!(set.pairs.len(), 2);
+        assert!(set.pairs.is_empty());
         assert!(set.stats.budget_exhausted);
+    }
+
+    #[test]
+    fn a_refused_list_does_not_stop_a_later_one_the_budget_can_hold() {
+        // The gate makes a list's cost independent of its length, so the pass
+        // keeps looking after a refusal. Three same-sized units share the first
+        // skeleton and cost all three of their pairs; four units share the
+        // second, and sizes so far apart that the gate leaves one pair
+        // standing. Rarest-first meets the three-unit list first, an allowance
+        // of one cannot hold it, and the longer list still fits.
+        let files = vec![file(vec![
+            unit(1, 4, 20),
+            unit(1, 4, 20),
+            unit(1, 4, 20),
+            unit(2, 4, 20),
+            unit(2, 4, 20),
+            unit(2, 4, 100),
+            unit(2, 4, 400),
+        ])];
+        let config = ControlFlowConfig {
+            pair_budget: 1,
+            ..ControlFlowConfig::default()
+        };
+        let set = generate(&files, &config);
+        assert_eq!(set.pairs.len(), 1);
+        assert_eq!(set.pairs[0].hash, hash(2));
+        assert!(set.stats.budget_exhausted);
+        // The gate's count is charged for the list that was taken and not for
+        // the one that was refused: a list nobody paired filtered nothing.
+        assert_eq!(set.stats.filtered_by_size, 5);
     }
 
     #[test]

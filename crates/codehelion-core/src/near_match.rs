@@ -31,6 +31,12 @@
 //! the lowest-signal candidates. Everything dropped is counted in
 //! [`NearMatchStats`].
 //!
+//! As in [`crate::candidate`], the budget is spent a bucket at a time: a bucket
+//! it cannot hold entirely is left alone rather than sampled, because a set of
+//! units compared to each other only in part is what grouping reads as a set
+//! that disagrees. A bucket costs only the pairs no earlier bucket already
+//! took, so the same pair banding twice is charged once.
+//!
 //! This design deliberately subsumes the separate size-bucket and
 //! prefix-filtering prefilters: LSH banding partitions the search, and the
 //! length-ratio gate bounds size divergence, which together already bound the
@@ -257,24 +263,37 @@ fn propose_pairs(
 
     let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut remaining = config.pair_budget;
-    'lists: for members in lists {
+    for members in lists {
         stats.buckets += 1;
         if members.len() > config.posting_cap {
             stats.stop_buckets += 1;
             stats.stop_bucket_members += members.len();
             continue;
         }
+        // What this bucket adds, before deciding whether to take it: a pair an
+        // earlier bucket already holds is not a second candidate and is not
+        // charged for again. A bucket's own pairs are distinct by
+        // construction, so counting them is exact and costs no allocation.
+        let mut wanted = 0usize;
         for (i, &a) in members.iter().enumerate() {
             for &b in &members[i + 1..] {
                 let pair = if a <= b { (a, b) } else { (b, a) };
-                if seen.contains(&pair) {
-                    continue;
+                if !seen.contains(&pair) {
+                    wanted += 1;
                 }
-                if remaining == 0 {
-                    stats.budget_exhausted = true;
-                    break 'lists;
-                }
-                remaining -= 1;
+            }
+        }
+        // Dedup makes a bucket's cost depend on what came before it, so a
+        // bucket the allowance cannot hold does not end the pass: a later one
+        // may overlap what is already taken and cost nothing.
+        if wanted > remaining {
+            stats.budget_exhausted = true;
+            continue;
+        }
+        remaining -= wanted;
+        for (i, &a) in members.iter().enumerate() {
+            for &b in &members[i + 1..] {
+                let pair = if a <= b { (a, b) } else { (b, a) };
                 seen.insert(pair);
             }
         }
@@ -535,7 +554,11 @@ mod tests {
     }
 
     #[test]
-    fn the_pair_budget_truncates_and_records_it() {
+    fn the_pair_budget_refuses_a_bucket_it_cannot_hold_whole() {
+        // Three units band together, so the bucket is worth three pairs and
+        // the allowance is worth one. Taking one of the three would leave the
+        // units compared to each other in part, which grouping reads as a set
+        // that disagrees rather than as a set nobody finished comparing.
         let files = vec![file(vec![
             unit(&[1, 2, 3, 4], &[5, 6], 20),
             unit(&[1, 2, 3, 4], &[5, 6], 20),
@@ -546,8 +569,37 @@ mod tests {
             ..NearMatchConfig::default()
         };
         let set = generate(&files, &config);
-        assert_eq!(set.stats.proposed_pairs, 1);
+        assert_eq!(set.stats.proposed_pairs, 0);
         assert!(set.stats.budget_exhausted);
+    }
+
+    #[test]
+    fn a_refused_bucket_does_not_stop_the_pass_accounting_for_the_rest() {
+        // A bucket costs only what no earlier bucket already took, so its cost
+        // does not follow its size and a refusal says nothing about the
+        // buckets behind it. The pass goes on to them, and its own count of
+        // what it looked at stays the count of what is there.
+        let units = vec![
+            unit(&[1, 2, 3, 4], &[5, 6], 20),
+            unit(&[1, 2, 3, 4], &[5, 6], 20),
+            unit(&[1, 2, 3, 4], &[5, 6], 20),
+            unit(&[40, 41, 42, 43], &[44, 45], 20),
+            unit(&[40, 41, 42, 43], &[44, 45], 20),
+        ];
+        let files = vec![file(units)];
+        let full = generate(&files, &NearMatchConfig::default());
+        let squeezed = generate(
+            &files,
+            &NearMatchConfig {
+                pair_budget: 1,
+                ..NearMatchConfig::default()
+            },
+        );
+        assert!(squeezed.stats.budget_exhausted);
+        assert_eq!(squeezed.stats.buckets, full.stats.buckets);
+        // The two-unit bucket costs one pair and is met first, so it survives
+        // the allowance the three-unit bucket cannot fit into.
+        assert_eq!(squeezed.stats.proposed_pairs, 1);
     }
 
     #[test]

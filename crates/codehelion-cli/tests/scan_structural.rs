@@ -3,6 +3,7 @@
 //! query layer.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use assert_cmd::Command;
@@ -2017,4 +2018,77 @@ fn every_occurrence_the_report_names_can_be_explained() {
                 member["file"].as_str().expect("a file path"),
             ));
     }
+}
+
+/// One member of a renamed family, spelled with names of its own.
+///
+/// Eight of these share every window and subtree hash, so one posting list
+/// holds twenty-eight pairs — more than the ceilings below allow, which is the
+/// point.
+fn family_member(index: usize) -> String {
+    format!(
+        "pub fn member{index}(input{index}: &[u32]) -> u32 {{
+    let mut total{index} = 0u32;
+    let mut seen{index} = 0u32;
+    for value{index} in input{index} {{
+        if *value{index} > 10 {{
+            total{index} = total{index}.wrapping_add(*value{index});
+        }} else {{
+            total{index} = total{index}.wrapping_sub(1);
+        }}
+        seen{index} += 1;
+    }}
+    total{index} = total{index}.wrapping_mul(3);
+    return total{index} + seen{index};
+}}
+"
+    )
+}
+
+/// Raising the candidate ceiling must never shorten the report.
+///
+/// Grouping reads a pair nothing proposed as a pair that is not similar, which
+/// is sound while the stage above it finished and is not once a ceiling cut a
+/// posting list in half. A family compared to itself only in part arrives there
+/// looking like a family that disagrees: it is broken up, and the comparisons
+/// that did survive come back out one at a time as pairs no group holds both
+/// halves of. The report then *grows* as the allowance shrinks — the reader is
+/// handed more rows, saying less, exactly when the tool is under pressure.
+///
+/// So the property worth holding is not how much a squeezed run finds but that
+/// squeezing it cannot inflate it. Ceilings are spent a posting list at a time,
+/// and this is what says so from outside.
+#[test]
+fn a_tighter_ceiling_never_makes_the_report_longer() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).expect("create src");
+    for index in 0..8 {
+        std::fs::write(src.join(format!("m{index}.rs")), family_member(index))
+            .expect("write source");
+    }
+
+    let mut previous = usize::MAX;
+    let mut ceilings = String::new();
+    for budget in [100_000usize, 400, 200, 100, 60, 40, 20, 10] {
+        std::fs::write(
+            dir.path().join("codehelion.toml"),
+            format!("[limits]\npair-budget = {budget}\n"),
+        )
+        .expect("write the ceiling");
+        let value = scan_json(dir.path());
+        let groups = value["groups"]
+            .as_array()
+            .expect("the report lists its groups")
+            .len();
+        let _ = writeln!(ceilings, "  ceiling {budget}: {groups} groups");
+        assert!(
+            groups <= previous,
+            "a tighter ceiling reported more groups\n{ceilings}"
+        );
+        previous = groups;
+    }
+    // And the family is found at all when the allowance is there, so the run
+    // above is not monotone merely by finding nothing throughout.
+    assert!(previous < 8, "{ceilings}");
 }

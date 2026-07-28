@@ -22,6 +22,31 @@
 //!   high-frequency, low-signal lists are the ones sacrificed, and the set
 //!   records that it was truncated.
 //!
+//! # A list is paired whole or not at all
+//!
+//! The ceiling stops between posting lists, never inside one. That costs
+//! coverage — the list the allowance could not hold entirely is skipped rather
+//! than half-paired — and it is worth the cost because of what grouping does
+//! with a half-paired list.
+//!
+//! Grouping treats a pair nothing proposed as a pair that is not similar
+//! ([`crate::grouping`]), which is sound while the stage above it ran to
+//! completion and is not sound once a ceiling cut a list in two. A family whose
+//! members were compared to each other only in part looks, from there, like a
+//! family whose members mostly disagree: the complete-linkage floor ejects them
+//! and the surviving comparisons come back out one by one, as pairs no group
+//! holds both halves of. One duplication that a whole list states once is then
+//! restated as many times as the ceiling happened to leave edges.
+//!
+//! Measured against the labelled corpora with the ceiling lowered until it
+//! bites, cutting inside a list turned one twenty-seven-member family into a
+//! hundred and fifty-five pairs, and made the report *grow* as the ceiling came
+//! down — seven times its untruncated size at one setting, while the findings
+//! anybody had ruled on stayed exactly the same. Stopping between lists costs
+//! a few per cent of those findings at the same ceiling and leaves the rest of
+//! the report the size it was. It also makes the ceiling monotone: a run given
+//! more allowance can no longer report more.
+//!
 //! Output is a pure function of the input: the emitted pairs are sorted
 //! deterministically, so file order only moves the `file` indices inside the
 //! fragment references and never changes which pairs appear or in what order.
@@ -43,8 +68,9 @@ pub struct CandidateConfig {
     /// Longest posting list that still enters pairing; longer ones are dropped
     /// as high-frequency noise and counted.
     pub posting_cap: usize,
-    /// Upper bound on candidate pairs emitted. Pairing is rarest-first, so
-    /// exhaustion sacrifices the lowest-signal candidates.
+    /// Upper bound on candidate pairs emitted. Pairing is rarest-first and
+    /// stops between posting lists, so exhaustion sacrifices the lowest-signal
+    /// lists whole rather than leaving one of them half-compared.
     pub pair_budget: usize,
 }
 
@@ -152,7 +178,7 @@ pub struct CandidateSet {
     pub stats: CandidateStats,
 }
 
-/// A remaining candidate-pair allowance; mirrors the Fast engine's budget.
+/// A remaining candidate-pair allowance, spent a posting list at a time.
 struct PairBudget {
     remaining: usize,
     exhausted: bool,
@@ -166,13 +192,16 @@ impl PairBudget {
         }
     }
 
-    /// Take one candidate from the budget; `false` means stop pairing.
-    const fn take(&mut self) -> bool {
-        if self.remaining == 0 {
+    /// Take a whole posting list's worth; `false` means it does not fit.
+    ///
+    /// Lists arrive shortest-first, so a list that does not fit is followed
+    /// only by lists that do not fit either: refusing one ends the pairing.
+    const fn take_list(&mut self, wanted: usize) -> bool {
+        if wanted > self.remaining {
             self.exhausted = true;
             return false;
         }
-        self.remaining -= 1;
+        self.remaining -= wanted;
         true
     }
 }
@@ -243,7 +272,9 @@ pub fn generate(files: &[FileFeatures], config: &CandidateConfig) -> CandidateSe
     }
     // Rarest-first: shortest lists carry the highest signal, so when the
     // budget runs out the frequent lists are the ones left unpaired. The key
-    // tiebreak keeps the order total and deterministic.
+    // tiebreak keeps the order total and deterministic. Shortest-first is also
+    // what lets the budget stop between lists without scanning further: the
+    // first list too big to fit is the smallest of the ones remaining.
     eligible.sort_by(|a, b| a.1.len().cmp(&b.1.len()).then_with(|| a.0.cmp(b.0)));
     stats.available_pairs = eligible
         .iter()
@@ -252,12 +283,12 @@ pub fn generate(files: &[FileFeatures], config: &CandidateConfig) -> CandidateSe
 
     let mut budget = PairBudget::new(config.pair_budget);
     let mut pairs = Vec::new();
-    'lists: for (&(kind, hash), postings) in eligible {
+    for (&(kind, hash), postings) in eligible {
+        if !budget.take_list(pairs_within(postings.len())) {
+            break;
+        }
         for (i, &a) in postings.iter().enumerate() {
             for &b in &postings[i + 1..] {
-                if !budget.take() {
-                    break 'lists;
-                }
                 let (a, b) = if a <= b { (a, b) } else { (b, a) };
                 pairs.push(CandidatePair { kind, hash, a, b });
             }
@@ -418,8 +449,13 @@ mod tests {
     }
 
     #[test]
-    fn the_pair_budget_truncates_and_records_it() {
-        // One hash with four occurrences => C(4,2) = 6 pairs, budget 2.
+    fn the_pair_budget_refuses_a_list_it_cannot_pair_whole() {
+        // One hash with four occurrences => C(4,2) = 6 pairs, budget 2. Two of
+        // those six would leave the four occurrences compared to each other
+        // only in part, and grouping reads an absent comparison as a failed
+        // one — so a family that is really a family comes back out as the
+        // stray pairs the ceiling happened to allow. The list is skipped
+        // instead, and the run still says the ceiling was reached.
         let files = vec![file_with(vec![
             unit_with(&[5], &[]),
             unit_with(&[5], &[]),
@@ -431,9 +467,36 @@ mod tests {
             pair_budget: 2,
         };
         let set = generate(&files, &config);
-        assert_eq!(set.pairs.len(), 2);
+        assert!(set.pairs.is_empty());
         assert!(set.stats.budget_exhausted);
-        assert_eq!(set.stats.candidate_pairs, 2);
+        assert_eq!(set.stats.candidate_pairs, 0);
+        // And says how much it did not do: the ceiling is what stopped this,
+        // not a shortage of anything to pair.
+        assert_eq!(set.stats.available_pairs, 6);
+    }
+
+    #[test]
+    fn a_budget_that_holds_one_list_and_not_the_next_pairs_the_first_whole() {
+        // Two hashes, one with two occurrences (1 pair) and one with four (6),
+        // against an allowance of five. Rarest-first reaches the short list
+        // first and it fits; the long one does not, and no part of it is taken.
+        let files = vec![file_with(vec![
+            unit_with(&[5], &[]),
+            unit_with(&[5], &[]),
+            unit_with(&[5], &[]),
+            unit_with(&[5], &[]),
+            unit_with(&[9], &[]),
+            unit_with(&[9], &[]),
+        ])];
+        let config = CandidateConfig {
+            posting_cap: 64,
+            pair_budget: 5,
+        };
+        let set = generate(&files, &config);
+        assert_eq!(set.pairs.len(), 1);
+        assert_eq!(set.pairs[0].hash, hash(9));
+        assert!(set.stats.budget_exhausted);
+        assert_eq!(set.stats.available_pairs, 7);
     }
 
     #[test]
