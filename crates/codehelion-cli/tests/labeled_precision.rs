@@ -24,23 +24,23 @@
 //!
 //! # What the "put forward" column has said so far
 //!
-//! Ranking a finding down is not, in general, a precision device. On seven of
+//! Ranking a finding down is not, in general, a precision device. On eight of
 //! these projects the column moves by a point or two against the overall
-//! figure or not at all — down on two, up on one, unchanged on four — which is
-//! what it should do if the findings the report files below the rest are about
-//! as likely to be real as the ones above. That agrees with the reason they
-//! are filed there: a pair says less per finding than a group does, and a test
-//! suite repeats itself on purpose, neither of which is a claim that the
+//! figure or not at all — down on three, up on one, unchanged on four — which
+//! is what it should do if the findings the report files below the rest are
+//! about as likely to be real as the ones above. That agrees with the reason
+//! they are filed there: a pair says less per finding than a group does, and a
+//! test suite repeats itself on purpose, neither of which is a claim that the
 //! finding is wrong.
 //!
-//! The eighth is eleven points higher put forward than overall, and it is the
+//! The ninth is eleven points higher put forward than overall, and it is the
 //! only case whose test suite is in scope at all. What the column measures
 //! there is the four groups in the library against the twenty-one in the
 //! suite, so the gap is the difference between the two bodies of code rather
 //! than anything the ranking knows. Which is the point of having the column:
 //! where it moves, it says what moved it.
 //!
-//! Added up, ranking down files nineteen confirmed findings below the rest
+//! Added up, ranking down files twenty confirmed findings below the rest
 //! against nine refuted ones, and the put-forward figure comes out a point
 //! under the overall one. Read as a precision device that is a loss. It is not
 //! read that way here, because these verdicts cannot settle it either way: a
@@ -145,6 +145,13 @@ const CORPORA: &[Expected] = &[
         forward_confirmed: 3,
         forward_refuted: 1,
     },
+    Expected {
+        name: "tinyxml2",
+        confirmed: 11,
+        refuted: 12,
+        forward_confirmed: 10,
+        forward_refuted: 12,
+    },
 ];
 
 /// What one ordering of the verdicts currently measures.
@@ -176,13 +183,13 @@ const ORDERINGS: &[Ordering] = &[
         name: "priority",
         at_10: 1.0,
         at_50: 0.96,
-        map: 0.9338,
+        map: 0.9247,
     },
     Ordering {
         name: "size",
-        at_10: 0.9,
+        at_10: 1.0,
         at_50: 0.94,
-        map: 0.8586,
+        map: 0.8555,
     },
 ];
 
@@ -193,10 +200,10 @@ const ORDERINGS: &[Ordering] = &[
 /// one silently redistributes every finding here. What the numbers say about
 /// the bands themselves is argued from the table, not from this assertion.
 const BANDS: &[(&str, usize, usize)] = &[
-    ("high", 64, 57),
-    ("medium", 15, 3),
+    ("high", 72, 69),
+    ("medium", 17, 3),
     ("low", 14, 5),
-    ("(unscored)", 42, 6),
+    ("(unscored)", 43, 6),
 ];
 
 /// The length spans of the two verdict populations, as last measured: the
@@ -206,7 +213,7 @@ const BANDS: &[(&str, usize, usize)] = &[
 /// The last number is the one with an argument attached — it is the price of a
 /// length floor, and it is why there is not one — so it is pinned rather than
 /// printed and re-argued from memory.
-const SIZES: (u32, u32, u32, u32, usize) = (4, 96, 3, 23, 97);
+const SIZES: (u32, u32, u32, u32, usize) = (4, 96, 3, 26, 115);
 
 /// What a floor on each similarity axis could remove without hiding a real
 /// clone, as last measured.
@@ -234,7 +241,7 @@ const FLOORS: &[(&str, usize)] = &[
     ("structural", 0),
     ("control flow", 0),
     ("api", 0),
-    ("composite", 9),
+    ("composite", 10),
 ];
 
 /// Whether two measurements differ once rounded the way they are printed,

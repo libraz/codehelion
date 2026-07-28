@@ -139,6 +139,7 @@ be counted rather than merely described. The ones in use:
 | `mirrored-operation` | a pair of dual operations — push against pop, enqueue against dequeue — alike because each is the other read backwards |
 | `member-call-run` | a short run of calls on the object's own members, alike in shape while the calls have nothing to do with one another |
 | `assertion-run` | a test body that is nothing but a run of checks — assertion macros, or calls into the suite's own case helper — alike because listing checks is all it does |
+| `single-expression-return` | a body that is one `return` of a compound expression, alike in having that shape while the expressions compute unrelated things |
 
 Extend the table when a case needs a class it does not have; do not reach for
 the nearest existing word.

@@ -1,0 +1,244 @@
+{
+  "schema_version": 0,
+  "language": "cpp",
+  "files": [
+    "tinyxml2.cpp",
+    "tinyxml2.h"
+  ],
+  "clone_pairs": [
+    {
+      "id": "cp-001",
+      "type": "type-3",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 599, "end_line": 614 },
+        { "file": "tinyxml2.cpp", "start_line": 668, "end_line": 685 }
+      ]
+    },
+    {
+      "id": "cp-002",
+      "type": "type-3",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 616, "end_line": 622 },
+        { "file": "tinyxml2.cpp", "start_line": 688, "end_line": 695 }
+      ]
+    },
+    {
+      "id": "cp-003",
+      "type": "type-2",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 778, "end_line": 789 },
+        { "file": "tinyxml2.cpp", "start_line": 2149, "end_line": 2160 }
+      ]
+    },
+    {
+      "id": "cp-004",
+      "type": "type-2",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 827, "end_line": 838 },
+        { "file": "tinyxml2.cpp", "start_line": 840, "end_line": 851 }
+      ]
+    },
+    {
+      "id": "cp-005",
+      "type": "type-2",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 931, "end_line": 958 },
+        { "file": "tinyxml2.cpp", "start_line": 961, "end_line": 989 }
+      ]
+    },
+    {
+      "id": "cp-006",
+      "type": "type-2",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 1030, "end_line": 1039 },
+        { "file": "tinyxml2.cpp", "start_line": 1042, "end_line": 1051 }
+      ]
+    },
+    {
+      "id": "cp-007",
+      "type": "type-2",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 1304, "end_line": 1312 },
+        { "file": "tinyxml2.cpp", "start_line": 1353, "end_line": 1361 }
+      ]
+    },
+    {
+      "id": "cp-008",
+      "type": "type-2",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 1778, "end_line": 1788 },
+        { "file": "tinyxml2.cpp", "start_line": 1791, "end_line": 1801 }
+      ]
+    },
+    {
+      "id": "cp-009",
+      "type": "type-3",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 2352, "end_line": 2369 },
+        { "file": "tinyxml2.cpp", "start_line": 2425, "end_line": 2441 }
+      ]
+    },
+    {
+      "id": "cp-010",
+      "type": "type-2",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 2940, "end_line": 2947 },
+        { "file": "tinyxml2.cpp", "start_line": 2950, "end_line": 2957 }
+      ]
+    },
+    {
+      "id": "cp-011",
+      "type": "type-2",
+      "fragments": [
+        { "file": "tinyxml2.h", "start_line": 2051, "end_line": 2125 },
+        { "file": "tinyxml2.h", "start_line": 2132, "end_line": 2191 }
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "id": "nc-001",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 650, "end_line": 656 },
+        { "file": "tinyxml2.cpp", "start_line": 659, "end_line": 665 }
+      ]
+    },
+    {
+      "id": "nc-002",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 1277, "end_line": 1282 },
+        { "file": "tinyxml2.cpp", "start_line": 1325, "end_line": 1330 }
+      ]
+    },
+    {
+      "id": "nc-003",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 1285, "end_line": 1289 },
+        { "file": "tinyxml2.cpp", "start_line": 1333, "end_line": 1337 }
+      ]
+    },
+    {
+      "id": "nc-004",
+      "reason": "trivial-factory",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 1315, "end_line": 1322 },
+        { "file": "tinyxml2.cpp", "start_line": 1364, "end_line": 1371 }
+      ]
+    },
+    {
+      "id": "nc-005",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 1482, "end_line": 1488 },
+        { "file": "tinyxml2.cpp", "start_line": 1491, "end_line": 1497 }
+      ]
+    },
+    {
+      "id": "nc-006",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 1645, "end_line": 1650 },
+        { "file": "tinyxml2.cpp", "start_line": 1652, "end_line": 1657 }
+      ]
+    },
+    {
+      "id": "nc-007",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 1551, "end_line": 1556 },
+        { "file": "tinyxml2.cpp", "start_line": 1559, "end_line": 1564 }
+      ]
+    },
+    {
+      "id": "nc-008",
+      "reason": "trivial-factory",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 2045, "end_line": 2049 },
+        { "file": "tinyxml2.cpp", "start_line": 2051, "end_line": 2055 }
+      ]
+    },
+    {
+      "id": "nc-009",
+      "reason": "trivial-factory",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 2277, "end_line": 2282 },
+        { "file": "tinyxml2.cpp", "start_line": 2285, "end_line": 2290 }
+      ]
+    },
+    {
+      "id": "nc-010",
+      "reason": "member-call-run",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 2444, "end_line": 2452 },
+        { "file": "tinyxml2.cpp", "start_line": 2534, "end_line": 2540 }
+      ]
+    },
+    {
+      "id": "nc-011",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        { "file": "tinyxml2.cpp", "start_line": 3010, "end_line": 3014 },
+        { "file": "tinyxml2.cpp", "start_line": 3016, "end_line": 3020 }
+      ]
+    },
+    {
+      "id": "nc-012",
+      "reason": "mirrored-operation",
+      "fragments": [
+        { "file": "tinyxml2.h", "start_line": 220, "end_line": 225 },
+        { "file": "tinyxml2.h", "start_line": 274, "end_line": 279 }
+      ]
+    },
+    {
+      "id": "nc-013",
+      "reason": "single-expression-return",
+      "fragments": [
+        { "file": "tinyxml2.h", "start_line": 579, "end_line": 584 },
+        { "file": "tinyxml2.cpp", "start_line": 2542, "end_line": 2545 }
+      ]
+    },
+    {
+      "id": "nc-014",
+      "reason": "const-overload-pair",
+      "fragments": [
+        { "file": "tinyxml2.h", "start_line": 780, "end_line": 782 },
+        { "file": "tinyxml2.h", "start_line": 798, "end_line": 800 }
+      ]
+    },
+    {
+      "id": "nc-015",
+      "reason": "declaration-run",
+      "fragments": [
+        { "file": "tinyxml2.h", "start_line": 1029, "end_line": 1054 },
+        { "file": "tinyxml2.h", "start_line": 1068, "end_line": 1093 }
+      ]
+    },
+    {
+      "id": "nc-016",
+      "reason": "guarded-forwarding",
+      "fragments": [
+        { "file": "tinyxml2.h", "start_line": 1341, "end_line": 1347 },
+        { "file": "tinyxml2.h", "start_line": 1350, "end_line": 1356 }
+      ]
+    },
+    {
+      "id": "nc-017",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        { "file": "tinyxml2.h", "start_line": 1463, "end_line": 1466 },
+        { "file": "tinyxml2.h", "start_line": 1468, "end_line": 1471 }
+      ]
+    },
+    {
+      "id": "nc-018",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        { "file": "tinyxml2.h", "start_line": 2070, "end_line": 2072 },
+        { "file": "tinyxml2.h", "start_line": 2078, "end_line": 2080 }
+      ]
+    }
+  ]
+}

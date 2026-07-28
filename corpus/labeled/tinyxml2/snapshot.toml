@@ -1,0 +1,11 @@
+schema_version = 0
+origin = "https://github.com/leethomason/tinyxml2.git"
+commit = "8224e427b655b83dae5e2298f1e6919523a78737"
+# The library is two files and nothing else — no headers to select between, no
+# vendored tree to leave out. `xmltest.cpp` is the suite, and it is one function
+# holding thousands of assertions; what it would add here is a lookalike class
+# the corpora already carry, at the cost of doubling the verdicts.
+paths = [
+  "tinyxml2.cpp",
+  "tinyxml2.h",
+]

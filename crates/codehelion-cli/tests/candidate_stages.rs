@@ -153,6 +153,12 @@ const CORPORA: &[Expected] = &[
         without_near_match: 18,
         without_shape_gate: 18,
     },
+    Expected {
+        path: "labeled/tinyxml2/snapshot",
+        groups: 28,
+        without_near_match: 28,
+        without_shape_gate: 28,
+    },
 ];
 
 /// Repository root, from this test's manifest directory.
