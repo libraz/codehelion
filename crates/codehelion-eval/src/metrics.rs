@@ -498,6 +498,85 @@ impl fmt::Display for BandSplit {
     }
 }
 
+/// How much of each class of lookalike still reaches the report.
+///
+/// Precision says how many findings were wrong; this says what they were wrong
+/// about. The two lead to different work: a class the report still shows in
+/// numbers is a rule waiting to be written, while a class it no longer shows is
+/// one already answered, and the aggregate cannot tell them apart.
+///
+/// Counted over labels rather than over findings. A finding can cover more than
+/// one labelled lookalike, so attributing findings to classes would count the
+/// same finding under several names and total to more than there are findings.
+/// A label, in contrast, was either reached or it was not.
+///
+/// A class whose labels are no longer reached is kept in the table at zero. The
+/// verdicts stay after the report stops showing them, and a row that reads zero
+/// is where a class coming back would appear.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReasonSplit {
+    /// Per class: labels a finding put forward, labels any finding reached, and
+    /// labels recorded.
+    pub reasons: BTreeMap<String, (usize, usize, usize)>,
+}
+
+impl ReasonSplit {
+    /// Add every labelled lookalike in `labels` to the split.
+    ///
+    /// Accumulates, so one split can span several corpora.
+    pub fn record(&mut self, results: &DetectionResult, labels: &LabelSet, threshold: f64) {
+        for non_clone in &labels.non_clones {
+            let reaching = || {
+                results
+                    .findings
+                    .iter()
+                    .filter(|finding| covers(finding, &non_clone.fragments, threshold))
+            };
+            let entry = self
+                .reasons
+                .entry(non_clone.reason.clone())
+                .or_insert((0, 0, 0));
+            entry.0 += usize::from(reaching().any(|finding| finding.actionable));
+            entry.1 += usize::from(reaching().next().is_some());
+            entry.2 += 1;
+        }
+    }
+
+    /// The classes the report still puts forward, the most of them first.
+    #[must_use]
+    pub fn still_reported(&self) -> Vec<(&str, usize, usize, usize)> {
+        let mut rows: Vec<_> = self
+            .reasons
+            .iter()
+            .map(|(reason, &(forward, reached, total))| (reason.as_str(), forward, reached, total))
+            .collect();
+        rows.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| a.0.cmp(b.0))
+        });
+        rows
+    }
+}
+
+impl fmt::Display for ReasonSplit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "{:<28}{:>13}{:>10}{:>10}",
+            "lookalike class", "put forward", "shown", "labelled"
+        )?;
+        for (reason, forward, reached, total) in self.still_reported() {
+            writeln!(f, "{reason:<28}{forward:>13}{reached:>10}{total:>10}")?;
+        }
+        writeln!(
+            f,
+            "put forward is what a reader meets first; shown counts the classes \
+             filed below them too"
+        )
+    }
+}
+
 /// How far a rule reads off the [substitution
 /// witness](codehelion_core::substitution::Witness) gets, and what it costs.
 ///

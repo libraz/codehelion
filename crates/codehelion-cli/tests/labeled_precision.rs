@@ -62,8 +62,8 @@ use codehelion_core::substitution::{self, Witness};
 use codehelion_eval::detected;
 use codehelion_eval::labels::LabelSet;
 use codehelion_eval::metrics::{
-    Adjudication, AxisSplit, BandSplit, DEFAULT_MATCH_THRESHOLD, RankedVerdicts, SizeSplit,
-    WidthFamily, adjudicate,
+    Adjudication, AxisSplit, BandSplit, DEFAULT_MATCH_THRESHOLD, RankedVerdicts, ReasonSplit,
+    SizeSplit, WidthFamily, adjudicate,
 };
 use codehelion_eval::schema::{DetectionResult, Finding, Fragment};
 
@@ -372,6 +372,9 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
     let mut widths = String::from("\nwritten once per width\n");
     let mut every_width = WidthFamily::default();
     let mut bands = BandSplit::default();
+    // Which classes of lookalike the report still shows, which is what says
+    // where the next rule would have to work.
+    let mut reasons = ReasonSplit::default();
     // Two orderings of the same verdicts: the one the tool prints, and the one
     // anybody would reach for without it.
     let mut ranked = RankedVerdicts::default();
@@ -412,6 +415,7 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
             &mut complaints,
         );
         bands.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
+        reasons.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
         ranked.record(&result, &labels, DEFAULT_MATCH_THRESHOLD, |finding| {
             finding.score
         });
@@ -445,15 +449,7 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
             every.refuted - every.actionable_refuted,
         );
     }
-    // Length is the first knob anyone reaches for when precision is short, and
-    // these two ranges are what says whether it can help.
-    println!("{sizes}\n");
-    // Similarity is the second, and it is the more tempting of the two because
-    // the numbers are already there.
-    println!("{axes}\n");
-    print!("{widths}");
-    println!("{every_width}\n");
-    print!("{bands}");
+    print_measures(&sizes, &axes, &widths, &every_width, &bands, &reasons);
     if whole {
         compare_bands(&bands, &mut complaints);
         compare_sizes(&sizes, &mut complaints);
@@ -467,6 +463,32 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
         );
     }
     assert!(complaints.is_empty(), "\n{complaints}");
+}
+
+/// Print every measure that accumulates over the whole corpus.
+///
+/// Ordered as the questions arrive: what could be filtered out, then what the
+/// filters that exist reached, then what is left and what it is.
+fn print_measures(
+    sizes: &SizeSplit,
+    axes: &AxisSplit,
+    widths: &str,
+    every_width: &WidthFamily,
+    bands: &BandSplit,
+    reasons: &ReasonSplit,
+) {
+    // Length is the first knob anyone reaches for when precision is short, and
+    // these two ranges are what says whether it can help.
+    println!("{sizes}\n");
+    // Similarity is the second, and it is the more tempting of the two because
+    // the numbers are already there.
+    println!("{axes}\n");
+    print!("{widths}");
+    println!("{every_width}\n");
+    print!("{bands}");
+    // Precision says how much was wrong; this says what it was wrong about,
+    // which is the question the next rule has to answer.
+    println!("\n{reasons}");
 }
 
 /// What the "written once per width" rule reaches in each corpus, as last
