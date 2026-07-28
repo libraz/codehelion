@@ -23,6 +23,9 @@ path = "src/lib.rs"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 codehelion-core = { version = "0.1.0", path = "../codehelion-core" }
+# Only to look for helper programs and, later, to run them. The engine crates
+# do not depend on this; the layer that starts processes does.
+codehelion-helper = { version = "0.1.0", path = "../codehelion-helper" }
 codehelion-frontend-c = { version = "0.1.0", path = "../codehelion-frontend-c" }
 codehelion-frontend-cpp = { version = "0.1.0", path = "../codehelion-frontend-cpp" }
 codehelion-frontend-rust = { version = "0.1.0", path = "../codehelion-frontend-rust" }

@@ -83,7 +83,14 @@ pub fn run(cli: &Cli) -> Result<Outcome> {
 fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
     match command {
         Command::Doctor => {
-            doctor::render(&doctor::diagnose(), out)?;
+            // The lookup is supplied here rather than by the engine: starting
+            // a program is this layer's business, and keeping it out of the
+            // engine is what stops a compiler helper from becoming something
+            // the analysis crates link.
+            doctor::render(
+                &doctor::diagnose_with(&|name| codehelion_helper::locate(name, None)),
+                out,
+            )?;
             doctor_install(out)?;
             doctor_database(out)?;
             Ok(Outcome::Success)

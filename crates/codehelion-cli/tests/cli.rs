@@ -23,14 +23,23 @@ fn doctor_reports_own_version() {
         .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
+/// Whether the Rust helper is found depends on the machine, so what is asserted
+/// is the helper nobody can have yet: it has to be reported as absent, as
+/// optional, and with something to do about it. A row that said only "not
+/// found" would be a report telling somebody a fact they cannot act on.
 #[test]
-fn doctor_lists_helper_placeholders() {
+fn doctor_reports_a_helper_that_is_not_installed_as_optional_and_actionable() {
     cmd()
         .arg("doctor")
         .assert()
         .success()
         .stdout(predicate::str::contains("rust-compiler-helper"))
-        .stdout(predicate::str::contains("not implemented"));
+        .stdout(predicate::str::contains("clang-helper"))
+        .stdout(predicate::str::contains("not found"))
+        .stdout(predicate::str::contains(
+            "not needed for fast or structural",
+        ))
+        .stdout(predicate::str::contains("codehelion-backend-clang"));
 }
 
 #[test]

@@ -346,6 +346,7 @@ dependencies = [
  "codehelion-frontend-c",
  "codehelion-frontend-cpp",
  "codehelion-frontend-rust",
+ "codehelion-helper",
  "codehelion-store",
  "globset",
  "ignore",
