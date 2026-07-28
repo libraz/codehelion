@@ -14,6 +14,7 @@ pub mod control_flow;
 pub mod discovery;
 pub mod doctor;
 pub mod engine;
+pub mod execution;
 pub mod features;
 pub mod frontend;
 pub mod grouping;
