@@ -204,12 +204,12 @@ fn map_token_kind(kind: SyntaxKind) -> TokenKind {
         SyntaxKind::TRUE_KW | SyntaxKind::FALSE_KW => TokenKind::Literal(LiteralKind::Bool),
         SyntaxKind::INT_NUMBER => TokenKind::Literal(LiteralKind::Integer),
         SyntaxKind::FLOAT_NUMBER => TokenKind::Literal(LiteralKind::Float),
-        SyntaxKind::STRING
-        | SyntaxKind::BYTE_STRING
-        | SyntaxKind::C_STRING
-        | SyntaxKind::RAW_STRING
-        | SyntaxKind::RAW_BYTE_STRING
-        | SyntaxKind::RAW_C_STRING => TokenKind::Literal(LiteralKind::String),
+        // Raw strings have no kind of their own: the parser reports `r"..."`
+        // as STRING, `br"..."` as BYTE_STRING and `cr"..."` as C_STRING, so
+        // the three of them are already covered here.
+        SyntaxKind::STRING | SyntaxKind::BYTE_STRING | SyntaxKind::C_STRING => {
+            TokenKind::Literal(LiteralKind::String)
+        }
         SyntaxKind::CHAR | SyntaxKind::BYTE => TokenKind::Literal(LiteralKind::Char),
         SyntaxKind::LIFETIME_IDENT => TokenKind::Lifetime,
         kind if kind.is_keyword(PARSE_EDITION) => TokenKind::Keyword,

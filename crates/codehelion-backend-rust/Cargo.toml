@@ -1,0 +1,33 @@
+[package]
+name = "codehelion-backend-rust"
+version.workspace = true
+edition.workspace = true
+# Not the workspace MSRV. The analysis libraries below need a newer compiler
+# than the tool does, and this crate is the only place that is allowed to: it
+# is a separate optional program, so what it needs to build does not become
+# what codehelion needs to build. That is the isolation earning its keep rather
+# than an exception to it.
+rust-version = "1.95"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Out-of-process Rust compiler helper for codehelion."
+
+[dependencies]
+codehelion-helper = { version = "0.1.0", path = "../codehelion-helper" }
+# rust-analyzer as a library. Published from the same tree as the editor
+# server, on a stable toolchain, and resolved by cargo like any other
+# dependency — which is what a version bump costs here, instead of a nightly
+# pin and an adapter per compiler release.
+ra_ap_hir = "0.0.344"
+ra_ap_ide_db = "0.0.344"
+ra_ap_load-cargo = "0.0.344"
+ra_ap_project_model = "0.0.344"
+ra_ap_syntax = "0.0.344"
+ra_ap_vfs = "0.0.344"
+
+[dev-dependencies]
+codehelion-fixtures = { version = "0.1.0", path = "../codehelion-fixtures" }
+
+[lints]
+workspace = true

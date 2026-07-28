@@ -10,7 +10,7 @@ description = "Rust Fast-mode lexer and unit-boundary frontend for the codehelio
 
 [dependencies]
 codehelion-core = { version = "0.1.0", path = "../codehelion-core" }
-ra_ap_syntax = "0.0.257"
+ra_ap_syntax = "0.0.344"
 
 [lints]
 workspace = true

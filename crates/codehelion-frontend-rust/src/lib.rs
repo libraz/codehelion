@@ -15,7 +15,12 @@ use codehelion_core::frontend::{Frontend, LexedFile};
 
 /// Version tag of this frontend, used as a fingerprint input. Bump it whenever
 /// a change alters the token stream or unit boundaries for unchanged input.
-pub const FRONTEND_VERSION: &str = "rust-lexer-v0";
+///
+/// Bumped with the parser it is built on. A newer parser can classify a token
+/// differently — a word that was an identifier becoming a keyword is the usual
+/// way — and fingerprints carry this version so that streams produced under
+/// rules that may disagree are never merged on the strength of an equal hash.
+pub const FRONTEND_VERSION: &str = "rust-lexer-v1";
 
 /// The Rust Fast-mode frontend.
 #[derive(Debug, Clone, Copy, Default)]
