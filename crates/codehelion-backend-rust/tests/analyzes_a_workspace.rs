@@ -14,7 +14,9 @@
 
 use std::time::Duration;
 
-use codehelion_helper::ir::{ResolvedSymbol, SymbolKind, TypeCategory, Unavailability, UnitRef};
+use codehelion_helper::ir::{
+    CallTarget, ResolvedSymbol, SymbolKind, TypeCategory, Unavailability, UnitRef,
+};
 use codehelion_helper::protocol::Capability;
 use codehelion_helper::{Analysis, COMPILER_IR_SCHEMA_VERSION, CompilerIr, Helper};
 
@@ -91,6 +93,7 @@ fn the_helper_says_which_compiler_will_answer_and_what_it_can_supply() {
     let helper = helper();
     assert!(helper.offers(Capability::Types));
     assert!(helper.offers(Capability::NameResolution));
+    assert!(helper.offers(Capability::CallTargets));
     assert!(!helper.offers(Capability::MirCfg));
     helper.shutdown().unwrap();
 }
@@ -162,6 +165,133 @@ fn two_bindings_that_share_a_name_do_not_share_an_identity() {
 fn a_binding_carries_the_type_the_compiler_inferred_for_it() {
     let ir = analyzed(&unit("plain", "ledger", "ledger"));
     assert_eq!(category_of(&ir, "total"), TypeCategory::Integer);
+}
+
+/// The dispatch fixture is one crate whose file is its own root.
+fn dispatch() -> Box<CompilerIr> {
+    let file = codehelion_fixtures::rust("dispatch")
+        .unwrap()
+        .join("src/lib.rs");
+    analyzed(&UnitRef {
+        unit: "dispatch".to_string(),
+        file: file.display().to_string(),
+        variant: "host".to_string(),
+    })
+}
+
+/// What a call written inside `enclosing` was found to reach.
+fn targets(ir: &CompilerIr, source: &str, enclosing: &str) -> Vec<CallTarget> {
+    let body = body_of(source, enclosing);
+    ir.calls
+        .iter()
+        .filter(|call| {
+            let range = &call.anchor.expansion;
+            body.contains(&usize::try_from(range.start_byte).unwrap())
+        })
+        .map(|call| call.target.clone())
+        .collect()
+}
+
+/// The byte range of one function's body, found by reading the fixture the
+/// same way a person would.
+fn body_of(source: &str, enclosing: &str) -> std::ops::Range<usize> {
+    let start = source
+        .find(enclosing)
+        .unwrap_or_else(|| panic!("the fixture no longer contains {enclosing}"));
+    let open = start + source[start..].find('{').expect("a body");
+    let mut depth = 0_i32;
+    for (offset, character) in source[open..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return open..open + offset;
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("{enclosing} has no closing brace");
+}
+
+fn fixture_source() -> String {
+    let path = codehelion_fixtures::rust("dispatch")
+        .unwrap()
+        .join("src/lib.rs");
+    std::fs::read_to_string(path).expect("the fixture is readable")
+}
+
+/// A concrete receiver settles which body runs, and it settles it even when
+/// the body was written on the trait: nothing overrides `doubled`, so the
+/// trait's own body is the one that runs. Calling that dynamic would say the
+/// compiler knew less than it did.
+#[test]
+fn a_concrete_receiver_reaches_one_body_wherever_that_body_was_written() {
+    let ir = dispatch();
+    let found = targets(&ir, &fixture_source(), "pub fn concrete");
+    assert_eq!(found.len(), 2, "{found:?}");
+    for target in &found {
+        assert!(
+            matches!(target, CallTarget::Static { .. }),
+            "a concrete receiver was reported as undecided: {target:?}"
+        );
+    }
+    let symbols: Vec<&str> = found
+        .iter()
+        .filter_map(|target| match target {
+            CallTarget::Static { symbol } => Some(symbol.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        symbols.iter().any(|symbol| symbol.contains("Segment")),
+        "{symbols:?}"
+    );
+    assert!(
+        symbols.iter().any(|symbol| symbol.contains("doubled")),
+        "{symbols:?}"
+    );
+}
+
+/// A type parameter does not settle it. Which body runs is decided where the
+/// function is instantiated, and the honest answer is the set the scan can
+/// see — here, the two implementations written beside it.
+#[test]
+fn a_type_parameter_receiver_is_one_of_the_implementations_in_the_scan() {
+    let ir = dispatch();
+    let found = targets(&ir, &fixture_source(), "pub fn generic");
+    assert_eq!(found.len(), 1, "{found:?}");
+    match &found[0] {
+        CallTarget::Dynamic { candidates } => {
+            assert_eq!(candidates.len(), 2, "{candidates:?}");
+            assert!(candidates.iter().any(|c| c.contains("Segment")));
+            assert!(candidates.iter().any(|c| c.contains("Tally")));
+        }
+        other => panic!("a generic receiver was reported as settled: {other:?}"),
+    }
+}
+
+/// And a trait object does not settle it either, for a different reason: the
+/// choice is made while the program runs rather than while it is compiled.
+/// The evidence is the same set, which is the point of keeping the set.
+#[test]
+fn a_trait_object_receiver_is_the_same_set_as_a_type_parameter() {
+    let ir = dispatch();
+    let source = fixture_source();
+    let erased = targets(&ir, &source, "pub fn erased");
+    let generic = targets(&ir, &source, "pub fn generic");
+    assert_eq!(erased, generic, "{erased:?} against {generic:?}");
+}
+
+/// Calling a value has no definition to point at, and saying so is the
+/// answer. A call reported as reaching something it does not would be worse
+/// than one reported as unknown.
+#[test]
+fn calling_a_value_rather_than_a_name_reaches_nothing_nameable() {
+    let ir = dispatch();
+    let found = targets(&ir, &fixture_source(), "pub fn indirect");
+    assert_eq!(found, vec![CallTarget::Unresolved], "{found:?}");
 }
 
 /// The baseline. Every category asserted here can be checked by opening the

@@ -40,7 +40,7 @@ use ra_ap_ide_db::RootDatabase;
 use ra_ap_ide_db::defs::{Definition, IdentClass};
 use ra_ap_syntax::{AstNode, SyntaxKind};
 
-use crate::analysis::{Loaded, TypeTable, path_of, real_file, source_range};
+use crate::analysis::{Loaded, TypeTable, file_of, path_of, real_file, source_range};
 
 /// One symbol per resolved name in `file`.
 ///
@@ -89,20 +89,6 @@ pub(crate) fn collect(loaded: &Loaded, file: &Path, types: &mut TypeTable) -> Ve
         });
     }
     found
-}
-
-/// The file the workspace holds for `path`, if it holds one.
-///
-/// Compared against what the loader recorded rather than resolved on the
-/// filesystem for every candidate: a workspace holds thousands of files, and
-/// asking the operating system about each of them to answer one question is a
-/// cost paid on every request.
-fn file_of(loaded: &Loaded, path: &Path) -> Option<ra_ap_vfs::FileId> {
-    let canonical = path.canonicalize().ok();
-    loaded.vfs.iter().find_map(|(id, vfs_path)| {
-        let candidate = Path::new(vfs_path.as_path()?.as_str());
-        (candidate == path || Some(candidate) == canonical.as_deref()).then_some(id)
-    })
 }
 
 /// Whether the definition of `definition` is outside the code being scanned.

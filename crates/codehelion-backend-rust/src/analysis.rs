@@ -35,8 +35,8 @@ use ra_ap_ide_db::base_db::SourceDatabase;
 use ra_ap_syntax::AstNode;
 use ra_ap_vfs::Vfs;
 
-use crate::occurrences;
 use crate::types::category;
+use crate::{calls, occurrences};
 
 /// A workspace that has been read, kept so a second request about the same
 /// project does not pay to read it again.
@@ -193,6 +193,13 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
             ir.symbols.push(occurrence);
         }
     }
+    ir.calls = calls::collect(loaded, Path::new(&unit.file));
+    ir.calls.sort_by_key(|call| {
+        (
+            call.anchor.expansion.start_byte,
+            call.anchor.expansion.end_byte,
+        )
+    });
     ir.types = types.finish();
     // Sorted so that two runs over one unchanged workspace produce the same
     // document: the module walk above visits in whatever order the database
@@ -348,6 +355,20 @@ fn anchor_of<T: AstNode>(loaded: &Loaded, source: Option<ra_ap_hir::InFile<T>>) 
         file_id,
         source.value.syntax().text_range(),
     )))
+}
+
+/// The file the workspace holds for `path`, if it holds one.
+///
+/// Compared against what the loader recorded rather than resolved on the
+/// filesystem for every candidate: a workspace holds thousands of files, and
+/// asking the operating system about each of them to answer one question is a
+/// cost paid on every request.
+pub(crate) fn file_of(loaded: &Loaded, path: &Path) -> Option<ra_ap_vfs::FileId> {
+    let canonical = path.canonicalize().ok();
+    loaded.vfs.iter().find_map(|(id, vfs_path)| {
+        let candidate = Path::new(vfs_path.as_path()?.as_str());
+        (candidate == path || Some(candidate) == canonical.as_deref()).then_some(id)
+    })
 }
 
 /// A byte range of one file, spelled the way the project spells the file.
