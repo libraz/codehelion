@@ -17,6 +17,7 @@ evidence that default settings keep the target's code from running.
 |---|---|
 | `rust/plain` | A two-crate workspace with nothing unusual in it. The baseline: a helper that cannot analyse this cannot analyse anything. |
 | `rust/features` | The same source under two feature settings, where the feature changes a resolved type. Two build variants that a purely textual reading cannot tell apart. |
+| `rust/dispatch` | The same method call written against a concrete type, a type parameter and a trait object, plus a call to a value rather than a name. Which body a call reaches, and whether that is decided here at all. |
 | `rust/build-script` | A crate whose `build.rs` writes a marker file into its own directory. Its presence is the evidence that something ran the build script. |
 | `rust/proc-macro` | A derive macro and the crate that uses it. Expanding it means running the macro crate; declining to expand it means saying so rather than reporting the unexpanded text as the truth. |
 

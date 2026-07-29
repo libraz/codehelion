@@ -21,7 +21,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// The Rust fixtures, by directory name under `fixtures/rust/`.
-pub const RUST_FIXTURES: [&str; 4] = ["plain", "features", "build-script", "proc-macro"];
+pub const RUST_FIXTURES: [&str; 5] = [
+    "plain",
+    "features",
+    "dispatch",
+    "build-script",
+    "proc-macro",
+];
 
 /// The C and C++ fixtures, by directory name under `fixtures/cpp/`.
 pub const CPP_FIXTURES: [&str; 2] = ["cmake", "header-only"];
@@ -258,7 +264,7 @@ mod tests {
     /// execution is the difference.
     #[test]
     fn the_baseline_fixtures_have_nothing_to_execute() {
-        for name in ["plain", "features"] {
+        for name in ["plain", "features", "dispatch"] {
             let path = rust(name).unwrap();
             assert!(
                 !path.join("build.rs").is_file(),
