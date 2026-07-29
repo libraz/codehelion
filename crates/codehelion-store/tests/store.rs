@@ -241,6 +241,8 @@ fn undo_since_fifteen(conn: &rusqlite::Connection) {
         )
         .unwrap();
     }
+    // Version 19 sits on a table version 17 created, which the loop above has
+    // already dropped, so nothing is left to undo for it.
     conn.execute("ALTER TABLE clone_group DROP COLUMN statements", [])
         .unwrap();
 }
@@ -1201,6 +1203,11 @@ fn a_variant_recorded_before_it_was_described_is_not_described_as_empty() {
             )
             .unwrap();
         }
+        // Winding the recorded version back means undoing every step since,
+        // not only the one this test is about: a step re-applied to a database
+        // that already has it fails for its own reason.
+        conn.execute("ALTER TABLE compiler_helper DROP COLUMN restarts", [])
+            .unwrap();
         conn.execute("UPDATE schema_meta SET version = 17", [])
             .unwrap();
     }

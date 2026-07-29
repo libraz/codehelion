@@ -100,6 +100,7 @@ fn helper_row() -> CompilerHelperRow {
             ],
         },
         protocol_agreed: 3,
+        restarts: Some(2),
     }
 }
 
@@ -370,6 +371,81 @@ fn asking_and_failing_does_not_read_as_never_asking() {
         .unwrap();
     assert!(store.run_compiler_units(silent).unwrap().is_empty());
     assert_eq!(store.run_compiler_units(asked).unwrap().len(), 1);
+    // A run that started no helper restarted nothing, which is a count rather
+    // than a gap in the record: nothing was left uncounted.
+    let coverage = store.run_compiler_coverage(asked).unwrap().unwrap();
+    assert_eq!(coverage.restarts, Some(0));
+    assert_eq!(coverage.not_asked, 1);
+}
+
+/// The counts a run reports about itself have to survive being recorded, and
+/// the three outcomes have to survive it separately: a summed pair would say a
+/// helper failed on files nobody showed it.
+#[test]
+fn how_much_a_compiler_spoke_for_is_counted_off_the_rows() {
+    let (_dir, mut store, _path) = on_disk();
+    let variant = variant();
+    let run = store
+        .record_snapshot(&snapshot(
+            "/tree",
+            &variant,
+            vec![helper_row()],
+            vec![
+                answered(full_analysis(unit_ref("render", "src/render.rs"))),
+                answered(full_analysis(unit_ref("ledger", "src/ledger.rs"))),
+                unavailable(
+                    unit_ref("build-script", "build.rs"),
+                    Unavailability::RequiresExecution,
+                    Some(0),
+                ),
+                unavailable(
+                    unit_ref("hooks", "hooks.rs"),
+                    Unavailability::RequiresExecution,
+                    Some(0),
+                ),
+                unavailable(
+                    unit_ref("crate", "src/slow.rs"),
+                    Unavailability::HelperTimedOut,
+                    Some(0),
+                ),
+                // Nobody was asked: no helper here reads it.
+                unavailable(
+                    unit_ref("", "vendor/blob.c"),
+                    Unavailability::NotSupported,
+                    None,
+                ),
+            ],
+        ))
+        .unwrap();
+
+    let coverage = store
+        .run_compiler_coverage(run)
+        .unwrap()
+        .expect("a compiler was asked about this run");
+    assert_eq!(coverage.answered, 2);
+    assert_eq!(coverage.not_asked, 1);
+    assert_eq!(
+        coverage.unavailable,
+        [
+            ("requires_execution".to_string(), 2),
+            ("helper_timed_out".to_string(), 1),
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(coverage.restarts, helper_row().restarts);
+}
+
+/// Asking nobody is not asking and being told nothing, so the run that put
+/// nothing to a compiler has no coverage rather than an empty one.
+#[test]
+fn a_run_that_asked_nobody_reports_no_coverage_rather_than_an_empty_one() {
+    let (_dir, mut store, _path) = on_disk();
+    let variant = variant();
+    let run = store
+        .record_snapshot(&snapshot("/tree", &variant, Vec::new(), Vec::new()))
+        .unwrap();
+    assert_eq!(store.run_compiler_coverage(run).unwrap(), None);
 }
 
 /// A graph with no blocks and a helper that builds no graph both store zero
@@ -596,6 +672,29 @@ fn the_helper_that_answered_is_recorded_with_what_it_granted() {
     // The agreed revision is the highest both sides could speak, which
     // neither range says on its own.
     assert_eq!(helpers[0].protocol_agreed, 3);
+    // How often it fell over is the other thing the run cannot reconstruct:
+    // the unit rows say which files came back empty, not that the emptiness
+    // was the helper's doing.
+    assert_eq!(helpers[0].restarts, Some(2));
+}
+
+/// A helper that survived the tree and one recorded before restarts were kept
+/// are different claims, and zero is only the first of them.
+#[test]
+fn a_run_that_did_not_count_restarts_is_not_a_run_with_none() {
+    let (_dir, mut store, _path) = on_disk();
+    let variant = variant();
+    let mut uncounted = helper_row();
+    uncounted.restarts = None;
+    let run = store
+        .record_snapshot(&snapshot(
+            "/tree",
+            &variant,
+            vec![uncounted.clone()],
+            vec![answered(full_analysis(unit_ref("crate", "src/lib.rs")))],
+        ))
+        .unwrap();
+    assert_eq!(store.run_compiler_helpers(run).unwrap(), vec![uncounted]);
 }
 
 /// One header analysed from two translation units is two analyses of one

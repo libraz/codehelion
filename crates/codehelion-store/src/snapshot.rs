@@ -610,7 +610,7 @@ fn write_snapshot(tx: &Transaction<'_>, snapshot: &Snapshot<'_>) -> Result<i64, 
     // says what each answer was written against, and nothing at run level
     // would otherwise say that this run holds compiler IR at all.
     for schema in crate::compiler::write(tx, snapshot, run_id, variant_id)? {
-        record_detector_version(tx, run_id, "compiler_ir", &schema)?;
+        record_detector_version(tx, run_id, crate::compiler::IR_SCHEMA_COMPONENT, &schema)?;
     }
     write_summary(tx, &snapshot.summary, run_id)?;
     Ok(run_id)

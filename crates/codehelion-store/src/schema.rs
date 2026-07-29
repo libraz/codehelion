@@ -36,6 +36,9 @@
 //!   value, in the order it was given. A row written before variants were
 //!   described reads as NULL there, which is not the same as a build that was
 //!   resolved and said nothing.
+//! - `compiler_helper.restarts` counts how often a run had to restart the
+//!   helper. NULL is a run that did not count; zero is a run whose helper
+//!   survived the whole tree.
 //! - Savings and confidence live in separate columns; there is no single
 //!   collapsed score column.
 //!
@@ -48,12 +51,12 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 18;
+pub const SCHEMA_VERSION: i64 = 19;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19,
 ];
 
 /// Version 1: the full entity set.
@@ -901,6 +904,20 @@ CREATE TABLE build_variant_setting (
 CREATE INDEX idx_build_variant_setting ON build_variant_setting (name, value);
 ";
 
+/// Version 19: how much trouble a helper was, beside what it is.
+///
+/// A helper that had to be restarted analysed the tree in pieces, and every
+/// restart is a unit that cost two attempts. The unit rows say which files came
+/// back empty but not that the emptiness came from the helper falling over, so
+/// a stored run could report a thin result with no sign of why it was thin.
+///
+/// Nullable and not backfilled: zero would be a claim that the run went
+/// smoothly, and a run recorded before this version says nothing either way.
+const V19: &str = "
+ALTER TABLE compiler_helper ADD COLUMN restarts INTEGER
+    CHECK (restarts IS NULL OR restarts >= 0);
+";
+
 /// Bring `conn` to the current schema version, applying any pending
 /// forward migrations inside one transaction per step.
 pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
@@ -992,8 +1009,15 @@ mod tests {
     use super::*;
 
     /// One group with one member, and the chain of rows they need to exist.
+    ///
+    /// Every insert names its columns. Positional inserts would tie the seed to
+    /// how wide each table happened to be when it was written, so a migration
+    /// that adds a column would break the tests about migrating rather than be
+    /// tested by them.
     const SEED: &str = "
-INSERT INTO build_variant VALUES (1, 'v', 'canonical', 'structural', 1);
+INSERT INTO build_variant (id, variant_fingerprint, canonical, analysis_mode,
+                           normalization_version)
+    VALUES (1, 'v', 'canonical', 'structural', 1);
 INSERT INTO scan_run (id, build_variant_id, root_path, tool_version, config_hash,
                       analysis_mode, started_at, status)
     VALUES (1, 1, '/tree', '0.1.0', 'cfg', 'structural', '2026-01-01T00:00:00Z', 'completed');
@@ -1007,7 +1031,8 @@ INSERT INTO fragment (id, scan_run_id, fingerprint_id, fragment_kind, file_path,
 INSERT INTO clone_group (id, scan_run_id, group_fingerprint_id, clone_type,
                          member_count, score, entropy_bits)
     VALUES (1, 1, 1, 'type-2', 1, 0.5, 8.0);
-INSERT INTO clone_group_member VALUES (1, 1, randomblob(16), 1);
+INSERT INTO clone_group_member (clone_group_id, fragment_id, finding_id, is_canonical)
+    VALUES (1, 1, randomblob(16), 1);
 ";
 
     /// A database genuinely at `version`, seeded with a group and its one

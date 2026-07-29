@@ -19,7 +19,7 @@
 //! candidates keeps its resolution rather than collapsing into an unresolved
 //! one.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use codehelion_helper::ir::{
     Anchor, BasicBlock, CallSite, CallTarget, CompilerIr, ControlFlowGraph, DataFlowSummary, Edge,
@@ -32,6 +32,13 @@ use rusqlite::{Row, Transaction, params};
 use crate::snapshot::Snapshot;
 use crate::{Store, StoreError};
 
+/// The detector-version component a run declares its compiler IR schema under.
+///
+/// Declared by the run rather than by the build that made it: a run holds a
+/// schema only if a compiler answered something about the tree, which is not
+/// known until the tree has been read.
+pub const IR_SCHEMA_COMPONENT: &str = "compiler_ir";
+
 /// A compiler helper that took part in a run, as it described itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompilerHelperRow {
@@ -40,6 +47,11 @@ pub struct CompilerHelperRow {
     /// The protocol revision the two sides settled on, which is the highest
     /// both could speak and so is not derivable from either range alone.
     pub protocol_agreed: u32,
+    /// How many times the run had to restart it, when the run counted.
+    ///
+    /// `None` from a run recorded before this was kept. Zero is the different
+    /// claim that the helper survived the whole tree.
+    pub restarts: Option<u32>,
 }
 
 /// One unit a run put to a helper, and what came back.
@@ -78,6 +90,28 @@ impl CompilerOutcome {
             Self::Unavailable { unit, .. } => unit,
         }
     }
+}
+
+/// How much of a run a compiler could speak for, counted off the stored rows.
+///
+/// The three outcomes stay apart here as they do in the rows: a file a helper
+/// answered, one it was given and could not answer, and one nobody was asked
+/// about. Summing the last two would report a helper as having failed on files
+/// it was never shown.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompilerCoverage {
+    /// Files a compiler answered about.
+    pub answered: u64,
+    /// Files nobody was asked about.
+    pub not_asked: u64,
+    /// Files a helper was asked about and could not answer, by reason.
+    pub unavailable: BTreeMap<String, u64>,
+    /// How often the run had to restart a helper.
+    ///
+    /// `None` from a run that ran one and did not count. A run that started no
+    /// helper — every file ruled out before anything was asked — restarted
+    /// nothing, and says zero.
+    pub restarts: Option<u32>,
 }
 
 /// A stored compiler result, with the helper that produced it.
@@ -132,6 +166,23 @@ impl Store {
     /// this build does not know; otherwise any underlying database error.
     pub fn run_compiler_units(&self, run_id: i64) -> Result<Vec<StoredCompilerUnit>, StoreError> {
         read::units(&self.conn, run_id)
+    }
+
+    /// How much of `run_id` a compiler could speak for, or `None` when the run
+    /// put nothing to one.
+    ///
+    /// Counted in the database rather than by reading the units back: the
+    /// answer is four numbers and the rows behind them carry every symbol and
+    /// type a compiler resolved.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn run_compiler_coverage(
+        &self,
+        run_id: i64,
+    ) -> Result<Option<CompilerCoverage>, StoreError> {
+        read::coverage(&self.conn, run_id)
     }
 
     /// Every expansion of `key` recorded by `run_id`.
@@ -196,8 +247,9 @@ fn write_helpers(
     for helper in helpers {
         tx.execute(
             "INSERT INTO compiler_helper
-                 (scan_run_id, name, version, protocol_min, protocol_max, protocol_agreed)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (scan_run_id, name, version, protocol_min, protocol_max, protocol_agreed,
+                  restarts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 run_id,
                 helper.identity.name,
@@ -205,6 +257,7 @@ fn write_helpers(
                 i64::from(helper.identity.protocol.min),
                 i64::from(helper.identity.protocol.max),
                 i64::from(helper.protocol_agreed),
+                helper.restarts.map(i64::from),
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -571,10 +624,10 @@ mod read {
     use rusqlite::Connection;
 
     use super::{
-        BasicBlock, CallSite, CallTarget, Capability, CompilerHelperRow, CompilerIr,
-        CompilerOutcome, ControlFlowGraph, DataFlowSummary, Edge, EdgeKind, EffectSummary,
-        HelperIdentity, Instantiation, ResolvedSymbol, ResolvedType, Row, StoreError,
-        StoredCompilerUnit, StoredExpansion, StoredHelperRef, SymbolKind, TypeCategory,
+        BasicBlock, CallSite, CallTarget, Capability, CompilerCoverage, CompilerHelperRow,
+        CompilerIr, CompilerOutcome, ControlFlowGraph, DataFlowSummary, Edge, EdgeKind,
+        EffectSummary, HelperIdentity, Instantiation, ResolvedSymbol, ResolvedType, Row,
+        StoreError, StoredCompilerUnit, StoredExpansion, StoredHelperRef, SymbolKind, TypeCategory,
         Unavailability, UnitRef, anchor_at, params,
     };
     use codehelion_helper::protocol::VersionRange;
@@ -584,7 +637,7 @@ mod read {
         run_id: i64,
     ) -> Result<Vec<CompilerHelperRow>, StoreError> {
         let mut statement = conn.prepare(
-            "SELECT id, name, version, protocol_min, protocol_max, protocol_agreed
+            "SELECT id, name, version, protocol_min, protocol_max, protocol_agreed, restarts
              FROM compiler_helper WHERE scan_run_id = ?1 ORDER BY name, version",
         )?;
         let rows = statement
@@ -596,11 +649,12 @@ mod read {
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, i64>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         let mut helpers = Vec::with_capacity(rows.len());
-        for (id, name, version, min, max, agreed) in rows {
+        for (id, name, version, min, max, agreed, restarts) in rows {
             helpers.push(CompilerHelperRow {
                 identity: HelperIdentity {
                     name,
@@ -618,6 +672,7 @@ mod read {
                     capabilities: capabilities(conn, id)?,
                 },
                 protocol_agreed: revision(agreed),
+                restarts: restarts.map(revision),
             });
         }
         Ok(helpers)
@@ -677,6 +732,70 @@ mod read {
             units.push(StoredCompilerUnit { helper, outcome });
         }
         Ok(units)
+    }
+
+    /// The counts, straight out of one grouped query.
+    ///
+    /// A run that put nothing to a compiler has no rows and answers `None`,
+    /// which is the claim that no compiler was asked — not that one was asked
+    /// and said nothing.
+    pub(super) fn coverage(
+        conn: &Connection,
+        run_id: i64,
+    ) -> Result<Option<CompilerCoverage>, StoreError> {
+        let mut statement = conn.prepare(
+            "SELECT compiler_helper_id IS NULL, unavailable_reason, count(*)
+             FROM compiler_unit WHERE scan_run_id = ?1
+             GROUP BY compiler_helper_id IS NULL, unavailable_reason",
+        )?;
+        let rows = statement
+            .query_map([run_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? != 0,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let mut coverage = CompilerCoverage {
+            restarts: restarts(conn, run_id)?,
+            ..CompilerCoverage::default()
+        };
+        for (unasked, reason, count) in rows {
+            let count = u64::try_from(count).unwrap_or(0);
+            match (unasked, reason) {
+                (true, _) => coverage.not_asked += count,
+                (false, None) => coverage.answered += count,
+                (false, Some(reason)) => *coverage.unavailable.entry(reason).or_default() += count,
+            }
+        }
+        Ok(Some(coverage))
+    }
+
+    /// How often the run's helpers were restarted, summed because each counts
+    /// its own.
+    ///
+    /// A run with no helper row restarted nothing, which is zero rather than
+    /// unknown: it put files to nobody. One helper row that did not count is
+    /// what makes the total unknown, and it makes the whole total unknown
+    /// rather than a sum of the rest that reads like the answer.
+    fn restarts(conn: &Connection, run_id: i64) -> Result<Option<u32>, StoreError> {
+        let mut statement =
+            conn.prepare("SELECT restarts FROM compiler_helper WHERE scan_run_id = ?1")?;
+        let rows = statement
+            .query_map([run_id], |row| row.get::<_, Option<i64>>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut total: u32 = 0;
+        for row in rows {
+            let Some(count) = row else {
+                return Ok(None);
+            };
+            total = total.saturating_add(revision(count));
+        }
+        Ok(Some(total))
     }
 
     pub(super) fn family(
