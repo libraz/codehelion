@@ -14,7 +14,7 @@
 
 use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::{CloneClass, CloneScope};
-use codehelion_core::discovery::{BuildVariant, Language};
+use codehelion_core::discovery::{BuildConfiguration, BuildVariant, Language};
 use codehelion_core::features::{
     FEATURE_SCHEMA_VERSION, FeatureKind, SHAPE_TAG_SLOTS, UnitFeatures,
 };
@@ -1085,22 +1085,91 @@ fn write_group_similarity(
 }
 
 fn upsert_variant(tx: &Transaction<'_>, variant: &BuildVariant) -> Result<i64, StoreError> {
+    let languages = variant
+        .languages
+        .enabled()
+        .into_iter()
+        .map(Language::name)
+        .collect::<Vec<_>>()
+        .join(",");
+    let headers = variant.headers.map_or("", Language::name);
+    let build_language = variant
+        .build
+        .as_ref()
+        .map_or("", BuildConfiguration::language);
+    // `ON CONFLICT DO NOTHING` rather than `INSERT OR IGNORE`: the variant is
+    // expected to be there already, but only the fingerprint clash is
+    // expected. `OR IGNORE` would swallow a `CHECK` violation too and leave the
+    // row absent, which surfaces later as a variant that cannot be found rather
+    // than as the value that was wrong.
     tx.execute(
-        "INSERT OR IGNORE INTO build_variant
-             (variant_fingerprint, canonical, analysis_mode, normalization_version)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO build_variant
+             (variant_fingerprint, canonical, analysis_mode, normalization_version,
+              languages, header_language, build_language)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT (variant_fingerprint) DO NOTHING",
         params![
             variant.fingerprint(),
             variant.canonical(),
             variant.mode.name(),
             variant.normalization_version,
+            languages,
+            headers,
+            build_language,
         ],
     )?;
-    Ok(tx.query_row(
+    let id: i64 = tx.query_row(
         "SELECT id FROM build_variant WHERE variant_fingerprint = ?1",
         params![variant.fingerprint()],
         |row| row.get(0),
-    )?)
+    )?;
+    // Describe the row even when it was already there. Equal fingerprints are
+    // equal variants, so this writes back what is already written — except on a
+    // row recorded before variants were described, which is the row that has
+    // nothing to say and is worth filling in.
+    tx.execute(
+        "UPDATE build_variant
+            SET languages = ?2, header_language = ?3, build_language = ?4
+          WHERE id = ?1",
+        params![id, languages, headers, build_language],
+    )?;
+    write_variant_settings(tx, id, variant)?;
+    Ok(id)
+}
+
+/// Record what the compiler was told, replacing whatever the row held.
+///
+/// The settings are derived from the same enumeration the variant's identity
+/// is, so rewriting them for an existing row restores the same values; a row
+/// from before they were recorded gains them.
+fn write_variant_settings(
+    tx: &Transaction<'_>,
+    variant_id: i64,
+    variant: &BuildVariant,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "DELETE FROM build_variant_setting WHERE build_variant_id = ?1",
+        params![variant_id],
+    )?;
+    let Some(build) = variant.build.as_ref() else {
+        return Ok(());
+    };
+    for setting in build.settings() {
+        for (position, value) in setting.shape.values().into_iter().enumerate() {
+            tx.execute(
+                "INSERT INTO build_variant_setting
+                     (build_variant_id, name, position, value)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    variant_id,
+                    setting.name,
+                    i64::try_from(position).unwrap_or(i64::MAX),
+                    value
+                ],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn upsert_fingerprint(

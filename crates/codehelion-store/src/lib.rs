@@ -172,6 +172,7 @@ mod tests {
         for table in [
             "scan_run",
             "build_variant",
+            "build_variant_setting",
             "source_unit",
             "fragment",
             "fingerprint",

@@ -31,6 +31,11 @@
 //!   (not NULL, which `SQLite` treats as always-distinct under UNIQUE).
 //! - `scan_run.build_variant_id` is NOT NULL: results without a variant
 //!   cannot exist.
+//! - A build variant records what it was, not only the hash it is known by:
+//!   what a compiler was told lives in `build_variant_setting`, one row per
+//!   value, in the order it was given. A row written before variants were
+//!   described reads as NULL there, which is not the same as a build that was
+//!   resolved and said nothing.
 //! - Savings and confidence live in separate columns; there is no single
 //!   collapsed score column.
 //!
@@ -43,12 +48,12 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18,
 ];
 
 /// Version 1: the full entity set.
@@ -858,6 +863,42 @@ CREATE TABLE compiler_data_flow (
     sink_symbol      TEXT NOT NULL,
     PRIMARY KEY (compiler_unit_id, ordinal)
 ) STRICT;
+";
+
+/// Version 18: what a variant was, beside the hash it is known by.
+///
+/// A variant row held its canonical form, and a canonical form names a
+/// resolved build configuration by fingerprint rather than by content. Two
+/// stored runs could therefore be shown to be incomparable without anything
+/// being able to say what differed — a define, a feature, a target — which is
+/// the one question a reader has at that point.
+///
+/// The settings go in a child table rather than in columns: they are lists
+/// whose order is meaning (an include path is a search order), the two
+/// languages name different things, and joining them into one column would
+/// re-introduce the delimiter ambiguity the canonical encoding exists to avoid.
+/// The enabled languages *are* joined into one column, because their names are
+/// a closed set of words with no punctuation in them.
+///
+/// The new columns are nullable and nothing is backfilled. A row written
+/// before this version was not described, and an empty description is a
+/// different claim — that a build was resolved and said nothing — so the two
+/// are kept apart. A later run under the same variant fills the row in.
+const V18: &str = "
+ALTER TABLE build_variant ADD COLUMN languages TEXT;
+ALTER TABLE build_variant ADD COLUMN header_language TEXT
+    CHECK (header_language IS NULL OR header_language IN ('rust', 'c', 'cpp', ''));
+ALTER TABLE build_variant ADD COLUMN build_language TEXT
+    CHECK (build_language IS NULL OR build_language IN ('rust', 'cpp', ''));
+
+CREATE TABLE build_variant_setting (
+    build_variant_id INTEGER NOT NULL REFERENCES build_variant (id) ON DELETE CASCADE,
+    name             TEXT NOT NULL,
+    position         INTEGER NOT NULL,
+    value            TEXT NOT NULL,
+    PRIMARY KEY (build_variant_id, name, position)
+) STRICT;
+CREATE INDEX idx_build_variant_setting ON build_variant_setting (name, value);
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

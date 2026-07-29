@@ -98,6 +98,43 @@ pub struct RunRecord {
     pub min_clone_tokens: Option<i64>,
 }
 
+/// A stored build variant, as what it was rather than as the hash it is
+/// known by.
+///
+/// The description is optional throughout: a variant recorded before a run
+/// wrote down what it was analysed under says nothing here, which is not the
+/// same claim as a build that was resolved and had nothing to say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredVariant {
+    /// Row id of the variant.
+    pub id: i64,
+    /// Its fingerprint, which is what results are attributed to.
+    pub fingerprint: String,
+    /// Analysis mode name.
+    pub analysis_mode: String,
+    /// The languages the run enumerated, comma-separated in a fixed order.
+    pub languages: Option<String>,
+    /// The grammar bare `.h` headers were read with; empty when the run
+    /// enumerated neither C nor C++.
+    pub header_language: Option<String>,
+    /// Which language's build was resolved; empty when none was.
+    pub build_language: Option<String>,
+    /// What the compiler was told, in the order it was told, grouped by
+    /// setting name.
+    pub settings: Vec<StoredSetting>,
+}
+
+/// One recorded value of one build setting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSetting {
+    /// The setting's stable name.
+    pub name: String,
+    /// Its position within that setting, for the ones that are sequences.
+    pub position: i64,
+    /// The value as it was given.
+    pub value: String,
+}
+
 /// One stored occurrence of a group's content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredMember {
@@ -604,6 +641,55 @@ impl Store {
             .query_map(params![run_id], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<Result<_, _>>()?;
         Ok(origin)
+    }
+
+    /// What the variant `fingerprint` names was analysed under, or `None` when
+    /// this database holds no such variant.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn build_variant(&self, fingerprint: &str) -> Result<Option<StoredVariant>, StoreError> {
+        let Some(mut variant) = self
+            .conn
+            .query_row(
+                "SELECT id, variant_fingerprint, analysis_mode, languages,
+                        header_language, build_language
+                 FROM build_variant
+                 WHERE variant_fingerprint = ?1",
+                params![fingerprint],
+                |row| {
+                    Ok(StoredVariant {
+                        id: row.get(0)?,
+                        fingerprint: row.get(1)?,
+                        analysis_mode: row.get(2)?,
+                        languages: row.get(3)?,
+                        header_language: row.get(4)?,
+                        build_language: row.get(5)?,
+                        settings: Vec::new(),
+                    })
+                },
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT name, position, value
+             FROM build_variant_setting
+             WHERE build_variant_id = ?1
+             ORDER BY name ASC, position ASC",
+        )?;
+        variant.settings = stmt
+            .query_map(params![variant.id], |row| {
+                Ok(StoredSetting {
+                    name: row.get(0)?,
+                    position: row.get(1)?,
+                    value: row.get(2)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(Some(variant))
     }
 
     /// Every completed run over `root_path`, newest first, at most `limit` of

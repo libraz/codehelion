@@ -3,9 +3,13 @@
 //! databases (in-memory and on-disk), never mocks.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+use std::path::Path;
+
 use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::{CloneClass, CloneScope};
-use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
+use codehelion_core::discovery::{
+    BuildConfiguration, BuildVariant, CppBuild, Language, LanguageSelection,
+};
 use codehelion_core::features::{
     ApiCallFeature, CfgFeature, CharacteristicVector, FeatureHash, FeatureKind, SubtreeFeature,
     UnitFeatures, WindowFeature,
@@ -18,6 +22,7 @@ use codehelion_core::stable_id::{
 };
 use codehelion_core::verify::Confidence;
 use codehelion_store::migrate::LineageAdoption;
+use codehelion_store::query::StoredVariant;
 use codehelion_store::snapshot::{
     FeatureRow, FileRow, FunnelDropRow, FunnelStageRow, GroupOrigin, GroupRow, LineageParent,
     MemberRow, PriorityRow, SimilarityBreakdownRow, Snapshot, SummaryRow, SuppressionRuleRow,
@@ -203,6 +208,8 @@ fn sample_summary() -> SummaryRow {
 /// every migration appended after 15 belongs here.
 fn undo_since_fifteen(conn: &rusqlite::Connection) {
     for table in [
+        // Version 18.
+        "build_variant_setting",
         // Version 17.
         "compiler_data_flow",
         "compiler_effect",
@@ -226,6 +233,13 @@ fn undo_since_fifteen(conn: &rusqlite::Connection) {
         "run_unused_suppression",
     ] {
         conn.execute(&format!("DROP TABLE {table}"), []).unwrap();
+    }
+    for column in ["languages", "header_language", "build_language"] {
+        conn.execute(
+            &format!("ALTER TABLE build_variant DROP COLUMN {column}"),
+            [],
+        )
+        .unwrap();
     }
     conn.execute("ALTER TABLE clone_group DROP COLUMN statements", [])
         .unwrap();
@@ -1042,6 +1056,177 @@ fn a_group_recorded_before_the_test_code_column_is_not_claimed_to_be_test_code()
     );
     let run = store.latest_run().unwrap().expect("the recorded run");
     assert!(!store.run_groups(run.id).unwrap()[0].test_code);
+}
+
+/// A variant resolved from a compilation database entry.
+fn compiled_variant(macros: &[&str]) -> BuildVariant {
+    let mut command = vec!["clang++".to_string(), "-std=c++17".to_string()];
+    command.extend(macros.iter().map(|setting| (*setting).to_string()));
+    command.extend(
+        [
+            "-I/w/vendor",
+            "-I/w/local",
+            "-c",
+            "-o",
+            "wide.o",
+            "/w/src/wide.cpp",
+        ]
+        .iter()
+        .map(|argument| (*argument).to_string()),
+    );
+    BuildVariant::semantic(
+        LanguageSelection::default(),
+        Language::Cpp,
+        BuildConfiguration::Cpp(Box::new(CppBuild::from_command(
+            &command,
+            Path::new("/w/src/wide.cpp"),
+        ))),
+    )
+}
+
+fn values_of<'a>(variant: &'a StoredVariant, name: &str) -> Vec<&'a str> {
+    variant
+        .settings
+        .iter()
+        .filter(|setting| setting.name == name)
+        .map(|setting| setting.value.as_str())
+        .collect()
+}
+
+/// A stored variant that can only be compared with another is a stored variant
+/// nobody can act on: two runs are shown to be incomparable and nothing says
+/// what the difference was.
+#[test]
+fn what_a_compiler_was_told_is_recorded_beside_the_variant_it_identifies() {
+    let variant = compiled_variant(&["-DACCUM_WIDTH=64"]);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+
+    let stored = store
+        .build_variant(&variant.fingerprint())
+        .unwrap()
+        .expect("the variant the run was recorded under");
+    assert_eq!(stored.analysis_mode, "semantic");
+    assert_eq!(stored.languages.as_deref(), Some("rust,c,cpp"));
+    assert_eq!(stored.header_language.as_deref(), Some("cpp"));
+    assert_eq!(stored.build_language.as_deref(), Some("cpp"));
+    assert_eq!(values_of(&stored, "compiler"), vec!["clang++"]);
+    assert_eq!(values_of(&stored, "macros"), vec!["-DACCUM_WIDTH=64"]);
+    assert_eq!(values_of(&stored, "flags"), vec!["-std=c++17"]);
+    // The search order is the meaning of an include path, so it comes back in
+    // the order it was given rather than in any order the database found handy.
+    assert_eq!(
+        values_of(&stored, "includes"),
+        vec!["/w/vendor", "/w/local"]
+    );
+    // Nobody ran the compiler to ask its version, and a setting nobody
+    // resolved is absent rather than empty.
+    assert!(values_of(&stored, "compiler_version").is_empty());
+    assert!(values_of(&stored, "linker").is_empty());
+}
+
+/// Two builds of one source tree are two variants, and what tells them apart
+/// has to be readable, not just hashable.
+#[test]
+fn two_builds_of_one_tree_are_told_apart_by_what_they_were_told() {
+    let narrow = compiled_variant(&[]);
+    let wide = compiled_variant(&["-DACCUM_WIDTH=64"]);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .record_snapshot(&sample_snapshot(&narrow, &detectors))
+        .unwrap();
+    store
+        .record_snapshot(&sample_snapshot(&wide, &detectors))
+        .unwrap();
+
+    let stored_narrow = store.build_variant(&narrow.fingerprint()).unwrap().unwrap();
+    let stored_wide = store.build_variant(&wide.fingerprint()).unwrap().unwrap();
+    assert_ne!(stored_narrow.id, stored_wide.id);
+    assert!(values_of(&stored_narrow, "macros").is_empty());
+    assert_eq!(values_of(&stored_wide, "macros"), vec!["-DACCUM_WIDTH=64"]);
+}
+
+/// The same variant seen again is the same variant: its settings are rewritten
+/// rather than added to, or a tree scanned twice would report every define
+/// twice.
+#[test]
+fn recording_one_variant_twice_records_its_settings_once() {
+    let variant = compiled_variant(&["-DACCUM_WIDTH=64"]);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    for _ in 0..2 {
+        store
+            .record_snapshot(&sample_snapshot(&variant, &detectors))
+            .unwrap();
+    }
+    let stored = store
+        .build_variant(&variant.fingerprint())
+        .unwrap()
+        .unwrap();
+    assert_eq!(values_of(&stored, "macros"), vec!["-DACCUM_WIDTH=64"]);
+    assert_eq!(
+        values_of(&stored, "includes"),
+        vec!["/w/vendor", "/w/local"]
+    );
+}
+
+/// A row written before variants were described has nothing to say about what
+/// it was built with. Migrating forward must leave it saying nothing, rather
+/// than fill it in with the different claim that a build was resolved and
+/// named nothing — and a later run under the same variant is what fills it in.
+#[test]
+fn a_variant_recorded_before_it_was_described_is_not_described_as_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.db");
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    {
+        let mut store = Store::open(&path).unwrap();
+        store
+            .record_snapshot(&sample_snapshot(&variant, &detectors))
+            .unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("DROP TABLE build_variant_setting", [])
+            .unwrap();
+        for column in ["languages", "header_language", "build_language"] {
+            conn.execute(
+                &format!("ALTER TABLE build_variant DROP COLUMN {column}"),
+                [],
+            )
+            .unwrap();
+        }
+        conn.execute("UPDATE schema_meta SET version = 17", [])
+            .unwrap();
+    }
+
+    let mut store = Store::open(&path).unwrap();
+    let stored = store
+        .build_variant(&variant.fingerprint())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.languages, None);
+    assert_eq!(stored.header_language, None);
+    assert_eq!(stored.build_language, None);
+
+    store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+    let stored = store
+        .build_variant(&variant.fingerprint())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.languages.as_deref(), Some("rust,c,cpp"));
+    assert_eq!(stored.header_language.as_deref(), Some("c"));
+    // Structural mode resolves no build, which is a claim of its own: the
+    // column says so rather than staying unset.
+    assert_eq!(stored.build_language.as_deref(), Some(""));
+    assert!(stored.settings.is_empty());
 }
 
 /// A run of the same tree under rules that named every group differently.
