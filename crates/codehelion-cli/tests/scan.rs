@@ -1244,6 +1244,29 @@ fn recording_a_baseline_needs_a_scan_and_refuses_to_overwrite_silently() {
         .success();
 }
 
+/// Whether a compiler helper is installed is a property of the machine this
+/// runs on, so what is fixed here is the pairing. Without one, the mode says
+/// which program supplies it and stops — it does not answer without a compiler
+/// and call the answer semantic. With one, the report says how much of the
+/// tree the compiler could speak for, which is what tells a thin semantic run
+/// apart from a tree with little duplication in it.
+#[test]
+fn semantic_mode_either_asks_a_compiler_or_says_which_one_is_missing() {
+    let dir = fixture();
+    let output = cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "semantic"])
+        .output()
+        .expect("the scan should run");
+    if output.status.success() {
+        let text = String::from_utf8(output.stdout).expect("output is utf-8");
+        assert!(text.contains("compiler: answered for"), "{text}");
+    } else {
+        let text = String::from_utf8(output.stderr).expect("output is utf-8");
+        assert!(text.contains("codehelion-backend-rust"), "{text}");
+    }
+}
+
 /// The reuse path's own tests: a tree nobody touched is reported from the
 /// recorded run rather than analysed again, and every input that could change
 /// the answer defeats that.

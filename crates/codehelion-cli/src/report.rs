@@ -20,6 +20,7 @@
 
 pub mod sarif;
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use codehelion_core::boilerplate::Boilerplate;
@@ -189,6 +190,37 @@ pub struct Summary {
     /// duplication in it are the same document.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guardrails: Option<Guardrails>,
+    /// What a compiler could supply about the tree, in the mode that asks one.
+    ///
+    /// Absent in the modes that ask nobody. Present and thin is a different
+    /// report from absent: it says the run had a compiler and the compiler
+    /// could not answer, which is why the findings look like the ones a
+    /// syntactic run would produce.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compiler: Option<CompilerCoverage>,
+}
+
+/// How much of the tree a compiler answered about.
+#[derive(Debug, Serialize)]
+pub struct CompilerCoverage {
+    /// Files a compiler answered about.
+    pub answered: u64,
+    /// Files nobody was asked about: no helper here reads their language, or
+    /// nothing said which crate they belong to.
+    pub not_asked: u64,
+    /// Files a compiler was asked about and could not answer for, by reason.
+    ///
+    /// Kept apart from `not_asked` because the two call for different things:
+    /// one is a project that needs something (a build script allowed to run, a
+    /// compilation database), the other a helper nobody installed.
+    pub unavailable: BTreeMap<String, u64>,
+    /// How many times the helper had to be restarted along the way.
+    ///
+    /// Not a failure — a helper that dies on one file is expected, and the
+    /// unit it died on is set aside rather than the run — but a run that
+    /// restarted a compiler repeatedly read its tree through a process that
+    /// kept losing its place, and that is worth seeing beside the counts.
+    pub restarts: u32,
 }
 
 /// The lowered ceilings a run worked under, and what asked for them.
@@ -360,6 +392,9 @@ pub fn restored(files: FileCounts, stored: &SummaryRow, groups: &[Group]) -> Sum
         // Not stored: the ceilings come from the invocation, and a recorded
         // run cannot say what the next one will be told to do.
         guardrails: None,
+        // Nor this: what a compiler answered belongs to the run that asked
+        // it, and this report is a recorded run read back.
+        compiler: None,
         groups: GroupCounts {
             total: u64::try_from(groups.len()).unwrap_or(u64::MAX),
             type_1: count(&|group| group.clone_type == CloneClass::Type1.name()),
@@ -1182,6 +1217,25 @@ impl Report {
                 guardrails.pair_budget,
             )?;
         }
+        // Beside the ceilings, and for the same reason: it says how much of
+        // what follows was decided by a compiler and how much was not.
+        if let Some(compiler) = &summary.compiler {
+            writeln!(
+                out,
+                "  compiler: answered for {} files, {} not asked, {} unanswered{}",
+                compiler.answered,
+                compiler.not_asked,
+                compiler.unavailable.values().sum::<u64>(),
+                if compiler.restarts == 0 {
+                    String::new()
+                } else {
+                    format!(" (helper restarted {} time(s))", compiler.restarts)
+                },
+            )?;
+            for (reason, count) in &compiler.unavailable {
+                writeln!(out, "    {count} {reason}")?;
+            }
+        }
         // Said only when there is a run to say it against. A first scan
         // reports nothing here rather than calling every file new, which
         // would read as a tree that had just been written from scratch.
@@ -1855,6 +1909,7 @@ pub(super) mod tests {
                 split_components: 0,
                 pair_budget_exhausted: false,
                 guardrails: None,
+                compiler: None,
             },
             groups: vec![visible_group(), suppressed_group()],
         }

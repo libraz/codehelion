@@ -91,13 +91,17 @@ fn help_flag_succeeds() {
         .stdout(predicate::str::contains("codehelion"));
 }
 
+/// The commands whose engine support is not built yet say so rather than
+/// doing something smaller under the same name.
 #[test]
-fn scan_semantic_reports_unavailable() {
-    cmd()
-        .args(["scan", "--mode", "semantic"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("not available in this release"));
+fn a_command_this_release_cannot_run_says_which_one() {
+    for command in ["artifact", "divergence"] {
+        cmd()
+            .arg(command)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not available in this release"));
+    }
 }
 
 #[test]

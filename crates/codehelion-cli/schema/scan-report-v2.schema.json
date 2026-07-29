@@ -495,6 +495,41 @@
               "description": "Largest number of candidate pairs any pairing pass examined."
             }
           }
+        },
+        "compiler": {
+          "type": "object",
+          "description": "What a compiler could supply about the tree. Absent in the modes that ask no compiler; present and thin means one was asked and could not answer.",
+          "required": [
+            "answered",
+            "not_asked",
+            "unavailable",
+            "restarts"
+          ],
+          "properties": {
+            "answered": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Files a compiler answered about."
+            },
+            "not_asked": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Files nobody was asked about: no installed helper reads their language, or nothing said which crate they belong to."
+            },
+            "unavailable": {
+              "type": "object",
+              "description": "Files a compiler was asked about and could not answer for, counted by reason.",
+              "additionalProperties": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "restarts": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "How many times the helper had to be restarted during the run."
+            }
+          }
         }
       }
     },

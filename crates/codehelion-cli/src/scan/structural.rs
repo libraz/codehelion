@@ -21,8 +21,8 @@ use anyhow::{Context, Result, bail};
 use codehelion_core::boilerplate::{BOILERPLATE_VERSION, Boilerplate};
 use codehelion_core::clone_class::CloneScope;
 use codehelion_core::discovery::{
-    BuildVariant, ContentHash, DiscoveryReport, Language, LanguageSelection, NORMALIZATION_VERSION,
-    SourceUnit,
+    BuildConfiguration, BuildVariant, ContentHash, DiscoveryReport, Language, LanguageSelection,
+    NORMALIZATION_VERSION, RustBuild, SourceUnit, content_hash,
 };
 use codehelion_core::engine::{self, LiteralNorm};
 use codehelion_core::features::FEATURE_SCHEMA_VERSION;
@@ -51,7 +51,9 @@ use crate::Outcome;
 use crate::cli::ScanArgs;
 use crate::config::{self, BoilerplatePolicy, CategoryAction, Config};
 use crate::report::{self, Report};
+use crate::semantic;
 use crate::suppress;
+use codehelion_core::doctor;
 
 /// The reporting metadata of one parsed source file.
 struct SourceMeta {
@@ -83,6 +85,85 @@ struct ParsedSource {
 /// fails. Per-file problems (unreadable or malformed sources) are counted and
 /// reported instead of failing the scan.
 pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
+    run_with(args, out, None)
+}
+
+/// Execute `codehelion scan` in Semantic mode: the same pipeline, over what a
+/// compiler resolved about the same files.
+///
+/// # Errors
+///
+/// Additionally fails when no compiler helper is installed or the installed
+/// one cannot be talked to. Semantic mode does not fall back to Structural: a
+/// run that answered without a compiler and called itself semantic would be
+/// syntactic results under another name, and nothing downstream could tell.
+pub fn semantic(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
+    let compilers = Compilers::found()?;
+    run_with(args, out, Some(&compilers))
+}
+
+/// The helper a semantic run asks, and what it said about itself.
+struct Compilers {
+    program: std::path::PathBuf,
+    greeting: doctor::Greeting,
+}
+
+impl Compilers {
+    /// Locate the helper and shake hands with it, before anything is read.
+    ///
+    /// Up front because the alternative is discovering after a full parse that
+    /// the run cannot be what it was asked to be, and because the two failures
+    /// need different answers: one is a program to install, the other a
+    /// program to update.
+    fn found() -> Result<Self> {
+        let helper = doctor::RUST_HELPER;
+        let Some(facts) = crate::interrogate(helper.binary, None) else {
+            bail!(
+                "semantic mode needs {}, and there is none beside this program \
+                 or on PATH: {}",
+                helper.binary,
+                helper.advice
+            );
+        };
+        match facts.state {
+            doctor::HelperState::Answered(greeting) => Ok(Self {
+                program: facts.path,
+                greeting,
+            }),
+            // Installed and unable to answer is its own problem, and telling
+            // someone to install what they have already installed sends them
+            // to solve the wrong one.
+            doctor::HelperState::Silent(why) => bail!(
+                "the helper at {} did not answer: {why}; \
+                 `codehelion doctor` reports what it is",
+                facts.path.display()
+            ),
+        }
+    }
+
+    /// What the run was analysed under.
+    ///
+    /// The compiler version is the helper's own, not the project's: the
+    /// answers came from what this program holds, and a variant that recorded
+    /// the project's toolchain would attribute them to a compiler that never
+    /// ran. The lockfile is the project's, because the dependency versions are
+    /// part of what its source means.
+    fn build(&self, root: &Path) -> BuildConfiguration {
+        BuildConfiguration::Rust(Box::new(RustBuild {
+            compiler_version: self.greeting.toolchains.join(", "),
+            lockfile_hash: std::fs::read_to_string(root.join("Cargo.lock"))
+                .ok()
+                .map(|text| content_hash(&text)),
+            ..RustBuild::default()
+        }))
+    }
+}
+
+fn run_with(
+    args: &ScanArgs,
+    out: &mut impl Write,
+    compilers: Option<&Compilers>,
+) -> Result<Outcome> {
     let started_at = rfc3339_now();
     let root = args
         .path
@@ -99,20 +180,15 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let sources = std::mem::take(&mut discovered.units);
     let (sources, glob_excluded) = filter_globs(&cfg, sources)?;
 
-    // Discovery reports the Fast variant; the results belong to the
-    // Structural one, and the two never share a fingerprint. The header
-    // grammar carries over unchanged: it decided which frontend read every
-    // `.h` below, so it describes these results just as it does Fast's.
-    let variant = BuildVariant::structural(
-        LanguageSelection {
-            rust: cfg.languages.rust,
-            c: cfg.languages.c,
-            cpp: cfg.languages.cpp,
-        },
-        discovered.header_language,
-    );
+    let variant = variant_of(compilers, &cfg, discovered.header_language, &root);
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
-    if let Some(mut model) = crate::scan::reusable(args, &cfg, &root, &db_path, &variant, &sources)?
+    // A recorded run does not yet hold what a compiler said about the tree, so
+    // reporting one back would drop the part of a semantic report that says
+    // how much of it a compiler could speak for. Asking again costs time; the
+    // alternative costs the sentence that tells a thin run from a clean tree.
+    if compilers.is_none()
+        && let Some(mut model) =
+            crate::scan::reusable(args, &cfg, &root, &db_path, &variant, &sources)?
     {
         model.summary.guardrails = guardrails;
         write_report(args, out, &model)?;
@@ -128,7 +204,14 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         .unzip();
     mark_test_modules(&files, &mut irs);
 
-    let analysis = structural::analyze(&irs, &variant, &structural_config(&cfg));
+    let asked = compilers.map(|compilers| ask_about(compilers, &sources, &variant));
+    let resolved = asked
+        .as_ref()
+        .map_or_else(structural::ResolvedTypes::default, |asked| {
+            resolved_types(asked, &sources, &files)
+        });
+    let analysis =
+        structural::analyze_resolved(&irs, &variant, &structural_config(&cfg), &resolved);
 
     let mut rules = compile_rules(&cfg, &files, &analysis)?;
     let baseline = crate::scan::load_baseline(
@@ -188,6 +271,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     inputs.audit = audit;
     let mut model = build_report(&inputs, run_id, &stored, groups);
     model.summary.guardrails = guardrails;
+    model.summary.compiler = asked.as_ref().map(coverage);
     // Counted against the assembled report rather than the raw analysis: a
     // stale entry is one whose duplication this run does not list.
     model.summary.baseline = baseline
@@ -195,6 +279,120 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         .map(|baseline| crate::scan::baseline_status(baseline, &model.groups));
     write_report(args, out, &model)?;
     Ok(crate::scan::outcome(args, &model))
+}
+
+/// What the results belong to.
+///
+/// Discovery reports the Fast variant; these results belong to the Structural
+/// or Semantic one, and no two of the three ever share a fingerprint. The
+/// header grammar carries over unchanged: it decided which frontend read every
+/// `.h` below, so it describes these results just as it does Fast's.
+fn variant_of(
+    compilers: Option<&Compilers>,
+    cfg: &Config,
+    headers: Language,
+    root: &Path,
+) -> BuildVariant {
+    let languages = LanguageSelection {
+        rust: cfg.languages.rust,
+        c: cfg.languages.c,
+        cpp: cfg.languages.cpp,
+    };
+    compilers.map_or_else(
+        || BuildVariant::structural(languages, headers),
+        |compilers| BuildVariant::semantic(languages, headers, compilers.build(root)),
+    )
+}
+
+/// How long one unit's analysis may take before the helper is given up on.
+///
+/// Longer than anything this program does itself: the first request loads a
+/// workspace, which reads a sysroot and a dependency graph. A ceiling short
+/// enough to be comfortable here would report a cold machine as a broken
+/// helper.
+const ANALYSIS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Ask the helper about every source, under the variant the results belong to.
+fn ask_about(
+    compilers: &Compilers,
+    sources: &[SourceUnit],
+    variant: &BuildVariant,
+) -> semantic::Answers {
+    semantic::ask(
+        semantic::Backend {
+            program: &compilers.program,
+            analyzes: Language::Rust,
+        },
+        sources,
+        &variant.fingerprint(),
+        ANALYSIS_TIMEOUT,
+    )
+}
+
+/// What was resolved about each file that parsed, indexed as the analysis
+/// reads them.
+///
+/// Keyed on the path rather than on position: the sources that parsed are a
+/// subset of the sources that were asked about, and lining up two lists of
+/// different lengths by index would attribute one file's types to another.
+///
+/// A helper anchors what it found at the path the project spells, relative to
+/// the root it read the project from, so that is the name a file's own answers
+/// are looked up under. When a scan is rooted somewhere else — a subdirectory
+/// of a workspace — the two spellings differ and the file's types go
+/// unclaimed. Unclaimed rather than misattributed: nothing here matches a
+/// reported path against a longer one it happens to end with, because two
+/// files can end the same way and the wrong one's types would be counted for
+/// this one without anything saying so.
+fn resolved_types(
+    asked: &semantic::Answers,
+    sources: &[SourceUnit],
+    files: &[SourceMeta],
+) -> structural::ResolvedTypes {
+    let answered: BTreeMap<&str, (&SourceUnit, &semantic::Answer)> = sources
+        .iter()
+        .zip(&asked.per_source)
+        .filter_map(|(source, answer)| Some((source.relative_path.to_str()?, (source, answer))))
+        .collect();
+    structural::ResolvedTypes::per_file(
+        files
+            .iter()
+            .map(|meta| {
+                answered
+                    .get(meta.relative_path.as_str())
+                    .and_then(|(source, answer)| {
+                        let ir = answer.analysis()?;
+                        Some(semantic::resolved_types_for(
+                            ir,
+                            &source.relative_path.to_string_lossy(),
+                        ))
+                    })
+                    .unwrap_or_default()
+            })
+            .collect(),
+    )
+}
+
+/// What the compiler managed to say about the tree, as the report puts it.
+fn coverage(asked: &semantic::Answers) -> report::CompilerCoverage {
+    let mut unavailable: BTreeMap<String, u64> = BTreeMap::new();
+    let mut answered = 0;
+    let mut not_asked = 0;
+    for answer in &asked.per_source {
+        match answer {
+            semantic::Answer::Analyzed(_) => answered += 1,
+            semantic::Answer::NotAsked => not_asked += 1,
+            semantic::Answer::Unavailable(reason) => {
+                *unavailable.entry(reason.name().to_string()).or_default() += 1;
+            }
+        }
+    }
+    report::CompilerCoverage {
+        answered,
+        not_asked,
+        unavailable,
+        restarts: asked.restarts,
+    }
 }
 
 /// Read and parse one source file, enforcing the per-file time ceiling.
@@ -1604,7 +1802,28 @@ fn breakdown_row(group: &StructuralGroup, detail: &GroupDetail) -> SimilarityBre
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{Config, StructuralConfig, structural_config};
+    use super::{Compilers, Config, StructuralConfig, structural_config};
+
+    /// Whether a helper is installed is a property of the machine, so what is
+    /// fixed here is the pairing: without one, the message names the program
+    /// to install rather than the mode that was asked for; with one, the run
+    /// knows which compiler answered.
+    #[test]
+    fn a_run_that_needs_a_compiler_says_which_program_supplies_it() {
+        match Compilers::found() {
+            Err(error) => {
+                let text = format!("{error:#}");
+                assert!(
+                    text.contains(codehelion_core::doctor::RUST_HELPER.binary),
+                    "{text}"
+                );
+            }
+            Ok(compilers) => assert!(
+                !compilers.greeting.toolchains.is_empty(),
+                "a helper that answered says what will do the analysing"
+            ),
+        }
+    }
 
     /// Structural pairs statement fragments where Fast pairs token windows, and
     /// the two need different ceilings. Reading one number from the

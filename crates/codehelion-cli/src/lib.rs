@@ -148,7 +148,7 @@ fn interrogate(name: &str, configured: Option<&Path>) -> Option<doctor::HelperFa
 
 fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     match args.mode {
-        Mode::Semantic => bail!("semantic mode is not available in this release"),
+        Mode::Semantic => scan::structural::semantic(args, out),
         Mode::Structural => scan::structural::run(args, out),
         Mode::Fast => scan::run(args, out),
     }
@@ -726,26 +726,6 @@ fn resolve_db(flag: Option<&Path>) -> Result<PathBuf> {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::cli::Format;
-
-    fn scan_args(mode: Mode) -> ScanArgs {
-        ScanArgs {
-            path: PathBuf::from("."),
-            mode,
-            format: Format::Text,
-            output: None,
-            config: None,
-            no_ignore: false,
-            jobs: None,
-            db: None,
-            baseline: None,
-            no_reuse: false,
-            show_suppressed: false,
-            verbose: false,
-            fail_on_findings: false,
-            untrusted: false,
-        }
-    }
 
     #[test]
     fn dispatch_doctor_writes_diagnostics() {
@@ -783,13 +763,6 @@ mod tests {
             channel("/usr/local/bin/codehelion"),
             "standalone (archive or manual install)"
         );
-    }
-
-    #[test]
-    fn unsupported_scan_modes_report_their_reason() {
-        let mut buffer = Vec::new();
-        let semantic = scan_command(&scan_args(Mode::Semantic), &mut buffer).unwrap_err();
-        assert!(format!("{semantic:#}").contains("not available in this release"));
     }
 
     #[test]

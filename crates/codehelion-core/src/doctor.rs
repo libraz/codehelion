@@ -141,21 +141,28 @@ pub struct HelperComponent {
     pub advice: &'static str,
 }
 
+/// The helper that answers about Rust.
+///
+/// Named here rather than only inside the list, so that the run which needs it
+/// and the report which says whether it is there name one value: advice that
+/// drifts from the mechanism it describes is advice that points nowhere.
+pub const RUST_HELPER: HelperComponent = HelperComponent {
+    name: "rust-compiler-helper",
+    binary: "codehelion-backend-rust",
+    enables: "semantic analysis of Rust",
+    advice: "install codehelion-backend-rust beside this binary or on PATH",
+};
+
+/// The helper that answers about C and C++.
+pub const CLANG_HELPER: HelperComponent = HelperComponent {
+    name: "clang-helper",
+    binary: "codehelion-backend-clang",
+    enables: "semantic analysis of C and C++",
+    advice: "install codehelion-backend-clang beside this binary or on PATH",
+};
+
 /// The helpers a run can use, in a fixed order.
-pub const OPTIONAL_HELPERS: [HelperComponent; 2] = [
-    HelperComponent {
-        name: "rust-compiler-helper",
-        binary: "codehelion-backend-rust",
-        enables: "semantic analysis of Rust",
-        advice: "install codehelion-backend-rust beside this binary or on PATH",
-    },
-    HelperComponent {
-        name: "clang-helper",
-        binary: "codehelion-backend-clang",
-        enables: "semantic analysis of C and C++",
-        advice: "install codehelion-backend-clang beside this binary or on PATH",
-    },
-];
+pub const OPTIONAL_HELPERS: [HelperComponent; 2] = [RUST_HELPER, CLANG_HELPER];
 
 fn inspect_self() -> ComponentReport {
     ComponentReport {
