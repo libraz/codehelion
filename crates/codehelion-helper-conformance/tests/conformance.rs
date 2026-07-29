@@ -15,9 +15,15 @@ use codehelion_helper::client::{Analysis, Helper, HelperError, MAX_DIAGNOSTIC_LI
 use codehelion_helper::ir::{TypeCategory, Unavailability, UnitRef};
 use codehelion_helper::protocol::{Capability, PROTOCOL_VERSION};
 
-/// A deadline short enough that a hung helper does not hold up the suite, and
-/// long enough that a loaded machine starting a process does not trip it.
-const SHORT: Duration = Duration::from_secs(3);
+/// The deadline for tests that are not about a deadline.
+///
+/// Generous on purpose. These tests wait for a mock to answer or to die, and
+/// both happen at once when the machine is idle — the deadline is only reached
+/// if something has genuinely hung, so a large one costs nothing and a tight
+/// one turns a loaded machine into a failure. That the wait *is* bounded is
+/// asserted where it belongs, by the test that gives a deaf helper its own
+/// short deadline and measures how long it took to give up.
+const DEADLINE: Duration = Duration::from_secs(20);
 
 /// The mock helper, as cargo built it for this run.
 ///
@@ -33,7 +39,7 @@ fn start(behaviour: &str, timeout: Duration) -> Result<Helper, HelperError> {
 
 #[test]
 fn a_well_behaved_helper_says_what_it_is_and_what_it_can_do() {
-    let helper = start("well-behaved", SHORT).expect("the mock answers the handshake");
+    let helper = start("well-behaved", DEADLINE).expect("the mock answers the handshake");
     assert_eq!(helper.identity().name, "codehelion-mock-helper");
     assert_eq!(helper.protocol_version(), PROTOCOL_VERSION);
     assert!(helper.offers(Capability::Types));
@@ -43,7 +49,7 @@ fn a_well_behaved_helper_says_what_it_is_and_what_it_can_do() {
 
 #[test]
 fn a_helper_from_another_era_is_named_as_such_rather_than_used() {
-    let error = start("ancient", SHORT).expect_err("no revision is common");
+    let error = start("ancient", DEADLINE).expect_err("no revision is common");
     assert!(
         matches!(error, HelperError::NoCommonProtocol { .. }),
         "{error:?}"
@@ -55,7 +61,7 @@ fn a_helper_from_another_era_is_named_as_such_rather_than_used() {
 
 #[test]
 fn a_helper_that_cannot_resolve_types_is_refused_rather_than_degraded() {
-    let error = start("untyped", SHORT).expect_err("types are not optional");
+    let error = start("untyped", DEADLINE).expect_err("types are not optional");
     assert!(
         matches!(
             error,
@@ -84,13 +90,13 @@ fn a_helper_that_stops_answering_is_given_up_on_at_the_deadline() {
 
 #[test]
 fn a_helper_that_dies_mid_handshake_is_reported_as_dead_not_as_a_broken_pipe() {
-    let error = start("dies", SHORT).expect_err("it exits before answering");
+    let error = start("dies", DEADLINE).expect_err("it exits before answering");
     assert!(matches!(error, HelperError::Died { .. }), "{error:?}");
 }
 
 #[test]
 fn what_a_dying_helper_printed_is_kept_and_told() {
-    let error = start("noisy-death", SHORT).expect_err("it exits during startup");
+    let error = start("noisy-death", DEADLINE).expect_err("it exits during startup");
     let HelperError::Died { stderr } = &error else {
         panic!("{error:?}");
     };
@@ -103,7 +109,7 @@ fn what_a_dying_helper_printed_is_kept_and_told() {
 
 #[test]
 fn a_helper_that_will_not_stop_talking_cannot_grow_what_is_kept_of_it() {
-    let error = start("chatty", SHORT).expect_err("it exits during startup");
+    let error = start("chatty", DEADLINE).expect_err("it exits during startup");
     let HelperError::Died { stderr } = &error else {
         panic!("{error:?}");
     };
@@ -120,13 +126,13 @@ fn a_helper_that_will_not_stop_talking_cannot_grow_what_is_kept_of_it() {
 
 #[test]
 fn an_answer_to_a_question_nobody_asked_is_not_taken_as_an_answer() {
-    let error = start("confused", SHORT).expect_err("the ids do not line up");
+    let error = start("confused", DEADLINE).expect_err("the ids do not line up");
     assert!(matches!(error, HelperError::Mismatched { .. }), "{error:?}");
 }
 
 #[test]
 fn a_helper_that_refuses_says_why_in_its_own_words() {
-    let error = start("refuses", SHORT).expect_err("it declines the handshake");
+    let error = start("refuses", DEADLINE).expect_err("it declines the handshake");
     let HelperError::Refused { code, message } = &error else {
         panic!("{error:?}");
     };
@@ -140,12 +146,17 @@ fn dropping_a_helper_takes_its_process_with_it() {
     // portable way to ask whether a reaped pid is gone, so this asserts the
     // observable consequence instead: dropping one that is mid-request returns
     // promptly rather than waiting on a child that never finishes.
-    let helper = start("deaf", SHORT).err();
+    let deadline = Duration::from_millis(200);
+    let helper = start("deaf", deadline).err();
     assert!(helper.is_some());
     let started = Instant::now();
-    let second = start("deaf", Duration::from_millis(200));
+    let second = start("deaf", deadline);
     assert!(matches!(second, Err(HelperError::TimedOut { .. })));
-    assert!(started.elapsed() < SHORT * 2);
+    // Bounded by this test's own deadline rather than the suite's: what is
+    // being asserted is that the drop did not wait on the first child, and a
+    // bound read off an unrelated constant would stop saying so if that
+    // constant moved.
+    assert!(started.elapsed() < deadline * 30, "{:?}", started.elapsed());
 }
 
 /// A unit to ask about, named so tests can tell them apart.
@@ -157,18 +168,21 @@ fn unit(file: &str) -> UnitRef {
     }
 }
 
+/// A supervisor on the same deadline as every other test here.
+///
+/// None of these tests is about a helper being slow — they are about one that
+/// dies — and the deadline covers starting the process as well as answering.
+/// A budget tight enough to be quick would make a loaded machine look like a
+/// helper that would not start, which is the failure these tests exist to tell
+/// apart from the one they are about.
 fn supervisor(behaviour: &str, restarts: u32) -> Supervisor {
-    Supervisor::new(
-        PathBuf::from(MOCK),
-        vec![behaviour.to_owned()],
-        Duration::from_millis(500),
-    )
-    .with_max_restarts(restarts)
+    Supervisor::new(PathBuf::from(MOCK), vec![behaviour.to_owned()], DEADLINE)
+        .with_max_restarts(restarts)
 }
 
 #[test]
 fn an_analysis_comes_back_anchored_where_it_reads() {
-    let mut helper = start("well-behaved", SHORT).expect("it answers");
+    let mut helper = start("well-behaved", DEADLINE).expect("it answers");
     let asked = unit("src/lib.rs");
     let Analysis::Done(ir) = helper
         .analyze(&asked, &[Capability::Types])
@@ -193,7 +207,7 @@ fn an_analysis_comes_back_anchored_where_it_reads() {
 
 #[test]
 fn a_unit_nobody_can_analyze_is_an_answer_rather_than_a_failure() {
-    let mut helper = start("needs-execution", SHORT).expect("it answers");
+    let mut helper = start("needs-execution", DEADLINE).expect("it answers");
     let outcome = helper
         .analyze(&unit("build.rs"), &[Capability::Types])
         .expect("saying no is not an error");
@@ -205,7 +219,7 @@ fn a_unit_nobody_can_analyze_is_an_answer_rather_than_a_failure() {
 
 #[test]
 fn an_answer_in_a_schema_nobody_reads_is_not_read() {
-    let mut helper = start("wrong-schema", SHORT).expect("it answers");
+    let mut helper = start("wrong-schema", DEADLINE).expect("it answers");
     let outcome = helper
         .analyze(&unit("src/lib.rs"), &[Capability::Types])
         .expect("it answered, after all");
@@ -238,6 +252,27 @@ fn the_unit_that_kills_a_helper_is_set_aside_and_the_rest_go_on() {
         Analysis::Done(_)
     ));
     supervisor.shutdown();
+}
+
+/// A run records which helper answered it, and it records that after the
+/// helper is gone. Nothing is claimed before one has spoken, and what it said
+/// outlives it.
+#[test]
+fn who_answered_is_still_known_once_the_helper_has_gone() {
+    let mut supervisor = supervisor("well-behaved", 0);
+    assert!(
+        supervisor.spoke_with().is_none(),
+        "nothing has been started, so nobody has said anything"
+    );
+    assert!(matches!(
+        supervisor.analyze(&unit("src/lib.rs"), &[Capability::Types]),
+        Analysis::Done(_)
+    ));
+    supervisor.shutdown();
+    let (identity, agreed) = supervisor.spoke_with().expect("one helper answered");
+    assert_eq!(identity.name, "codehelion-mock-helper");
+    assert_eq!(agreed, PROTOCOL_VERSION);
+    assert!(identity.capabilities.contains(&Capability::Types));
 }
 
 #[test]

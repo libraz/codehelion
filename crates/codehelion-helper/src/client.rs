@@ -436,6 +436,14 @@ pub struct Supervisor {
     max_restarts: u32,
     restarts: u32,
     helper: Option<Helper>,
+    /// What the last helper to answer a handshake said it is, kept after that
+    /// helper is gone.
+    ///
+    /// A run records who answered it, and by the time it does the helper has
+    /// been shut down and every restart along the way has been and gone. Read
+    /// off the live process instead, the answer would be "nobody" for every
+    /// run that finished — which is every run that gets recorded.
+    spoke_with: Option<(HelperIdentity, u32)>,
     /// Units that have already broken a helper once.
     poisoned: BTreeSet<UnitRef>,
     /// Whether a helper has ever been started, which is what tells a first
@@ -456,6 +464,7 @@ impl Supervisor {
             max_restarts: DEFAULT_MAX_RESTARTS,
             restarts: 0,
             helper: None,
+            spoke_with: None,
             poisoned: BTreeSet::new(),
             started: false,
             given_up: false,
@@ -473,6 +482,18 @@ impl Supervisor {
     #[must_use]
     pub const fn restarts(&self) -> u32 {
         self.restarts
+    }
+
+    /// What the helper said it is, and the revision the two sides settled on.
+    ///
+    /// `None` until one has answered a handshake: a program that never started
+    /// described itself to nobody, and a run that names it anyway would be
+    /// crediting answers to a helper that never spoke.
+    #[must_use]
+    pub fn spoke_with(&self) -> Option<(&HelperIdentity, u32)> {
+        self.spoke_with
+            .as_ref()
+            .map(|(identity, agreed)| (identity, *agreed))
     }
 
     /// Whether `unit` has been set aside as one the helper cannot survive.
@@ -527,14 +548,15 @@ impl Supervisor {
             }
             self.started = true;
             let arguments: Vec<&str> = self.args.iter().map(String::as_str).collect();
-            self.helper = Some(
+            let helper =
                 Helper::start_with(&self.program, &arguments, self.timeout).inspect_err(|_| {
                     // A helper that will not start will not start for the next
                     // unit either, so the run stops asking rather than paying a
                     // process spawn per file to be told the same thing.
                     self.given_up = true;
-                })?,
-            );
+                })?;
+            self.spoke_with = Some((helper.identity().clone(), helper.protocol_version()));
+            self.helper = Some(helper);
         }
         let Some(helper) = self.helper.as_mut() else {
             return Ok(Analysis::Missing(Unavailability::HelperDied));
