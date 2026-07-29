@@ -515,6 +515,77 @@ fn configured_file_size_ceiling_skips_oversized_files() {
     );
 }
 
+/// A scan told to distrust the tree reads less of it, and a report that read
+/// less has to be distinguishable from a tree that holds less. The oversized
+/// file is the evidence the ceilings took effect; the profile line is what
+/// stops the smaller result from reading as a smaller codebase.
+#[test]
+fn distrusting_the_tree_lowers_the_ceilings_and_reports_them() {
+    let dir = fixture();
+    // Above the untrusted profile's 512 KiB ceiling and below the default one.
+    let big = "// filler line to grow the file body\n".repeat(16_000);
+    std::fs::write(dir.path().join("src/big.rs"), big).unwrap();
+
+    let trusting = scan_json(dir.path());
+    assert_eq!(trusting["summary"]["files"]["total"], 6);
+    assert!(trusting["summary"]["guardrails"].is_null());
+
+    let distrusting = scan_json_with(dir.path(), &["--untrusted"]);
+    assert_eq!(distrusting["summary"]["files"]["total"], 5);
+    assert_eq!(distrusting["summary"]["excluded"]["skipped"], 1);
+    let guardrails = &distrusting["summary"]["guardrails"];
+    assert_eq!(guardrails["profile"], "untrusted");
+    assert_eq!(guardrails["max_file_bytes"], 512 * 1024);
+    assert_eq!(guardrails["parse_timeout_ms"], 5000);
+    assert_eq!(guardrails["pair_budget"], 500_000);
+}
+
+/// The profile has to be visible in the format a person reads, not only in the
+/// one a program reads: the text report is where somebody notices that a run
+/// which found less was told to look at less.
+#[test]
+fn the_text_report_says_the_run_was_told_to_distrust_the_tree() {
+    let dir = fixture();
+    let output = cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--no-reuse", "--untrusted"])
+        .output()
+        .expect("run scan");
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).expect("stdout is utf-8");
+    assert!(text.contains("untrusted profile"), "{text}");
+}
+
+/// The ceilings are part of what a reused run is matched on, so a distrusting
+/// scan cannot be answered with a recording made under the default ones — that
+/// recording read files this run would not have opened.
+#[test]
+fn a_distrusting_scan_does_not_reuse_a_run_that_trusted_the_tree() {
+    let dir = fixture();
+    let reused = |extra: &[&str]| -> bool {
+        let output = cmd()
+            .current_dir(dir.path())
+            .args(["scan", ".", "--format", "json"])
+            .args(extra)
+            .output()
+            .expect("run scan");
+        assert!(output.status.success(), "{output:?}");
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+        value["run"]["reused"] == serde_json::Value::Bool(true)
+    };
+    assert!(!reused(&[]), "the first scan cannot reuse anything");
+    assert!(reused(&[]), "an unchanged tree is read from the recording");
+    assert!(
+        !reused(&["--untrusted"]),
+        "a recording made under the default ceilings answered a distrusting scan"
+    );
+    assert!(
+        reused(&["--untrusted"]),
+        "a second distrusting scan should reuse the first one"
+    );
+}
+
 #[test]
 fn configured_pair_budget_exhaustion_is_reported() {
     let dir = fixture();

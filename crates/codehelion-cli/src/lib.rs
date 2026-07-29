@@ -743,6 +743,7 @@ mod tests {
             show_suppressed: false,
             verbose: false,
             fail_on_findings: false,
+            untrusted: false,
         }
     }
 

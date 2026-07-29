@@ -464,6 +464,37 @@
         "pair_budget_exhausted": {
           "type": "boolean",
           "description": "True when the candidate-pair budget ran out and results may be incomplete."
+        },
+        "guardrails": {
+          "type": "object",
+          "description": "Ceilings lowered on the command line rather than by the configuration. Absent when the run worked under the configured ones.",
+          "required": [
+            "profile",
+            "max_file_bytes",
+            "parse_timeout_ms",
+            "pair_budget"
+          ],
+          "properties": {
+            "profile": {
+              "type": "string",
+              "description": "The named profile that was asked for."
+            },
+            "max_file_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Largest file read, in bytes."
+            },
+            "parse_timeout_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Longest one file was parsed for, in milliseconds."
+            },
+            "pair_budget": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Largest number of candidate pairs any pairing pass examined."
+            }
+          }
         }
       }
     },

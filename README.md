@@ -62,6 +62,7 @@ codehelion scan --format json --output report.json path/to/repo
 codehelion scan --format sarif --output report.sarif   # SARIF 2.1.0 log
 codehelion scan --verbose     # list every clone group and member
 codehelion scan --no-reuse    # analyse even if a recorded run read exactly this tree
+codehelion scan --untrusted   # read a tree nobody vouches for under lowered ceilings
 codehelion audit              # what became of the duplication since last time
 codehelion explain <ID>       # show a finding from the audit database
 codehelion baseline           # manage accepted-findings baselines

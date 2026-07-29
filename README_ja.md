@@ -56,6 +56,7 @@ codehelion scan --format json --output report.json path/to/repo
 codehelion scan --format sarif --output report.sarif   # SARIF 2.1.0 ログ
 codehelion scan --verbose     # 全クローングループと全メンバーを列挙
 codehelion scan --no-reuse    # 同一ツリーの記録があっても解析し直す
+codehelion scan --untrusted   # 素性の分からないツリーを低い上限で読む
 codehelion audit              # 前回から重複がどうなったかを報告
 codehelion explain <ID>       # 監査データベースから finding を表示
 codehelion baseline           # 既知 finding の baseline を管理

@@ -79,7 +79,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     if !root.is_dir() {
         bail!("scan path {} is not a directory", root.display());
     }
-    let cfg = config::load(args.config.as_deref(), &root)?.config;
+    let (cfg, guardrails) = guarded(config::load(args.config.as_deref(), &root)?.config, args);
     let jobs = effective_jobs(args.jobs, cfg.jobs)?;
 
     let mut discovered = discover_sources(&root, &cfg, args.no_ignore)?;
@@ -87,7 +87,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let (sources, glob_excluded) = filter_globs(&cfg, sources)?;
 
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
-    if let Some(model) = reusable(
+    if let Some(mut model) = reusable(
         args,
         &cfg,
         &root,
@@ -95,6 +95,11 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         &discovered.build_variant,
         &sources,
     )? {
+        // A recorded run is only reused when it worked under these ceilings, so
+        // saying which they were is as true of the reused report as of a fresh
+        // one — and leaving it off would make the same reading print differently
+        // depending on whether it happened just now.
+        model.summary.guardrails = guardrails;
         write_report(args, out, &model)?;
         return Ok(outcome(args, &model));
     }
@@ -163,6 +168,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let stored = summary_row(&inputs, baseline.as_ref().map(ScanBaseline::digest));
     let groups = rank_and_record(&mut inputs, &cfg, &contexts, file_rows(&sources), &stored)?;
     let mut model = build_report(&inputs, &stored, groups);
+    model.summary.guardrails = guardrails;
     // Counted against the assembled report rather than the raw analysis: a
     // stale entry is one whose duplication this run does not list.
     model.summary.baseline = baseline
@@ -656,6 +662,44 @@ pub(crate) fn effective_jobs(flag: Option<usize>, configured: Option<usize>) -> 
         Some(jobs) => Ok(jobs),
         None => Ok(std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)),
     }
+}
+
+/// The name the lowered-ceiling profile is reported under.
+const UNTRUSTED_PROFILE: &str = "untrusted";
+
+/// The configuration a scan actually works under, once the command line has
+/// had its say, and what to report about it.
+///
+/// The profile only ever *lowers* a ceiling. A configuration already stricter
+/// than the profile stays where it is: taking the profile's number outright
+/// would let asking for less trust loosen a deliberately tight setting, which
+/// is the opposite of what asking for it means.
+///
+/// The candidate ceiling is set rather than clamped because leaving it unset
+/// means "each pass keeps its own default", and every one of those defaults is
+/// above the profile's number.
+pub(crate) fn guarded(mut cfg: Config, args: &ScanArgs) -> (Config, Option<report::Guardrails>) {
+    if !args.untrusted {
+        return (cfg, None);
+    }
+    let profile = codehelion_core::execution::Limits::untrusted();
+    let timeout = u64::try_from(profile.parse_timeout.as_millis()).unwrap_or(u64::MAX);
+    cfg.limits.max_file_bytes = cfg.limits.max_file_bytes.min(profile.max_file_bytes);
+    cfg.limits.parse_timeout_ms = cfg.limits.parse_timeout_ms.min(timeout);
+    let budget = cfg
+        .limits
+        .pair_budget
+        .map_or(profile.max_candidates, |set| {
+            set.min(profile.max_candidates)
+        });
+    cfg.limits.pair_budget = Some(budget);
+    let guardrails = report::Guardrails {
+        profile: UNTRUSTED_PROFILE,
+        max_file_bytes: cfg.limits.max_file_bytes,
+        parse_timeout_ms: cfg.limits.parse_timeout_ms,
+        pair_budget: budget,
+    };
+    (cfg, Some(guardrails))
 }
 
 /// Build the engine configuration from the effective scan configuration:
@@ -1362,6 +1406,74 @@ mod tests {
         assert_eq!(stamp.len(), "1970-01-01T00:00:00.000000Z".len());
         assert!(stamp.ends_with('Z'));
         assert_eq!(stamp.as_bytes()[10], b'T');
+    }
+
+    fn scan_args(untrusted: bool) -> ScanArgs {
+        ScanArgs {
+            path: PathBuf::from("."),
+            mode: crate::cli::Mode::Fast,
+            format: Format::Text,
+            output: None,
+            config: None,
+            no_ignore: false,
+            jobs: None,
+            db: None,
+            baseline: None,
+            no_reuse: false,
+            show_suppressed: false,
+            verbose: false,
+            fail_on_findings: false,
+            untrusted,
+        }
+    }
+
+    #[test]
+    fn a_scan_that_was_not_told_to_distrust_the_tree_keeps_its_settings() {
+        let before = Config::default();
+        let (after, guardrails) = guarded(Config::default(), &scan_args(false));
+        assert_eq!(after.limits, before.limits);
+        assert!(guardrails.is_none());
+    }
+
+    /// The ceilings a repository nobody vouches for is read under, and the
+    /// report line that says so — a scan that read less has to be
+    /// distinguishable from a tree that holds less.
+    #[test]
+    fn distrusting_the_tree_lowers_every_ceiling_and_says_which() {
+        let defaults = Config::default();
+        let (tightened, guardrails) = guarded(Config::default(), &scan_args(true));
+        assert!(tightened.limits.max_file_bytes < defaults.limits.max_file_bytes);
+        assert!(tightened.limits.parse_timeout_ms < defaults.limits.parse_timeout_ms);
+        assert_eq!(tightened.limits.pair_budget, Some(500_000));
+        let reported = guardrails.expect("a lowered ceiling is reported");
+        assert_eq!(reported.profile, UNTRUSTED_PROFILE);
+        assert_eq!(reported.max_file_bytes, tightened.limits.max_file_bytes);
+        assert_eq!(reported.parse_timeout_ms, tightened.limits.parse_timeout_ms);
+    }
+
+    /// Asking for less trust must not hand back more room. A configuration
+    /// already stricter than the profile is the stricter of the two, or the
+    /// flag would be a way to loosen a deliberately tight setting.
+    #[test]
+    fn a_setting_already_stricter_than_the_profile_survives_it() {
+        let mut cfg = Config::default();
+        cfg.limits.max_file_bytes = 1024;
+        cfg.limits.parse_timeout_ms = 1;
+        cfg.limits.pair_budget = Some(10);
+        let (tightened, _) = guarded(cfg, &scan_args(true));
+        assert_eq!(tightened.limits.max_file_bytes, 1024);
+        assert_eq!(tightened.limits.parse_timeout_ms, 1);
+        assert_eq!(tightened.limits.pair_budget, Some(10));
+    }
+
+    /// What keeps a distrusting scan from being answered with a recorded run
+    /// that read more of the tree: the ceilings are part of the configuration
+    /// the reuse check hashes, so the two runs are not the same reading.
+    #[test]
+    fn distrust_changes_the_configuration_a_reused_run_is_matched_on() {
+        let plain = Config::default().to_toml().unwrap();
+        let (tightened, _) = guarded(Config::default(), &scan_args(true));
+        assert_ne!(tightened.to_toml().unwrap(), plain);
     }
 
     #[test]

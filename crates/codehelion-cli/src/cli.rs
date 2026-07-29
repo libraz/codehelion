@@ -135,6 +135,14 @@ pub struct ScanArgs {
     /// Exit with a non-zero status if any findings are reported.
     #[arg(long)]
     pub fail_on_findings: bool,
+    /// Read the tree under the ceilings for a repository nobody vouches for.
+    ///
+    /// Deliberately a flag and not a configuration key. The configuration file
+    /// is discovered inside the tree being scanned, so a repository could set
+    /// its own trust level — which is the one setting whose whole point is that
+    /// its subject does not choose it.
+    #[arg(long)]
+    pub untrusted: bool,
 }
 
 /// Arguments for the `explain` subcommand.

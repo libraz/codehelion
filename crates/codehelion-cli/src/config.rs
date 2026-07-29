@@ -562,6 +562,10 @@ pub const TEMPLATE: &str = "\
 # refactoring-ease = 1
 
 # Resource ceilings; every ceiling that fires is accounted for in the report.
+# There is deliberately no trust setting here. `codehelion scan --untrusted`
+# lowers every ceiling below at once, and it is a command-line flag because this
+# file is discovered inside the tree being scanned — a repository must not get to
+# say how much it should be trusted.
 # [limits]
 # Per-file size ceiling in bytes; larger files are skipped and counted.
 # max-file-bytes = 2097152

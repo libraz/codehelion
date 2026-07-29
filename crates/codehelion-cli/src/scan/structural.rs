@@ -91,7 +91,8 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     if !root.is_dir() {
         bail!("scan path {} is not a directory", root.display());
     }
-    let cfg = config::load(args.config.as_deref(), &root)?.config;
+    let (cfg, guardrails) =
+        crate::scan::guarded(config::load(args.config.as_deref(), &root)?.config, args);
     let jobs = effective_jobs(args.jobs, cfg.jobs)?;
 
     let mut discovered = discover_sources(&root, &cfg, args.no_ignore)?;
@@ -111,7 +112,9 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         discovered.header_language,
     );
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
-    if let Some(model) = crate::scan::reusable(args, &cfg, &root, &db_path, &variant, &sources)? {
+    if let Some(mut model) = crate::scan::reusable(args, &cfg, &root, &db_path, &variant, &sources)?
+    {
+        model.summary.guardrails = guardrails;
         write_report(args, out, &model)?;
         return Ok(crate::scan::outcome(args, &model));
     }
@@ -184,6 +187,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     )?;
     inputs.audit = audit;
     let mut model = build_report(&inputs, run_id, &stored, groups);
+    model.summary.guardrails = guardrails;
     // Counted against the assembled report rather than the raw analysis: a
     // stale entry is one whose duplication this run does not list.
     model.summary.baseline = baseline

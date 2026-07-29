@@ -181,6 +181,27 @@ pub struct Summary {
     /// Whether the candidate-pair budget ran out, making results
     /// potentially incomplete.
     pub pair_budget_exhausted: bool,
+    /// The ceilings a run worked under when they were lowered on the command
+    /// line rather than left where the configuration put them.
+    ///
+    /// A run told to distrust the tree reads less of it and reports fewer
+    /// findings. Without this, that report and a report of a tree with less
+    /// duplication in it are the same document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guardrails: Option<Guardrails>,
+}
+
+/// The lowered ceilings a run worked under, and what asked for them.
+#[derive(Debug, Serialize)]
+pub struct Guardrails {
+    /// The named profile that was asked for.
+    pub profile: &'static str,
+    /// Largest file read, in bytes.
+    pub max_file_bytes: u64,
+    /// Longest one file was parsed for, in milliseconds.
+    pub parse_timeout_ms: u64,
+    /// Largest number of candidate pairs any pairing pass examined.
+    pub pair_budget: usize,
 }
 
 /// One stage of the candidate pipeline.
@@ -336,6 +357,9 @@ pub fn restored(files: FileCounts, stored: &SummaryRow, groups: &[Group]) -> Sum
         changes: None,
         audit: None,
         baseline: None,
+        // Not stored: the ceilings come from the invocation, and a recorded
+        // run cannot say what the next one will be told to do.
+        guardrails: None,
         groups: GroupCounts {
             total: u64::try_from(groups.len()).unwrap_or(u64::MAX),
             type_1: count(&|group| group.clone_type == CloneClass::Type1.name()),
@@ -1146,6 +1170,18 @@ impl Report {
             "  lines: {}; tokens: {}; lexer diagnostics: {}",
             summary.lines, summary.tokens, summary.lexer_diagnostics,
         )?;
+        // Before anything about what was found, because it is the sentence
+        // that says how to read everything after it.
+        if let Some(guardrails) = &summary.guardrails {
+            writeln!(
+                out,
+                "  {} profile: files over {} bytes skipped, {} ms per file, {} candidate pairs per pass",
+                guardrails.profile,
+                guardrails.max_file_bytes,
+                guardrails.parse_timeout_ms,
+                guardrails.pair_budget,
+            )?;
+        }
         // Said only when there is a run to say it against. A first scan
         // reports nothing here rather than calling every file new, which
         // would read as a tree that had just been written from scratch.
@@ -1818,6 +1854,7 @@ pub(super) mod tests {
                 ],
                 split_components: 0,
                 pair_budget_exhausted: false,
+                guardrails: None,
             },
             groups: vec![visible_group(), suppressed_group()],
         }
