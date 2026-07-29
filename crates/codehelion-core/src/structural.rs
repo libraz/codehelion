@@ -51,6 +51,7 @@ use crate::stable_id::{
 };
 use crate::substitution;
 use crate::test_code;
+use crate::types::{TypeEvidence, TypeTag};
 use crate::verify::{self, SimilarityBreakdown, UnitView, VerifyConfig};
 
 /// Default largest shape-mix divergence a candidate pair may span.
@@ -359,6 +360,56 @@ struct Unit {
     arms: ArmPath,
 }
 
+/// What a compiler resolved about the files being analysed.
+///
+/// Held per file and anchored at bytes, because that is what a compiler
+/// answers about: it reports the types it resolved where they were written,
+/// and which unit a byte belongs to is this crate's own reading of the tree.
+/// The two are matched here rather than by whoever asked the compiler, so that
+/// a caller cannot attribute a type to a unit this crate never saw.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedTypes {
+    per_file: Vec<Vec<(ByteRange, TypeTag)>>,
+}
+
+impl ResolvedTypes {
+    /// Collect what was resolved in each file, indexed as the files are.
+    ///
+    /// A file nobody asked about contributes an empty list, which is the same
+    /// to a comparison as a file whose types nobody could resolve: neither
+    /// supports a claim about agreement.
+    #[must_use]
+    pub fn per_file(mut per_file: Vec<Vec<(ByteRange, TypeTag)>>) -> Self {
+        for file in &mut per_file {
+            file.sort_by_key(|(range, _)| (range.start, range.end));
+        }
+        Self { per_file }
+    }
+
+    /// Whether nothing was resolved anywhere.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.per_file.iter().all(Vec::is_empty)
+    }
+
+    /// The evidence for one unit: everything resolved within its bytes.
+    ///
+    /// `None` when nothing was, so that a unit no compiler spoke about is
+    /// compared as one nobody measured rather than as one measured to hold no
+    /// types.
+    fn within(&self, unit: &Unit) -> Option<TypeEvidence> {
+        let file = self.per_file.get(unit.file)?;
+        let from = file.partition_point(|(range, _)| range.start < unit.range.start);
+        let tags = file[from..]
+            .iter()
+            .take_while(|(range, _)| range.start < unit.range.end)
+            .filter(|(range, _)| range.end <= unit.range.end)
+            .map(|(_, tag)| *tag);
+        let evidence = TypeEvidence::from_tags(tags);
+        (!evidence.is_empty()).then_some(evidence)
+    }
+}
+
 /// Run the structural pipeline over parsed IR files.
 ///
 /// The result is a pure, deterministic function of the inputs and the build
@@ -369,9 +420,25 @@ pub fn analyze(
     variant: &BuildVariant,
     config: &StructuralConfig,
 ) -> StructuralReport {
+    analyze_resolved(files, variant, config, &ResolvedTypes::default())
+}
+
+/// [`analyze`] with what a compiler resolved about the same files.
+///
+/// The stages are the same ones; what changes is that the type dimension of
+/// every comparison is measured instead of absent. Passing nothing resolved is
+/// exactly [`analyze`], which is the modes that run no compiler.
+#[must_use]
+pub fn analyze_resolved(
+    files: &[SyntaxIrFile],
+    variant: &BuildVariant,
+    config: &StructuralConfig,
+    resolved: &ResolvedTypes,
+) -> StructuralReport {
     let feature_files: Vec<FileFeatures> = files.iter().map(features::extract).collect();
 
     let (units, offsets) = flatten_units(files, variant);
+    let typed: Vec<Option<TypeEvidence>> = units.iter().map(|unit| resolved.within(unit)).collect();
 
     // Stage: candidate extraction (exact seeds, near matches and shared
     // control-flow skeletons), lifted to distinct unit pairs.
@@ -412,7 +479,14 @@ pub fn analyze(
     let subsumed = drop_subsumed(&mut regions);
 
     // Stage: precise verification of each distinct unit pair.
-    let edges = verify_pairs(&pairs, &units, files, &feature_files, &config.verify);
+    let edges = verify_pairs(
+        &pairs,
+        &units,
+        files,
+        &feature_files,
+        &typed,
+        &config.verify,
+    );
 
     // Stage: medoid grouping over the verified pairs.
     let grouping_units: Vec<GroupingUnit> = units
@@ -428,7 +502,17 @@ pub fn analyze(
     let details: Vec<GroupDetail> = groups
         .groups
         .iter()
-        .map(|group| group_detail(group, &units, files, &feature_files, variant, config))
+        .map(|group| {
+            group_detail(
+                group,
+                &units,
+                files,
+                &feature_files,
+                &typed,
+                variant,
+                config,
+            )
+        })
         .collect();
 
     let (unrepresented, described_pairs, severed_pairs) =
@@ -458,7 +542,20 @@ pub fn analyze(
         grouping: groups.stats.clone(),
     };
 
-    let report_units = units
+    StructuralReport {
+        units: reported(&units),
+        groups,
+        regions,
+        details,
+        unrepresented,
+        stats,
+    }
+}
+
+/// The analysed units as the report carries them: what a reader can point at,
+/// without the working state the pipeline needed to get there.
+fn reported(units: &[Unit]) -> Vec<StructuralUnit> {
+    units
         .iter()
         .map(|unit| StructuralUnit {
             file: unit.file,
@@ -474,16 +571,7 @@ pub fn analyze(
             fingerprint: unit.fingerprint,
             content: unit.content,
         })
-        .collect();
-
-    StructuralReport {
-        units: report_units,
-        groups,
-        regions,
-        details,
-        unrepresented,
-        stats,
-    }
+        .collect()
 }
 
 /// Verify every candidate unit pair, keeping the ones a verdict accepts.
@@ -495,12 +583,13 @@ fn verify_pairs(
     units: &[Unit],
     files: &[SyntaxIrFile],
     feature_files: &[FileFeatures],
+    typed: &[Option<TypeEvidence>],
     config: &VerifyConfig,
 ) -> Vec<SimilarityEdge> {
     let mut edges: Vec<SimilarityEdge> = Vec::new();
     for &(a, b) in pairs {
-        let view_a = view(&units[a], files, feature_files);
-        let view_b = view(&units[b], files, feature_files);
+        let view_a = view(a, units, files, feature_files, typed);
+        let view_b = view(b, units, files, feature_files, typed);
         let verdict = verify::verify(&view_a, &view_b, config);
         if let (Some(class), Some(confidence)) = (verdict.class, verdict.confidence) {
             edges.push(SimilarityEdge {
@@ -970,17 +1059,18 @@ fn group_detail(
     units: &[Unit],
     files: &[SyntaxIrFile],
     feature_files: &[FileFeatures],
+    typed: &[Option<TypeEvidence>],
     variant: &BuildVariant,
     config: &StructuralConfig,
 ) -> GroupDetail {
-    let medoid_view = view(&units[group.canonical], files, feature_files);
+    let medoid_view = view(group.canonical, units, files, feature_files, typed);
     let member_breakdowns = group
         .members
         .iter()
         .map(|&member| {
             verify::verify(
                 &medoid_view,
-                &view(&units[member], files, feature_files),
+                &view(member, units, files, feature_files, typed),
                 &config.verify,
             )
             .breakdown
@@ -1187,16 +1277,19 @@ fn line_range(tokens: &[Token]) -> (u32, u32) {
 /// Build a unit's verification view from its statements, the token stream they
 /// span, and its features.
 fn view<'a>(
-    unit: &'a Unit,
+    index: usize,
+    units: &'a [Unit],
     files: &'a [SyntaxIrFile],
     feature_files: &'a [FileFeatures],
+    typed: &'a [Option<TypeEvidence>],
 ) -> UnitView<'a> {
+    let unit = &units[index];
     UnitView {
         statements: &unit.statements,
         tokens: &files[unit.file].tokens,
         features: &feature_files[unit.file].units[unit.local],
-        // Structural mode runs no compiler, so nothing resolved a type here.
-        types: None,
+        // Absent unless a compiler resolved types inside this unit's bytes.
+        types: typed.get(index).and_then(Option::as_ref),
     }
 }
 
@@ -1510,12 +1603,15 @@ const fn encloses(a: &Unit, b: &Unit) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        CloneClass, Confirmed, RegionOccurrence, RegionSide, StructuralRegion, drop_subsumed,
-        merge_adjacent,
+        CloneClass, Confirmed, RegionOccurrence, RegionSide, ResolvedTypes, StructuralRegion, Unit,
+        drop_subsumed, merge_adjacent,
     };
     use crate::candidate::StatementRun;
+    use crate::conditional::ArmPath;
+    use crate::frontend::UnitKind;
     use crate::ir::ByteRange;
-    use crate::stable_id::{CloneGroupFingerprint, FragmentFingerprint};
+    use crate::stable_id::{CloneGroupFingerprint, FragmentFingerprint, UnitFingerprint};
+    use crate::types::TypeTag;
 
     fn occurrence(file: usize, start: usize, end: usize) -> RegionOccurrence {
         RegionOccurrence {
@@ -1552,6 +1648,72 @@ mod tests {
             .iter()
             .map(|region| region.fingerprint.as_bytes()[0])
             .collect()
+    }
+
+    fn unit_at(file: usize, start: usize, end: usize) -> Unit {
+        Unit {
+            file,
+            local: 0,
+            kind: UnitKind::Function,
+            statements: Vec::new(),
+            fingerprint: UnitFingerprint::from_bytes([0; 16]),
+            content: FragmentFingerprint::from_bytes([0; 16]),
+            range: ByteRange { start, end },
+            lines: (1, 2),
+            tokens: (0, 0),
+            name: None,
+            boilerplate: None,
+            test_code: false,
+            arms: ArmPath::default(),
+        }
+    }
+
+    fn at(start: usize, end: usize, tag: TypeTag) -> (ByteRange, TypeTag) {
+        (ByteRange { start, end }, tag)
+    }
+
+    /// A compiler answers about bytes; which unit those bytes are in is this
+    /// crate's reading of the tree, and the two are matched here.
+    #[test]
+    fn a_type_resolved_inside_a_unit_is_evidence_about_that_unit() {
+        let resolved = ResolvedTypes::per_file(vec![vec![
+            at(30, 33, TypeTag::Integer),
+            at(10, 16, TypeTag::Text),
+            at(90, 93, TypeTag::Integer),
+        ]]);
+        let evidence = resolved
+            .within(&unit_at(0, 0, 40))
+            .expect("two types were resolved inside it");
+        assert_eq!(evidence.len(), 2);
+        // The one at 90 belongs to whatever holds byte 90, not to this unit.
+        let other = resolved
+            .within(&unit_at(0, 80, 100))
+            .expect("one type was resolved inside it");
+        assert_eq!(other.len(), 1);
+    }
+
+    /// A unit nobody resolved anything in is compared as one nobody measured,
+    /// not as one measured to hold no types: the second would let a pair no
+    /// compiler spoke about claim the dimension's full weight.
+    #[test]
+    fn a_unit_no_compiler_spoke_about_has_no_evidence_rather_than_empty_evidence() {
+        let resolved = ResolvedTypes::per_file(vec![vec![at(10, 16, TypeTag::Text)]]);
+        assert!(resolved.within(&unit_at(0, 40, 80)).is_none());
+        // A file nobody asked about at all.
+        assert!(resolved.within(&unit_at(1, 0, 40)).is_none());
+        assert!(
+            ResolvedTypes::default()
+                .within(&unit_at(0, 0, 40))
+                .is_none()
+        );
+    }
+
+    /// A range that starts in one unit and ends outside it describes neither,
+    /// so it is counted for neither.
+    #[test]
+    fn a_type_reaching_past_a_unit_is_not_counted_inside_it() {
+        let resolved = ResolvedTypes::per_file(vec![vec![at(30, 60, TypeTag::Sequence)]]);
+        assert!(resolved.within(&unit_at(0, 0, 40)).is_none());
     }
 
     #[test]
