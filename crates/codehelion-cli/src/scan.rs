@@ -1528,6 +1528,7 @@ mod tests {
                 content_hash: ContentHash::of(b""),
                 byte_len: 0,
                 package: None,
+                crate_name: None,
                 target_kind: discovery::TargetKind::Library,
             })
             .collect();

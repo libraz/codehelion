@@ -104,6 +104,7 @@ mod tests {
             content_hash: ContentHash::of(content.as_bytes()),
             byte_len: content.len() as u64,
             package: None,
+            crate_name: None,
             target_kind: TargetKind::Library,
         }
     }

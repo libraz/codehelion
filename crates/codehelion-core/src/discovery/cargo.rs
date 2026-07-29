@@ -27,6 +27,7 @@ struct PackageSection {
 
 #[derive(Debug, Deserialize)]
 struct TargetSection {
+    name: Option<String>,
     path: Option<String>,
 }
 
@@ -35,10 +36,21 @@ struct TargetSection {
 struct Package {
     root: PathBuf,
     name: String,
+    /// The `[lib] name`, when the manifest set one.
+    lib_name: Option<String>,
     /// Absolute path of an explicit `[lib] path`, if the manifest set one.
     lib_path: Option<PathBuf>,
+    /// Explicit `[[bin]]` entries that gave both a name and a path.
+    bins: Vec<Binary>,
     /// Absolute paths of explicit `[[bin]] path` entries.
     bin_paths: Vec<PathBuf>,
+}
+
+/// An explicitly declared binary target.
+#[derive(Debug, Clone)]
+struct Binary {
+    name: String,
+    path: PathBuf,
 }
 
 /// The recognised Cargo packages in a scanned tree.
@@ -80,10 +92,21 @@ impl CargoLayout {
             let Some(package) = manifest.package else {
                 continue;
             };
-            let lib_path = manifest
-                .lib
-                .and_then(|lib| lib.path)
-                .map(|path| root.join(path));
+            let lib = manifest.lib.unwrap_or(TargetSection {
+                name: None,
+                path: None,
+            });
+            let lib_path = lib.path.map(|path| root.join(path));
+            let bins: Vec<Binary> = manifest
+                .bin
+                .iter()
+                .filter_map(|bin| {
+                    Some(Binary {
+                        name: bin.name.clone()?,
+                        path: root.join(bin.path.clone()?),
+                    })
+                })
+                .collect();
             let bin_paths = manifest
                 .bin
                 .into_iter()
@@ -93,7 +116,9 @@ impl CargoLayout {
             packages.push(Package {
                 root: root.to_path_buf(),
                 name: package.name,
+                lib_name: lib.name,
                 lib_path,
+                bins,
                 bin_paths,
             });
         }
@@ -133,6 +158,37 @@ impl CargoLayout {
         let kind = package.target_kind(absolute_path);
         (Some(package.name.clone()), kind)
     }
+
+    /// The name a compiler knows `absolute_path`'s crate by, when the layout
+    /// says which crate that is.
+    ///
+    /// A compiler names a crate after the *target*, not the package: one
+    /// package is a library, some binaries and a test crate per test file, and
+    /// asking about a file under the wrong one gets an answer about somebody
+    /// else's code. Dashes become underscores because that mapping is the
+    /// compiler's — a crate name is an identifier and a package name need not
+    /// be — rather than a guess about spelling.
+    ///
+    /// `None` where the layout does not settle it: a file under `tests/` that
+    /// is not a target's own entry point is a module of one of them, and which
+    /// one is written in the code rather than in the manifest. Asking under a
+    /// guessed crate would produce an answer about a crate the file is not in,
+    /// which is worse than reporting that nobody asked.
+    #[must_use]
+    pub fn crate_name(&self, absolute_path: &Path) -> Option<String> {
+        let package = self
+            .packages
+            .iter()
+            .find(|p| absolute_path.starts_with(&p.root))?;
+        package
+            .crate_name(absolute_path)
+            .map(|name| identifier(&name))
+    }
+}
+
+/// A crate name as the compiler spells it.
+fn identifier(name: &str) -> String {
+    name.replace('-', "_")
 }
 
 impl Package {
@@ -152,6 +208,55 @@ impl Package {
         };
         classify_by_convention(rel)
     }
+
+    /// Which of this package's targets holds `absolute_path`, by target name.
+    fn crate_name(&self, absolute_path: &Path) -> Option<String> {
+        // A declared target settles it whatever the path looks like, which is
+        // the point of declaring one.
+        if let Some(bin) = self.bins.iter().find(|bin| bin.path == absolute_path) {
+            return Some(bin.name.clone());
+        }
+        if self
+            .lib_path
+            .as_ref()
+            .is_some_and(|lib| lib == absolute_path)
+        {
+            return Some(self.lib_name.clone().unwrap_or_else(|| self.name.clone()));
+        }
+        let rel = absolute_path.strip_prefix(&self.root).ok()?;
+        let components: Vec<&str> = rel
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect();
+        match components.as_slice() {
+            // The default binary is the one target named after the package
+            // rather than after a file.
+            ["src", "main.rs"] => Some(self.name.clone()),
+            // A binary, test, bench or example is its own crate, named after
+            // the file that is its entry point — and only that file is one.
+            ["src", "bin", entry] | ["tests" | "benches" | "examples", entry] => {
+                Some(stem(entry)?.to_string())
+            }
+            ["src", "bin", target, "main.rs"]
+            | ["tests" | "benches" | "examples", target, "main.rs"] => Some((*target).to_string()),
+            // A module of one of the binaries, and which one is written in the
+            // code rather than in the manifest.
+            ["src", "bin", ..] => None,
+            // Everything else under `src` is a module of the library. A
+            // package whose only target is a binary under another name gets
+            // the wrong name here, and the answer to a name that names no
+            // crate is that there is no build information for it — which is
+            // the safe direction to be wrong in.
+            ["src", ..] => Some(self.lib_name.clone().unwrap_or_else(|| self.name.clone())),
+            _ => None,
+        }
+    }
+}
+
+/// The target name a single-file entry point carries, or `None` when the file
+/// is not a Rust source at all.
+fn stem(entry: &str) -> Option<&str> {
+    entry.strip_suffix(".rs")
 }
 
 /// Classify a package-relative path by Cargo's default layout conventions.
@@ -237,6 +342,88 @@ mod tests {
         let (pkg, kind) = layout.classify(Path::new("/tmp/loose/file.rs"));
         assert_eq!(pkg, None);
         assert_eq!(kind, TargetKind::Unknown);
+    }
+
+    /// A compiler is asked about a crate, and a package is not one. Every
+    /// entry point below is a crate of its own, and a module file belongs to
+    /// the crate whose tree it sits in.
+    #[test]
+    fn each_target_is_the_crate_its_files_belong_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_manifest(dir.path(), "[package]\nname = \"demo\"\n");
+        let layout = CargoLayout::from_manifests(&[manifest]);
+        let cases = [
+            ("src/lib.rs", Some("demo")),
+            ("src/engine/mod.rs", Some("demo")),
+            ("src/main.rs", Some("demo")),
+            ("src/bin/tool.rs", Some("tool")),
+            ("src/bin/tool/main.rs", Some("tool")),
+            ("tests/it.rs", Some("it")),
+            ("benches/speed.rs", Some("speed")),
+            ("examples/demo.rs", Some("demo")),
+            // A module of some test crate; which one is written in the code.
+            ("tests/common/helper.rs", None),
+            ("src/bin/tool/helper.rs", None),
+            ("build.rs", None),
+        ];
+        for (rel, expected) in cases {
+            assert_eq!(
+                layout.crate_name(&dir.path().join(rel)).as_deref(),
+                expected,
+                "{rel}"
+            );
+        }
+    }
+
+    /// A declared target says what it is called, and a name a manifest gives
+    /// is not derivable from any path.
+    #[test]
+    fn a_declared_target_is_known_by_the_name_it_declared() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_manifest(
+            dir.path(),
+            "[package]\nname = \"demo\"\n\
+             [lib]\nname = \"engine\"\npath = \"lib/entry.rs\"\n\
+             [[bin]]\nname = \"tool\"\npath = \"cmd/run.rs\"\n",
+        );
+        let layout = CargoLayout::from_manifests(&[manifest]);
+        assert_eq!(
+            layout
+                .crate_name(&dir.path().join("lib/entry.rs"))
+                .as_deref(),
+            Some("engine")
+        );
+        assert_eq!(
+            layout.crate_name(&dir.path().join("cmd/run.rs")).as_deref(),
+            Some("tool")
+        );
+        // The library's own name reaches its modules too.
+        assert_eq!(
+            layout
+                .crate_name(&dir.path().join("src/parse.rs"))
+                .as_deref(),
+            Some("engine")
+        );
+    }
+
+    /// Cargo lets a package be called what a compiler cannot: the crate is
+    /// known by the identifier, and that mapping belongs to the compiler
+    /// rather than to a guess about how names are spelled here.
+    #[test]
+    fn a_dash_in_a_package_name_is_an_underscore_in_the_crate_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_manifest(dir.path(), "[package]\nname = \"my-crate\"\n");
+        let layout = CargoLayout::from_manifests(&[manifest]);
+        assert_eq!(
+            layout.crate_name(&dir.path().join("src/lib.rs")).as_deref(),
+            Some("my_crate")
+        );
+    }
+
+    #[test]
+    fn a_file_outside_every_package_belongs_to_no_crate() {
+        let layout = CargoLayout::default();
+        assert_eq!(layout.crate_name(Path::new("/tmp/loose/file.rs")), None);
     }
 
     #[test]

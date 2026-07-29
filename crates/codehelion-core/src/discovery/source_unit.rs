@@ -104,6 +104,13 @@ pub struct SourceUnit {
     pub byte_len: u64,
     /// Owning Cargo package, when the file sits inside one.
     pub package: Option<String>,
+    /// The crate a compiler knows this file by, when the package layout says
+    /// which crate that is.
+    ///
+    /// Not the package: one package holds a library, its binaries and a crate
+    /// per test file, and a compiler is asked about one of those rather than
+    /// about the package they share.
+    pub crate_name: Option<String>,
     /// Role of the file in its package.
     pub target_kind: TargetKind,
 }

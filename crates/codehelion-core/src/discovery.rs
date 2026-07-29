@@ -200,6 +200,7 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
         }
         let content_hash = ContentHash::of(&bytes);
         let (package, target_kind) = layout.classify(&candidate.absolute_path);
+        let crate_name = layout.crate_name(&candidate.absolute_path);
         units.push(SourceUnit {
             relative_path: candidate.relative_path,
             absolute_path: candidate.absolute_path,
@@ -208,6 +209,7 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
             content_hash,
             byte_len: candidate.byte_len,
             package,
+            crate_name,
             target_kind,
         });
     }
@@ -292,6 +294,24 @@ mod tests {
             .find(|u| u.relative_path == Path::new("src/main.rs"))
             .unwrap();
         assert_eq!(main.target_kind, TargetKind::Binary);
+    }
+
+    /// Discovery is where the package layout is read, so it is where a file
+    /// learns the crate a compiler would be asked about. The package name and
+    /// the crate name are spelled differently here, so a unit that carried the
+    /// package instead would fail rather than pass by looking alike.
+    #[test]
+    fn a_unit_carries_the_crate_a_compiler_knows_it_by() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"my-demo\"\n").unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+
+        let report = discover(&root, &DiscoveryConfig::default()).unwrap();
+        let lib = &report.units[0];
+        assert_eq!(lib.package.as_deref(), Some("my-demo"));
+        assert_eq!(lib.crate_name.as_deref(), Some("my_demo"));
     }
 
     #[test]
