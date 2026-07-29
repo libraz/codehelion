@@ -28,8 +28,10 @@ mod types;
 
 use codehelion_helper::PROTOCOL_VERSION;
 use codehelion_helper::ir::COMPILER_IR_SCHEMA_VERSION;
-use codehelion_helper::protocol::{Analyze, Capability, HelperIdentity, VersionRange};
-use codehelion_helper::server::{Answer, Backend, serve};
+use codehelion_helper::protocol::{
+    Analyze, BuildDescription, Capability, DescribeBuild, Failure, HelperIdentity, VersionRange,
+};
+use codehelion_helper::server::{Answer, Backend, Description, serve};
 
 use crate::analysis::{Outcome, Workspaces};
 
@@ -80,6 +82,24 @@ impl Backend for RustBackend {
                 Capability::MacroExpansion,
                 Capability::TemplateInstantiation,
             ],
+        }
+    }
+
+    fn describe(&mut self, request: &DescribeBuild) -> Description {
+        match self
+            .workspaces
+            .describe(std::path::Path::new(&request.root))
+        {
+            Ok(Some(build)) => Description::Build(build),
+            // No Cargo project below the path that was asked about. Described,
+            // and what there is to describe is nothing: every run over this
+            // tree reads it under the same absent build, so an empty
+            // description is the answer rather than a missing one.
+            Ok(None) => Description::Build(BuildDescription::default()),
+            Err(why) => Description::Failed(Failure {
+                code: "no_build_description".to_string(),
+                message: why,
+            }),
         }
     }
 

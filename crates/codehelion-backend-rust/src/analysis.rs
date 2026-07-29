@@ -29,6 +29,7 @@ use codehelion_helper::ir::{
     Anchor, CompilerIr, ResolvedSymbol, ResolvedType, SourceRange, SymbolKind, Unavailability,
     UnitRef,
 };
+use codehelion_helper::protocol::BuildDescription;
 use ra_ap_hir::{Adt, Crate, HasSource, HirFileId, ModuleDef};
 use ra_ap_ide_db::RootDatabase;
 use ra_ap_ide_db::base_db::SourceDatabase;
@@ -50,6 +51,7 @@ pub(crate) struct Loaded {
 #[derive(Default)]
 pub(crate) struct Workspaces {
     loaded: BTreeMap<PathBuf, Result<Loaded, String>>,
+    described: BTreeMap<PathBuf, Result<BuildDescription, String>>,
 }
 
 /// Why a unit could not be analysed, or the analysis itself.
@@ -61,6 +63,30 @@ pub(crate) enum Outcome {
 }
 
 impl Workspaces {
+    /// What the code under `root` is analysed under.
+    ///
+    /// `Ok(None)` when there is no Cargo project here at all, which is a thing
+    /// this can say rather than a failure to say anything: a tree with no
+    /// manifest has no build to be described, and every answer about it will
+    /// be the same one.
+    ///
+    /// Read from `cargo metadata` and the compiler's own `--print cfg` rather
+    /// than from the loaded database, because a run asks this before it knows
+    /// whether it needs the database at all — a scan of an unchanged tree is
+    /// reported from what was recorded, and paying to read a whole workspace to
+    /// find out which record to read would cost more than the work it saves.
+    pub(crate) fn describe(&mut self, root: &Path) -> Result<Option<BuildDescription>, String> {
+        let Some(manifest) = nearest_manifest(root) else {
+            return Ok(None);
+        };
+        let workspace = workspace_manifest(&manifest);
+        self.described
+            .entry(workspace.clone())
+            .or_insert_with(|| describe_workspace(&workspace))
+            .clone()
+            .map(Some)
+    }
+
     /// Analyse one crate of one workspace.
     pub(crate) fn analyze(&mut self, unit: &UnitRef) -> Outcome {
         let anchor = Path::new(&unit.file);
@@ -137,14 +163,69 @@ fn has_build_script(manifest: &Path) -> bool {
     })
 }
 
-fn load(manifest: &Path) -> Result<Loaded, String> {
-    let config = ra_ap_project_model::CargoConfig {
+/// How this process reads a project, wherever it reads one.
+///
+/// One value, so that what a run is told it was analysed under and what it was
+/// actually analysed under cannot drift apart: the description below and the
+/// load above are two readings of the same configuration.
+fn cargo_config() -> ra_ap_project_model::CargoConfig {
+    ra_ap_project_model::CargoConfig {
         // Without the standard library almost every type resolves to nothing,
         // and evidence made of unknowns is worse than no evidence: it looks
         // like agreement.
         sysroot: Some(ra_ap_project_model::RustLibSource::Discover),
         ..ra_ap_project_model::CargoConfig::default()
-    };
+    }
+}
+
+/// What the workspace at `manifest` is read under.
+///
+/// Members only. A dependency's features follow from what the members asked
+/// for and from the lockfile, both of which the variant already carries, and
+/// the resolver's answer for three hundred transitive packages would move
+/// whenever cargo changed its mind about one of them — splitting a variant
+/// without the program having changed hides a project's history just as surely
+/// as merging two that differ.
+fn describe_workspace(manifest: &Path) -> Result<BuildDescription, String> {
+    let path = manifest
+        .to_str()
+        .and_then(|path| ra_ap_vfs::AbsPathBuf::try_from(path).ok())
+        .ok_or_else(|| {
+            format!(
+                "the manifest path is not absolute utf-8: {}",
+                manifest.display()
+            )
+        })?;
+    let found = ra_ap_project_model::ProjectManifest::from_manifest_file(path)
+        .map_err(|error| error.to_string())?;
+    let workspace = ra_ap_project_model::ProjectWorkspace::load(found, &cargo_config(), &|_| {})
+        .map_err(|error| error.to_string())?;
+    let mut cfgs: Vec<String> = workspace
+        .rustc_cfg
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let mut features = Vec::new();
+    if let ra_ap_project_model::ProjectWorkspaceKind::Cargo { cargo, .. } = &workspace.kind {
+        for package in cargo.packages() {
+            let data = &cargo[package];
+            if !data.is_member {
+                continue;
+            }
+            for feature in &data.active_features {
+                features.push(format!("{}/{feature}", data.name));
+            }
+        }
+    }
+    cfgs.sort();
+    cfgs.dedup();
+    features.sort();
+    features.dedup();
+    Ok(BuildDescription { features, cfgs })
+}
+
+fn load(manifest: &Path) -> Result<Loaded, String> {
+    let config = cargo_config();
     let load_config = ra_ap_load_cargo::LoadCargoConfig {
         // The two settings that would run the project's code. Constants, with
         // nothing that can change them.

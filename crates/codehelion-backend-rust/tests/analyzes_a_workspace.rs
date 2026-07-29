@@ -493,6 +493,51 @@ fn asking_twice_in_one_process_gives_the_same_answer() {
     assert_eq!(first, second);
 }
 
+/// What a run files its answers under, asked of the side that resolves it.
+///
+/// Both halves matter. The features name the package that enables them,
+/// because two packages' features of one name are unrelated; the settings are
+/// the compiler's own, so that the same source read for two targets is two
+/// readings rather than one.
+#[test]
+fn a_project_says_which_features_it_is_read_with() {
+    let described = describe(&codehelion_fixtures::rust("features").unwrap());
+    assert_eq!(described.features, vec!["counters/default".to_string()]);
+    assert!(
+        described
+            .cfgs
+            .iter()
+            .any(|cfg| cfg.starts_with("target_os")),
+        "the compiler's own settings should be there: {:?}",
+        described.cfgs
+    );
+}
+
+/// A tree with no project in it is described as having no build, which is not
+/// the same as failing to describe it: every run over such a tree reads it the
+/// same way, so an empty answer is the answer.
+#[test]
+fn a_tree_with_no_project_in_it_is_described_as_having_no_build() {
+    let described = describe(std::path::Path::new("/nowhere/at/all"));
+    assert_eq!(described, codehelion_helper::BuildDescription::default());
+}
+
+/// A described build always has settings — the target alone supplies dozens —
+/// so the empty description above says what it says without a flag for it.
+#[test]
+fn a_project_that_enables_nothing_is_still_described_by_its_target() {
+    let described = describe(&codehelion_fixtures::rust("plain").unwrap());
+    assert!(described.features.is_empty(), "{:?}", described.features);
+    assert!(!described.cfgs.is_empty());
+}
+
+fn describe(root: &std::path::Path) -> codehelion_helper::BuildDescription {
+    let mut helper = helper();
+    let described = helper.describe(root).expect("the helper should answer");
+    helper.shutdown().expect("the helper should stop cleanly");
+    described
+}
+
 /// A unit nobody can place is refused rather than guessed at.
 #[test]
 fn a_unit_outside_any_project_is_reported_as_having_no_build_information() {
