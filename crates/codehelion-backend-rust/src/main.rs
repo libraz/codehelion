@@ -21,6 +21,7 @@
 
 mod analysis;
 mod calls;
+mod expansions;
 mod occurrences;
 mod types;
 
@@ -75,6 +76,7 @@ impl Backend for RustBackend {
                 Capability::Types,
                 Capability::NameResolution,
                 Capability::CallTargets,
+                Capability::MacroExpansion,
             ],
         }
     }

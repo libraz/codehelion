@@ -94,6 +94,7 @@ fn the_helper_says_which_compiler_will_answer_and_what_it_can_supply() {
     assert!(helper.offers(Capability::Types));
     assert!(helper.offers(Capability::NameResolution));
     assert!(helper.offers(Capability::CallTargets));
+    assert!(helper.offers(Capability::MacroExpansion));
     assert!(!helper.offers(Capability::MirCfg));
     helper.shutdown().unwrap();
 }
@@ -292,6 +293,105 @@ fn calling_a_value_rather_than_a_name_reaches_nothing_nameable() {
     let ir = dispatch();
     let found = targets(&ir, &fixture_source(), "pub fn indirect");
     assert_eq!(found, vec![CallTarget::Unresolved], "{found:?}");
+}
+
+/// The macro fixture is one crate whose file is its own root.
+fn repeated() -> Box<CompilerIr> {
+    let file = codehelion_fixtures::rust("macro-rules")
+        .unwrap()
+        .join("src/lib.rs");
+    analyzed(&UnitRef {
+        unit: "repeated".to_string(),
+        file: file.display().to_string(),
+        variant: "host".to_string(),
+    })
+}
+
+/// A declarative macro is expanded by reading it, so what it declared is
+/// there to be reported. Leaving it out would report a file as holding less
+/// than it does.
+#[test]
+fn what_a_declarative_macro_declared_is_reported() {
+    let ir = repeated();
+    for produced in ["Reads", "Writes"] {
+        // Exactly one: the declaration walk passes over what it cannot place,
+        // and this pass places it. Both reporting it would put two of one type
+        // in a unit that holds one.
+        let found = names(&ir, produced)
+            .into_iter()
+            .filter(|symbol| symbol.kind == SymbolKind::Type)
+            .count();
+        assert_eq!(
+            found,
+            1,
+            "{produced}: {:?}",
+            ir.symbols.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// The claim the whole two-part anchor exists for. Both types came out of one
+/// macro, so they share a definition site and differ only in where they were
+/// invoked — which is what lets a group say "written once, expanded twice"
+/// instead of reporting a duplication nobody can remove.
+#[test]
+fn two_expansions_of_one_macro_share_the_place_it_was_written() {
+    let ir = repeated();
+    let reads = expanded_type(&ir, "Reads");
+    let writes = expanded_type(&ir, "Writes");
+    assert_eq!(
+        reads.anchor.definition, writes.anchor.definition,
+        "two expansions of one macro were attributed to two definitions"
+    );
+    assert_ne!(
+        reads.anchor.expansion, writes.anchor.expansion,
+        "two invocations were reported at one place"
+    );
+}
+
+/// And what somebody typed carries no second place, or the distinction the
+/// definition site draws would be no distinction at all.
+#[test]
+fn what_was_typed_out_is_not_attributed_to_a_macro() {
+    let ir = repeated();
+    let manual = ir
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "Manual")
+        .expect("the hand-written type");
+    assert_eq!(manual.anchor.definition, None);
+}
+
+/// An expansion anchors at the invocation, because that is the only place in
+/// the file it can be pointed at: the text of the produced item is not there.
+#[test]
+fn an_expansion_anchors_on_the_invocation_that_produced_it() {
+    let path = codehelion_fixtures::rust("macro-rules")
+        .unwrap()
+        .join("src/lib.rs");
+    let text = std::fs::read_to_string(path).expect("the fixture is readable");
+    let ir = repeated();
+    let reads = expanded_type(&ir, "Reads");
+    let range = &reads.anchor.expansion;
+    let start = usize::try_from(range.start_byte).unwrap();
+    let end = usize::try_from(range.end_byte).unwrap();
+    assert_eq!(&text[start..end], "counter!(Reads);");
+    // And the definition site is the macro, which is somewhere else entirely.
+    // It spans the item as written, doc comment included, the same way every
+    // other declaration's anchor does.
+    let written = reads.anchor.definition.as_ref().expect("a definition site");
+    let start = usize::try_from(written.start_byte).unwrap();
+    let end = usize::try_from(written.end_byte).unwrap();
+    let source = &text[start..end];
+    assert!(source.contains("macro_rules! counter"), "{source:?}");
+    assert!(end <= usize::try_from(range.start_byte).unwrap());
+}
+
+fn expanded_type<'a>(ir: &'a CompilerIr, name: &str) -> &'a ResolvedSymbol {
+    ir.symbols
+        .iter()
+        .find(|symbol| symbol.name == name && symbol.kind == SymbolKind::Type)
+        .unwrap_or_else(|| panic!("no type called {name}"))
 }
 
 /// The baseline. Every category asserted here can be checked by opening the

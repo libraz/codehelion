@@ -36,7 +36,7 @@ use ra_ap_syntax::AstNode;
 use ra_ap_vfs::Vfs;
 
 use crate::types::category;
-use crate::{calls, occurrences};
+use crate::{calls, expansions, occurrences};
 
 /// A workspace that has been read, kept so a second request about the same
 /// project does not pay to read it again.
@@ -180,8 +180,20 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
     while let Some(module) = modules.pop() {
         modules.extend(module.children(db));
         for definition in module.declarations(db) {
-            collect(loaded, definition, &mut ir, &mut types);
+            collect(loaded, definition, None, &mut ir, &mut types);
         }
+    }
+    // What the macros invoked in this file declared. The walk above passes
+    // those over, because a declaration inside an expansion has no place in a
+    // file until somebody says which invocation it came out of.
+    for expanded in expansions::collect(loaded, Path::new(&unit.file)) {
+        collect(
+            loaded,
+            expanded.definition,
+            Some(&expanded.anchor),
+            &mut ir,
+            &mut types,
+        );
     }
     // Names, after declarations, so that a name occurring exactly where a
     // declaration begins is dropped rather than recorded twice. That can only
@@ -227,11 +239,22 @@ fn place(symbol: &ResolvedSymbol) -> (String, u64) {
     )
 }
 
-fn collect(loaded: &Loaded, definition: ModuleDef, ir: &mut CompilerIr, types: &mut TypeTable) {
+/// Add what the compiler knows about one declaration to `ir`.
+///
+/// `origin` is set for a declaration a macro produced. Everything it declares
+/// — the item, and the fields inside it — anchors at the invocation, because
+/// that is the only place in a file any of it can be pointed at.
+fn collect(
+    loaded: &Loaded,
+    definition: ModuleDef,
+    origin: Option<&Anchor>,
+    ir: &mut CompilerIr,
+    types: &mut TypeTable,
+) {
     let db = &loaded.db;
     match definition {
         ModuleDef::Function(function) => {
-            let Some(anchor) = anchor_of(loaded, function.source(db)) else {
+            let Some(anchor) = anchored(loaded, origin, function.source(db)) else {
                 return;
             };
             let returns = types.intern(&function.ret_type(db), db);
@@ -249,7 +272,7 @@ fn collect(loaded: &Loaded, definition: ModuleDef, ir: &mut CompilerIr, types: &
         }
         ModuleDef::Adt(adt) => {
             let name = adt.name(db).as_str().to_string();
-            if let Some(anchor) = adt_anchor(loaded, adt) {
+            if let Some(anchor) = adt_anchor(loaded, origin, adt) {
                 ir.symbols.push(ResolvedSymbol {
                     id: path_of(&name, adt.module(db), db),
                     name: name.clone(),
@@ -261,7 +284,7 @@ fn collect(loaded: &Loaded, definition: ModuleDef, ir: &mut CompilerIr, types: &
             }
             if let Adt::Struct(structure) = adt {
                 for field in structure.fields(db) {
-                    let Some(anchor) = anchor_of(loaded, field.source(db)) else {
+                    let Some(anchor) = anchored(loaded, origin, field.source(db)) else {
                         continue;
                     };
                     let field_name = field.name(db).as_str().to_string();
@@ -278,7 +301,7 @@ fn collect(loaded: &Loaded, definition: ModuleDef, ir: &mut CompilerIr, types: &
             }
         }
         ModuleDef::Const(konst) => {
-            let Some(anchor) = anchor_of(loaded, konst.source(db)) else {
+            let Some(anchor) = anchored(loaded, origin, konst.source(db)) else {
                 return;
             };
             let name = konst
@@ -296,7 +319,7 @@ fn collect(loaded: &Loaded, definition: ModuleDef, ir: &mut CompilerIr, types: &
             });
         }
         ModuleDef::Static(statik) => {
-            let Some(anchor) = anchor_of(loaded, statik.source(db)) else {
+            let Some(anchor) = anchored(loaded, origin, statik.source(db)) else {
                 return;
             };
             let name = statik.name(db).as_str().to_string();
@@ -314,13 +337,22 @@ fn collect(loaded: &Loaded, definition: ModuleDef, ir: &mut CompilerIr, types: &
     }
 }
 
-fn adt_anchor(loaded: &Loaded, adt: Adt) -> Option<Anchor> {
+fn adt_anchor(loaded: &Loaded, origin: Option<&Anchor>, adt: Adt) -> Option<Anchor> {
     let db = &loaded.db;
     match adt {
-        Adt::Struct(item) => anchor_of(loaded, item.source(db)),
-        Adt::Enum(item) => anchor_of(loaded, item.source(db)),
-        Adt::Union(item) => anchor_of(loaded, item.source(db)),
+        Adt::Struct(item) => anchored(loaded, origin, item.source(db)),
+        Adt::Enum(item) => anchored(loaded, origin, item.source(db)),
+        Adt::Union(item) => anchored(loaded, origin, item.source(db)),
     }
+}
+
+/// Where a declaration is, given what it came out of.
+fn anchored<T: AstNode>(
+    loaded: &Loaded,
+    origin: Option<&Anchor>,
+    source: Option<ra_ap_hir::InFile<T>>,
+) -> Option<Anchor> {
+    origin.cloned().or_else(|| anchor_of(loaded, source))
 }
 
 /// The path a definition is known by, as the compiler spells it.
