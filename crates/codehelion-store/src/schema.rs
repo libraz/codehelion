@@ -51,12 +51,12 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 19;
+pub const SCHEMA_VERSION: i64 = 20;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20,
 ];
 
 /// Version 1: the full entity set.
@@ -916,6 +916,20 @@ CREATE INDEX idx_build_variant_setting ON build_variant_setting (name, value);
 const V19: &str = "
 ALTER TABLE compiler_helper ADD COLUMN restarts INTEGER
     CHECK (restarts IS NULL OR restarts >= 0);
+";
+
+/// Version 20: what an analysis spelled its paths against.
+///
+/// The anchor columns hold a path the way the helper's project spells it, which
+/// is relative to the root that helper read the project from. Stored without
+/// that root, a relative path reads as one relative to whatever the reader
+/// happens to be standing in, and the answers land on a file nobody asked
+/// about — quietly, since the two spellings can look alike.
+///
+/// Nullable: an analysis whose paths stand on their own says so by having none,
+/// and a row written before the root was recorded says nothing either way.
+const V20: &str = "
+ALTER TABLE compiler_unit ADD COLUMN anchored_at TEXT;
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

@@ -289,24 +289,25 @@ fn write_unit_row(
     helper_id: Option<i64>,
 ) -> Result<i64, StoreError> {
     let unit = outcome.unit();
-    let (schema, reason, cfg, effects, flows) = match outcome {
+    let (schema, anchored_at, reason, cfg, effects, flows) = match outcome {
         CompilerOutcome::Analyzed(ir) => (
             Some(ir.schema_version.as_str()),
+            ir.anchored_at.as_deref(),
             None,
             ir.cfg.is_some(),
             ir.effects.computed,
             ir.data_flow.computed,
         ),
         CompilerOutcome::Unavailable { reason, .. } => {
-            (None, Some(reason.name()), false, false, false)
+            (None, None, Some(reason.name()), false, false, false)
         }
     };
     tx.execute(
         "INSERT INTO compiler_unit
              (scan_run_id, build_variant_id, compiler_helper_id, unit_name, file_path,
-              variant_key, schema_version, unavailable_reason, has_cfg, effects_computed,
-              data_flow_computed)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+              variant_key, schema_version, anchored_at, unavailable_reason, has_cfg,
+              effects_computed, data_flow_computed)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             run_id,
             variant_id,
@@ -315,6 +316,7 @@ fn write_unit_row(
             unit.file,
             unit.variant,
             schema,
+            anchored_at,
             reason,
             i64::from(cfg),
             i64::from(effects),
@@ -685,7 +687,7 @@ mod read {
         let mut statement = conn.prepare(
             "SELECT u.id, u.unit_name, u.file_path, u.variant_key, u.schema_version,
                     u.unavailable_reason, u.has_cfg, u.effects_computed, u.data_flow_computed,
-                    h.name, h.version
+                    h.name, h.version, u.anchored_at
              FROM compiler_unit u
              LEFT JOIN compiler_helper h ON h.id = u.compiler_helper_id
              WHERE u.scan_run_id = ?1 ORDER BY u.id",
@@ -707,15 +709,23 @@ mod read {
                         row.get::<_, i64>(8)? != 0,
                     ),
                     helper_ref(row)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         let mut units = Vec::with_capacity(rows.len());
-        for (id, unit, schema, reason, flags, helper) in rows {
+        for (id, unit, schema, reason, flags, helper, anchored_at) in rows {
             let outcome = match (schema, reason) {
-                (Some(schema), _) => {
-                    CompilerOutcome::Analyzed(Box::new(payload(conn, id, unit, schema, flags)?))
-                }
+                (Some(schema), _) => CompilerOutcome::Analyzed(Box::new(payload(
+                    conn,
+                    id,
+                    unit,
+                    Written {
+                        schema_version: schema,
+                        anchored_at,
+                    },
+                    flags,
+                )?)),
                 (None, Some(reason)) => CompilerOutcome::Unavailable {
                     unit,
                     reason: unavailability(&reason)?,
@@ -829,17 +839,24 @@ mod read {
         Ok(rows)
     }
 
+    /// What an analysis says about itself rather than about the code.
+    struct Written {
+        schema_version: String,
+        anchored_at: Option<String>,
+    }
+
     /// Everything hanging off one analysed unit.
     fn payload(
         conn: &Connection,
         id: i64,
         unit: UnitRef,
-        schema_version: String,
+        written: Written,
         flags: (bool, bool, bool),
     ) -> Result<CompilerIr, StoreError> {
         let (has_cfg, effects_computed, data_flow_computed) = flags;
         Ok(CompilerIr {
-            schema_version,
+            schema_version: written.schema_version,
+            anchored_at: written.anchored_at,
             unit,
             symbols: symbols(conn, id)?,
             types: types(conn, id)?,

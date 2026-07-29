@@ -110,6 +110,7 @@ fn full_analysis(unit: UnitRef) -> CompilerIr {
     CompilerIr {
         schema_version: codehelion_helper::ir::COMPILER_IR_SCHEMA_VERSION.to_string(),
         unit,
+        anchored_at: Some("/projects/ledger".to_string()),
         symbols: sample_symbols(),
         types: sample_types(),
         calls: sample_calls(),
@@ -446,6 +447,23 @@ fn a_run_that_asked_nobody_reports_no_coverage_rather_than_an_empty_one() {
         .record_snapshot(&snapshot("/tree", &variant, Vec::new(), Vec::new()))
         .unwrap();
     assert_eq!(store.run_compiler_coverage(run).unwrap(), None);
+}
+
+/// Anchors are stored the way the analysis spelled them, so what they were
+/// spelled against has to be stored beside them. Without it a relative path
+/// reads as relative to wherever the reader is standing, and the answers land
+/// on a file nobody asked about — quietly, since the two can look alike.
+#[test]
+fn an_analysis_keeps_what_its_paths_were_spelled_against() {
+    let written = full_analysis(unit_ref("render", "src/render.rs"));
+    assert_eq!(
+        round_trip(written).anchored_at.as_deref(),
+        Some("/projects/ledger")
+    );
+
+    let mut standalone = full_analysis(unit_ref("render", "src/render.rs"));
+    standalone.anchored_at = None;
+    assert_eq!(round_trip(standalone).anchored_at, None);
 }
 
 /// A graph with no blocks and a helper that builds no graph both store zero
