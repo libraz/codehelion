@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use codehelion_helper::ir::{TypeCategory, Unavailability, UnitRef};
+use codehelion_helper::ir::{ResolvedSymbol, SymbolKind, TypeCategory, Unavailability, UnitRef};
 use codehelion_helper::protocol::Capability;
 use codehelion_helper::{Analysis, COMPILER_IR_SCHEMA_VERSION, CompilerIr, Helper};
 
@@ -75,6 +75,14 @@ fn category_of(ir: &CompilerIr, name: &str) -> TypeCategory {
     ir.types[index].category
 }
 
+/// Every name written in `file`, in the order they were written.
+fn names<'a>(ir: &'a CompilerIr, name: &str) -> Vec<&'a ResolvedSymbol> {
+    ir.symbols
+        .iter()
+        .filter(|symbol| symbol.name == name)
+        .collect()
+}
+
 /// The handshake is where a helper says what it is. Claiming a capability it
 /// does not have would be worse than claiming none: a run stops recording that
 /// it did not get something once it has been told it would.
@@ -82,8 +90,78 @@ fn category_of(ir: &CompilerIr, name: &str) -> TypeCategory {
 fn the_helper_says_which_compiler_will_answer_and_what_it_can_supply() {
     let helper = helper();
     assert!(helper.offers(Capability::Types));
+    assert!(helper.offers(Capability::NameResolution));
     assert!(!helper.offers(Capability::MirCfg));
     helper.shutdown().unwrap();
+}
+
+/// What normalization is for. A name defined outside the scan is an interface
+/// two fragments genuinely share and is compared on; a name defined inside it
+/// is a detail one of them happens to have chosen, and is not.
+#[test]
+fn a_name_the_project_did_not_write_is_marked_as_coming_from_outside() {
+    let ir = analyzed(&unit("plain", "ledger", "ledger"));
+    for outside in ["String", "Vec", "i64"] {
+        let found = names(&ir, outside);
+        assert!(!found.is_empty(), "{outside} was never resolved");
+        for symbol in found {
+            assert!(symbol.external, "{outside} was called part of the scan");
+        }
+    }
+    for inside in ["Entry", "debits", "total", "entries"] {
+        let found = names(&ir, inside);
+        assert!(!found.is_empty(), "{inside} was never resolved");
+        for symbol in found {
+            assert!(!symbol.external, "{inside} was called a library name");
+        }
+    }
+}
+
+/// The offsets are the whole mechanism: normalization looks a name up by the
+/// byte it starts at, so an anchor pointing anywhere near the name rather than
+/// at it resolves a different name, or none, without saying so.
+#[test]
+fn a_name_is_anchored_on_the_name_rather_than_near_it() {
+    let source = codehelion_fixtures::rust("plain")
+        .unwrap()
+        .join("ledger/src/lib.rs");
+    let text = std::fs::read_to_string(source).expect("the fixture is readable");
+    let ir = analyzed(&unit("plain", "ledger", "ledger"));
+    // Bindings only, because a declaration's anchor spans the whole item it
+    // declares. A binding is only ever reported as an occurrence.
+    let bindings: Vec<_> = ir
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::Binding)
+        .collect();
+    assert!(!bindings.is_empty(), "no binding was resolved at all");
+    for symbol in bindings {
+        let range = &symbol.anchor.expansion;
+        let start = usize::try_from(range.start_byte).unwrap();
+        let end = usize::try_from(range.end_byte).unwrap();
+        assert_eq!(&text[start..end], symbol.name);
+    }
+}
+
+/// `total` is written in both `debits` and `credits`, and they are two
+/// bindings. An identity two definitions share is not an identity, and here it
+/// would make the two functions look like they touch one variable.
+#[test]
+fn two_bindings_that_share_a_name_do_not_share_an_identity() {
+    let ir = analyzed(&unit("plain", "ledger", "ledger"));
+    let totals = names(&ir, "total");
+    assert!(totals.len() >= 4, "expected several mentions of total");
+    let identities: std::collections::BTreeSet<&str> =
+        totals.iter().map(|symbol| symbol.id.as_str()).collect();
+    assert_eq!(identities.len(), 2, "{identities:?}");
+}
+
+/// A local's type is the one nothing else records and the one a structural
+/// reading cannot see: `total` is only ever written as `0`.
+#[test]
+fn a_binding_carries_the_type_the_compiler_inferred_for_it() {
+    let ir = analyzed(&unit("plain", "ledger", "ledger"));
+    assert_eq!(category_of(&ir, "total"), TypeCategory::Integer);
 }
 
 /// The baseline. Every category asserted here can be checked by opening the

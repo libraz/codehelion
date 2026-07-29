@@ -22,7 +22,7 @@
 //! settles is whether it can analyse a project rather than whether it matches
 //! it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use codehelion_helper::ir::{
@@ -35,14 +35,15 @@ use ra_ap_ide_db::base_db::SourceDatabase;
 use ra_ap_syntax::AstNode;
 use ra_ap_vfs::Vfs;
 
+use crate::occurrences;
 use crate::types::category;
 
 /// A workspace that has been read, kept so a second request about the same
 /// project does not pay to read it again.
-struct Loaded {
-    db: RootDatabase,
-    vfs: Vfs,
-    root: PathBuf,
+pub(crate) struct Loaded {
+    pub(crate) db: RootDatabase,
+    pub(crate) vfs: Vfs,
+    pub(crate) root: PathBuf,
 }
 
 /// Every workspace this process has read, by the manifest that identifies it.
@@ -182,6 +183,16 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
             collect(loaded, definition, &mut ir, &mut types);
         }
     }
+    // Names, after declarations, so that a name occurring exactly where a
+    // declaration begins is dropped rather than recorded twice. That can only
+    // happen where the declaration opens with its own name — a field, and
+    // nothing else — so the entry that survives is the one that says more.
+    let declared: BTreeSet<(String, u64)> = ir.symbols.iter().map(place).collect();
+    for occurrence in occurrences::collect(loaded, Path::new(&unit.file), &mut types) {
+        if !declared.contains(&place(&occurrence)) {
+            ir.symbols.push(occurrence);
+        }
+    }
     ir.types = types.finish();
     // Sorted so that two runs over one unchanged workspace produce the same
     // document: the module walk above visits in whatever order the database
@@ -199,6 +210,14 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
             ))
     });
     Outcome::Analyzed(Box::new(ir))
+}
+
+/// Where a symbol sits, which is what makes two entries the same entry.
+fn place(symbol: &ResolvedSymbol) -> (String, u64) {
+    (
+        symbol.anchor.expansion.file.clone(),
+        symbol.anchor.expansion.start_byte,
+    )
 }
 
 fn collect(loaded: &Loaded, definition: ModuleDef, ir: &mut CompilerIr, types: &mut TypeTable) {
@@ -298,7 +317,7 @@ fn adt_anchor(loaded: &Loaded, adt: Adt) -> Option<Anchor> {
 }
 
 /// The path a definition is known by, as the compiler spells it.
-fn path_of(name: &str, module: ra_ap_hir::Module, db: &RootDatabase) -> String {
+pub(crate) fn path_of(name: &str, module: ra_ap_hir::Module, db: &RootDatabase) -> String {
     let mut segments: Vec<String> = module
         .path_to_root(db)
         .into_iter()
@@ -324,7 +343,19 @@ fn path_of(name: &str, module: ra_ap_hir::Module, db: &RootDatabase) -> String {
 fn anchor_of<T: AstNode>(loaded: &Loaded, source: Option<ra_ap_hir::InFile<T>>) -> Option<Anchor> {
     let source = source?;
     let file_id = real_file(source.file_id, &loaded.db)?;
-    let range = source.value.syntax().text_range();
+    Some(Anchor::written_here(source_range(
+        loaded,
+        file_id,
+        source.value.syntax().text_range(),
+    )))
+}
+
+/// A byte range of one file, spelled the way the project spells the file.
+pub(crate) fn source_range(
+    loaded: &Loaded,
+    file_id: ra_ap_vfs::FileId,
+    range: ra_ap_syntax::TextRange,
+) -> SourceRange {
     let start = u32::from(range.start());
     let text = loaded.db.file_text(file_id).text(&loaded.db).to_string();
     let path = loaded
@@ -339,15 +370,15 @@ fn anchor_of<T: AstNode>(loaded: &Loaded, source: Option<ra_ap_hir::InFile<T>>) 
                 .to_string()
         })
         .unwrap_or_default();
-    Some(Anchor::written_here(SourceRange {
+    SourceRange {
         file: path,
         start_byte: u64::from(start),
         end_byte: u64::from(u32::from(range.end())),
         start_line: line_of(&text, start as usize),
-    }))
+    }
 }
 
-fn real_file(file_id: HirFileId, db: &RootDatabase) -> Option<ra_ap_vfs::FileId> {
+pub(crate) fn real_file(file_id: HirFileId, db: &RootDatabase) -> Option<ra_ap_vfs::FileId> {
     file_id.file_id().map(|file| file.file_id(db))
 }
 
@@ -361,14 +392,14 @@ fn line_of(text: &str, offset: usize) -> u32 {
 
 /// The types a unit mentions, each recorded once.
 #[derive(Default)]
-struct TypeTable {
+pub(crate) struct TypeTable {
     seen: BTreeMap<(String, &'static str), u32>,
     entries: Vec<ResolvedType>,
 }
 
 impl TypeTable {
     /// The index of `ty` in the table, adding it if this is its first mention.
-    fn intern(&mut self, ty: &ra_ap_hir::Type<'_>, db: &RootDatabase) -> u32 {
+    pub(crate) fn intern(&mut self, ty: &ra_ap_hir::Type<'_>, db: &RootDatabase) -> u32 {
         let category = category(ty, db);
         let display = display_of(ty, db);
         let key = (display.clone(), category.name());

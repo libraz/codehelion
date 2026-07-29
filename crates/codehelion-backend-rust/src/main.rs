@@ -20,6 +20,7 @@
 #![allow(clippy::redundant_pub_crate)]
 
 mod analysis;
+mod occurrences;
 mod types;
 
 use codehelion_helper::PROTOCOL_VERSION;
@@ -69,7 +70,7 @@ impl Backend for RustBackend {
             // and a helper that claims call targets and returns none is worse
             // than one that never claimed them: the run would stop recording
             // that it did not get any.
-            capabilities: vec![Capability::Types],
+            capabilities: vec![Capability::Types, Capability::NameResolution],
         }
     }
 
