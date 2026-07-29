@@ -25,6 +25,7 @@ pub mod migrate;
 pub mod report;
 pub mod reuse;
 pub mod scan;
+pub mod semantic;
 pub mod suppress;
 
 use std::io::{self, Write};
