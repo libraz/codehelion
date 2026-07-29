@@ -25,6 +25,7 @@ fn canonical() -> CompilerIr {
             file: "src/render.rs".to_string(),
             variant: "target=host".to_string(),
         },
+        anchored_at: Some("/projects/ledger".to_string()),
         symbols: vec![
             ResolvedSymbol {
                 id: "crate::render".to_string(),
@@ -120,18 +121,22 @@ fn range(file: &str, start: u64) -> SourceRange {
 }
 
 /// The stored document for the version this build writes. A new version means
-/// a new file beside this one, not an edit to this one — the old shape has to
-/// stay readable to say what a stored analysis written against it meant.
+/// a new file beside the last, not an edit to it — the shapes that have been
+/// shipped stay on disk to say what a stored analysis written against them
+/// meant.
+const GOLDEN_V1: &str = include_str!("golden/compiler-ir-v1.json");
+
+/// The shape before the analysis said what its paths were spelled against.
 const GOLDEN_V0: &str = include_str!("golden/compiler-ir-v0.json");
 
 #[test]
 fn the_wire_shape_matches_the_document_for_this_version() {
-    assert_eq!(COMPILER_IR_SCHEMA_VERSION, "compiler-ir-v0");
+    assert_eq!(COMPILER_IR_SCHEMA_VERSION, "compiler-ir-v1");
     let written = serde_json::to_string_pretty(&canonical()).unwrap();
     assert_eq!(
         written.trim(),
-        GOLDEN_V0.trim(),
-        "the compiler IR no longer serializes as compiler-ir-v0 does; \
+        GOLDEN_V1.trim(),
+        "the compiler IR no longer serializes as compiler-ir-v1 does; \
          a shape change needs a new schema version and a new document"
     );
 }
@@ -141,7 +146,21 @@ fn the_wire_shape_matches_the_document_for_this_version() {
 /// wrong would pass the check above.
 #[test]
 fn the_document_reads_back_as_what_produced_it() {
-    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V0).unwrap();
+    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V1).unwrap();
     assert_eq!(parsed, canonical());
     assert!(parsed.is_readable());
+}
+
+/// An analysis from an earlier schema has to arrive before it can be turned
+/// away. Refusing it at the parser instead would report a helper from another
+/// release as a helper that broke, and send someone to debug their project
+/// rather than to update a program.
+#[test]
+fn an_answer_from_an_earlier_schema_arrives_and_is_turned_away() {
+    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V0)
+        .expect("a shape this build no longer writes still has to parse");
+    assert!(!parsed.is_readable());
+    // The field it predates reads as absent rather than as a claim: what a v0
+    // analysis spelled its paths against is exactly what nobody recorded.
+    assert_eq!(parsed.anchored_at, None);
 }

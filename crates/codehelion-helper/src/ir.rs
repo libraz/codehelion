@@ -29,6 +29,8 @@
 //! to a version this schema already names, rather than a shape change to one it
 //! does not.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 /// The revision of the compiler-IR shape.
@@ -36,7 +38,7 @@ use serde::{Deserialize, Serialize};
 /// Recorded beside every stored result: a stored IR whose schema this build
 /// cannot read must be recognised as such rather than read as if it were
 /// current.
-pub const COMPILER_IR_SCHEMA_VERSION: &str = "compiler-ir-v0";
+pub const COMPILER_IR_SCHEMA_VERSION: &str = "compiler-ir-v1";
 
 /// A half-open byte range in one file, with the line its start falls on.
 ///
@@ -44,7 +46,8 @@ pub const COMPILER_IR_SCHEMA_VERSION: &str = "compiler-ir-v0";
 /// a line something begins, and clone fragments regularly do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceRange {
-    /// Path as the project spells it, relative to the scan root.
+    /// Path as the analysis spells it — see [`CompilerIr::anchored_at`] for
+    /// what it is spelled against.
     pub file: String,
     /// First byte covered.
     pub start_byte: u64,
@@ -389,6 +392,27 @@ pub struct CompilerIr {
     pub schema_version: String,
     /// What it is about.
     pub unit: UnitRef,
+    /// The directory the file paths in this analysis are spelled against.
+    ///
+    /// A helper reports paths the way the project spells them, which is
+    /// relative to the root it read the project from — not to whatever
+    /// directory a scan was started in. Saying which root that was is what lets
+    /// a reader turn a file it knows about into the name this analysis filed it
+    /// under. Without it the two spellings can only be compared by hoping they
+    /// agree, and comparing on a shared suffix instead would let one file's
+    /// answers be counted for another's, since two files can end the same way.
+    ///
+    /// `None` when the paths stand on their own, which is what an analysis
+    /// with no project root to speak of reports.
+    ///
+    /// Defaulted when absent so that an analysis written against a schema
+    /// without it still parses. What tells a reader to update its helper is
+    /// [`CompilerIr::is_readable`], and that only gets to speak if the message
+    /// arrives — a field this side requires would turn "a helper from another
+    /// release" into "a helper that broke", which sends someone to debug the
+    /// wrong thing.
+    #[serde(default)]
+    pub anchored_at: Option<String>,
     /// Names resolved to definitions.
     pub symbols: Vec<ResolvedSymbol>,
     /// Types, referred to by index from everything else.
@@ -412,6 +436,7 @@ impl CompilerIr {
         Self {
             schema_version: COMPILER_IR_SCHEMA_VERSION.to_owned(),
             unit,
+            anchored_at: None,
             symbols: Vec::new(),
             types: Vec::new(),
             calls: Vec::new(),
@@ -427,6 +452,29 @@ impl CompilerIr {
     pub fn is_readable(&self) -> bool {
         self.schema_version == COMPILER_IR_SCHEMA_VERSION
     }
+
+    /// How this analysis spells `absolute`, so a caller holding a file can
+    /// look up what was said about it.
+    #[must_use]
+    pub fn spelling(&self, absolute: &Path) -> String {
+        spell(self.anchored_at.as_ref().map(Path::new), absolute)
+    }
+}
+
+/// How a path is spelled against `root`.
+///
+/// One function for both sides of the wire. A helper writes its anchors with
+/// it and a reader looks them up with it, so the two spellings agree because
+/// they are the same rule rather than because they were written to match.
+///
+/// A path outside `root` keeps its own name: made relative it would climb out
+/// of the project with `..`, which says less than the path it started as.
+#[must_use]
+pub fn spell(root: Option<&Path>, path: &Path) -> String {
+    root.and_then(|root| path.strip_prefix(root).ok())
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 /// Why a unit has no compiler IR.

@@ -175,6 +175,7 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
     };
 
     let mut ir = CompilerIr::empty(unit.clone());
+    ir.anchored_at = Some(loaded.root.display().to_string());
     let mut types = TypeTable::default();
     let mut modules = vec![krate.root_module(db)];
     while let Some(module) = modules.pop() {
@@ -420,6 +421,10 @@ pub(crate) fn file_of(loaded: &Loaded, path: &Path) -> Option<ra_ap_vfs::FileId>
 }
 
 /// A byte range of one file, spelled the way the project spells the file.
+///
+/// Against the workspace root this process read the project from, which the
+/// analysis states in [`CompilerIr::anchored_at`] — the spelling is written and
+/// read back by one shared rule rather than by two that have to agree.
 pub(crate) fn source_range(
     loaded: &Loaded,
     file_id: ra_ap_vfs::FileId,
@@ -431,13 +436,7 @@ pub(crate) fn source_range(
         .vfs
         .file_path(file_id)
         .as_path()
-        .map(|path| {
-            let path = Path::new(path.as_str());
-            path.strip_prefix(&loaded.root)
-                .unwrap_or(path)
-                .display()
-                .to_string()
-        })
+        .map(|path| codehelion_helper::ir::spell(Some(&loaded.root), Path::new(path.as_str())))
         .unwrap_or_default();
     SourceRange {
         file: path,
