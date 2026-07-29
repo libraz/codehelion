@@ -30,12 +30,16 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 
 use crate::ir::{CompilerIr, Unavailability, UnitRef};
 use crate::protocol::{
-    Analyze, Capability, ClientIdentity, FrameError, HelperIdentity, PROTOCOL_VERSION, Request,
-    RequestBody, Response, ResponseBody, VersionRange, read_frame, write_frame,
+    Analyze, BuildDescription, Capability, ClientIdentity, DescribeBuild, FrameError,
+    HelperIdentity, OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, Request, RequestBody, Response,
+    ResponseBody, VersionRange, read_frame, write_frame,
 };
 
 /// How long a request waits before the helper is treated as unresponsive.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The oldest revision that can be asked what a tree is built under.
+const DESCRIBES_BUILDS: u32 = 2;
 
 /// Lines of helper standard error kept for diagnostics.
 ///
@@ -80,6 +84,17 @@ pub enum HelperError {
     MissingRequiredCapability {
         /// What it could not supply.
         missing: Capability,
+    },
+    /// The revision the two sides settled on has no way to ask this.
+    #[error(
+        "the helper speaks protocol {agreed}, which has no way to ask it to {request}; \
+         update the helper"
+    )]
+    TooOld {
+        /// What the handshake settled on.
+        agreed: u32,
+        /// What could not be asked, as a person would say it.
+        request: &'static str,
     },
     /// The helper did not answer in time.
     #[error("the helper did not answer within {}s", timeout.as_secs())]
@@ -213,7 +228,10 @@ impl Helper {
             responses,
             stderr,
             identity: unknown_identity(),
-            protocol_version: PROTOCOL_VERSION,
+            // Until the handshake settles one, requests travel at the oldest
+            // revision this build can speak, because that is the only one a
+            // peer that has not spoken yet is known to have.
+            protocol_version: OLDEST_PROTOCOL_VERSION,
             timeout,
             next_id: 0,
         };
@@ -311,9 +329,38 @@ impl Helper {
         }
     }
 
+    /// Ask what the tree at `root` is analysed under.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the helper predates the request, cannot be written to, does not
+    /// answer in time, dies, or answers something else. A helper that answers
+    /// with a failure is reported as having refused: conditions nobody could
+    /// name are not conditions a run may record its answers under.
+    pub fn describe(&mut self, root: &Path) -> Result<BuildDescription, HelperError> {
+        if self.protocol_version < DESCRIBES_BUILDS {
+            return Err(HelperError::TooOld {
+                agreed: self.protocol_version,
+                request: "describe the build",
+            });
+        }
+        let id = self.send(RequestBody::DescribeBuild(DescribeBuild {
+            root: root.display().to_string(),
+        }))?;
+        match self.receive(id)? {
+            ResponseBody::Build(build) => Ok(*build),
+            _ => Err(HelperError::Died {
+                stderr: vec!["the helper answered a build description with something else".into()],
+            }),
+        }
+    }
+
     /// Send the handshake and take what comes back.
     fn shake_hands(&mut self) -> Result<(), HelperError> {
-        let ours = VersionRange::exactly(PROTOCOL_VERSION);
+        let ours = VersionRange {
+            min: OLDEST_PROTOCOL_VERSION,
+            max: PROTOCOL_VERSION,
+        };
         let id = self.send(RequestBody::Handshake(ClientIdentity {
             client: env!("CARGO_PKG_NAME").into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
@@ -576,9 +623,9 @@ impl Supervisor {
 const fn unavailability(error: &HelperError) -> Unavailability {
     match error {
         HelperError::TimedOut { .. } => Unavailability::HelperTimedOut,
-        HelperError::NoCommonProtocol { .. } | HelperError::MissingRequiredCapability { .. } => {
-            Unavailability::ToolchainMismatch
-        }
+        HelperError::NoCommonProtocol { .. }
+        | HelperError::MissingRequiredCapability { .. }
+        | HelperError::TooOld { .. } => Unavailability::ToolchainMismatch,
         _ => Unavailability::HelperDied,
     }
 }

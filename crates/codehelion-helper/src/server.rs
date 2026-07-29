@@ -19,8 +19,8 @@ use std::io::{Read, Write};
 
 use crate::ir::{CompilerIr, Unavailability};
 use crate::protocol::{
-    Analyze, Failure, FrameError, HelperIdentity, PROTOCOL_VERSION, Request, RequestBody, Response,
-    ResponseBody, write_frame,
+    Analyze, BuildDescription, DescribeBuild, Failure, FrameError, HelperIdentity,
+    PROTOCOL_VERSION, Request, RequestBody, Response, ResponseBody, write_frame,
 };
 
 /// What a backend can say about one unit.
@@ -37,6 +37,20 @@ pub enum Answer {
     Failed(Failure),
 }
 
+/// What a backend can say about the conditions a tree is read under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Description {
+    /// What the code is analysed under. Empty when there is no project here to
+    /// describe, which is a description rather than a failure to make one.
+    Build(BuildDescription),
+    /// The conditions could not be established.
+    ///
+    /// Apart from an empty description on purpose: a run cannot record its
+    /// answers under conditions nobody could name, so this stops the run
+    /// instead of filing it under conditions that were guessed at.
+    Failed(Failure),
+}
+
 /// One compiler, behind one program.
 pub trait Backend {
     /// Who this helper is and what it can supply.
@@ -44,6 +58,9 @@ pub trait Backend {
     /// Asked once per connection, at the handshake. What it claims here bounds
     /// what it will be asked for, so a capability listed is a promise.
     fn identity(&self) -> HelperIdentity;
+
+    /// What the code in a tree is analysed under.
+    fn describe(&mut self, request: &DescribeBuild) -> Description;
 
     /// Analyse one unit.
     fn analyze(&mut self, request: &Analyze) -> Answer;
@@ -86,6 +103,13 @@ pub fn serve<B: Backend, R: Read, W: Write>(
 }
 
 fn answer<B: Backend>(backend: &mut B, request: &Request) -> ResponseBody {
+    // Answered before the revision is checked, and it is the only message that
+    // is: a handshake is how two peers find out what they can say to each
+    // other, so refusing it for arriving in the wrong revision would make the
+    // question unaskable by anyone who did not already know the answer.
+    if let RequestBody::Handshake(_) = &request.body {
+        return ResponseBody::Handshake(Box::new(backend.identity()));
+    }
     if request.protocol_version != PROTOCOL_VERSION {
         return ResponseBody::Failed(Failure {
             code: "protocol_version".to_string(),
@@ -96,7 +120,12 @@ fn answer<B: Backend>(backend: &mut B, request: &Request) -> ResponseBody {
         });
     }
     match &request.body {
+        // Answered above, before anything was agreed.
         RequestBody::Handshake(_) => ResponseBody::Handshake(Box::new(backend.identity())),
+        RequestBody::DescribeBuild(describe) => match backend.describe(describe) {
+            Description::Build(build) => ResponseBody::Build(Box::new(build)),
+            Description::Failed(failure) => ResponseBody::Failed(failure),
+        },
         RequestBody::Analyze(analyze) => match backend.analyze(analyze) {
             Answer::Analyzed(ir) => ResponseBody::Analyzed(ir),
             Answer::Unavailable(reason) => ResponseBody::Unavailable {
@@ -130,6 +159,13 @@ mod tests {
                 toolchains: vec!["fixed 1.0".to_string()],
                 capabilities: vec![Capability::Types],
             }
+        }
+
+        fn describe(&mut self, _request: &DescribeBuild) -> Description {
+            Description::Build(BuildDescription {
+                features: vec!["ledger/std".to_string()],
+                cfgs: vec!["unix".to_string()],
+            })
         }
 
         fn analyze(&mut self, request: &Analyze) -> Answer {
@@ -243,17 +279,60 @@ mod tests {
         assert!(matches!(responses[0].body, ResponseBody::Shutdown));
     }
 
+    #[test]
+    fn a_description_says_what_the_backend_reads_the_tree_under() {
+        let (responses, _) = conversation(&[RequestBody::DescribeBuild(DescribeBuild {
+            root: "/repo".to_string(),
+        })]);
+        match &responses[0].body {
+            ResponseBody::Build(build) => {
+                assert_eq!(build.features, vec!["ledger/std".to_string()]);
+                assert_eq!(build.cfgs, vec!["unix".to_string()]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     /// A request in a revision this build does not speak is refused, rather
     /// than answered in a language neither side chose.
     #[test]
     fn a_request_from_another_revision_is_refused_by_name() {
+        let response = at_revision(
+            PROTOCOL_VERSION + 7,
+            RequestBody::Analyze(Analyze {
+                unit: unit(),
+                want: vec![Capability::Types],
+            }),
+        );
+        assert_eq!(response.id, 3);
+        assert_eq!(response.protocol_version, PROTOCOL_VERSION);
+        match &response.body {
+            ResponseBody::Failed(failure) => assert_eq!(failure.code, "protocol_version"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Except the handshake, which is how a revision gets agreed in the first
+    /// place. Refusing it for arriving in the wrong one would leave a peer that
+    /// guessed wrong with no way to find out what to guess instead.
+    #[test]
+    fn a_handshake_from_another_revision_is_answered_rather_than_refused() {
+        let response = at_revision(PROTOCOL_VERSION + 7, handshake());
+        match &response.body {
+            ResponseBody::Handshake(identity) => assert_eq!(identity.name, "fixed"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// One request, sent in `revision` whatever this build speaks.
+    fn at_revision(revision: u32, body: RequestBody) -> Response {
         let mut input = Vec::new();
         write_frame(
             &mut input,
             &Request {
-                protocol_version: PROTOCOL_VERSION + 7,
+                protocol_version: revision,
                 id: 3,
-                body: handshake(),
+                body,
             },
         )
         .unwrap();
@@ -263,13 +342,7 @@ mod tests {
         };
         let mut output = Vec::new();
         serve(&mut backend, &mut input.as_slice(), &mut output).unwrap();
-        let response: Response = read_frame(&mut output.as_slice()).unwrap().unwrap();
-        assert_eq!(response.id, 3);
-        assert_eq!(response.protocol_version, PROTOCOL_VERSION);
-        match &response.body {
-            ResponseBody::Failed(failure) => assert_eq!(failure.code, "protocol_version"),
-            other => panic!("{other:?}"),
-        }
+        read_frame(&mut output.as_slice()).unwrap().unwrap()
     }
 
     /// Framing is no longer trustworthy once a frame has not parsed, so the

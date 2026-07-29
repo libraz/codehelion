@@ -10,6 +10,8 @@
 //! ```sh
 //! mock-helper well-behaved      # answers correctly
 //! mock-helper ancient           # speaks a protocol revision nobody else does
+//! mock-helper predates-describe # speaks the oldest revision, which cannot
+//! mock-helper undescribed       # cannot say what the tree is built with
 //! mock-helper untyped           # cannot resolve types
 //! mock-helper slow              # answers, eventually
 //! mock-helper deaf              # never answers
@@ -31,8 +33,9 @@ use codehelion_helper::ir::{
     Unavailability, UnitRef,
 };
 use codehelion_helper::protocol::{
-    Capability, Failure, HelperIdentity, PROTOCOL_VERSION, Request, RequestBody, Response,
-    ResponseBody, VersionRange, read_frame, write_frame,
+    BuildDescription, Capability, Failure, HelperIdentity, OLDEST_PROTOCOL_VERSION,
+    PROTOCOL_VERSION, Request, RequestBody, Response, ResponseBody, VersionRange, read_frame,
+    write_frame,
 };
 
 fn main() {
@@ -75,6 +78,16 @@ fn main() {
             RequestBody::Handshake(_) => {
                 ResponseBody::Handshake(Box::new(identity(behaviour.as_str())))
             }
+            RequestBody::DescribeBuild(_) if behaviour == "undescribed" => {
+                ResponseBody::Failed(Failure {
+                    code: "no_build_description".into(),
+                    message: "this mock cannot read a manifest".into(),
+                })
+            }
+            RequestBody::DescribeBuild(_) => ResponseBody::Build(Box::new(BuildDescription {
+                features: vec!["mock/std".into()],
+                cfgs: vec!["target_os = \"mock\"".into()],
+            })),
             RequestBody::Analyze(analyze) if behaviour == "needs-execution" => {
                 ResponseBody::Unavailable {
                     unit: analyze.unit,
@@ -138,11 +151,17 @@ fn analyzed(unit: UnitRef) -> CompilerIr {
 /// What this mock claims to be, under the named behaviour.
 fn identity(behaviour: &str) -> HelperIdentity {
     let protocol = if behaviour == "ancient" {
-        // A revision far enough back that no negotiation can reach it.
+        // A revision far enough back that no negotiation can reach it: below
+        // the oldest a client still accepts, rather than merely below the
+        // newest, which would be a helper a release behind and usable.
         VersionRange {
             min: 0,
-            max: PROTOCOL_VERSION.saturating_sub(1),
+            max: OLDEST_PROTOCOL_VERSION.saturating_sub(1),
         }
+    } else if behaviour == "predates-describe" {
+        // A helper a release behind: everything the older revision has works,
+        // and what was added after it cannot be asked for.
+        VersionRange::exactly(OLDEST_PROTOCOL_VERSION)
     } else {
         VersionRange::exactly(PROTOCOL_VERSION)
     };

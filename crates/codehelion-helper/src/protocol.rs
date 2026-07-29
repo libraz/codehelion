@@ -29,7 +29,19 @@ use crate::ir::{CompilerIr, Unavailability, UnitRef};
 ///
 /// Bumped when a change would make an older peer misread a message. Additive
 /// fields with defaults do not need it; removing or repurposing one does.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// Revision 2 added [`RequestBody::DescribeBuild`]. A helper from revision 1
+/// cannot parse it, which is why asking is gated on what the handshake settled
+/// rather than on what this build would like to send.
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// The oldest revision this build can still talk to.
+///
+/// Two things depend on it. A client accepts everything from here up, so a
+/// helper one release behind is still usable for what both sides have; and the
+/// handshake itself travels at this revision, because a peer that has not said
+/// what it speaks cannot be sent a message in a revision it may not have.
+pub const OLDEST_PROTOCOL_VERSION: u32 = 1;
 
 /// Largest payload a single frame may declare.
 ///
@@ -214,10 +226,50 @@ pub struct Request {
 pub enum RequestBody {
     /// Identify yourself and say what you can do.
     Handshake(ClientIdentity),
+    /// Say what the code in a tree is analyzed under.
+    ///
+    /// Asked before any unit is, because what a run records its answers under
+    /// has to be settled before there are answers to record.
+    DescribeBuild(DescribeBuild),
     /// Analyze one unit and return what the compiler knows about it.
     Analyze(Analyze),
     /// Finish outstanding work and exit.
     Shutdown,
+}
+
+/// The tree whose build is being asked about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescribeBuild {
+    /// A directory inside the project, as this machine spells it.
+    ///
+    /// Not necessarily the project's own root: a scan can be rooted at one
+    /// member of a workspace, and finding the project from there is the
+    /// helper's job because it is the side that knows what a project is.
+    pub root: String,
+}
+
+/// The conditions a tree's code is analyzed under.
+///
+/// What belongs here is what changes the answers rather than what changes the
+/// build: two runs that resolve the same names to the same things are one
+/// variant however differently they were invoked, and two that do not are two
+/// however alike the command line looked.
+///
+/// Empty on both counts when the helper found no project to describe. That is
+/// not the same claim as a project that enables nothing — a described build
+/// always has settings, because the target alone supplies a dozen — so nothing
+/// has to be spelled to tell the two apart.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildDescription {
+    /// Enabled features, each qualified by the package that enables it.
+    ///
+    /// Qualified because a feature is declared per package: `serde/derive` and
+    /// `ledger/derive` are unrelated facts, and an unqualified list would let
+    /// one package's selection stand in for another's.
+    pub features: Vec<String>,
+    /// The conditional-compilation settings the code is read under, as the
+    /// compiler spells them.
+    pub cfgs: Vec<String>,
 }
 
 /// One unit to analyze, and what is wanted from it.
@@ -261,6 +313,8 @@ pub struct Response {
 pub enum ResponseBody {
     /// Who the helper is and what it can do.
     Handshake(Box<HelperIdentity>),
+    /// What the tree's code is analyzed under.
+    Build(Box<BuildDescription>),
     /// What the compiler knows about the unit.
     Analyzed(Box<CompilerIr>),
     /// Nothing can be known about the unit, and why.

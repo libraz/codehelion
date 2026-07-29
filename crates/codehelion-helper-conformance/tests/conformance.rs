@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use codehelion_helper::client::{Analysis, Helper, HelperError, MAX_DIAGNOSTIC_LINES, Supervisor};
 use codehelion_helper::ir::{TypeCategory, Unavailability, UnitRef};
-use codehelion_helper::protocol::{Capability, PROTOCOL_VERSION};
+use codehelion_helper::protocol::{Capability, OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION};
 
 /// The deadline for tests that are not about a deadline.
 ///
@@ -57,6 +57,54 @@ fn a_helper_from_another_era_is_named_as_such_rather_than_used() {
     // The message has to tell someone which side to update.
     let said = error.to_string();
     assert!(said.contains("update"), "{said}");
+}
+
+/// A helper one revision behind is usable for everything that revision has,
+/// and says so about what it does not. Turning it away outright would make
+/// every addition to the protocol a reason to reinstall, and answering around
+/// it would file a run's results under conditions nobody established.
+#[test]
+fn a_helper_a_release_behind_answers_what_its_revision_has_and_declines_the_rest() {
+    let mut helper = start("predates-describe", DEADLINE).expect("the revisions overlap");
+    assert_eq!(helper.protocol_version(), OLDEST_PROTOCOL_VERSION);
+    let error = helper
+        .describe(Path::new("/repo"))
+        .expect_err("the older revision cannot be asked this");
+    assert!(matches!(error, HelperError::TooOld { .. }), "{error:?}");
+    assert!(error.to_string().contains("update the helper"), "{error}");
+    // And what its revision does have still works: the point is a helper that
+    // is behind, not one that is broken.
+    assert!(matches!(
+        helper.analyze(&unit("src/lib.rs"), &[Capability::Types]),
+        Ok(Analysis::Done(_))
+    ));
+    helper.shutdown().expect("it goes when asked");
+}
+
+#[test]
+fn a_helper_says_what_the_tree_it_was_pointed_at_is_read_under() {
+    let mut helper = start("well-behaved", DEADLINE).expect("the mock answers");
+    let described = helper.describe(Path::new("/repo")).expect("it describes");
+    assert_eq!(described.features, vec!["mock/std".to_string()]);
+    assert_eq!(described.cfgs, vec!["target_os = \"mock\"".to_string()]);
+    helper.shutdown().expect("it goes when asked");
+}
+
+/// A helper that cannot establish what a tree is read under says so, and that
+/// is not an empty description: a run that recorded its answers under
+/// conditions nobody could name would compare them against answers from
+/// conditions that were not those.
+#[test]
+fn conditions_nobody_could_establish_are_refused_rather_than_left_empty() {
+    let mut helper = start("undescribed", DEADLINE).expect("the mock answers");
+    let error = helper
+        .describe(Path::new("/repo"))
+        .expect_err("it cannot say");
+    let HelperError::Refused { code, .. } = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(code, "no_build_description");
+    helper.shutdown().expect("it goes when asked");
 }
 
 #[test]
