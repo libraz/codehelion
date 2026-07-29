@@ -243,6 +243,10 @@ pub struct RustBuild {
     pub target: String,
     /// Enabled cargo features, deduplicated and sorted: they are a set, and
     /// nothing about the order they were requested in reaches the compiler.
+    ///
+    /// Each names the package it belongs to, because a feature is declared per
+    /// package: one package's `derive` and another's are unrelated, and a bare
+    /// list would let either stand for both.
     pub features: Vec<String>,
     /// `--cfg` settings, deduplicated and sorted for the same reason.
     pub cfgs: Vec<String>,

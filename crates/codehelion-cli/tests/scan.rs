@@ -1321,6 +1321,63 @@ fn a_scan_below_the_workspace_root_still_gets_what_the_compiler_resolved() {
     );
 }
 
+/// Two readings of one tree under different features are two programs, and a
+/// run has to file them apart. Nothing in the source text changes when a
+/// feature is switched on — the manifest is not a file the scan reads — so a
+/// run that took its identity from the tree alone would report the first
+/// reading's findings as this one's, and the types the compiler resolved
+/// differently would go unremarked.
+#[test]
+fn one_tree_read_with_different_features_is_not_reported_as_the_other() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let manifest = |default: &str| {
+        format!(
+            "[workspace]\n\n[package]\nname = \"counters\"\nversion = \"0.1.0\"\n\
+             edition = \"2021\"\npublish = false\n\n\
+             [features]\ndefault = [{default}]\nwide = []\n"
+        )
+    };
+    std::fs::write(root.join("Cargo.toml"), manifest("")).unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "#[cfg(feature = \"wide\")]\npub type Count = i64;\n\
+         #[cfg(not(feature = \"wide\"))]\npub type Count = i16;\n\
+         pub fn counted(values: &[Count]) -> Count { values.iter().sum() }\n",
+    )
+    .unwrap();
+
+    let scan = || {
+        let output = cmd()
+            .current_dir(root)
+            .args(["scan", ".", "--mode", "semantic", "--format", "json"])
+            .output()
+            .expect("the scan should run");
+        output.status.success().then(|| {
+            serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .expect("stdout is one JSON document")
+        })
+    };
+    let Some(first) = scan() else {
+        // No helper on this machine, which the pairing test above covers.
+        return;
+    };
+    // The same reading twice: reported from what was recorded, which is what
+    // makes the third scan below say something.
+    let again = scan().expect("the helper answered once, so it answers again");
+    assert_eq!(again["run"]["reused"], serde_json::json!(true));
+
+    std::fs::write(root.join("Cargo.toml"), manifest("\"wide\"")).unwrap();
+    let widened = scan().expect("the helper answers");
+    assert_ne!(
+        widened["run"]["reused"],
+        serde_json::json!(true),
+        "{widened}"
+    );
+    assert_ne!(widened["run"]["run_id"], first["run"]["run_id"]);
+}
+
 /// A recorded semantic run is reported again like any other, and it has to
 /// come back with the sentence that makes it semantic. Restored short — no
 /// compiler line, or one claiming files nobody asked about were failures — a

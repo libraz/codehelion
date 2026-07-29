@@ -55,6 +55,7 @@ use crate::report::{self, Report};
 use crate::semantic;
 use crate::suppress;
 use codehelion_core::doctor;
+use codehelion_helper::Helper;
 
 /// The reporting metadata of one parsed source file.
 struct SourceMeta {
@@ -149,16 +150,62 @@ impl Compilers {
     /// the project's toolchain would attribute them to a compiler that never
     /// ran. The lockfile is the project's, because the dependency versions are
     /// part of what its source means.
-    fn build(&self, root: &Path) -> BuildConfiguration {
-        BuildConfiguration::Rust(Box::new(RustBuild {
+    ///
+    /// The features and settings are asked of the helper, because it is the
+    /// side that resolves them, and asked before anything is analysed, because
+    /// they are what the answers get filed under. Two runs of one tree under
+    /// different features resolve different types; recorded under one identity
+    /// they would be compared against each other, and the older of the two
+    /// would be reported as findings that this run did not make.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the helper cannot say. A run that could not name what it
+    /// analysed the tree under would file its results under conditions it
+    /// guessed at, which is worse than not running.
+    fn build(&self, root: &Path) -> Result<BuildConfiguration> {
+        let described = self.describe(root)?;
+        Ok(BuildConfiguration::Rust(Box::new(RustBuild {
             compiler_version: self.greeting.toolchains.join(", "),
             lockfile_hash: std::fs::read_to_string(root.join("Cargo.lock"))
                 .ok()
                 .map(|text| content_hash(&text)),
+            features: described.features,
+            cfgs: described.cfgs,
             ..RustBuild::default()
-        }))
+        })))
+    }
+
+    /// Ask one helper what the tree is read under, and let it go again.
+    ///
+    /// Its own short conversation rather than the one the analysis holds: this
+    /// is asked before a run knows whether it will analyse anything at all,
+    /// and a scan of an unchanged tree is answered from what was recorded
+    /// without a compiler being asked about a single file.
+    fn describe(&self, root: &Path) -> Result<codehelion_helper::BuildDescription> {
+        let mut helper = Helper::start(&self.program, DESCRIBE_TIMEOUT).with_context(|| {
+            format!(
+                "asking {} what this tree is built with",
+                self.program.display()
+            )
+        })?;
+        let described = helper.describe(root);
+        let _ = helper.shutdown();
+        described.with_context(|| {
+            format!(
+                "the helper at {} could not say what this tree is built with",
+                self.program.display()
+            )
+        })
     }
 }
+
+/// How long the helper has to say what a tree is built with.
+///
+/// Shorter than an analysis and longer than anything this program does itself:
+/// answering means reading the project's own manifests, which is a fraction of
+/// what analysing it costs but is still somebody else's process doing work.
+const DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 fn run_with(
     args: &ScanArgs,
@@ -181,7 +228,7 @@ fn run_with(
     let sources = std::mem::take(&mut discovered.units);
     let (sources, glob_excluded) = filter_globs(&cfg, sources)?;
 
-    let variant = variant_of(compilers, &cfg, discovered.header_language, &root);
+    let variant = variant_of(compilers, &cfg, discovered.header_language, &root)?;
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
     // A recorded semantic run holds what a compiler said about the tree, so
     // reporting it back keeps the part that says how much of it a compiler
@@ -291,16 +338,20 @@ fn variant_of(
     cfg: &Config,
     headers: Language,
     root: &Path,
-) -> BuildVariant {
+) -> Result<BuildVariant> {
     let languages = LanguageSelection {
         rust: cfg.languages.rust,
         c: cfg.languages.c,
         cpp: cfg.languages.cpp,
     };
-    compilers.map_or_else(
-        || BuildVariant::structural(languages, headers),
-        |compilers| BuildVariant::semantic(languages, headers, compilers.build(root)),
-    )
+    let Some(compilers) = compilers else {
+        return Ok(BuildVariant::structural(languages, headers));
+    };
+    Ok(BuildVariant::semantic(
+        languages,
+        headers,
+        compilers.build(root)?,
+    ))
 }
 
 /// How long one unit's analysis may take before the helper is given up on.
