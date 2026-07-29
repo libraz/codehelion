@@ -1,5 +1,5 @@
 //! End-to-end tests that run the compiled binary.
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -23,23 +23,32 @@ fn doctor_reports_own_version() {
         .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
-/// Whether the Rust helper is found depends on the machine, so what is asserted
-/// is the helper nobody can have yet: it has to be reported as absent, as
-/// optional, and with something to do about it. A row that said only "not
-/// found" would be a report telling somebody a fact they cannot act on.
+/// Every helper is listed whether or not this machine has it, and every one is
+/// optional. A report that left out the ones nobody installed would answer
+/// "what can this do here" by saying only what it can already do.
+///
+/// What a missing one has to carry is fixed here too, and it is the thing a row
+/// saying "not found" does not: something to do about it. Whether either helper
+/// is installed depends on the machine, so the absent case is asserted where it
+/// can be arranged rather than where it might happen to occur.
 #[test]
-fn doctor_reports_a_helper_that_is_not_installed_as_optional_and_actionable() {
-    cmd()
-        .arg("doctor")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("rust-compiler-helper"))
-        .stdout(predicate::str::contains("clang-helper"))
-        .stdout(predicate::str::contains("not found"))
-        .stdout(predicate::str::contains(
-            "not needed for fast or structural",
-        ))
-        .stdout(predicate::str::contains("codehelion-backend-clang"));
+fn doctor_lists_every_helper_as_optional_whether_or_not_it_is_installed() {
+    let output = cmd().arg("doctor").output().expect("doctor should run");
+    let text = String::from_utf8(output.stdout).expect("output is utf-8");
+    for helper in ["rust-compiler-helper", "clang-helper"] {
+        let row = text
+            .lines()
+            .find(|line| line.contains(helper))
+            .unwrap_or_else(|| panic!("{helper} is listed: {text}"));
+        assert!(row.contains("optional"), "{row}");
+        if row.contains("not found") {
+            assert!(row.contains("not needed for fast or structural"), "{row}");
+            assert!(
+                row.contains("codehelion-backend-"),
+                "a missing helper names the program to install: {row}"
+            );
+        }
+    }
 }
 
 /// Being on disk is not being usable, so a row that claims a helper is there

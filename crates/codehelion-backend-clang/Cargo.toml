@@ -1,0 +1,30 @@
+[package]
+name = "codehelion-backend-clang"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Out-of-process C and C++ compiler helper for codehelion."
+
+[dependencies]
+codehelion-helper = { version = "0.1.0", path = "../codehelion-helper" }
+# Clang through libclang's stable C ABI, loaded at run time rather than linked.
+# Loading it means this program builds on a machine that has no Clang and says
+# so when started, which is what an optional component has to be able to do;
+# linking the C++ API instead would pin a whole LLVM release into the binary
+# and make installing the helper the harder half of installing the tool.
+#
+# No `clang_*` feature is enabled, so only the API every supported release has
+# is compiled — the reason to talk to a compiler through a C ABI at all.
+clang = { version = "2", features = ["runtime"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+codehelion-fixtures = { version = "0.1.0", path = "../codehelion-fixtures" }
+tempfile = "3"
+
+[lints]
+workspace = true
