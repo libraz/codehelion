@@ -123,6 +123,9 @@ impl VersionRange {
 pub enum Capability {
     /// Resolved types for expressions and bindings.
     Types,
+    /// Which definition each name refers to, and whether it is outside the
+    /// scanned code.
+    NameResolution,
     /// Resolved call targets.
     CallTargets,
     /// A control-flow graph built from the compiler's own.
@@ -153,18 +156,37 @@ pub enum Absence {
 }
 
 impl Capability {
+    /// Stable lowercase identifier, the same spelling this serializes as.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Types => "types",
+            Self::NameResolution => "name_resolution",
+            Self::CallTargets => "call_targets",
+            Self::MirCfg => "mir_cfg",
+            Self::MacroExpansion => "macro_expansion",
+            Self::TemplateInstantiation => "template_instantiation",
+            Self::OverloadResolution => "overload_resolution",
+            Self::Unknown => "unknown",
+        }
+    }
+
     /// What its absence costs.
     ///
-    /// Only resolved types are load-bearing. Semantic mode exists to answer
-    /// with what the compiler knows rather than with what the text looks like,
-    /// and every other capability here refines an answer that types make
-    /// possible in the first place. Missing any of those narrows the result;
-    /// missing types would leave a run that reports syntactic findings under a
-    /// semantic label, which is worse than not running.
+    /// Two are load-bearing, for the same reason stated twice. Semantic mode
+    /// exists to answer with what the compiler knows rather than with what the
+    /// text looks like: without resolved types a run reports syntactic findings
+    /// under a semantic label, and without name resolution it decides which
+    /// names to compare on by guessing from their spelling, which is the
+    /// structural answer wearing the same stronger name.
+    ///
+    /// Everything else refines an answer those two make possible in the first
+    /// place, so missing any of them narrows the result rather than misnaming
+    /// it.
     #[must_use]
     pub const fn absence(self) -> Absence {
         match self {
-            Self::Types => Absence::Refuse,
+            Self::Types | Self::NameResolution => Absence::Refuse,
             Self::CallTargets
             | Self::MirCfg
             | Self::MacroExpansion
@@ -510,6 +532,26 @@ mod tests {
         assert_eq!(core.best_common(helper), None);
     }
 
+    /// One spelling, kept in one place. A stored capability and a transmitted
+    /// one that disagree would make a database written by this build unreadable
+    /// by it.
+    #[test]
+    fn what_a_capability_is_called_is_what_it_is_sent_as() {
+        for capability in [
+            Capability::Types,
+            Capability::NameResolution,
+            Capability::CallTargets,
+            Capability::MirCfg,
+            Capability::MacroExpansion,
+            Capability::TemplateInstantiation,
+            Capability::OverloadResolution,
+            Capability::Unknown,
+        ] {
+            let sent = serde_json::to_string(&capability).unwrap();
+            assert_eq!(sent, format!("\"{}\"", capability.name()));
+        }
+    }
+
     #[test]
     fn a_capability_this_build_cannot_name_still_parses() {
         let listed: Vec<Capability> =
@@ -517,9 +559,12 @@ mod tests {
         assert_eq!(listed, vec![Capability::Types, Capability::Unknown]);
     }
 
+    /// The two that decide what a comparison is made of. Everything else
+    /// sharpens a comparison that these make possible at all.
     #[test]
-    fn only_resolved_types_are_worth_refusing_over() {
+    fn what_a_comparison_is_made_of_is_worth_refusing_over() {
         assert_eq!(Capability::Types.absence(), Absence::Refuse);
+        assert_eq!(Capability::NameResolution.absence(), Absence::Refuse);
         for capability in [
             Capability::CallTargets,
             Capability::MirCfg,

@@ -212,7 +212,7 @@ fn write_helpers(
             tx.execute(
                 "INSERT OR IGNORE INTO compiler_helper_capability
                      (compiler_helper_id, capability) VALUES (?1, ?2)",
-                params![id, capability_name(*capability)],
+                params![id, capability.name()],
             )?;
         }
         for toolchain in &helper.identity.toolchains {
@@ -562,18 +562,6 @@ fn offset(value: u64) -> i64 {
 /// A position in a list as the column stores it.
 fn index_of(value: usize) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-const fn capability_name(capability: Capability) -> &'static str {
-    match capability {
-        Capability::Types => "types",
-        Capability::CallTargets => "call_targets",
-        Capability::MirCfg => "mir_cfg",
-        Capability::MacroExpansion => "macro_expansion",
-        Capability::TemplateInstantiation => "template_instantiation",
-        Capability::OverloadResolution => "overload_resolution",
-        Capability::Unknown => "unknown",
-    }
 }
 
 /// Reading stored compiler results back into the shape they were written from.
