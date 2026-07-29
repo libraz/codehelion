@@ -335,14 +335,12 @@ fn ask_about(
 /// subset of the sources that were asked about, and lining up two lists of
 /// different lengths by index would attribute one file's types to another.
 ///
-/// A helper anchors what it found at the path the project spells, relative to
-/// the root it read the project from, so that is the name a file's own answers
-/// are looked up under. When a scan is rooted somewhere else — a subdirectory
-/// of a workspace — the two spellings differ and the file's types go
-/// unclaimed. Unclaimed rather than misattributed: nothing here matches a
-/// reported path against a longer one it happens to end with, because two
-/// files can end the same way and the wrong one's types would be counted for
-/// this one without anything saying so.
+/// A helper anchors what it found at the path the project spells, against the
+/// root it read the project from, and the analysis says which root that was.
+/// So the name a file's answers are looked up under is the one that analysis
+/// would have filed it under — asked of the analysis rather than guessed, which
+/// is what lets a scan rooted in a subdirectory of a workspace still be given
+/// what the compiler resolved about its files.
 fn resolved_types(
     asked: &semantic::Answers,
     sources: &[SourceUnit],
@@ -363,7 +361,7 @@ fn resolved_types(
                         let ir = answer.analysis()?;
                         Some(semantic::resolved_types_for(
                             ir,
-                            &source.relative_path.to_string_lossy(),
+                            &ir.spelling(&source.absolute_path),
                         ))
                     })
                     .unwrap_or_default()

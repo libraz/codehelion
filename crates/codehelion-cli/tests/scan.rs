@@ -1267,6 +1267,60 @@ fn semantic_mode_either_asks_a_compiler_or_says_which_one_is_missing() {
     }
 }
 
+/// A scan rooted inside a workspace spells its files against that root, and
+/// the compiler spells them against the workspace's. Matched on the scan's own
+/// spelling the two never meet, and every file's types go missing without
+/// anything saying so — the analysis says what it anchored against so the two
+/// can be brought together instead.
+#[test]
+fn a_scan_below_the_workspace_root_still_gets_what_the_compiler_resolved() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("member/src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"member\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("member/Cargo.toml"),
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    // The second file is a declared module: a file no crate reaches is a file
+    // the compiler resolves nothing in, which would leave the group scored the
+    // way an unanchored one is and prove nothing about the anchoring.
+    std::fs::write(
+        root.join("member/src/lib.rs"),
+        format!("mod other;\n\n{CHECKSUM_RS}"),
+    )
+    .unwrap();
+    std::fs::write(root.join("member/src/other.rs"), CHECKSUM_RS).unwrap();
+
+    let output = cmd()
+        .current_dir(root.join("member"))
+        .args(["scan", ".", "--mode", "semantic", "--format", "json"])
+        .output()
+        .expect("the scan should run");
+    if !output.status.success() {
+        // No helper on this machine, which the pairing test above covers.
+        return;
+    }
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+    assert_eq!(report["summary"]["compiler"]["answered"], 2);
+    let types = report["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .find_map(|group| group["similarity"]["type_similarity"].as_f64())
+        .expect("a group scored on every dimension");
+    assert!(
+        (types - 1.0).abs() < f64::EPSILON,
+        "two copies of one function agree on their types: {report}"
+    );
+}
+
 /// A recorded semantic run is reported again like any other, and it has to
 /// come back with the sentence that makes it semantic. Restored short — no
 /// compiler line, or one claiming files nobody asked about were failures — a
