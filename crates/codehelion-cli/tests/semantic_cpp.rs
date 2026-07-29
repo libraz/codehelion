@@ -56,20 +56,20 @@ fn a_cpp_tree_is_answered_about_rather_than_reported_as_unreadable() {
 
     let report = scan(&root);
     let coverage = &report["summary"]["compiler"];
-    assert!(
-        coverage["answered"].as_u64().unwrap_or(0) >= 2,
-        "the two translation units were not answered about: {coverage}"
+    // Both translation units and the header they share. The header is compiled
+    // by no command of its own, so it is answered by the units that read it —
+    // with what both of them agree it holds, since in this fixture they compile
+    // it into two different programs.
+    assert_eq!(
+        coverage["answered"].as_u64(),
+        Some(3),
+        "every file of the tree was answered about: {coverage}"
     );
-    // The header is included by both units and compiled as neither, so nothing
-    // names a command for it. That it is reported as such rather than silently
-    // absent is the point; that it is not reported as answered is what stops
-    // the count above from being met by something other than the units.
     assert!(
-        coverage["not_asked"].as_u64().unwrap_or(0) > 0
-            || !coverage["unavailable"]
-                .as_object()
-                .is_none_or(serde_json::Map::is_empty),
-        "a header no command compiles was neither asked about nor accounted for: {coverage}"
+        coverage["unavailable"]
+            .as_object()
+            .is_none_or(serde_json::Map::is_empty),
+        "nothing was left unanswerable: {coverage}"
     );
 }
 

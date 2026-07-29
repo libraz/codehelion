@@ -16,6 +16,24 @@
 //! of each answering for the other — silently, and in the direction that keeps
 //! names a normalizer should have replaced.
 //!
+//! # Why a header is answered by the units that read it
+//!
+//! A C or C++ header is compiled by no command of its own, so nothing can be
+//! asked about it as a unit — and a scan that stopped there would have nothing
+//! to say about the files a header-only library is entirely made of. What reads
+//! it is a translation unit, and that unit's analysis carries the header's
+//! names filed under the header.
+//!
+//! When several units read one header, what it is answered with is what they
+//! all agree on. The disagreements are real — the same declaration can resolve
+//! to a 32-bit accumulator in one unit and a 64-bit one in another — and there
+//! is exactly one thing to do with them that is neither picking a reading nor
+//! discarding the file: say nothing about the names the readings differ over,
+//! which leaves those to be compared as text, and say what the compiler
+//! resolved about the rest. Telling the readings apart instead would mean
+//! recording them under build variants of their own, which is a unit of
+//! recording this run does not have.
+//!
 //! # Why a file that was never asked about is its own outcome
 //!
 //! A run holds three kinds of file: the ones a compiler answered about, the
@@ -25,6 +43,7 @@
 //! helper as having failed on files it was never shown, and would hide the
 //! reason the run is thin. They are separate outcomes and stay separate.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -32,7 +51,7 @@ use codehelion_core::discovery::{Language, SourceUnit};
 use codehelion_core::engine::normalize::Resolution;
 use codehelion_core::ir::ByteRange;
 use codehelion_core::types::TypeTag;
-use codehelion_helper::ir::{CompilerIr, Unavailability, UnitRef};
+use codehelion_helper::ir::{CompilerIr, ResolvedSymbol, ResolvedType, Unavailability, UnitRef};
 use codehelion_helper::protocol::{Capability, Execution, HelperIdentity};
 use codehelion_helper::{Analysis, Supervisor};
 
@@ -184,13 +203,14 @@ pub(crate) fn ask(
         })
         .collect();
     let analyzes: Vec<&[Language]> = backends.iter().map(|backend| backend.analyzes).collect();
-    let gathered = gather(&analyzes, sources, variant, &mut |backend, unit| {
+    let mut gathered = gather(&analyzes, sources, variant, &mut |backend, unit| {
         supervisors
             .get_mut(backend)
             .map_or(Analysis::Missing(Unavailability::NotSupported), |helper| {
                 helper.analyze(unit, &WANTED)
             })
     });
+    read_by_other_units(&mut gathered, sources);
     // A backend that never said who it was leaves no row to point at, so the
     // rows are compacted and what the answers point at is moved with them.
     let mut helpers = Vec::new();
@@ -304,6 +324,220 @@ fn gather(
             }
         })
         .collect()
+}
+
+/// Answer the files nothing could be asked about as units of their own from the
+/// units that read them.
+///
+/// A header is the case this exists for: no command compiles one, so the
+/// request naming it comes back unanswerable, while the translation units that
+/// include it carry its names in their own analyses.
+///
+/// Only files nothing answered for are filled in. A file that is its own unit
+/// has an answer about the program it is, and replacing that with what its
+/// readers saw would be a worse answer arrived at indirectly.
+fn read_by_other_units(gathered: &mut [Gathered], sources: &[SourceUnit]) {
+    // Who read what, worked out in one pass over the analyses rather than
+    // searched per file: a tree holds about as many headers as units, and
+    // looking through every unit's symbols once per header is that product.
+    //
+    // Keyed by the root as well as by the name, because a name is only a name
+    // against something: two helpers can read one tree from different roots,
+    // and a file the one spells `src/a.hpp` is not whatever the other spells
+    // the same way.
+    let mut readers: BTreeMap<(&str, &str), Vec<(usize, &CompilerIr)>> = BTreeMap::new();
+    let mut roots: BTreeSet<&str> = BTreeSet::new();
+    for answer in gathered.iter() {
+        let Gathered::Analyzed { backend, ir } = answer else {
+            continue;
+        };
+        let root = ir.anchored_at.as_deref().unwrap_or_default();
+        roots.insert(root);
+        let mut seen = BTreeSet::new();
+        for symbol in &ir.symbols {
+            let file = symbol.anchor.expansion.file.as_str();
+            if seen.insert(file) {
+                readers
+                    .entry((root, file))
+                    .or_default()
+                    .push((*backend, ir));
+            }
+        }
+    }
+    let mut filled: Vec<(usize, Gathered)> = Vec::new();
+    for (at, (answer, source)) in gathered.iter().zip(sources).enumerate() {
+        let (Gathered::Unavailable { unit, .. } | Gathered::NotAsked { unit, .. }) = answer else {
+            continue;
+        };
+        // Named as the analyses that hold it would have filed it, which is how
+        // the project spells it against the root a helper read it from — worked
+        // out from that root rather than guessed at, so that a scan started in a
+        // subdirectory still finds its own files in the answers.
+        let mut readings: Vec<(usize, &CompilerIr, String)> = Vec::new();
+        for root in &roots {
+            let file = codehelion_helper::ir::spell(
+                (!root.is_empty()).then(|| Path::new(root)),
+                &source.absolute_path,
+            );
+            for (backend, ir) in readers.get(&(*root, file.as_str())).into_iter().flatten() {
+                readings.push((*backend, *ir, file.clone()));
+            }
+        }
+        let Some((backend, _, _)) = readings.first() else {
+            continue;
+        };
+        if let Some(ir) = agreed(unit.clone(), &readings) {
+            filled.push((
+                at,
+                Gathered::Analyzed {
+                    backend: *backend,
+                    ir: Box::new(ir),
+                },
+            ));
+        }
+    }
+    for (at, answer) in filled {
+        if let Some(slot) = gathered.get_mut(at) {
+            *slot = answer;
+        }
+    }
+}
+
+/// What every reading of one file agrees it holds.
+///
+/// Two readings agree about a name when they put it at the same bytes, call it
+/// the same thing, resolve it to the same definition, place that definition on
+/// the same side of the project boundary, and give it the same type. Anything
+/// less than all of that is a disagreement, and a disagreement is dropped: the
+/// name is then compared as it is written, which is what a run with no compiler
+/// would have done with it and is the direction that cannot mislead.
+///
+/// `None` when nothing survived, which is a file its readers say nothing common
+/// about — reported as unanswerable rather than as an analysis that found
+/// nothing, because those are different claims.
+///
+/// What the result is filed under keeps naming the file, and names the unit
+/// only when one unit read it. An agreement between several is an answer about
+/// no single unit, and the empty name is what this side already spells that
+/// with — while naming one of them would file the whole agreement under the
+/// program of whichever reading happened to come first.
+fn agreed(file: UnitRef, readings: &[(usize, &CompilerIr, String)]) -> Option<CompilerIr> {
+    let (_, first, first_file) = readings.first()?;
+    let unit = UnitRef {
+        unit: match readings {
+            [(_, only, _)] => only.unit.unit.clone(),
+            _ => String::new(),
+        },
+        ..file
+    };
+    let mut kept = written_in(first, first_file);
+    for (_, ir, file) in readings.iter().skip(1) {
+        let other = written_in(ir, file);
+        kept.retain(|at, held| {
+            other
+                .get(at)
+                .is_some_and(|found| same(ir, found, first, held))
+        });
+    }
+    if kept.is_empty() {
+        return None;
+    }
+    let mut merged = CompilerIr::empty(unit);
+    merged.anchored_at.clone_from(&first.anchored_at);
+    let mut types = Interned::default();
+    merged.symbols = kept
+        .into_values()
+        .map(|symbol| ResolvedSymbol {
+            type_index: symbol.type_index.and_then(|index| types.copy(first, index)),
+            ..symbol.clone()
+        })
+        .collect();
+    merged.types = types.types;
+    Some(merged)
+}
+
+/// Where each name written in `file` sits, keyed so that two readings of the
+/// same file line up.
+///
+/// The bytes and the name are the key because they are what makes two entries
+/// the same occurrence; everything else about a symbol is what the two readings
+/// are being compared on, and folding any of it into the key would turn a
+/// disagreement into two occurrences that each survive.
+fn written_in<'a>(
+    ir: &'a CompilerIr,
+    file: &str,
+) -> BTreeMap<(u64, u64, &'a str), &'a ResolvedSymbol> {
+    ir.symbols
+        .iter()
+        .filter(|symbol| symbol.anchor.expansion.file == file)
+        .map(|symbol| {
+            (
+                (
+                    symbol.anchor.expansion.start_byte,
+                    symbol.anchor.expansion.end_byte,
+                    symbol.name.as_str(),
+                ),
+                symbol,
+            )
+        })
+        .collect()
+}
+
+/// Whether two readings resolved one occurrence to the same thing.
+fn same(
+    ir: &CompilerIr,
+    symbol: &ResolvedSymbol,
+    against: &CompilerIr,
+    held: &ResolvedSymbol,
+) -> bool {
+    let resolved = |ir: &CompilerIr, symbol: &ResolvedSymbol| {
+        symbol
+            .type_index
+            .and_then(|index| ir.types.get(usize::try_from(index).ok()?))
+            .map(|ty| (ty.display.clone(), ty.category))
+    };
+    symbol.id == held.id
+        && symbol.kind == held.kind
+        && symbol.external == held.external
+        && resolved(ir, symbol) == resolved(against, held)
+}
+
+/// Types copied out of the analyses they were resolved in.
+#[derive(Default)]
+struct Interned {
+    /// Where each type landed, keyed by the resolved form, which is what says
+    /// two spellings are one type.
+    at: BTreeMap<String, u32>,
+    types: Vec<ResolvedType>,
+}
+
+impl Interned {
+    /// The place `ir.types[index]` takes here, copying it and everything it is
+    /// built from.
+    fn copy(&mut self, ir: &CompilerIr, index: u32) -> Option<u32> {
+        let source = ir.types.get(usize::try_from(index).ok()?)?;
+        if let Some(already) = self.at.get(&source.display) {
+            return Some(*already);
+        }
+        let at = u32::try_from(self.types.len()).ok()?;
+        // Its place is taken before what it is built from is copied, for the
+        // reason a helper's own table reserves one: a type can be built from
+        // itself, and a copy that recursed first would not stop.
+        self.at.insert(source.display.clone(), at);
+        self.types.push(ResolvedType {
+            arguments: Vec::new(),
+            ..source.clone()
+        });
+        let arguments = source
+            .arguments
+            .iter()
+            .filter_map(|argument| self.copy(ir, *argument))
+            .collect();
+        if let Some(recorded) = self.types.get_mut(at as usize) {
+            recorded.arguments = arguments;
+        }
+        Some(at)
+    }
 }
 
 /// How `source` is named, whether or not anything is asked about it.
@@ -588,6 +822,149 @@ mod tests {
             Analysis::Done(Box::new(CompilerIr::empty(unit.clone())))
         });
         assert!(matches!(answers[0], Gathered::Analyzed { .. }));
+    }
+
+    /// One reading of a file, as a helper that read the whole unit reports it.
+    fn read(unit: &str, symbols: Vec<ResolvedSymbol>, types: Vec<ResolvedType>) -> Gathered {
+        let mut ir = CompilerIr::empty(UnitRef {
+            unit: format!("/repo/src/{unit}"),
+            file: format!("/repo/src/{unit}"),
+            variant: "host".into(),
+        });
+        ir.anchored_at = Some("/repo".into());
+        ir.symbols = symbols;
+        ir.types = types;
+        Gathered::Analyzed {
+            backend: 0,
+            ir: Box::new(ir),
+        }
+    }
+
+    fn typed(mut symbol: ResolvedSymbol, at: u32) -> ResolvedSymbol {
+        symbol.type_index = Some(at);
+        symbol
+    }
+
+    fn integer(display: &str) -> ResolvedType {
+        ResolvedType {
+            display: display.into(),
+            category: codehelion_helper::ir::TypeCategory::Integer,
+            arguments: Vec::new(),
+            definition: None,
+        }
+    }
+
+    fn header() -> SourceUnit {
+        let mut source = source("include/accumulate.hpp", Language::Cpp, None);
+        source.is_header = true;
+        source
+    }
+
+    fn unanswerable(source: &SourceUnit) -> Gathered {
+        Gathered::Unavailable {
+            backend: 0,
+            unit: unit_ref(source, "host"),
+            reason: Unavailability::NoBuildInformation,
+        }
+    }
+
+    /// No command compiles a header, so nothing can be asked about it as a unit
+    /// of its own. The unit that includes it read it, and its names are in that
+    /// unit's answer — which is the only place they are.
+    #[test]
+    fn a_file_no_command_compiles_is_answered_by_the_unit_that_read_it() {
+        let sources = [source("src/narrow.cpp", Language::Cpp, None), header()];
+        let mut gathered = vec![
+            read(
+                "narrow.cpp",
+                vec![symbol("sum", "include/accumulate.hpp", 300, 3, false)],
+                Vec::new(),
+            ),
+            unanswerable(&sources[1]),
+        ];
+        read_by_other_units(&mut gathered, &sources);
+        let Gathered::Analyzed { ir, .. } = &gathered[1] else {
+            panic!("the header is answered by the unit that read it");
+        };
+        // Filed under the header, and under the unit that read it — which is
+        // the program these names were resolved in, and is not the header.
+        assert_eq!(ir.unit.file, "/repo/include/accumulate.hpp");
+        assert_eq!(ir.unit.unit, "/repo/src/narrow.cpp");
+        assert_eq!(ir.anchored_at.as_deref(), Some("/repo"));
+        assert_eq!(ir.symbols.len(), 1);
+        assert_eq!(ir.symbols[0].name, "sum");
+    }
+
+    /// Two units can compile one header into two different programs. A run with
+    /// one build variant has nowhere to keep both readings apart, so what it
+    /// says about the header is what both agree on — and the names they differ
+    /// over are left to be compared as they are written.
+    #[test]
+    fn what_two_readings_of_one_header_disagree_about_is_left_unsaid() {
+        let sources = [
+            source("src/narrow.cpp", Language::Cpp, None),
+            source("src/wide.cpp", Language::Cpp, None),
+            header(),
+        ];
+        let agree = symbol("values", "include/accumulate.hpp", 400, 6, false);
+        let differ = symbol("total", "include/accumulate.hpp", 500, 5, false);
+        let mut gathered = vec![
+            read(
+                "narrow.cpp",
+                vec![agree.clone(), typed(differ.clone(), 0)],
+                vec![integer("unsigned int")],
+            ),
+            read(
+                "wide.cpp",
+                vec![agree, typed(differ, 0)],
+                vec![integer("unsigned long long")],
+            ),
+            unanswerable(&sources[2]),
+        ];
+        read_by_other_units(&mut gathered, &sources);
+        let Gathered::Analyzed { ir, .. } = &gathered[2] else {
+            panic!("the header is answered by the units that read it");
+        };
+        assert_eq!(
+            ir.symbols.iter().map(|s| &s.name).collect::<Vec<_>>(),
+            vec!["values"],
+            "the name the two readings resolved differently is not reported"
+        );
+        // An agreement between two readings is an answer about no single unit,
+        // and naming one of them would file it under that reading's program.
+        assert!(ir.unit.unit.is_empty(), "{:?}", ir.unit);
+        // And what did survive carries no type it never had: the table holds
+        // what the kept names refer to and nothing else.
+        assert!(ir.types.is_empty());
+    }
+
+    /// A file that is its own unit was answered about the program it actually
+    /// is. Replacing that with what some other unit saw of it would be a worse
+    /// answer arrived at indirectly.
+    #[test]
+    fn a_file_that_is_its_own_unit_keeps_the_answer_about_itself() {
+        let sources = [
+            source("src/narrow.cpp", Language::Cpp, None),
+            source("src/wide.cpp", Language::Cpp, None),
+        ];
+        let mut gathered = vec![
+            read(
+                "narrow.cpp",
+                vec![symbol("narrow_sum", "src/narrow.cpp", 80, 10, false)],
+                Vec::new(),
+            ),
+            // A unity build: one unit includes the other's source outright.
+            read(
+                "wide.cpp",
+                vec![symbol("narrow_sum", "src/narrow.cpp", 80, 10, true)],
+                Vec::new(),
+            ),
+        ];
+        read_by_other_units(&mut gathered, &sources);
+        let Gathered::Analyzed { ir, .. } = &gathered[0] else {
+            panic!("it was answered about itself");
+        };
+        assert!(!ir.symbols[0].external, "its own answer, not the other's");
     }
 
     /// A helper that never got as far as saying who it was leaves no row, and
