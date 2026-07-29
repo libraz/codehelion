@@ -52,6 +52,7 @@ cargo install --path crates/codehelion-cli
 ```sh
 codehelion scan               # カレントディレクトリをスキャンし text レポート
 codehelion scan --mode structural           # gapped（Type-3）クローンも検出
+codehelion scan --mode semantic             # コンパイラが解決した型で比較（helper が必要）
 codehelion scan --format json --output report.json path/to/repo
 codehelion scan --format sarif --output report.sarif   # SARIF 2.1.0 ログ
 codehelion scan --verbose     # 全クローングループと全メンバーを列挙

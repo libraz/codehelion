@@ -58,6 +58,7 @@ The result is a single self-contained binary; SQLite is bundled.
 ```sh
 codehelion scan               # scan the current directory, text report
 codehelion scan --mode structural           # also detect gapped (Type-3) clones
+codehelion scan --mode semantic             # compare on what a compiler resolved (needs a helper)
 codehelion scan --format json --output report.json path/to/repo
 codehelion scan --format sarif --output report.sarif   # SARIF 2.1.0 log
 codehelion scan --verbose     # list every clone group and member
