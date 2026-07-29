@@ -37,6 +37,7 @@ use codehelion_core::structural::{
 };
 use codehelion_core::test_code::{self, TEST_CODE_VERSION};
 use codehelion_core::verify::{SimilarityBreakdown, WEIGHT_VERSION};
+use codehelion_store::compiler::{self as store_compiler, CompilerHelperRow, CompilerOutcome};
 use codehelion_store::snapshot::{
     FileRow, GroupOrigin, GroupRow, MemberRow, PriorityRow, SimilarityBreakdownRow, Snapshot,
     SummaryRow, UnitRow, UnparsedRow,
@@ -182,13 +183,10 @@ fn run_with(
 
     let variant = variant_of(compilers, &cfg, discovered.header_language, &root);
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
-    // A recorded run does not yet hold what a compiler said about the tree, so
-    // reporting one back would drop the part of a semantic report that says
-    // how much of it a compiler could speak for. Asking again costs time; the
-    // alternative costs the sentence that tells a thin run from a clean tree.
-    if compilers.is_none()
-        && let Some(mut model) =
-            crate::scan::reusable(args, &cfg, &root, &db_path, &variant, &sources)?
+    // A recorded semantic run holds what a compiler said about the tree, so
+    // reporting it back keeps the part that says how much of it a compiler
+    // could speak for; a record that cannot say that in full is not reused.
+    if let Some(mut model) = crate::scan::reusable(args, &cfg, &root, &db_path, &variant, &sources)?
     {
         model.summary.guardrails = guardrails;
         write_report(args, out, &model)?;
@@ -267,6 +265,7 @@ fn run_with(
         &groups,
         crate::scan::file_rows(&sources),
         &stored,
+        asked.as_ref(),
     )?;
     inputs.audit = audit;
     let mut model = build_report(&inputs, run_id, &stored, groups);
@@ -381,8 +380,8 @@ fn coverage(asked: &semantic::Answers) -> report::CompilerCoverage {
     for answer in &asked.per_source {
         match answer {
             semantic::Answer::Analyzed(_) => answered += 1,
-            semantic::Answer::NotAsked => not_asked += 1,
-            semantic::Answer::Unavailable(reason) => {
+            semantic::Answer::NotAsked { .. } => not_asked += 1,
+            semantic::Answer::Unavailable { reason, .. } => {
                 *unavailable.entry(reason.name().to_string()).or_default() += 1;
             }
         }
@@ -1489,6 +1488,7 @@ fn record(
     ranked: &[report::Group],
     files: Vec<FileRow>,
     summary: &SummaryRow,
+    asked: Option<&semantic::Answers>,
 ) -> Result<(i64, Option<report::AuditSummary>)> {
     let (units, mut groups) = snapshot_rows(inputs, ranked)?;
     let mut store = open_store(inputs.db_path)?;
@@ -1500,6 +1500,12 @@ fn record(
         literal_norm(cfg.literal_normalization),
     );
     let root_path = inputs.root.to_string_lossy();
+    let (compiler_helpers, compiler_units) = asked.map_or_else(
+        // No compiler was asked anything: this mode reads source and nothing
+        // else, and an empty list is the whole truth about it.
+        || (Vec::new(), Vec::new()),
+        compiler_rows,
+    );
     let snapshot = Snapshot {
         root_path: &root_path,
         tool_version: env!("CARGO_PKG_VERSION"),
@@ -1514,13 +1520,62 @@ fn record(
         units,
         groups,
         features: Vec::new(),
-        // No compiler was asked anything: this mode reads source and nothing
-        // else, and an empty list is the whole truth about it.
-        compiler_helpers: Vec::new(),
-        compiler_units: Vec::new(),
+        compiler_helpers,
+        compiler_units,
         summary: summary.clone(),
     };
     Ok((store.record_snapshot(&snapshot)?, audit))
+}
+
+/// What a compiler said about the tree, as the snapshot records it.
+///
+/// Every source gets a row, including the ones nobody was asked about. The
+/// helper column is what tells those apart from the ones a helper was given
+/// and could not answer: a row naming no helper was ruled out before any was
+/// asked, and its reason says which of the two gaps it was. Leaving them out
+/// instead would make the three outcomes recoverable only by subtracting the
+/// rows from the file list, and a run reporting itself has no business
+/// deriving what it knew outright.
+fn compiler_rows(
+    asked: &semantic::Answers,
+) -> (Vec<CompilerHelperRow>, Vec<store_compiler::CompilerUnitRow>) {
+    let helpers: Vec<CompilerHelperRow> = asked
+        .helper
+        .iter()
+        .map(|(identity, agreed)| CompilerHelperRow {
+            identity: identity.clone(),
+            protocol_agreed: *agreed,
+            restarts: Some(asked.restarts),
+        })
+        .collect();
+    // The one helper this release runs, when it ran at all. A source answered
+    // by nobody names none.
+    let answering = helpers.first().map(|_| 0);
+    let units = asked
+        .per_source
+        .iter()
+        .map(|answer| match answer {
+            semantic::Answer::Analyzed(ir) => store_compiler::CompilerUnitRow {
+                helper: answering,
+                outcome: CompilerOutcome::Analyzed(ir.clone()),
+            },
+            semantic::Answer::Unavailable { unit, reason } => store_compiler::CompilerUnitRow {
+                helper: answering,
+                outcome: CompilerOutcome::Unavailable {
+                    unit: unit.clone(),
+                    reason: *reason,
+                },
+            },
+            semantic::Answer::NotAsked { unit, reason } => store_compiler::CompilerUnitRow {
+                helper: None,
+                outcome: CompilerOutcome::Unavailable {
+                    unit: unit.clone(),
+                    reason: *reason,
+                },
+            },
+        })
+        .collect();
+    (helpers, units)
 }
 
 /// Turn the analysis into store rows. Every unit that hosts a member is

@@ -24,7 +24,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use codehelion_core::discovery::{BuildVariant, ContentHash, Language, SourceUnit};
 use codehelion_core::priority::Weights;
+use codehelion_helper::ir::COMPILER_IR_SCHEMA_VERSION;
 use codehelion_store::Store;
+use codehelion_store::compiler;
 use codehelion_store::query::{RunRecord, StoredGroup, StoredMember, StoredSimilarity};
 use codehelion_store::snapshot::SummaryRow;
 
@@ -79,7 +81,43 @@ pub(crate) fn recorded(request: &Request<'_>) -> Result<Option<Report>> {
     if !matches(&store, request, &run, &summary)? {
         return Ok(None);
     }
-    restore(&store, request, &run, &summary).map(Some)
+    let compiler = match compiler(&store, run.id)? {
+        // Reported short, a thin semantic run would read as a clean tree. Doing
+        // the work again costs less than that.
+        Compiler::Untold => return Ok(None),
+        Compiler::NoneAsked => None,
+        Compiler::Asked(coverage) => Some(coverage),
+    };
+    restore(&store, request, &run, &summary, compiler).map(Some)
+}
+
+/// What a recorded run can say about the compiler behind it.
+enum Compiler {
+    /// It put nothing to one, which for a source-only mode is the whole truth
+    /// about the run.
+    NoneAsked,
+    /// It put files to one, and this is how much of the tree came back.
+    Asked(report::CompilerCoverage),
+    /// It put files to one without recording how the asking went. How thin a
+    /// semantic result is and whether the thinness was the helper falling over
+    /// are two halves of one sentence, and half of it is not reportable.
+    Untold,
+}
+
+/// What the recorded run got out of a compiler.
+fn compiler(store: &Store, run_id: i64) -> Result<Compiler> {
+    let Some(coverage) = store.run_compiler_coverage(run_id)? else {
+        return Ok(Compiler::NoneAsked);
+    };
+    let Some(restarts) = coverage.restarts else {
+        return Ok(Compiler::Untold);
+    };
+    Ok(Compiler::Asked(report::CompilerCoverage {
+        answered: coverage.answered,
+        not_asked: coverage.not_asked,
+        unavailable: coverage.unavailable,
+        restarts,
+    }))
 }
 
 /// Whether the recorded run answers the question this invocation is asking.
@@ -102,10 +140,30 @@ fn matches(
     // in presentation and not in what ran.
     let mut asked: Vec<(String, String)> = request.detector_versions.to_vec();
     asked.sort_unstable();
-    if store.run_origin(run.id)?.detector_versions != asked {
+    let mut recorded = store.run_origin(run.id)?.detector_versions;
+    if !reads_the_recorded_ir(&recorded) {
+        return Ok(false);
+    }
+    recorded.retain(|(component, _)| component != compiler::IR_SCHEMA_COMPONENT);
+    if recorded != asked {
         return Ok(false);
     }
     Ok(same_tree(&store.run_tree(run.id)?, request.sources))
+}
+
+/// Whether this build reads whatever compiler IR the run holds.
+///
+/// The IR schema is the one recorded version an invocation cannot state in
+/// advance: a run declares it only when a compiler answered something, and
+/// what answered is not known until the tree has been read. So it is compared
+/// on its own terms — a run that holds none is a run with nothing to read, and
+/// a run holding a schema this build does not read is not reportable however
+/// well the rest of it lines up.
+fn reads_the_recorded_ir(recorded: &[(String, String)]) -> bool {
+    recorded
+        .iter()
+        .filter(|(component, _)| component == compiler::IR_SCHEMA_COMPONENT)
+        .all(|(_, schema)| schema == COMPILER_IR_SCHEMA_VERSION)
 }
 
 /// Whether the run read exactly these files and they still hash the same.
@@ -130,6 +188,7 @@ fn restore(
     request: &Request<'_>,
     run: &RunRecord,
     summary: &SummaryRow,
+    compiler: Option<report::CompilerCoverage>,
 ) -> Result<Report> {
     let mut groups: Vec<report::Group> = store
         .run_groups(run.id)?
@@ -145,6 +204,8 @@ fn restore(
         cpp: counts.get(Language::Cpp.name()).copied().unwrap_or(0),
     };
     let variant = request.variant;
+    let mut summary = report::restored(files, summary, &groups);
+    summary.compiler = compiler;
     Ok(Report {
         schema_version: report::SCHEMA_VERSION,
         run: report::RunInfo {
@@ -182,7 +243,7 @@ fn restore(
             run_id: run.id,
             reused: true,
         },
-        summary: report::restored(files, summary, &groups),
+        summary,
         groups,
     })
 }

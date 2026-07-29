@@ -33,7 +33,7 @@ use codehelion_core::engine::normalize::Resolution;
 use codehelion_core::ir::ByteRange;
 use codehelion_core::types::TypeTag;
 use codehelion_helper::ir::{CompilerIr, Unavailability, UnitRef};
-use codehelion_helper::protocol::Capability;
+use codehelion_helper::protocol::{Capability, HelperIdentity};
 use codehelion_helper::{Analysis, Supervisor};
 
 /// Everything a run can use from a compiler.
@@ -55,10 +55,22 @@ pub(crate) enum Answer {
     /// A compiler answered.
     Analyzed(Box<CompilerIr>),
     /// One was asked and could not answer, for this reason.
-    Unavailable(Unavailability),
-    /// Nobody was asked: no helper here analyses this file's language, or the
-    /// layout does not say which crate it belongs to.
-    NotAsked,
+    Unavailable {
+        /// What was asked about.
+        unit: UnitRef,
+        /// Why there is no analysis of it.
+        reason: Unavailability,
+    },
+    /// Nobody was asked, and why not: no helper here analyses this file's
+    /// language, or the layout does not say which crate it belongs to.
+    NotAsked {
+        /// What would have been asked about. Its crate name is empty exactly
+        /// when the layout could not supply one, which is one of the two
+        /// reasons nothing was asked.
+        unit: UnitRef,
+        /// Why nobody was asked.
+        reason: Unavailability,
+    },
 }
 
 impl Answer {
@@ -66,7 +78,7 @@ impl Answer {
     pub(crate) fn analysis(&self) -> Option<&CompilerIr> {
         match self {
             Self::Analyzed(ir) => Some(ir),
-            Self::Unavailable(_) | Self::NotAsked => None,
+            Self::Unavailable { .. } | Self::NotAsked { .. } => None,
         }
     }
 }
@@ -113,6 +125,12 @@ pub(crate) struct Backend<'a> {
 /// What a helper said about a tree.
 #[derive(Debug, Clone)]
 pub(crate) struct Answers {
+    /// The helper that answered, as it described itself, and the protocol
+    /// revision the two sides settled on.
+    ///
+    /// Absent when no helper was ever started, which is a run where every
+    /// source turned out to be one nobody could be asked about.
+    pub(crate) helper: Option<(HelperIdentity, u32)>,
     /// One entry per source, in the order the sources were given.
     pub(crate) per_source: Vec<Answer>,
     /// How many times the helper had to be restarted along the way.
@@ -135,8 +153,12 @@ pub(crate) fn ask(
         supervisor.analyze(unit, &WANTED)
     });
     let restarts = supervisor.restarts();
+    let helper = supervisor
+        .spoke_with()
+        .map(|(identity, agreed)| (identity.clone(), agreed));
     supervisor.shutdown();
     Answers {
+        helper,
         per_source,
         restarts,
     }
@@ -159,37 +181,50 @@ fn gather(
     sources
         .iter()
         .map(|source| {
-            let Some(unit) = unit_ref(source, analyzes, variant) else {
-                return Answer::NotAsked;
-            };
+            let unit = unit_ref(source, variant);
+            if let Some(reason) = unasked(source, analyzes) {
+                return Answer::NotAsked { unit, reason };
+            }
             match ask_one(&unit) {
                 Analysis::Done(ir) => Answer::Analyzed(ir),
-                Analysis::Missing(reason) => Answer::Unavailable(reason),
+                Analysis::Missing(reason) => Answer::Unavailable { unit, reason },
             }
         })
         .collect()
 }
 
-/// How to name `source` when asking about it, or `None` when it is not this
-/// helper's to answer.
+/// How `source` is named, whether or not anything is asked about it.
 ///
-/// A file whose crate the layout cannot name is not asked about rather than
-/// asked about under a guess: a guessed crate name either names nothing, which
-/// wastes the round trip, or names another crate, whose answer would be
-/// recorded against this file.
+/// The crate name is left empty when the layout has none, which only happens
+/// on a file [`unasked`] has already ruled out: a guessed crate name either
+/// names nothing, which wastes the round trip, or names another crate, whose
+/// answer would then be recorded against this file.
+fn unit_ref(source: &SourceUnit, variant: &str) -> UnitRef {
+    UnitRef {
+        unit: source.crate_name.clone().unwrap_or_default(),
+        file: source.absolute_path.display().to_string(),
+        variant: variant.to_string(),
+    }
+}
+
+/// Why nobody will be asked about `source`, when nobody will be.
+///
+/// The two reasons are different facts about the run and stay apart. A file in
+/// a language no helper here reads is a gap in what is installed; a file whose
+/// crate the layout cannot name is a gap in what the project says about
+/// itself, and only the second gets better by looking harder at the tree.
 ///
 /// A C or C++ file is named by the translation unit that compiles it, which a
 /// compilation database says and a Cargo layout does not; a helper that
 /// analyses those reads it from there.
-fn unit_ref(source: &SourceUnit, analyzes: Language, variant: &str) -> Option<UnitRef> {
+fn unasked(source: &SourceUnit, analyzes: Language) -> Option<Unavailability> {
     if source.language != analyzes {
-        return None;
+        return Some(Unavailability::NotSupported);
     }
-    Some(UnitRef {
-        unit: source.crate_name.clone()?,
-        file: source.absolute_path.display().to_string(),
-        variant: variant.to_string(),
-    })
+    source
+        .crate_name
+        .is_none()
+        .then_some(Unavailability::NoBuildInformation)
 }
 
 /// What `ir` resolved about the names written in `file`.
@@ -220,7 +255,7 @@ pub fn resolution_for(ir: &CompilerIr, file: &str) -> Resolution {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use codehelion_helper::ir::{Anchor, ResolvedSymbol, SourceRange, SymbolKind, UnitRef};
@@ -333,9 +368,21 @@ mod tests {
         });
         assert!(matches!(answers[0], Answer::Analyzed(_)));
         // A C file, with no helper here that reads C.
-        assert_eq!(answers[1], Answer::NotAsked);
+        assert!(matches!(
+            answers[1],
+            Answer::NotAsked {
+                reason: Unavailability::NotSupported,
+                ..
+            }
+        ));
         // A build script belongs to no crate the layout can name.
-        assert_eq!(answers[2], Answer::NotAsked);
+        assert!(matches!(
+            answers[2],
+            Answer::NotAsked {
+                reason: Unavailability::NoBuildInformation,
+                ..
+            }
+        ));
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0].unit, "ledger");
         assert_eq!(asked[0].file, "/repo/src/lib.rs");
@@ -354,11 +401,33 @@ mod tests {
         let answers = gather(Language::Rust, &sources, "host", &mut |_| {
             Analysis::Missing(Unavailability::RequiresExecution)
         });
-        assert_eq!(
-            answers[0],
-            Answer::Unavailable(Unavailability::RequiresExecution)
-        );
-        assert_eq!(answers[1], Answer::NotAsked);
+        let Answer::Unavailable { unit, reason } = &answers[0] else {
+            panic!("the helper was asked and could not answer");
+        };
+        assert_eq!(*reason, Unavailability::RequiresExecution);
+        // The unit is kept: a run records what it asked about, and a reason
+        // with nothing attached names no file.
+        assert_eq!(unit.unit, "ledger");
+        assert_eq!(unit.file, "/repo/src/lib.rs");
+        assert!(matches!(answers[1], Answer::NotAsked { .. }));
         assert!(answers.iter().all(|answer| answer.analysis().is_none()));
+    }
+
+    /// A file nobody could be asked about is still named, so the run can say
+    /// which files those were. Its crate name is empty because there is none —
+    /// the alternative is inventing one, which is what makes an answer land on
+    /// the wrong file.
+    #[test]
+    fn a_file_nobody_was_asked_about_is_named_without_a_crate_being_invented() {
+        let sources = [source("build.rs", Language::Rust, None)];
+        let answers = gather(Language::Rust, &sources, "host", &mut |_| {
+            panic!("nothing should be asked")
+        });
+        let Answer::NotAsked { unit, reason } = &answers[0] else {
+            panic!("nobody was asked about it");
+        };
+        assert_eq!(*reason, Unavailability::NoBuildInformation);
+        assert_eq!(unit.file, "/repo/build.rs");
+        assert!(unit.unit.is_empty());
     }
 }

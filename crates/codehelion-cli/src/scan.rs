@@ -200,9 +200,11 @@ pub(crate) fn reusable(
         return Ok(None);
     }
     let literals = literal_norm(cfg.literal_normalization);
+    // Semantic runs the structural pipeline over what a compiler resolved, so
+    // it records the structural detector versions; only Fast has its own.
     let versions = match variant.mode {
-        AnalysisMode::Structural => structural::detector_versions(cfg.priority.weights(), literals),
-        _ => detector_versions(cfg.priority.weights(), literals),
+        AnalysisMode::Fast => detector_versions(cfg.priority.weights(), literals),
+        _ => structural::detector_versions(cfg.priority.weights(), literals),
     };
     let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
     reuse::recorded(&reuse::Request {

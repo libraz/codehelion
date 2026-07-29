@@ -1267,6 +1267,38 @@ fn semantic_mode_either_asks_a_compiler_or_says_which_one_is_missing() {
     }
 }
 
+/// A recorded semantic run is reported again like any other, and it has to
+/// come back with the sentence that makes it semantic. Restored short — no
+/// compiler line, or one claiming files nobody asked about were failures — a
+/// thin run would read as a clean tree the second time it was reported.
+#[test]
+fn a_semantic_run_reported_again_still_says_what_the_compiler_answered() {
+    let dir = fixture();
+    let scan = || {
+        let output = cmd()
+            .current_dir(dir.path())
+            .args(["scan", ".", "--mode", "semantic", "--format", "json"])
+            .output()
+            .expect("the scan should run");
+        output.status.success().then(|| {
+            serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .expect("stdout is one JSON document")
+        })
+    };
+    let Some(first) = scan() else {
+        // No helper on this machine, which the pairing test above covers.
+        return;
+    };
+    let second = scan().expect("the helper answered once, so it answers again");
+    assert_eq!(second["run"]["reused"], serde_json::json!(true));
+    assert_eq!(second["run"]["run_id"], first["run"]["run_id"]);
+    assert_eq!(second["summary"]["compiler"], first["summary"]["compiler"]);
+    assert!(
+        second["summary"]["compiler"].is_object(),
+        "a semantic run says what a compiler answered: {second}"
+    );
+}
+
 /// The reuse path's own tests: a tree nobody touched is reported from the
 /// recorded run rather than analysed again, and every input that could change
 /// the answer defeats that.
