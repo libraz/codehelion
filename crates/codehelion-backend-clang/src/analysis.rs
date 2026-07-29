@@ -14,6 +14,21 @@
 //! analyses rather than one repeated: they disagree, and the disagreement is
 //! the point.
 //!
+//! # Why an answer covers the whole unit
+//!
+//! What comes back is everything the unit read that lies inside the tree, each
+//! name filed under the file it is written in — not only the file the request
+//! named. A header is compiled by no command of its own, so a request naming it
+//! as its own unit is one nothing can answer; the only thing that ever reads it
+//! is a translation unit, and that unit's answer is where its names are. The
+//! file the request names still decides which unit is read, which is the whole
+//! of what it decides.
+//!
+//! Reporting a unit's other files under the requested file's name would be the
+//! one thing that must not happen, and is why every anchor is spelled from the
+//! file the compiler puts the entity in rather than from the file that was
+//! asked about.
+//!
 //! # Nothing here runs anything
 //!
 //! The compilation database is read where it is, and the commands in it are
@@ -63,17 +78,13 @@ pub(crate) fn analyze(clang: &Clang, unit: &UnitRef, database: &Database) -> Out
         return Outcome::Unavailable(Unavailability::NoBuildInformation);
     };
     let file = canonical(Path::new(&unit.file));
-    let Some(wanted) = parsed.get_file(&file) else {
-        // The unit was read and this file is no part of what it read. Nothing
-        // in it can be reported on, and reporting the unit's other files under
-        // this file's name is the one thing that must not happen.
+    if parsed.get_file(&file).is_none() {
+        // The unit was read and this file is no part of what it read, so the
+        // pair the request named does not exist. Answering anyway would report
+        // one unit's contents against a file that unit never opened.
         return Outcome::Unavailable(Unavailability::NoBuildInformation);
-    };
-    // Told apart by what the compiler calls one file rather than by how the
-    // path is written: a file reached through an include search path is
-    // reported with the spelling that search produced, which is a different
-    // string from the one a caller names it by and the same file.
-    let mut reading = Reading::new(&database.root, &file, wanted.get_id());
+    }
+    let mut reading = Reading::new(&database.root);
     reading.walk(parsed.get_entity());
     let mut ir = CompilerIr::empty(unit.clone());
     ir.anchored_at = Some(database.root.display().to_string());
@@ -86,34 +97,59 @@ pub(crate) fn analyze(clang: &Clang, unit: &UnitRef, database: &Database) -> Out
 struct Reading<'a> {
     /// What paths are spelled against.
     root: &'a Path,
-    /// The file being reported on, which is one of many the unit reads.
-    file: &'a Path,
-    /// What the compiler calls that file, which is what its own answers are
-    /// compared against.
-    id: (u64, u64, u64),
-    /// Whether each file the unit has reached so far sits inside the tree.
-    inside: BTreeMap<(u64, u64, u64), bool>,
+    /// How the project spells each file the unit has reached so far, and
+    /// nothing for the ones outside the tree.
+    ///
+    /// Keyed by what the compiler calls a file rather than by how a path is
+    /// written: a file reached through an include search path is reported with
+    /// the spelling that search produced, which is a different string from the
+    /// one a caller names it by and the same file. Resolved once per file
+    /// rather than once per name — a unit holds thousands of names and tens of
+    /// files.
+    known: BTreeMap<(u64, u64, u64), Option<String>>,
     types: TypeTable,
     symbols: Vec<ResolvedSymbol>,
 }
 
 impl<'a> Reading<'a> {
-    fn new(root: &'a Path, file: &'a Path, id: (u64, u64, u64)) -> Self {
+    fn new(root: &'a Path) -> Self {
         Self {
             root,
-            file,
-            id,
-            inside: BTreeMap::new(),
+            known: BTreeMap::new(),
             types: TypeTable::default(),
             symbols: Vec::new(),
         }
     }
 
-    /// Visit every entity of the unit, keeping the ones written in this file.
+    /// How this project spells `file`, or nothing when the file is not one of
+    /// its own.
     ///
-    /// The whole unit is walked rather than only the file's own entities,
-    /// because Clang's tree is the unit's: the file is a region of it, reached
-    /// by including, and there is no subtree that is only this file.
+    /// The project root decides it. A C++ build has no membership list to ask —
+    /// there is no manifest saying which of the files a command reaches belong
+    /// to the project — so where a file sits is what there is. It gets the cases
+    /// that matter: the standard library and every installed dependency are
+    /// outside the tree, and the project's own headers are in it, whichever
+    /// include path reached them.
+    fn spelling(&mut self, file: &clang::source::File<'_>) -> Option<String> {
+        let id = file.get_id();
+        if let Some(known) = self.known.get(&id) {
+            return known.clone();
+        }
+        let path = canonical(&file.get_path());
+        let spelled = path
+            .starts_with(self.root)
+            .then(|| spell(Some(self.root), &path));
+        self.known.insert(id, spelled.clone());
+        spelled
+    }
+
+    /// Visit every entity of the unit, keeping the ones written in the tree.
+    ///
+    /// The whole unit is walked because Clang's tree is the unit's: each file is
+    /// a region of it, reached by including, and there is no subtree that is one
+    /// file. What is dropped is what the unit read from outside the project —
+    /// the standard library and every installed dependency, which nobody in the
+    /// scan wrote and no fragment can be cut from.
     fn walk(&mut self, root: Entity<'_>) {
         root.visit_children(|entity, _| {
             self.visit(entity);
@@ -148,21 +184,19 @@ impl<'a> Reading<'a> {
         });
     }
 
-    /// Where `entity` sits in the file being reported on, if it sits there.
+    /// Where `entity` sits, if it sits in a file of this project.
     ///
     /// The expansion location decides, not the spelling one: code produced by a
     /// macro physically occupies the place the macro was invoked, and that is
     /// the only place a fragment can be cut from. Where it was written is a
     /// separate question this slice does not answer yet.
-    fn anchor(&self, entity: Entity<'_>) -> Option<Anchor> {
+    fn anchor(&mut self, entity: Entity<'_>) -> Option<Anchor> {
         let range = entity.get_range()?;
         let start = range.get_start().get_expansion_location();
         let end = range.get_end().get_expansion_location();
-        if start.file?.get_id() != self.id {
-            return None;
-        }
+        let file = self.spelling(&start.file?)?;
         Some(Anchor::written_here(SourceRange {
-            file: spell(Some(self.root), self.file),
+            file,
             start_byte: u64::from(start.offset),
             end_byte: u64::from(end.offset.max(start.offset)),
             start_line: start.line,
@@ -171,22 +205,13 @@ impl<'a> Reading<'a> {
 
     /// Whether the definition of `entity` is outside the code being scanned.
     ///
-    /// The project root decides it. A C++ build has no membership list to ask —
-    /// there is no manifest saying which of the files a command reaches belong
-    /// to the project — so where the definition sits is what there is. It gets
-    /// the cases that matter: the standard library and every installed
-    /// dependency are outside the tree, and the project's own headers are in
-    /// it, whichever include path reached them.
+    /// Where the definition sits answers it, which is the same question
+    /// [`Reading::spelling`] resolves and so the same answer.
     ///
     /// A definition with no location at all is a compiler builtin, which counts
     /// as outside for the same reason a primitive does: nobody in the scan
     /// wrote it, so a normalizer that renamed it would be comparing two
     /// fragments on a vocabulary neither of them chose.
-    /// A definition reached through an include search path is reported with the
-    /// path that search built — through the directory above, or through
-    /// whatever symbolic link the tree was reached by — so the answer is
-    /// resolved rather than compared as text. Resolved once per file rather
-    /// than once per name: a unit holds thousands of names and tens of files.
     fn is_external(&mut self, entity: Entity<'_>) -> bool {
         let Some(location) = entity.get_location() else {
             return true;
@@ -197,13 +222,7 @@ impl<'a> Reading<'a> {
         let Some(file) = location.get_expansion_location().file else {
             return true;
         };
-        let id = file.get_id();
-        if let Some(inside) = self.inside.get(&id) {
-            return !inside;
-        }
-        let inside = canonical(&file.get_path()).starts_with(self.root);
-        self.inside.insert(id, inside);
-        !inside
+        self.spelling(&file).is_none()
     }
 }
 

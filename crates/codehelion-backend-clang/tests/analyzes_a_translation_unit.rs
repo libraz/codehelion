@@ -145,8 +145,8 @@ fn one_header_read_by_two_units_is_two_different_programs() {
         assert!(
             ir.symbols
                 .iter()
-                .all(|symbol| symbol.anchor.expansion.file == header),
-            "every symbol is anchored in the file that was asked about"
+                .any(|symbol| symbol.anchor.expansion.file == header),
+            "the header the unit read is reported on"
         );
     }
 
@@ -161,6 +161,52 @@ fn one_header_read_by_two_units_is_two_different_programs() {
         type_of(&wide, "total").display,
         "the same declaration resolves to a different type in each reading"
     );
+}
+
+/// A header is compiled by no command of its own, so nothing can be asked about
+/// it as a unit. What reads it is a translation unit, and the answer about that
+/// unit is where the header's names are — filed under the header, because a
+/// name reported under the unit's own file would be attributed to a file it was
+/// never written in.
+///
+/// What the unit read from outside the project stays out. `<vector>` is not
+/// this project's code, nothing in the scan can be cut from it, and reporting
+/// its thousands of declarations would bury the tree's own in them.
+#[test]
+fn a_header_is_answered_under_the_unit_that_reads_it() {
+    let planted = plant("header-only");
+    let ir = analyzed(&planted.unit("src/narrow.cpp", "src/narrow.cpp"));
+
+    let files: std::collections::BTreeSet<&str> = ir
+        .symbols
+        .iter()
+        .map(|symbol| symbol.anchor.expansion.file.as_str())
+        .collect();
+    assert!(
+        files.contains("include/accumulate.hpp"),
+        "the header the unit read is reported on: {files:?}"
+    );
+    assert!(
+        files.contains("src/narrow.cpp"),
+        "and so is the unit's own source: {files:?}"
+    );
+    assert_eq!(
+        files.len(),
+        2,
+        "nothing from outside the tree is reported: {files:?}"
+    );
+
+    // Anchored where it is written, not where the request pointed: `sum` is
+    // declared in the header and called from the source, and the two are
+    // different places in different files.
+    let declared = ir
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.name == "sum" && symbol.kind == codehelion_helper::ir::SymbolKind::Function
+        })
+        .expect("the header declares sum");
+    assert_eq!(declared.anchor.expansion.file, "include/accumulate.hpp");
 }
 
 /// The categories are a claim about what libclang reports, so they are checked
