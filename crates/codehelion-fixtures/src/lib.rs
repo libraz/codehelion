@@ -202,6 +202,106 @@ pub fn write_compile_commands(fixture: &str, destination: &Path) -> Result<PathB
     Ok(written)
 }
 
+/// Copies a C or C++ fixture into `destination`, database and all, and returns
+/// the root of the copy.
+///
+/// A helper finds the database governing a file by walking up from that file,
+/// so exercising one means a tree where the sources and the database naming
+/// them are the same tree. The checkout cannot be it: rendering the database
+/// there would leave a generated file, naming this machine, in the source tree.
+/// So the fixture is copied and the database is rendered against the copy.
+///
+/// # Errors
+///
+/// Fails if the fixture is absent, its template unreadable, or the destination
+/// unwritable.
+pub fn copy_cpp(fixture: &str, destination: &Path) -> Result<PathBuf, FixtureError> {
+    let source = cpp(fixture)?;
+    let root = destination.join(fixture);
+    copy_tree(&source, &root)?;
+    let template = source.join("compile_commands.json.in");
+    let mut entries: Vec<CompileCommand> = serde_json::from_str(&render(&template, &root)?)
+        .map_err(|source| FixtureError::Malformed {
+            path: template,
+            source,
+        })?;
+    for entry in &mut entries {
+        entry.arguments.splice(1..1, platform_arguments());
+    }
+    let written = root.join("compile_commands.json");
+    let rendered =
+        serde_json::to_string_pretty(&entries).map_err(|source| FixtureError::Malformed {
+            path: written.clone(),
+            source,
+        })?;
+    std::fs::write(&written, rendered).map_err(|source| FixtureError::Io {
+        path: written,
+        source,
+    })?;
+    Ok(root)
+}
+
+/// What a database generated on this machine would carry that a committed
+/// template cannot.
+///
+/// On macOS the standard library lives inside an SDK whose path names the
+/// developer tools installed here, and a compiler invoked without it finds no
+/// `<vector>` at all — the parse succeeds, every standard type resolves to
+/// nothing, and a test reads the silence as an answer. A generator run on this
+/// machine writes the path into every entry it emits, which is the same reason
+/// the committed fixture is a template: a real compilation database names the
+/// machine it was made on.
+///
+/// `SDKROOT` first, because that is what a developer who has moved their tools
+/// sets; then the two places the tools install. Empty everywhere else, where
+/// the compiler finds its own standard library.
+fn platform_arguments() -> Vec<String> {
+    /// Where the developer tools put an SDK, in the order they are tried.
+    const SDKS: [&str; 2] = [
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+    ];
+    if !cfg!(target_os = "macos") {
+        return Vec::new();
+    }
+    let configured = std::env::var_os("SDKROOT").map(PathBuf::from);
+    let sdk = configured
+        .into_iter()
+        .chain(SDKS.iter().map(PathBuf::from))
+        .find(|path| path.is_dir());
+    sdk.and_then(|path| path.to_str().map(str::to_string))
+        .map(|path| vec!["-isysroot".to_string(), path])
+        .unwrap_or_default()
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<(), FixtureError> {
+    std::fs::create_dir_all(to).map_err(|source| FixtureError::Io {
+        path: to.to_path_buf(),
+        source,
+    })?;
+    let entries = std::fs::read_dir(from).map_err(|source| FixtureError::Io {
+        path: from.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| FixtureError::Io {
+            path: from.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let target = to.join(entry.file_name());
+        if path.is_dir() {
+            copy_tree(&path, &target)?;
+        } else {
+            std::fs::copy(&path, &target).map_err(|source| FixtureError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn render(template: &Path, directory: &Path) -> Result<String, FixtureError> {
     let text = std::fs::read_to_string(template).map_err(|source| FixtureError::Io {
         path: template.to_path_buf(),
