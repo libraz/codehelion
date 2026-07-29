@@ -165,6 +165,44 @@ fn structural_output_satisfies_the_published_schema() {
     assert_eq!(similarity["type_similarity"], Value::Null);
 }
 
+/// What the run could not read is the sentence that tells a thin log apart
+/// from a clean tree, and it has to satisfy the same published schema the
+/// results do — a consumer that rejects the document reads neither.
+///
+/// Whether a compiler helper is installed is a property of the machine, so a
+/// run that could not start one is left to the pairing test in the scan suite.
+#[test]
+fn what_a_run_could_not_read_is_valid_sarif_too() {
+    let dir = fixture();
+    let output = cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "semantic", "--format", "sarif"])
+        .output()
+        .expect("run scan");
+    if !output.status.success() {
+        return;
+    }
+    let log: Value = serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+    assert_valid_sarif(&log);
+
+    // Nothing here belongs to a crate, so nobody was asked about any of it.
+    let notifications = log["runs"][0]["invocations"][0]["toolExecutionNotifications"]
+        .as_array()
+        .expect("a tree with no project in it is a tree no compiler was asked about");
+    let not_asked = notifications
+        .iter()
+        .find(|notification| notification["descriptor"]["id"] == "coverage/not-asked")
+        .expect("the files nobody was asked about are named as such");
+    assert!(
+        not_asked["properties"]["files"].as_u64().unwrap_or(0) > 0,
+        "{log}"
+    );
+    assert_eq!(
+        log["runs"][0]["invocations"][0]["executionSuccessful"],
+        true
+    );
+}
+
 #[test]
 fn reruns_produce_the_same_log() {
     let dir = fixture();

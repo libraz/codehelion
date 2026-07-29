@@ -16,6 +16,27 @@
 //! - A suppressed group is emitted with a SARIF `suppressions` entry rather
 //!   than dropped, matching the other views: findings are hidden, never
 //!   deleted.
+//! - What the run did not see becomes an invocation notification against a
+//!   declared descriptor, not only a number in the property bag. See below.
+//!
+//! # Saying what was not looked at
+//!
+//! SARIF is shaped around findings, and a finding is something that was found.
+//! Nothing in a result set tells a project with little duplication apart from a
+//! run that could not read the project — both are short lists. The counts are
+//! in the property bag either way, but a bag is where a consumer looks after
+//! deciding something is wrong, and this is the fact that decides it.
+//!
+//! So each such condition is a `toolExecutionNotifications` entry on the
+//! invocation, against a descriptor the driver declares. That is the one place
+//! the format has for a statement about the analysis rather than about the
+//! code, and it reaches consumers that show notifications without being taught
+//! this tool's property keys.
+//!
+//! The run still reports `executionSuccessful`. Reading less of a tree than it
+//! holds is an outcome, not a failure — a project with no compilation database
+//! is analysed by what its source says, and calling that a failed run would
+//! tell somebody to fix a tool that did what it could.
 //!
 //! # Severity
 //!
@@ -100,6 +121,79 @@ const RULES: [RuleSpec; 3] = [
     },
 ];
 
+/// One condition about the run itself that the tool can report.
+struct NoticeSpec {
+    /// Which condition, so that deciding what to emit is exhaustive rather
+    /// than a lookup by string that can quietly match nothing.
+    kind: Notice,
+    /// SARIF notification id.
+    id: &'static str,
+    /// SARIF notification name.
+    name: &'static str,
+    /// One-line description.
+    short: &'static str,
+    /// Full description.
+    full: &'static str,
+    /// The level it is reported at.
+    level: &'static str,
+}
+
+/// The conditions a notification can be about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Notice {
+    /// Files that were read without a compiler being asked at all.
+    NotAsked,
+    /// Files a compiler was asked about and supplied nothing for.
+    Unanswered,
+    /// Comparison that stopped at its budget rather than at the end.
+    PairsTruncated,
+}
+
+/// The notifications this tool can emit, in the order they are declared: a
+/// notification's `descriptor.index` is a position in this table, which stays
+/// fixed for the same reason [`RULES`] does.
+///
+/// Every entry says one kind of thing — the run saw less than the tree holds —
+/// because that is the statement a result set cannot make about itself. How
+/// often a helper had to be restarted is deliberately not here: a restart the
+/// run recovered from cost no coverage, and one that did not shows up as the
+/// files it could not answer for. A notification for it would put a fact about
+/// the tool's health in the list a reader is using to judge the tool's reach.
+const NOTICES: [NoticeSpec; 3] = [
+    NoticeSpec {
+        kind: Notice::NotAsked,
+        id: "coverage/not-asked",
+        name: "FilesNoCompilerWasAskedAbout",
+        short: "Files analysed without asking a compiler",
+        full: "No compiler was asked about these files: no installed helper \
+               reads their language, or nothing said which compilation unit \
+               they belong to. What is reported about them rests on what their \
+               source says alone.",
+        level: "note",
+    },
+    NoticeSpec {
+        kind: Notice::Unanswered,
+        id: "coverage/unanswered",
+        name: "FilesTheCompilerAnsweredNothingFor",
+        short: "Files a compiler was asked about and could not answer for",
+        full: "A compiler helper was asked about these files and supplied \
+               nothing. The reason is given per group, because they call for \
+               different things: a project that needs a build script allowed \
+               to run is not a helper that died.",
+        level: "warning",
+    },
+    NoticeSpec {
+        kind: Notice::PairsTruncated,
+        id: "coverage/pairs-truncated",
+        name: "CandidatePairBudgetExhausted",
+        short: "Comparison stopped at the candidate-pair budget",
+        full: "The run reached the largest number of candidate pairs it was \
+               allowed to examine and stopped comparing. Duplication the tree \
+               holds may be absent from these results.",
+        level: "warning",
+    },
+];
+
 impl Report {
     /// The report as a SARIF 2.1.0 log document, pretty-printed and
     /// newline-terminated.
@@ -155,6 +249,10 @@ impl<'a> From<&'a Report> for Run<'a> {
                     semantic_version: &run.tool_version,
                     information_uri: env!("CARGO_PKG_REPOSITORY"),
                     rules: RULES.iter().map(Descriptor::from).collect(),
+                    // Declared whether or not this run had anything to say
+                    // with them, so the catalogue of what the tool can report
+                    // is the same document to document.
+                    notifications: NOTICES.iter().map(NoticeDescriptor::from).collect(),
                 },
             },
             automation_details: AutomationDetails {
@@ -168,9 +266,11 @@ impl<'a> From<&'a Report> for Run<'a> {
             ))
             .collect(),
             invocations: [Invocation {
+                // A run that read less of a tree than the tree holds still ran.
                 execution_successful: true,
                 start_time_utc: millisecond_timestamp(&run.started_at),
                 end_time_utc: millisecond_timestamp(&run.finished_at),
+                tool_execution_notifications: notifications(report),
             }],
             results: report.groups.iter().map(ResultEntry::from).collect(),
             properties: RunProperties {
@@ -201,6 +301,7 @@ struct Driver<'a> {
     semantic_version: &'a str,
     information_uri: &'static str,
     rules: Vec<Descriptor>,
+    notifications: Vec<NoticeDescriptor>,
 }
 
 #[derive(Debug, Serialize)]
@@ -246,6 +347,139 @@ struct DescriptorProperties {
     clone_type: &'static str,
 }
 
+/// Notification metadata, as the driver declares it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoticeDescriptor {
+    id: &'static str,
+    name: &'static str,
+    short_description: StaticText,
+    full_description: StaticText,
+    default_configuration: Configuration,
+}
+
+impl From<&'static NoticeSpec> for NoticeDescriptor {
+    fn from(spec: &'static NoticeSpec) -> Self {
+        Self {
+            id: spec.id,
+            name: spec.name,
+            short_description: StaticText { text: spec.short },
+            full_description: StaticText { text: spec.full },
+            default_configuration: Configuration { level: spec.level },
+        }
+    }
+}
+
+/// One thing this run has to say about itself.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Notification {
+    descriptor: DescriptorReference,
+    level: &'static str,
+    message: Message,
+    properties: NotificationProperties,
+}
+
+#[derive(Debug, Serialize)]
+struct DescriptorReference {
+    id: &'static str,
+    index: usize,
+}
+
+/// Notification property bag: what the sentence says, as numbers a consumer can
+/// act on without reading it.
+#[derive(Debug, Serialize)]
+struct NotificationProperties {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    files: Option<u64>,
+    /// Which reason a compiler gave, in the vocabulary the JSON report uses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+/// Everything this run has to say about what it did not see.
+///
+/// Driven from the table rather than written out condition by condition, so a
+/// notification cannot be declared and then never emitted, or emitted against a
+/// descriptor nobody declared.
+fn notifications(report: &Report) -> Vec<Notification> {
+    let mut notifications = Vec::new();
+    for (index, spec) in NOTICES.iter().enumerate() {
+        for (text, properties) in occurrences(spec.kind, report) {
+            notifications.push(Notification {
+                descriptor: DescriptorReference { id: spec.id, index },
+                level: spec.level,
+                message: Message { text },
+                properties,
+            });
+        }
+    }
+    notifications
+}
+
+/// What one condition has to say about this run, if anything.
+///
+/// A count of zero says nothing: a run that asked about every file it read is
+/// not a run with an empty complaint to file.
+fn occurrences(kind: Notice, report: &Report) -> Vec<(String, NotificationProperties)> {
+    let compiler = report.summary.compiler.as_ref();
+    match kind {
+        Notice::NotAsked => compiler
+            .filter(|coverage| coverage.not_asked > 0)
+            .map(|coverage| {
+                (
+                    format!(
+                        "{} file(s) were read without asking a compiler: no installed helper \
+                         reads their language, or nothing said which compilation unit they \
+                         belong to",
+                        coverage.not_asked
+                    ),
+                    NotificationProperties {
+                        files: Some(coverage.not_asked),
+                        reason: None,
+                    },
+                )
+            })
+            .into_iter()
+            .collect(),
+        // One per reason rather than one total: what to do about a project
+        // whose build script was not allowed to run has nothing in common with
+        // what to do about a helper that died, and a single number would leave
+        // a reader to guess which they have.
+        Notice::Unanswered => compiler
+            .into_iter()
+            .flat_map(|coverage| coverage.unavailable.iter())
+            .filter(|(_, count)| **count > 0)
+            .map(|(reason, count)| {
+                (
+                    format!(
+                        "a compiler was asked about {count} file(s) and supplied nothing: {reason}"
+                    ),
+                    NotificationProperties {
+                        files: Some(*count),
+                        reason: Some(reason.clone()),
+                    },
+                )
+            })
+            .collect(),
+        Notice::PairsTruncated => {
+            if report.summary.pair_budget_exhausted {
+                vec![(
+                    "comparison stopped at the candidate-pair budget, so duplication this tree \
+                     holds may be missing from these results"
+                        .to_string(),
+                    NotificationProperties {
+                        files: None,
+                        reason: None,
+                    },
+                )]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct AutomationDetails {
     id: String,
@@ -262,6 +496,11 @@ struct Invocation {
     execution_successful: bool,
     start_time_utc: String,
     end_time_utc: String,
+    /// Left out when the run has nothing to say: an empty array reads as a
+    /// report that was checked and came back clean, which is a different claim
+    /// from a mode that asks no compiler and never had one to make.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_execution_notifications: Vec<Notification>,
 }
 
 /// Run property bag: every scan-level field of the JSON report that SARIF has
@@ -781,6 +1020,123 @@ mod tests {
         assert_eq!(properties["detector_versions"][0]["component"], "fp-schema");
         assert_eq!(properties["summary"]["files"]["total"], 2);
         assert_eq!(properties["run_id"], 1);
+    }
+
+    fn coverage(not_asked: u64, unavailable: &[(&str, u64)]) -> crate::report::CompilerCoverage {
+        crate::report::CompilerCoverage {
+            answered: 3,
+            not_asked,
+            unavailable: unavailable
+                .iter()
+                .map(|(reason, count)| ((*reason).to_string(), *count))
+                .collect(),
+            restarts: 2,
+        }
+    }
+
+    /// A short result list is what a clean tree and an unreadable one both look
+    /// like. Which one this is has to be said outright, in the place a consumer
+    /// reads without having been taught this tool's property keys.
+    #[test]
+    fn what_a_run_could_not_read_is_said_rather_than_left_to_the_property_bag() {
+        let mut report = sample_report();
+        report.summary.compiler = Some(coverage(
+            5,
+            &[("helper_died", 1), ("requires_execution", 2)],
+        ));
+        let value = sarif(&report);
+        let run = &value["runs"][0];
+        let notifications = run["invocations"][0]["toolExecutionNotifications"]
+            .as_array()
+            .unwrap();
+        assert_eq!(notifications.len(), 3);
+
+        assert_eq!(notifications[0]["descriptor"]["id"], "coverage/not-asked");
+        assert_eq!(notifications[0]["level"], "note");
+        assert_eq!(notifications[0]["properties"]["files"], 5);
+
+        // One per reason: a build script nobody allowed to run and a helper
+        // that died call for different things, and one total would leave a
+        // reader to guess which they have.
+        for (at, reason, files) in [(1, "helper_died", 1), (2, "requires_execution", 2)] {
+            let notification = &notifications[at];
+            assert_eq!(notification["descriptor"]["id"], "coverage/unanswered");
+            assert_eq!(notification["level"], "warning");
+            assert_eq!(notification["properties"]["reason"], reason);
+            assert_eq!(notification["properties"]["files"], files);
+            assert!(
+                notification["message"]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(reason)
+            );
+        }
+
+        // Reading less of a tree than it holds is an outcome, not a failure.
+        assert_eq!(run["invocations"][0]["executionSuccessful"], true);
+
+        // And the index has to land on the descriptor it names, or a consumer
+        // resolving it by position gets somebody else's sentence.
+        let declared = run["tool"]["driver"]["notifications"].as_array().unwrap();
+        assert_eq!(declared.len(), NOTICES.len());
+        for notification in notifications {
+            let index = notification["descriptor"]["index"].as_u64().unwrap();
+            let at = usize::try_from(index).unwrap();
+            assert_eq!(declared[at]["id"], notification["descriptor"]["id"]);
+        }
+    }
+
+    /// A run told to stop comparing before it ran out of things to compare has
+    /// findings missing for a reason that is not the tree's.
+    #[test]
+    fn a_comparison_that_stopped_at_its_budget_says_so() {
+        let mut report = sample_report();
+        report.summary.pair_budget_exhausted = true;
+        let value = sarif(&report);
+        let notifications = value["runs"][0]["invocations"][0]["toolExecutionNotifications"]
+            .as_array()
+            .unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(
+            notifications[0]["descriptor"]["id"],
+            "coverage/pairs-truncated"
+        );
+        assert_eq!(notifications[0]["level"], "warning");
+        // Nothing was counted in files, so nothing claims to have been.
+        assert!(notifications[0]["properties"].get("files").is_none());
+    }
+
+    /// Silence and an empty complaint are different claims. A mode that asks no
+    /// compiler never had one to make, and a run that asked about everything it
+    /// read has nothing outstanding — neither is served by an empty array that
+    /// reads as a report that came back clean.
+    #[test]
+    fn a_run_with_nothing_to_report_about_itself_reports_nothing() {
+        let value = sarif(&sample_report());
+        assert!(
+            value["runs"][0]["invocations"][0]
+                .get("toolExecutionNotifications")
+                .is_none()
+        );
+        // The catalogue is still there, because what the tool can say does not
+        // depend on what this run had to say.
+        assert_eq!(
+            value["runs"][0]["tool"]["driver"]["notifications"]
+                .as_array()
+                .unwrap()
+                .len(),
+            NOTICES.len()
+        );
+
+        // Nor does a compiler that answered about everything file an empty one.
+        let mut answered = sample_report();
+        answered.summary.compiler = Some(coverage(0, &[]));
+        let value = sarif(&answered);
+        assert!(
+            value["runs"][0]["invocations"][0]
+                .get("toolExecutionNotifications")
+                .is_none()
+        );
     }
 
     #[test]
