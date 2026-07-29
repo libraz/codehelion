@@ -39,6 +39,17 @@
 //! builds that any comma-joined encoding reports as the same one. Prefixing
 //! each value with its length makes the encoding injective whatever the values
 //! contain.
+//!
+//! # One list, read two ways
+//!
+//! A configuration says what it was told once, as [`Setting`]s, and the
+//! canonical form is a fold over that list. Anything that wants the fields
+//! themselves — an audit database recording what a stored variant was built
+//! with — reads the same list. Keeping the identity and the record derived from
+//! one enumeration is what stops them drifting: a field added to the encoding
+//! but forgotten in the record would leave two variants that differ in the
+//! database by nothing but a hash, which is precisely a difference nobody can
+//! act on.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -70,6 +81,69 @@ pub const EXCLUDED_WITH_VALUE: [&str; 4] = ["-o", "-MF", "-MT", "-MQ"];
 #[must_use]
 pub fn content_hash(text: &str) -> String {
     blake3::hash(text.as_bytes()).to_hex().to_string()
+}
+
+/// One thing a compiler was told, under the name it is recorded by.
+///
+/// The name is part of the record and outlives the release that wrote it, so it
+/// is chosen once and not renamed with the field it comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setting {
+    /// What it is called wherever it is stored.
+    pub name: &'static str,
+    /// Its value, in the shape the setting has.
+    pub shape: Shape,
+}
+
+/// The three shapes a build setting comes in.
+///
+/// They are distinguished because they encode differently, and they encode
+/// differently because they mean different things: a value nobody resolved is
+/// not an empty value, and a sequence of one is not a scalar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Shape {
+    /// A value every build has.
+    Given(String),
+    /// A value only something that looked it up can supply.
+    Resolved(Option<String>),
+    /// A sequence, in the order it was given.
+    Ordered(Vec<String>),
+}
+
+impl Shape {
+    /// The values worth recording, in order.
+    ///
+    /// An unresolved setting yields nothing: what was never looked up is
+    /// absent from the record rather than present and empty.
+    #[must_use]
+    pub fn values(&self) -> Vec<&str> {
+        match self {
+            Self::Given(value) => vec![value.as_str()],
+            Self::Resolved(value) => value.as_deref().into_iter().collect(),
+            Self::Ordered(values) => values.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+fn given(name: &'static str, value: &str) -> Setting {
+    Setting {
+        name,
+        shape: Shape::Given(value.to_string()),
+    }
+}
+
+fn resolved(name: &'static str, value: Option<&str>) -> Setting {
+    Setting {
+        name,
+        shape: Shape::Resolved(value.map(ToString::to_string)),
+    }
+}
+
+fn ordered(name: &'static str, values: &[String]) -> Setting {
+    Setting {
+        name,
+        shape: Shape::Ordered(values.to_vec()),
+    }
 }
 
 /// What a C or C++ translation unit was compiled with.
@@ -143,14 +217,18 @@ impl CppBuild {
             .collect()
     }
 
-    fn encode(&self, out: &mut String) {
-        scalar(out, "compiler", &self.compiler);
-        optional(out, "compiler_version", self.compiler_version.as_deref());
-        optional(out, "linker", self.linker.as_deref());
-        list(out, "macros", &self.macros);
-        list(out, "includes", &self.include_paths);
-        list(out, "flags", &self.flags);
-        optional(out, "database", self.database_hash.as_deref());
+    /// Everything this build was told, in the order the identity encodes it.
+    #[must_use]
+    pub fn settings(&self) -> Vec<Setting> {
+        vec![
+            given("compiler", &self.compiler),
+            resolved("compiler_version", self.compiler_version.as_deref()),
+            resolved("linker", self.linker.as_deref()),
+            ordered("macros", &self.macros),
+            ordered("includes", &self.include_paths),
+            ordered("flags", &self.flags),
+            resolved("database", self.database_hash.as_deref()),
+        ]
     }
 }
 
@@ -204,21 +282,24 @@ impl RustBuild {
         self
     }
 
-    fn encode(&self, out: &mut String) {
-        scalar(out, "target", &self.target);
-        list(out, "features", &self.features);
-        list(out, "cfgs", &self.cfgs);
-        scalar(out, "compiler_version", &self.compiler_version);
-        scalar(out, "opt_level", &self.opt_level);
-        scalar(out, "lto", &self.lto);
-        optional(
-            out,
-            "codegen_units",
-            self.codegen_units.map(|units| units.to_string()).as_deref(),
-        );
-        scalar(out, "panic", &self.panic);
-        optional(out, "lockfile", self.lockfile_hash.as_deref());
-        optional(out, "build_command", self.build_command_hash.as_deref());
+    /// Everything this build was told, in the order the identity encodes it.
+    #[must_use]
+    pub fn settings(&self) -> Vec<Setting> {
+        vec![
+            given("target", &self.target),
+            ordered("features", &self.features),
+            ordered("cfgs", &self.cfgs),
+            given("compiler_version", &self.compiler_version),
+            given("opt_level", &self.opt_level),
+            given("lto", &self.lto),
+            resolved(
+                "codegen_units",
+                self.codegen_units.map(|units| units.to_string()).as_deref(),
+            ),
+            given("panic", &self.panic),
+            resolved("lockfile", self.lockfile_hash.as_deref()),
+            resolved("build_command", self.build_command_hash.as_deref()),
+        ]
     }
 }
 
@@ -232,6 +313,28 @@ pub enum BuildConfiguration {
 }
 
 impl BuildConfiguration {
+    /// Which language's build this is.
+    ///
+    /// Part of the identity in its own right: the two languages' settings are
+    /// named differently, but nothing stops them lining up field for field, and
+    /// two builds that share an encoding are not the same program.
+    #[must_use]
+    pub const fn language(&self) -> &'static str {
+        match self {
+            Self::Rust(_) => "rust",
+            Self::Cpp(_) => "cpp",
+        }
+    }
+
+    /// Everything this build was told, in the order the identity encodes it.
+    #[must_use]
+    pub fn settings(&self) -> Vec<Setting> {
+        match self {
+            Self::Rust(build) => build.settings(),
+            Self::Cpp(build) => build.settings(),
+        }
+    }
+
     /// The canonical, injective encoding of this configuration.
     ///
     /// Two configurations produce the same string exactly when they are equal,
@@ -239,14 +342,12 @@ impl BuildConfiguration {
     #[must_use]
     pub fn canonical(&self) -> String {
         let mut out = String::new();
-        match self {
-            Self::Rust(build) => {
-                scalar(&mut out, "language", "rust");
-                build.encode(&mut out);
-            }
-            Self::Cpp(build) => {
-                scalar(&mut out, "language", "cpp");
-                build.encode(&mut out);
+        scalar(&mut out, "language", self.language());
+        for setting in self.settings() {
+            match &setting.shape {
+                Shape::Given(value) => scalar(&mut out, setting.name, value),
+                Shape::Resolved(value) => optional(&mut out, setting.name, value.as_deref()),
+                Shape::Ordered(values) => list(&mut out, setting.name, values),
             }
         }
         out
@@ -551,5 +652,108 @@ mod tests {
         let rust = BuildConfiguration::Rust(Box::default());
         let cpp = BuildConfiguration::Cpp(Box::default());
         assert_ne!(rust.fingerprint(), cpp.fingerprint());
+    }
+
+    /// The canonical form is what stored variants are identified by, so it is
+    /// pinned here in full: a refactor that reorders or renames a setting would
+    /// otherwise silently stop an audit database from lining up with the runs
+    /// that follow it.
+    #[test]
+    fn the_encoding_of_a_configuration_is_fixed() {
+        let build = BuildConfiguration::Cpp(Box::new(CppBuild {
+            compiler: "cc".into(),
+            macros: vec!["-DA=1".into()],
+            include_paths: vec!["/inc".into()],
+            ..CppBuild::default()
+        }));
+        assert_eq!(
+            build.canonical(),
+            "language=3:cpp;compiler=2:cc;compiler_version=none;linker=none;\
+             macros=1[5:-DA=1];includes=1[4:/inc];flags=0[];database=none;"
+        );
+    }
+
+    /// Whatever a field is worth to the identity, it is worth the same to the
+    /// record: a field that moved the fingerprint but not the settings would
+    /// leave two stored variants differing by a hash and nothing a reader could
+    /// name.
+    #[test]
+    fn every_field_that_moves_the_identity_is_one_of_the_settings() {
+        let cpp = |change: fn(&mut CppBuild)| {
+            let mut build = CppBuild {
+                compiler: "cc".into(),
+                compiler_version: Some("18".into()),
+                linker: Some("ld".into()),
+                macros: vec!["-DA=1".into()],
+                include_paths: vec!["/inc".into()],
+                flags: vec!["-O2".into()],
+                database_hash: Some("db".into()),
+            };
+            change(&mut build);
+            BuildConfiguration::Cpp(Box::new(build))
+        };
+        let changes: [fn(&mut CppBuild); 7] = [
+            |b| b.compiler = "c++".into(),
+            |b| b.compiler_version = None,
+            |b| b.linker = Some("lld".into()),
+            |b| b.macros.push("-DB=2".into()),
+            |b| b.include_paths.clear(),
+            |b| b.flags = vec!["-O0".into()],
+            |b| b.database_hash = None,
+        ];
+        let base = cpp(|_| {});
+        for change in changes {
+            let moved = cpp(change);
+            assert_ne!(base.fingerprint(), moved.fingerprint());
+            assert_ne!(base.settings(), moved.settings());
+        }
+
+        let rust = |change: fn(&mut RustBuild)| {
+            let mut build = RustBuild {
+                target: "aarch64-apple-darwin".into(),
+                features: vec!["serde".into()],
+                cfgs: vec!["unix".into()],
+                compiler_version: "rustc 1.85.0".into(),
+                opt_level: "3".into(),
+                lto: "thin".into(),
+                codegen_units: Some(16),
+                panic: "unwind".into(),
+                lockfile_hash: Some("lock".into()),
+                build_command_hash: Some("cmd".into()),
+            };
+            change(&mut build);
+            BuildConfiguration::Rust(Box::new(build))
+        };
+        let changes: [fn(&mut RustBuild); 10] = [
+            |b| b.target = "x86_64-unknown-linux-gnu".into(),
+            |b| b.features.clear(),
+            |b| b.cfgs.push("windows".into()),
+            |b| b.compiler_version = "rustc 1.86.0".into(),
+            |b| b.opt_level = "0".into(),
+            |b| b.lto = "fat".into(),
+            |b| b.codegen_units = None,
+            |b| b.panic = "abort".into(),
+            |b| b.lockfile_hash = None,
+            |b| b.build_command_hash = Some("other".into()),
+        ];
+        let base = rust(|_| {});
+        for change in changes {
+            let moved = rust(change);
+            assert_ne!(base.fingerprint(), moved.fingerprint());
+            assert_ne!(base.settings(), moved.settings());
+        }
+    }
+
+    /// A value nobody looked up is left out of the record, rather than written
+    /// down as an empty one — the same distinction the encoding makes.
+    #[test]
+    fn an_unresolved_setting_records_nothing_and_an_empty_one_records_a_value() {
+        assert!(Shape::Resolved(None).values().is_empty());
+        assert_eq!(Shape::Resolved(Some(String::new())).values(), vec![""]);
+        assert_eq!(Shape::Given("cc".into()).values(), vec!["cc"]);
+        assert_eq!(
+            Shape::Ordered(vec!["/a".into(), "/b".into()]).values(),
+            vec!["/a", "/b"]
+        );
     }
 }

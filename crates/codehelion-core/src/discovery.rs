@@ -20,7 +20,8 @@ mod source_unit;
 mod walk;
 
 pub use build_config::{
-    BuildConfiguration, CppBuild, EXCLUDED, EXCLUDED_WITH_VALUE, RustBuild, content_hash,
+    BuildConfiguration, CppBuild, EXCLUDED, EXCLUDED_WITH_VALUE, RustBuild, Setting, Shape,
+    content_hash,
 };
 pub use build_variant::{AnalysisMode, BuildVariant, NORMALIZATION_VERSION, Partition, partition};
 pub use cargo::{CargoLayout, PackageInfo};
