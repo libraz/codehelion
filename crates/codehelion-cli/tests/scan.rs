@@ -1378,6 +1378,106 @@ fn one_tree_read_with_different_features_is_not_reported_as_the_other() {
     assert_ne!(widened["run"]["run_id"], first["run"]["run_id"]);
 }
 
+/// The three ways a permission would be granted and change nothing. Each is
+/// refused with the sentence that says which, because a permission that was
+/// accepted and dropped leaves somebody believing the thin answer they got is
+/// what their project looks like.
+#[test]
+fn a_permission_that_could_not_take_effect_is_refused_rather_than_dropped() {
+    let dir = fixture();
+    let refused = |extra: &[&str]| {
+        let output = cmd()
+            .current_dir(dir.path())
+            .args(["scan", "."])
+            .args(extra)
+            .output()
+            .expect("the scan should run");
+        assert!(!output.status.success(), "{output:?}");
+        String::from_utf8(output.stderr).expect("output is utf-8")
+    };
+
+    // A mode that runs nothing whatever it is told.
+    let said = refused(&["--allow-execution=build-script"]);
+    assert!(said.contains("fast"), "{said}");
+
+    // A trust level that permits nothing, and a permission, in one command.
+    let said = refused(&[
+        "--mode",
+        "semantic",
+        "--untrusted",
+        "--allow-execution=build-script",
+    ]);
+    assert!(said.contains("--untrusted"), "{said}");
+
+    // A class nobody can grant, which somebody who misspelled one believes
+    // they granted.
+    let said = refused(&["--mode", "semantic", "--allow-execution=build-scripts"]);
+    assert!(said.contains("build-script"), "{said}");
+}
+
+/// Permitting a build script changes two things at once, and both have to
+/// hold. The crate stops being declined, which is what was asked for; and the
+/// run is filed apart from the refused one, which is what stops the refused
+/// run's findings from being handed back as this one's — nothing in the source
+/// text differs between the two, so the identity is the only thing that can
+/// tell them apart.
+#[test]
+fn a_run_allowed_to_build_reads_more_and_is_filed_apart_from_one_that_was_not() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\n\n[package]\nname = \"generated\"\nversion = \"0.1.0\"\n\
+         edition = \"2021\"\npublish = false\nbuild = \"build.rs\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("build.rs"),
+        "fn main() {\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    \
+         std::fs::write(std::path::Path::new(&out).join(\"table.rs\"), \
+         \"pub const SIZES: [u32; 3] = [1, 2, 4];\\n\").unwrap();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "include!(concat!(env!(\"OUT_DIR\"), \"/table.rs\"));\n\
+         pub fn largest() -> u32 { SIZES.iter().copied().max().unwrap_or(0) }\n",
+    )
+    .unwrap();
+
+    let scan = |extra: &[&str]| {
+        let output = cmd()
+            .current_dir(root)
+            .args(["scan", ".", "--mode", "semantic", "--format", "json"])
+            .args(extra)
+            .output()
+            .expect("the scan should run");
+        output.status.success().then(|| {
+            serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .expect("stdout is one JSON document")
+        })
+    };
+    let Some(refused) = scan(&[]) else {
+        // No helper on this machine, which the pairing test above covers.
+        return;
+    };
+    assert_eq!(
+        refused["summary"]["compiler"]["unavailable"]["requires_execution"],
+        serde_json::json!(1),
+        "{refused}"
+    );
+
+    let permitted = scan(&["--allow-execution=build-script"]).expect("the helper answers");
+    assert_eq!(
+        permitted["summary"]["compiler"]["answered"],
+        serde_json::json!(1),
+        "{permitted}"
+    );
+    assert_ne!(permitted["run"]["reused"], serde_json::json!(true));
+    assert_ne!(permitted["run"]["run_id"], refused["run"]["run_id"]);
+}
+
 /// A recorded semantic run is reported again like any other, and it has to
 /// come back with the sentence that makes it semantic. Restored short — no
 /// compiler line, or one claiming files nobody asked about were failures — a

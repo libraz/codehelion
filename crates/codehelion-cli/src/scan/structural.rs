@@ -55,7 +55,9 @@ use crate::report::{self, Report};
 use crate::semantic;
 use crate::suppress;
 use codehelion_core::doctor;
+use codehelion_core::execution::ExecutionPolicy;
 use codehelion_helper::Helper;
+use codehelion_helper::protocol::Execution;
 
 /// The reporting metadata of one parsed source file.
 struct SourceMeta {
@@ -99,15 +101,21 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
 /// one cannot be talked to. Semantic mode does not fall back to Structural: a
 /// run that answered without a compiler and called itself semantic would be
 /// syntactic results under another name, and nothing downstream could tell.
-pub fn semantic(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
-    let compilers = Compilers::found()?;
+pub fn semantic(
+    args: &ScanArgs,
+    permitted: &ExecutionPolicy,
+    out: &mut impl Write,
+) -> Result<Outcome> {
+    let compilers = Compilers::found(permitted)?;
     run_with(args, out, Some(&compilers))
 }
 
-/// The helper a semantic run asks, and what it said about itself.
+/// The helper a semantic run asks, what it said about itself, and what it is
+/// allowed to run while answering.
 struct Compilers {
     program: std::path::PathBuf,
     greeting: doctor::Greeting,
+    permitted: Vec<Execution>,
 }
 
 impl Compilers {
@@ -117,7 +125,13 @@ impl Compilers {
     /// the run cannot be what it was asked to be, and because the two failures
     /// need different answers: one is a program to install, the other a
     /// program to update.
-    fn found() -> Result<Self> {
+    ///
+    /// It is also where a permission meets the program it was granted to. A
+    /// helper says at the handshake what it acts on; anything permitted beyond
+    /// that is refused here rather than sent and ignored, because the answer
+    /// that comes back from ignoring it is thinner than the one that was asked
+    /// for and looks exactly like the project's own.
+    fn found(permitted: &ExecutionPolicy) -> Result<Self> {
         let helper = doctor::RUST_HELPER;
         let Some(facts) = crate::interrogate(helper.binary, None) else {
             bail!(
@@ -129,6 +143,7 @@ impl Compilers {
         };
         match facts.state {
             doctor::HelperState::Answered(greeting) => Ok(Self {
+                permitted: acted_on(permitted, &greeting, helper.binary)?,
                 program: facts.path,
                 greeting,
             }),
@@ -172,6 +187,11 @@ impl Compilers {
                 .map(|text| content_hash(&text)),
             features: described.features,
             cfgs: described.cfgs,
+            permitted_execution: self
+                .permitted
+                .iter()
+                .map(|class| class.name().to_string())
+                .collect(),
             ..RustBuild::default()
         })))
     }
@@ -198,6 +218,38 @@ impl Compilers {
             )
         })
     }
+}
+
+/// The permitted classes as the protocol names them, refusing any the helper
+/// said it would not act on.
+///
+/// The greeting carries the classes as strings, so the round trip through the
+/// protocol's own spelling is also what checks that both sides mean the same
+/// class by the same word.
+fn acted_on(
+    permitted: &ExecutionPolicy,
+    greeting: &doctor::Greeting,
+    binary: &str,
+) -> Result<Vec<Execution>> {
+    let mut sending = Vec::new();
+    for class in permitted.permitted() {
+        let Some(named) = Execution::from_name(class.name()) else {
+            bail!(
+                "this build has no protocol name for the execution class {}",
+                class.name()
+            );
+        };
+        if !greeting.executes.iter().any(|acts| acts == class.name()) {
+            bail!(
+                "{binary} does not run {}, so --allow-execution={} would change \
+                 nothing about this scan; `codehelion doctor` lists what it runs",
+                class.name(),
+                class.name()
+            );
+        }
+        sending.push(named);
+    }
+    Ok(sending)
 }
 
 /// How long the helper has to say what a tree is built with.
@@ -372,6 +424,7 @@ fn ask_about(
         semantic::Backend {
             program: &compilers.program,
             analyzes: Language::Rust,
+            permitted: &compilers.permitted,
         },
         sources,
         &variant.fingerprint(),
@@ -1906,7 +1959,7 @@ fn breakdown_row(group: &StructuralGroup, detail: &GroupDetail) -> SimilarityBre
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{Compilers, Config, StructuralConfig, structural_config};
+    use super::{Compilers, Config, ExecutionPolicy, StructuralConfig, structural_config};
 
     /// Whether a helper is installed is a property of the machine, so what is
     /// fixed here is the pairing: without one, the message names the program
@@ -1914,7 +1967,7 @@ mod tests {
     /// knows which compiler answered.
     #[test]
     fn a_run_that_needs_a_compiler_says_which_program_supplies_it() {
-        match Compilers::found() {
+        match Compilers::found(&ExecutionPolicy::deny_all()) {
             Err(error) => {
                 let text = format!("{error:#}");
                 assert!(

@@ -68,6 +68,18 @@ pub enum Mode {
     Semantic,
 }
 
+impl Mode {
+    /// What this mode is called, as it is typed and as a message names it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Structural => "structural",
+            Self::Semantic => "semantic",
+        }
+    }
+}
+
 /// Output format for a scan report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
@@ -143,6 +155,14 @@ pub struct ScanArgs {
     /// its subject does not choose it.
     #[arg(long)]
     pub untrusted: bool,
+    /// Let a compiler helper run these classes of the project's own code:
+    /// build-script, proc-macro, configure, compiler-wrapper, generated-source.
+    ///
+    /// Nothing runs without this. A flag rather than a configuration key for
+    /// the same reason as `--untrusted`, and stronger: the file that would
+    /// carry the setting is one the tree being scanned supplies.
+    #[arg(long, value_name = "CLASS[,CLASS]")]
+    pub allow_execution: Option<String>,
 }
 
 /// Arguments for the `explain` subcommand.

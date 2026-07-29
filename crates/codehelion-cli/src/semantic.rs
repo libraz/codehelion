@@ -33,7 +33,7 @@ use codehelion_core::engine::normalize::Resolution;
 use codehelion_core::ir::ByteRange;
 use codehelion_core::types::TypeTag;
 use codehelion_helper::ir::{CompilerIr, Unavailability, UnitRef};
-use codehelion_helper::protocol::{Capability, HelperIdentity};
+use codehelion_helper::protocol::{Capability, Execution, HelperIdentity};
 use codehelion_helper::{Analysis, Supervisor};
 
 /// Everything a run can use from a compiler.
@@ -113,13 +113,18 @@ pub(crate) fn resolved_types_for(ir: &CompilerIr, file: &str) -> Vec<(ByteRange,
         .collect()
 }
 
-/// A helper program and the language it answers about.
+/// A helper program, the language it answers about, and what it may run.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Backend<'a> {
     /// The program to run.
     pub(crate) program: &'a Path,
     /// The language whose files it is asked about.
     pub(crate) analyzes: Language,
+    /// What it is allowed to run out of the project while answering.
+    ///
+    /// Already narrowed to classes the helper said it acts on, so nothing here
+    /// is a permission that will be silently dropped at the other end.
+    pub(crate) permitted: &'a [Execution],
 }
 
 /// What a helper said about a tree.
@@ -148,7 +153,8 @@ pub(crate) fn ask(
     variant: &str,
     timeout: Duration,
 ) -> Answers {
-    let mut supervisor = Supervisor::new(backend.program.to_path_buf(), Vec::new(), timeout);
+    let mut supervisor = Supervisor::new(backend.program.to_path_buf(), Vec::new(), timeout)
+        .permitting(backend.permitted.to_vec());
     let per_source = gather(backend.analyzes, sources, variant, &mut |unit| {
         supervisor.analyze(unit, &WANTED)
     });

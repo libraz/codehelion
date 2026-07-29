@@ -135,6 +135,11 @@ fn interrogate(name: &str, configured: Option<&Path>) -> Option<doctor::HelperFa
                     .iter()
                     .map(|capability| capability.name().to_string())
                     .collect(),
+                executes: identity
+                    .executes
+                    .iter()
+                    .map(|execution| execution.name().to_string())
+                    .collect(),
             };
             // Failing to stop cleanly is not a reason to withhold what it
             // already said: the answer was given before the goodbye.
@@ -147,8 +152,13 @@ fn interrogate(name: &str, configured: Option<&Path>) -> Option<doctor::HelperFa
 }
 
 fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
+    // Resolved before the mode is dispatched on, because a permission that
+    // nothing in the chosen mode could act on is refused rather than accepted:
+    // Fast and Structural run nothing whatever they are told, and somebody who
+    // granted an execution to one of them is owed the sentence saying so.
+    let permitted = scan::permitted(args)?;
     match args.mode {
-        Mode::Semantic => scan::structural::semantic(args, out),
+        Mode::Semantic => scan::structural::semantic(args, &permitted, out),
         Mode::Structural => scan::structural::run(args, out),
         Mode::Fast => scan::run(args, out),
     }

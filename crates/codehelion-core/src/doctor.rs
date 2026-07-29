@@ -126,6 +126,13 @@ pub struct Greeting {
     pub toolchains: Vec<String>,
     /// What it offers to supply, in the spelling the protocol uses.
     pub capabilities: Vec<String>,
+    /// The classes of execution it acts on when permitted, in the spelling a
+    /// person types to permit them.
+    ///
+    /// Reported because permitting something is a decision, and the person
+    /// making it should be able to find out beforehand whether the program
+    /// they are permitting would do anything with it.
+    pub executes: Vec<String>,
 }
 
 /// An optional out-of-process helper, and what a machine without it loses.
@@ -231,6 +238,16 @@ fn describe(greeting: &Greeting) -> Vec<String> {
         notes.push("supplies: nothing this build asked about".to_string());
     } else {
         notes.push(format!("supplies: {}", greeting.capabilities.join(", ")));
+    }
+    // Stated either way, because "runs nothing" is the answer somebody
+    // deciding whether to permit something needs just as much as a list is.
+    if greeting.executes.is_empty() {
+        notes.push("runs nothing out of a project, whatever is permitted".to_string());
+    } else {
+        notes.push(format!(
+            "runs when permitted: {}",
+            greeting.executes.join(", ")
+        ));
     }
     notes
 }
@@ -339,6 +356,7 @@ mod tests {
             protocol: 1,
             toolchains: vec!["rust-analyzer 0.0.344".to_string()],
             capabilities: vec!["types".to_string(), "name_resolution".to_string()],
+            executes: vec!["build-script".to_string()],
         }
     }
 
@@ -375,6 +393,12 @@ mod tests {
         assert!(notes.contains("protocol 1"), "{notes}");
         assert!(notes.contains("rust-analyzer 0.0.344"), "{notes}");
         assert!(notes.contains("types, name_resolution"), "{notes}");
+        // And what permitting something would actually get, which is the fact
+        // a person needs before granting it rather than after.
+        assert!(
+            notes.contains("runs when permitted: build-script"),
+            "{notes}"
+        );
     }
 
     /// A helper offering nothing would refuse every request it is sent, which
@@ -387,6 +411,7 @@ mod tests {
                 path: PathBuf::from("/opt/bin/helper"),
                 state: HelperState::Answered(Greeting {
                     capabilities: Vec::new(),
+                    executes: Vec::new(),
                     ..greeting()
                 }),
             }),
@@ -396,6 +421,16 @@ mod tests {
                 .notes
                 .iter()
                 .any(|note| note.starts_with("supplies:")),
+            "{:?}",
+            report.notes
+        );
+        // The same for what it runs: "nothing, whatever you permit" is an
+        // answer, and leaving the line off reads as a question nobody asked.
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("runs nothing")),
             "{:?}",
             report.notes
         );

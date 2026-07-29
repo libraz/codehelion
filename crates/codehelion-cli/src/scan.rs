@@ -27,6 +27,7 @@ use codehelion_core::discovery::{
 use codehelion_core::engine::{
     self, CloneGroup, EngineConfig, EngineReport, InputFile, LiteralNorm,
 };
+use codehelion_core::execution::ExecutionPolicy;
 use codehelion_core::frontend::{Frontend, Token, Unit};
 use codehelion_core::incremental;
 use codehelion_core::lineage;
@@ -40,7 +41,7 @@ use codehelion_store::snapshot::{
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::Outcome;
-use crate::cli::{Format, ScanArgs};
+use crate::cli::{Format, Mode, ScanArgs};
 use crate::config::{self, Config, LiteralNormalization};
 use crate::report::{self, Report};
 use crate::reuse;
@@ -176,6 +177,37 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         .map(|baseline| baseline_status(baseline, &model.groups));
     write_report(args, out, &model)?;
     Ok(outcome(args, &model))
+}
+
+/// What this invocation lets a compiler helper run out of the project.
+///
+/// Every way the permission could not take effect is refused here rather than
+/// accepted and quietly dropped. A granted permission changes what a person
+/// believes the run did: they think the thin part of the answer is the
+/// project's, when it is the tool's.
+///
+/// # Errors
+///
+/// Fails on a class name that does not exist, on a permission given to a mode
+/// that runs nothing, and on one given alongside `--untrusted`.
+pub(crate) fn permitted(args: &ScanArgs) -> Result<ExecutionPolicy> {
+    let Some(names) = args.allow_execution.as_deref() else {
+        return Ok(ExecutionPolicy::deny_all());
+    };
+    if args.untrusted {
+        bail!(
+            "--untrusted permits nothing to run, and --allow-execution={names} \
+             asks for something to. Drop whichever of the two was not meant"
+        );
+    }
+    if args.mode != Mode::Semantic {
+        bail!(
+            "--allow-execution={names} has nothing to act on in {} mode, which \
+             reads source and runs nothing; it applies to --mode semantic",
+            args.mode.name()
+        );
+    }
+    ExecutionPolicy::parse(names).map_err(Into::into)
 }
 
 /// The recorded run to report again instead of scanning, or `None` when this
@@ -1413,7 +1445,7 @@ mod tests {
     fn scan_args(untrusted: bool) -> ScanArgs {
         ScanArgs {
             path: PathBuf::from("."),
-            mode: crate::cli::Mode::Fast,
+            mode: Mode::Fast,
             format: Format::Text,
             output: None,
             config: None,
@@ -1421,6 +1453,7 @@ mod tests {
             jobs: None,
             db: None,
             baseline: None,
+            allow_execution: None,
             no_reuse: false,
             show_suppressed: false,
             verbose: false,
