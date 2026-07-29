@@ -42,8 +42,12 @@ fn plant(fixture: &str) -> Planted {
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp(fixture, directory.path()).expect("copy the fixture");
     Planted {
+        // Resolved because a scan resolves the path it was pointed at, and the
+        // answers are spelled against the tree as the filesystem has it. A test
+        // that named the same tree another way would be testing an arrangement
+        // no run makes.
+        root: root.canonicalize().expect("the copy is there"),
         _directory: directory,
-        root,
     }
 }
 

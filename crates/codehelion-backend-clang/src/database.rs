@@ -18,7 +18,7 @@
 //! configure step is a program the project ships. A tree with no database is a
 //! tree this helper cannot answer about, which it says rather than fixes.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -84,16 +84,29 @@ impl Database {
         let raw: Vec<RawEntry> = serde_json::from_str(&text)
             .map_err(|error| format!("parsing {}: {error}", path.display()))?;
         Ok(Self {
-            root: root.to_path_buf(),
+            // Resolved for the same reason the entries are: the root is what
+            // every answer is spelled against, and one spelled against a root
+            // the caller reached another way is a set of relative paths that
+            // point somewhere else.
+            root: canonical(root),
             entries: raw.iter().filter_map(RawEntry::entry).collect(),
         })
     }
 
-    /// The entry for the translation unit spelled `unit`, against this root.
+    /// The entry for the translation unit named `unit`.
+    ///
+    /// Named either the way this project spells its files or by where the file
+    /// is, because the two sides of a request need not stand in the same place:
+    /// a scan rooted inside a tree spells a file against its own root, which is
+    /// not the root the database was found from, and a name matched only one
+    /// way would come back unanswerable for every unit of a project scanned
+    /// from a subdirectory.
     pub(crate) fn unit(&self, unit: &str) -> Option<&Entry> {
-        self.entries
-            .iter()
-            .find(|entry| codehelion_helper::ir::spell(Some(&self.root), &entry.file) == unit)
+        let absolute = canonical(Path::new(unit));
+        self.entries.iter().find(|entry| {
+            codehelion_helper::ir::spell(Some(&self.root), &entry.file) == unit
+                || entry.file == absolute
+        })
     }
 
     /// Every macro the database defines anywhere, sorted and without repeats.
@@ -133,21 +146,69 @@ impl RawEntry {
     /// carries no command to read.
     fn entry(&self) -> Option<Entry> {
         let directory = self.directory.as_ref().map(PathBuf::from);
-        let file = resolve(directory.as_deref(), Path::new(&self.file));
+        let written = resolve(directory.as_deref(), Path::new(&self.file));
         let words = match (&self.arguments, &self.command) {
             (Some(arguments), _) => arguments.clone(),
             (None, Some(command)) => split(command),
             (None, None) => return None,
         };
+        // Resolved, because a generator run from a build directory writes its
+        // sources as `../src/a.cpp` while a caller naming the same file names
+        // it as it is. The two are one file and no plain string comparison
+        // says so.
         let mut entry = Entry {
-            file,
+            file: canonical(&written),
             arguments: Vec::new(),
             definitions: Vec::new(),
         };
-        entry.arguments = parse_arguments(&words, &entry.file, directory.as_deref());
+        // Matched against the path as the command spells it rather than as the
+        // filesystem does: the argument to drop is the one the command carries,
+        // and asking the filesystem about every other argument to find it would
+        // be a search for something already in hand.
+        entry.arguments = parse_arguments(&words, &written, directory.as_deref());
         entry.definitions = definitions(&words);
         Some(entry)
     }
+}
+
+/// `path` as the filesystem spells it, or with its `.` and `..` folded away
+/// when it names nothing there.
+///
+/// Both sides of a request name files, and the two need not have arrived at
+/// their spelling the same way: a scan resolves the root it was pointed at, a
+/// generator writes whatever it was run with, and on a machine where the one is
+/// reached through a symbolic link the two strings differ while the file is one
+/// file. Asking the filesystem is the only thing that says so.
+pub(crate) fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| lexical(path))
+}
+
+/// `path` with its `.` and `..` folded away.
+///
+/// The fallback for a path that names nothing, and the answer for the paths a
+/// compiler reports back: those are built from an include search path and reach
+/// this program by the thousand, which is too many to ask the filesystem about
+/// one at a time.
+pub(crate) fn lexical(path: &Path) -> PathBuf {
+    let mut folded = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            // Only where there is something to fold: a leading `..` names a
+            // directory the path does not otherwise mention, and dropping it
+            // would name a different one.
+            Component::ParentDir
+                if folded
+                    .components()
+                    .next_back()
+                    .is_some_and(|last| matches!(last, Component::Normal(_))) =>
+            {
+                folded.pop();
+            }
+            other => folded.push(other),
+        }
+    }
+    folded
 }
 
 /// `path` made absolute against `directory` when it is not already.
@@ -346,6 +407,64 @@ mod tests {
     fn a_definition_is_collected_however_the_flag_spells_it() {
         let joined = ["-DA", "-DB=2", "-U", "C", "-D", "E=5", "-Iwherever"].map(str::to_string);
         assert_eq!(definitions(&joined), ["-DA", "-DB=2", "-UC", "-DE=5"]);
+    }
+
+    /// The caller and the database need not stand in the same place. A scan
+    /// rooted inside a tree spells its files against its own root, which is not
+    /// the one this database was found from, so a unit is found by where it is
+    /// as well as by how this project spells it.
+    #[test]
+    fn a_unit_is_found_by_where_it_is_as_well_as_by_how_the_project_spells_it() {
+        let database = Database {
+            root: PathBuf::from("/work"),
+            entries: vec![
+                RawEntry {
+                    file: "/work/src/a.cpp".to_string(),
+                    directory: Some("/work/build".to_string()),
+                    arguments: Some(
+                        ["clang++", "-std=c++17", "/work/src/a.cpp"]
+                            .map(str::to_string)
+                            .to_vec(),
+                    ),
+                    command: None,
+                }
+                .entry()
+                .expect("the entry carries a command"),
+            ],
+        };
+        assert!(database.unit("src/a.cpp").is_some());
+        assert!(database.unit("/work/src/a.cpp").is_some());
+        // A file this database says nothing about stays unanswerable, whichever
+        // way it is named: finding the nearest entry would analyse one unit and
+        // report it as another.
+        assert!(database.unit("/work/src/b.cpp").is_none());
+        assert!(database.unit("src/b.cpp").is_none());
+    }
+
+    /// A generator run from a build directory names its sources through the
+    /// directory above. That is the same file a caller names directly, and a
+    /// comparison of the two spellings as text says it is not.
+    #[test]
+    fn a_source_named_through_the_directory_above_is_the_file_it_names() {
+        let entry = RawEntry {
+            file: "../src/a.cpp".to_string(),
+            directory: Some("/work/build".to_string()),
+            arguments: Some(
+                ["clang++", "-std=c++17", "../src/a.cpp"]
+                    .map(str::to_string)
+                    .to_vec(),
+            ),
+            command: None,
+        }
+        .entry()
+        .expect("the entry carries a command");
+        assert_eq!(entry.file, Path::new("/work/src/a.cpp"));
+        // The unit's own source still says which unit this is rather than how
+        // it is read, so it is still not one of the arguments.
+        assert_eq!(
+            entry.arguments,
+            ["-working-directory=/work/build", "-std=c++17"]
+        );
     }
 
     /// An entry with neither form of command describes no compilation, and a

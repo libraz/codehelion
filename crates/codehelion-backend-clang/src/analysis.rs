@@ -22,7 +22,7 @@
 //! project would produce a database it does not already have.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use clang::{Clang, Entity, EntityKind, EntityVisitResult, Index, Type};
 use codehelion_helper::ir::{
@@ -30,7 +30,7 @@ use codehelion_helper::ir::{
     UnitRef, spell,
 };
 
-use crate::database::Database;
+use crate::database::{Database, canonical};
 use crate::types::category;
 
 /// What came of being asked about one unit.
@@ -62,8 +62,18 @@ pub(crate) fn analyze(clang: &Clang, unit: &UnitRef, database: &Database) -> Out
         // analysed under whatever would parse.
         return Outcome::Unavailable(Unavailability::NoBuildInformation);
     };
-    let file = PathBuf::from(&unit.file);
-    let mut reading = Reading::new(&database.root, &file);
+    let file = canonical(Path::new(&unit.file));
+    let Some(wanted) = parsed.get_file(&file) else {
+        // The unit was read and this file is no part of what it read. Nothing
+        // in it can be reported on, and reporting the unit's other files under
+        // this file's name is the one thing that must not happen.
+        return Outcome::Unavailable(Unavailability::NoBuildInformation);
+    };
+    // Told apart by what the compiler calls one file rather than by how the
+    // path is written: a file reached through an include search path is
+    // reported with the spelling that search produced, which is a different
+    // string from the one a caller names it by and the same file.
+    let mut reading = Reading::new(&database.root, &file, wanted.get_id());
     reading.walk(parsed.get_entity());
     let mut ir = CompilerIr::empty(unit.clone());
     ir.anchored_at = Some(database.root.display().to_string());
@@ -78,15 +88,22 @@ struct Reading<'a> {
     root: &'a Path,
     /// The file being reported on, which is one of many the unit reads.
     file: &'a Path,
+    /// What the compiler calls that file, which is what its own answers are
+    /// compared against.
+    id: (u64, u64, u64),
+    /// Whether each file the unit has reached so far sits inside the tree.
+    inside: BTreeMap<(u64, u64, u64), bool>,
     types: TypeTable,
     symbols: Vec<ResolvedSymbol>,
 }
 
 impl<'a> Reading<'a> {
-    fn new(root: &'a Path, file: &'a Path) -> Self {
+    fn new(root: &'a Path, file: &'a Path, id: (u64, u64, u64)) -> Self {
         Self {
             root,
             file,
+            id,
+            inside: BTreeMap::new(),
             types: TypeTable::default(),
             symbols: Vec::new(),
         }
@@ -119,13 +136,15 @@ impl<'a> Reading<'a> {
         let Some(name) = entity.get_name().or_else(|| named.get_name()) else {
             return;
         };
+        let type_index = named.get_type().map(|ty| self.types.intern(ty));
+        let external = self.is_external(named);
         self.symbols.push(ResolvedSymbol {
             id: identity(named),
             name,
             kind,
             anchor,
-            type_index: named.get_type().map(|ty| self.types.intern(ty)),
-            external: self.is_external(named),
+            type_index,
+            external,
         });
     }
 
@@ -139,7 +158,7 @@ impl<'a> Reading<'a> {
         let range = entity.get_range()?;
         let start = range.get_start().get_expansion_location();
         let end = range.get_end().get_expansion_location();
-        if start.file?.get_path() != self.file {
+        if start.file?.get_id() != self.id {
             return None;
         }
         Some(Anchor::written_here(SourceRange {
@@ -163,17 +182,28 @@ impl<'a> Reading<'a> {
     /// as outside for the same reason a primitive does: nobody in the scan
     /// wrote it, so a normalizer that renamed it would be comparing two
     /// fragments on a vocabulary neither of them chose.
-    fn is_external(&self, entity: Entity<'_>) -> bool {
+    /// A definition reached through an include search path is reported with the
+    /// path that search built — through the directory above, or through
+    /// whatever symbolic link the tree was reached by — so the answer is
+    /// resolved rather than compared as text. Resolved once per file rather
+    /// than once per name: a unit holds thousands of names and tens of files.
+    fn is_external(&mut self, entity: Entity<'_>) -> bool {
         let Some(location) = entity.get_location() else {
             return true;
         };
         if location.is_in_system_header() {
             return true;
         }
-        location
-            .get_expansion_location()
-            .file
-            .is_none_or(|file| !file.get_path().starts_with(self.root))
+        let Some(file) = location.get_expansion_location().file else {
+            return true;
+        };
+        let id = file.get_id();
+        if let Some(inside) = self.inside.get(&id) {
+            return !inside;
+        }
+        let inside = canonical(&file.get_path()).starts_with(self.root);
+        self.inside.insert(id, inside);
+        !inside
     }
 }
 
