@@ -21,11 +21,12 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// The Rust fixtures, by directory name under `fixtures/rust/`.
-pub const RUST_FIXTURES: [&str; 6] = [
+pub const RUST_FIXTURES: [&str; 7] = [
     "plain",
     "features",
     "dispatch",
     "macro-rules",
+    "generic",
     "build-script",
     "proc-macro",
 ];
@@ -267,7 +268,7 @@ mod tests {
     fn the_baseline_fixtures_have_nothing_to_execute() {
         // `macro-rules` belongs here too: a declarative macro is expanded by
         // reading it, so a fixture full of them still has nothing to run.
-        for name in ["plain", "features", "dispatch", "macro-rules"] {
+        for name in ["plain", "features", "dispatch", "macro-rules", "generic"] {
             let path = rust(name).unwrap();
             assert!(
                 !path.join("build.rs").is_file(),
