@@ -39,6 +39,9 @@
 //! - `compiler_helper.restarts` counts how often a run had to restart the
 //!   helper. NULL is a run that did not count; zero is a run whose helper
 //!   survived the whole tree.
+//! - `compiler_helper_execution` holds what a helper said it would run when
+//!   permitted, which is not what the run permitted it: the permission is part
+//!   of the build variant, because results depend on it.
 //! - Savings and confidence live in separate columns; there is no single
 //!   collapsed score column.
 //!
@@ -51,12 +54,12 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 21;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
 ];
 
 /// Version 1: the full entity set.
@@ -930,6 +933,14 @@ ALTER TABLE compiler_helper ADD COLUMN restarts INTEGER
 /// and a row written before the root was recorded says nothing either way.
 const V20: &str = "
 ALTER TABLE compiler_unit ADD COLUMN anchored_at TEXT;
+";
+
+const V21: &str = "
+CREATE TABLE compiler_helper_execution (
+    compiler_helper_id INTEGER NOT NULL REFERENCES compiler_helper (id) ON DELETE CASCADE,
+    execution          TEXT NOT NULL,
+    PRIMARY KEY (compiler_helper_id, execution)
+) STRICT;
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

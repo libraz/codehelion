@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use codehelion_helper::client::{Analysis, Helper, HelperError, MAX_DIAGNOSTIC_LINES, Supervisor};
 use codehelion_helper::ir::{TypeCategory, Unavailability, UnitRef};
-use codehelion_helper::protocol::{Capability, OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION};
+use codehelion_helper::protocol::{
+    Capability, Execution, OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION,
+};
 
 /// The deadline for tests that are not about a deadline.
 ///
@@ -105,6 +107,21 @@ fn conditions_nobody_could_establish_are_refused_rather_than_left_empty() {
     };
     assert_eq!(code, "no_build_description");
     helper.shutdown().expect("it goes when asked");
+}
+
+/// A helper says at the handshake what it would run if it were let to, so a
+/// permission that would change nothing can be turned down before it is given.
+/// Sent and ignored, the thin answer that follows reads as the project's.
+#[test]
+fn a_helper_says_what_it_would_run_before_anything_is_permitted() {
+    let helper = start("well-behaved", DEADLINE).expect("the mock answers");
+    assert!(helper.executes(Execution::BuildScript));
+    assert!(!helper.executes(Execution::Configure));
+    helper.shutdown().expect("it goes when asked");
+
+    let inert = start("inert", DEADLINE).expect("the mock answers");
+    assert!(!inert.executes(Execution::BuildScript));
+    inert.shutdown().expect("it goes when asked");
 }
 
 #[test]

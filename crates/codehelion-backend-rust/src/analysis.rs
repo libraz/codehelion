@@ -1,18 +1,24 @@
 //! Loading a Cargo workspace and reading what the compiler knows about it.
 //!
-//! # Nothing here runs the project's code
+//! # Nothing here runs the project's code unless the request said so
 //!
-//! Not by policy but by construction: the two settings that would run it —
-//! executing build scripts to learn their output directories, and starting a
-//! procedural-macro server — are written as constants with no way to reach
-//! them. There is no flag to pass and no configuration to get wrong, because
-//! the code that would do it is not present. `cargo metadata` is read, which
-//! compiles nothing.
+//! One value decides it, and it arrives in the request: [`Permissions`] is
+//! built from what the client permitted and from nothing else. There is no
+//! default that grants anything, no setting to get wrong and no path that
+//! reaches an executing configuration without a permission having travelled to
+//! this process — a run that permits nothing and a build of this program that
+//! could not execute at all behave identically.
 //!
-//! The cost is visible rather than hidden. A crate with a build script is
-//! reported as [`Unavailability::RequiresExecution`] instead of being analysed
-//! with whatever happens to resolve, because a build script can generate types
-//! the rest of the crate is written against, and there is no way to tell from
+//! Starting a procedural-macro server is not among the things a permission can
+//! turn on here: this helper does not offer that class at all, so a person who
+//! permits it is told rather than left with a thinner answer than they asked
+//! for.
+//!
+//! The cost of refusing is visible rather than hidden. A crate with a build
+//! script nobody permitted is reported as
+//! [`Unavailability::RequiresExecution`] instead of being analysed with
+//! whatever happens to resolve, because a build script can generate types the
+//! rest of the crate is written against, and there is no way to tell from
 //! outside how much of an answer is missing.
 //!
 //! # Which compiler answers
@@ -29,7 +35,7 @@ use codehelion_helper::ir::{
     Anchor, CompilerIr, ResolvedSymbol, ResolvedType, SourceRange, SymbolKind, Unavailability,
     UnitRef,
 };
-use codehelion_helper::protocol::BuildDescription;
+use codehelion_helper::protocol::{BuildDescription, Execution};
 use ra_ap_hir::{Adt, Crate, HasSource, HirFileId, ModuleDef};
 use ra_ap_ide_db::RootDatabase;
 use ra_ap_ide_db::base_db::SourceDatabase;
@@ -47,10 +53,35 @@ pub(crate) struct Loaded {
     pub(crate) root: PathBuf,
 }
 
-/// Every workspace this process has read, by the manifest that identifies it.
+/// What a request permitted this process to run out of the project.
+///
+/// One field, because one class is all this helper acts on. A permission it
+/// does not act on never reaches here: the handshake says what it will do, and
+/// granting anything else is refused where somebody can be told.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Permissions {
+    /// Whether build scripts may be run and their output read.
+    pub(crate) build_scripts: bool,
+}
+
+impl Permissions {
+    /// What `permitted` allows, ignoring classes this helper does not act on.
+    pub(crate) fn of(permitted: &[Execution]) -> Self {
+        Self {
+            build_scripts: permitted.contains(&Execution::BuildScript),
+        }
+    }
+}
+
+/// Every workspace this process has read, by the manifest that identifies it
+/// and the permissions it was read under.
+///
+/// Keyed by both, because a workspace read with its build scripts run is not
+/// the same reading as one read without them: a cache on the path alone would
+/// answer a permitted request from a refused reading, or the reverse.
 #[derive(Default)]
 pub(crate) struct Workspaces {
-    loaded: BTreeMap<PathBuf, Result<Loaded, String>>,
+    loaded: BTreeMap<(PathBuf, Permissions), Result<Loaded, String>>,
     described: BTreeMap<PathBuf, Result<BuildDescription, String>>,
 }
 
@@ -87,15 +118,15 @@ impl Workspaces {
             .map(Some)
     }
 
-    /// Analyse one crate of one workspace.
-    pub(crate) fn analyze(&mut self, unit: &UnitRef) -> Outcome {
+    /// Analyse one crate of one workspace, running only what `permitted` says.
+    pub(crate) fn analyze(&mut self, unit: &UnitRef, permitted: Permissions) -> Outcome {
         let anchor = Path::new(&unit.file);
         let Some(manifest) = nearest_manifest(anchor) else {
             return Outcome::Unavailable(Unavailability::NoBuildInformation);
         };
         // The package's own manifest decides this, not the workspace's: one
         // member having a build script says nothing about its neighbours.
-        if has_build_script(&manifest) {
+        if !permitted.build_scripts && has_build_script(&manifest) {
             return Outcome::Unavailable(Unavailability::RequiresExecution);
         }
         // Loaded and cached by workspace rather than by package. Reading a
@@ -106,8 +137,8 @@ impl Workspaces {
         let root = workspace_manifest(&manifest);
         let loaded = self
             .loaded
-            .entry(root.clone())
-            .or_insert_with(|| load(&root));
+            .entry((root.clone(), permitted))
+            .or_insert_with(|| load(&root, permitted));
         match loaded {
             Err(_) => Outcome::Unavailable(Unavailability::NoBuildInformation),
             Ok(loaded) => ra_ap_hir::attach_db(&loaded.db, || analyze_crate(loaded, unit)),
@@ -224,12 +255,17 @@ fn describe_workspace(manifest: &Path) -> Result<BuildDescription, String> {
     Ok(BuildDescription { features, cfgs })
 }
 
-fn load(manifest: &Path) -> Result<Loaded, String> {
+fn load(manifest: &Path, permitted: Permissions) -> Result<Loaded, String> {
     let config = cargo_config();
     let load_config = ra_ap_load_cargo::LoadCargoConfig {
-        // The two settings that would run the project's code. Constants, with
-        // nothing that can change them.
-        load_out_dirs_from_check: false,
+        // The one setting here that runs the project's code, and the only
+        // thing that turns it on is a permission that travelled with the
+        // request. Running build scripts is what makes the output directory
+        // they wrote readable, which is the whole of what permitting them buys.
+        load_out_dirs_from_check: permitted.build_scripts,
+        // Not reachable by any permission: starting a procedural-macro server
+        // is a class this helper does not offer, so nobody can be under the
+        // impression they turned it on.
         with_proc_macro_server: ra_ap_load_cargo::ProcMacroServerChoice::None,
         prefill_caches: false,
         num_worker_threads: 1,

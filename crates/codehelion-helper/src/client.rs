@@ -30,7 +30,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 
 use crate::ir::{CompilerIr, Unavailability, UnitRef};
 use crate::protocol::{
-    Analyze, BuildDescription, Capability, ClientIdentity, DescribeBuild, FrameError,
+    Analyze, BuildDescription, Capability, ClientIdentity, DescribeBuild, Execution, FrameError,
     HelperIdentity, OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, Request, RequestBody, Response,
     ResponseBody, VersionRange, read_frame, write_frame,
 };
@@ -176,6 +176,7 @@ pub struct Helper {
     protocol_version: u32,
     timeout: Duration,
     next_id: u64,
+    permitted: Vec<Execution>,
 }
 
 impl Helper {
@@ -234,6 +235,7 @@ impl Helper {
             protocol_version: OLDEST_PROTOCOL_VERSION,
             timeout,
             next_id: 0,
+            permitted: Vec::new(),
         };
         helper.shake_hands()?;
         Ok(helper)
@@ -255,6 +257,23 @@ impl Helper {
     #[must_use]
     pub fn offers(&self, capability: Capability) -> bool {
         self.identity.capabilities.contains(&capability)
+    }
+
+    /// Whether the helper acts on `execution` when it is permitted.
+    #[must_use]
+    pub fn executes(&self, execution: Execution) -> bool {
+        self.identity.executes.contains(&execution)
+    }
+
+    /// Permit `permitted` for every unit this helper is asked about.
+    ///
+    /// Set once for a whole run rather than per unit: what somebody agreed to
+    /// let a project run is a decision about the project, and a permission that
+    /// could vary between two of its files would be one nobody made.
+    #[must_use]
+    pub fn permitting(mut self, permitted: Vec<Execution>) -> Self {
+        self.permitted = permitted;
+        self
     }
 
     /// Everything the helper has printed on standard error so far.
@@ -309,6 +328,11 @@ impl Helper {
         let id = self.send(RequestBody::Analyze(Analyze {
             unit: unit.clone(),
             want,
+            // Not narrowed to what the helper said it acts on. A permission it
+            // will not act on has to be refused where somebody can be told
+            // about it, and quietly dropping it here is what makes that
+            // impossible.
+            permitted: self.permitted.clone(),
         }))?;
         match self.receive(id)? {
             ResponseBody::Analyzed(ir) => {
@@ -491,6 +515,8 @@ pub struct Supervisor {
     /// off the live process instead, the answer would be "nobody" for every
     /// run that finished — which is every run that gets recorded.
     spoke_with: Option<(HelperIdentity, u32)>,
+    /// What every helper started here may run out of the project.
+    permitted: Vec<Execution>,
     /// Units that have already broken a helper once.
     poisoned: BTreeSet<UnitRef>,
     /// Whether a helper has ever been started, which is what tells a first
@@ -512,6 +538,7 @@ impl Supervisor {
             restarts: 0,
             helper: None,
             spoke_with: None,
+            permitted: Vec::new(),
             poisoned: BTreeSet::new(),
             started: false,
             given_up: false,
@@ -522,6 +549,18 @@ impl Supervisor {
     #[must_use]
     pub const fn with_max_restarts(mut self, restarts: u32) -> Self {
         self.max_restarts = restarts;
+        self
+    }
+
+    /// Permit `permitted` for every helper this supervises, restarts included.
+    ///
+    /// Held here rather than on the helper because a restart replaces the
+    /// process: a permission that lived only on the first one would quietly
+    /// lapse the moment a unit killed it, and the rest of the run would answer
+    /// under rules nobody chose.
+    #[must_use]
+    pub fn permitting(mut self, permitted: Vec<Execution>) -> Self {
+        self.permitted = permitted;
         self
     }
 
@@ -595,13 +634,14 @@ impl Supervisor {
             }
             self.started = true;
             let arguments: Vec<&str> = self.args.iter().map(String::as_str).collect();
-            let helper =
-                Helper::start_with(&self.program, &arguments, self.timeout).inspect_err(|_| {
+            let helper = Helper::start_with(&self.program, &arguments, self.timeout)
+                .inspect_err(|_| {
                     // A helper that will not start will not start for the next
                     // unit either, so the run stops asking rather than paying a
                     // process spawn per file to be told the same thing.
                     self.given_up = true;
-                })?;
+                })?
+                .permitting(self.permitted.clone());
             self.spoke_with = Some((helper.identity().clone(), helper.protocol_version()));
             self.helper = Some(helper);
         }
@@ -648,6 +688,7 @@ const fn unknown_identity() -> HelperIdentity {
         protocol: VersionRange::exactly(PROTOCOL_VERSION),
         toolchains: Vec::new(),
         capabilities: Vec::new(),
+        executes: Vec::new(),
     }
 }
 

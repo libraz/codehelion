@@ -208,6 +208,8 @@ fn sample_summary() -> SummaryRow {
 /// every migration appended after 15 belongs here.
 fn undo_since_fifteen(conn: &rusqlite::Connection) {
     for table in [
+        // Version 21.
+        "compiler_helper_execution",
         // Version 18.
         "build_variant_setting",
         // Version 17.
@@ -1194,8 +1196,9 @@ fn a_variant_recorded_before_it_was_described_is_not_described_as_empty() {
     }
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute("DROP TABLE build_variant_setting", [])
-            .unwrap();
+        for table in ["build_variant_setting", "compiler_helper_execution"] {
+            conn.execute(&format!("DROP TABLE {table}"), []).unwrap();
+        }
         for column in ["languages", "header_language", "build_language"] {
             conn.execute(
                 &format!("ALTER TABLE build_variant DROP COLUMN {column}"),

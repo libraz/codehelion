@@ -283,6 +283,78 @@ pub struct Analyze {
     /// can do is how a run that needs only types avoids paying for a
     /// control-flow graph nobody will read.
     pub want: Vec<Capability>,
+    /// What the helper may run out of the project while answering.
+    ///
+    /// Empty unless somebody said otherwise, and empty is what a request that
+    /// predates the field parses as: a helper reading an older client's message
+    /// runs nothing, which is the outcome that needs no permission.
+    #[serde(default)]
+    pub permitted: Vec<Execution>,
+}
+
+/// Something a helper may be permitted to run out of the project it is
+/// analyzing.
+///
+/// Named per class rather than as one switch, for the reason the tool's own
+/// permissions are: expanding a macro the project's developers already run and
+/// executing a configure step that may reach the network are decisions of
+/// different weight, and a single permission would make agreeing to either mean
+/// agreeing to both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Execution {
+    /// A Cargo build script.
+    BuildScript,
+    /// A procedural macro, expanded by compiling and calling it.
+    ProcMacro,
+    /// A configure step: `CMake`, autotools, or a generator script.
+    Configure,
+    /// A compiler wrapper the project interposes.
+    CompilerWrapper,
+    /// A command that generates source files.
+    GeneratedSource,
+    /// A class this build has no name for.
+    ///
+    /// A newer peer may name one this build does not know. Folding those into
+    /// one variant keeps the message parseable, and a helper cannot be
+    /// permitted something it cannot name — which is the safe direction.
+    #[serde(other)]
+    Unknown,
+}
+
+impl Execution {
+    /// Stable identifier, the same spelling this serializes as and the same
+    /// one a person types to permit it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::BuildScript => "build-script",
+            Self::ProcMacro => "proc-macro",
+            Self::Configure => "configure",
+            Self::CompilerWrapper => "compiler-wrapper",
+            Self::GeneratedSource => "generated-source",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// The class a name refers to, or `None` for one this build cannot name.
+    ///
+    /// Never [`Execution::Unknown`]: that variant exists so an unknown name
+    /// arriving over the wire stays parseable, and turning a name nobody
+    /// recognises into it here would let a misspelled permission travel as a
+    /// permission.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        [
+            Self::BuildScript,
+            Self::ProcMacro,
+            Self::Configure,
+            Self::CompilerWrapper,
+            Self::GeneratedSource,
+        ]
+        .into_iter()
+        .find(|class| class.name() == name)
+    }
 }
 
 /// Who is connecting, and which revisions it can speak.
@@ -350,6 +422,14 @@ pub struct HelperIdentity {
     pub toolchains: Vec<String>,
     /// What it can supply.
     pub capabilities: Vec<Capability>,
+    /// The classes of execution it will act on when it is permitted them.
+    ///
+    /// Stated so that permitting something this helper would not do can be
+    /// refused rather than accepted and forgotten. A permission that changes
+    /// nothing is worse than one that is turned down: somebody granted it, and
+    /// the thin answer that follows looks like the project's own.
+    #[serde(default)]
+    pub executes: Vec<Execution>,
 }
 
 /// Why a request could not be answered.
@@ -482,6 +562,7 @@ mod tests {
             protocol: VersionRange::exactly(PROTOCOL_VERSION),
             toolchains: vec!["rustc 1.85.0".into()],
             capabilities: vec![Capability::Types, Capability::CallTargets],
+            executes: vec![Execution::BuildScript],
         }
     }
 
@@ -604,6 +685,40 @@ mod tests {
             let sent = serde_json::to_string(&capability).unwrap();
             assert_eq!(sent, format!("\"{}\"", capability.name()));
         }
+    }
+
+    /// The same rule as for capabilities, and for the same reason: what is
+    /// stored, what is typed and what is sent are one spelling.
+    #[test]
+    fn what_an_execution_class_is_called_is_what_it_is_sent_as() {
+        for class in [
+            Execution::BuildScript,
+            Execution::ProcMacro,
+            Execution::Configure,
+            Execution::CompilerWrapper,
+            Execution::GeneratedSource,
+            Execution::Unknown,
+        ] {
+            let sent = serde_json::to_string(&class).unwrap();
+            assert_eq!(sent, format!("\"{}\"", class.name()));
+        }
+    }
+
+    /// A name nobody recognises is not a class. Reading it as the catch-all
+    /// would let a misspelling travel as a permission, and the whole point of
+    /// naming classes is that granting one grants exactly one.
+    #[test]
+    fn a_class_nobody_can_name_is_not_read_as_the_one_with_no_name() {
+        assert_eq!(
+            Execution::from_name("build-script"),
+            Some(Execution::BuildScript)
+        );
+        assert_eq!(Execution::from_name("build-scripts"), None);
+        assert_eq!(Execution::from_name("unknown"), None);
+        // Over the wire it still parses, so a newer peer's message is readable.
+        let listed: Vec<Execution> =
+            serde_json::from_str(r#"["build-script","something-newer"]"#).unwrap();
+        assert_eq!(listed, vec![Execution::BuildScript, Execution::Unknown]);
     }
 
     #[test]

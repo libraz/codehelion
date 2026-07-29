@@ -28,6 +28,7 @@ ra_ap_vfs = "0.0.344"
 
 [dev-dependencies]
 codehelion-fixtures = { version = "0.1.0", path = "../codehelion-fixtures" }
+tempfile = "3"
 
 [lints]
 workspace = true

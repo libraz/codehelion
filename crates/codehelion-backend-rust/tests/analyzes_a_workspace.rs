@@ -17,7 +17,7 @@ use std::time::Duration;
 use codehelion_helper::ir::{
     CallTarget, Instantiation, ResolvedSymbol, SymbolKind, TypeCategory, Unavailability, UnitRef,
 };
-use codehelion_helper::protocol::Capability;
+use codehelion_helper::protocol::{Capability, Execution};
 use codehelion_helper::{Analysis, COMPILER_IR_SCHEMA_VERSION, CompilerIr, Helper};
 
 /// Loading a workspace reads its sysroot and its metadata, which on a cold
@@ -478,6 +478,66 @@ fn declining_a_build_script_does_not_run_it() {
         "{} appeared: the helper ran the fixture's build script",
         marker.display()
     );
+}
+
+/// The other half of refusing: permitted, the crate is analysed rather than
+/// declined, and the script that was declined before has now run.
+///
+/// Against a copy, not the fixture. The fixture's marker is the evidence that
+/// nothing in this checkout ran its build script, and a test that ran it in
+/// place would spend that evidence to prove one thing about permission.
+#[test]
+fn permitting_a_build_script_runs_it_and_analyses_what_it_wrote() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().join("build-script");
+    copy_fixture(&codehelion_fixtures::rust("build-script").unwrap(), &root);
+    let marker = root.join(codehelion_fixtures::EXECUTION_MARKER);
+    assert!(!marker.exists(), "the copy starts as the fixture does");
+
+    let unit = UnitRef {
+        // The crate, not the package: cargo's `generated-tables` is compiled
+        // as `generated_tables`, and a unit is named by what the compiler
+        // calls it.
+        unit: "generated_tables".to_string(),
+        file: root.join("src/lib.rs").display().to_string(),
+        variant: "host".to_string(),
+    };
+    let mut helper = helper().permitting(vec![Execution::BuildScript]);
+    let analysis = helper
+        .analyze(&unit, &[Capability::Types])
+        .expect("the helper should answer");
+    helper.shutdown().expect("the helper should stop cleanly");
+
+    assert!(
+        matches!(analysis, Analysis::Done(_)),
+        "permitted, the crate is read rather than declined: {analysis:?}"
+    );
+    assert!(
+        marker.exists(),
+        "{} is missing: nothing ran, so permitting it bought nothing",
+        marker.display()
+    );
+}
+
+/// Copy a fixture's own files, and only those: a `target` directory left by an
+/// earlier run would be carried into a tree whose whole point is that nothing
+/// has been built in it yet.
+fn copy_fixture(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("create the copy");
+    for entry in std::fs::read_dir(from).expect("read the fixture") {
+        let entry = entry.expect("read an entry");
+        let name = entry.file_name();
+        if name == "target" {
+            continue;
+        }
+        let source = entry.path();
+        let destination = to.join(&name);
+        if source.is_dir() {
+            copy_fixture(&source, &destination);
+        } else {
+            std::fs::copy(&source, &destination).expect("copy a file");
+        }
+    }
 }
 
 /// One process, asked twice, must not answer differently the second time. The

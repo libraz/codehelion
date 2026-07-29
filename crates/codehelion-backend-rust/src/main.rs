@@ -29,11 +29,12 @@ mod types;
 use codehelion_helper::PROTOCOL_VERSION;
 use codehelion_helper::ir::COMPILER_IR_SCHEMA_VERSION;
 use codehelion_helper::protocol::{
-    Analyze, BuildDescription, Capability, DescribeBuild, Failure, HelperIdentity, VersionRange,
+    Analyze, BuildDescription, Capability, DescribeBuild, Execution, Failure, HelperIdentity,
+    VersionRange,
 };
 use codehelion_helper::server::{Answer, Backend, Description, serve};
 
-use crate::analysis::{Outcome, Workspaces};
+use crate::analysis::{Outcome, Permissions, Workspaces};
 
 /// The name this helper is known by, in `doctor` and in the audit database.
 const NAME: &str = "codehelion-backend-rust";
@@ -82,6 +83,12 @@ impl Backend for RustBackend {
                 Capability::MacroExpansion,
                 Capability::TemplateInstantiation,
             ],
+            // The classes this program acts on when permitted, which is not
+            // the same list as the classes a Rust project can contain: a
+            // procedural macro is expanded by compiling and calling it, and
+            // this helper does not do that at any permission. Saying so lets
+            // permitting it be refused rather than have no effect.
+            executes: vec![Execution::BuildScript],
         }
     }
 
@@ -104,7 +111,8 @@ impl Backend for RustBackend {
     }
 
     fn analyze(&mut self, request: &Analyze) -> Answer {
-        match self.workspaces.analyze(&request.unit) {
+        let permitted = Permissions::of(&request.permitted);
+        match self.workspaces.analyze(&request.unit, permitted) {
             Outcome::Analyzed(mut ir) => {
                 ir.schema_version = COMPILER_IR_SCHEMA_VERSION.to_string();
                 Answer::Analyzed(ir)

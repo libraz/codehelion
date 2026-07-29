@@ -12,6 +12,7 @@
 //! mock-helper ancient           # speaks a protocol revision nobody else does
 //! mock-helper predates-describe # speaks the oldest revision, which cannot
 //! mock-helper undescribed       # cannot say what the tree is built with
+//! mock-helper inert             # runs nothing, whatever it is permitted
 //! mock-helper untyped           # cannot resolve types
 //! mock-helper slow              # answers, eventually
 //! mock-helper deaf              # never answers
@@ -33,7 +34,7 @@ use codehelion_helper::ir::{
     Unavailability, UnitRef,
 };
 use codehelion_helper::protocol::{
-    BuildDescription, Capability, Failure, HelperIdentity, OLDEST_PROTOCOL_VERSION,
+    BuildDescription, Capability, Execution, Failure, HelperIdentity, OLDEST_PROTOCOL_VERSION,
     PROTOCOL_VERSION, Request, RequestBody, Response, ResponseBody, VersionRange, read_frame,
     write_frame,
 };
@@ -180,6 +181,13 @@ fn identity(behaviour: &str) -> HelperIdentity {
         protocol,
         toolchains: vec!["mock 1.0".into()],
         capabilities,
+        // What it would run if permitted. `inert` says nothing, which is how
+        // the refusal of a permission nobody would act on gets tested.
+        executes: if behaviour == "inert" {
+            Vec::new()
+        } else {
+            vec![Execution::BuildScript]
+        },
     }
 }
 

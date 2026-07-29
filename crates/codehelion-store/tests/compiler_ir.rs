@@ -11,7 +11,7 @@ use codehelion_helper::ir::{
     EdgeKind, EffectSummary, Instantiation, ResolvedSymbol, ResolvedType, SourceRange, SymbolKind,
     TypeCategory, Unavailability, UnitRef,
 };
-use codehelion_helper::protocol::{Capability, HelperIdentity, VersionRange};
+use codehelion_helper::protocol::{Capability, Execution, HelperIdentity, VersionRange};
 use codehelion_store::compiler::{CompilerHelperRow, CompilerOutcome, CompilerUnitRow};
 use codehelion_store::snapshot::{Snapshot, SummaryRow};
 use codehelion_store::{Store, StoreError};
@@ -98,6 +98,7 @@ fn helper_row() -> CompilerHelperRow {
                 Capability::TemplateInstantiation,
                 Capability::Types,
             ],
+            executes: vec![Execution::BuildScript, Execution::ProcMacro],
         },
         protocol_agreed: 3,
         restarts: Some(2),
@@ -694,6 +695,14 @@ fn the_helper_that_answered_is_recorded_with_what_it_granted() {
     // the unit rows say which files came back empty, not that the emptiness
     // was the helper's doing.
     assert_eq!(helpers[0].restarts, Some(2));
+    // What it said it would run if permitted, which answers "why did nothing
+    // run" without the helper still being there to ask. What it *was*
+    // permitted is a different fact and lives in the variant, because results
+    // depend on it.
+    assert_eq!(
+        helpers[0].identity.executes,
+        vec![Execution::BuildScript, Execution::ProcMacro]
+    );
 }
 
 /// A helper that survived the tree and one recorded before restarts were kept

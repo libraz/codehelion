@@ -26,7 +26,7 @@ use codehelion_helper::ir::{
     EdgeKind, EffectSummary, Instantiation, ResolvedSymbol, ResolvedType, SourceRange, SymbolKind,
     TypeCategory, Unavailability, UnitRef,
 };
-use codehelion_helper::protocol::{Capability, HelperIdentity};
+use codehelion_helper::protocol::{Capability, Execution, HelperIdentity};
 use rusqlite::{Row, Transaction, params};
 
 use crate::snapshot::Snapshot;
@@ -273,6 +273,13 @@ fn write_helpers(
                 "INSERT OR IGNORE INTO compiler_helper_toolchain
                      (compiler_helper_id, toolchain) VALUES (?1, ?2)",
                 params![id, toolchain],
+            )?;
+        }
+        for execution in &helper.identity.executes {
+            tx.execute(
+                "INSERT OR IGNORE INTO compiler_helper_execution
+                     (compiler_helper_id, execution) VALUES (?1, ?2)",
+                params![id, execution.name()],
             )?;
         }
         ids.push(id);
@@ -628,7 +635,7 @@ mod read {
     use super::{
         BasicBlock, CallSite, CallTarget, Capability, CompilerCoverage, CompilerHelperRow,
         CompilerIr, CompilerOutcome, ControlFlowGraph, DataFlowSummary, Edge, EdgeKind,
-        EffectSummary, HelperIdentity, Instantiation, ResolvedSymbol, ResolvedType, Row,
+        EffectSummary, Execution, HelperIdentity, Instantiation, ResolvedSymbol, ResolvedType, Row,
         StoreError, StoredCompilerUnit, StoredExpansion, StoredHelperRef, SymbolKind, TypeCategory,
         Unavailability, UnitRef, anchor_at, params,
     };
@@ -672,6 +679,7 @@ mod read {
                         id,
                     )?,
                     capabilities: capabilities(conn, id)?,
+                    executes: executions(conn, id)?,
                 },
                 protocol_agreed: revision(agreed),
                 restarts: restarts.map(revision),
@@ -1121,6 +1129,22 @@ mod read {
             id,
         )?;
         Ok(names.iter().map(|name| capability(name)).collect())
+    }
+
+    fn executions(conn: &Connection, id: i64) -> Result<Vec<Execution>, StoreError> {
+        let names = strings(
+            conn,
+            "SELECT execution FROM compiler_helper_execution
+             WHERE compiler_helper_id = ?1 ORDER BY execution",
+            id,
+        )?;
+        // A class this build cannot name is kept as the nameless one rather
+        // than dropped: the row says the helper offered something, and losing
+        // it would report a helper that offered less than it did.
+        Ok(names
+            .iter()
+            .map(|name| Execution::from_name(name).unwrap_or(Execution::Unknown))
+            .collect())
     }
 
     fn strings(conn: &Connection, sql: &str, id: i64) -> Result<Vec<String>, StoreError> {

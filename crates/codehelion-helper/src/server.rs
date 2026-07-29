@@ -158,6 +158,7 @@ mod tests {
                 protocol: VersionRange::exactly(PROTOCOL_VERSION),
                 toolchains: vec!["fixed 1.0".to_string()],
                 capabilities: vec![Capability::Types],
+                executes: Vec::new(),
             }
         }
 
@@ -238,6 +239,7 @@ mod tests {
             RequestBody::Analyze(Analyze {
                 unit: unit(),
                 want: vec![Capability::Types],
+                permitted: Vec::new(),
             }),
             RequestBody::Shutdown,
         ]);
@@ -254,6 +256,7 @@ mod tests {
         let (responses, backend) = conversation(&[RequestBody::Analyze(Analyze {
             unit: unit(),
             want: vec![Capability::Types],
+            permitted: Vec::new(),
         })]);
         assert_eq!(backend.asked, vec![unit()]);
         match &responses[0].body {
@@ -302,6 +305,7 @@ mod tests {
             RequestBody::Analyze(Analyze {
                 unit: unit(),
                 want: vec![Capability::Types],
+                permitted: Vec::new(),
             }),
         );
         assert_eq!(response.id, 3);
