@@ -88,10 +88,7 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
             // a program is this layer's business, and keeping it out of the
             // engine is what stops a compiler helper from becoming something
             // the analysis crates link.
-            doctor::render(
-                &doctor::diagnose_with(&|name| codehelion_helper::locate(name, None)),
-                out,
-            )?;
+            doctor::render(&doctor::diagnose_with(&|name| interrogate(name, None)), out)?;
             doctor_install(out)?;
             doctor_database(out)?;
             Ok(Outcome::Success)
@@ -105,6 +102,48 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
         Command::Artifact => bail!("artifact analysis is not available in this release"),
         Command::Divergence => bail!("divergence reporting is not available in this release"),
     }
+}
+
+/// How long a diagnostic waits for a helper to introduce itself.
+///
+/// Shorter than a scan's, because a handshake reads nothing: a helper that
+/// takes longer than this to say its own name is one a person is waiting on,
+/// and reporting it as unusable with the reason beats hanging the command that
+/// exists to explain what is wrong.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Find a helper and ask it what it is.
+///
+/// Going as far as the handshake rather than stopping at the path, because a
+/// program being on disk says nothing about whether this build can talk to it,
+/// which compiler will answer, or what it will answer about. All three decide
+/// whether a semantic run is worth starting.
+///
+/// The helper is shut down again. `doctor` inspects; it does not leave a
+/// process running behind a command that printed a table and returned.
+fn interrogate(name: &str, configured: Option<&Path>) -> Option<doctor::HelperFacts> {
+    let path = codehelion_helper::locate(name, configured)?;
+    let state = match codehelion_helper::Helper::start(&path, HANDSHAKE_TIMEOUT) {
+        Ok(helper) => {
+            let identity = helper.identity();
+            let greeting = doctor::Greeting {
+                version: identity.version.clone(),
+                protocol: helper.protocol_version(),
+                toolchains: identity.toolchains.clone(),
+                capabilities: identity
+                    .capabilities
+                    .iter()
+                    .map(|capability| capability.name().to_string())
+                    .collect(),
+            };
+            // Failing to stop cleanly is not a reason to withhold what it
+            // already said: the answer was given before the goodbye.
+            drop(helper.shutdown());
+            doctor::HelperState::Answered(greeting)
+        }
+        Err(error) => doctor::HelperState::Silent(format!("{error}")),
+    };
+    Some(doctor::HelperFacts { path, state })
 }
 
 fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {

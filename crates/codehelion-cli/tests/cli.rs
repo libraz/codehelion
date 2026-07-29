@@ -42,6 +42,38 @@ fn doctor_reports_a_helper_that_is_not_installed_as_optional_and_actionable() {
         .stdout(predicate::str::contains("codehelion-backend-clang"));
 }
 
+/// Being on disk is not being usable, so a row that claims a helper is there
+/// has to carry what the handshake settled — which compiler will answer and
+/// what it will answer about. Whether one is installed depends on the machine,
+/// so what is fixed here is the pairing rather than the outcome: available
+/// comes with what it said, unusable comes with why it said nothing.
+#[test]
+fn a_helper_reported_as_present_says_what_it_answered() {
+    let output = cmd().arg("doctor").output().expect("doctor should run");
+    let text = String::from_utf8(output.stdout).expect("output is utf-8");
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.contains("rust-compiler-helper"))
+        .expect("the helper is listed whether or not it is installed");
+    let row = lines[at];
+    let following = lines[at + 1..].join("\n");
+    if row.contains("available") {
+        assert!(following.starts_with("  "), "{text}");
+        assert!(lines[at + 1].contains("version "), "{text}");
+        assert!(
+            lines[at + 1..at + 4]
+                .iter()
+                .any(|l| l.contains("supplies:")),
+            "{text}"
+        );
+    } else if row.contains("unusable") {
+        assert!(lines[at + 1].contains("could not talk to it"), "{text}");
+    } else {
+        assert!(row.contains("not found"), "{text}");
+    }
+}
+
 #[test]
 fn missing_subcommand_is_an_error() {
     cmd()

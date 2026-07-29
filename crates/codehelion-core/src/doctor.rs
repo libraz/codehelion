@@ -5,15 +5,25 @@
 //! always succeeds.
 //!
 //! Compiler helpers are separate programs, and this module does not know how to
-//! run one — it is handed a way to look for them. That keeps the crate that
-//! compares programs free of the crate that starts processes, and it is also
-//! what makes the absence of a helper testable: a lookup that finds nothing is
-//! a machine without helpers, which is the case worth being sure about.
+//! run one — it is handed what was found out about them. That keeps the crate
+//! that compares programs free of the crate that starts processes, and it is
+//! also what makes the absence of a helper testable: a lookup that finds
+//! nothing is a machine without helpers, which is the case worth being sure
+//! about.
 //!
 //! An absent helper is reported as what is still available rather than as a
 //! problem. Fast and Structural analysis do not need one, so a report that
 //! read as a failure would be telling somebody to fix something that is not
 //! broken.
+//!
+//! # Why being there is not the same as being usable
+//!
+//! A helper that is installed can still be one this build cannot talk to: an
+//! older protocol, a program that dies on startup, a name that resolves to
+//! something else entirely. Reporting that as "available" sends somebody to
+//! debug a scan that was never going to work, and reporting it as "not found"
+//! sends them to install what is already installed. It is its own state, and
+//! what the helper said — or why it said nothing — is the part worth printing.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -25,6 +35,8 @@ pub enum ComponentStatus {
     Available,
     /// Looked for but not found on this system.
     NotFound,
+    /// Found, but this build could not use it.
+    Unusable,
     /// Planned, but not yet provided by this build.
     NotImplemented,
 }
@@ -36,6 +48,7 @@ impl ComponentStatus {
         match self {
             Self::Available => "available",
             Self::NotFound => "not found",
+            Self::Unusable => "unusable",
             Self::NotImplemented => "not implemented",
         }
     }
@@ -72,6 +85,47 @@ pub struct ComponentReport {
     pub status: ComponentStatus,
     /// Extra detail: a version string, or why the component is unavailable.
     pub detail: String,
+    /// Lines printed under the component, in the order they were added.
+    ///
+    /// What a helper said about itself does not fit on the line that says
+    /// whether it is there, and squeezing it in would make the common case —
+    /// reading down the status column — harder for the sake of the rare one.
+    pub notes: Vec<String>,
+}
+
+/// What one helper turned out to be, once somebody went and looked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperFacts {
+    /// Where the program is.
+    pub path: PathBuf,
+    /// Whether it can be talked to, and what it said.
+    pub state: HelperState,
+}
+
+/// Whether a helper that is present can be used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HelperState {
+    /// It answered the handshake, and this is what it answered.
+    Answered(Greeting),
+    /// It is there and this build could not talk to it, with the reason.
+    Silent(String),
+}
+
+/// What a helper said about itself at the handshake.
+///
+/// Spelled as text rather than as the protocol's own types: this crate does not
+/// read the protocol, and a diagnostic that made it do so would put the crate
+/// that compares programs downstream of the crate that starts them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Greeting {
+    /// The helper's own version.
+    pub version: String,
+    /// The protocol version the two settled on.
+    pub protocol: u32,
+    /// The compilers it analyses with — its own, not the project's.
+    pub toolchains: Vec<String>,
+    /// What it offers to supply, in the spelling the protocol uses.
+    pub capabilities: Vec<String>,
 }
 
 /// An optional out-of-process helper, and what a machine without it loses.
@@ -109,41 +163,82 @@ fn inspect_self() -> ComponentReport {
         requirement: Requirement::Required,
         status: ComponentStatus::Available,
         detail: format!("codehelion {}", env!("CARGO_PKG_VERSION")),
+        notes: Vec::new(),
     }
 }
 
-fn inspect_helper(helper: HelperComponent, found: Option<PathBuf>) -> ComponentReport {
-    // Says what is unaffected before what to do about it: the usual reason
-    // somebody reads this line is to find out whether it matters.
-    let (status, detail) = found.map_or_else(
-        || {
-            (
-                ComponentStatus::NotFound,
-                format!(
-                    "not needed for fast or structural analysis; enables {}. To add it, {}.",
-                    helper.enables, helper.advice
+fn inspect_helper(helper: HelperComponent, found: Option<HelperFacts>) -> ComponentReport {
+    let (status, detail, notes) = match found {
+        // Says what is unaffected before what to do about it: the usual reason
+        // somebody reads this line is to find out whether it matters.
+        None => (
+            ComponentStatus::NotFound,
+            format!(
+                "not needed for fast or structural analysis; enables {}. To add it, {}.",
+                helper.enables, helper.advice
+            ),
+            Vec::new(),
+        ),
+        Some(facts) => {
+            let path = facts.path.display().to_string();
+            match facts.state {
+                HelperState::Answered(greeting) => {
+                    (ComponentStatus::Available, path, describe(&greeting))
+                }
+                // The reason goes on its own line rather than beside the path,
+                // because it is the sentence somebody came here for.
+                HelperState::Silent(reason) => (
+                    ComponentStatus::Unusable,
+                    path,
+                    vec![format!("this build could not talk to it: {reason}")],
                 ),
-            )
-        },
-        |path| (ComponentStatus::Available, path.display().to_string()),
-    );
+            }
+        }
+    };
     ComponentReport {
         name: helper.name,
         requirement: Requirement::Optional,
         status,
         detail,
+        notes,
     }
 }
 
-/// Diagnose the environment, asking `find` where each optional helper is.
+/// What a helper said, as the lines a reader gets.
 ///
-/// `find` is given a program name and returns where it is, if anywhere. It is
-/// a parameter rather than a call because looking for a program is the business
-/// of the layer that runs one, and this crate does not run anything.
+/// The toolchain line says whose compiler answered, which is the helper's own
+/// rather than the project's — a scan analysed by a different compiler than the
+/// one that builds the project is a fact worth reading off the diagnostic
+/// instead of discovering in a result.
+fn describe(greeting: &Greeting) -> Vec<String> {
+    let mut notes = vec![format!(
+        "version {}, protocol {}",
+        greeting.version, greeting.protocol
+    )];
+    if !greeting.toolchains.is_empty() {
+        notes.push(format!("analyses with: {}", greeting.toolchains.join(", ")));
+    }
+    // A helper that offers nothing is a helper that will answer every request
+    // with a refusal, so the empty case is stated rather than left off.
+    if greeting.capabilities.is_empty() {
+        notes.push("supplies: nothing this build asked about".to_string());
+    } else {
+        notes.push(format!("supplies: {}", greeting.capabilities.join(", ")));
+    }
+    notes
+}
+
+/// Diagnose the environment, asking `find` what each optional helper turned out
+/// to be.
+///
+/// `find` is given a program name and returns what was found out about it, if
+/// anything. It is a parameter rather than a call because looking for a program
+/// — and starting it — is the business of the layer that runs one, and this
+/// crate does not run anything.
 ///
 /// The order is stable so that output is deterministic.
 #[must_use]
-pub fn diagnose_with(find: &dyn Fn(&str) -> Option<PathBuf>) -> Vec<ComponentReport> {
+pub fn diagnose_with(find: &dyn Fn(&str) -> Option<HelperFacts>) -> Vec<ComponentReport> {
     let mut reports = vec![inspect_self()];
     for helper in OPTIONAL_HELPERS {
         reports.push(inspect_helper(helper, find(helper.binary)));
@@ -180,6 +275,9 @@ pub fn render(reports: &[ComponentReport], out: &mut impl Write) -> io::Result<(
             status = report.status.label(),
             detail = report.detail,
         )?;
+        for note in &report.notes {
+            writeln!(out, "  {:<name_width$}  {note}", "")?;
+        }
     }
     Ok(())
 }
@@ -228,11 +326,26 @@ mod tests {
         }
     }
 
+    fn greeting() -> Greeting {
+        Greeting {
+            version: "0.1.0".to_string(),
+            protocol: 1,
+            toolchains: vec!["rust-analyzer 0.0.344".to_string()],
+            capabilities: vec!["types".to_string(), "name_resolution".to_string()],
+        }
+    }
+
+    fn answered(name: &str) -> HelperFacts {
+        HelperFacts {
+            path: PathBuf::from("/opt/bin").join(name),
+            state: HelperState::Answered(greeting()),
+        }
+    }
+
     #[test]
     fn a_helper_that_is_there_is_reported_with_where_it_is() {
-        let reports = diagnose_with(&|name| {
-            (name == OPTIONAL_HELPERS[0].binary).then(|| PathBuf::from("/opt/bin").join(name))
-        });
+        let reports =
+            diagnose_with(&|name| (name == OPTIONAL_HELPERS[0].binary).then(|| answered(name)));
         let found = &reports[1];
         assert_eq!(found.name, OPTIONAL_HELPERS[0].name);
         assert_eq!(found.status, ComponentStatus::Available);
@@ -240,6 +353,85 @@ mod tests {
         // And the one that was not found still says so, rather than inheriting
         // the answer of the helper beside it.
         assert_eq!(reports[2].status, ComponentStatus::NotFound);
+    }
+
+    /// The point of shaking hands rather than stopping at the path. Which
+    /// compiler will answer, and what it will answer about, decide whether a
+    /// semantic run is worth starting — and neither is knowable from a program
+    /// being on disk.
+    #[test]
+    fn a_helper_that_answered_says_what_it_is_and_what_it_supplies() {
+        let reports =
+            diagnose_with(&|name| (name == OPTIONAL_HELPERS[0].binary).then(|| answered(name)));
+        let notes = reports[1].notes.join("\n");
+        assert!(notes.contains("version 0.1.0"), "{notes}");
+        assert!(notes.contains("protocol 1"), "{notes}");
+        assert!(notes.contains("rust-analyzer 0.0.344"), "{notes}");
+        assert!(notes.contains("types, name_resolution"), "{notes}");
+    }
+
+    /// A helper offering nothing would refuse every request it is sent, which
+    /// is a different situation from one whose capabilities were not printed.
+    #[test]
+    fn a_helper_that_offers_nothing_says_so_rather_than_saying_less() {
+        let report = inspect_helper(
+            OPTIONAL_HELPERS[0],
+            Some(HelperFacts {
+                path: PathBuf::from("/opt/bin/helper"),
+                state: HelperState::Answered(Greeting {
+                    capabilities: Vec::new(),
+                    ..greeting()
+                }),
+            }),
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.starts_with("supplies:")),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// Installed and unusable is its own state. Calling it available sends
+    /// somebody to debug a scan that was never going to work; calling it
+    /// missing sends them to install what is already there.
+    #[test]
+    fn a_helper_that_would_not_answer_is_neither_available_nor_missing() {
+        let report = inspect_helper(
+            OPTIONAL_HELPERS[0],
+            Some(HelperFacts {
+                path: PathBuf::from("/opt/bin/helper"),
+                state: HelperState::Silent("speaks protocol 2, this build speaks 1".to_string()),
+            }),
+        );
+        assert_eq!(report.status, ComponentStatus::Unusable);
+        assert!(
+            report.detail.contains("/opt/bin/helper"),
+            "{}",
+            report.detail
+        );
+        assert!(
+            report.notes.iter().any(|note| note.contains("protocol 2")),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    #[test]
+    fn what_a_helper_said_is_printed_under_it() {
+        let mut buffer = Vec::new();
+        let reports =
+            diagnose_with(&|name| (name == OPTIONAL_HELPERS[0].binary).then(|| answered(name)));
+        render(&reports, &mut buffer).expect("render should succeed");
+        let text = String::from_utf8(buffer).expect("output is utf-8");
+        let lines: Vec<&str> = text.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.contains(OPTIONAL_HELPERS[0].name))
+            .expect("the helper is listed");
+        assert!(lines[at + 1].contains("version 0.1.0"), "{text}");
     }
 
     #[test]
