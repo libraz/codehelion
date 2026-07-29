@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# Guardrail: block commits that fail formatting, linting or tests.
+# Guardrail: block commits that fail formatting or linting.
 # Install with: make hooks   (sets core.hooksPath to .githooks)
+#
+# Formatting and lints only. They are mechanical, they are what a commit can
+# get wrong without anyone noticing, and they cost seconds. The tests are not
+# here: a suite that takes minutes turns every commit into a wait, and a hook
+# people wait on is a hook people pass --no-verify to. Run `make check` before
+# pushing, which is what CI runs.
 set -euo pipefail
 
 echo "pre-commit: cargo fmt --check"
@@ -8,8 +14,5 @@ cargo fmt --all --check
 
 echo "pre-commit: cargo clippy -D warnings"
 cargo clippy --all-targets --all-features -- -D warnings
-
-echo "pre-commit: cargo test"
-cargo test --all-targets --all-features
 
 echo "pre-commit: OK"
