@@ -12,6 +12,8 @@
 //! written as anchor columns on the per-scan rows and participates in no
 //! identity.
 
+use std::collections::BTreeSet;
+
 use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::discovery::{BuildConfiguration, BuildVariant, Language};
@@ -1093,10 +1095,17 @@ fn upsert_variant(tx: &Transaction<'_>, variant: &BuildVariant) -> Result<i64, S
         .collect::<Vec<_>>()
         .join(",");
     let headers = variant.headers.map_or("", Language::name);
+    // The languages whose builds were resolved, as a set: which of them a run
+    // reached first is not a fact about the tree, and the identity beside this
+    // column already carries what each was told.
     let build_language = variant
-        .build
-        .as_ref()
-        .map_or("", BuildConfiguration::language);
+        .builds
+        .iter()
+        .map(BuildConfiguration::language)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(",");
     // `ON CONFLICT DO NOTHING` rather than `INSERT OR IGNORE`: the variant is
     // expected to be there already, but only the fingerprint clash is
     // expected. `OR IGNORE` would swallow a `CHECK` violation too and leave the
@@ -1151,22 +1160,26 @@ fn write_variant_settings(
         "DELETE FROM build_variant_setting WHERE build_variant_id = ?1",
         params![variant_id],
     )?;
-    let Some(build) = variant.build.as_ref() else {
-        return Ok(());
-    };
-    for setting in build.settings() {
-        for (position, value) in setting.shape.values().into_iter().enumerate() {
-            tx.execute(
-                "INSERT INTO build_variant_setting
-                     (build_variant_id, name, position, value)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    variant_id,
-                    setting.name,
-                    i64::try_from(position).unwrap_or(i64::MAX),
-                    value
-                ],
-            )?;
+    // Written under the language whose build it came from. The two languages
+    // name some of the same settings — both have a `compiler_version` — and a
+    // record keyed by the name alone would have one compiler's answer standing
+    // for the other's.
+    for build in &variant.builds {
+        for setting in build.settings() {
+            for (position, value) in setting.shape.values().into_iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO build_variant_setting
+                         (build_variant_id, language, name, position, value)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        variant_id,
+                        build.language(),
+                        setting.name,
+                        i64::try_from(position).unwrap_or(i64::MAX),
+                        value
+                    ],
+                )?;
+            }
         }
     }
     Ok(())

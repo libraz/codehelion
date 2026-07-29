@@ -34,6 +34,8 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+use crate::discovery::Language;
+
 /// Availability of a diagnostic component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComponentStatus {
@@ -157,6 +159,13 @@ pub struct HelperComponent {
     pub name: &'static str,
     /// The program to look for.
     pub binary: &'static str,
+    /// The languages it is the one to ask about.
+    ///
+    /// Beside the sentence that says the same thing to a reader, rather than
+    /// parsed back out of it: a run picking a helper per file and a report
+    /// saying what having it makes possible are then two readings of one
+    /// answer, and neither can drift from the other.
+    pub analyses: &'static [Language],
     /// What having it makes possible.
     pub enables: &'static str,
     /// What to do about not having it.
@@ -171,6 +180,7 @@ pub struct HelperComponent {
 pub const RUST_HELPER: HelperComponent = HelperComponent {
     name: "rust-compiler-helper",
     binary: "codehelion-backend-rust",
+    analyses: &[Language::Rust],
     enables: "semantic analysis of Rust",
     advice: "install codehelion-backend-rust beside this binary or on PATH",
 };
@@ -179,6 +189,7 @@ pub const RUST_HELPER: HelperComponent = HelperComponent {
 pub const CLANG_HELPER: HelperComponent = HelperComponent {
     name: "clang-helper",
     binary: "codehelion-backend-clang",
+    analyses: &[Language::C, Language::Cpp],
     enables: "semantic analysis of C and C++",
     advice: "install codehelion-backend-clang beside this binary or on PATH",
 };

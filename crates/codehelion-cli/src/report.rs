@@ -206,7 +206,7 @@ pub struct CompilerCoverage {
     /// Files a compiler answered about.
     pub answered: u64,
     /// Files nobody was asked about: no helper here reads their language, or
-    /// nothing said which crate they belong to.
+    /// nothing said which unit they are compiled as.
     pub not_asked: u64,
     /// Files a compiler was asked about and could not answer for, by reason.
     ///

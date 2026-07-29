@@ -34,7 +34,7 @@ fn variants(fixture: &str) -> Vec<(BuildVariant, String)> {
             let variant = BuildVariant::semantic(
                 LanguageSelection::default(),
                 Language::Cpp,
-                BuildConfiguration::Cpp(Box::new(build)),
+                vec![BuildConfiguration::Cpp(Box::new(build))],
             );
             let name = Path::new(&entry.file)
                 .file_name()
@@ -117,10 +117,10 @@ fn the_database_a_unit_came_from_is_part_of_its_variant() {
             BuildVariant::semantic(
                 LanguageSelection::default(),
                 Language::Cpp,
-                BuildConfiguration::Cpp(Box::new(CppBuild::from_command(
+                vec![BuildConfiguration::Cpp(Box::new(CppBuild::from_command(
                     &entry.arguments,
                     Path::new(&entry.file),
-                ))),
+                )))],
             )
         })
         .collect();

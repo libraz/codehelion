@@ -377,6 +377,7 @@ dependencies = [
  "clap",
  "codehelion-core",
  "codehelion-eval",
+ "codehelion-fixtures",
  "codehelion-frontend-c",
  "codehelion-frontend-cpp",
  "codehelion-frontend-rust",

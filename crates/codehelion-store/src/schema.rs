@@ -54,12 +54,13 @@ use rusqlite::Connection;
 use crate::StoreError;
 
 /// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 22;
 
 /// Migration scripts, applied in order; index `i` migrates version `i` to
 /// `i + 1`. Existing entries are frozen — schema changes append.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
+    V22,
 ];
 
 /// Version 1: the full entity set.
@@ -941,6 +942,62 @@ CREATE TABLE compiler_helper_execution (
     execution          TEXT NOT NULL,
     PRIMARY KEY (compiler_helper_id, execution)
 ) STRICT;
+";
+
+/// Version 22: a run answered by more than one compiler.
+///
+/// A tree holding Rust beside C++ is analysed by a helper for each, and what
+/// each was told is part of what the run's results mean. Both columns assumed
+/// one: `build_language` accepted a single language name, and a setting was
+/// keyed by name alone, so the two languages' identically named settings — both
+/// have a `compiler_version` — collided on the primary key.
+///
+/// Both tables are rebuilt rather than extended, because neither change can be
+/// made in place: a `CHECK` cannot be dropped by `ALTER TABLE`, and a column
+/// cannot be added to a primary key.
+///
+/// The language on a setting is filled in from the variant it belongs to, which
+/// is exactly what it meant while there could only be one. A row from before
+/// variants were described has no language to give and keeps the empty string
+/// the column already used for that.
+const V22: &str = "
+CREATE TABLE build_variant_rebuilt (
+    id                    INTEGER PRIMARY KEY,
+    variant_fingerprint   TEXT NOT NULL UNIQUE,
+    canonical             TEXT NOT NULL,
+    analysis_mode         TEXT NOT NULL CHECK (analysis_mode IN ('fast', 'structural', 'semantic')),
+    normalization_version INTEGER NOT NULL,
+    languages             TEXT,
+    header_language       TEXT
+        CHECK (header_language IS NULL OR header_language IN ('rust', 'c', 'cpp', '')),
+    build_language        TEXT
+) STRICT;
+INSERT INTO build_variant_rebuilt
+    (id, variant_fingerprint, canonical, analysis_mode, normalization_version,
+     languages, header_language, build_language)
+    SELECT id, variant_fingerprint, canonical, analysis_mode, normalization_version,
+           languages, header_language, build_language
+      FROM build_variant;
+
+CREATE TABLE build_variant_setting_rebuilt (
+    build_variant_id INTEGER NOT NULL REFERENCES build_variant (id) ON DELETE CASCADE,
+    language         TEXT NOT NULL,
+    name             TEXT NOT NULL,
+    position         INTEGER NOT NULL,
+    value            TEXT NOT NULL,
+    PRIMARY KEY (build_variant_id, language, name, position)
+) STRICT;
+INSERT INTO build_variant_setting_rebuilt
+    (build_variant_id, language, name, position, value)
+    SELECT s.build_variant_id, coalesce(v.build_language, ''), s.name, s.position, s.value
+      FROM build_variant_setting s
+      JOIN build_variant v ON v.id = s.build_variant_id;
+
+DROP TABLE build_variant_setting;
+DROP TABLE build_variant;
+ALTER TABLE build_variant_rebuilt RENAME TO build_variant;
+ALTER TABLE build_variant_setting_rebuilt RENAME TO build_variant_setting;
+CREATE INDEX idx_build_variant_setting ON build_variant_setting (name, value);
 ";
 
 /// Bring `conn` to the current schema version, applying any pending

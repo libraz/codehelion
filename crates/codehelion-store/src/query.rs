@@ -117,16 +117,20 @@ pub struct StoredVariant {
     /// The grammar bare `.h` headers were read with; empty when the run
     /// enumerated neither C nor C++.
     pub header_language: Option<String>,
-    /// Which language's build was resolved; empty when none was.
+    /// Which languages' builds were resolved, comma-separated in a fixed
+    /// order; empty when none was.
     pub build_language: Option<String>,
-    /// What the compiler was told, in the order it was told, grouped by
-    /// setting name.
+    /// What each compiler was told, in the order it was told, grouped by
+    /// language and then by setting name.
     pub settings: Vec<StoredSetting>,
 }
 
 /// One recorded value of one build setting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredSetting {
+    /// Which language's build it belongs to. Empty on a row recorded before a
+    /// run could resolve more than one, and so before the question arose.
+    pub language: String,
     /// The setting's stable name.
     pub name: String,
     /// Its position within that setting, for the ones that are sequences.
@@ -675,17 +679,18 @@ impl Store {
             return Ok(None);
         };
         let mut stmt = self.conn.prepare(
-            "SELECT name, position, value
+            "SELECT language, name, position, value
              FROM build_variant_setting
              WHERE build_variant_id = ?1
-             ORDER BY name ASC, position ASC",
+             ORDER BY language ASC, name ASC, position ASC",
         )?;
         variant.settings = stmt
             .query_map(params![variant.id], |row| {
                 Ok(StoredSetting {
-                    name: row.get(0)?,
-                    position: row.get(1)?,
-                    value: row.get(2)?,
+                    language: row.get(0)?,
+                    name: row.get(1)?,
+                    position: row.get(2)?,
+                    value: row.get(3)?,
                 })
             })?
             .collect::<Result<_, _>>()?;

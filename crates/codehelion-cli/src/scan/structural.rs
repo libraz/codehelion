@@ -21,8 +21,8 @@ use anyhow::{Context, Result, bail};
 use codehelion_core::boilerplate::{BOILERPLATE_VERSION, Boilerplate};
 use codehelion_core::clone_class::CloneScope;
 use codehelion_core::discovery::{
-    BuildConfiguration, BuildVariant, ContentHash, DiscoveryReport, Language, LanguageSelection,
-    NORMALIZATION_VERSION, RustBuild, SourceUnit, content_hash,
+    BuildConfiguration, BuildVariant, ContentHash, CppBuild, DiscoveryReport, Language,
+    LanguageSelection, NORMALIZATION_VERSION, RustBuild, SourceUnit, content_hash,
 };
 use codehelion_core::engine::{self, LiteralNorm};
 use codehelion_core::features::FEATURE_SCHEMA_VERSION;
@@ -110,55 +110,17 @@ pub fn semantic(
     run_with(args, out, Some(&compilers))
 }
 
-/// The helper a semantic run asks, what it said about itself, and what it is
-/// allowed to run while answering.
-struct Compilers {
+/// One helper a semantic run can ask, what it said about itself, and what it
+/// is allowed to run while answering.
+struct Installed {
+    component: doctor::HelperComponent,
     program: std::path::PathBuf,
     greeting: doctor::Greeting,
     permitted: Vec<Execution>,
 }
 
-impl Compilers {
-    /// Locate the helper and shake hands with it, before anything is read.
-    ///
-    /// Up front because the alternative is discovering after a full parse that
-    /// the run cannot be what it was asked to be, and because the two failures
-    /// need different answers: one is a program to install, the other a
-    /// program to update.
-    ///
-    /// It is also where a permission meets the program it was granted to. A
-    /// helper says at the handshake what it acts on; anything permitted beyond
-    /// that is refused here rather than sent and ignored, because the answer
-    /// that comes back from ignoring it is thinner than the one that was asked
-    /// for and looks exactly like the project's own.
-    fn found(permitted: &ExecutionPolicy) -> Result<Self> {
-        let helper = doctor::RUST_HELPER;
-        let Some(facts) = crate::interrogate(helper.binary, None) else {
-            bail!(
-                "semantic mode needs {}, and there is none beside this program \
-                 or on PATH: {}",
-                helper.binary,
-                helper.advice
-            );
-        };
-        match facts.state {
-            doctor::HelperState::Answered(greeting) => Ok(Self {
-                permitted: acted_on(permitted, &greeting, helper.binary)?,
-                program: facts.path,
-                greeting,
-            }),
-            // Installed and unable to answer is its own problem, and telling
-            // someone to install what they have already installed sends them
-            // to solve the wrong one.
-            doctor::HelperState::Silent(why) => bail!(
-                "the helper at {} did not answer: {why}; \
-                 `codehelion doctor` reports what it is",
-                facts.path.display()
-            ),
-        }
-    }
-
-    /// What the run was analysed under.
+impl Installed {
+    /// What this helper's half of the run was analysed under.
     ///
     /// The compiler version is the helper's own, not the project's: the
     /// answers came from what this program holds, and a variant that recorded
@@ -180,19 +142,32 @@ impl Compilers {
     /// guessed at, which is worse than not running.
     fn build(&self, root: &Path) -> Result<BuildConfiguration> {
         let described = self.describe(root)?;
-        Ok(BuildConfiguration::Rust(Box::new(RustBuild {
-            compiler_version: self.greeting.toolchains.join(", "),
-            lockfile_hash: std::fs::read_to_string(root.join("Cargo.lock"))
-                .ok()
-                .map(|text| content_hash(&text)),
-            features: described.features,
-            cfgs: described.cfgs,
-            permitted_execution: self
-                .permitted
-                .iter()
-                .map(|class| class.name().to_string())
-                .collect(),
-            ..RustBuild::default()
+        let permitted_execution: Vec<String> = self
+            .permitted
+            .iter()
+            .map(|class| class.name().to_string())
+            .collect();
+        if self.component.analyses.contains(&Language::Rust) {
+            return Ok(BuildConfiguration::Rust(Box::new(RustBuild {
+                compiler_version: self.greeting.toolchains.join(", "),
+                lockfile_hash: std::fs::read_to_string(root.join("Cargo.lock"))
+                    .ok()
+                    .map(|text| content_hash(&text)),
+                features: described.features,
+                cfgs: described.cfgs,
+                permitted_execution,
+                ..RustBuild::default()
+            })));
+        }
+        Ok(BuildConfiguration::Cpp(Box::new(CppBuild {
+            // The compiler that answered rather than the one the database
+            // names, for the reason the Rust side records its own: what a type
+            // resolved to is a fact about the compiler that resolved it.
+            compiler: self.greeting.toolchains.join(", "),
+            // What a C or C++ file means is decided before it is parsed, by the
+            // macros its command defines — the same question a cfg answers.
+            macros: described.cfgs,
+            ..CppBuild::default()
         })))
     }
 
@@ -220,36 +195,187 @@ impl Compilers {
     }
 }
 
-/// The permitted classes as the protocol names them, refusing any the helper
-/// said it would not act on.
+/// The helpers a semantic run can ask, in the order they are tried.
+struct Compilers {
+    installed: Vec<Installed>,
+}
+
+impl Compilers {
+    /// Locate every helper and shake hands with it, before anything is read.
+    ///
+    /// Up front because the alternative is discovering after a full parse that
+    /// the run cannot be what it was asked to be, and because the two failures
+    /// need different answers: one is a program to install, the other a
+    /// program to update.
+    ///
+    /// A helper that is not installed is not a failure. One machine has the
+    /// Rust helper and no Clang; the tree it is pointed at may be entirely
+    /// Rust, in which case nothing is missing at all. What the run cannot do
+    /// without is *some* helper, and which languages went unanswered is the
+    /// coverage report's answer rather than this one's.
+    ///
+    /// It is also where a permission meets the program it was granted to. A
+    /// helper says at the handshake what it acts on; anything permitted beyond
+    /// that is dropped for that helper rather than sent and ignored, because
+    /// the answer that comes back from ignoring it is thinner than the one that
+    /// was asked for and looks exactly like the project's own.
+    fn found(permitted: &ExecutionPolicy) -> Result<Self> {
+        let mut installed = Vec::new();
+        for component in doctor::OPTIONAL_HELPERS {
+            let Some(facts) = crate::interrogate(component.binary, None) else {
+                continue;
+            };
+            match facts.state {
+                doctor::HelperState::Answered(greeting) => installed.push(Installed {
+                    permitted: acted_on(permitted, &greeting),
+                    component,
+                    program: facts.path,
+                    greeting,
+                }),
+                // Installed and unable to answer is its own problem, and
+                // telling someone to install what they have already installed
+                // sends them to solve the wrong one.
+                doctor::HelperState::Silent(why) => bail!(
+                    "the helper at {} did not answer: {why}; \
+                     `codehelion doctor` reports what it is",
+                    facts.path.display()
+                ),
+            }
+        }
+        if installed.is_empty() {
+            bail!(
+                "semantic mode needs a compiler helper, and there is none beside \
+                 this program or on PATH: {}",
+                doctor::OPTIONAL_HELPERS
+                    .iter()
+                    .map(|component| component.advice)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
+        for class in permitted.permitted() {
+            if Execution::from_name(class.name()).is_none() {
+                bail!(
+                    "this build has no protocol name for the execution class {}",
+                    class.name()
+                );
+            }
+            if !installed.iter().any(|helper| {
+                helper
+                    .permitted
+                    .iter()
+                    .any(|acts| acts.name() == class.name())
+            }) {
+                bail!(
+                    "no helper installed here runs {}, so --allow-execution={} would \
+                     change nothing about this scan; `codehelion doctor` lists what \
+                     each of them runs",
+                    class.name(),
+                    class.name()
+                );
+            }
+        }
+        Ok(Self { installed })
+    }
+
+    /// The helpers that have something to answer about, given the languages the
+    /// tree turned out to hold.
+    ///
+    /// Narrowed after discovery rather than at the handshake, because what a
+    /// helper is worth to a run is decided by the tree and not by the machine.
+    /// A Rust-only project scanned where the Clang helper happens to be
+    /// installed must be identified as the same run as one scanned where it is
+    /// not: a variant that moved with what is installed would make every
+    /// recorded run incomparable with the next machine's.
+    fn at_work(&self, present: LanguageSelection) -> Vec<&Installed> {
+        self.installed
+            .iter()
+            .filter(|helper| {
+                helper
+                    .component
+                    .analyses
+                    .iter()
+                    .any(|language| present.includes(*language))
+            })
+            .collect()
+    }
+}
+
+/// The helpers this run will put files to, or `None` when it asks nobody.
+///
+/// Decided after discovery, because which helpers have anything to answer about
+/// is a fact about the tree. The same answer serves both the identity the
+/// results are filed under and the asking itself, which is what keeps a run from
+/// being identified by a compiler it never put a file to.
+///
+/// # Errors
+///
+/// Fails when the tree holds sources and no installed helper reads any of their
+/// languages. Semantic mode does not fall back to Structural: a run that
+/// answered without a compiler and called itself semantic would be syntactic
+/// results under another name. An empty tree is not that — nothing to scan and
+/// nothing to scan it with are different, and only the second is a problem.
+fn asking_about<'a>(
+    compilers: Option<&'a Compilers>,
+    sources: &[SourceUnit],
+) -> Result<Option<Vec<&'a Installed>>> {
+    let present = languages_in(sources);
+    let asking = compilers.map(|compilers| compilers.at_work(present));
+    if let Some(asking) = &asking
+        && asking.is_empty()
+        && !sources.is_empty()
+    {
+        bail!(
+            "semantic mode found no helper that reads {}; \
+             `codehelion doctor` lists which languages each helper answers about, \
+             and `--mode structural` analyses this tree without one",
+            present
+                .enabled()
+                .into_iter()
+                .map(Language::name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(asking)
+}
+
+/// The languages the tree turned out to hold.
+fn languages_in(sources: &[SourceUnit]) -> LanguageSelection {
+    let mut present = LanguageSelection {
+        rust: false,
+        c: false,
+        cpp: false,
+    };
+    for source in sources {
+        match source.language {
+            Language::Rust => present.rust = true,
+            Language::C => present.c = true,
+            Language::Cpp => present.cpp = true,
+        }
+    }
+    present
+}
+
+/// The permitted classes as the protocol names them, keeping the ones this
+/// helper said it acts on.
 ///
 /// The greeting carries the classes as strings, so the round trip through the
 /// protocol's own spelling is also what checks that both sides mean the same
 /// class by the same word.
-fn acted_on(
-    permitted: &ExecutionPolicy,
-    greeting: &doctor::Greeting,
-    binary: &str,
-) -> Result<Vec<Execution>> {
-    let mut sending = Vec::new();
-    for class in permitted.permitted() {
-        let Some(named) = Execution::from_name(class.name()) else {
-            bail!(
-                "this build has no protocol name for the execution class {}",
-                class.name()
-            );
-        };
-        if !greeting.executes.iter().any(|acts| acts == class.name()) {
-            bail!(
-                "{binary} does not run {}, so --allow-execution={} would change \
-                 nothing about this scan; `codehelion doctor` lists what it runs",
-                class.name(),
-                class.name()
-            );
-        }
-        sending.push(named);
-    }
-    Ok(sending)
+///
+/// Narrowed per helper rather than refused: one permission can be meaningful
+/// for one helper and meaningless for another — the Clang helper runs nothing
+/// out of a project whatever it is allowed — and refusing on behalf of all of
+/// them would make permitting anything at all impossible as soon as a helper
+/// that runs nothing is installed.
+fn acted_on(permitted: &ExecutionPolicy, greeting: &doctor::Greeting) -> Vec<Execution> {
+    permitted
+        .permitted()
+        .into_iter()
+        .filter(|class| greeting.executes.iter().any(|acts| acts == class.name()))
+        .filter_map(|class| Execution::from_name(class.name()))
+        .collect()
 }
 
 /// How long the helper has to say what a tree is built with.
@@ -280,7 +406,8 @@ fn run_with(
     let sources = std::mem::take(&mut discovered.units);
     let (sources, glob_excluded) = filter_globs(&cfg, sources)?;
 
-    let variant = variant_of(compilers, &cfg, discovered.header_language, &root)?;
+    let asking = asking_about(compilers, &sources)?;
+    let variant = variant_of(asking.as_deref(), &cfg, discovered.header_language, &root)?;
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
     // A recorded semantic run holds what a compiler said about the tree, so
     // reporting it back keeps the part that says how much of it a compiler
@@ -301,12 +428,7 @@ fn run_with(
         .unzip();
     mark_test_modules(&files, &mut irs);
 
-    let asked = compilers.map(|compilers| ask_about(compilers, &sources, &variant));
-    let resolved = asked
-        .as_ref()
-        .map_or_else(structural::ResolvedTypes::default, |asked| {
-            resolved_types(asked, &sources, &files)
-        });
+    let (asked, resolved) = resolve(asking.as_deref(), &sources, &files, &variant);
     let analysis =
         structural::analyze_resolved(&irs, &variant, &structural_config(&cfg), &resolved);
 
@@ -386,7 +508,7 @@ fn run_with(
 /// header grammar carries over unchanged: it decided which frontend read every
 /// `.h` below, so it describes these results just as it does Fast's.
 fn variant_of(
-    compilers: Option<&Compilers>,
+    asking: Option<&[&Installed]>,
     cfg: &Config,
     headers: Language,
     root: &Path,
@@ -396,14 +518,14 @@ fn variant_of(
         c: cfg.languages.c,
         cpp: cfg.languages.cpp,
     };
-    let Some(compilers) = compilers else {
+    let Some(asking) = asking else {
         return Ok(BuildVariant::structural(languages, headers));
     };
-    Ok(BuildVariant::semantic(
-        languages,
-        headers,
-        compilers.build(root)?,
-    ))
+    let builds = asking
+        .iter()
+        .map(|helper| helper.build(root))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(BuildVariant::semantic(languages, headers, builds))
 }
 
 /// How long one unit's analysis may take before the helper is given up on.
@@ -414,22 +536,45 @@ fn variant_of(
 /// helper.
 const ANALYSIS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Ask the helper about every source, under the variant the results belong to.
+/// Ask each helper about the sources it reads, under the variant the results
+/// belong to.
 fn ask_about(
-    compilers: &Compilers,
+    asking: &[&Installed],
     sources: &[SourceUnit],
     variant: &BuildVariant,
 ) -> semantic::Answers {
-    semantic::ask(
-        semantic::Backend {
-            program: &compilers.program,
-            analyzes: Language::Rust,
-            permitted: &compilers.permitted,
-        },
-        sources,
-        &variant.fingerprint(),
-        ANALYSIS_TIMEOUT,
-    )
+    let backends: Vec<semantic::Backend<'_>> = asking
+        .iter()
+        .map(|helper| semantic::Backend {
+            program: &helper.program,
+            analyzes: helper.component.analyses,
+            permitted: &helper.permitted,
+        })
+        .collect();
+    semantic::ask(&backends, sources, &variant.fingerprint(), ANALYSIS_TIMEOUT)
+}
+
+/// Ask the helpers about the tree, and index what they resolved as the analysis
+/// reads it.
+///
+/// Both come back because both are wanted and neither is derivable from the
+/// other: the analysis reads the types, and the report reads how much of the
+/// tree a compiler could speak for at all. A run that asked nobody produces no
+/// answers and no types, which is a mode that reads source and nothing else
+/// rather than a compiler that found nothing.
+fn resolve(
+    asking: Option<&[&Installed]>,
+    sources: &[SourceUnit],
+    files: &[SourceMeta],
+    variant: &BuildVariant,
+) -> (Option<semantic::Answers>, structural::ResolvedTypes) {
+    let asked = asking.map(|asking| ask_about(asking, sources, variant));
+    let resolved = asked
+        .as_ref()
+        .map_or_else(structural::ResolvedTypes::default, |asked| {
+            resolved_types(asked, sources, files)
+        });
+    (asked, resolved)
 }
 
 /// What was resolved about each file that parsed, indexed as the analysis
@@ -474,14 +619,18 @@ fn resolved_types(
     )
 }
 
-/// What the compiler managed to say about the tree, as the report puts it.
+/// What the compilers managed to say about the tree, as the report puts it.
+///
+/// The restarts are summed across the helpers, because a restart is trouble the
+/// run had rather than trouble one program had: what a reader does with the
+/// number is decide whether a thin result was the tree's fault.
 fn coverage(asked: &semantic::Answers) -> report::CompilerCoverage {
     let mut unavailable: BTreeMap<String, u64> = BTreeMap::new();
     let mut answered = 0;
     let mut not_asked = 0;
     for answer in &asked.per_source {
         match answer {
-            semantic::Answer::Analyzed(_) => answered += 1,
+            semantic::Answer::Analyzed { .. } => answered += 1,
             semantic::Answer::NotAsked { .. } => not_asked += 1,
             semantic::Answer::Unavailable { reason, .. } => {
                 *unavailable.entry(reason.name().to_string()).or_default() += 1;
@@ -492,7 +641,11 @@ fn coverage(asked: &semantic::Answers) -> report::CompilerCoverage {
         answered,
         not_asked,
         unavailable,
-        restarts: asked.restarts,
+        restarts: asked
+            .helpers
+            .iter()
+            .map(|helper| helper.restarts)
+            .fold(0, u32::saturating_add),
     }
 }
 
@@ -1642,27 +1795,28 @@ fn compiler_rows(
     asked: &semantic::Answers,
 ) -> (Vec<CompilerHelperRow>, Vec<store_compiler::CompilerUnitRow>) {
     let helpers: Vec<CompilerHelperRow> = asked
-        .helper
+        .helpers
         .iter()
-        .map(|(identity, agreed)| CompilerHelperRow {
-            identity: identity.clone(),
-            protocol_agreed: *agreed,
-            restarts: Some(asked.restarts),
+        .map(|helper| CompilerHelperRow {
+            identity: helper.identity.clone(),
+            protocol_agreed: helper.agreed,
+            restarts: Some(helper.restarts),
         })
         .collect();
-    // The one helper this release runs, when it ran at all. A source answered
-    // by nobody names none.
-    let answering = helpers.first().map(|_| 0);
     let units = asked
         .per_source
         .iter()
         .map(|answer| match answer {
-            semantic::Answer::Analyzed(ir) => store_compiler::CompilerUnitRow {
-                helper: answering,
+            semantic::Answer::Analyzed { helper, ir } => store_compiler::CompilerUnitRow {
+                helper: Some(*helper),
                 outcome: CompilerOutcome::Analyzed(ir.clone()),
             },
-            semantic::Answer::Unavailable { unit, reason } => store_compiler::CompilerUnitRow {
-                helper: answering,
+            semantic::Answer::Unavailable {
+                helper,
+                unit,
+                reason,
+            } => store_compiler::CompilerUnitRow {
+                helper: *helper,
                 outcome: CompilerOutcome::Unavailable {
                     unit: unit.clone(),
                     reason: *reason,
@@ -1959,10 +2113,14 @@ fn breakdown_row(group: &StructuralGroup, detail: &GroupDetail) -> SimilarityBre
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{Compilers, Config, ExecutionPolicy, StructuralConfig, structural_config};
+    use super::{
+        Compilers, Config, ExecutionPolicy, Language, LanguageSelection, ScanArgs,
+        StructuralConfig, run_with, structural_config,
+    };
+    use crate::cli::{Format, Mode};
 
     /// Whether a helper is installed is a property of the machine, so what is
-    /// fixed here is the pairing: without one, the message names the program
+    /// fixed here is the pairing: without one, the message names the programs
     /// to install rather than the mode that was asked for; with one, the run
     /// knows which compiler answered.
     #[test]
@@ -1975,11 +2133,68 @@ mod tests {
                     "{text}"
                 );
             }
-            Ok(compilers) => assert!(
-                !compilers.greeting.toolchains.is_empty(),
-                "a helper that answered says what will do the analysing"
-            ),
+            Ok(compilers) => {
+                for helper in &compilers.installed {
+                    assert!(
+                        !helper.greeting.toolchains.is_empty(),
+                        "a helper that answered says what will do the analysing"
+                    );
+                }
+            }
         }
+    }
+
+    /// A helper that reads none of the languages the tree holds has nothing to
+    /// answer about, and a run that counted it would file its results under a
+    /// compiler that never saw the project — giving one tree two identities
+    /// depending on what happens to be installed beside the scanner.
+    #[test]
+    fn a_helper_that_reads_nothing_in_this_tree_is_not_part_of_the_run() {
+        let Ok(compilers) = Compilers::found(&ExecutionPolicy::deny_all()) else {
+            return;
+        };
+        let rust_only = LanguageSelection {
+            rust: true,
+            c: false,
+            cpp: false,
+        };
+        for helper in compilers.at_work(rust_only) {
+            assert!(
+                helper.component.analyses.contains(&Language::Rust),
+                "{} was asked about a tree it reads nothing in",
+                helper.component.name
+            );
+        }
+    }
+
+    /// Nothing to scan is not the same as nothing to scan it with. A tree with
+    /// no sources gives every helper nothing to do, and refusing there would
+    /// report an empty directory as a machine missing a compiler.
+    #[test]
+    fn an_empty_tree_is_not_reported_as_a_missing_compiler() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = ScanArgs {
+            path: dir.path().to_path_buf(),
+            mode: Mode::Semantic,
+            format: Format::Text,
+            output: None,
+            config: None,
+            no_ignore: false,
+            jobs: None,
+            db: Some(dir.path().join("audit.db")),
+            baseline: None,
+            allow_execution: None,
+            no_reuse: false,
+            show_suppressed: false,
+            verbose: false,
+            fail_on_findings: false,
+            untrusted: false,
+        };
+        let Ok(compilers) = Compilers::found(&ExecutionPolicy::deny_all()) else {
+            return;
+        };
+        let mut out = Vec::new();
+        run_with(&args, &mut out, Some(&compilers)).expect("an empty tree scans");
     }
 
     /// Structural pairs statement fragments where Fast pairs token windows, and

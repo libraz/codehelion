@@ -56,14 +56,19 @@ pub struct BuildVariant {
     pub headers: Option<Language>,
     /// Normalization ruleset version.
     pub normalization_version: u32,
-    /// What the compiler was told, for the runs that resolved it.
+    /// What each compiler was told, for the runs that resolved it.
     ///
-    /// `None` in Fast and Structural mode, which read source and ask no
+    /// Empty in Fast and Structural mode, which read source and ask no
     /// compiler anything: there is no build configuration to differ over, so a
-    /// single implicit variant covers the run. Absent rather than empty,
-    /// because an empty configuration would claim a compiler was invoked with
-    /// no arguments.
-    pub build: Option<BuildConfiguration>,
+    /// single implicit variant covers the run.
+    ///
+    /// A list because a tree is answered by one compiler per language, and a
+    /// run of a tree holding both is one run: what either compiler was told is
+    /// part of what its results mean, and a variant that named only one of them
+    /// would give two differently built trees the same identity. Sorted by
+    /// fingerprint when the variant is made, so that the order helpers happened
+    /// to be reached in — an accident of what is installed — cannot move it.
+    pub builds: Vec<BuildConfiguration>,
 }
 
 impl BuildVariant {
@@ -76,7 +81,7 @@ impl BuildVariant {
             languages,
             headers: Self::headers_of(languages, headers),
             normalization_version: NORMALIZATION_VERSION,
-            build: None,
+            builds: Vec::new(),
         }
     }
 
@@ -91,7 +96,7 @@ impl BuildVariant {
             languages,
             headers: Self::headers_of(languages, headers),
             normalization_version: NORMALIZATION_VERSION,
-            build: None,
+            builds: Vec::new(),
         }
     }
 
@@ -102,17 +107,18 @@ impl BuildVariant {
     /// header under two sets of defines are different programs that happen to
     /// share their text.
     #[must_use]
-    pub const fn semantic(
+    pub fn semantic(
         languages: LanguageSelection,
         headers: Language,
-        build: BuildConfiguration,
+        mut builds: Vec<BuildConfiguration>,
     ) -> Self {
+        builds.sort_by_cached_key(BuildConfiguration::fingerprint);
         Self {
             mode: AnalysisMode::Semantic,
             languages,
             headers: Self::headers_of(languages, headers),
             normalization_version: NORMALIZATION_VERSION,
-            build: Some(build),
+            builds,
         }
     }
 
@@ -134,11 +140,17 @@ impl BuildVariant {
     ///
     /// A resolved build configuration is appended as its fingerprint rather
     /// than its own canonical form: compiler arguments are arbitrary text and
-    /// would otherwise be free to contain this string's own separators. It is
-    /// appended only when there is one, so that the modes which resolve no
-    /// build configuration keep the identity they had before the field
-    /// existed — an audit database written by an earlier build still lines up
-    /// with one written by this one.
+    /// would otherwise be free to contain this string's own separators. Several
+    /// are appended comma-separated, which is safe for the same reason it is
+    /// not safe for the arguments themselves — a fingerprint is fixed-width hex
+    /// and holds no punctuation to be mistaken for a separator.
+    ///
+    /// Appended only when the run resolved something, so that the modes which
+    /// resolve nothing keep the identity they had before the field existed —
+    /// an audit database written by an earlier build still lines up with one
+    /// written by this one. A run that resolved exactly one configuration keeps
+    /// its identity too, which is what stops the field growing a list from
+    /// re-identifying every Rust-only tree already recorded.
     #[must_use]
     pub fn canonical(&self) -> String {
         let langs = self
@@ -155,9 +167,16 @@ impl BuildVariant {
             self.headers.map_or("none", Language::name),
             self.normalization_version,
         );
-        if let Some(build) = &self.build {
+        if !self.builds.is_empty() {
             canonical.push_str(";build=");
-            canonical.push_str(&build.fingerprint());
+            canonical.push_str(
+                &self
+                    .builds
+                    .iter()
+                    .map(BuildConfiguration::fingerprint)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
         }
         canonical
     }
@@ -210,7 +229,7 @@ pub fn partition<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::build_config::CppBuild;
+    use super::super::build_config::{CppBuild, RustBuild};
     use super::*;
 
     #[test]
@@ -304,7 +323,7 @@ mod tests {
     #[test]
     fn a_run_that_resolved_no_build_configuration_is_identified_as_it_always_was() {
         let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
-        assert_eq!(variant.build, None);
+        assert!(variant.builds.is_empty());
         assert!(
             !variant.canonical().contains("build="),
             "{}",
@@ -318,22 +337,108 @@ mod tests {
         let narrow = BuildVariant::semantic(
             languages,
             Language::Cpp,
-            BuildConfiguration::Cpp(Box::new(CppBuild {
+            vec![BuildConfiguration::Cpp(Box::new(CppBuild {
                 compiler: "clang++".into(),
                 ..CppBuild::default()
-            })),
+            }))],
         );
         let wide = BuildVariant::semantic(
             languages,
             Language::Cpp,
-            BuildConfiguration::Cpp(Box::new(CppBuild {
+            vec![BuildConfiguration::Cpp(Box::new(CppBuild {
                 compiler: "clang++".into(),
                 macros: vec!["-DACCUM_WIDTH=64".into()],
                 ..CppBuild::default()
-            })),
+            }))],
         );
         assert_ne!(narrow, wide);
         assert_ne!(narrow.fingerprint(), wide.fingerprint());
+    }
+
+    /// A tree holding both languages is answered by both helpers, and the run
+    /// is one run: the variant names what each was told, because results that
+    /// came out of two compilers mean what both of them were told.
+    #[test]
+    fn a_tree_answered_by_two_compilers_is_one_variant_naming_both() {
+        let languages = LanguageSelection::default();
+        let rust = BuildConfiguration::Rust(Box::new(RustBuild {
+            compiler_version: "rustc 1.85.0".into(),
+            ..RustBuild::default()
+        }));
+        let cpp = BuildConfiguration::Cpp(Box::new(CppBuild {
+            compiler: "clang++".into(),
+            ..CppBuild::default()
+        }));
+        let both =
+            BuildVariant::semantic(languages, Language::Cpp, vec![rust.clone(), cpp.clone()]);
+        let rust_only = BuildVariant::semantic(languages, Language::Cpp, vec![rust]);
+        assert_eq!(both.builds.len(), 2);
+        assert_ne!(both.fingerprint(), rust_only.fingerprint());
+        assert!(
+            both.canonical().contains(&cpp.fingerprint()),
+            "{}",
+            both.canonical()
+        );
+    }
+
+    /// Which helper was reached first is a fact about the machine, not about
+    /// the tree. A variant that moved with it would give one project two
+    /// identities across two installations and compare neither with the other.
+    #[test]
+    fn the_order_the_compilers_were_reached_in_is_not_part_of_the_identity() {
+        let languages = LanguageSelection::default();
+        let rust = || BuildConfiguration::Rust(Box::default());
+        let cpp = || BuildConfiguration::Cpp(Box::default());
+        let one = BuildVariant::semantic(languages, Language::Cpp, vec![rust(), cpp()]);
+        let other = BuildVariant::semantic(languages, Language::Cpp, vec![cpp(), rust()]);
+        assert_eq!(one, other);
+        assert_eq!(one.fingerprint(), other.fingerprint());
+    }
+
+    /// Half a tree built differently is a differently built tree. The Rust side
+    /// resolving the same way says nothing about whether the C++ results can be
+    /// compared with the ones recorded before.
+    #[test]
+    fn one_language_building_differently_moves_the_whole_run() {
+        let languages = LanguageSelection::default();
+        let variant = |macros: Vec<String>| {
+            BuildVariant::semantic(
+                languages,
+                Language::Cpp,
+                vec![
+                    BuildConfiguration::Rust(Box::default()),
+                    BuildConfiguration::Cpp(Box::new(CppBuild {
+                        compiler: "clang++".into(),
+                        macros,
+                        ..CppBuild::default()
+                    })),
+                ],
+            )
+        };
+        assert_ne!(
+            variant(Vec::new()).fingerprint(),
+            variant(vec!["-DACCUM_WIDTH=64".into()]).fingerprint()
+        );
+    }
+
+    /// A run that resolved exactly one configuration keeps the identity it had
+    /// before a variant could hold several, or every semantic run already
+    /// recorded stops lining up with the runs that follow it.
+    #[test]
+    fn resolving_one_configuration_identifies_a_run_as_it_always_did() {
+        let build = BuildConfiguration::Rust(Box::default());
+        let variant = BuildVariant::semantic(
+            LanguageSelection::default(),
+            Language::Cpp,
+            vec![build.clone()],
+        );
+        assert!(
+            variant
+                .canonical()
+                .ends_with(&format!(";build={}", build.fingerprint())),
+            "{}",
+            variant.canonical()
+        );
     }
 
     /// The languages are separate identity spaces one level down as well, so a
@@ -345,12 +450,12 @@ mod tests {
         let rust = BuildVariant::semantic(
             languages,
             Language::Cpp,
-            BuildConfiguration::Rust(Box::default()),
+            vec![BuildConfiguration::Rust(Box::default())],
         );
         let cpp = BuildVariant::semantic(
             languages,
             Language::Cpp,
-            BuildConfiguration::Cpp(Box::default()),
+            vec![BuildConfiguration::Cpp(Box::default())],
         );
         assert_ne!(rust.fingerprint(), cpp.fingerprint());
     }
@@ -362,11 +467,11 @@ mod tests {
             BuildVariant::semantic(
                 languages,
                 Language::Cpp,
-                BuildConfiguration::Cpp(Box::new(CppBuild {
+                vec![BuildConfiguration::Cpp(Box::new(CppBuild {
                     compiler: "clang++".into(),
                     macros,
                     ..CppBuild::default()
-                })),
+                }))],
             )
         };
         let narrow = variant(Vec::new());

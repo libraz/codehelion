@@ -53,20 +53,30 @@ pub(crate) const WANTED: [Capability; 5] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Answer {
     /// A compiler answered.
-    Analyzed(Box<CompilerIr>),
+    Analyzed {
+        /// Which of [`Answers::helpers`] answered.
+        helper: usize,
+        /// What it said.
+        ir: Box<CompilerIr>,
+    },
     /// One was asked and could not answer, for this reason.
     Unavailable {
+        /// Which of [`Answers::helpers`] was asked, when it got far enough to
+        /// say who it was. A helper that fell over before its handshake is not
+        /// in that list, and a run that named it anyway would be naming a
+        /// program it never heard from.
+        helper: Option<usize>,
         /// What was asked about.
         unit: UnitRef,
         /// Why there is no analysis of it.
         reason: Unavailability,
     },
     /// Nobody was asked, and why not: no helper here analyses this file's
-    /// language, or the layout does not say which crate it belongs to.
+    /// language, or nothing says which unit it is compiled as.
     NotAsked {
-        /// What would have been asked about. Its crate name is empty exactly
-        /// when the layout could not supply one, which is one of the two
-        /// reasons nothing was asked.
+        /// What would have been asked about. Its unit name is empty exactly
+        /// when nothing could supply one, which is one of the two reasons
+        /// nothing was asked.
         unit: UnitRef,
         /// Why nobody was asked.
         reason: Unavailability,
@@ -77,7 +87,7 @@ impl Answer {
     /// The analysis, when there is one.
     pub(crate) fn analysis(&self) -> Option<&CompilerIr> {
         match self {
-            Self::Analyzed(ir) => Some(ir),
+            Self::Analyzed { ir, .. } => Some(ir),
             Self::Unavailable { .. } | Self::NotAsked { .. } => None,
         }
     }
@@ -113,13 +123,14 @@ pub(crate) fn resolved_types_for(ir: &CompilerIr, file: &str) -> Vec<(ByteRange,
         .collect()
 }
 
-/// A helper program, the language it answers about, and what it may run.
+/// A helper program, the languages it answers about, and what it may run.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Backend<'a> {
     /// The program to run.
     pub(crate) program: &'a Path,
-    /// The language whose files it is asked about.
-    pub(crate) analyzes: Language,
+    /// The languages whose files it is asked about. One helper answers about
+    /// C and C++ both, because one compiler does.
+    pub(crate) analyzes: &'a [Language],
     /// What it is allowed to run out of the project while answering.
     ///
     /// Already narrowed to classes the helper said it acts on, so nothing here
@@ -127,73 +138,169 @@ pub(crate) struct Backend<'a> {
     pub(crate) permitted: &'a [Execution],
 }
 
-/// What a helper said about a tree.
+/// One helper that took part, as it described itself.
 #[derive(Debug, Clone)]
-pub(crate) struct Answers {
-    /// The helper that answered, as it described itself, and the protocol
-    /// revision the two sides settled on.
-    ///
-    /// Absent when no helper was ever started, which is a run where every
-    /// source turned out to be one nobody could be asked about.
-    pub(crate) helper: Option<(HelperIdentity, u32)>,
-    /// One entry per source, in the order the sources were given.
-    pub(crate) per_source: Vec<Answer>,
-    /// How many times the helper had to be restarted along the way.
+pub(crate) struct Answered {
+    /// What it said about itself at the handshake.
+    pub(crate) identity: HelperIdentity,
+    /// The protocol revision the two sides settled on.
+    pub(crate) agreed: u32,
+    /// How many times it had to be restarted along the way.
     pub(crate) restarts: u32,
 }
 
-/// Ask `backend` about every source it analyses, one at a time.
+/// What the helpers said about a tree.
+#[derive(Debug, Clone)]
+pub(crate) struct Answers {
+    /// Every helper that got as far as saying who it was.
+    ///
+    /// Empty when none was ever started, which is a run where every source
+    /// turned out to be one nobody could be asked about. Shorter than the list
+    /// of backends when one of them was installed and never reached — a helper
+    /// that answered nothing about itself is not one the run can report having
+    /// used.
+    pub(crate) helpers: Vec<Answered>,
+    /// One entry per source, in the order the sources were given.
+    pub(crate) per_source: Vec<Answer>,
+}
+
+/// Ask each backend about the sources it analyses, one at a time.
 ///
-/// Runs the helper under a [`Supervisor`], so a source that kills it costs
-/// that source rather than the run: what the helper could not survive comes
-/// back as an unavailability like any other.
+/// Every helper runs under its own [`Supervisor`], so a source that kills one
+/// costs that source rather than the run — and rather than the other language:
+/// what one helper could not survive comes back as an unavailability like any
+/// other while the other helper is still answering.
 pub(crate) fn ask(
-    backend: Backend<'_>,
+    backends: &[Backend<'_>],
     sources: &[SourceUnit],
     variant: &str,
     timeout: Duration,
 ) -> Answers {
-    let mut supervisor = Supervisor::new(backend.program.to_path_buf(), Vec::new(), timeout)
-        .permitting(backend.permitted.to_vec());
-    let per_source = gather(backend.analyzes, sources, variant, &mut |unit| {
-        supervisor.analyze(unit, &WANTED)
+    let mut supervisors: Vec<Supervisor> = backends
+        .iter()
+        .map(|backend| {
+            Supervisor::new(backend.program.to_path_buf(), Vec::new(), timeout)
+                .permitting(backend.permitted.to_vec())
+        })
+        .collect();
+    let analyzes: Vec<&[Language]> = backends.iter().map(|backend| backend.analyzes).collect();
+    let gathered = gather(&analyzes, sources, variant, &mut |backend, unit| {
+        supervisors
+            .get_mut(backend)
+            .map_or(Analysis::Missing(Unavailability::NotSupported), |helper| {
+                helper.analyze(unit, &WANTED)
+            })
     });
-    let restarts = supervisor.restarts();
-    let helper = supervisor
-        .spoke_with()
-        .map(|(identity, agreed)| (identity.clone(), agreed));
-    supervisor.shutdown();
+    // A backend that never said who it was leaves no row to point at, so the
+    // rows are compacted and what the answers point at is moved with them.
+    let mut helpers = Vec::new();
+    let mut row = Vec::with_capacity(supervisors.len());
+    for supervisor in &mut supervisors {
+        let restarts = supervisor.restarts();
+        let answered = supervisor.spoke_with().map(|(identity, agreed)| Answered {
+            identity: identity.clone(),
+            agreed,
+            restarts,
+        });
+        row.push(answered.map(|answered| {
+            helpers.push(answered);
+            helpers.len() - 1
+        }));
+        supervisor.shutdown();
+    }
     Answers {
-        helper,
-        per_source,
-        restarts,
+        helpers,
+        per_source: gathered
+            .into_iter()
+            .map(|answer| answer.pointing_at(&row))
+            .collect(),
     }
 }
 
-/// The asking itself, with the process kept behind `ask_one`.
+/// One answer, still naming the backend that produced it rather than the row it
+/// will be reported under.
+enum Gathered {
+    Analyzed {
+        backend: usize,
+        ir: Box<CompilerIr>,
+    },
+    Unavailable {
+        backend: usize,
+        unit: UnitRef,
+        reason: Unavailability,
+    },
+    NotAsked {
+        unit: UnitRef,
+        reason: Unavailability,
+    },
+}
+
+impl Gathered {
+    /// The same answer, naming the row `row` puts this backend at.
+    fn pointing_at(self, row: &[Option<usize>]) -> Answer {
+        let at = |backend: usize| row.get(backend).copied().flatten();
+        match self {
+            Self::Analyzed { backend, ir } => Answer::Analyzed {
+                // An analysis came out of a conversation, so the helper that
+                // produced it said who it was; the fallback cannot be reached
+                // and is the harmless one either way.
+                helper: at(backend).unwrap_or(0),
+                ir,
+            },
+            Self::Unavailable {
+                backend,
+                unit,
+                reason,
+            } => Answer::Unavailable {
+                helper: at(backend),
+                unit,
+                reason,
+            },
+            Self::NotAsked { unit, reason } => Answer::NotAsked { unit, reason },
+        }
+    }
+}
+
+/// The asking itself, with the processes kept behind `ask_one`.
 ///
 /// Split out so that what a run does with a tree — which files are asked
-/// about, under which crate, and what an answer is filed as — is decided here
-/// and checked without a subprocess. How a helper behaves when it is slow,
-/// broken or from another release is fixed against real processes in the
-/// helper crate's own conformance suite; repeating that here would test the
-/// same two things again and this one not at all.
+/// about, of which helper, under which unit, and what an answer is filed as —
+/// is decided here and checked without a subprocess. How a helper behaves when
+/// it is slow, broken or from another release is fixed against real processes
+/// in the helper crate's own conformance suite; repeating that here would test
+/// the same two things again and this one not at all.
 fn gather(
-    analyzes: Language,
+    analyzes: &[&[Language]],
     sources: &[SourceUnit],
     variant: &str,
-    ask_one: &mut dyn FnMut(&UnitRef) -> Analysis,
-) -> Vec<Answer> {
+    ask_one: &mut dyn FnMut(usize, &UnitRef) -> Analysis,
+) -> Vec<Gathered> {
     sources
         .iter()
         .map(|source| {
             let unit = unit_ref(source, variant);
-            if let Some(reason) = unasked(source, analyzes) {
-                return Answer::NotAsked { unit, reason };
+            let Some(backend) = analyzes
+                .iter()
+                .position(|reads| reads.contains(&source.language))
+            else {
+                return Gathered::NotAsked {
+                    unit,
+                    reason: Unavailability::NotSupported,
+                };
+            };
+            if unit.unit.is_empty() {
+                return Gathered::NotAsked {
+                    unit,
+                    reason: Unavailability::NoBuildInformation,
+                };
             }
-            match ask_one(&unit) {
-                Analysis::Done(ir) => Answer::Analyzed(ir),
-                Analysis::Missing(reason) => Answer::Unavailable { unit, reason },
+            match ask_one(backend, &unit) {
+                Analysis::Done(ir) => Gathered::Analyzed { backend, ir },
+                Analysis::Missing(reason) => Gathered::Unavailable {
+                    backend,
+                    unit,
+                    reason,
+                },
             }
         })
         .collect()
@@ -201,36 +308,32 @@ fn gather(
 
 /// How `source` is named, whether or not anything is asked about it.
 ///
-/// The crate name is left empty when the layout has none, which only happens
-/// on a file [`unasked`] has already ruled out: a guessed crate name either
-/// names nothing, which wastes the round trip, or names another crate, whose
-/// answer would then be recorded against this file.
+/// The unit name is left empty when nothing can supply one, which is one of the
+/// reasons nobody is asked: a guessed name either names nothing, which wastes
+/// the round trip, or names another unit, whose answer would then be recorded
+/// against this file.
 fn unit_ref(source: &SourceUnit, variant: &str) -> UnitRef {
     UnitRef {
-        unit: source.crate_name.clone().unwrap_or_default(),
+        unit: unit_name(source).unwrap_or_default(),
         file: source.absolute_path.display().to_string(),
         variant: variant.to_string(),
     }
 }
 
-/// Why nobody will be asked about `source`, when nobody will be.
+/// The unit `source` is compiled as part of, when something says.
 ///
-/// The two reasons are different facts about the run and stay apart. A file in
-/// a language no helper here reads is a gap in what is installed; a file whose
-/// crate the layout cannot name is a gap in what the project says about
-/// itself, and only the second gets better by looking harder at the tree.
-///
-/// A C or C++ file is named by the translation unit that compiles it, which a
-/// compilation database says and a Cargo layout does not; a helper that
-/// analyses those reads it from there.
-fn unasked(source: &SourceUnit, analyzes: Language) -> Option<Unavailability> {
-    if source.language != analyzes {
-        return Some(Unavailability::NotSupported);
+/// The two languages answer this differently, and the difference is not a
+/// detail of spelling. A Rust file is compiled as part of a crate, which only
+/// the layout knows and which a file in no crate — a build script, a stray file
+/// beside a workspace — therefore has no name for at all. A C or C++ file is
+/// its own translation unit, named by where it is; which command compiles it is
+/// the compilation database's answer, and the helper reads that itself rather
+/// than being told.
+fn unit_name(source: &SourceUnit) -> Option<String> {
+    match source.language {
+        Language::Rust => source.crate_name.clone(),
+        Language::C | Language::Cpp => Some(source.absolute_path.display().to_string()),
     }
-    source
-        .crate_name
-        .is_none()
-        .then_some(Unavailability::NoBuildInformation)
 }
 
 /// What `ir` resolved about the names written in `file`.
@@ -357,6 +460,9 @@ mod tests {
         }
     }
 
+    /// The only helper installed reads Rust.
+    const RUST_ONLY: [&[Language]; 1] = [&[Language::Rust]];
+
     /// Every source gets an entry, in the order it was given: a run reports
     /// per file what it got, and a list that skipped the files nobody asked
     /// about would have to be re-aligned by whoever reads it.
@@ -368,15 +474,15 @@ mod tests {
             source("build.rs", Language::Rust, None),
         ];
         let mut asked = Vec::new();
-        let answers = gather(Language::Rust, &sources, "host", &mut |unit| {
+        let answers = gather(&RUST_ONLY, &sources, "host", &mut |_, unit| {
             asked.push(unit.clone());
             Analysis::Done(Box::new(CompilerIr::empty(unit.clone())))
         });
-        assert!(matches!(answers[0], Answer::Analyzed(_)));
+        assert!(matches!(answers[0], Gathered::Analyzed { .. }));
         // A C file, with no helper here that reads C.
         assert!(matches!(
             answers[1],
-            Answer::NotAsked {
+            Gathered::NotAsked {
                 reason: Unavailability::NotSupported,
                 ..
             }
@@ -384,7 +490,7 @@ mod tests {
         // A build script belongs to no crate the layout can name.
         assert!(matches!(
             answers[2],
-            Answer::NotAsked {
+            Gathered::NotAsked {
                 reason: Unavailability::NoBuildInformation,
                 ..
             }
@@ -404,10 +510,10 @@ mod tests {
             source("src/lib.rs", Language::Rust, Some("ledger")),
             source("src/native.c", Language::C, None),
         ];
-        let answers = gather(Language::Rust, &sources, "host", &mut |_| {
+        let answers = gather(&RUST_ONLY, &sources, "host", &mut |_, _| {
             Analysis::Missing(Unavailability::RequiresExecution)
         });
-        let Answer::Unavailable { unit, reason } = &answers[0] else {
+        let Gathered::Unavailable { unit, reason, .. } = &answers[0] else {
             panic!("the helper was asked and could not answer");
         };
         assert_eq!(*reason, Unavailability::RequiresExecution);
@@ -415,25 +521,97 @@ mod tests {
         // with nothing attached names no file.
         assert_eq!(unit.unit, "ledger");
         assert_eq!(unit.file, "/repo/src/lib.rs");
-        assert!(matches!(answers[1], Answer::NotAsked { .. }));
-        assert!(answers.iter().all(|answer| answer.analysis().is_none()));
+        assert!(matches!(answers[1], Gathered::NotAsked { .. }));
     }
 
     /// A file nobody could be asked about is still named, so the run can say
-    /// which files those were. Its crate name is empty because there is none —
+    /// which files those were. Its unit name is empty because there is none —
     /// the alternative is inventing one, which is what makes an answer land on
     /// the wrong file.
     #[test]
-    fn a_file_nobody_was_asked_about_is_named_without_a_crate_being_invented() {
+    fn a_file_nobody_was_asked_about_is_named_without_a_unit_being_invented() {
         let sources = [source("build.rs", Language::Rust, None)];
-        let answers = gather(Language::Rust, &sources, "host", &mut |_| {
+        let answers = gather(&RUST_ONLY, &sources, "host", &mut |_, _| {
             panic!("nothing should be asked")
         });
-        let Answer::NotAsked { unit, reason } = &answers[0] else {
+        let Gathered::NotAsked { unit, reason } = &answers[0] else {
             panic!("nobody was asked about it");
         };
         assert_eq!(*reason, Unavailability::NoBuildInformation);
         assert_eq!(unit.file, "/repo/build.rs");
         assert!(unit.unit.is_empty());
+    }
+
+    /// Two helpers, and each file goes to the one that reads its language. A
+    /// run that sent every file to the first would report the C++ half as
+    /// unanswerable by a compiler that was never going to be asked about it.
+    #[test]
+    fn each_file_is_put_to_the_helper_that_reads_its_language() {
+        let analyzes: [&[Language]; 2] = [&[Language::Rust], &[Language::C, Language::Cpp]];
+        let sources = [
+            source("src/lib.rs", Language::Rust, Some("ledger")),
+            source("src/accumulate.cpp", Language::Cpp, None),
+            source("src/native.c", Language::C, None),
+        ];
+        let mut asked: Vec<(usize, String)> = Vec::new();
+        let answers = gather(&analyzes, &sources, "host", &mut |backend, unit| {
+            asked.push((backend, unit.unit.clone()));
+            Analysis::Done(Box::new(CompilerIr::empty(unit.clone())))
+        });
+        assert!(
+            answers
+                .iter()
+                .all(|answer| matches!(answer, Gathered::Analyzed { .. }))
+        );
+        assert_eq!(
+            asked,
+            vec![
+                (0, "ledger".to_string()),
+                // A C or C++ file is its own translation unit, named by where
+                // it is: no layout says which command compiles it, and the
+                // helper reads that from the compilation database itself.
+                (1, "/repo/src/accumulate.cpp".to_string()),
+                (1, "/repo/src/native.c".to_string()),
+            ]
+        );
+    }
+
+    /// A C++ file belongs to no crate, and a run that asked a Cargo layout for
+    /// one would rule out every C++ file in the tree before anything was asked
+    /// — reported as a project that says nothing about itself rather than as
+    /// the question having been the wrong one.
+    #[test]
+    fn a_cpp_file_is_not_ruled_out_for_belonging_to_no_crate() {
+        let analyzes: [&[Language]; 1] = [&[Language::C, Language::Cpp]];
+        let sources = [source("src/accumulate.cpp", Language::Cpp, None)];
+        let answers = gather(&analyzes, &sources, "host", &mut |_, unit| {
+            Analysis::Done(Box::new(CompilerIr::empty(unit.clone())))
+        });
+        assert!(matches!(answers[0], Gathered::Analyzed { .. }));
+    }
+
+    /// A helper that never got as far as saying who it was leaves no row, and
+    /// the answers it did produce must not point at another helper's.
+    #[test]
+    fn an_answer_names_the_helper_that_produced_it_rather_than_a_position() {
+        let row = [None, Some(0)];
+        let unit = UnitRef {
+            unit: "ledger".into(),
+            file: "/repo/src/lib.rs".into(),
+            variant: "host".into(),
+        };
+        let silent = Gathered::Unavailable {
+            backend: 0,
+            unit: unit.clone(),
+            reason: Unavailability::HelperDied,
+        }
+        .pointing_at(&row);
+        assert!(matches!(silent, Answer::Unavailable { helper: None, .. }));
+        let answered = Gathered::Analyzed {
+            backend: 1,
+            ir: Box::new(CompilerIr::empty(unit)),
+        }
+        .pointing_at(&row);
+        assert!(matches!(answered, Answer::Analyzed { helper: 0, .. }));
     }
 }

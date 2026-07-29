@@ -8,7 +8,7 @@ use std::path::Path;
 use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::discovery::{
-    BuildConfiguration, BuildVariant, CppBuild, Language, LanguageSelection,
+    BuildConfiguration, BuildVariant, CppBuild, Language, LanguageSelection, RustBuild,
 };
 use codehelion_core::features::{
     ApiCallFeature, CfgFeature, CharacteristicVector, FeatureHash, FeatureKind, SubtreeFeature,
@@ -1081,10 +1081,10 @@ fn compiled_variant(macros: &[&str]) -> BuildVariant {
     BuildVariant::semantic(
         LanguageSelection::default(),
         Language::Cpp,
-        BuildConfiguration::Cpp(Box::new(CppBuild::from_command(
+        vec![BuildConfiguration::Cpp(Box::new(CppBuild::from_command(
             &command,
             Path::new("/w/src/wide.cpp"),
-        ))),
+        )))],
     )
 }
 
@@ -1130,6 +1130,50 @@ fn what_a_compiler_was_told_is_recorded_beside_the_variant_it_identifies() {
     // resolved is absent rather than empty.
     assert!(values_of(&stored, "compiler_version").is_empty());
     assert!(values_of(&stored, "linker").is_empty());
+}
+
+/// A tree holding both languages is answered by a compiler for each, and both
+/// have a `compiler_version`. Recorded under the setting name alone, one would
+/// stand for the other — and a reader comparing two runs would be shown a
+/// compiler that never touched half the tree.
+#[test]
+fn what_two_compilers_were_told_is_kept_apart_by_the_language_each_answered_for() {
+    let variant = BuildVariant::semantic(
+        LanguageSelection::default(),
+        Language::Cpp,
+        vec![
+            BuildConfiguration::Cpp(Box::new(CppBuild {
+                compiler: "clang++".into(),
+                compiler_version: Some("Apple clang version 21.0.0".into()),
+                ..CppBuild::default()
+            })),
+            BuildConfiguration::Rust(Box::new(RustBuild {
+                compiler_version: "rust-analyzer 0.0.344".into(),
+                ..RustBuild::default()
+            })),
+        ],
+    );
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+
+    let stored = store
+        .build_variant(&variant.fingerprint())
+        .unwrap()
+        .expect("the variant the run was recorded under");
+    assert_eq!(stored.build_language.as_deref(), Some("cpp,rust"));
+    let version = |language: &str| {
+        stored
+            .settings
+            .iter()
+            .filter(|setting| setting.language == language && setting.name == "compiler_version")
+            .map(|setting| setting.value.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(version("cpp"), vec!["Apple clang version 21.0.0"]);
+    assert_eq!(version("rust"), vec!["rust-analyzer 0.0.344"]);
 }
 
 /// Two builds of one source tree are two variants, and what tells them apart
