@@ -41,6 +41,16 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// The oldest revision that can be asked what a tree is built under.
 const DESCRIBES_BUILDS: u32 = 2;
 
+/// What a semantic run has to ask, with the oldest revision that can carry it.
+///
+/// Written down as a table rather than only as a check where the request is
+/// made, so that "is this helper new enough" can be answered at the handshake
+/// instead of at the moment a run is stopped by the answer. Everything listed
+/// is something a run cannot go on without: a request that a run could do
+/// without would have to say so here, because whoever reads this list is being
+/// told that a helper too old for one of these is a helper no run gets past.
+const NEEDED_SINCE: [(&str, u32); 1] = [("describe the build", DESCRIBES_BUILDS)];
+
 /// Lines of helper standard error kept for diagnostics.
 ///
 /// Enough to carry a compiler's complaint and a backtrace, bounded so a helper
@@ -263,6 +273,23 @@ impl Helper {
     #[must_use]
     pub fn executes(&self, execution: Execution) -> bool {
         self.identity.executes.contains(&execution)
+    }
+
+    /// What a run would have to ask that the settled revision cannot carry.
+    ///
+    /// Empty for a helper a run can get through, and that is the distinction
+    /// worth having: a helper can answer the handshake perfectly and still be
+    /// one every run stops at, because these are asked before anything is
+    /// analysed. Knowing which at the handshake is what lets a diagnostic say
+    /// "update this" instead of leaving somebody to find out from a scan that
+    /// refuses on its opening question.
+    #[must_use]
+    pub fn predates(&self) -> Vec<&'static str> {
+        NEEDED_SINCE
+            .iter()
+            .filter(|(_, since)| self.protocol_version < *since)
+            .map(|(request, _)| *request)
+            .collect()
     }
 
     /// Permit `permitted` for every unit this helper is asked about.

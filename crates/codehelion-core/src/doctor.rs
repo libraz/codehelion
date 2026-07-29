@@ -24,6 +24,12 @@
 //! debug a scan that was never going to work, and reporting it as "not found"
 //! sends them to install what is already installed. It is its own state, and
 //! what the helper said — or why it said nothing — is the part worth printing.
+//!
+//! The same state covers the helper that talks perfectly and is still no use:
+//! one whose revision predates a question every run asks before it analyses
+//! anything. Nothing is wrong with that program, and no run will get past it,
+//! so the row says so here rather than leaving it to be discovered from a scan
+//! that refuses immediately.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -133,6 +139,15 @@ pub struct Greeting {
     /// making it should be able to find out beforehand whether the program
     /// they are permitting would do anything with it.
     pub executes: Vec<String>,
+    /// What a run has to ask that the revision the two sides settled on has no
+    /// way to carry, each named as a person would say it.
+    ///
+    /// Empty for a helper a run can use. A non-empty list is the difference
+    /// between a helper that answers and a helper that is any good: these are
+    /// asked before a line of the project is analysed, so a revision short of
+    /// one of them stops the run at its first question rather than making it
+    /// report less.
+    pub predates: Vec<String>,
 }
 
 /// An optional out-of-process helper, and what a machine without it loses.
@@ -196,8 +211,17 @@ fn inspect_helper(helper: HelperComponent, found: Option<HelperFacts>) -> Compon
         Some(facts) => {
             let path = facts.path.display().to_string();
             match facts.state {
+                // Answering is not the same as being usable. A revision that
+                // cannot carry what a run asks first is one no run gets past,
+                // and calling it available sends somebody to debug a scan that
+                // stops on its opening question.
                 HelperState::Answered(greeting) => {
-                    (ComponentStatus::Available, path, describe(&greeting))
+                    let status = if greeting.predates.is_empty() {
+                        ComponentStatus::Available
+                    } else {
+                        ComponentStatus::Unusable
+                    };
+                    (status, path, describe(&greeting))
                 }
                 // The reason goes on its own line rather than beside the path,
                 // because it is the sentence somebody came here for.
@@ -229,6 +253,14 @@ fn describe(greeting: &Greeting) -> Vec<String> {
         "version {}, protocol {}",
         greeting.version, greeting.protocol
     )];
+    // Next to the number it explains, because the revision on the line above is
+    // what somebody would otherwise have to know by heart to read this off.
+    if !greeting.predates.is_empty() {
+        notes.push(format!(
+            "too old for a semantic run: it cannot be asked to {}. Update it.",
+            greeting.predates.join(", ")
+        ));
+    }
     if !greeting.toolchains.is_empty() {
         notes.push(format!("analyses with: {}", greeting.toolchains.join(", ")));
     }
@@ -357,6 +389,7 @@ mod tests {
             toolchains: vec!["rust-analyzer 0.0.344".to_string()],
             capabilities: vec!["types".to_string(), "name_resolution".to_string()],
             executes: vec!["build-script".to_string()],
+            predates: Vec::new(),
         }
     }
 
@@ -459,6 +492,35 @@ mod tests {
             "{:?}",
             report.notes
         );
+    }
+
+    /// A helper can answer everything it is asked and still be one no run gets
+    /// past, because the questions a run asks first are ones its revision never
+    /// had. Reporting that as available leaves somebody to find out from a scan
+    /// that refuses before it reads anything.
+    #[test]
+    fn a_helper_too_old_to_be_asked_what_a_run_asks_first_is_not_called_available() {
+        let report = inspect_helper(
+            OPTIONAL_HELPERS[0],
+            Some(HelperFacts {
+                path: PathBuf::from("/opt/bin/helper"),
+                state: HelperState::Answered(Greeting {
+                    protocol: 1,
+                    predates: vec!["describe the build".to_string()],
+                    ..greeting()
+                }),
+            }),
+        );
+        assert_eq!(report.status, ComponentStatus::Unusable);
+        let notes = report.notes.join("\n");
+        // Naming the question rather than only the number: a revision is a
+        // fact about the program, and what it cannot be asked is the fact
+        // about the run.
+        assert!(notes.contains("describe the build"), "{notes}");
+        assert!(notes.contains("Update it"), "{notes}");
+        // And it still says what it is, because deciding whether to update
+        // takes knowing which build is installed.
+        assert!(notes.contains("version 0.1.0"), "{notes}");
     }
 
     #[test]

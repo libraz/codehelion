@@ -83,6 +83,21 @@ fn a_helper_a_release_behind_answers_what_its_revision_has_and_declines_the_rest
     helper.shutdown().expect("it goes when asked");
 }
 
+/// The same helper, before anything has been asked of it. A run finds out it
+/// is too old by being refused halfway in; a diagnostic has to be able to find
+/// out at the handshake, or the only way to learn that a helper wants updating
+/// is to start a scan that cannot finish.
+#[test]
+fn whether_a_helper_is_too_old_to_be_used_is_answerable_before_it_is_used() {
+    let behind = start("predates-describe", DEADLINE).expect("the revisions overlap");
+    assert_eq!(behind.predates(), vec!["describe the build"]);
+    behind.shutdown().expect("it goes when asked");
+
+    let current = start("well-behaved", DEADLINE).expect("the mock answers");
+    assert!(current.predates().is_empty(), "{:?}", current.predates());
+    current.shutdown().expect("it goes when asked");
+}
+
 #[test]
 fn a_helper_says_what_the_tree_it_was_pointed_at_is_read_under() {
     let mut helper = start("well-behaved", DEADLINE).expect("the mock answers");

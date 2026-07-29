@@ -140,6 +140,15 @@ fn interrogate(name: &str, configured: Option<&Path>) -> Option<doctor::HelperFa
                     .iter()
                     .map(|execution| execution.name().to_string())
                     .collect(),
+                // Asked of the conversation rather than worked out from the
+                // number beside it: which revision can carry which request is
+                // the protocol's business, and a diagnostic that decided it
+                // here would go stale the first time a request was added.
+                predates: helper
+                    .predates()
+                    .into_iter()
+                    .map(ToString::to_string)
+                    .collect(),
             };
             // Failing to stop cleanly is not a reason to withhold what it
             // already said: the answer was given before the goodbye.
