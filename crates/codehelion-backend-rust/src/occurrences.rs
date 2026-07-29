@@ -97,7 +97,7 @@ pub(crate) fn collect(loaded: &Loaded, file: &Path, types: &mut TypeTable) -> Ve
 /// attribute — counts as outside. Nobody in the scan wrote `u32`, and a
 /// normalizer that renamed it would be comparing two fragments on a vocabulary
 /// neither of them chose.
-fn is_external(definition: Definition<'_>, db: &RootDatabase) -> bool {
+pub(crate) fn is_external(definition: Definition<'_>, db: &RootDatabase) -> bool {
     definition
         .krate(db)
         .is_none_or(|krate| !krate.origin(db).is_local())

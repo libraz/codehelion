@@ -193,7 +193,7 @@ fn implementations(db: &RootDatabase, trait_: Trait, name: &str) -> Vec<String> 
 /// Rust spells a qualified path. Its module alone would give every
 /// implementation of one trait method the same name, and two implementations
 /// that share a name are two things the IR cannot tell apart.
-fn identity(function: Function, db: &RootDatabase) -> String {
+pub(crate) fn identity(function: Function, db: &RootDatabase) -> String {
     let name = function.name(db);
     let name = name.as_str();
     let module = function.module(db);

@@ -36,7 +36,7 @@ use ra_ap_syntax::AstNode;
 use ra_ap_vfs::Vfs;
 
 use crate::types::category;
-use crate::{calls, expansions, occurrences};
+use crate::{calls, expansions, instantiations, occurrences};
 
 /// A workspace that has been read, kept so a second request about the same
 /// project does not pay to read it again.
@@ -205,6 +205,7 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
             ir.symbols.push(occurrence);
         }
     }
+    ir.instantiations = instantiations::collect(loaded, Path::new(&unit.file), krate, &mut types);
     ir.calls = calls::collect(loaded, Path::new(&unit.file));
     ir.calls.sort_by_key(|call| {
         (
@@ -338,11 +339,18 @@ fn collect(
 }
 
 fn adt_anchor(loaded: &Loaded, origin: Option<&Anchor>, adt: Adt) -> Option<Anchor> {
+    origin
+        .cloned()
+        .or_else(|| adt_range(loaded, adt).map(Anchor::written_here))
+}
+
+/// Where a type was written.
+pub(crate) fn adt_range(loaded: &Loaded, adt: Adt) -> Option<SourceRange> {
     let db = &loaded.db;
     match adt {
-        Adt::Struct(item) => anchored(loaded, origin, item.source(db)),
-        Adt::Enum(item) => anchored(loaded, origin, item.source(db)),
-        Adt::Union(item) => anchored(loaded, origin, item.source(db)),
+        Adt::Struct(item) => definition_range(loaded, item.source(db)),
+        Adt::Enum(item) => definition_range(loaded, item.source(db)),
+        Adt::Union(item) => definition_range(loaded, item.source(db)),
     }
 }
 
@@ -380,13 +388,21 @@ pub(crate) fn path_of(name: &str, module: ra_ap_hir::Module, db: &RootDatabase) 
 /// anchor's two halves exist to prevent — and until macro expansion is a
 /// capability this helper offers, leaving it out is the honest answer.
 fn anchor_of<T: AstNode>(loaded: &Loaded, source: Option<ra_ap_hir::InFile<T>>) -> Option<Anchor> {
+    definition_range(loaded, source).map(Anchor::written_here)
+}
+
+/// The range a declaration occupies in a file, if it occupies one.
+pub(crate) fn definition_range<T: AstNode>(
+    loaded: &Loaded,
+    source: Option<ra_ap_hir::InFile<T>>,
+) -> Option<SourceRange> {
     let source = source?;
     let file_id = real_file(source.file_id, &loaded.db)?;
-    Some(Anchor::written_here(source_range(
+    Some(source_range(
         loaded,
         file_id,
         source.value.syntax().text_range(),
-    )))
+    ))
 }
 
 /// The file the workspace holds for `path`, if it holds one.
