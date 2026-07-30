@@ -1,0 +1,28 @@
+[
+  {
+    "directory": "@DIRECTORY@",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-I@DIRECTORY@/include",
+      "-c",
+      "-o",
+      "CMakeFiles/templates.dir/src/templates.cpp.o",
+      "@DIRECTORY@/src/templates.cpp"
+    ],
+    "file": "@DIRECTORY@/src/templates.cpp"
+  },
+  {
+    "directory": "@DIRECTORY@",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-I@DIRECTORY@/include",
+      "-c",
+      "-o",
+      "CMakeFiles/templates_repeat.dir/src/repeat.cpp.o",
+      "@DIRECTORY@/src/repeat.cpp"
+    ],
+    "file": "@DIRECTORY@/src/repeat.cpp"
+  }
+]

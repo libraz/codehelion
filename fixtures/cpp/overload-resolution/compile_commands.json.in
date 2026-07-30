@@ -1,0 +1,29 @@
+[
+  {
+    "directory": "@DIRECTORY@",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-I@DIRECTORY@/include",
+      "-c",
+      "-o",
+      "CMakeFiles/calls.dir/src/calls.cpp.o",
+      "@DIRECTORY@/src/calls.cpp"
+    ],
+    "file": "@DIRECTORY@/src/calls.cpp"
+  },
+  {
+    "directory": "@DIRECTORY@",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-DWIDE_CALL",
+      "-I@DIRECTORY@/include",
+      "-c",
+      "-o",
+      "CMakeFiles/repeat.dir/src/repeat.cpp.o",
+      "@DIRECTORY@/src/repeat.cpp"
+    ],
+    "file": "@DIRECTORY@/src/repeat.cpp"
+  }
+]

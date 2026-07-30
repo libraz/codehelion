@@ -32,7 +32,13 @@ pub const RUST_FIXTURES: [&str; 7] = [
 ];
 
 /// The C and C++ fixtures, by directory name under `fixtures/cpp/`.
-pub const CPP_FIXTURES: [&str; 2] = ["cmake", "header-only"];
+pub const CPP_FIXTURES: [&str; 5] = [
+    "cmake",
+    "header-only",
+    "macro-expansion",
+    "overload-resolution",
+    "template-instantiation",
+];
 
 /// The placeholder a committed compilation database carries where an absolute
 /// path belongs.
@@ -469,6 +475,103 @@ mod tests {
             );
         }
         assert!(header.is_file());
+    }
+
+    /// What the macro-expansion fixture poses: one macro body, invoked more
+    /// than once, and a declaration beside them that came from nowhere else. A
+    /// fixture with one invocation would go on passing every test built on it
+    /// while proving nothing about repetition, and one whose file held only
+    /// expansions could not tell "everything here was written once" apart from
+    /// "the answer is the same for everything".
+    #[test]
+    fn one_macro_body_is_stamped_out_more_than_once() {
+        let root = cpp("macro-expansion").unwrap();
+        let header = read(&root.join("include/accessor.hpp"));
+        assert!(
+            header.contains("#define ACCESSOR("),
+            "the fixture no longer defines the macro it exists for"
+        );
+        assert!(
+            header.matches("ACCESSOR(std::uint32_t,").count() >= 2,
+            "one invocation is not repetition"
+        );
+        assert!(
+            read(&root.join("src/frame.cpp")).contains("std::uint32_t volume("),
+            "nothing in the fixture is written where it reads any more"
+        );
+    }
+
+    /// The template fixture keeps every distinction the helper has to report:
+    /// repeated and differently substituted function uses, class type and
+    /// non-type arguments, a selected partial specialization, and controls that
+    /// must not be attributed to the primary template body.
+    #[test]
+    fn template_uses_cover_specialization_and_control_cases() {
+        let root = cpp("template-instantiation").unwrap();
+        let header = read(&root.join("include/templates.hpp"));
+        let source = read(&root.join("src/templates.cpp"));
+        assert_eq!(
+            source.matches("twice(").count(),
+            3,
+            "the fixture no longer distinguishes repetition from substitution"
+        );
+        for use_ in ["Buffer<int, 4>", "Buffer<int, 8>", "Buffer<double, 4>"] {
+            assert!(source.contains(use_), "missing class use {use_}");
+        }
+        assert!(
+            header.contains("Buffer<int, 16> shared_buffer"),
+            "the header no longer has a template use read by both units"
+        );
+        assert!(
+            header.contains("struct Holder<T*>"),
+            "the selected partial specialization is gone"
+        );
+        assert!(
+            header.contains("struct Holder<bool>"),
+            "the explicit full-specialization control is gone"
+        );
+        assert!(
+            source.contains("std::vector<int>") && source.contains("ordinary("),
+            "the external or non-template control is gone"
+        );
+    }
+
+    /// The overload fixture separates compile-time overload selection from
+    /// calls whose runtime target libclang cannot completely enumerate.
+    #[test]
+    fn overload_calls_cover_static_and_unresolved_targets() {
+        let root = cpp("overload-resolution").unwrap();
+        let header = read(&root.join("include/calls.hpp"));
+        let source = read(&root.join("src/calls.cpp"));
+        for declaration in [
+            "int choose(int value)",
+            "long choose(long value)",
+            "virtual int run(int value) const",
+            "int run(int value) const override",
+        ] {
+            assert!(header.contains(declaration), "missing {declaration}");
+        }
+        for call in [
+            "choose(1)",
+            "choose(1L)",
+            "mixer.mix(2)",
+            "mixer.mix(2L)",
+            "base.run(3)",
+            "derived.Base::run(4)",
+            "pointer(6)",
+            "CALL_DIRECT(7)",
+            "std::puts",
+        ] {
+            assert!(source.contains(call), "missing {call}");
+        }
+        assert!(
+            header.contains("return choose(value);"),
+            "the dependent call is gone"
+        );
+        assert!(
+            header.contains("HEADER_ARGUMENT"),
+            "the shared header call no longer varies by translation unit"
+        );
     }
 
     #[test]

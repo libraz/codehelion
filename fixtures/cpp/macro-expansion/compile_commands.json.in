@@ -1,0 +1,15 @@
+[
+  {
+    "directory": "@DIRECTORY@",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-I@DIRECTORY@/include",
+      "-c",
+      "-o",
+      "CMakeFiles/settings.dir/src/frame.cpp.o",
+      "@DIRECTORY@/src/frame.cpp"
+    ],
+    "file": "@DIRECTORY@/src/frame.cpp"
+  }
+]
