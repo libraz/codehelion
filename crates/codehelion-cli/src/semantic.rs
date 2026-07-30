@@ -51,7 +51,9 @@ use codehelion_core::discovery::{Language, SourceUnit};
 use codehelion_core::engine::normalize::Resolution;
 use codehelion_core::ir::ByteRange;
 use codehelion_core::types::TypeTag;
-use codehelion_helper::ir::{CompilerIr, ResolvedSymbol, ResolvedType, Unavailability, UnitRef};
+use codehelion_helper::ir::{
+    CallSite, CompilerIr, Instantiation, ResolvedSymbol, ResolvedType, Unavailability, UnitRef,
+};
 use codehelion_helper::protocol::{Capability, Execution, HelperIdentity};
 use codehelion_helper::{Analysis, Supervisor};
 
@@ -363,6 +365,24 @@ fn read_by_other_units(gathered: &mut [Gathered], sources: &[SourceUnit]) {
                     .push((*backend, ir));
             }
         }
+        for instantiation in &ir.instantiations {
+            let file = instantiation.anchor.expansion.file.as_str();
+            if seen.insert(file) {
+                readers
+                    .entry((root, file))
+                    .or_default()
+                    .push((*backend, ir));
+            }
+        }
+        for call in &ir.calls {
+            let file = call.anchor.expansion.file.as_str();
+            if seen.insert(file) {
+                readers
+                    .entry((root, file))
+                    .or_default()
+                    .push((*backend, ir));
+            }
+        }
     }
     let mut filled: Vec<(usize, Gathered)> = Vec::new();
     for (at, (answer, source)) in gathered.iter().zip(sources).enumerate() {
@@ -407,14 +427,17 @@ fn read_by_other_units(gathered: &mut [Gathered], sources: &[SourceUnit]) {
 ///
 /// Two readings agree about a name when they put it at the same bytes, call it
 /// the same thing, resolve it to the same definition, place that definition on
-/// the same side of the project boundary, and give it the same type. Anything
-/// less than all of that is a disagreement, and a disagreement is dropped: the
-/// name is then compared as it is written, which is what a run with no compiler
-/// would have done with it and is the direction that cannot mislead.
+/// the same side of the project boundary, and give it the same type. Template
+/// uses likewise have to agree on their stable specialization key, origin,
+/// definition anchor and resolved type arguments. Calls have to agree on the
+/// complete macro-aware anchor and target. Anything less than all of that is a
+/// disagreement, and a disagreement is dropped: the occurrence is then
+/// compared as it is written, which is what a run with no compiler would have
+/// done with it and is the direction that cannot mislead.
 ///
-/// `None` when nothing survived, which is a file its readers say nothing common
-/// about — reported as unanswerable rather than as an analysis that found
-/// nothing, because those are different claims.
+/// `None` when no symbol, instantiation or call survived, which is a file its
+/// readers say nothing common about — reported as unanswerable rather than as
+/// an analysis that found nothing, because those are different claims.
 ///
 /// What the result is filed under keeps naming the file, and names the unit
 /// only when one unit read it. An agreement between several is an answer about
@@ -439,7 +462,21 @@ fn agreed(file: UnitRef, readings: &[(usize, &CompilerIr, String)]) -> Option<Co
                 .is_some_and(|found| same(ir, found, first, held))
         });
     }
-    if kept.is_empty() {
+    let mut instantiations = instantiations_in(first, first_file);
+    for (_, ir, file) in readings.iter().skip(1) {
+        let other = instantiations_in(ir, file);
+        instantiations.retain(|at, held| {
+            other
+                .get(at)
+                .is_some_and(|found| same_instantiation(ir, found, first, held))
+        });
+    }
+    let mut calls = calls_in(first, first_file);
+    for (_, ir, file) in readings.iter().skip(1) {
+        let other = calls_in(ir, file);
+        calls.retain(|at, held| other.get(at).is_some_and(|found| *found == *held));
+    }
+    if kept.is_empty() && instantiations.is_empty() && calls.is_empty() {
         return None;
     }
     let mut merged = CompilerIr::empty(unit);
@@ -452,6 +489,18 @@ fn agreed(file: UnitRef, readings: &[(usize, &CompilerIr, String)]) -> Option<Co
             ..symbol.clone()
         })
         .collect();
+    merged.instantiations = instantiations
+        .into_values()
+        .map(|instantiation| Instantiation {
+            arguments: instantiation
+                .arguments
+                .iter()
+                .filter_map(|index| types.copy(first, *index))
+                .collect(),
+            ..instantiation.clone()
+        })
+        .collect();
+    merged.calls = calls.into_values().cloned().collect();
     merged.types = types.types;
     Some(merged)
 }
@@ -499,7 +548,83 @@ fn same(
     symbol.id == held.id
         && symbol.kind == held.kind
         && symbol.external == held.external
+        && symbol.anchor.definition == held.anchor.definition
         && resolved(ir, symbol) == resolved(against, held)
+}
+
+/// Where each template use written in `file` sits.
+///
+/// The stable key is included so two readings that specialize the same written
+/// use differently do not turn into one representative reading. The first
+/// reading's entry survives only when every other reading has the same family
+/// at the same bytes and agrees on the origin and argument types.
+fn instantiations_in<'a>(
+    ir: &'a CompilerIr,
+    file: &str,
+) -> BTreeMap<(u64, u64, &'a str), &'a Instantiation> {
+    ir.instantiations
+        .iter()
+        .filter(|instantiation| instantiation.anchor.expansion.file == file)
+        .map(|instantiation| {
+            (
+                (
+                    instantiation.anchor.expansion.start_byte,
+                    instantiation.anchor.expansion.end_byte,
+                    instantiation.instantiation_key.as_str(),
+                ),
+                instantiation,
+            )
+        })
+        .collect()
+}
+
+/// Whether two readings give one template use the same semantic answer.
+fn same_instantiation(
+    ir: &CompilerIr,
+    instantiation: &Instantiation,
+    against: &CompilerIr,
+    held: &Instantiation,
+) -> bool {
+    let arguments = |ir: &CompilerIr, instantiation: &Instantiation| {
+        instantiation
+            .arguments
+            .iter()
+            .map(|index| {
+                ir.types
+                    .get(usize::try_from(*index).ok()?)
+                    .map(|ty| (ty.display.clone(), ty.category))
+            })
+            .collect::<Option<Vec<_>>>()
+    };
+    let arguments_agree = match (arguments(ir, instantiation), arguments(against, held)) {
+        (Some(found), Some(expected)) => found == expected,
+        (None, _) | (_, None) => false,
+    };
+    instantiation.definition == held.definition
+        && instantiation.anchor.definition == held.anchor.definition
+        && arguments_agree
+}
+
+/// Calls written in `file`, lined up by their physical occurrence.
+///
+/// The complete anchor and target are deliberately values rather than parts of
+/// the key. A macro body or overload selected differently by another
+/// translation unit must contradict the first reading, not become a second
+/// independent occurrence that survives.
+fn calls_in<'a>(ir: &'a CompilerIr, file: &str) -> BTreeMap<(u64, u64), &'a CallSite> {
+    ir.calls
+        .iter()
+        .filter(|call| call.anchor.expansion.file == file)
+        .map(|call| {
+            (
+                (
+                    call.anchor.expansion.start_byte,
+                    call.anchor.expansion.end_byte,
+                ),
+                call,
+            )
+        })
+        .collect()
 }
 
 /// Types copied out of the analyses they were resolved in.
@@ -601,7 +726,9 @@ pub fn resolution_for(ir: &CompilerIr, file: &str) -> Resolution {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use codehelion_helper::ir::{Anchor, ResolvedSymbol, SourceRange, SymbolKind, UnitRef};
+    use codehelion_helper::ir::{
+        Anchor, CallTarget, ResolvedSymbol, SourceRange, SymbolKind, UnitRef,
+    };
 
     fn symbol(name: &str, file: &str, start: u64, width: u64, external: bool) -> ResolvedSymbol {
         ResolvedSymbol {
@@ -826,6 +953,15 @@ mod tests {
 
     /// One reading of a file, as a helper that read the whole unit reports it.
     fn read(unit: &str, symbols: Vec<ResolvedSymbol>, types: Vec<ResolvedType>) -> Gathered {
+        read_with_instantiations(unit, symbols, types, Vec::new())
+    }
+
+    fn read_with_instantiations(
+        unit: &str,
+        symbols: Vec<ResolvedSymbol>,
+        types: Vec<ResolvedType>,
+        instantiations: Vec<Instantiation>,
+    ) -> Gathered {
         let mut ir = CompilerIr::empty(UnitRef {
             unit: format!("/repo/src/{unit}"),
             file: format!("/repo/src/{unit}"),
@@ -834,14 +970,54 @@ mod tests {
         ir.anchored_at = Some("/repo".into());
         ir.symbols = symbols;
         ir.types = types;
+        ir.instantiations = instantiations;
         Gathered::Analyzed {
             backend: 0,
             ir: Box::new(ir),
         }
     }
 
+    fn read_with_calls(unit: &str, calls: Vec<CallSite>) -> Gathered {
+        let mut gathered = read(unit, Vec::new(), Vec::new());
+        let Gathered::Analyzed { ir, .. } = &mut gathered else {
+            unreachable!("read always produces an analysis");
+        };
+        ir.calls = calls;
+        gathered
+    }
+
+    fn call(start: u64, target: CallTarget, definition: Option<&str>) -> CallSite {
+        CallSite {
+            anchor: Anchor {
+                expansion: SourceRange {
+                    file: "include/accumulate.hpp".into(),
+                    start_byte: start,
+                    end_byte: start + 8,
+                    start_line: 20,
+                },
+                definition: definition.map(|file| SourceRange {
+                    file: file.into(),
+                    start_byte: 10,
+                    end_byte: 30,
+                    start_line: 2,
+                }),
+            },
+            target,
+        }
+    }
+
     fn typed(mut symbol: ResolvedSymbol, at: u32) -> ResolvedSymbol {
         symbol.type_index = Some(at);
+        symbol
+    }
+
+    fn defined(mut symbol: ResolvedSymbol, file: &str, start: u64) -> ResolvedSymbol {
+        symbol.anchor.definition = Some(SourceRange {
+            file: file.into(),
+            start_byte: start,
+            end_byte: start + 10,
+            start_line: 1,
+        });
         symbol
     }
 
@@ -851,6 +1027,28 @@ mod tests {
             category: codehelion_helper::ir::TypeCategory::Integer,
             arguments: Vec::new(),
             definition: None,
+        }
+    }
+
+    fn instantiation(key: &str, argument: u32) -> Instantiation {
+        Instantiation {
+            anchor: Anchor {
+                expansion: SourceRange {
+                    file: "include/accumulate.hpp".into(),
+                    start_byte: 600,
+                    end_byte: 606,
+                    start_line: 20,
+                },
+                definition: Some(SourceRange {
+                    file: "include/templates.hpp".into(),
+                    start_byte: 20,
+                    end_byte: 80,
+                    start_line: 3,
+                }),
+            },
+            definition: "c:@N@accumulate@FT@sum".into(),
+            instantiation_key: key.into(),
+            arguments: vec![argument],
         }
     }
 
@@ -936,6 +1134,228 @@ mod tests {
         // And what did survive carries no type it never had: the table holds
         // what the kept names refer to and nothing else.
         assert!(ir.types.is_empty());
+    }
+
+    /// A macro selected differently in two translation units can stamp a name
+    /// at the same bytes with the same type and definition identity. Its body
+    /// anchor is still part of the answer: retaining the first reading would
+    /// claim a definition site the other unit explicitly contradicts.
+    #[test]
+    fn macro_definition_anchors_must_agree_across_translation_units() {
+        let sources = [
+            source("src/narrow.cpp", Language::Cpp, None),
+            source("src/wide.cpp", Language::Cpp, None),
+            header(),
+        ];
+        let stable = symbol("values", "include/accumulate.hpp", 400, 6, false);
+        let expanded = symbol("total", "include/accumulate.hpp", 500, 5, false);
+        let mut gathered = vec![
+            read(
+                "narrow.cpp",
+                vec![
+                    stable.clone(),
+                    defined(expanded.clone(), "include/narrow_macro.hpp", 20),
+                ],
+                Vec::new(),
+            ),
+            read(
+                "wide.cpp",
+                vec![stable, defined(expanded, "include/wide_macro.hpp", 30)],
+                Vec::new(),
+            ),
+            unanswerable(&sources[2]),
+        ];
+
+        read_by_other_units(&mut gathered, &sources);
+        let Gathered::Analyzed { ir, .. } = &gathered[2] else {
+            panic!("the stable part of the header is still answered");
+        };
+        assert_eq!(
+            ir.symbols
+                .iter()
+                .map(|symbol| &symbol.name)
+                .collect::<Vec<_>>(),
+            vec!["values"],
+            "a representative macro definition was retained despite disagreement"
+        );
+    }
+
+    /// A header can be known only through template uses, so reader discovery
+    /// cannot be driven by symbols alone. The type index belongs to the first
+    /// translation unit's table and must be remapped into the merged table.
+    #[test]
+    fn agreed_header_instantiations_are_retained_with_remapped_types() {
+        let sources = [
+            source("src/narrow.cpp", Language::Cpp, None),
+            source("src/wide.cpp", Language::Cpp, None),
+            header(),
+        ];
+        let key = "clang-usr-v1:c:@N@accumulate@F@sum<#I>";
+        let mut gathered = vec![
+            read_with_instantiations(
+                "narrow.cpp",
+                Vec::new(),
+                vec![integer("unused"), integer("int")],
+                vec![instantiation(key, 1)],
+            ),
+            read_with_instantiations(
+                "wide.cpp",
+                Vec::new(),
+                vec![integer("int")],
+                vec![instantiation(key, 0)],
+            ),
+            unanswerable(&sources[2]),
+        ];
+
+        read_by_other_units(&mut gathered, &sources);
+        let Gathered::Analyzed { ir, .. } = &gathered[2] else {
+            panic!("the agreed template use answers the header");
+        };
+        assert!(ir.symbols.is_empty());
+        assert_eq!(ir.instantiations.len(), 1);
+        assert_eq!(ir.instantiations[0].instantiation_key, key);
+        assert_eq!(ir.instantiations[0].arguments, [0]);
+        assert_eq!(ir.types.len(), 1);
+        assert_eq!(ir.types[0].display, "int");
+    }
+
+    /// Picking the first translation unit would silently select one concrete
+    /// specialization for a header whose build-dependent reading disagrees.
+    /// With no common answer, the header stays unavailable.
+    #[test]
+    fn disagreeing_header_instantiations_do_not_choose_a_representative() {
+        let sources = [
+            source("src/narrow.cpp", Language::Cpp, None),
+            source("src/wide.cpp", Language::Cpp, None),
+            header(),
+        ];
+        let mut gathered = vec![
+            read_with_instantiations(
+                "narrow.cpp",
+                Vec::new(),
+                vec![integer("int")],
+                vec![instantiation("clang-usr-v1:int", 0)],
+            ),
+            read_with_instantiations(
+                "wide.cpp",
+                Vec::new(),
+                vec![integer("long")],
+                vec![instantiation("clang-usr-v1:long", 0)],
+            ),
+            unanswerable(&sources[2]),
+        ];
+
+        read_by_other_units(&mut gathered, &sources);
+        assert!(
+            matches!(gathered[2], Gathered::Unavailable { .. }),
+            "one translation unit's specialization was selected"
+        );
+    }
+
+    /// Header calls are useful only when every translation unit reports the
+    /// same macro-aware anchor and exact target. A stable direct call survives;
+    /// overload and macro-definition disagreements are omitted instead of
+    /// selecting whichever translation unit happened to be first.
+    #[test]
+    fn header_calls_survive_only_exact_translation_unit_agreement() {
+        let sources = [
+            source("src/narrow.cpp", Language::Cpp, None),
+            source("src/wide.cpp", Language::Cpp, None),
+            header(),
+        ];
+        let stable = call(
+            700,
+            CallTarget::Static {
+                symbol: "c:@F@stable#I#".into(),
+            },
+            None,
+        );
+        let selected = call(
+            800,
+            CallTarget::Static {
+                symbol: "c:@F@choose#I#".into(),
+            },
+            None,
+        );
+        let expanded = call(
+            900,
+            CallTarget::Static {
+                symbol: "c:@F@macro_call#I#".into(),
+            },
+            Some("include/first.hpp"),
+        );
+        let mut gathered = vec![
+            read_with_calls("narrow.cpp", vec![stable.clone(), selected, expanded]),
+            read_with_calls(
+                "wide.cpp",
+                vec![
+                    stable.clone(),
+                    call(
+                        800,
+                        CallTarget::Static {
+                            symbol: "c:@F@choose#L#".into(),
+                        },
+                        None,
+                    ),
+                    call(
+                        900,
+                        CallTarget::Static {
+                            symbol: "c:@F@macro_call#I#".into(),
+                        },
+                        Some("include/second.hpp"),
+                    ),
+                ],
+            ),
+            unanswerable(&sources[2]),
+        ];
+
+        read_by_other_units(&mut gathered, &sources);
+        let Gathered::Analyzed { ir, .. } = &gathered[2] else {
+            panic!("the agreed call answers the header");
+        };
+        assert!(ir.symbols.is_empty());
+        assert!(ir.instantiations.is_empty());
+        assert_eq!(ir.calls, [stable]);
+    }
+
+    /// With no agreed call, choosing the first reading would turn a
+    /// build-dependent overload into a false static answer.
+    #[test]
+    fn a_header_with_only_disagreeing_calls_stays_unavailable() {
+        let sources = [
+            source("src/narrow.cpp", Language::Cpp, None),
+            source("src/wide.cpp", Language::Cpp, None),
+            header(),
+        ];
+        let mut gathered = vec![
+            read_with_calls(
+                "narrow.cpp",
+                vec![call(
+                    800,
+                    CallTarget::Static {
+                        symbol: "c:@F@choose#I#".into(),
+                    },
+                    None,
+                )],
+            ),
+            read_with_calls(
+                "wide.cpp",
+                vec![call(
+                    800,
+                    CallTarget::Static {
+                        symbol: "c:@F@choose#L#".into(),
+                    },
+                    None,
+                )],
+            ),
+            unanswerable(&sources[2]),
+        ];
+
+        read_by_other_units(&mut gathered, &sources);
+        assert!(
+            matches!(gathered[2], Gathered::Unavailable { .. }),
+            "one translation unit's call target was selected"
+        );
     }
 
     /// A file that is its own unit was answered about the program it actually

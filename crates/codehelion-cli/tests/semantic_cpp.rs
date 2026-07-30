@@ -13,6 +13,9 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use assert_cmd::Command;
+use codehelion_helper::ir::CallTarget;
+use codehelion_store::Store;
+use codehelion_store::compiler::CompilerOutcome;
 use serde_json::Value;
 
 fn cmd() -> Command {
@@ -70,6 +73,100 @@ fn a_cpp_tree_is_answered_about_rather_than_reported_as_unreadable() {
             .as_object()
             .is_none_or(serde_json::Map::is_empty),
         "nothing was left unanswerable: {coverage}"
+    );
+}
+
+/// A template use written in a header is reported by both translation units
+/// that read it. The CLI keeps the common answer, including a valid type-table
+/// index, instead of selecting one unit or dropping template data while it
+/// backfills the header.
+#[test]
+fn template_instantiations_survive_header_agreement_and_storage() {
+    if !clang_helper_is_usable() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root =
+        codehelion_fixtures::copy_cpp("template-instantiation", dir.path()).expect("plant fixture");
+
+    let report = scan(&root);
+    let run_id = report["run"]["run_id"].as_i64().expect("recorded run");
+    let store = Store::open(&root.join(".codehelion/audit.db")).expect("open audit database");
+    let units = store
+        .run_compiler_units(run_id)
+        .expect("read compiler results");
+    let header = units
+        .iter()
+        .find_map(|stored| match &stored.outcome {
+            CompilerOutcome::Analyzed(ir) if ir.unit.file.ends_with("include/templates.hpp") => {
+                Some(ir)
+            }
+            CompilerOutcome::Analyzed(_) | CompilerOutcome::Unavailable { .. } => None,
+        })
+        .expect("the units agree on an answer for the header");
+    let stamp = header
+        .instantiations
+        .iter()
+        .find(|stamp| stamp.anchor.expansion.file == "include/templates.hpp")
+        .expect("the agreed header template use was retained");
+    assert!(stamp.instantiation_key.starts_with("clang-usr-v1:"));
+    assert_eq!(stamp.arguments.len(), 1);
+    let argument = usize::try_from(stamp.arguments[0]).expect("type index fits");
+    assert_eq!(
+        header.types[argument].category,
+        codehelion_helper::ir::TypeCategory::Integer
+    );
+}
+
+/// The stored header answer is the intersection of its translation-unit
+/// readings. A call whose overload changes under `-DWIDE_CALL` is omitted,
+/// while an identical direct call survives with its exact static USR.
+#[test]
+fn call_targets_survive_header_agreement_and_sqlite_round_trip() {
+    if !clang_helper_is_usable() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root =
+        codehelion_fixtures::copy_cpp("overload-resolution", dir.path()).expect("plant fixture");
+    let header_source =
+        std::fs::read_to_string(root.join("include/calls.hpp")).expect("read fixture header");
+    let stable = u64::try_from(header_source.find("direct(8)").expect("stable call")).unwrap();
+    let selected = u64::try_from(
+        header_source
+            .find("choose(HEADER_ARGUMENT)")
+            .expect("variant call"),
+    )
+    .unwrap();
+
+    let report = scan(&root);
+    let run_id = report["run"]["run_id"].as_i64().expect("recorded run");
+    let store = Store::open(&root.join(".codehelion/audit.db")).expect("open audit database");
+    let units = store
+        .run_compiler_units(run_id)
+        .expect("read compiler results");
+    let header = units
+        .iter()
+        .find_map(|stored| match &stored.outcome {
+            CompilerOutcome::Analyzed(ir) if ir.unit.file.ends_with("include/calls.hpp") => {
+                Some(ir)
+            }
+            CompilerOutcome::Analyzed(_) | CompilerOutcome::Unavailable { .. } => None,
+        })
+        .expect("the units agree on part of the header");
+
+    let stable_call = header
+        .calls
+        .iter()
+        .find(|call| call.anchor.expansion.start_byte == stable)
+        .expect("the agreed direct call survived storage");
+    assert!(matches!(stable_call.target, CallTarget::Static { .. }));
+    assert!(
+        header
+            .calls
+            .iter()
+            .all(|call| call.anchor.expansion.start_byte != selected),
+        "one translation unit's selected overload survived disagreement"
     );
 }
 
