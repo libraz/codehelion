@@ -103,7 +103,16 @@ impl Backend for ClangBackend<'_> {
             // and a helper that claims control flow and returns none is worse
             // than one that never claimed it: the run would stop recording that
             // it did not get any.
-            capabilities: vec![Capability::Types, Capability::NameResolution],
+            capabilities: vec![
+                Capability::Types,
+                Capability::NameResolution,
+                Capability::CallTargets,
+                // Both locations of every name, which is what the capability
+                // names: a declaration a macro produced anchors where it reads
+                // and carries where it was written.
+                Capability::MacroExpansion,
+                Capability::TemplateInstantiation,
+            ],
             // Nothing, at any permission. Somebody who permits a configure step
             // is told this helper would not act on it, rather than left to
             // wonder why the answers did not change.

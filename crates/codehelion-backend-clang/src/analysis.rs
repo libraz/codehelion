@@ -41,8 +41,8 @@ use std::path::Path;
 
 use clang::{Clang, Entity, EntityKind, EntityVisitResult, Index, Type};
 use codehelion_helper::ir::{
-    Anchor, CompilerIr, ResolvedSymbol, ResolvedType, SourceRange, SymbolKind, Unavailability,
-    UnitRef, spell,
+    Anchor, CallSite, CallTarget, CompilerIr, Instantiation, ResolvedSymbol, ResolvedType,
+    SourceRange, SymbolKind, Unavailability, UnitRef, spell,
 };
 
 use crate::database::{Database, canonical};
@@ -67,7 +67,7 @@ pub(crate) fn analyze(clang: &Clang, unit: &UnitRef, database: &Database) -> Out
     let Ok(parsed) = index
         .parser(&entry.file)
         .arguments(&entry.arguments)
-        .detailed_preprocessing_record(false)
+        .detailed_preprocessing_record(true)
         .skip_function_bodies(false)
         .parse()
     else {
@@ -89,6 +89,8 @@ pub(crate) fn analyze(clang: &Clang, unit: &UnitRef, database: &Database) -> Out
     let mut ir = CompilerIr::empty(unit.clone());
     ir.anchored_at = Some(database.root.display().to_string());
     ir.symbols = reading.symbols;
+    ir.calls = reading.calls;
+    ir.instantiations = reading.instantiations;
     ir.types = reading.types.into_vec();
     Outcome::Analyzed(Box::new(ir))
 }
@@ -97,8 +99,7 @@ pub(crate) fn analyze(clang: &Clang, unit: &UnitRef, database: &Database) -> Out
 struct Reading<'a> {
     /// What paths are spelled against.
     root: &'a Path,
-    /// How the project spells each file the unit has reached so far, and
-    /// nothing for the ones outside the tree.
+    /// What is known about each file the unit has reached so far.
     ///
     /// Keyed by what the compiler calls a file rather than by how a path is
     /// written: a file reached through an include search path is reported with
@@ -106,23 +107,21 @@ struct Reading<'a> {
     /// one a caller names it by and the same file. Resolved once per file
     /// rather than once per name — a unit holds thousands of names and tens of
     /// files.
-    known: BTreeMap<(u64, u64, u64), Option<String>>,
+    known: BTreeMap<(u64, u64, u64), Spelled>,
+    /// Macro invocations paired with the definitions they expanded.
+    macros: Vec<MacroStamp>,
     types: TypeTable,
     symbols: Vec<ResolvedSymbol>,
+    calls: Vec<CallSite>,
+    instantiations: Vec<Instantiation>,
 }
 
-impl<'a> Reading<'a> {
-    fn new(root: &'a Path) -> Self {
-        Self {
-            root,
-            known: BTreeMap::new(),
-            types: TypeTable::default(),
-            symbols: Vec::new(),
-        }
-    }
-
-    /// How this project spells `file`, or nothing when the file is not one of
-    /// its own.
+/// One file the unit read, as this analysis reports it.
+struct Spelled {
+    /// How the project spells it, or its own path when it is not the
+    /// project's.
+    name: String,
+    /// Whether it is one of the project's own.
     ///
     /// The project root decides it. A C++ build has no membership list to ask —
     /// there is no manifest saying which of the files a command reaches belong
@@ -130,17 +129,43 @@ impl<'a> Reading<'a> {
     /// that matter: the standard library and every installed dependency are
     /// outside the tree, and the project's own headers are in it, whichever
     /// include path reached them.
-    fn spelling(&mut self, file: &clang::source::File<'_>) -> Option<String> {
-        let id = file.get_id();
-        if let Some(known) = self.known.get(&id) {
-            return known.clone();
+    inside: bool,
+}
+
+/// One macro invocation and the body it expanded.
+struct MacroStamp {
+    /// Clang's identity for the file containing the invocation.
+    file: (u64, u64, u64),
+    /// Invocation bytes, used to associate AST cursor locations with it.
+    start: u64,
+    end: u64,
+    /// The two source ranges reported for every cursor produced by it.
+    anchor: Anchor,
+}
+
+impl<'a> Reading<'a> {
+    fn new(root: &'a Path) -> Self {
+        Self {
+            root,
+            known: BTreeMap::new(),
+            macros: Vec::new(),
+            types: TypeTable::default(),
+            symbols: Vec::new(),
+            calls: Vec::new(),
+            instantiations: Vec::new(),
         }
-        let path = canonical(&file.get_path());
-        let spelled = path
-            .starts_with(self.root)
-            .then(|| spell(Some(self.root), &path));
-        self.known.insert(id, spelled.clone());
-        spelled
+    }
+
+    /// What is known about `file`, working it out the first time it is seen.
+    fn known(&mut self, file: &clang::source::File<'_>) -> &Spelled {
+        let root = self.root;
+        self.known.entry(file.get_id()).or_insert_with(|| {
+            let path = canonical(&file.get_path());
+            Spelled {
+                inside: path.starts_with(root),
+                name: spell(Some(root), &path),
+            }
+        })
     }
 
     /// Visit every entity of the unit, keeping the ones written in the tree.
@@ -151,10 +176,209 @@ impl<'a> Reading<'a> {
     /// the standard library and every installed dependency, which nobody in the
     /// scan wrote and no fragment can be cut from.
     fn walk(&mut self, root: Entity<'_>) {
+        // A preprocessing cursor carries the direct MacroExpansion →
+        // MacroDefinition relation. Build that index before visiting AST
+        // cursors: their spelling endpoints can come from different places
+        // when a function-like macro mixes an argument with its body, so an
+        // AST range cannot reconstruct this relation.
         root.visit_children(|entity, _| {
+            if entity.get_kind() == EntityKind::MacroExpansion {
+                self.remember_macro(entity);
+            }
+            EntityVisitResult::Recurse
+        });
+        root.visit_children(|entity, parent| {
+            self.remember_instantiation(entity, parent);
+            self.remember_call(entity);
             self.visit(entity);
             EntityVisitResult::Recurse
         });
+        self.calls.sort_by(|left, right| {
+            anchor_order(&left.anchor, &right.anchor)
+                .then_with(|| call_target_order(&left.target, &right.target))
+        });
+        self.calls.dedup();
+        self.instantiations.sort_by(|left, right| {
+            (
+                &left.anchor.expansion.file,
+                left.anchor.expansion.start_byte,
+                left.anchor.expansion.end_byte,
+                &left.instantiation_key,
+            )
+                .cmp(&(
+                    &right.anchor.expansion.file,
+                    right.anchor.expansion.start_byte,
+                    right.anchor.expansion.end_byte,
+                    &right.instantiation_key,
+                ))
+        });
+        self.instantiations.dedup_by(|left, right| {
+            left.anchor.expansion == right.anchor.expansion
+                && left.instantiation_key == right.instantiation_key
+        });
+    }
+
+    /// Remember what one written call expression was found to invoke.
+    ///
+    /// `get_reference` is Clang's overload-resolution answer for a direct
+    /// call. It can also return the variable holding a function pointer, which
+    /// is not a callable identity, so only callable declarations with a USR
+    /// become static targets. Virtual dispatch stays unresolved: libclang can
+    /// walk overridden methods toward their bases, but cannot enumerate every
+    /// derived implementation that may run, and an incomplete dynamic set
+    /// would be more misleading than no set.
+    fn remember_call(&mut self, entity: Entity<'_>) {
+        if entity.get_kind() != EntityKind::CallExpr {
+            return;
+        }
+        let Some(anchor) = self.anchor(entity) else {
+            return;
+        };
+        let target = if entity.is_dynamic_call() {
+            CallTarget::Unresolved
+        } else {
+            entity
+                .get_reference()
+                .map(|target| target.get_canonical_entity())
+                .filter(|target| callable(target.get_kind()))
+                .and_then(|target| target.get_usr())
+                .map_or(CallTarget::Unresolved, |symbol| CallTarget::Static {
+                    symbol: symbol.0,
+                })
+        };
+        self.calls.push(CallSite { anchor, target });
+    }
+
+    /// Remember a concrete template specialization named at this cursor.
+    ///
+    /// A free-function use exposes its specialization directly from the
+    /// `DeclRefExpr`. A class use exposes the template name as a `TemplateRef`,
+    /// while the containing declaration carries the concrete type. Restricting
+    /// the two cases to those cursor kinds gives one stamp per written use
+    /// instead of also counting the enclosing call and implicit conversions.
+    fn remember_instantiation(&mut self, entity: Entity<'_>, parent: Entity<'_>) {
+        let (specialization, argument_type) = match entity.get_kind() {
+            EntityKind::DeclRefExpr => {
+                let Some(specialization) = entity.get_reference() else {
+                    return;
+                };
+                (specialization, None)
+            }
+            EntityKind::TemplateRef => {
+                let Some(ty) = parent.get_type().map(|ty| ty.get_canonical_type()) else {
+                    return;
+                };
+                let Some(specialization) = ty.get_declaration() else {
+                    return;
+                };
+                (specialization, Some(ty))
+            }
+            _ => return,
+        };
+        let Some(origin) = specialization.get_template() else {
+            return;
+        };
+        let origin = origin.get_canonical_entity();
+        if self.is_external(origin) || !same_definition_site(specialization, origin) {
+            // A full explicit specialization owns the body at its own source
+            // location. libclang still points it at the primary template, but
+            // attributing that separate body to the primary would manufacture
+            // repetition. Implicit specializations point at the selected
+            // primary or partial-specialization location instead.
+            return;
+        }
+        let (Some(definition), Some(specialization_usr)) =
+            (origin.get_usr(), specialization.get_usr())
+        else {
+            // Source positions are not stable instantiation identities. If
+            // Clang cannot name either side, omit the stamp rather than make a
+            // key that moves whenever the file does.
+            return;
+        };
+        let Some(origin_range) = self.definition_range(origin) else {
+            return;
+        };
+        let Some(mut anchor) = self.anchor(entity) else {
+            return;
+        };
+        anchor.definition = Some(origin_range);
+        let arguments = argument_type.map_or_else(Vec::new, |ty| {
+            ty.get_template_argument_types()
+                .unwrap_or_default()
+                .into_iter()
+                .flatten()
+                .map(|argument| self.types.intern(argument))
+                .collect()
+        });
+        // The unversioned libclang surface exposed by clang 2.0/runtime can
+        // enumerate class type arguments but not function template arguments:
+        // Entity::get_template_arguments() requires the optional clang_3_6
+        // feature. The concrete function USR still carries every substitution,
+        // so it remains a stable, distinct key while `arguments` stays empty.
+        self.instantiations.push(Instantiation {
+            anchor,
+            definition: definition.0,
+            instantiation_key: format!("clang-usr-v1:{}", specialization_usr.0),
+            arguments,
+        });
+    }
+
+    /// Remember the definition the preprocessing record associates with one
+    /// macro invocation.
+    fn remember_macro(&mut self, expansion: Entity<'_>) {
+        let Some(definition) = expansion
+            .get_reference()
+            .or_else(|| expansion.get_definition())
+            .filter(|entity| entity.get_kind() == EntityKind::MacroDefinition)
+        else {
+            return;
+        };
+        let Some(invocation) = expansion.get_range() else {
+            return;
+        };
+        let start = invocation.get_start().get_expansion_location();
+        let end = invocation.get_end().get_expansion_location();
+        let (Some(start_file), Some(end_file)) = (start.file, end.file) else {
+            return;
+        };
+        if start_file.get_id() != end_file.get_id() || end.offset <= start.offset {
+            return;
+        }
+        let Some(written) = self.definition_range(definition) else {
+            return;
+        };
+        let file_name = self.known(&start_file).name.clone();
+        self.macros.push(MacroStamp {
+            file: start_file.get_id(),
+            start: u64::from(start.offset),
+            end: u64::from(end.offset),
+            anchor: Anchor {
+                expansion: SourceRange {
+                    file: file_name,
+                    start_byte: u64::from(start.offset),
+                    end_byte: u64::from(end.offset),
+                    start_line: start.line,
+                },
+                definition: Some(written),
+            },
+        });
+    }
+
+    /// The non-empty source range of a macro definition cursor.
+    fn definition_range(&mut self, definition: Entity<'_>) -> Option<SourceRange> {
+        let range = definition.get_range()?;
+        let start = range.get_start().get_spelling_location();
+        let end = range.get_end().get_spelling_location();
+        let (start_file, end_file) = (start.file?, end.file?);
+        if start_file.get_id() != end_file.get_id() || end.offset <= start.offset {
+            return None;
+        }
+        Some(SourceRange {
+            file: self.known(&start_file).name.clone(),
+            start_byte: u64::from(start.offset),
+            end_byte: u64::from(end.offset),
+            start_line: start.line,
+        })
     }
 
     fn visit(&mut self, entity: Entity<'_>) {
@@ -184,29 +408,51 @@ impl<'a> Reading<'a> {
         });
     }
 
-    /// Where `entity` sits, if it sits in a file of this project.
+    /// Where `entity` sits, if it sits in a file of this project, and where it
+    /// was written when a macro put it somewhere else.
     ///
-    /// The expansion location decides, not the spelling one: code produced by a
+    /// The expansion location is what a node anchors to: code produced by a
     /// macro physically occupies the place the macro was invoked, and that is
-    /// the only place a fragment can be cut from. Where it was written is a
-    /// separate question this slice does not answer yet.
+    /// the only place a fragment can be cut from.
     fn anchor(&mut self, entity: Entity<'_>) -> Option<Anchor> {
+        let at = entity.get_location()?.get_expansion_location();
+        let file = at.file?;
+        if !self.known(&file).inside {
+            return None;
+        }
+        let offset = u64::from(at.offset);
+        if let Some(anchor) = self
+            .macros
+            .iter()
+            .filter(|stamp| {
+                stamp.file == file.get_id() && stamp.start <= offset && offset <= stamp.end
+            })
+            .min_by_key(|stamp| stamp.end - stamp.start)
+            .map(|stamp| stamp.anchor.clone())
+        {
+            return Some(anchor);
+        }
+
         let range = entity.get_range()?;
         let start = range.get_start().get_expansion_location();
         let end = range.get_end().get_expansion_location();
-        let file = self.spelling(&start.file?)?;
-        Some(Anchor::written_here(SourceRange {
-            file,
+        let known = self.known(&start.file?);
+        if !known.inside {
+            return None;
+        }
+        let expansion = SourceRange {
+            file: known.name.clone(),
             start_byte: u64::from(start.offset),
             end_byte: u64::from(end.offset.max(start.offset)),
             start_line: start.line,
-        }))
+        };
+        Some(Anchor::written_here(expansion))
     }
 
     /// Whether the definition of `entity` is outside the code being scanned.
     ///
     /// Where the definition sits answers it, which is the same question
-    /// [`Reading::spelling`] resolves and so the same answer.
+    /// [`Spelled::inside`] records and so the same answer.
     ///
     /// A definition with no location at all is a compiler builtin, which counts
     /// as outside for the same reason a primitive does: nobody in the scan
@@ -222,8 +468,88 @@ impl<'a> Reading<'a> {
         let Some(file) = location.get_expansion_location().file else {
             return true;
         };
-        self.spelling(&file).is_none()
+        !self.known(&file).inside
     }
+}
+
+/// Whether an implicit specialization still occupies its selected template's
+/// source location.
+///
+/// A full explicit specialization has a body of its own and therefore a
+/// different declaration location. Comparing Clang's file identities and byte
+/// offsets avoids treating path spelling as identity.
+fn same_definition_site(specialization: Entity<'_>, origin: Entity<'_>) -> bool {
+    let Some(specialized) = specialization.get_location() else {
+        return false;
+    };
+    let Some(original) = origin.get_location() else {
+        return false;
+    };
+    let specialized = specialized.get_spelling_location();
+    let original = original.get_spelling_location();
+    let (Some(specialized_file), Some(original_file)) = (specialized.file, original.file) else {
+        return false;
+    };
+    specialized_file.get_id() == original_file.get_id() && specialized.offset == original.offset
+}
+
+/// A stable order for call anchors, independent of AST traversal order.
+fn anchor_order(left: &Anchor, right: &Anchor) -> std::cmp::Ordering {
+    source_range_order(&left.expansion, &right.expansion).then_with(|| {
+        match (&left.definition, &right.definition) {
+            (Some(left), Some(right)) => source_range_order(left, right),
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+        }
+    })
+}
+
+fn source_range_order(left: &SourceRange, right: &SourceRange) -> std::cmp::Ordering {
+    (
+        left.file.as_str(),
+        left.start_byte,
+        left.end_byte,
+        left.start_line,
+    )
+        .cmp(&(
+            right.file.as_str(),
+            right.start_byte,
+            right.end_byte,
+            right.start_line,
+        ))
+}
+
+/// A stable order for the three call-target representations.
+fn call_target_order(left: &CallTarget, right: &CallTarget) -> std::cmp::Ordering {
+    match (left, right) {
+        (CallTarget::Static { symbol: left }, CallTarget::Static { symbol: right }) => {
+            left.cmp(right)
+        }
+        (CallTarget::Dynamic { candidates: left }, CallTarget::Dynamic { candidates: right }) => {
+            left.cmp(right)
+        }
+        (CallTarget::Unresolved, CallTarget::Unresolved) => std::cmp::Ordering::Equal,
+        (CallTarget::Static { .. }, _) | (CallTarget::Dynamic { .. }, CallTarget::Unresolved) => {
+            std::cmp::Ordering::Less
+        }
+        (_, CallTarget::Static { .. }) | (CallTarget::Unresolved, CallTarget::Dynamic { .. }) => {
+            std::cmp::Ordering::Greater
+        }
+    }
+}
+
+/// Whether an entity is itself something a call can name.
+const fn callable(kind: EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::FunctionDecl
+            | EntityKind::Method
+            | EntityKind::Constructor
+            | EntityKind::Destructor
+            | EntityKind::ConversionFunction
+            | EntityKind::FunctionTemplate
+    )
 }
 
 /// The identity of what a name resolved to.

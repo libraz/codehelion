@@ -15,7 +15,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use codehelion_helper::ir::{ResolvedType, TypeCategory, Unavailability, UnitRef};
+use codehelion_helper::ir::{
+    CallSite, CallTarget, ResolvedType, TypeCategory, Unavailability, UnitRef,
+};
 use codehelion_helper::protocol::{Capability, Execution};
 use codehelion_helper::{Analysis, COMPILER_IR_SCHEMA_VERSION, CompilerIr, Helper};
 
@@ -65,7 +67,16 @@ impl Planted {
 fn analyze(unit: &UnitRef) -> Analysis {
     let mut helper = helper();
     let analysis = helper
-        .analyze(unit, &[Capability::Types])
+        .analyze(
+            unit,
+            &[
+                Capability::Types,
+                Capability::NameResolution,
+                Capability::CallTargets,
+                Capability::MacroExpansion,
+                Capability::TemplateInstantiation,
+            ],
+        )
         .expect("the helper should answer");
     helper.shutdown().expect("the helper should stop cleanly");
     analysis
@@ -108,6 +119,9 @@ fn the_helper_says_which_compiler_will_answer_and_what_it_will_not_do() {
     );
     assert!(helper.offers(Capability::Types));
     assert!(helper.offers(Capability::NameResolution));
+    assert!(helper.offers(Capability::CallTargets));
+    assert!(helper.offers(Capability::MacroExpansion));
+    assert!(helper.offers(Capability::TemplateInstantiation));
     // libclang does not expose Clang's control-flow graph. Claiming it and
     // answering nothing would leave a run recording that it got an answer.
     assert!(!helper.offers(Capability::MirCfg));
@@ -248,6 +262,500 @@ fn a_name_from_outside_the_tree_is_told_apart_from_the_projects_own() {
     );
     assert!(!external("sum"), "the fixture's own function is");
     assert!(!external("accumulate"), "and so is its namespace");
+}
+
+/// What a macro produced, and where the two halves of that are.
+///
+/// A macro invoked three times produces three identical bodies. Nobody wrote
+/// them three times and nobody can delete one of them, so a detector reading
+/// only the text reports repetition that cannot be acted on. What tells that
+/// apart is that all three were written in one place — which is what the
+/// spelling location says and the expansion location cannot.
+#[test]
+fn what_a_macro_produced_says_where_it_was_written() {
+    let planted = plant("macro-expansion");
+    let header = "include/accessor.hpp";
+    let ir = analyzed(&planted.unit("src/frame.cpp", "src/frame.cpp"));
+
+    let stamped: Vec<_> = ["width_", "height_", "depth_"]
+        .iter()
+        .map(|name| {
+            ir.symbols
+                .iter()
+                .find(|symbol| {
+                    symbol.name == *name && symbol.kind == codehelion_helper::ir::SymbolKind::Field
+                })
+                .unwrap_or_else(|| panic!("the macro-produced field {name} is reported"))
+        })
+        .collect();
+
+    // Three invocations, three places in the file, one place they were written.
+    // The second half is what turns three findings into one, and is the only
+    // part the characters in the file cannot supply.
+    let invocations: std::collections::BTreeSet<(u64, u64)> = stamped
+        .iter()
+        .map(|symbol| {
+            assert_eq!(symbol.anchor.expansion.file, header);
+            (
+                symbol.anchor.expansion.start_byte,
+                symbol.anchor.expansion.end_byte,
+            )
+        })
+        .collect();
+    assert_eq!(invocations.len(), 3, "{invocations:?}");
+    let written = stamped[0]
+        .anchor
+        .definition
+        .as_ref()
+        .expect("an expanded name says where it was written");
+    assert_eq!(
+        written,
+        &codehelion_helper::ir::SourceRange {
+            file: header.into(),
+            start_byte: 549,
+            end_byte: 741,
+            start_line: 13,
+        },
+        "the definition is the complete macro body, not an AST cursor's mixed spelling range"
+    );
+    for symbol in stamped.iter().skip(1) {
+        assert_eq!(
+            symbol.anchor.definition.as_ref(),
+            Some(written),
+            "every invocation maps to the exact same definition cursor"
+        );
+    }
+
+    // And a declaration written where it reads carries no second place, or the
+    // answer would be the same for everything and say nothing.
+    let plain = ir
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "volume")
+        .expect("the fixture declares a function outside the macro");
+    assert!(!plain.anchor.is_expanded(), "{:?}", plain.anchor);
+}
+
+/// A macro body outside the project is still where generated code was written.
+///
+/// This uses an ordinary local include directory beside the planted project:
+/// external means outside the scan root, not remote, untrusted, or unavailable.
+#[test]
+fn a_macro_definition_outside_the_tree_keeps_its_own_path() {
+    let planted = plant("macro-expansion");
+    let dependency = tempfile::tempdir().expect("external include directory");
+    let external_header = dependency.path().join("external_accessor.hpp");
+    std::fs::write(
+        &external_header,
+        "#pragma once\n#define EXTERNAL_FIELD(type, name) type name##_; \n",
+    )
+    .expect("write the external header");
+
+    let project_header = planted.root.join("include/accessor.hpp");
+    let source = std::fs::read_to_string(&project_header).expect("read the project header");
+    let source = source
+        .replace(
+            "#include <cstdint>\n",
+            "#include <cstdint>\n#include <external_accessor.hpp>\n",
+        )
+        .replace(
+            "struct Frame {\n",
+            "struct Frame {\n  EXTERNAL_FIELD(std::uint32_t, external)\n",
+        );
+    std::fs::write(&project_header, source).expect("include and invoke the external macro");
+
+    let database_path = planted.root.join("compile_commands.json");
+    let mut database: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&database_path).expect("read the compilation database"),
+    )
+    .expect("the database is JSON");
+    let arguments = database[0]["arguments"]
+        .as_array_mut()
+        .expect("the fixture uses an arguments array");
+    arguments.insert(
+        1,
+        serde_json::Value::String(format!("-I{}", dependency.path().display())),
+    );
+    std::fs::write(
+        &database_path,
+        serde_json::to_vec_pretty(&database).expect("render the database"),
+    )
+    .expect("add the external include path");
+
+    let ir = analyzed(&planted.unit("src/frame.cpp", "src/frame.cpp"));
+    let field = ir
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.name == "external_" && symbol.kind == codehelion_helper::ir::SymbolKind::Field
+        })
+        .expect("the external macro produced a field");
+    assert_eq!(field.anchor.expansion.file, "include/accessor.hpp");
+    let definition = field
+        .anchor
+        .definition
+        .as_ref()
+        .expect("the field keeps the macro definition");
+    assert_eq!(
+        definition.file,
+        external_header
+            .canonicalize()
+            .expect("the external header exists")
+            .display()
+            .to_string()
+    );
+    assert!(definition.end_byte > definition.start_byte);
+}
+
+fn template_ir(planted: &Planted) -> Box<CompilerIr> {
+    analyzed(&planted.unit("src/templates.cpp", "src/templates.cpp"))
+}
+
+fn template_source(planted: &Planted, file: &str) -> String {
+    std::fs::read_to_string(planted.root.join(file))
+        .unwrap_or_else(|error| panic!("read {file}: {error}"))
+}
+
+fn overload_ir(planted: &Planted) -> Box<CompilerIr> {
+    analyzed(&planted.unit("src/calls.cpp", "src/calls.cpp"))
+}
+
+fn call_at<'a>(ir: &'a CompilerIr, file: &str, start: usize) -> &'a CallSite {
+    ir.calls
+        .iter()
+        .find(|call| {
+            call.anchor.expansion.file == file
+                && call.anchor.expansion.start_byte == u64::try_from(start).unwrap()
+        })
+        .unwrap_or_else(|| panic!("no call at {file}:{start}: {:?}", ir.calls))
+}
+
+fn static_symbol(call: &CallSite) -> &str {
+    match &call.target {
+        CallTarget::Static { symbol } => symbol,
+        target => panic!("expected a static target, got {target:?}"),
+    }
+}
+
+/// The referenced callable USR is Clang's overload-resolution answer. The two
+/// free overloads and two member overloads therefore remain distinct, while a
+/// direct non-overloaded call and a declaration outside the tree are resolved
+/// by exactly the same rule.
+#[test]
+fn direct_calls_keep_the_selected_callable_usr() {
+    let planted = plant("overload-resolution");
+    let source = template_source(&planted, "src/calls.cpp");
+    let ir = overload_ir(&planted);
+    let call = |text: &str| call_at(&ir, "src/calls.cpp", source.find(text).unwrap());
+
+    let free_integer = static_symbol(call("choose(1)"));
+    let free_long = static_symbol(call("choose(1L)"));
+    assert_ne!(free_integer, free_long);
+
+    let member_integer = static_symbol(call("mixer.mix(2)"));
+    let member_long = static_symbol(call("mixer.mix(2L)"));
+    assert_ne!(member_integer, member_long);
+    assert_ne!(free_integer, member_integer);
+
+    let direct = static_symbol(call("direct(9)"));
+    let declared = ir
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.name == "direct"
+                && symbol.kind == codehelion_helper::ir::SymbolKind::Function
+                && !symbol.external
+        })
+        .expect("the direct function declaration is resolved");
+    assert_eq!(direct, declared.id);
+
+    let external = static_symbol(call("std::puts"));
+    assert!(
+        !external.is_empty(),
+        "an external declaration still has a USR"
+    );
+    assert_ne!(external, direct);
+}
+
+/// A qualified virtual call names one base implementation. An ordinary
+/// virtual call does not: libclang cannot enumerate all derived overrides, so
+/// emitting a partial dynamic candidate list would overstate the answer.
+#[test]
+fn virtual_dispatch_is_unresolved_but_a_qualified_call_is_static() {
+    let planted = plant("overload-resolution");
+    let source = template_source(&planted, "src/calls.cpp");
+    let ir = overload_ir(&planted);
+    let target = |text: &str| &call_at(&ir, "src/calls.cpp", source.find(text).unwrap()).target;
+
+    assert!(matches!(target("base.run(3)"), CallTarget::Unresolved));
+    assert!(matches!(target("derived.run(5)"), CallTarget::Unresolved));
+    assert!(matches!(
+        target("derived.Base::run(4)"),
+        CallTarget::Static { .. }
+    ));
+    assert!(
+        ir.calls
+            .iter()
+            .all(|call| !matches!(call.target, CallTarget::Dynamic { .. })),
+        "an incomplete dynamic candidate set was manufactured"
+    );
+}
+
+/// A function-pointer variable is not the function eventually reached, and a
+/// dependent call has no selected overload until instantiation. Neither is
+/// assigned a positional identity or a compile-time overload set.
+#[test]
+fn indirect_and_dependent_calls_stay_unresolved() {
+    let planted = plant("overload-resolution");
+    let source = template_source(&planted, "src/calls.cpp");
+    let header = template_source(&planted, "include/calls.hpp");
+    let ir = overload_ir(&planted);
+
+    assert!(matches!(
+        call_at(&ir, "src/calls.cpp", source.find("pointer(6)").unwrap()).target,
+        CallTarget::Unresolved
+    ));
+    assert!(matches!(
+        call_at(
+            &ir,
+            "include/calls.hpp",
+            header.find("choose(value)").unwrap()
+        )
+        .target,
+        CallTarget::Unresolved
+    ));
+}
+
+/// Call anchors use the same macro index as symbols. The expanded call sits at
+/// the invocation, carries the macro-body definition, and remains one call in
+/// a deterministic, duplicate-free result.
+#[test]
+fn macro_calls_are_anchored_at_the_invocation_and_results_are_stable() {
+    let planted = plant("overload-resolution");
+    let source = template_source(&planted, "src/calls.cpp");
+    let ir = overload_ir(&planted);
+    let start = source.find("CALL_DIRECT(7)").unwrap();
+    let call = call_at(&ir, "src/calls.cpp", start);
+    assert_eq!(
+        &source[start..usize::try_from(call.anchor.expansion.end_byte).unwrap()],
+        "CALL_DIRECT(7)"
+    );
+    assert!(
+        call.anchor
+            .definition
+            .as_ref()
+            .is_some_and(|range| range.file == "include/calls.hpp")
+    );
+    assert!(matches!(call.target, CallTarget::Static { .. }));
+
+    assert_eq!(
+        ir.calls
+            .iter()
+            .filter(|call| call.anchor.expansion.file == "src/calls.cpp")
+            .count(),
+        11,
+        "every written source CallExpr is represented exactly once"
+    );
+    assert_eq!(
+        ir.calls
+            .iter()
+            .filter(|call| call.anchor.expansion.file == "include/calls.hpp")
+            .count(),
+        3,
+        "every written header CallExpr is represented exactly once"
+    );
+    assert!(
+        ir.calls.windows(2).all(|pair| {
+            let left = &pair[0];
+            let right = &pair[1];
+            (
+                &left.anchor.expansion.file,
+                left.anchor.expansion.start_byte,
+                left.anchor.expansion.end_byte,
+            ) <= (
+                &right.anchor.expansion.file,
+                right.anchor.expansion.start_byte,
+                right.anchor.expansion.end_byte,
+            ) && left != right
+        }),
+        "calls are not sorted and deduplicated: {:?}",
+        ir.calls
+    );
+    let repeated = overload_ir(&planted);
+    assert_eq!(
+        ir.calls, repeated.calls,
+        "AST traversal order leaked into IR"
+    );
+}
+
+fn stamp_at<'a>(
+    ir: &'a CompilerIr,
+    file: &str,
+    start: usize,
+) -> &'a codehelion_helper::ir::Instantiation {
+    ir.instantiations
+        .iter()
+        .find(|stamp| {
+            stamp.anchor.expansion.file == file
+                && stamp.anchor.expansion.start_byte == u64::try_from(start).unwrap()
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no template stamp at {file}:{start}: {:?}",
+                ir.instantiations
+            )
+        })
+}
+
+/// One function body instantiated at two substitutions is one definition and
+/// two families. Repeating one substitution is still one family at two written
+/// uses, and each use is anchored on the name rather than the enclosing call.
+#[test]
+fn function_template_uses_share_the_origin_and_key_by_specialization() {
+    let planted = plant("template-instantiation");
+    let source = template_source(&planted, "src/templates.cpp");
+    let ir = template_ir(&planted);
+    let uses: Vec<usize> = source.match_indices("twice(").map(|(at, _)| at).collect();
+    assert_eq!(uses.len(), 3);
+    let stamps: Vec<_> = uses
+        .iter()
+        .map(|at| stamp_at(&ir, "src/templates.cpp", *at))
+        .collect();
+
+    assert_eq!(stamps[0].definition, stamps[1].definition);
+    assert_eq!(stamps[1].definition, stamps[2].definition);
+    assert_eq!(stamps[0].instantiation_key, stamps[1].instantiation_key);
+    assert_ne!(stamps[1].instantiation_key, stamps[2].instantiation_key);
+    assert!(
+        stamps
+            .iter()
+            .all(|stamp| stamp.instantiation_key.starts_with("clang-usr-v1:"))
+    );
+    assert!(
+        stamps.iter().all(|stamp| stamp.arguments.is_empty()),
+        "clang 2.0/runtime has no unversioned function-template argument API"
+    );
+    for (stamp, start) in stamps.iter().zip(uses) {
+        assert_eq!(
+            &source[start..usize::try_from(stamp.anchor.expansion.end_byte).unwrap()],
+            "twice"
+        );
+        let definition = stamp
+            .anchor
+            .definition
+            .as_ref()
+            .expect("the selected template body has a source range");
+        assert_eq!(definition.file, "include/templates.hpp");
+    }
+}
+
+/// Class specializations expose their type arguments even when another
+/// argument is non-type. The concrete USR keeps the missing non-type value in
+/// the key, so two array lengths do not collapse into one family.
+#[test]
+fn class_template_keys_keep_non_type_arguments_and_types_keep_categories() {
+    let planted = plant("template-instantiation");
+    let source = template_source(&planted, "src/templates.cpp");
+    let ir = template_ir(&planted);
+    let four = stamp_at(
+        &ir,
+        "src/templates.cpp",
+        source.find("Buffer<int, 4>").unwrap(),
+    );
+    let eight = stamp_at(
+        &ir,
+        "src/templates.cpp",
+        source.find("Buffer<int, 8>").unwrap(),
+    );
+    let floating = stamp_at(
+        &ir,
+        "src/templates.cpp",
+        source.find("Buffer<double, 4>").unwrap(),
+    );
+
+    assert_eq!(four.definition, eight.definition);
+    assert_eq!(eight.definition, floating.definition);
+    assert_ne!(four.instantiation_key, eight.instantiation_key);
+    assert_ne!(four.instantiation_key, floating.instantiation_key);
+    assert_eq!(four.arguments.len(), 1, "the non-type argument is key-only");
+    assert_eq!(
+        eight.arguments.len(),
+        1,
+        "the non-type argument is key-only"
+    );
+    assert_eq!(
+        ir.types[four.arguments[0] as usize].category,
+        TypeCategory::Integer
+    );
+    assert_eq!(
+        ir.types[floating.arguments[0] as usize].category,
+        TypeCategory::Float
+    );
+}
+
+/// Clang identifies the selected partial specialization directly. A full
+/// explicit specialization owns another body and is therefore not attributed
+/// to the primary, while external and ordinary controls produce no stamps.
+#[test]
+fn selected_partial_and_controls_are_not_misattributed() {
+    let planted = plant("template-instantiation");
+    let source = template_source(&planted, "src/templates.cpp");
+    let ir = template_ir(&planted);
+    let partial = stamp_at(
+        &ir,
+        "src/templates.cpp",
+        source.find("Holder<int*>").unwrap(),
+    );
+    assert!(
+        partial.definition.contains("@SP>"),
+        "the selected partial-specialization USR is the origin: {partial:?}"
+    );
+    let written = partial
+        .anchor
+        .definition
+        .as_ref()
+        .expect("the partial specialization has a body");
+    let header = template_source(&planted, "include/templates.hpp");
+    assert!(
+        header[usize::try_from(written.start_byte).unwrap()
+            ..usize::try_from(written.end_byte).unwrap()]
+            .contains("struct Holder<T*>")
+    );
+
+    for control in ["Holder<bool>", "std::vector<int>", "ordinary("] {
+        let at = source.find(control).unwrap();
+        let end = at + control.len();
+        assert!(
+            ir.instantiations.iter().all(|stamp| {
+                if stamp.anchor.expansion.file != "src/templates.cpp" {
+                    return true;
+                }
+                let start = usize::try_from(stamp.anchor.expansion.start_byte).unwrap();
+                !(at..end).contains(&start)
+            }),
+            "{control} was reported as an instantiation: {:?}",
+            ir.instantiations
+        );
+    }
+    assert!(
+        ir.instantiations.windows(2).all(|pair| {
+            let left = &pair[0];
+            let right = &pair[1];
+            (
+                &left.anchor.expansion.file,
+                left.anchor.expansion.start_byte,
+                left.anchor.expansion.end_byte,
+                &left.instantiation_key,
+            ) < (
+                &right.anchor.expansion.file,
+                right.anchor.expansion.start_byte,
+                right.anchor.expansion.end_byte,
+                &right.instantiation_key,
+            )
+        }),
+        "stamps are not sorted and deduplicated: {:?}",
+        ir.instantiations
+    );
 }
 
 /// A file no compilation database mentions is one nothing says how to compile.
