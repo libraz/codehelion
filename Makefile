@@ -2,6 +2,13 @@
 
 CARGO ?= cargo
 
+# Whole-workspace runs compile every target once and exit, which is the case
+# incremental compilation cannot pay off in: it splits each crate into far more
+# codegen units and leaves a per-crate cache behind, and the caches grow to
+# gigabytes over a few days of these runs. `build` and `run` are the interactive
+# ones and keep it.
+ONESHOT := CARGO_INCREMENTAL=0
+
 .PHONY: help
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -11,7 +18,7 @@ help: ## Show this help
 
 .PHONY: format
 format: ## Auto-fix everything: apply clippy fixes, then format
-	$(CARGO) clippy --fix --allow-dirty --allow-staged --workspace --all-targets --all-features
+	$(ONESHOT) $(CARGO) clippy --fix --allow-dirty --allow-staged --workspace --all-targets --all-features
 	$(CARGO) fmt --all
 
 .PHONY: fix
@@ -25,15 +32,15 @@ format-check: ## Check formatting without modifying files
 
 .PHONY: lint
 lint: ## Static analysis only: clippy with warnings as errors
-	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
+	$(ONESHOT) $(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 
 .PHONY: test
 test: ## Run the full test suite
-	$(CARGO) test --workspace --all-targets --all-features
+	$(ONESHOT) $(CARGO) test --workspace --all-targets --all-features
 
 .PHONY: doc
 doc: ## Build docs, failing on warnings
-	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --all-features
+	RUSTDOCFLAGS="-D warnings" $(ONESHOT) $(CARGO) doc --workspace --no-deps --all-features
 
 .PHONY: eval
 eval: ## Show detection accuracy over the committed corpora
@@ -61,7 +68,7 @@ audit: ## Check dependencies for advisories, bans and license issues
 
 .PHONY: coverage
 coverage: ## Generate an HTML coverage report (needs cargo-llvm-cov)
-	$(CARGO) llvm-cov --workspace --all-features --html
+	$(ONESHOT) $(CARGO) llvm-cov --workspace --all-features --html
 
 .PHONY: hooks
 hooks: ## Install the repo's git hooks

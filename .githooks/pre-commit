@@ -9,6 +9,10 @@
 # pushing, which is what CI runs.
 set -euo pipefail
 
+# One pass over the whole workspace and then exit, which incremental
+# compilation only adds caches to. Same reason `make lint` sets it.
+export CARGO_INCREMENTAL=0
+
 echo "pre-commit: cargo fmt --check"
 cargo fmt --all --check
 

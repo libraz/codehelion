@@ -34,6 +34,18 @@ todo = "warn"
 unimplemented = "warn"
 dbg_macro = "warn"
 
+# No debug info in development builds, which is what keeps `target/` from
+# growing without bound. On macOS the default keeps debug info inside the
+# per-codegen-unit object files, so those objects cannot be deleted after a
+# link; every rebuild names its changed units differently and leaves the
+# previous ones behind, and nothing ever collects them. A test suite of this
+# size reaches hundreds of thousands of stale objects in one directory within
+# days, at which point every cargo invocation spends longer on filesystem calls
+# than on compiling. Assertion and panic messages carry their own file and line,
+# so what is given up is line numbers inside backtraces.
+[profile.dev]
+debug = 0
+
 [profile.release]
 strip = true
 lto = true
