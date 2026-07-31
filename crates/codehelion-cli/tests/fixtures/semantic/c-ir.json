@@ -9,12 +9,13 @@
     "flows": []
   },
   "effects": {
-    "computed": false,
+    "computed": true,
     "interactions": [],
     "writes": []
   },
   "instantiations": [],
   "schema_version": "compiler-ir-v1",
+  "semantic_constructs": [],
   "symbols": [
     {
       "anchor": {

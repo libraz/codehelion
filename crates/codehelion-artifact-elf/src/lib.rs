@@ -489,6 +489,7 @@ fn dwarf_line_frames<R: Reader>(
         frames.push(DwarfLineFrame {
             address: row.address(),
             frame: ArtifactInlineFrame {
+                evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
                 source: resolve_dwarf_source_path(
                     &source,
                     directory.as_deref(),
@@ -561,6 +562,7 @@ fn dwarf_source_frame<R: Reader>(
         .and_then(|value| value.udata_value())
         .and_then(|value| u32::try_from(value).ok());
     Some(ArtifactInlineFrame {
+        evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
         source: resolve_dwarf_source_path(
             &source,
             directory.as_deref(),

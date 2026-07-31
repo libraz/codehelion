@@ -43,6 +43,66 @@ pub(crate) struct Entry {
     pub(crate) selector: CompileCommandSelector,
 }
 
+impl Entry {
+    /// Arguments safe for the helper-owned syntax-only CFG frontend.
+    ///
+    /// Build commands can ask a compiler to load code, re-expand response
+    /// files, or write an output. The CFG reader neither needs nor permits
+    /// any of those. Refusing the entire auxiliary reading is deliberate: a
+    /// command whose nested arguments are not known safe must not become safe
+    /// by selectively guessing which pieces to retain.
+    pub(crate) fn cfg_arguments(&self) -> Result<Vec<String>, String> {
+        let mut safe = Vec::with_capacity(self.arguments.len());
+        for argument in &self.arguments {
+            if is_unsafe_for_cfg(argument) {
+                return Err(format!(
+                    "unsafe compiler argument for CFG frontend: {argument}"
+                ));
+            }
+            safe.push(argument.clone());
+        }
+        Ok(safe)
+    }
+}
+
+/// Whether an argument could make the fixed syntax-only command load code,
+/// perform another command-line parse, or write an auxiliary artifact.
+///
+/// This is intentionally a deny list with a fail-closed response for every
+/// Clang escape hatch. Normal preprocessing, include and language options are
+/// retained because changing them would analyse a different program.
+fn is_unsafe_for_cfg(argument: &str) -> bool {
+    argument.starts_with('@')
+        || matches!(
+            argument,
+            "-Xclang" | "-cc1" | "-mllvm" | "-load" | "-plugin"
+        )
+        || argument.starts_with("-Xclang=")
+        || argument.starts_with("-cc1")
+        || argument.starts_with("-mllvm")
+        || argument.starts_with("-load")
+        || argument.starts_with("-plugin")
+        || argument.starts_with("-fplugin")
+        || argument.starts_with("-fpass-plugin")
+        || argument.starts_with("-analyzer-")
+        || argument.starts_with("-fmodules")
+        || argument.starts_with("-fmodule-")
+        || argument.starts_with("-fimplicit-module")
+        || argument.starts_with("-include-pch")
+        || argument.starts_with("-emit-pch")
+        || argument.starts_with("-emit-module")
+        || argument.starts_with("-fmodule-output")
+        || argument.starts_with("-fmodule-cache-path")
+        || argument.starts_with("-save-temps")
+        || argument.starts_with("-serialize-diagnostics")
+        || argument.starts_with("-fdiagnostics-serialize-file")
+        || argument.starts_with("-ftime-trace")
+        || argument.starts_with("-MJ")
+        || argument.starts_with("-E")
+        || argument.starts_with("-S")
+        || argument.starts_with("-emit-")
+}
+
 /// A compilation database, and the directory a project rooted at it spells its
 /// files against.
 pub(crate) struct Database {
@@ -393,6 +453,62 @@ mod tests {
             ]
         );
         assert_eq!(entry.definitions, ["-DWIDE=64"]);
+    }
+
+    #[test]
+    fn cfg_frontend_refuses_plugin_and_clang_internal_execution_flags() {
+        let entry = Entry {
+            file: PathBuf::from("/work/src/a.cpp"),
+            arguments: [
+                "-std=c++20",
+                "-Xclang",
+                "-load",
+                "-fplugin=/work/plugin.so",
+                "-fplugin-arg-test=value",
+                "-I/work/include",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+            definitions: Vec::new(),
+            selector: CompileCommandSelector {
+                file: "/work/src/a.cpp".to_string(),
+                directory: None,
+                arguments: Vec::new(),
+            },
+        };
+        assert!(entry.cfg_arguments().is_err());
+    }
+
+    #[test]
+    fn cfg_frontend_retains_the_build_reading_when_it_is_syntax_only_safe() {
+        let entry = Entry {
+            file: PathBuf::from("/work/src/a.cpp"),
+            arguments: [
+                "-working-directory=/work/build",
+                "-std=c++20",
+                "-DLEVEL=2",
+                "-I/work/include",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+            definitions: Vec::new(),
+            selector: CompileCommandSelector {
+                file: "/work/src/a.cpp".to_string(),
+                directory: None,
+                arguments: Vec::new(),
+            },
+        };
+        assert_eq!(
+            entry
+                .cfg_arguments()
+                .expect("ordinary parsing flags are safe"),
+            [
+                "-working-directory=/work/build",
+                "-std=c++20",
+                "-DLEVEL=2",
+                "-I/work/include",
+            ]
+        );
     }
 
     /// The relative include path in the entry above is relative to the

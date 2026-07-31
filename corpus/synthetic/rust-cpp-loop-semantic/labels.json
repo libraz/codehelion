@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "language": "mixed",
+  "files": ["src/lib.rs", "cpp/range_loop.cpp"],
+  "clone_pairs": [
+    {
+      "id": "rust-cpp-direct-loop-collection",
+      "type": "restricted-semantic",
+      "rule_id": "cross-language-sequence-pipeline-v1",
+      "fragments": [
+        {"file": "src/lib.rs", "start_line": 3, "end_line": 4},
+        {"file": "cpp/range_loop.cpp", "start_line": 6, "end_line": 7}
+      ]
+    },
+    {
+      "id": "rust-cpp-direct-loop-reduction",
+      "type": "restricted-semantic",
+      "rule_id": "cross-language-sequence-pipeline-v1",
+      "fragments": [
+        {"file": "src/lib.rs", "start_line": 11, "end_line": 12},
+        {"file": "cpp/range_loop.cpp", "start_line": 14, "end_line": 15}
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "id": "rust-cpp-transformed-collection",
+      "reason": "the changed collection operand is outside the direct loop correspondence",
+      "rule_id": "cross-language-sequence-pipeline-v1",
+      "fragments": [
+        {"file": "src/lib.rs", "start_line": 3, "end_line": 4},
+        {"file": "cpp/range_loop.cpp", "start_line": 23, "end_line": 24}
+      ]
+    },
+    {
+      "id": "rust-cpp-transformed-reduction",
+      "reason": "the changed accumulation operand is outside the direct loop correspondence",
+      "rule_id": "cross-language-sequence-pipeline-v1",
+      "fragments": [
+        {"file": "src/lib.rs", "start_line": 11, "end_line": 12},
+        {"file": "cpp/range_loop.cpp", "start_line": 31, "end_line": 32}
+      ]
+    }
+  ]
+}

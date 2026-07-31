@@ -361,6 +361,7 @@ CREATE TABLE compiler_instantiation (
     compiler_unit_id      INTEGER NOT NULL REFERENCES compiler_unit (id) ON DELETE CASCADE,
     ordinal               INTEGER NOT NULL,
     definition            TEXT NOT NULL,
+    artifact_match_key    TEXT,
     instantiation_key     TEXT NOT NULL,
     expansion_file        TEXT NOT NULL,
     expansion_start_byte  INTEGER NOT NULL,
@@ -370,6 +371,7 @@ CREATE TABLE compiler_instantiation (
     definition_start_byte INTEGER,
     definition_end_byte   INTEGER,
     definition_start_line INTEGER,
+    definition_end_line   INTEGER,
     UNIQUE (compiler_unit_id, ordinal)
 ) STRICT;
 CREATE TABLE compiler_instantiation_argument (

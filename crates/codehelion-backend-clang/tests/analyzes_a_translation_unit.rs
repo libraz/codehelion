@@ -172,9 +172,9 @@ fn the_helper_says_which_compiler_will_answer_and_what_it_will_not_do() {
     assert!(helper.offers(Capability::CallTargets));
     assert!(helper.offers(Capability::MacroExpansion));
     assert!(helper.offers(Capability::TemplateInstantiation));
-    // libclang does not expose Clang's control-flow graph. Claiming it and
-    // answering nothing would leave a run recording that it got an answer.
-    assert!(!helper.offers(Capability::MirCfg));
+    // libclang does not expose Clang's CFG, so this capability proves the
+    // helper also found its fixed, syntax-only Clang frontend.
+    assert!(helper.offers(Capability::MirCfg));
     // And nothing out of the project runs at any permission, which is what
     // lets permitting something be refused instead of quietly doing nothing.
     for class in [
@@ -185,6 +185,69 @@ fn the_helper_says_which_compiler_will_answer_and_what_it_will_not_do() {
         assert!(!helper.executes(class), "{class:?}");
     }
     helper.shutdown().expect("the helper should stop cleanly");
+}
+
+#[test]
+fn compiler_cfgs_are_anchored_to_unambiguous_function_definitions() {
+    let planted = plant("cmake");
+    let unit = planted.unit("src/geometry.cpp", "src/geometry.cpp");
+    let mut helper = helper();
+    let analysis = helper
+        .analyze(&unit, &[Capability::MirCfg])
+        .expect("the helper should answer");
+    helper.shutdown().expect("the helper should stop cleanly");
+    let Analysis::Done(ir) = analysis else {
+        panic!("the CMake fixture has a readable translation unit");
+    };
+    let cfg = ir.cfg.expect("the fixed Clang frontend produced a CFG");
+    assert!(cfg.blocks.len() >= 10, "{cfg:?}");
+    assert!(
+        cfg.blocks
+            .iter()
+            .all(|block| block.anchor.expansion.file == "src/geometry.cpp"),
+        "{cfg:?}"
+    );
+    assert!(
+        cfg.edges.iter().any(|edge| edge.kind.name() == "taken")
+            && cfg.edges.iter().any(|edge| edge.kind.name() == "not_taken"),
+        "{cfg:?}"
+    );
+}
+
+#[test]
+fn a_plain_standard_vector_range_loop_is_a_closed_collection_construct() {
+    let planted = plant("overload-resolution");
+    let ir = analyzed(&planted.unit("src/range_loop.cpp", "src/range_loop.cpp"));
+    let constructs: Vec<_> = ir
+        .semantic_constructs
+        .iter()
+        .filter(|construct| {
+            construct.anchor.expansion.file == "src/range_loop.cpp"
+                && matches!(
+                    construct.kind,
+                    SemanticConstructKind::Source
+                        | SemanticConstructKind::Collect
+                        | SemanticConstructKind::Reduce
+                )
+        })
+        .collect();
+    assert_eq!(
+        constructs
+            .iter()
+            .map(|construct| construct.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            SemanticConstructKind::Source,
+            SemanticConstructKind::Collect,
+            SemanticConstructKind::Source,
+            SemanticConstructKind::Collect,
+            SemanticConstructKind::Source,
+            SemanticConstructKind::Reduce,
+            SemanticConstructKind::Source,
+            SemanticConstructKind::Reduce,
+        ],
+        "only direct collection and numeric reduction range loops are normalized: {constructs:?}"
+    );
 }
 
 /// The claim C++ exists to make here. One header, two translation units, and
@@ -594,6 +657,22 @@ fn standard_optional_presence_checks_are_validation_constructs() {
            if (value.has_value() && keep) {{ return true; }}\n\
            return false;\n\
          }}\n\
+         void early_return(std::optional<long> value) {{\n\
+           if (!value.has_value()) return;\n\
+           (void)value;\n\
+         }}\n\
+         void braced_early_return(std::optional<long> value) {{\n\
+           if (!value.has_value()) {{ return; }}\n\
+           (void)value;\n\
+         }}\n\
+         bool value_return(std::optional<long> value) {{\n\
+           if (!value.has_value()) return false;\n\
+           return true;\n\
+         }}\n\
+         void else_branch(std::optional<long> value) {{\n\
+           if (!value.has_value()) return;\n\
+           else (void)value;\n\
+         }}\n\
          #ifdef CODEHELION_EXPECTED\n\
          bool expected_standard(std::expected<long, int> expected_value) {{\n\
            if (expected_value.has_value()) {{ return true; }}\n\
@@ -627,7 +706,7 @@ fn standard_optional_presence_checks_are_validation_constructs() {
         .collect::<Vec<_>>();
     assert_eq!(
         validates.len(),
-        3 + expected_validations,
+        5 + expected_validations,
         "{:?}",
         ir.semantic_constructs
     );
@@ -636,7 +715,7 @@ fn standard_optional_presence_checks_are_validation_constructs() {
             .iter()
             .filter(|construct| construct.fallible_kind == Some(FallibleKind::Option))
             .count(),
-        3
+        5
     );
     assert_eq!(
         validates
@@ -675,6 +754,13 @@ fn standard_optional_presence_checks_are_validation_constructs() {
         spellings
             .iter()
             .any(|spelling| spelling.contains("value.has_value()"))
+    );
+    assert_eq!(
+        spellings
+            .iter()
+            .filter(|spelling| spelling.trim() == "!value.has_value()")
+            .count(),
+        2
     );
     assert!(spellings.iter().any(|spelling| spelling.trim() == "value"));
     assert_eq!(
@@ -766,6 +852,9 @@ fn standard_expected_identity_return_is_a_propagation_construct() {
 fn direct_standard_lock_guard_lifetimes_are_reported_at_function_scope() {
     let planted = plant("overload-resolution");
     let ir = overload_ir(&planted);
+    assert!(ir.effects.computed);
+    assert_eq!(ir.effects.interactions, ["synchronization"]);
+    assert!(ir.effects.writes.is_empty());
     let lifetimes = ir
         .semantic_constructs
         .iter()
@@ -1015,6 +1104,17 @@ fn function_template_uses_share_the_origin_and_key_by_specialization() {
             .all(|stamp| stamp.instantiation_key.starts_with("clang-usr-v1:"))
     );
     assert!(
+        stamps.iter().all(|stamp| {
+            stamp
+                .artifact_match_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("clang-display-v1:templates::twice"))
+        }),
+        "function template specializations retain their compiler display spelling: {stamps:#?}"
+    );
+    assert_eq!(stamps[0].artifact_match_key, stamps[1].artifact_match_key);
+    assert_ne!(stamps[1].artifact_match_key, stamps[2].artifact_match_key);
+    assert!(
         stamps.iter().all(|stamp| stamp.arguments.is_empty()),
         "clang 2.0/runtime has no unversioned function-template argument API"
     );
@@ -1060,6 +1160,22 @@ fn class_template_keys_keep_non_type_arguments_and_types_keep_categories() {
     assert_eq!(eight.definition, floating.definition);
     assert_ne!(four.instantiation_key, eight.instantiation_key);
     assert_ne!(four.instantiation_key, floating.instantiation_key);
+    assert_eq!(
+        four.artifact_match_key.as_deref(),
+        Some("clang-display-v1:templates::Buffer<int, 4>")
+    );
+    assert_eq!(
+        eight.artifact_match_key.as_deref(),
+        Some("clang-display-v1:templates::Buffer<int, 8>")
+    );
+    assert_eq!(
+        floating.artifact_match_key.as_deref(),
+        Some("clang-display-v1:templates::Buffer<double, 4>")
+    );
+    assert!(
+        four.definition_end_line.is_some_and(|line| line > 36),
+        "the class definition extent contains its inline member: {four:#?}"
+    );
     assert_eq!(four.arguments.len(), 1, "the non-type argument is key-only");
     assert_eq!(
         eight.arguments.len(),

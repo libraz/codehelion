@@ -205,6 +205,8 @@ fn record(
             expansion: source_range(loaded, file_id, at),
             definition: written,
         },
+        definition_end_line: None,
+        artifact_match_key: None,
         instantiation_key: format!("{name}<{}>", spelled.join(", ")),
         definition: name,
         arguments: indices,

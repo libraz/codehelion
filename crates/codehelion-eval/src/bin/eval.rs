@@ -1,9 +1,9 @@
 //! Development CLI for the `codehelion` evaluation harness.
 //!
 //! Scores a scan report against a corpus label file and prints accuracy
-//! metrics. With `--compare`, it also reports run-to-run stability against a
-//! second report. This binary is a dev/CI tool; it is not part of the shipped
-//! `codehelion` CLI.
+//! metrics. With `--compare`, it also reports overall and registered-rule
+//! run-to-run stability against a second report. This binary is a dev/CI tool;
+//! it is not part of the shipped `codehelion` CLI.
 //!
 //! For the committed corpora the same measurement runs as a test, so it does
 //! not depend on anyone remembering to invoke this. Reach for this binary to
@@ -17,7 +17,9 @@ use clap::Parser;
 
 use codehelion_eval::detected;
 use codehelion_eval::labels::LabelSet;
-use codehelion_eval::metrics::{DEFAULT_MATCH_THRESHOLD, evaluate, evaluate_by_rule, stability};
+use codehelion_eval::metrics::{
+    DEFAULT_MATCH_THRESHOLD, evaluate, evaluate_by_rule, stability, stability_by_rule,
+};
 use codehelion_eval::schema::DetectionResult;
 
 /// Score detection-prototype output against a labelled corpus.
@@ -43,7 +45,8 @@ struct Args {
     /// Number of top-scoring findings for precision@k.
     #[arg(long, default_value_t = 10)]
     top_k: usize,
-    /// A second results JSON; when given, also report stability vs `--results`.
+    /// A second results JSON; when given, report overall and per-rule stability
+    /// versus `--results`.
     #[arg(long)]
     compare: Option<PathBuf>,
 }
@@ -83,6 +86,10 @@ fn main() -> Result<()> {
         println!();
         println!("stability vs {}", compare_path.display());
         println!("{stability}");
+        for (rule_id, stability) in stability_by_rule(&results, &other) {
+            println!("\nrule stability {rule_id}");
+            println!("{stability}");
+        }
     }
 
     Ok(())

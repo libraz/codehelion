@@ -7,12 +7,12 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
 A fully local command-line tool that audits Rust, C and C++ codebases for
-duplicate logic and tracks how those findings change over time. It never sends
+duplicate logic. It never sends
 your source or results anywhere, needs no network access, and does not execute
 the code it analyses by default.
 
-The current release ships two build-free analysis modes and an optional
-compiler-assisted mode. **Fast** is
+The tool provides two build-free analysis modes and an optional compiler-assisted
+mode. **Fast** is
 token-level Type-1 (identical) and Type-2 (renamed identifiers / changed
 literals) detection that scans hundreds of thousands of lines in seconds and
 millions in a couple of minutes.
@@ -22,8 +22,10 @@ edits do not make otherwise identical code different findings.
 added, removed or changed statements — and reports the per-dimension similarity
 each finding was judged on. **Semantic** uses separately installed Rust and
 Clang helpers to include compiler-resolved type and name information without
-linking compiler APIs into the main CLI. Compiled-artifact analysis arrives in
-a later release.
+linking compiler APIs into the main CLI. The optional `artifact` commands read
+WASM, ELF, Mach-O, PE/COFF and static archives locally to report observed size,
+duplicate code/data, retained-size and source-location evidence. They never
+load or execute the inspected artifact.
 
 ## Highlights
 
@@ -40,6 +42,10 @@ a later release.
   mode cannot measure is reported as absent rather than guessed.
 - **Local current-scan storage** — the latest scan is stored in SQLite; text,
   JSON and SARIF reports are exports from that current snapshot.
+- **Local artifact inspection** — `artifact analyze` and `artifact compare`
+  read supported binary formats without running them. Debug companions are
+  accepted only after the matching ELF build ID, Mach-O UUID or PE CodeView/PDB
+  identity has been verified.
 - **Separated priority measures** — findings are ordered by clone confidence,
   maintenance risk and refactoring difficulty reported side by side, never by
   one opaque score, and every measure shows the inputs it was derived from.
@@ -88,7 +94,16 @@ codehelion baseline           # manage accepted-findings baselines
 codehelion cache status       # local-database location and size
 codehelion config init        # write a commented codehelion.toml template
 codehelion doctor             # report available analysis components
+codehelion artifact analyze path/to/binary
+codehelion artifact compare before/binary after/binary
 ```
+
+Artifact inspection parses local bytes and never executes the inspected
+program. It rejects inputs above 512 MiB by default, runs parsing in a worker
+with a 30-second deadline, and accepts `--max-bytes` and `--timeout-seconds`
+when a deliberate adjustment is needed. On Linux,
+`--max-memory-bytes <bytes>` also enforces a worker virtual-memory ceiling;
+other platforms reject that option rather than silently ignoring it.
 
 Findings are grouped into clone groups; each group and member carries a stable
 ID you can suppress, baseline or look up later with `explain`.

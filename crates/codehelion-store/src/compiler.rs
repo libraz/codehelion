@@ -601,15 +601,16 @@ fn write_instantiations(
         let cells = AnchorCells::of(&instantiation.anchor);
         tx.execute(
             "INSERT INTO compiler_instantiation
-                 (compiler_unit_id, ordinal, definition, instantiation_key,
+                 (compiler_unit_id, ordinal, definition, artifact_match_key, instantiation_key,
                   expansion_file, expansion_start_byte, expansion_end_byte, expansion_start_line,
                   definition_file, definition_start_byte, definition_end_byte,
-                  definition_start_line)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                  definition_start_line, definition_end_line)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 unit_id,
                 index_of(ordinal),
                 instantiation.definition,
+                instantiation.artifact_match_key,
                 instantiation.instantiation_key,
                 cells.file,
                 cells.start_byte,
@@ -619,6 +620,7 @@ fn write_instantiations(
                 cells.definition_start_byte,
                 cells.definition_end_byte,
                 cells.definition_start_line,
+                instantiation.definition_end_line.map(i64::from),
             ],
         )?;
         let row_id = tx.last_insert_rowid();
@@ -1252,10 +1254,10 @@ mod read {
             arguments.entry(row_id).or_default().push(slot(argument));
         }
         let mut statement = conn.prepare(
-            "SELECT id, definition, instantiation_key,
+            "SELECT id, definition, artifact_match_key, instantiation_key,
                     expansion_file, expansion_start_byte, expansion_end_byte,
                     expansion_start_line, definition_file, definition_start_byte,
-                    definition_end_byte, definition_start_line
+                    definition_end_byte, definition_start_line, definition_end_line
              FROM compiler_instantiation WHERE compiler_unit_id = ?1 ORDER BY ordinal",
         )?;
         let rows = statement
@@ -1263,8 +1265,10 @@ mod read {
                 let row_id: i64 = row.get(0)?;
                 Ok(Instantiation {
                     definition: row.get(1)?,
-                    instantiation_key: row.get(2)?,
-                    anchor: anchor_at(row, 3)?,
+                    artifact_match_key: row.get(2)?,
+                    instantiation_key: row.get(3)?,
+                    anchor: anchor_at(row, 4)?,
+                    definition_end_line: row.get(12)?,
                     arguments: arguments.remove(&row_id).unwrap_or_default(),
                 })
             })?

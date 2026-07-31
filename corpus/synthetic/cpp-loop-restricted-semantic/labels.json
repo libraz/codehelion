@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "language": "cpp",
+  "files": ["cpp/range_loop.cpp"],
+  "clone_pairs": [
+    {
+      "id": "plain-range-collection",
+      "type": "restricted-semantic",
+      "rule_id": "sequence-pipeline-v1",
+      "fragments": [
+        {"file": "cpp/range_loop.cpp", "start_line": 5, "end_line": 6},
+        {"file": "cpp/range_loop.cpp", "start_line": 13, "end_line": 14}
+      ]
+    },
+    {
+      "id": "plain-range-reduction",
+      "type": "restricted-semantic",
+      "rule_id": "sequence-pipeline-v1",
+      "fragments": [
+        {"file": "cpp/range_loop.cpp", "start_line": 29, "end_line": 30},
+        {"file": "cpp/range_loop.cpp", "start_line": 37, "end_line": 38}
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "id": "transformed-range-collection",
+      "reason": "a transformed push_back argument is outside the direct collection form",
+      "rule_id": "sequence-pipeline-v1",
+      "fragments": [
+        {"file": "cpp/range_loop.cpp", "start_line": 5, "end_line": 6},
+        {"file": "cpp/range_loop.cpp", "start_line": 21, "end_line": 22}
+      ]
+    },
+    {
+      "id": "transformed-range-reduction",
+      "reason": "a transformed accumulation right-hand side is outside the direct reduction form",
+      "rule_id": "sequence-pipeline-v1",
+      "fragments": [
+        {"file": "cpp/range_loop.cpp", "start_line": 29, "end_line": 30},
+        {"file": "cpp/range_loop.cpp", "start_line": 45, "end_line": 46}
+      ]
+    }
+  ]
+}

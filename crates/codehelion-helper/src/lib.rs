@@ -21,6 +21,7 @@
 #![doc(html_root_url = "https://docs.rs/codehelion-helper")]
 
 pub mod client;
+pub mod effects;
 pub mod ir;
 pub mod protocol;
 pub mod sandbox;

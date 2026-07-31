@@ -49,14 +49,14 @@ fn a_well_behaved_helper_says_what_it_is_and_what_it_can_do() {
 
 #[test]
 fn a_helper_from_another_era_is_named_as_such_rather_than_used() {
-    let error = start("ancient", DEADLINE).expect_err("no revision is common");
+    let error = start("ancient", DEADLINE).expect_err("the v1 protocol must match exactly");
     assert!(
         matches!(error, HelperError::NoCommonProtocol { .. }),
         "{error:?}"
     );
-    // The message has to tell someone which side to update.
+    // The message has to identify the exact v1 protocol contract.
     let said = error.to_string();
-    assert!(said.contains("update"), "{said}");
+    assert!(said.contains("requires protocol 1"), "{said}");
 }
 
 #[test]

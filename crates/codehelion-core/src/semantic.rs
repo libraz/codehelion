@@ -540,6 +540,7 @@ pub fn normalize_registered_observations_with_ranges(
         )
     }));
     nodes.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    nodes.dedup_by(coincident_operation);
     let node_source_ranges = nodes.iter().map(|(_, _, range, _)| *range).collect();
     let nodes: Vec<_> = nodes.into_iter().map(|(_, _, _, node)| node).collect();
     // The initial registry covers only data-sequence APIs. It never guesses
@@ -552,6 +553,21 @@ pub fn normalize_registered_observations_with_ranges(
             excluded_observations,
         });
     }
+    let edges = operation_edges(&nodes)?;
+    Ok(ApiNormalization {
+        graph: Some(SemanticOperationGraph::new(
+            language,
+            build_variant_fingerprint,
+            nodes,
+            edges,
+        )?),
+        node_source_ranges,
+        excluded_observations,
+    })
+}
+
+/// Build the ordered data edges and any explicit resource-lifetime edge.
+fn operation_edges(nodes: &[OperationNode]) -> Result<Vec<OperationEdge>, SemanticGraphError> {
     let mut edges = (1..nodes.len())
         .map(|index| {
             Ok(OperationEdge {
@@ -576,16 +592,15 @@ pub fn normalize_registered_observations_with_ranges(
             });
         }
     }
-    Ok(ApiNormalization {
-        graph: Some(SemanticOperationGraph::new(
-            language,
-            build_variant_fingerprint,
-            nodes,
-            edges,
-        )?),
-        node_source_ranges,
-        excluded_observations,
-    })
+    Ok(edges)
+}
+
+/// Whether two construct/API observations describe one source operation.
+fn coincident_operation(
+    left: &mut (u64, String, SemanticSourceRange, OperationNode),
+    right: &mut (u64, String, SemanticSourceRange, OperationNode),
+) -> bool {
+    left.0 == right.0 && left.2 == right.2 && left.3.kind == right.3.kind
 }
 
 /// Extract the largest source-contiguous windows that a same-variant rule can
@@ -617,7 +632,8 @@ pub fn registered_semantic_windows(
         .filter(|rule| rule.scope == SemanticRuleScope::SameBuildVariant)
     {
         match rule.matcher {
-            SemanticRuleMatcher::EquivalentSequence => {
+            SemanticRuleMatcher::EquivalentSequence
+            | SemanticRuleMatcher::ExactApiSequence { .. } => {
                 let mut start = 0;
                 while start < graph.nodes.len() {
                     while start < graph.nodes.len()
@@ -717,7 +733,18 @@ fn semantic_graph_window(
 }
 
 fn registered_api_kind(language: Language, api_name: &str) -> Option<OperationKind> {
-    cross_language_api_correspondence(language, api_name).map(|entry| entry.operation)
+    cross_language_api_correspondence(language, api_name)
+        .map(|entry| entry.operation)
+        .or_else(|| {
+            matches!(
+                (language, api_name),
+                (
+                    Language::Rust,
+                    "rust::ToString::to_string" | "rust::str::parse"
+                ) | (Language::Cpp, "std::to_string" | "std::stoull")
+            )
+            .then_some(OperationKind::Map)
+        })
 }
 
 /// One explicit correspondence between Rust and C++ standard-library APIs.
@@ -860,6 +887,13 @@ pub enum SemanticRuleMatcher {
     /// Match equal-length operation sequences when every aligned node has the
     /// same kind and compatible compiler-confirmed type evidence.
     EquivalentSequence,
+    /// Match a single closed compiler-confirmed API sequence. The operation
+    /// kinds remain part of the rule pattern; these names prevent a generic
+    /// pair of value transformations from being described as serialization.
+    ExactApiSequence {
+        /// One resolved API name required at each aligned operation position.
+        api_names: &'static [&'static str],
+    },
     /// Match exactly one compiler-confirmed construct with the supplied
     /// operation, fallible family, and optional direct-propagation form.
     DirectConstruct {
@@ -898,6 +932,42 @@ const SEQUENCE_PIPELINE_RULE: SemanticRule = SemanticRule {
         ],
     },
     matcher: SemanticRuleMatcher::EquivalentSequence,
+};
+
+/// Serialization and deserialization are a fixed two-step value conversion
+/// here, not a claim that arbitrary parsing or formatting is semantically
+/// interchangeable. Rust's standard `ToString` and `str::parse` are the only
+/// admitted implementation in this initial rule.
+const RUST_SERIALIZATION_ROUND_TRIP_RULE: SemanticRule = SemanticRule {
+    id: "rust-serialization-round-trip-v1",
+    version: 1,
+    confidence: 0.8,
+    scope: SemanticRuleScope::SameBuildVariant,
+    pattern: SemanticRulePattern {
+        minimum_operations: 2,
+        permitted_kinds: &[OperationKind::Map],
+    },
+    matcher: SemanticRuleMatcher::ExactApiSequence {
+        api_names: &["rust::ToString::to_string", "rust::str::parse"],
+    },
+};
+
+/// C++ records the analogous closed standard-library conversion pair. This is
+/// intentionally a separate rule: source language and exact resolved APIs
+/// remain evidence, rather than being erased behind a generic serialization
+/// label.
+const CPP_SERIALIZATION_ROUND_TRIP_RULE: SemanticRule = SemanticRule {
+    id: "cpp-serialization-round-trip-v1",
+    version: 1,
+    confidence: 0.8,
+    scope: SemanticRuleScope::SameBuildVariant,
+    pattern: SemanticRulePattern {
+        minimum_operations: 2,
+        permitted_kinds: &[OperationKind::Map],
+    },
+    matcher: SemanticRuleMatcher::ExactApiSequence {
+        api_names: &["std::to_string", "std::stoull"],
+    },
 };
 
 const RESULT_DIRECT_PROPAGATION_RULE: SemanticRule = SemanticRule {
@@ -1069,6 +1139,8 @@ const RESULT_DIRECT_PROPAGATION_CORRESPONDENCE_ID: &str = "result-expected-direc
 #[must_use]
 pub const fn registered_rules() -> &'static [SemanticRule] {
     &[
+        RUST_SERIALIZATION_ROUND_TRIP_RULE,
+        CPP_SERIALIZATION_ROUND_TRIP_RULE,
         SEQUENCE_PIPELINE_RULE,
         RESULT_DIRECT_PROPAGATION_RULE,
         OPTION_DIRECT_PROPAGATION_RULE,
@@ -1270,13 +1342,15 @@ pub struct CrossLanguageCandidateExtraction {
     pub stats: CrossLanguageCandidateStats,
 }
 
-/// One verified Rust-to-C++ rule application with its API-table evidence.
+/// One verified Rust-to-C++ rule application with its closed correspondence
+/// evidence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CrossLanguageRuleMatch {
     /// Rule that justified the correspondence.
     pub rule: SemanticRule,
-    /// One registered API correspondence identifier for each matched node.
-    pub api_correspondence_ids: Vec<&'static str>,
+    /// Registered API or compiler-construct correspondence identifiers used by
+    /// the matched operations.
+    pub correspondence_ids: Vec<&'static str>,
 }
 
 /// Extract bounded candidates for an explicit Rust-to-C++ comparison.
@@ -1284,8 +1358,9 @@ pub struct CrossLanguageRuleMatch {
 /// Ordinary semantic findings must use [`extract_registered_candidates`].
 /// This function considers only graphs that carry the same caller-provided
 /// comparison partition, have a Rust/C++ language pairing, and consist solely
-/// of APIs in [`cross_language_api_correspondences`]. It never compares C,
-/// joins normal `BuildVariants`, or falls back to matching API-name suffixes.
+/// of closed API correspondences or compiler-confirmed direct-loop
+/// constructs. It never compares C, joins normal `BuildVariants`, or falls
+/// back to matching API-name suffixes or arbitrary source syntax.
 #[must_use]
 pub fn extract_cross_language_candidates(
     inputs: &[CrossLanguageCandidateInput],
@@ -1318,12 +1393,17 @@ pub fn extract_cross_language_candidates(
                             .is_some_and(|entry| entry.operation == node.kind)
                     })
             });
+        let direct_loop_pipeline = is_cross_language_direct_loop(graph);
         let optional_validation = is_optional_validation(graph);
         let result_validation = is_result_validation(graph);
         let result_direct_propagation = is_result_direct_propagation(graph);
         if graph.schema_version != SOG_SCHEMA_VERSION
             || !matches!(graph.language, Language::Rust | Language::Cpp)
-            || !(pipeline || optional_validation || result_validation || result_direct_propagation)
+            || !(pipeline
+                || direct_loop_pipeline
+                || optional_validation
+                || result_validation
+                || result_direct_propagation)
         {
             stats.ineligible_graphs += 1;
             continue;
@@ -1723,8 +1803,25 @@ fn match_same_variant_rule(
                 && left
                     .nodes
                     .iter()
+                    .any(|node| node.kind != OperationKind::Map)
+                && left
+                    .nodes
+                    .iter()
                     .zip(&right.nodes)
                     .all(|(left, right)| compatible_nodes(left, right))
+        }
+        SemanticRuleMatcher::ExactApiSequence { api_names } => {
+            left.nodes.len() == api_names.len()
+                && right.nodes.len() == api_names.len()
+                && left.nodes.iter().zip(&right.nodes).zip(api_names).all(
+                    |((left, right), api_name)| {
+                        compatible_nodes(left, right)
+                            && left.attributes.api_names.len() == 1
+                            && right.attributes.api_names.len() == 1
+                            && left.attributes.api_names.contains(*api_name)
+                            && right.attributes.api_names.contains(*api_name)
+                    },
+                )
         }
         SemanticRuleMatcher::DirectConstruct {
             kind,
@@ -1781,8 +1878,9 @@ pub fn match_registered_rule(
 ///
 /// Unlike [`match_registered_pipeline`], this is not part of ordinary
 /// BuildVariant-local detection. Its caller must first select an explicit
-/// comparison domain and use [`extract_cross_language_candidates`]. Every
-/// aligned operation must name the same closed API correspondence entry.
+/// comparison domain and use [`extract_cross_language_candidates`]. Aligned
+/// operations must either name the same closed API correspondence entry or be
+/// the deliberately small compiler-confirmed direct-loop construct pair.
 #[must_use]
 pub fn match_cross_language_pipeline(
     left: &SemanticOperationGraph,
@@ -1803,7 +1901,21 @@ pub fn match_cross_language_pipeline(
     {
         return None;
     }
-    let mut api_correspondence_ids = Vec::with_capacity(left.nodes.len());
+    if is_cross_language_direct_loop(left)
+        && is_cross_language_direct_loop(right)
+        && left
+            .nodes
+            .iter()
+            .zip(&right.nodes)
+            .all(|(left_node, right_node)| left_node.kind == right_node.kind)
+    {
+        return Some(CrossLanguageRuleMatch {
+            rule: CROSS_LANGUAGE_SEQUENCE_PIPELINE_RULE,
+            correspondence_ids: vec![DIRECT_LOOP_SEQUENCE_CORRESPONDENCE_ID],
+        });
+    }
+
+    let mut correspondence_ids = Vec::with_capacity(left.nodes.len());
     for (left_node, right_node) in left.nodes.iter().zip(&right.nodes) {
         if left_node.kind != right_node.kind
             || !compatible_type_tags(
@@ -1827,12 +1939,45 @@ pub fn match_cross_language_pipeline(
         if !correspondence_matches {
             return None;
         }
-        api_correspondence_ids.push(left_entry.id);
+        correspondence_ids.push(left_entry.id);
     }
     Some(CrossLanguageRuleMatch {
         rule: CROSS_LANGUAGE_SEQUENCE_PIPELINE_RULE,
-        api_correspondence_ids,
+        correspondence_ids,
     })
+}
+
+/// Closed correspondence for compiler-confirmed Rust and C++ direct loop
+/// forms. It is intentionally separate from the API table: both helpers have
+/// proved a standard sequence plus an unchanged loop binding, while neither
+/// side is represented by an arbitrary recovered call spelling.
+const DIRECT_LOOP_SEQUENCE_CORRESPONDENCE_ID: &str = "direct-loop-sequence-v1";
+
+/// Whether `graph` is one direct range/`for` loop form that both compiler
+/// helpers recognize. A graph with an API name is deliberately excluded: that
+/// stays on the API correspondence path, and a transformed call cannot borrow
+/// the loop rule merely because it appears beside a construct.
+fn is_cross_language_direct_loop(graph: &SemanticOperationGraph) -> bool {
+    matches!(
+        graph.nodes.as_slice(),
+        [
+            OperationNode {
+                kind: OperationKind::Source,
+                attributes: source,
+            },
+            OperationNode {
+                kind: OperationKind::Collect | OperationKind::Reduce,
+                attributes: operation,
+            },
+        ] if source.api_names.is_empty()
+            && operation.api_names.is_empty()
+            && source.fallible_kind.is_none()
+            && operation.fallible_kind.is_none()
+            && source.direct_propagation.is_none()
+            && operation.direct_propagation.is_none()
+            && source.resource_kind.is_none()
+            && operation.resource_kind.is_none()
+    )
 }
 
 /// Match an explicit Rust `Option` validation with its C++ `optional` counterpart.
@@ -1857,7 +2002,7 @@ pub fn match_cross_language_optional_validation(
         && is_optional_validation(right))
     .then_some(CrossLanguageRuleMatch {
         rule: CROSS_LANGUAGE_OPTIONAL_VALIDATION_RULE,
-        api_correspondence_ids: vec![OPTIONAL_VALIDATION_CORRESPONDENCE_ID],
+        correspondence_ids: vec![OPTIONAL_VALIDATION_CORRESPONDENCE_ID],
     })
 }
 
@@ -1883,7 +2028,7 @@ pub fn match_cross_language_result_validation(
         && is_result_validation(right))
     .then_some(CrossLanguageRuleMatch {
         rule: CROSS_LANGUAGE_RESULT_VALIDATION_RULE,
-        api_correspondence_ids: vec![RESULT_VALIDATION_CORRESPONDENCE_ID],
+        correspondence_ids: vec![RESULT_VALIDATION_CORRESPONDENCE_ID],
     })
 }
 
@@ -1908,7 +2053,7 @@ pub fn match_cross_language_result_direct_propagation(
         && is_result_direct_propagation(right))
     .then_some(CrossLanguageRuleMatch {
         rule: CROSS_LANGUAGE_RESULT_DIRECT_PROPAGATION_RULE,
-        api_correspondence_ids: vec![RESULT_DIRECT_PROPAGATION_CORRESPONDENCE_ID],
+        correspondence_ids: vec![RESULT_DIRECT_PROPAGATION_CORRESPONDENCE_ID],
     })
 }
 
@@ -2193,6 +2338,37 @@ mod tests {
             Some(FallibleKind::Result)
         );
         assert_eq!(normalized.excluded_observations, 0);
+    }
+
+    #[test]
+    fn one_source_operation_is_not_duplicated_by_construct_and_api_evidence() {
+        let normalized = normalize_registered_observations_with_ranges(
+            Language::Rust,
+            [44; 32],
+            vec![(
+                OperationObservation {
+                    source_offset: 10,
+                    api_name: "rust::Vec::push".to_owned(),
+                    type_tag: Some(TypeTag::Sequence),
+                },
+                SemanticSourceRange { start: 10, end: 14 },
+            )],
+            vec![(
+                ConstructObservation {
+                    source_offset: 10,
+                    kind: OperationKind::Collect,
+                    fallible_kind: None,
+                    direct_propagation: None,
+                    resource_kind: None,
+                },
+                SemanticSourceRange { start: 10, end: 14 },
+            )],
+        )
+        .expect("overlapping observations form a graph");
+        let graph = normalized.graph.expect("one registered operation");
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].kind, OperationKind::Collect);
+        assert!(graph.nodes[0].attributes.api_names.is_empty());
     }
 
     #[test]
@@ -2500,7 +2676,7 @@ mod tests {
             "cross-language-optional-validation-v1"
         );
         assert_eq!(
-            verified[0].1.api_correspondence_ids,
+            verified[0].1.correspondence_ids,
             vec!["optional-presence-validation-v1"]
         );
     }
@@ -2558,7 +2734,7 @@ mod tests {
         assert_eq!(verified.len(), 1);
         assert_eq!(verified[0].1.rule.id, "cross-language-result-validation-v1");
         assert_eq!(
-            verified[0].1.api_correspondence_ids,
+            verified[0].1.correspondence_ids,
             vec!["result-expected-validation-v1"]
         );
     }
@@ -2630,7 +2806,7 @@ mod tests {
             "cross-language-result-direct-propagation-v1"
         );
         assert_eq!(
-            verified[0].1.api_correspondence_ids,
+            verified[0].1.correspondence_ids,
             vec!["result-expected-direct-propagation-v1"]
         );
     }
@@ -2644,6 +2820,18 @@ mod tests {
         assert_eq!(
             rules["sequence-pipeline-v1"],
             SemanticRuleMatcher::EquivalentSequence
+        );
+        assert_eq!(
+            rules["rust-serialization-round-trip-v1"],
+            SemanticRuleMatcher::ExactApiSequence {
+                api_names: &["rust::ToString::to_string", "rust::str::parse"],
+            }
+        );
+        assert_eq!(
+            rules["cpp-serialization-round-trip-v1"],
+            SemanticRuleMatcher::ExactApiSequence {
+                api_names: &["std::to_string", "std::stoull"],
+            }
         );
         assert_eq!(
             rules["result-direct-propagation-v1"],
@@ -2677,7 +2865,7 @@ mod tests {
                 direct_propagation: None,
             }
         );
-        assert_eq!(registered_rules().len(), 10);
+        assert_eq!(registered_rules().len(), 12);
         assert_eq!(
             rules["resource-lifecycle-v1"],
             SemanticRuleMatcher::ResourceLifecycle
@@ -2746,6 +2934,59 @@ mod tests {
     }
 
     #[test]
+    fn serialization_rule_requires_its_exact_closed_api_sequence() {
+        let round_trip = normalize_registered_apis(
+            Language::Rust,
+            [44; 32],
+            vec![
+                OperationObservation {
+                    source_offset: 1,
+                    api_name: "rust::ToString::to_string".to_owned(),
+                    type_tag: None,
+                },
+                OperationObservation {
+                    source_offset: 2,
+                    api_name: "rust::str::parse".to_owned(),
+                    type_tag: None,
+                },
+            ],
+        )
+        .expect("valid round trip")
+        .graph
+        .expect("round-trip graph");
+        let verified = verify_registered_candidates(
+            &[round_trip.clone(), round_trip],
+            &[SemanticCandidatePair { left: 0, right: 1 }],
+        );
+        assert_eq!(verified[0].1.rule.id, "rust-serialization-round-trip-v1");
+
+        let ordinary_maps = normalize_registered_apis(
+            Language::Rust,
+            [44; 32],
+            vec![
+                OperationObservation {
+                    source_offset: 1,
+                    api_name: "rust::Iterator::map".to_owned(),
+                    type_tag: None,
+                },
+                OperationObservation {
+                    source_offset: 2,
+                    api_name: "rust::Iterator::map".to_owned(),
+                    type_tag: None,
+                },
+            ],
+        )
+        .expect("valid ordinary maps")
+        .graph
+        .expect("ordinary map graph");
+        let verified = verify_registered_candidates(
+            &[ordinary_maps.clone(), ordinary_maps],
+            &[SemanticCandidatePair { left: 0, right: 1 }],
+        );
+        assert!(verified.is_empty(), "a map-only pair is not a pipeline");
+    }
+
+    #[test]
     fn explicit_cross_language_candidates_require_one_registered_mapping_per_node() {
         let rust = cross_language_pipeline(
             Language::Rust,
@@ -2786,7 +3027,7 @@ mod tests {
         assert_eq!(verified.len(), 1);
         assert_eq!(verified[0].1.rule.id, "cross-language-sequence-pipeline-v1");
         assert_eq!(
-            verified[0].1.api_correspondence_ids,
+            verified[0].1.correspondence_ids,
             vec![
                 "sequence-source-v1",
                 "sequence-map-v1",
@@ -2935,13 +3176,15 @@ mod tests {
         );
 
         assert_eq!(grouping.groups.len(), 2);
+        let mut expected = vec![first.id, second.id];
+        expected.sort_unstable();
         assert_eq!(
             grouping
                 .groups
                 .iter()
                 .map(|group| group.rule.id)
                 .collect::<Vec<_>>(),
-            vec![second.id, first.id]
+            expected
         );
         assert!(grouping.ungrouped.is_empty());
     }
@@ -2984,6 +3227,81 @@ mod tests {
             .collect();
         SemanticOperationGraph::new(language, variant, nodes, Vec::new())
             .expect("valid cross-language pipeline graph")
+    }
+
+    fn direct_loop_pipeline(
+        language: Language,
+        variant: [u8; 32],
+        terminal: OperationKind,
+    ) -> SemanticOperationGraph {
+        SemanticOperationGraph::new(
+            language,
+            variant,
+            vec![
+                OperationNode {
+                    kind: OperationKind::Source,
+                    attributes: OperationAttributes::default(),
+                },
+                OperationNode {
+                    kind: terminal,
+                    attributes: OperationAttributes::default(),
+                },
+            ],
+            Vec::new(),
+        )
+        .expect("valid direct loop graph")
+    }
+
+    #[test]
+    fn cross_language_direct_loops_need_the_closed_construct_pair() {
+        let rust = direct_loop_pipeline(Language::Rust, [38; 32], OperationKind::Collect);
+        let cpp = direct_loop_pipeline(Language::Cpp, [39; 32], OperationKind::Collect);
+        let inputs = vec![
+            CrossLanguageCandidateInput {
+                graph: rust.clone(),
+                comparison_partition: [4; 16],
+            },
+            CrossLanguageCandidateInput {
+                graph: cpp,
+                comparison_partition: [4; 16],
+            },
+        ];
+        let extracted =
+            extract_cross_language_candidates(&inputs, SemanticCandidateConfig::default());
+        assert_eq!(
+            extracted.pairs,
+            vec![SemanticCandidatePair { left: 0, right: 1 }]
+        );
+        let verified = verify_cross_language_candidates(&inputs, &extracted.pairs);
+        assert_eq!(verified.len(), 1);
+        assert_eq!(
+            verified[0].1.correspondence_ids,
+            vec![DIRECT_LOOP_SEQUENCE_CORRESPONDENCE_ID]
+        );
+
+        let transformed = SemanticOperationGraph::new(
+            Language::Cpp,
+            [40; 32],
+            vec![
+                OperationNode {
+                    kind: OperationKind::Source,
+                    attributes: OperationAttributes::default(),
+                },
+                OperationNode {
+                    kind: OperationKind::Collect,
+                    attributes: OperationAttributes {
+                        api_names: BTreeSet::from(["std::push_back".to_owned()]),
+                        ..OperationAttributes::default()
+                    },
+                },
+            ],
+            Vec::new(),
+        )
+        .expect("valid transformed loop lookalike");
+        assert!(match_cross_language_pipeline(&rust, &transformed).is_none());
+
+        let reduction = direct_loop_pipeline(Language::Cpp, [41; 32], OperationKind::Reduce);
+        assert!(match_cross_language_pipeline(&rust, &reduction).is_none());
     }
 
     #[test]

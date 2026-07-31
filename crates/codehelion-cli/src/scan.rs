@@ -608,28 +608,27 @@ fn sarif_with_artifact_savings(model: &Report) -> Result<String> {
     for group in &model.groups {
         let entries = store.clone_group_savings(model.run.run_id, &group.fingerprint)?;
         if !entries.is_empty() {
-            savings.insert(
-                group.fingerprint.clone(),
-                Value::Array(
-                    entries
-                        .into_iter()
-                        .map(|(analysis_id, entry)| {
-                            json!({
-                                "artifact_analysis_id": analysis_id,
-                                "source_build_variant_fingerprint": artifact_fingerprint_hex(entry.source_build_variant_fingerprint),
-                                "artifact_build_variant_fingerprint": artifact_fingerprint_hex(entry.artifact_build_variant_fingerprint),
-                                "duplicated_bytes": entry.duplicated_bytes,
-                                "estimated_refactor_savings_bytes": entry.estimated_refactor_savings_bytes,
-                                "mapping_confidence": artifact_savings_confidence(entry.mapping_confidence),
-                                "clone_confidence": entry.clone_confidence,
-                                "model_confidence": artifact_savings_confidence(entry.model_confidence),
-                                "savings_confidence": artifact_savings_confidence(entry.savings_confidence),
-                                "model_schema_version": entry.model_schema_version,
-                            })
-                        })
-                        .collect(),
-                ),
-            );
+            let entries = entries
+                .into_iter()
+                .map(|(analysis_id, entry)| {
+                    let assumptions = serde_json::from_str::<Value>(&entry.assumptions_json)
+                        .context("parsing persisted artifact savings assumptions for SARIF")?;
+                    Ok(json!({
+                        "artifact_analysis_id": analysis_id,
+                        "source_build_variant_fingerprint": artifact_fingerprint_hex(entry.source_build_variant_fingerprint),
+                        "artifact_build_variant_fingerprint": artifact_fingerprint_hex(entry.artifact_build_variant_fingerprint),
+                        "duplicated_bytes": entry.duplicated_bytes,
+                        "estimated_refactor_savings_bytes": entry.estimated_refactor_savings_bytes,
+                        "mapping_confidence": artifact_savings_confidence(entry.mapping_confidence),
+                        "clone_confidence": entry.clone_confidence,
+                        "model_confidence": artifact_savings_confidence(entry.model_confidence),
+                        "savings_confidence": artifact_savings_confidence(entry.savings_confidence),
+                        "model_schema_version": entry.model_schema_version,
+                        "assumptions": assumptions,
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            savings.insert(group.fingerprint.clone(), Value::Array(entries));
         }
     }
     attach_sarif_artifact_savings(&mut sarif, &savings)?;
@@ -825,7 +824,7 @@ fn cross_language_sarif_result(group: &report::CrossLanguageGroup) -> Value {
         "properties": {
             "ruleVersion": group.rule_version,
             "semanticConfidence": group.semantic_confidence,
-            "apiCorrespondenceIds": group.api_correspondence_ids,
+            "correspondenceIds": group.correspondence_ids,
         }
     })
 }
@@ -920,8 +919,8 @@ fn append_cross_language_text(
         )?;
         writeln!(
             text,
-            "    APIs: {}",
-            group.api_correspondence_ids.join(", ")
+            "    Correspondences: {}",
+            group.correspondence_ids.join(", ")
         )?;
         for member in &group.members {
             writeln!(
@@ -1679,12 +1678,26 @@ mod tests {
         });
         let savings = BTreeMap::from([(
             "aabb".to_owned(),
-            json!([{ "estimated_refactor_savings_bytes": 9 }]),
+            json!([{
+                "estimated_refactor_savings_bytes": 9,
+                "source_build_variant_fingerprint": "01".repeat(16),
+                "artifact_build_variant_fingerprint": "02".repeat(16),
+                "savings_confidence": "low",
+                "assumptions": [{ "kind": "inlining_outcome_unknown" }],
+            }]),
         )]);
         attach_sarif_artifact_savings(&mut sarif, &savings).unwrap();
         assert_eq!(
             sarif["runs"][0]["results"][0]["properties"]["artifact_savings"][0]["estimated_refactor_savings_bytes"],
             9
+        );
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["properties"]["artifact_savings"][0]["source_build_variant_fingerprint"],
+            "01".repeat(16)
+        );
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["properties"]["artifact_savings"][0]["assumptions"][0]["kind"],
+            "inlining_outcome_unknown"
         );
         assert!(
             sarif["runs"][0]["results"][1]["properties"]

@@ -6,8 +6,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path as FilePath;
+use std::process::Stdio;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use codehelion_artifact::{
@@ -39,7 +42,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::Outcome;
 use crate::cli::{
-    ArtifactArgs, ArtifactCalibrationArgs, ArtifactCompareArgs, ArtifactFormat, ArtifactInputFormat,
+    ArtifactArgs, ArtifactCalibrationArgs, ArtifactCompareArgs, ArtifactFormat,
+    ArtifactInputFormat, ArtifactIsolatedArgs,
 };
 
 /// JSON schema emitted by the artifact command.
@@ -62,6 +66,22 @@ const ARTIFACT_CSV_COLUMNS: usize = 22;
 /// Largest accepted local linker-map input.
 const MAX_LINKER_MAP_BYTES: u64 = 64 * 1024 * 1024;
 
+/// The exact request one parent sends to its private worker.
+#[derive(Debug, Serialize, Deserialize)]
+enum IsolatedArtifactRequest {
+    Analyze(ArtifactArgs),
+    Compare(ArtifactCompareArgs),
+}
+
+impl IsolatedArtifactRequest {
+    fn set_output(&mut self, path: std::path::PathBuf) {
+        match self {
+            Self::Analyze(args) => args.output = Some(path),
+            Self::Compare(args) => args.output = Some(path),
+        }
+    }
+}
+
 /// Inspect one artifact and render its observed facts and equality groups.
 ///
 /// # Errors
@@ -70,6 +90,162 @@ const MAX_LINKER_MAP_BYTES: u64 = 64 * 1024 * 1024;
 /// implemented, its parser rejects the bytes, or an output file cannot be
 /// written. No error path executes the inspected input.
 pub fn run(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
+    run_isolated(args, out)
+}
+
+/// Execute an artifact request in a separate process and relay its report.
+///
+/// The parser and its allocations live only in the worker. The parent owns the
+/// wall-clock deadline and kills the worker if it expires, rather than leaving
+/// an untrusted malformed input able to hold the CLI open indefinitely.
+fn run_isolated(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
+    run_isolated_request(
+        IsolatedArtifactRequest::Analyze(args.clone()),
+        args.timeout_seconds,
+        args.output.as_deref(),
+        out,
+    )
+}
+
+/// Run either public artifact operation under one worker deadline.
+#[allow(clippy::disallowed_types)] // Artifact parsing, unlike source scanning, is intentionally isolated in a worker.
+fn run_isolated_request(
+    mut request: IsolatedArtifactRequest,
+    timeout_seconds: u64,
+    output: Option<&FilePath>,
+    out: &mut impl Write,
+) -> Result<Outcome> {
+    let request_path = tempfile::NamedTempFile::new()
+        .context("creating artifact worker request")?
+        .into_temp_path();
+    let report_path = tempfile::NamedTempFile::new()
+        .context("creating artifact worker report")?
+        .into_temp_path();
+    request.set_output(report_path.to_path_buf());
+    fs::write(&request_path, serde_json::to_vec(&request)?)
+        .context("writing artifact worker request")?;
+
+    let executable = std::env::current_exe().context("locating artifact worker executable")?;
+    let mut child = std::process::Command::new(executable)
+        .args([
+            "artifact",
+            "isolated",
+            "--request",
+            request_path
+                .to_str()
+                .context("encoding artifact worker request path")?,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("starting isolated artifact worker")?;
+    let status = wait_for_worker(&mut child, Duration::from_secs(timeout_seconds))?;
+    let mut stderr = String::new();
+    if let Some(mut stream) = child.stderr.take() {
+        stream
+            .read_to_string(&mut stderr)
+            .context("reading isolated artifact worker diagnostics")?;
+    }
+    if !status.success() {
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            bail!("isolated artifact worker exited with {status}");
+        }
+        bail!("isolated artifact worker failed: {detail}");
+    }
+    let rendered = fs::read(&report_path).context("reading isolated artifact worker report")?;
+    if let Some(path) = output {
+        fs::write(path, &rendered).with_context(|| format!("writing {}", path.display()))?;
+    } else {
+        out.write_all(&rendered)?;
+    }
+    Ok(Outcome::Success)
+}
+
+/// Run the request sent by [`run_isolated`] without starting another worker.
+///
+/// # Errors
+///
+/// Returns an error for a malformed private request or any error the normal
+/// local-only artifact analysis reports.
+pub fn run_isolated_worker(args: &ArtifactIsolatedArgs) -> Result<Outcome> {
+    let request: IsolatedArtifactRequest =
+        serde_json::from_slice(&fs::read(&args.request).with_context(|| {
+            format!("reading artifact worker request {}", args.request.display())
+        })?)
+        .context("parsing artifact worker request")?;
+    let output = match &request {
+        IsolatedArtifactRequest::Analyze(args) => args.output.as_ref(),
+        IsolatedArtifactRequest::Compare(args) => args.output.as_ref(),
+    };
+    if output.is_none() {
+        bail!("artifact worker request must name a private output file");
+    }
+    enforce_memory_limit(match &request {
+        IsolatedArtifactRequest::Analyze(args) => args.max_memory_bytes,
+        IsolatedArtifactRequest::Compare(args) => args.max_memory_bytes,
+    })?;
+    match request {
+        IsolatedArtifactRequest::Analyze(args) => run_direct(&args, &mut std::io::sink()),
+        IsolatedArtifactRequest::Compare(args) => compare_direct(&args, &mut std::io::sink()),
+    }
+}
+
+/// Install the caller's required OS memory ceiling before an artifact parser
+/// reads untrusted bytes.
+fn enforce_memory_limit(max_memory_bytes: Option<u64>) -> Result<()> {
+    let Some(max_memory_bytes) = max_memory_bytes else {
+        return Ok(());
+    };
+    #[cfg(target_os = "linux")]
+    {
+        use nix::sys::resource::{Resource, rlim_t, setrlimit};
+
+        let limit = rlim_t::try_from(max_memory_bytes)
+            .context("converting artifact worker memory limit for this platform")?;
+        setrlimit(Resource::RLIMIT_AS, limit, limit).with_context(|| {
+            format!("enforcing artifact worker memory limit of {max_memory_bytes} bytes")
+        })?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        bail!(
+            "cannot enforce the requested artifact worker memory limit of {max_memory_bytes} bytes on this platform"
+        );
+    }
+}
+
+/// Wait for an isolated worker, forcefully terminating it after `timeout`.
+fn wait_for_worker(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .context("waiting for isolated artifact worker")?
+        {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            child
+                .kill()
+                .context("terminating timed-out artifact worker")?;
+            let _ = child.wait().context("reaping timed-out artifact worker")?;
+            bail!(
+                "artifact analysis exceeded the configured timeout of {}s",
+                timeout.as_secs()
+            );
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Run the artifact pipeline in the already isolated worker process.
+fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
     let started_at = crate::scan::rfc3339_now();
     let artifact = inspect(
         &args.path,
@@ -622,6 +798,9 @@ const fn stored_savings_confidence(
 /// Observed artifact symbols attributed to one generic definition origin.
 #[derive(Debug, Clone, Serialize)]
 struct GenericOriginReport {
+    /// Compiler-confirmed definition spelling that distinguishes origins with
+    /// otherwise identical source content.
+    definition: String,
     /// Content-derived source unit identity of the generic definition.
     origin_fingerprint: String,
     /// Build variant that minted the origin identity.
@@ -760,16 +939,22 @@ impl ArtifactCorrelationReport {
             }
             let keys = mapping.evidence.facts.iter().filter_map(|fact| match fact {
                 MappingEvidenceFact::GenericOrigin {
+                    definition,
                     instantiation_key,
                     translation_units,
-                } => Some((instantiation_key.clone(), translation_units)),
+                } => Some((
+                    definition.clone(),
+                    instantiation_key.clone(),
+                    translation_units,
+                )),
                 _ => None,
             });
-            for (key, translation_units) in keys {
+            for (definition, key, translation_units) in keys {
                 let entry = generic_origins
                     .entry((
                         mapping.source_fingerprint,
                         mapping.source_build_variant_fingerprint,
+                        definition,
                     ))
                     .or_default();
                 let specialization = entry.entry(key).or_default();
@@ -783,7 +968,7 @@ impl ArtifactCorrelationReport {
         }
         let mut generic_origins: Vec<_> = generic_origins
             .into_iter()
-            .map(|((origin, variant), specializations)| {
+            .map(|((origin, variant, definition), specializations)| {
                 let symbols = specializations
                     .values()
                     .flat_map(|specialization| specialization.symbols.iter().copied())
@@ -818,8 +1003,11 @@ impl ArtifactCorrelationReport {
                         .cmp(&left.observed_symbol_bytes)
                         .then_with(|| left.instantiation_key.cmp(&right.instantiation_key))
                 });
+                let origin_fingerprint =
+                    fingerprint_hex(generic_origin_fingerprint(origin, &definition));
                 GenericOriginReport {
-                    origin_fingerprint: fingerprint_hex(origin),
+                    definition,
+                    origin_fingerprint,
                     origin_build_variant_fingerprint: fingerprint_hex(variant),
                     instantiations: specializations.len(),
                     translation_units: translation_units.len(),
@@ -840,6 +1028,7 @@ impl ArtifactCorrelationReport {
                     left.origin_build_variant_fingerprint
                         .cmp(&right.origin_build_variant_fingerprint)
                 })
+                .then_with(|| left.definition.cmp(&right.definition))
         });
         let mut macro_origins: BTreeMap<_, (BTreeSet<String>, BTreeSet<[u8; 16]>)> =
             BTreeMap::new();
@@ -1577,9 +1766,7 @@ fn correlate_debug_locations(
                     source_instance_fingerprint: source_unit_instance_fingerprint(unit),
                     source_build_variant_fingerprint: unit.build_variant_fingerprint,
                     evidence: MappingEvidence::new(
-                        vec![MappingEvidenceFact::Dwarf {
-                            source_path: frame.source.clone(),
-                        }],
+                        vec![source_location_evidence(frame)],
                         candidate_count,
                         false,
                     ),
@@ -1608,9 +1795,7 @@ fn correlate_debug_locations(
                     source_instance_fingerprint: fragment.finding_id,
                     source_build_variant_fingerprint: fragment.build_variant_fingerprint,
                     evidence: MappingEvidence::new(
-                        vec![MappingEvidenceFact::Dwarf {
-                            source_path: frame.source.clone(),
-                        }],
+                        vec![source_location_evidence(frame)],
                         candidate_count,
                         false,
                     ),
@@ -1662,6 +1847,21 @@ fn correlate_debug_locations(
         &mut rows.mappings,
     );
     assign_unambiguous_fragment_bytes(artifact, &mut rows.mappings);
+    // Artifact fingerprints deliberately describe stable symbol content rather
+    // than a linker-local slot. A container can consequently expose the same
+    // content identity through multiple symbol-table entries. The persistence
+    // schema records one unmapped outcome per stable identity, so retain the
+    // deterministic first reason instead of treating those entries as distinct
+    // rows or leaking a SQLite uniqueness error.
+    rows.unmapped_symbols.sort_by(|left, right| {
+        left.artifact_symbol_fingerprint
+            .cmp(&right.artifact_symbol_fingerprint)
+            .then_with(|| {
+                unmapped_reason_label(left.reason).cmp(unmapped_reason_label(right.reason))
+            })
+    });
+    rows.unmapped_symbols
+        .dedup_by_key(|unmapped| unmapped.artifact_symbol_fingerprint);
     let mapped_units = rows
         .mappings
         .iter()
@@ -1724,6 +1924,23 @@ fn correlate_debug_locations(
     rows
 }
 
+/// Preserve the parser-established debug metadata family in correlation
+/// evidence. A source path alone cannot distinguish PDB and DWARF provenance.
+fn source_location_evidence(
+    frame: &codehelion_artifact::ArtifactInlineFrame,
+) -> MappingEvidenceFact {
+    match frame.evidence_kind {
+        codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf => {
+            MappingEvidenceFact::Dwarf {
+                source_path: frame.source.clone(),
+            }
+        }
+        codehelion_artifact::ArtifactSourceLocationEvidenceKind::Pdb => MappingEvidenceFact::Pdb {
+            source_path: frame.source.clone(),
+        },
+    }
+}
+
 /// Derive an occurrence identity for one source unit without changing its
 /// content-derived stable fingerprint. Equal source bodies can occur in more
 /// than one file or declaration, and the `SQLite` correlation table retains each
@@ -1742,6 +1959,17 @@ fn source_unit_instance_fingerprint(unit: &SourceUnitIdentity) -> [u8; 16] {
     bytes.extend(unit.build_variant_fingerprint);
     codehelion_artifact::ArtifactFingerprint::from_content("source-unit-instance", &bytes)
         .as_bytes()
+}
+
+/// Derive a generic-definition origin identity without merging distinct
+/// compiler-confirmed definitions that happen to share normalized source
+/// content.
+fn generic_origin_fingerprint(source_fingerprint: [u8; 16], definition: &str) -> [u8; 16] {
+    let mut bytes = Vec::with_capacity(source_fingerprint.len() + definition.len() + 1);
+    bytes.extend(source_fingerprint);
+    bytes.push(0);
+    bytes.extend(definition.as_bytes());
+    codehelion_artifact::ArtifactFingerprint::from_content("generic-origin-v1", &bytes).as_bytes()
 }
 
 /// Attribute a symbol's observed bytes only when one exact fragment mapping
@@ -1876,34 +2104,56 @@ fn correlate_generic_origin(
     instantiations: &[SourceInstantiation],
     artifact_variant: [u8; 16],
 ) -> Vec<ArtifactAnalysisMapping> {
-    let Some(artifact_key) = symbol
-        .name
-        .as_deref()
-        .and_then(normalized_generic_instantiation_key)
-    else {
+    let Some(artifact_name) = symbol.name.as_deref() else {
         return Vec::new();
     };
+    let rust_key = normalized_generic_instantiation_key(artifact_name);
+    let clang_key = normalized_clang_template_display_name(artifact_name);
+    let clang_owner_key = normalized_clang_template_owner_name(artifact_name);
+    if rust_key.is_none() && clang_key.is_none() && clang_owner_key.is_none() {
+        return Vec::new();
+    }
     let mut unit_candidates = BTreeMap::new();
     let mut fragment_candidates = BTreeMap::new();
     for instantiation in instantiations {
-        if normalized_generic_instantiation_key(&instantiation.instantiation_key).as_deref()
-            != Some(artifact_key.as_str())
-        {
+        let matches_rust_key = rust_key.as_deref().is_some_and(|artifact_key| {
+            normalized_generic_instantiation_key(&instantiation.instantiation_key).as_deref()
+                == Some(artifact_key)
+        });
+        let matches_clang_key = clang_key.as_deref().is_some_and(|artifact_key| {
+            instantiation
+                .artifact_match_key
+                .as_deref()
+                .and_then(normalized_clang_template_display_name)
+                .as_deref()
+                == Some(artifact_key)
+        });
+        let matches_clang_owner_key = clang_owner_key.as_deref().is_some_and(|artifact_key| {
+            instantiation
+                .artifact_match_key
+                .as_deref()
+                .and_then(normalized_clang_template_owner_name)
+                .as_deref()
+                == Some(artifact_key)
+        });
+        if !matches_rust_key && !matches_clang_key && !matches_clang_owner_key {
             continue;
         }
         for unit in units.iter().filter(|unit| {
-            source_unit_matches(
+            source_generic_unit_matches(
                 &instantiation.file_path,
                 Some(instantiation.line),
                 scan_root,
                 unit,
-            )
+            ) || matches_clang_owner_key
+                && source_template_definition_contains_unit(instantiation, scan_root, unit)
         }) {
             unit_candidates
                 .entry((
                     unit.fingerprint,
                     unit.build_variant_fingerprint,
                     instantiation.instantiation_key.clone(),
+                    instantiation.definition.clone(),
                 ))
                 .or_insert_with(|| (unit, BTreeSet::new()))
                 .1
@@ -1922,6 +2172,7 @@ fn correlate_generic_origin(
                     fragment.finding_id,
                     fragment.build_variant_fingerprint,
                     instantiation.instantiation_key.clone(),
+                    instantiation.definition.clone(),
                 ))
                 .or_insert_with(|| (fragment, BTreeSet::new()))
                 .1
@@ -1931,7 +2182,7 @@ fn correlate_generic_origin(
     let unit_candidate_count = u32::try_from(
         unit_candidates
             .keys()
-            .map(|(fingerprint, variant, _)| (*fingerprint, *variant))
+            .map(|(fingerprint, variant, _, _)| (*fingerprint, *variant))
             .collect::<BTreeSet<_>>()
             .len(),
     )
@@ -1939,13 +2190,13 @@ fn correlate_generic_origin(
     let fragment_candidate_count = u32::try_from(
         fragment_candidates
             .keys()
-            .map(|(finding, variant, _)| (*finding, *variant))
+            .map(|(finding, variant, _, _)| (*finding, *variant))
             .collect::<BTreeSet<_>>()
             .len(),
     )
     .unwrap_or(u32::MAX);
     let mut mappings = Vec::new();
-    for ((_, _, instantiation_key), (unit, translation_units)) in unit_candidates {
+    for ((_, _, instantiation_key, definition), (unit, translation_units)) in unit_candidates {
         mappings.push(ArtifactAnalysisMapping {
             schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
             artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
@@ -1955,6 +2206,7 @@ fn correlate_generic_origin(
             source_build_variant_fingerprint: unit.build_variant_fingerprint,
             evidence: MappingEvidence::new(
                 vec![MappingEvidenceFact::GenericOrigin {
+                    definition,
                     instantiation_key,
                     translation_units: translation_units.into_iter().collect(),
                 }],
@@ -1965,7 +2217,9 @@ fn correlate_generic_origin(
             build_variant_fingerprint: artifact_variant,
         });
     }
-    for ((_, _, instantiation_key), (fragment, translation_units)) in fragment_candidates {
+    for ((_, _, instantiation_key, definition), (fragment, translation_units)) in
+        fragment_candidates
+    {
         mappings.push(ArtifactAnalysisMapping {
             schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
             artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
@@ -1975,6 +2229,7 @@ fn correlate_generic_origin(
             source_build_variant_fingerprint: fragment.build_variant_fingerprint,
             evidence: MappingEvidence::new(
                 vec![MappingEvidenceFact::GenericOrigin {
+                    definition,
                     instantiation_key,
                     translation_units: translation_units.into_iter().collect(),
                 }],
@@ -2183,6 +2438,141 @@ fn normalized_generic_instantiation_key(name: &str) -> Option<String> {
     (compact.contains('<') && compact.ends_with('>')).then(|| compact.replace("::<", "<"))
 }
 
+/// Normalize a C++ function-template display name for a source/artifact
+/// comparison. Both inputs are compiler-produced: Clang's display name is
+/// tagged by the helper, while the artifact backend has already demangled its
+/// symbol. This deliberately rejects class templates and ordinary functions;
+/// neither form has enough evidence to be a generic-origin correspondence.
+fn normalized_clang_template_display_name(name: &str) -> Option<String> {
+    let tagged_source = name.starts_with("clang-display-v1:");
+    let name = name
+        .strip_prefix("clang-display-v1:")
+        .unwrap_or(name)
+        .trim();
+    let open = name.find('(')?;
+    let close = name.rfind(')')?;
+    if close < open || (!name[..open].contains('<') && !tagged_source) {
+        return None;
+    }
+    let before_parameters = name[..open].trim();
+    let qualified = qualified_cpp_symbol_name(before_parameters);
+    let mut normalized = String::with_capacity(name.len());
+    let mut depth = 0_u32;
+    for character in qualified.chars() {
+        match character {
+            '<' => depth = depth.saturating_add(1),
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => normalized.push(character),
+            _ => {}
+        }
+    }
+    normalized.push_str(name.get(open..=close)?);
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+/// Normalize a C++ class-template specialization that owns one demangled
+/// member function. The source key is the fully qualified class display name;
+/// the artifact key is the owner preceding the member name. The comparison is
+/// exact after whitespace and integral-literal suffix normalization, so a
+/// member of `Buffer<int, 8>` cannot be attributed to `Buffer<int, 4>`.
+fn normalized_clang_template_owner_name(name: &str) -> Option<String> {
+    let tagged_source = name.starts_with("clang-display-v1:");
+    let name = name
+        .strip_prefix("clang-display-v1:")
+        .unwrap_or(name)
+        .trim();
+    let owner = if tagged_source {
+        (name.contains('<') && name.ends_with('>')).then_some(name)
+    } else {
+        let open = cpp_member_parameter_open(name)?;
+        let before_parameters = name[..open].trim();
+        let qualified = qualified_cpp_symbol_name(before_parameters);
+        let (owner, _) = qualified.rsplit_once("::")?;
+        (owner.contains('<') && owner.ends_with('>')).then_some(owner)
+    }?;
+    Some(normalize_cpp_template_owner(owner))
+}
+
+/// Locate the member-function parameter list outside template arguments.
+///
+/// A non-type template argument may itself contain a cast such as
+/// `(unsigned long)4`, which is not the member-function parameter list.
+fn cpp_member_parameter_open(name: &str) -> Option<usize> {
+    let mut template_depth = 0_u32;
+    for (index, character) in name.char_indices() {
+        match character {
+            '<' => template_depth = template_depth.saturating_add(1),
+            '>' => template_depth = template_depth.saturating_sub(1),
+            '(' if template_depth == 0 => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Remove a C++ return type without mistaking whitespace inside `<...>` for
+/// the separator before the qualified function name.
+fn qualified_cpp_symbol_name(spelling: &str) -> &str {
+    let mut depth = 0_u32;
+    let mut separator = None;
+    for (index, character) in spelling.char_indices() {
+        match character {
+            '<' => depth = depth.saturating_add(1),
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && character.is_whitespace() => separator = Some(index),
+            _ => {}
+        }
+    }
+    separator.map_or(spelling, |index| spelling[index..].trim_start())
+}
+
+/// Remove formatting and the ABI's harmless decimal integer literal suffixes.
+fn normalize_cpp_template_owner(owner: &str) -> String {
+    let compact: String = owner
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    // Demanglers may spell a non-type integral template argument with the
+    // ABI's explicit type cast, e.g. `Buffer<int, (unsigned long)4>`.  This
+    // function only receives the template owner (never parameter types), so
+    // removing those integer casts leaves the specialization identity intact.
+    let compact = [
+        "(unsignedlonglong)",
+        "(unsignedlong)",
+        "(unsignedint)",
+        "(longlong)",
+        "(long)",
+        "(int)",
+    ]
+    .into_iter()
+    .fold(compact, |normalized, cast| normalized.replace(cast, ""));
+    let characters: Vec<_> = compact.chars().collect();
+    let mut normalized = String::with_capacity(compact.len());
+    let mut index = 0;
+    while index < characters.len() {
+        if !characters[index].is_ascii_digit() {
+            normalized.push(characters[index]);
+            index += 1;
+            continue;
+        }
+        let digits_start = index;
+        while index < characters.len() && characters[index].is_ascii_digit() {
+            index += 1;
+        }
+        normalized.extend(characters[digits_start..index].iter());
+        let suffix_start = index;
+        while index < characters.len() && matches!(characters[index], 'u' | 'U' | 'l' | 'L') {
+            index += 1;
+        }
+        if suffix_start == index
+            || index < characters.len() && !matches!(characters[index], ',' | '>' | ')')
+        {
+            normalized.extend(characters[suffix_start..index].iter());
+        }
+    }
+    normalized
+}
+
 fn source_unit_matches(
     source_path: &str,
     source_line: Option<u32>,
@@ -2200,6 +2590,56 @@ fn source_unit_matches(
     }
 }
 
+/// Match a compiler's generic-definition anchor to a source unit.
+///
+/// Clang reports a function template at its declaration line, whereas the
+/// structural frontend anchors its function unit at the opening brace on the
+/// following line.  That one-line difference is syntax-derived rather than a
+/// fuzzy location match, and is limited to generic-origin evidence.
+fn source_generic_unit_matches(
+    source_path: &str,
+    source_line: Option<u32>,
+    scan_root: &FilePath,
+    unit: &SourceUnitIdentity,
+) -> bool {
+    if source_unit_matches(source_path, source_line, scan_root, unit) {
+        return true;
+    }
+    let (Some(line), Some(start_line)) = (source_line, unit.start_line) else {
+        return false;
+    };
+    let source_path = FilePath::new(source_path);
+    let unit_path = FilePath::new(&unit.file_path);
+    (source_path == unit_path || source_path == scan_root.join(unit_path))
+        && line.checked_add(1) == Some(start_line)
+}
+
+/// Whether a source unit is wholly inside a class-template definition.
+///
+/// Class template instantiations are anchored at the class declaration, while
+/// emitted symbols commonly name an inline member body.  The compiler-supplied
+/// definition extent lets this match that member without guessing from its
+/// short name.  Both endpoints must be present, so a partial range remains
+/// unmapped.
+fn source_template_definition_contains_unit(
+    instantiation: &SourceInstantiation,
+    scan_root: &FilePath,
+    unit: &SourceUnitIdentity,
+) -> bool {
+    let (Some(definition_end_line), Some(unit_start_line), Some(unit_end_line)) = (
+        instantiation.definition_end_line,
+        unit.start_line,
+        unit.end_line,
+    ) else {
+        return false;
+    };
+    let source_path = FilePath::new(&instantiation.file_path);
+    let unit_path = FilePath::new(&unit.file_path);
+    (source_path == unit_path || source_path == scan_root.join(unit_path))
+        && instantiation.line <= unit_start_line
+        && unit_end_line <= definition_end_line
+}
+
 fn source_fragment_matches(
     source_path: &str,
     source_line: Option<u32>,
@@ -2213,7 +2653,12 @@ fn source_fragment_matches(
     }
     match (source_line, fragment.start_line, fragment.end_line) {
         (Some(line), Some(start), Some(end)) => start <= line && line <= end,
-        _ => true,
+        // A file path alone cannot select a clone fragment: treating every
+        // fragment in the file as a DWARF match would make a missing line
+        // look like evidence and could attribute bytes to an arbitrary
+        // duplicate. Whole units may remain an explicitly ambiguous mapping,
+        // but fragment-level attribution is fail-closed.
+        _ => false,
     }
 }
 
@@ -2224,6 +2669,16 @@ fn source_fragment_matches(
 /// Returns an error under the same conditions as [`run`]. The artifacts are
 /// read as bytes only; neither one is executed.
 pub fn compare(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Outcome> {
+    run_isolated_request(
+        IsolatedArtifactRequest::Compare(args.clone()),
+        args.timeout_seconds,
+        args.output.as_deref(),
+        out,
+    )
+}
+
+/// Run an artifact comparison in the already isolated worker process.
+fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Outcome> {
     let before = inspect(&args.before, args.max_bytes, None, None)?;
     let after = inspect(&args.after, args.max_bytes, None, None)?;
     let before_variant = read_build_variant(args.before_build_variant.as_deref())?;
@@ -3226,6 +3681,14 @@ fn render_text(report: &ArtifactReport, verbose: bool, out: &mut impl Write) -> 
                     estimate.model_confidence,
                     estimate.savings_confidence,
                 )?;
+                writeln!(out, "    model schema: {}", estimate.model_schema_version)?;
+                for assumption in &estimate.assumptions {
+                    writeln!(
+                        out,
+                        "    assumption: {}",
+                        refactor_savings_assumption_text(assumption)
+                    )?;
+                }
             }
         }
         if !correlation.generic_origins.is_empty() {
@@ -3233,7 +3696,8 @@ fn render_text(report: &ArtifactReport, verbose: bool, out: &mut impl Write) -> 
             for origin in &correlation.generic_origins {
                 writeln!(
                     out,
-                    "  {} ({}): {} observed bytes, {} normalized duplicate bytes, {} retained-size sum, {} symbols, {} instantiations across {} translation units",
+                    "  {} [{}] ({}): {} observed bytes, {} normalized duplicate bytes, {} retained-size sum, {} symbols, {} instantiations across {} translation units",
+                    origin.definition,
                     origin.origin_fingerprint,
                     origin.origin_build_variant_fingerprint,
                     origin.observed_symbol_bytes,
@@ -3415,6 +3879,23 @@ fn render_groups(
     Ok(())
 }
 
+fn refactor_savings_assumption_text(assumption: &RefactorSavingsAssumption) -> String {
+    match assumption {
+        RefactorSavingsAssumption::SharedImplementationRetainsCopies { copies } => {
+            format!("shared implementation retains {copies} copy/copies")
+        }
+        RefactorSavingsAssumption::CallOverheadPerReplacedMember { bytes } => {
+            format!("call overhead is {bytes} bytes per replaced member")
+        }
+        RefactorSavingsAssumption::InliningOutcomeUnknown => {
+            "compiler inlining outcome is unknown".to_owned()
+        }
+        RefactorSavingsAssumption::LinkerIcfOutcomeUnknown => {
+            "linker ICF outcome is unknown".to_owned()
+        }
+    }
+}
+
 fn optional_bytes(value: Option<u64>) -> String {
     value.map_or_else(|| "unavailable".to_owned(), |value| value.to_string())
 }
@@ -3528,6 +4009,7 @@ fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Result<()> {
             row[2] = report.format.to_string();
             "generic-origin".clone_into(&mut row[3]);
             row[4].clone_from(&origin.origin_fingerprint);
+            row[5].clone_from(&origin.definition);
             row[7] = origin.observed_symbol_bytes.to_string();
             row[8] = origin.normalized_instruction_duplicated_bytes.to_string();
             row[19].clone_from(&origin.origin_build_variant_fingerprint);
@@ -3912,6 +4394,25 @@ mod tests {
     use super::*;
     use boon::{Compiler, Schemas};
 
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::disallowed_types)] // Exercises the actual worker-kill path.
+    fn worker_deadline_terminates_a_nonresponsive_parser_process() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 1"])
+            .spawn()
+            .expect("start deliberately nonresponsive worker");
+        let error = wait_for_worker(&mut child, Duration::from_millis(1))
+            .expect_err("deadline must terminate the worker");
+        assert!(
+            error
+                .to_string()
+                .contains("exceeded the configured timeout"),
+            "unexpected error: {error}"
+        );
+        assert!(child.try_wait().expect("query terminated worker").is_some());
+    }
+
     fn assert_valid_schema(schema_uri: &str, schema: &str, value: &serde_json::Value) {
         let mut schemas = Schemas::new();
         let mut compiler = Compiler::new();
@@ -3919,6 +4420,56 @@ mod tests {
         compiler.add_resource(schema_uri, schema).unwrap();
         let index = compiler.compile(schema_uri, &mut schemas).unwrap();
         schemas.validate(value, index).unwrap();
+    }
+
+    #[test]
+    fn clang_template_display_names_match_only_demangled_function_templates() {
+        assert_eq!(
+            normalized_clang_template_display_name("clang-display-v1:templates::twice(int)"),
+            normalized_clang_template_display_name("int templates::twice<int>(int)")
+        );
+        assert_eq!(
+            normalized_clang_template_display_name("clang-display-v1:templates::twice(long)"),
+            normalized_clang_template_display_name("long templates::twice<long>(long)")
+        );
+        assert_ne!(
+            normalized_clang_template_display_name("clang-display-v1:templates::twice(int)"),
+            normalized_clang_template_display_name("long templates::twice<long>(long)")
+        );
+        assert_ne!(
+            normalized_clang_template_display_name("clang-display-v1:templates::twice<>(long)"),
+            normalized_clang_template_display_name("int templates::twice<int>(int)")
+        );
+        assert_eq!(
+            normalized_clang_template_display_name("templates::ordinary(int)"),
+            None
+        );
+        assert_eq!(
+            normalized_clang_template_display_name("templates::Buffer<int, 4>"),
+            None
+        );
+        assert_eq!(
+            normalized_clang_template_owner_name("clang-display-v1:templates::Buffer<int, 4>"),
+            normalized_clang_template_owner_name(
+                "int templates::Buffer<int, 4ul>::at(unsigned long) const"
+            )
+        );
+        assert_eq!(
+            normalized_clang_template_owner_name("clang-display-v1:templates::Buffer<int, 4>"),
+            normalized_clang_template_owner_name(
+                "int templates::Buffer<int, (unsigned long)4>::at(unsigned long) const"
+            )
+        );
+        assert_ne!(
+            normalized_clang_template_owner_name("clang-display-v1:templates::Buffer<int, 4>"),
+            normalized_clang_template_owner_name(
+                "int templates::Buffer<int, 8ul>::at(unsigned long) const"
+            )
+        );
+        assert_eq!(
+            normalized_clang_template_owner_name("clang-display-v1:templates::twice<>(int)"),
+            None
+        );
     }
 
     #[test]
@@ -3938,6 +4489,7 @@ mod tests {
             code: Vec::new(),
             normalized: None,
             inline_stack: vec![codehelion_artifact::ArtifactInlineFrame {
+                evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
                 source: "/work/src/main.cpp".to_owned(),
                 line: Some(12),
                 column: Some(3),
@@ -4028,6 +4580,147 @@ mod tests {
     }
 
     #[test]
+    fn pdb_location_maps_with_pdb_evidence() {
+        let symbol = codehelion_artifact::ArtifactSymbol {
+            fingerprint: codehelion_artifact::ArtifactFingerprint::from_content(
+                "symbol",
+                b"pdb-location",
+            ),
+            name: Some("entry".to_owned()),
+            exported: false,
+            section: Some(1),
+            offset: 0,
+            size: 8,
+            size_inferred: false,
+            code: Vec::new(),
+            normalized: None,
+            inline_stack: vec![codehelion_artifact::ArtifactInlineFrame {
+                evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Pdb,
+                source: "/work/src/main.cpp".to_owned(),
+                line: Some(12),
+                column: Some(3),
+            }],
+        };
+        let mut artifact = ArtifactIr::empty(BinaryFormat::PeCoff, b"fixture");
+        artifact.symbols.push(symbol);
+        let units = [SourceUnitIdentity {
+            fingerprint: [3; 16],
+            build_variant_fingerprint: [4; 16],
+            file_path: "src/main.cpp".to_owned(),
+            name: Some("entry".to_owned()),
+            start_line: Some(10),
+            end_line: Some(20),
+        }];
+
+        let rows = correlate_debug_locations(
+            &artifact,
+            FilePath::new("/work"),
+            &units,
+            &[],
+            &[],
+            &[],
+            &[],
+            [5; 16],
+        );
+
+        assert_eq!(rows.mappings.len(), 1);
+        assert_eq!(
+            rows.mappings[0].evidence.facts,
+            vec![MappingEvidenceFact::Pdb {
+                source_path: "/work/src/main.cpp".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn dwarf_frame_without_line_does_not_map_clone_fragments() {
+        let symbol = codehelion_artifact::ArtifactSymbol {
+            fingerprint: codehelion_artifact::ArtifactFingerprint::from_content(
+                "symbol",
+                b"missing-line",
+            ),
+            name: Some("entry".to_owned()),
+            exported: false,
+            section: Some(1),
+            offset: 0,
+            size: 8,
+            size_inferred: false,
+            code: Vec::new(),
+            normalized: None,
+            inline_stack: vec![codehelion_artifact::ArtifactInlineFrame {
+                evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
+                source: "/work/src/main.cpp".to_owned(),
+                line: None,
+                column: None,
+            }],
+        };
+        let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
+        artifact.symbols.push(symbol);
+        let units = [SourceUnitIdentity {
+            fingerprint: [3; 16],
+            build_variant_fingerprint: [4; 16],
+            file_path: "src/main.cpp".to_owned(),
+            name: Some("entry".to_owned()),
+            start_line: Some(1),
+            end_line: Some(40),
+        }];
+        let fragments = [
+            SourceFragmentIdentity {
+                fingerprint: [6; 16],
+                finding_id: [16; 16],
+                clone_group_fingerprint: [17; 16],
+                is_canonical: false,
+                clone_confidence: 1.0,
+                build_variant_fingerprint: [4; 16],
+                file_path: "src/main.cpp".to_owned(),
+                start_line: Some(10),
+                end_line: Some(13),
+            },
+            SourceFragmentIdentity {
+                fingerprint: [7; 16],
+                finding_id: [18; 16],
+                clone_group_fingerprint: [17; 16],
+                is_canonical: true,
+                clone_confidence: 1.0,
+                build_variant_fingerprint: [4; 16],
+                file_path: "src/main.cpp".to_owned(),
+                start_line: Some(20),
+                end_line: Some(23),
+            },
+        ];
+
+        let rows = correlate_debug_locations(
+            &artifact,
+            FilePath::new("/work"),
+            &units,
+            &fragments,
+            &[],
+            &[],
+            &[],
+            [5; 16],
+        );
+
+        assert_eq!(rows.mappings.len(), 1);
+        assert_eq!(
+            rows.mappings[0].source_kind,
+            ArtifactAnalysisSourceKind::Unit
+        );
+        assert!(
+            rows.mappings
+                .iter()
+                .all(|mapping| mapping.source_kind != ArtifactAnalysisSourceKind::Fragment)
+        );
+        assert_eq!(
+            rows.unmapped_sources
+                .iter()
+                .filter(|source| source.source_kind == ArtifactAnalysisSourceKind::Fragment)
+                .map(|source| source.source_instance_fingerprint)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([[16; 16], [18; 16]])
+        );
+    }
+
+    #[test]
     #[allow(
         clippy::too_many_lines,
         reason = "the fixture keeps every multi-origin assertion together"
@@ -4047,11 +4740,13 @@ mod tests {
             normalized: None,
             inline_stack: vec![
                 codehelion_artifact::ArtifactInlineFrame {
+                    evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
                     source: "/work/src/a.cpp".to_owned(),
                     line: Some(10),
                     column: None,
                 },
                 codehelion_artifact::ArtifactInlineFrame {
+                    evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
                     source: "/work/src/b.cpp".to_owned(),
                     line: Some(20),
                     column: None,
@@ -4541,16 +5236,20 @@ mod tests {
         let instantiations = [
             SourceInstantiation {
                 definition: "crate::Buffer::push".to_owned(),
+                artifact_match_key: None,
                 instantiation_key: "crate::Buffer::push<String>".to_owned(),
                 file_path: "/work/src/generic.rs".to_owned(),
                 line: 12,
+                definition_end_line: None,
                 translation_unit: "src/one.rs".to_owned(),
             },
             SourceInstantiation {
                 definition: "crate::Buffer::push".to_owned(),
+                artifact_match_key: None,
                 instantiation_key: "crate::Buffer::push<String>".to_owned(),
                 file_path: "/work/src/generic.rs".to_owned(),
                 line: 12,
+                definition_end_line: None,
                 translation_unit: "src/two.rs".to_owned(),
             },
         ];
@@ -4583,6 +5282,7 @@ mod tests {
         assert_eq!(
             rows.mappings[0].evidence.facts,
             vec![MappingEvidenceFact::GenericOrigin {
+                definition: "crate::Buffer::push".to_owned(),
                 instantiation_key: "crate::Buffer::push<String>".to_owned(),
                 translation_units: vec!["src/one.rs".to_owned(), "src/two.rs".to_owned()],
             }]
@@ -4597,7 +5297,11 @@ mod tests {
         assert_eq!(correlation.generic_origins.len(), 1);
         assert_eq!(
             correlation.generic_origins[0].origin_fingerprint,
-            "03030303030303030303030303030303"
+            fingerprint_hex(generic_origin_fingerprint([3; 16], "crate::Buffer::push"))
+        );
+        assert_eq!(
+            correlation.generic_origins[0].definition,
+            "crate::Buffer::push"
         );
         assert_eq!(correlation.generic_origins[0].instantiations, 1);
         assert_eq!(correlation.generic_origins[0].translation_units, 2);
@@ -4647,11 +5351,15 @@ mod tests {
         let mut csv_rows = csv_output.lines();
         let width = csv_rows.next().unwrap().split(',').count();
         assert!(csv_rows.all(|row| row.split(',').count() == width));
+        assert!(csv_output.contains(&format!(
+            "generic-origin,fixture.so,elf,generic-origin,{},crate::Buffer::push,,8,0",
+            fingerprint_hex(generic_origin_fingerprint([3; 16], "crate::Buffer::push"))
+        )));
         assert!(csv_output.contains(
-            "generic-origin,fixture.so,elf,generic-origin,03030303030303030303030303030303,,,8,0"
-        ));
-        assert!(csv_output.contains(
-            "generic-specialization,fixture.so,elf,generic-origin,03030303030303030303030303030303,crate::Buffer::push<String>,,8"
+            &format!(
+                "generic-specialization,fixture.so,elf,generic-origin,{},crate::Buffer::push<String>,,8",
+                fingerprint_hex(generic_origin_fingerprint([3; 16], "crate::Buffer::push"))
+            )
         ));
         let mut text = Vec::new();
         render_text(&report, false, &mut text).unwrap();
@@ -4695,16 +5403,20 @@ mod tests {
         let instantiations = [
             SourceInstantiation {
                 definition: "crate::render".to_owned(),
+                artifact_match_key: None,
                 instantiation_key: "crate::render<u8>".to_owned(),
                 file_path: "/work/src/generic.rs".to_owned(),
                 line: 2,
+                definition_end_line: None,
                 translation_unit: "src/first.rs".to_owned(),
             },
             SourceInstantiation {
                 definition: "crate::render".to_owned(),
+                artifact_match_key: None,
                 instantiation_key: "crate::render<u16>".to_owned(),
                 file_path: "/work/src/generic.rs".to_owned(),
                 line: 2,
+                definition_end_line: None,
                 translation_unit: "src/second.rs".to_owned(),
             },
         ];
@@ -4744,6 +5456,145 @@ mod tests {
     }
 
     #[test]
+    fn clang_template_display_key_maps_only_its_demangled_specialization() {
+        let symbol = codehelion_artifact::ArtifactSymbol {
+            fingerprint: codehelion_artifact::ArtifactFingerprint::from_content(
+                "symbol",
+                b"twice-int",
+            ),
+            name: Some("int templates::twice<int>(int)".to_owned()),
+            exported: false,
+            section: Some(1),
+            offset: 0,
+            size: 8,
+            size_inferred: false,
+            code: Vec::new(),
+            normalized: None,
+            inline_stack: Vec::new(),
+        };
+        let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
+        artifact.symbols.push(symbol);
+        let units = [SourceUnitIdentity {
+            fingerprint: [3; 16],
+            build_variant_fingerprint: [4; 16],
+            file_path: "include/templates.hpp".to_owned(),
+            name: Some("unrelated".to_owned()),
+            start_line: Some(1),
+            end_line: Some(20),
+        }];
+        let instantiations = [
+            SourceInstantiation {
+                definition: "c:@N@templates@FT@twice#t0.0#".to_owned(),
+                artifact_match_key: Some("clang-display-v1:templates::twice<>(int)".to_owned()),
+                instantiation_key: "clang-usr-v1:c:@N@templates@F@twice<#I>#I#".to_owned(),
+                file_path: "/work/include/templates.hpp".to_owned(),
+                line: 4,
+                definition_end_line: None,
+                translation_unit: "src/templates.cpp".to_owned(),
+            },
+            SourceInstantiation {
+                definition: "c:@N@templates@FT@twice#t0.0#".to_owned(),
+                artifact_match_key: Some("clang-display-v1:templates::twice<>(long)".to_owned()),
+                instantiation_key: "clang-usr-v1:c:@N@templates@F@twice<#L>#L#".to_owned(),
+                file_path: "/work/include/templates.hpp".to_owned(),
+                line: 4,
+                definition_end_line: None,
+                translation_unit: "src/templates.cpp".to_owned(),
+            },
+        ];
+
+        let rows = correlate_debug_locations(
+            &artifact,
+            FilePath::new("/work"),
+            &units,
+            &[],
+            &instantiations,
+            &[],
+            &[],
+            [5; 16],
+        );
+
+        assert!(rows.unmapped_symbols.is_empty());
+        assert_eq!(rows.mappings.len(), 1);
+        assert_eq!(rows.mappings[0].source_fingerprint, [3; 16]);
+        assert_eq!(
+            rows.mappings[0].evidence.facts,
+            vec![MappingEvidenceFact::GenericOrigin {
+                definition: "c:@N@templates@FT@twice#t0.0#".to_owned(),
+                instantiation_key: "clang-usr-v1:c:@N@templates@F@twice<#I>#I#".to_owned(),
+                translation_units: vec!["src/templates.cpp".to_owned()],
+            }]
+        );
+    }
+
+    #[test]
+    fn clang_template_owner_key_maps_only_its_member_specialization() {
+        let symbol = codehelion_artifact::ArtifactSymbol {
+            fingerprint: codehelion_artifact::ArtifactFingerprint::from_content(
+                "symbol",
+                b"buffer-int-four",
+            ),
+            name: Some("int templates::Buffer<int, 4ul>::at(unsigned long) const".to_owned()),
+            exported: false,
+            section: Some(1),
+            offset: 0,
+            size: 8,
+            size_inferred: false,
+            code: Vec::new(),
+            normalized: None,
+            inline_stack: Vec::new(),
+        };
+        let units = [SourceUnitIdentity {
+            fingerprint: [3; 16],
+            build_variant_fingerprint: [4; 16],
+            file_path: "include/templates.hpp".to_owned(),
+            name: Some("unrelated".to_owned()),
+            start_line: Some(10),
+            end_line: Some(15),
+        }];
+        let instantiations = [
+            SourceInstantiation {
+                definition: "c:@N@templates@S@Buffer>#I#VI4".to_owned(),
+                artifact_match_key: Some("clang-display-v1:templates::Buffer<int, 4>".to_owned()),
+                instantiation_key: "clang-usr-v1:c:@N@templates@S@Buffer>#I#VI4".to_owned(),
+                file_path: "/work/include/templates.hpp".to_owned(),
+                line: 8,
+                definition_end_line: Some(20),
+                translation_unit: "src/templates.cpp".to_owned(),
+            },
+            SourceInstantiation {
+                definition: "c:@N@templates@S@Buffer>#I#VI8".to_owned(),
+                artifact_match_key: Some("clang-display-v1:templates::Buffer<int, 8>".to_owned()),
+                instantiation_key: "clang-usr-v1:c:@N@templates@S@Buffer>#I#VI8".to_owned(),
+                file_path: "/work/include/templates.hpp".to_owned(),
+                line: 8,
+                definition_end_line: Some(20),
+                translation_unit: "src/templates.cpp".to_owned(),
+            },
+        ];
+
+        let mappings = correlate_generic_origin(
+            &symbol,
+            FilePath::new("/work"),
+            &units,
+            &[],
+            &instantiations,
+            [5; 16],
+        );
+
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].source_fingerprint, [3; 16]);
+        assert_eq!(
+            mappings[0].evidence.facts,
+            vec![MappingEvidenceFact::GenericOrigin {
+                definition: "c:@N@templates@S@Buffer>#I#VI4".to_owned(),
+                instantiation_key: "clang-usr-v1:c:@N@templates@S@Buffer>#I#VI4".to_owned(),
+                translation_units: vec!["src/templates.cpp".to_owned()],
+            }]
+        );
+    }
+
+    #[test]
     fn conflicting_generic_origin_and_name_candidates_remain_ambiguous() {
         let symbol = codehelion_artifact::ArtifactSymbol {
             fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("symbol", b"one"),
@@ -4779,9 +5630,11 @@ mod tests {
         ];
         let instantiations = [SourceInstantiation {
             definition: "crate::render".to_owned(),
+            artifact_match_key: None,
             instantiation_key: "crate::render<u8>".to_owned(),
             file_path: "/work/src/generic.rs".to_owned(),
             line: 2,
+            definition_end_line: None,
             translation_unit: "src/lib.rs".to_owned(),
         }];
         let resolved_symbols = [SourceResolvedSymbol {
@@ -5014,6 +5867,26 @@ mod tests {
             serde_json::to_value(&savings[0]).unwrap()["assumptions"][0]["kind"],
             "shared_implementation_retains_copies"
         );
+        assert_eq!(
+            savings[0].source_build_variant_fingerprint,
+            fingerprint_hex([4; 16])
+        );
+        assert_eq!(
+            savings[0].artifact_build_variant_fingerprint,
+            fingerprint_hex([5; 16])
+        );
+        let artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
+        let report = ArtifactReport::from_ir(FilePath::new("fixture.so"), &artifact, None, None)
+            .with_correlation(Some(ArtifactCorrelationReport::from_rows(
+                7, &artifact, &rows,
+            )));
+        let mut text = Vec::new();
+        render_text(&report, false, &mut text).unwrap();
+        let text = String::from_utf8(text).unwrap();
+        assert!(text.contains("source 04040404040404040404040404040404"));
+        assert!(text.contains("artifact 05050505050505050505050505050505"));
+        assert!(text.contains("model schema: refactor-savings-model-v1"));
+        assert!(text.contains("shared implementation retains 1 copy/copies"));
         assert_eq!(
             serde_json::to_vec(&savings).unwrap(),
             serde_json::to_vec(&clone_group_savings(&rows)).unwrap()

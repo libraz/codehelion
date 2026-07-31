@@ -471,7 +471,11 @@
         "scope",
         "confidence",
         "priority",
+        "similarity",
+        "boilerplate",
         "test_code",
+        "width_family",
+        "split_pair",
         "suppressed",
         "members"
       ],
@@ -547,6 +551,10 @@
         "test_code": {
           "type": "boolean",
           "description": "Whether every member is test code, recognised from the test marker in the source. False for a group spanning a test and the code it exercises: that duplication crosses the boundary."
+        },
+        "width_family": {
+          "type": "boolean",
+          "description": "Whether members differ only by integer width; false when no such width family was recognised."
         },
         "split_pair": {
           "type": "boolean",

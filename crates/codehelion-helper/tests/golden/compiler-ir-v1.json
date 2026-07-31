@@ -240,6 +240,8 @@
         }
       },
       "definition": "crate::Buffer::push",
+      "definition_end_line": null,
+      "artifact_match_key": null,
       "instantiation_key": "crate::Buffer::push<String>",
       "arguments": [
         0

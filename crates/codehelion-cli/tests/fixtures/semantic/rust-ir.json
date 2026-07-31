@@ -5,12 +5,13 @@
       "anchor": {
         "definition": null,
         "expansion": {
-          "end_byte": 51,
+          "end_byte": 49,
           "file": "src/lib.rs",
-          "start_byte": 38,
+          "start_byte": 45,
           "start_line": 1
         }
       },
+      "api_name": "rust::slice::iter",
       "target": {
         "resolution": "static",
         "symbol": "core::slice::_::iter"
@@ -20,12 +21,13 @@
       "anchor": {
         "definition": null,
         "expansion": {
-          "end_byte": 57,
+          "end_byte": 55,
           "file": "src/lib.rs",
-          "start_byte": 38,
+          "start_byte": 52,
           "start_line": 1
         }
       },
+      "api_name": null,
       "target": {
         "resolution": "static",
         "symbol": "core::iter::traits::iterator::Iterator::sum"
@@ -36,16 +38,17 @@
   "unexpanded_macros": [],
   "cfg": null,
   "data_flow": {
-    "computed": false,
+    "computed": true,
     "flows": []
   },
   "effects": {
-    "computed": false,
+    "computed": true,
     "interactions": [],
     "writes": []
   },
   "instantiations": [],
   "schema_version": "compiler-ir-v1",
+  "semantic_constructs": [],
   "symbols": [
     {
       "anchor": {

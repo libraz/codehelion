@@ -67,6 +67,7 @@ use crate::semantic;
 use crate::suppress;
 use codehelion_core::doctor;
 use codehelion_core::execution::ExecutionPolicy;
+use codehelion_helper::ir::{ControlFlowGraph, DataFlowSummary, EdgeKind};
 use codehelion_helper::protocol::{CompileCommandSelector, Execution};
 use codehelion_helper::{Helper, SandboxRequest};
 
@@ -109,6 +110,53 @@ struct SemanticUnitGraph {
     /// unit. This may lower semantic confidence but never invents or removes
     /// a registered-rule match.
     normalization_confidence: f64,
+    /// Closed interactions observed inside this exact SOG window. An empty
+    /// set is unknown evidence, never a purity claim.
+    interactions: BTreeSet<String>,
+    /// Compiler-confirmed direct `filter`/`map` receiver flows in this exact
+    /// window. Missing evidence is neutral rather than a claim that no flow
+    /// exists.
+    data_flows: BTreeSet<(String, String)>,
+    /// Compiler-produced CFG shape that overlaps this exact window. It is
+    /// supplementary confidence evidence only; absence never removes a match.
+    cfg_shape: Option<CfgShape>,
+}
+
+/// A deliberately small, language-neutral summary of the CFG that covers one
+/// semantic window.
+///
+/// The summary counts blocks and interior edge kinds rather than preserving
+/// compiler-local block indices. It cannot establish semantic equivalence; it
+/// only corroborates or weakens a match the closed SOG rule already verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CfgShape {
+    blocks: u32,
+    flow_edges: u32,
+    taken_edges: u32,
+    not_taken_edges: u32,
+    unwind_edges: u32,
+    return_edges: u32,
+}
+
+/// Non-authoritative compiler evidence that can adjust one SOG match's
+/// confidence without changing whether the registered rule matched.
+#[derive(Clone, Copy)]
+struct SemanticConfidenceEvidence<'a> {
+    normalization: f64,
+    interactions: &'a BTreeSet<String>,
+    data_flows: &'a BTreeSet<(String, String)>,
+    cfg_shape: Option<CfgShape>,
+}
+
+impl SemanticUnitGraph {
+    const fn confidence_evidence(&self) -> SemanticConfidenceEvidence<'_> {
+        SemanticConfidenceEvidence {
+            normalization: self.normalization_confidence,
+            interactions: &self.interactions,
+            data_flows: &self.data_flows,
+            cfg_shape: self.cfg_shape,
+        }
+    }
 }
 
 /// One registered semantic correspondence between two whole units that no
@@ -180,6 +228,20 @@ struct CrossLanguageComparisonUnit {
     graph: SemanticOperationGraph,
     content: stable_id::FragmentFingerprint,
     normalization_confidence: f64,
+    interactions: BTreeSet<String>,
+    data_flows: BTreeSet<(String, String)>,
+    cfg_shape: Option<CfgShape>,
+}
+
+impl CrossLanguageComparisonUnit {
+    const fn confidence_evidence(&self) -> SemanticConfidenceEvidence<'_> {
+        SemanticConfidenceEvidence {
+            normalization: self.normalization_confidence,
+            interactions: &self.interactions,
+            data_flows: &self.data_flows,
+            cfg_shape: self.cfg_shape,
+        }
+    }
 }
 
 /// The ordinary report plus source units available to an opt-in comparison.
@@ -906,6 +968,9 @@ fn maybe_cross_language_comparison_units(
                 graph: semantic_unit.graph.clone(),
                 content: semantic_unit.content,
                 normalization_confidence: semantic_unit.normalization_confidence,
+                interactions: semantic_unit.interactions.clone(),
+                data_flows: semantic_unit.data_flows.clone(),
+                cfg_shape: semantic_unit.cfg_shape,
             })
         })
         .collect()
@@ -1101,11 +1166,11 @@ fn record_cross_language_comparison(
         );
         let semantic_confidence = semantic_confidence(
             matched.rule.confidence,
-            left.normalization_confidence,
-            right.normalization_confidence,
+            left.confidence_evidence(),
+            right.confidence_evidence(),
         );
         let correspondence_ids: Vec<String> = matched
-            .api_correspondence_ids
+            .correspondence_ids
             .iter()
             .map(|id| (*id).to_string())
             .collect();
@@ -1139,7 +1204,7 @@ fn record_cross_language_comparison(
             rule_id: matched.rule.id.to_string(),
             rule_version: matched.rule.version,
             semantic_confidence,
-            api_correspondence_ids: correspondence_ids,
+            correspondence_ids,
             members: members
                 .iter()
                 .map(|unit| report::CrossLanguageMember {
@@ -1547,12 +1612,12 @@ fn registered_semantic_pairs(
         let Some((source, answer)) = answered.get(file.relative_path.as_str()) else {
             continue;
         };
-        let Some(ir) = answer.analysis() else {
+        let Some(compiler_ir) = answer.analysis() else {
             continue;
         };
-        let spelling = ir.spelling(&source.absolute_path);
+        let spelling = compiler_ir.spelling(&source.absolute_path);
         let normalized = semantic::registered_sog_in_range(
-            ir,
+            compiler_ir,
             &spelling,
             file.language,
             variant_fingerprint,
@@ -1582,7 +1647,7 @@ fn registered_semantic_pairs(
         if windows.is_empty() {
             unrepresentable_units = unrepresentable_units.saturating_add(1);
         }
-        let Some(ir) = irs.get(unit.file) else {
+        let Some(syntax_ir) = irs.get(unit.file) else {
             continue;
         };
         for window in windows {
@@ -1592,8 +1657,17 @@ fn registered_semantic_pairs(
                 end: usize::try_from(window.source_range.end)
                     .context("semantic source range end exceeds this platform")?,
             };
-            let (start_line, end_line, token_count) = semantic_window_location(ir, unit, range);
+            let (start_line, end_line, token_count) =
+                semantic_window_location(syntax_ir, unit, range);
             let content = stable_id::semantic_fragment_fingerprint(variant, &window.graph);
+            let interactions = semantic_window_interactions(&window.graph);
+            let data_flows =
+                semantic_window_data_flows(&compiler_ir.data_flow, window.source_range);
+            let cfg_shape = semantic_window_cfg_shape(
+                compiler_ir.cfg.as_ref(),
+                &file.relative_path,
+                window.source_range,
+            );
             units.push(SemanticUnitGraph {
                 unit: unit_index,
                 range,
@@ -1603,6 +1677,9 @@ fn registered_semantic_pairs(
                 graph: window.graph,
                 content,
                 normalization_confidence,
+                interactions,
+                data_flows,
+                cfg_shape,
             });
         }
     }
@@ -1703,8 +1780,8 @@ fn semantic_pair_from_indices(
     let right = units[verified.candidate.right].clone();
     let pair_confidence = semantic_confidence(
         verified.matched.rule.confidence,
-        left.normalization_confidence,
-        right.normalization_confidence,
+        left.confidence_evidence(),
+        right.confidence_evidence(),
     );
     let (canonical, corresponding) = if (left.content, left.unit) <= (right.content, right.unit) {
         (left, right)
@@ -1765,10 +1842,19 @@ fn semantic_window_location(
 }
 
 /// Combine a rule's measured base confidence with non-authoritative coverage
-/// evidence. Missing data-flow or CFG evidence is intentionally absent here:
-/// it may adjust future confidence but must never be required for a finding.
-fn semantic_confidence(rule_confidence: f64, left: f64, right: f64) -> f64 {
-    rule_confidence * left.min(right)
+/// evidence. Missing data-flow or CFG evidence is intentionally neutral: it
+/// may adjust confidence but must never be required for a finding.
+fn semantic_confidence(
+    rule_confidence: f64,
+    left: SemanticConfidenceEvidence<'_>,
+    right: SemanticConfidenceEvidence<'_>,
+) -> f64 {
+    (rule_confidence
+        * left.normalization.min(right.normalization)
+        * interaction_confidence(left.interactions, right.interactions)
+        * data_flow_confidence(left.data_flows, right.data_flows)
+        * cfg_confidence(left.cfg_shape, right.cfg_shape))
+    .min(1.0)
 }
 
 /// Apply one rule's confidence to the least-complete member of a cohesive
@@ -1779,7 +1865,158 @@ fn semantic_group_confidence(rule_confidence: f64, members: &[SemanticUnitGraph]
         .iter()
         .map(|member| member.normalization_confidence)
         .fold(1.0_f64, f64::min);
-    rule_confidence * coverage
+    let interactions = members
+        .first()
+        .map_or_else(BTreeSet::new, |member| member.interactions.clone());
+    let interaction_confidence = members.iter().skip(1).fold(1.05_f64, |confidence, member| {
+        confidence.min(interaction_confidence(&interactions, &member.interactions))
+    });
+    let data_flows = members
+        .first()
+        .map_or_else(BTreeSet::new, |member| member.data_flows.clone());
+    let data_flow_confidence = members.iter().skip(1).fold(1.05_f64, |confidence, member| {
+        confidence.min(data_flow_confidence(&data_flows, &member.data_flows))
+    });
+    let cfg = members.first().and_then(|member| member.cfg_shape);
+    let cfg_confidence = members.iter().skip(1).fold(1.05_f64, |confidence, member| {
+        confidence.min(cfg_confidence(cfg, member.cfg_shape))
+    });
+    (rule_confidence * coverage * interaction_confidence * data_flow_confidence * cfg_confidence)
+        .min(1.0)
+}
+
+/// A matching non-empty interaction summary corroborates a finding; a
+/// disagreement lowers only confidence. Missing evidence is deliberately
+/// neutral, because an empty closed summary cannot prove a pure unit.
+fn interaction_confidence(left: &BTreeSet<String>, right: &BTreeSet<String>) -> f64 {
+    if left.is_empty() || right.is_empty() {
+        1.0
+    } else if left == right {
+        1.05
+    } else {
+        0.85
+    }
+}
+
+/// A matching non-empty direct def-use summary corroborates a finding. It is
+/// deliberately symmetrical with effect evidence: unavailable or empty
+/// evidence cannot rule a finding out or establish the absence of a flow.
+fn data_flow_confidence(
+    left: &BTreeSet<(String, String)>,
+    right: &BTreeSet<(String, String)>,
+) -> f64 {
+    if left.is_empty() || right.is_empty() {
+        1.0
+    } else if left == right {
+        1.05
+    } else {
+        0.85
+    }
+}
+
+/// A matching compiler-produced CFG shape corroborates a registered match;
+/// conflicting shapes lower confidence. A missing summary is neutral so that
+/// helpers without `MirCfg` preserve the same set of findings.
+fn cfg_confidence(left: Option<CfgShape>, right: Option<CfgShape>) -> f64 {
+    match (left, right) {
+        (Some(left), Some(right)) if left == right => 1.05,
+        (Some(_), Some(_)) => 0.85,
+        (None, _) | (_, None) => 1.0,
+    }
+}
+
+/// Summarize only compiler blocks whose anchors overlap a registered semantic
+/// window. Compiler-local block indices are reduced to counts, which are
+/// comparable across the two language helpers but never become stable IDs.
+fn semantic_window_cfg_shape(
+    cfg: Option<&ControlFlowGraph>,
+    file: &str,
+    window: codehelion_core::semantic::SemanticSourceRange,
+) -> Option<CfgShape> {
+    let cfg = cfg?;
+    let blocks: BTreeSet<u32> = cfg
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            let range = &block.anchor.expansion;
+            (range.file == file && range.start_byte < window.end && window.start < range.end_byte)
+                .then(|| u32::try_from(index).ok())
+                .flatten()
+        })
+        .collect();
+    if blocks.is_empty() {
+        return None;
+    }
+    let mut shape = CfgShape {
+        blocks: u32::try_from(blocks.len()).unwrap_or(u32::MAX),
+        flow_edges: 0,
+        taken_edges: 0,
+        not_taken_edges: 0,
+        unwind_edges: 0,
+        return_edges: 0,
+    };
+    for edge in &cfg.edges {
+        if !blocks.contains(&edge.from) || !blocks.contains(&edge.to) {
+            continue;
+        }
+        let counter = match edge.kind {
+            EdgeKind::Flow => &mut shape.flow_edges,
+            EdgeKind::Taken => &mut shape.taken_edges,
+            EdgeKind::NotTaken => &mut shape.not_taken_edges,
+            EdgeKind::Unwind => &mut shape.unwind_edges,
+            EdgeKind::Return => &mut shape.return_edges,
+        };
+        *counter = counter.saturating_add(1);
+    }
+    Some(shape)
+}
+
+/// An interaction belongs to a fragment only when its closed resource node is
+/// already part of that fragment's SOG window.
+fn semantic_window_interactions(graph: &SemanticOperationGraph) -> BTreeSet<String> {
+    graph
+        .nodes
+        .iter()
+        .filter_map(|node| node.attributes.resource_kind.as_deref())
+        .filter_map(|resource| match resource {
+            "file" => Some("file_io".to_owned()),
+            "lock" => Some("synchronization".to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Retain only helper-reported direct receiver flows whose two written API
+/// anchors fall inside this SOG window. The helper's endpoint format is local
+/// to compiler IR v1; after range membership is established, only closed API
+/// names remain as comparison evidence.
+fn semantic_window_data_flows(
+    summary: &DataFlowSummary,
+    window: codehelion_core::semantic::SemanticSourceRange,
+) -> BTreeSet<(String, String)> {
+    summary
+        .flows
+        .iter()
+        .filter_map(|(source, sink)| {
+            let source = flow_endpoint_in_window(source, window)?;
+            let sink = flow_endpoint_in_window(sink, window)?;
+            Some((source.to_owned(), sink.to_owned()))
+        })
+        .collect()
+}
+
+/// Parse one helper-local `start:end:api` endpoint and return its API only
+/// when its full written range belongs to `window`.
+fn flow_endpoint_in_window(
+    endpoint: &str,
+    window: codehelion_core::semantic::SemanticSourceRange,
+) -> Option<&str> {
+    let (start, rest) = endpoint.split_once(':')?;
+    let (end, api) = rest.split_once(':')?;
+    let start = start.parse::<u64>().ok()?;
+    let end = end.parse::<u64>().ok()?;
+    (start >= window.start && end <= window.end).then_some(api)
 }
 
 /// Select the narrowest truthful scope for a semantic finding.
@@ -4250,7 +4487,170 @@ mod tests {
     fn incomplete_normalization_lowers_confidence_without_affecting_matching() {
         assert!((super::normalization_confidence(3, 0) - 1.0).abs() < f64::EPSILON);
         assert!((super::normalization_confidence(0, 2) - 0.0).abs() < f64::EPSILON);
-        assert!((super::semantic_confidence(0.7, 1.0, 0.5) - 0.35).abs() < f64::EPSILON);
+        let empty_interactions = std::collections::BTreeSet::new();
+        let empty_data_flows = std::collections::BTreeSet::new();
+        assert!(
+            (super::semantic_confidence(
+                0.7,
+                super::SemanticConfidenceEvidence {
+                    normalization: 1.0,
+                    interactions: &empty_interactions,
+                    data_flows: &empty_data_flows,
+                    cfg_shape: None,
+                },
+                super::SemanticConfidenceEvidence {
+                    normalization: 0.5,
+                    interactions: &empty_interactions,
+                    data_flows: &empty_data_flows,
+                    cfg_shape: None,
+                },
+            ) - 0.35)
+                .abs()
+                < f64::EPSILON
+        );
+        let file = std::collections::BTreeSet::from(["file_io".to_owned()]);
+        let lock = std::collections::BTreeSet::from(["synchronization".to_owned()]);
+        assert!((super::interaction_confidence(&file, &file) - 1.05).abs() < f64::EPSILON);
+        assert!((super::interaction_confidence(&file, &lock) - 0.85).abs() < f64::EPSILON);
+        assert!(
+            (super::interaction_confidence(&file, &std::collections::BTreeSet::new()) - 1.0).abs()
+                < f64::EPSILON
+        );
+        let filter_map = std::collections::BTreeSet::from([(
+            "rust::Iterator::filter".to_owned(),
+            "rust::Iterator::map".to_owned(),
+        )]);
+        let map_filter = std::collections::BTreeSet::from([(
+            "rust::Iterator::map".to_owned(),
+            "rust::Iterator::filter".to_owned(),
+        )]);
+        assert!(
+            (super::data_flow_confidence(&filter_map, &filter_map) - 1.05).abs() < f64::EPSILON
+        );
+        assert!(
+            (super::data_flow_confidence(&filter_map, &map_filter) - 0.85).abs() < f64::EPSILON
+        );
+        assert!(
+            (super::data_flow_confidence(&filter_map, &std::collections::BTreeSet::new()) - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+        let straight = super::CfgShape {
+            blocks: 2,
+            flow_edges: 1,
+            taken_edges: 0,
+            not_taken_edges: 0,
+            unwind_edges: 0,
+            return_edges: 0,
+        };
+        let branch = super::CfgShape {
+            taken_edges: 1,
+            not_taken_edges: 1,
+            ..straight
+        };
+        assert!(
+            (super::cfg_confidence(Some(straight), Some(straight)) - 1.05).abs() < f64::EPSILON
+        );
+        assert!((super::cfg_confidence(Some(straight), Some(branch)) - 0.85).abs() < f64::EPSILON);
+        assert!((super::cfg_confidence(Some(straight), None) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn compiler_cfg_is_reduced_to_the_overlapping_semantic_window() {
+        let anchor = |start_byte, end_byte| {
+            codehelion_helper::ir::Anchor::written_here(codehelion_helper::ir::SourceRange {
+                file: "src/lib.rs".to_string(),
+                start_byte,
+                end_byte,
+                start_line: 1,
+            })
+        };
+        let cfg = codehelion_helper::ir::ControlFlowGraph {
+            blocks: vec![
+                codehelion_helper::ir::BasicBlock {
+                    anchor: anchor(10, 20),
+                    length: 2,
+                },
+                codehelion_helper::ir::BasicBlock {
+                    anchor: anchor(20, 30),
+                    length: 1,
+                },
+                codehelion_helper::ir::BasicBlock {
+                    anchor: anchor(40, 50),
+                    length: 1,
+                },
+            ],
+            edges: vec![
+                codehelion_helper::ir::Edge {
+                    from: 0,
+                    to: 1,
+                    kind: codehelion_helper::ir::EdgeKind::Flow,
+                },
+                codehelion_helper::ir::Edge {
+                    from: 1,
+                    to: 2,
+                    kind: codehelion_helper::ir::EdgeKind::Taken,
+                },
+            ],
+        };
+        assert_eq!(
+            super::semantic_window_cfg_shape(
+                Some(&cfg),
+                "src/lib.rs",
+                codehelion_core::semantic::SemanticSourceRange { start: 10, end: 30 },
+            ),
+            Some(super::CfgShape {
+                blocks: 2,
+                flow_edges: 1,
+                taken_edges: 0,
+                not_taken_edges: 0,
+                unwind_edges: 0,
+                return_edges: 0,
+            })
+        );
+        assert!(
+            super::semantic_window_cfg_shape(
+                Some(&cfg),
+                "src/lib.rs",
+                codehelion_core::semantic::SemanticSourceRange { start: 30, end: 40 },
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn direct_data_flow_is_scoped_to_its_semantic_window() {
+        let summary = codehelion_helper::ir::DataFlowSummary {
+            computed: true,
+            flows: vec![
+                (
+                    "10:16:rust::Iterator::filter".to_owned(),
+                    "17:20:rust::Iterator::map".to_owned(),
+                ),
+                (
+                    "40:46:rust::Iterator::filter".to_owned(),
+                    "47:50:rust::Iterator::map".to_owned(),
+                ),
+            ],
+        };
+        let first = super::semantic_window_data_flows(
+            &summary,
+            codehelion_core::semantic::SemanticSourceRange { start: 0, end: 30 },
+        );
+        assert_eq!(
+            first,
+            std::collections::BTreeSet::from([(
+                "rust::Iterator::filter".to_owned(),
+                "rust::Iterator::map".to_owned(),
+            )])
+        );
+        assert!(
+            super::semantic_window_data_flows(
+                &summary,
+                codehelion_core::semantic::SemanticSourceRange { start: 21, end: 39 },
+            )
+            .is_empty()
+        );
     }
 
     #[test]

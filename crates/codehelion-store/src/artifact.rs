@@ -331,6 +331,9 @@ fn supported_mapping_schema(schema_version: &str) -> bool {
 /// Current JSON shape for source-to-artifact correspondence evidence.
 pub const MAPPING_EVIDENCE_SCHEMA_VERSION: &str = "source-artifact-evidence-v1";
 
+/// Only operation recipe understood by the unreleased v1 evidence contract.
+pub const FUNCTION_RECIPE_VERSION: &str = "source-artifact-operation-recipe-v1";
+
 /// Versioned, local-only evidence used to justify one correspondence.
 ///
 /// The source and artifact fingerprints live on [`ArtifactAnalysisMapping`].
@@ -372,6 +375,13 @@ impl MappingEvidence {
         if self.schema_version != MAPPING_EVIDENCE_SCHEMA_VERSION
             || self.facts.is_empty()
             || self.candidate_count == 0
+            || self.facts.iter().any(|fact| {
+                matches!(
+                    fact,
+                    MappingEvidenceFact::FunctionRecipe { recipe_version }
+                        if recipe_version != FUNCTION_RECIPE_VERSION
+                )
+            })
         {
             return None;
         }
@@ -442,22 +452,33 @@ pub enum MappingEvidenceFact {
         /// Object path recorded in the linker map.
         object_path: String,
     },
-    /// A versioned normalized-function recipe matched.
-    FunctionFingerprint {
-        /// Normalization recipe used for the matching fingerprint.
+    /// A closed source/artifact operation recipe matched.
+    ///
+    /// This is deliberately not a source or instruction fingerprint. Both
+    /// producers must have proved the complete shared recipe before this fact
+    /// can be emitted.
+    FunctionRecipe {
+        /// Closed operation recipe used for the comparison.
         recipe_version: String,
     },
     /// Established caller/callee neighborhoods agree.
     CallGraphNeighborhood,
     /// A compiler-reported generic or template instantiation key agrees.
     GenericOrigin {
+        /// Compiler-reported spelling of the generic definition that owns the
+        /// specialization.
+        ///
+        /// This distinguishes separately declared templates with identical
+        /// normalized source bodies. The surrounding source fingerprint still
+        /// identifies the content; this compiler-confirmed spelling keeps the
+        /// aggregation from merging their emitted bytes.
+        definition: String,
         /// Compiler-reported specialization or instantiation key.
         instantiation_key: String,
         /// Translation units that independently reported this specialization.
         ///
         /// The entries are display evidence only; stable source identity stays
         /// on the surrounding mapping record.
-        #[serde(default)]
         translation_units: Vec<String>,
     },
     /// A compiler anchor says generated code was written in this macro body.
@@ -480,7 +501,7 @@ impl MappingEvidenceFact {
             Self::Dwarf { .. } | Self::Pdb { .. } | Self::SourceMap { .. } => 0,
             Self::SymbolName { .. } => 1,
             Self::LinkerMap { .. } => 2,
-            Self::FunctionFingerprint { .. } => 3,
+            Self::FunctionRecipe { .. } => 3,
             Self::CallGraphNeighborhood | Self::GenericOrigin { .. } | Self::MacroOrigin { .. } => {
                 4
             }
@@ -988,8 +1009,8 @@ mod tests {
             MappingEvidence::new(
                 vec![
                     name,
-                    MappingEvidenceFact::FunctionFingerprint {
-                        recipe_version: "normalized-function-v1".to_owned(),
+                    MappingEvidenceFact::FunctionRecipe {
+                        recipe_version: FUNCTION_RECIPE_VERSION.to_owned(),
                     },
                 ],
                 1,
@@ -1027,18 +1048,45 @@ mod tests {
     }
 
     #[test]
-    fn legacy_generic_origin_evidence_without_translation_units_still_reads() {
-        let evidence = MappingEvidence::from_json(
-            r#"{"schema_version":"source-artifact-evidence-v1","facts":[{"kind":"generic_origin","instantiation_key":"crate::render<u8>"}],"candidate_count":1,"has_conflict":false}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            evidence.facts,
-            vec![MappingEvidenceFact::GenericOrigin {
-                instantiation_key: "crate::render<u8>".to_owned(),
-                translation_units: Vec::new(),
-            }]
+    fn operation_recipe_evidence_accepts_only_its_current_v1_contract() {
+        let evidence = MappingEvidence::new(
+            vec![MappingEvidenceFact::FunctionRecipe {
+                recipe_version: FUNCTION_RECIPE_VERSION.to_owned(),
+            }],
+            1,
+            false,
         );
+        let value = serde_json::to_value(&evidence).expect("evidence serializes");
+        assert_eq!(value["facts"][0]["kind"], "function_recipe");
+        assert_eq!(
+            evidence.confidence(),
+            Some(ArtifactAnalysisMappingConfidence::Weak)
+        );
+
+        let stale = MappingEvidence::new(
+            vec![MappingEvidenceFact::FunctionRecipe {
+                recipe_version: "source-artifact-operation-recipe-other".to_owned(),
+            }],
+            1,
+            false,
+        );
+        assert_eq!(stale.confidence(), None);
+        assert!(MappingEvidence::from_json(
+            r#"{"schema_version":"source-artifact-evidence-v1","facts":[{"kind":"function_fingerprint","recipe_version":"source-artifact-operation-recipe-v1"}],"candidate_count":1,"has_conflict":false}"#,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn generic_origin_evidence_requires_every_v1_field() {
+        let result = MappingEvidence::from_json(
+            r#"{"schema_version":"source-artifact-evidence-v1","facts":[{"kind":"generic_origin","instantiation_key":"crate::render<u8>"}],"candidate_count":1,"has_conflict":false}"#,
+        );
+        assert!(result.is_err());
+        let result = MappingEvidence::from_json(
+            r#"{"schema_version":"source-artifact-evidence-v1","facts":[{"kind":"generic_origin","definition":"crate::render","instantiation_key":"crate::render<u8>"}],"candidate_count":1,"has_conflict":false}"#,
+        );
+        assert!(result.is_err());
     }
 
     #[test]

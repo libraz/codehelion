@@ -32,8 +32,19 @@ fn clang_helper_is_usable() -> bool {
 
 /// A scan of `root` in semantic mode, as the report puts it.
 fn scan(root: &std::path::Path) -> Value {
-    let output = cmd()
-        .current_dir(root)
+    scan_with_path(root, None)
+}
+
+/// The same scan with an optional helper process `PATH`. Keeping the compile
+/// command unchanged lets this compare optional helper capability rather than
+/// two different build variants.
+fn scan_with_path(root: &std::path::Path, path: Option<&std::path::Path>) -> Value {
+    let mut command = cmd();
+    command.current_dir(root);
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    let output = command
         .args(["scan", ".", "--mode", "semantic", "--format", "json"])
         .output()
         .expect("run scan");
@@ -77,6 +88,55 @@ fn reports(value: &Value) -> Vec<&Value> {
         .get("partitions")
         .and_then(Value::as_array)
         .map_or_else(|| vec![value], |partitions| partitions.iter().collect())
+}
+
+/// The aspects of a restricted-semantic group which decide whether it exists.
+/// Confidence is intentionally excluded: compiler auxiliary evidence may
+/// adjust it, but must never create or remove a finding.
+fn restricted_finding_set(report: &Value) -> Vec<Value> {
+    let mut findings: Vec<_> = reports(report)
+        .into_iter()
+        .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())
+        .filter(|group| group["clone_type"] == "restricted-semantic")
+        .map(|group| {
+            serde_json::json!({
+                "members": group["members"].as_array().into_iter().flatten().map(|member| {
+                    serde_json::json!({
+                        "file": member["file"],
+                        "start_line": member["start_line"],
+                        "end_line": member["end_line"],
+                        "unit": member["unit"],
+                    })
+                }).collect::<Vec<_>>(),
+                "rules": group["semantic"]["rules"].as_array().into_iter().flatten().map(|rule| {
+                    serde_json::json!({"id": rule["id"], "version": rule["version"]})
+                }).collect::<Vec<_>>(),
+                "graphs": group["semantic"]["graphs"].as_array().into_iter().flatten().map(|graph| {
+                    serde_json::json!({
+                        "language": graph["language"],
+                        "nodes": graph["nodes"],
+                        "edges": graph["edges"],
+                    })
+                }).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    findings.sort_by_key(ToString::to_string);
+    findings
+}
+
+/// Per-group confidence is reported independently of the group identity so a
+/// test can establish that CFG availability reaches the intended score layer.
+fn restricted_confidences(report: &Value) -> Vec<f64> {
+    let mut confidences: Vec<_> = reports(report)
+        .into_iter()
+        .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())
+        .filter(|group| group["clone_type"] == "restricted-semantic")
+        .flat_map(|group| group["semantic"]["rules"].as_array().into_iter().flatten())
+        .filter_map(|rule| rule["confidence"].as_f64())
+        .collect();
+    confidences.sort_by(f64::total_cmp);
+    confidences
 }
 
 /// The scan and the helper have to agree about how a file is named, and nothing
@@ -161,6 +221,14 @@ fn cplusplus_standard_api_calls_form_a_restricted_semantic_finding() {
         .find(|group| {
             group["clone_type"] == "restricted-semantic"
                 && group["semantic"]["rules"][0]["id"] == "sequence-pipeline-v1"
+                && group["members"].as_array().is_some_and(|members| {
+                    let units: Vec<_> = members
+                        .iter()
+                        .filter_map(|member| member["unit"].as_str())
+                        .collect();
+                    units.contains(&"standard_api_names")
+                        && units.contains(&"standard_api_names_again")
+                })
                 && group["semantic"]["graphs"]
                     .as_array()
                     .is_some_and(|graphs| {
@@ -175,21 +243,154 @@ fn cplusplus_standard_api_calls_form_a_restricted_semantic_finding() {
                     })
         })
         .expect("two C++ standard API sequences form a semantic finding");
-    assert_eq!(group["members"].as_array().map(Vec::len), Some(2));
-    for graph in group["semantic"]["graphs"]
-        .as_array()
-        .expect("semantic graphs")
-    {
-        assert_eq!(
-            graph["nodes"]
-                .as_array()
-                .expect("graph nodes")
-                .iter()
-                .map(|node| node["kind"].as_str())
-                .collect::<Vec<_>>(),
-            vec![Some("source"), Some("collect")]
-        );
+    assert!(
+        group["semantic"]["graphs"]
+            .as_array()
+            .is_some_and(|graphs| {
+                graphs
+                    .iter()
+                    .filter(|graph| {
+                        graph["nodes"].as_array().is_some_and(|nodes| {
+                            nodes
+                                .iter()
+                                .map(|node| node["kind"].as_str())
+                                .eq([Some("source"), Some("collect")])
+                                && nodes[0]["attributes"]["api_names"]
+                                    == serde_json::json!(["std::begin"])
+                                && nodes[1]["attributes"]["api_names"]
+                                    == serde_json::json!(["std::push_back"])
+                        })
+                    })
+                    .count()
+                    == 2
+            }),
+        "the original API observations remain compiler-confirmed: {group}"
+    );
+}
+
+#[test]
+fn compiler_cfg_evidence_changes_confidence_without_changing_cplusplus_findings() {
+    if !clang_helper_is_usable() {
+        return;
     }
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
+        .expect("plant fixture");
+
+    let with_cfg = scan(&root);
+    let no_compiler = tempfile::tempdir().expect("empty PATH directory");
+    let without_cfg = scan_with_path(&root, Some(no_compiler.path()));
+
+    assert_eq!(
+        restricted_finding_set(&with_cfg),
+        restricted_finding_set(&without_cfg),
+        "CFG is a confidence-only feature"
+    );
+    assert_ne!(
+        restricted_confidences(&with_cfg),
+        restricted_confidences(&without_cfg),
+        "the fixture's function-local CFGs reach confidence scoring"
+    );
+}
+
+#[test]
+fn cplusplus_plain_range_loops_match_as_closed_collections() {
+    if !clang_helper_is_usable() {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
+        .expect("plant fixture");
+    let report = scan(&root);
+    let group = reports(&report)
+        .into_iter()
+        .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())
+        .find(|group| {
+            group["clone_type"] == "restricted-semantic"
+                && group["semantic"]["rules"][0]["id"] == "sequence-pipeline-v1"
+                && group["members"].as_array().is_some_and(|members| {
+                    let units: Vec<_> = members
+                        .iter()
+                        .filter_map(|member| member["unit"].as_str())
+                        .collect();
+                    units.contains(&"copied")
+                        && units.contains(&"copied_again")
+                        && !units.contains(&"transformed")
+                })
+        })
+        .unwrap_or_else(|| panic!("two direct C++ range loops form a semantic finding: {report}"));
+    assert!(
+        group["semantic"]["graphs"]
+            .as_array()
+            .is_some_and(|graphs| {
+                graphs
+                    .iter()
+                    .filter(|graph| {
+                        graph["nodes"].as_array().is_some_and(|nodes| {
+                            nodes
+                                .iter()
+                                .map(|node| node["kind"].as_str())
+                                .eq([Some("source"), Some("collect")])
+                                && nodes.iter().all(|node| {
+                                    node["attributes"]["api_names"]
+                                        .as_array()
+                                        .is_some_and(Vec::is_empty)
+                                })
+                        })
+                    })
+                    .count()
+                    == 2
+            }),
+        "the two range loops retain the closed source/collect shape: {group}"
+    );
+}
+
+#[test]
+fn cplusplus_plain_range_loops_match_as_closed_reductions() {
+    if !clang_helper_is_usable() {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
+        .expect("plant fixture");
+    let report = scan(&root);
+    let group = reports(&report)
+        .into_iter()
+        .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())
+        .find(|group| {
+            group["clone_type"] == "restricted-semantic"
+                && group["semantic"]["rules"][0]["id"] == "sequence-pipeline-v1"
+                && group["members"].as_array().is_some_and(|members| {
+                    let units: Vec<_> = members
+                        .iter()
+                        .filter_map(|member| member["unit"].as_str())
+                        .collect();
+                    units.len() == 2 && units.contains(&"summed") && units.contains(&"summed_again")
+                })
+        })
+        .unwrap_or_else(|| {
+            panic!("two direct C++ range reductions form a semantic finding: {report}")
+        });
+    assert!(
+        group["semantic"]["graphs"]
+            .as_array()
+            .is_some_and(|graphs| {
+                graphs.iter().all(|graph| {
+                    graph["nodes"].as_array().is_some_and(|nodes| {
+                        nodes
+                            .iter()
+                            .map(|node| node["kind"].as_str())
+                            .eq([Some("source"), Some("reduce")])
+                            && nodes.iter().all(|node| {
+                                node["attributes"]["api_names"]
+                                    .as_array()
+                                    .is_some_and(Vec::is_empty)
+                            })
+                    })
+                })
+            }),
+        "only the closed source/reduce shape is reported: {group}"
+    );
 }
 
 /// A direct standard `lock_guard` is recorded as a matched lexical resource
@@ -565,11 +766,197 @@ fn template_instantiations_survive_header_agreement_and_storage() {
         .find(|stamp| stamp.anchor.expansion.file == "include/templates.hpp")
         .expect("the agreed header template use was retained");
     assert!(stamp.instantiation_key.starts_with("clang-usr-v1:"));
+    assert!(
+        stamp
+            .artifact_match_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("clang-display-v1:"))
+    );
     assert_eq!(stamp.arguments.len(), 1);
     let argument = usize::try_from(stamp.arguments[0]).expect("type index fits");
     assert_eq!(
         header.types[argument].category,
         codehelion_helper::ir::TypeCategory::Integer
+    );
+}
+
+/// A C++ template specialization can still correlate to a stripped object
+/// through its compiler display key and demangled symbol name. Debug locations
+/// are deliberately absent here, so the generic-origin evidence is the only
+/// route that can produce the report entry.
+#[test]
+#[allow(
+    clippy::disallowed_types,
+    clippy::too_many_lines,
+    reason = "the integration fixture is compiled outside the product scan path"
+)]
+fn cpp_template_specializations_correlate_to_a_debugless_object() {
+    if !clang_helper_is_usable() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root =
+        codehelion_fixtures::copy_cpp("template-instantiation", dir.path()).expect("plant fixture");
+    let source_report = scan(&root);
+    let source_run = source_report["run"]["run_id"]
+        .as_i64()
+        .expect("recorded source run");
+    let object = root.join("templates.o");
+    let status = std::process::Command::new("clang++")
+        .current_dir(&root)
+        .args([
+            "-std=c++17",
+            "-g0",
+            "-O0",
+            "-fno-inline",
+            "-I",
+            "include",
+            "-c",
+            "src/templates.cpp",
+            "-o",
+            "templates.o",
+        ])
+        .status()
+        .expect("compile debugless C++ object");
+    assert!(status.success(), "template fixture should compile");
+    let manifest = root.join("artifact-build-variant.json");
+    std::fs::write(
+        &manifest,
+        r#"{"target":"fixture","optimization_level":0,"debug_info":false}"#,
+    )
+    .expect("write artifact build variant");
+    let database = root.join(".codehelion/audit.db");
+    let store = Store::open(&database).expect("open source database");
+    let source_instantiations = store
+        .source_instantiations(source_run)
+        .expect("read source instantiations");
+    let source_units = store.source_units(source_run).expect("read source units");
+    assert!(
+        source_units
+            .iter()
+            .any(|unit| unit.file_path == "include/templates.hpp"
+                && unit.name.as_deref() == Some("twice")),
+        "the source clone fixture must retain the generic definition unit: {source_units:#?}"
+    );
+    assert!(
+        source_instantiations.iter().any(|instantiation| {
+            instantiation
+                .artifact_match_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("clang-display-v1:templates::twice"))
+        }),
+        "{source_instantiations:#?}"
+    );
+    let output = cmd()
+        .current_dir(&root)
+        .args([
+            "artifact",
+            "analyze",
+            object.to_str().expect("object path"),
+            "--format",
+            "json",
+            "--build-variant",
+            manifest.to_str().expect("manifest path"),
+            "--source-run",
+            &source_run.to_string(),
+            "--db",
+            database.to_str().expect("database path"),
+        ])
+        .output()
+        .expect("analyse debugless C++ object");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("artifact JSON report");
+    let origins = report["correlation"]["generic_origins"]
+        .as_array()
+        .expect("generic origins are reported");
+    assert!(
+        origins.iter().any(|origin| {
+            origin["specializations"]
+                .as_array()
+                .is_some_and(|specializations| {
+                    specializations.iter().any(|specialization| {
+                        specialization["instantiation_key"]
+                            .as_str()
+                            .is_some_and(|key| key.starts_with("clang-usr-v1:"))
+                            && specialization["observed_symbol_bytes"]
+                                .as_u64()
+                                .is_some_and(|bytes| bytes > 0)
+                    })
+                })
+        }),
+        "artifact report: {report}\nsource instantiations: {source_instantiations:#?}\nsource units: {source_units:#?}"
+    );
+    assert!(
+        origins.iter().any(|origin| {
+            origin["specializations"]
+                .as_array()
+                .is_some_and(|specializations| {
+                    specializations.iter().any(|specialization| {
+                        specialization["instantiation_key"]
+                            .as_str()
+                            .is_some_and(|key| key.contains("@S@Buffer>"))
+                            && specialization["observed_symbol_bytes"]
+                                .as_u64()
+                                .is_some_and(|bytes| bytes > 0)
+                    })
+                })
+        }),
+        "the emitted class-template member should retain generic-origin evidence: {report}\nsource instantiations: {source_instantiations:#?}\nsource units: {source_units:#?}"
+    );
+    assert_eq!(
+        report["correlation"]["mappings"].as_u64(),
+        Some(6),
+        "two function specializations and four class-member specializations map once each: {report}"
+    );
+    assert_eq!(
+        origins.len(),
+        3,
+        "three template origins should rank separately: {report}"
+    );
+    assert!(
+        origins[0]["observed_symbol_bytes"]
+            .as_u64()
+            .zip(origins[1]["observed_symbol_bytes"].as_u64())
+            .is_some_and(|(higher, lower)| higher > lower),
+        "generic origins must be ordered by observed symbol bytes: {report}"
+    );
+    assert!(
+        origins[1]["observed_symbol_bytes"]
+            .as_u64()
+            .zip(origins[2]["observed_symbol_bytes"].as_u64())
+            .is_some_and(|(higher, lower)| higher > lower),
+        "generic origins must retain their complete byte ordering: {report}"
+    );
+    assert_eq!(origins[0]["instantiations"].as_u64(), Some(3), "{report}");
+    assert_eq!(origins[1]["instantiations"].as_u64(), Some(2), "{report}");
+    assert_eq!(origins[2]["instantiations"].as_u64(), Some(1), "{report}");
+    assert!(
+        origins[0]["specializations"]
+            .as_array()
+            .is_some_and(
+                |specializations| specializations.iter().all(|specialization| {
+                    specialization["instantiation_key"]
+                        .as_str()
+                        .is_some_and(|key| key.contains("@S@Buffer>"))
+                })
+            ),
+        "the higher-ranked origin is the three-specialization Buffer template: {report}"
+    );
+    assert!(
+        origins[2]["specializations"]
+            .as_array()
+            .is_some_and(
+                |specializations| specializations.iter().all(|specialization| {
+                    specialization["instantiation_key"]
+                        .as_str()
+                        .is_some_and(|key| key.contains("@S@BufferForComparison>"))
+                })
+            ),
+        "the lower-ranked origin remains distinct despite sharing member names: {report}"
     );
 }
 

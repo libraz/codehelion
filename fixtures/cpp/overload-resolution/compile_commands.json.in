@@ -25,5 +25,18 @@
       "@DIRECTORY@/src/repeat.cpp"
     ],
     "file": "@DIRECTORY@/src/repeat.cpp"
+  },
+  {
+    "directory": "@DIRECTORY@",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-I@DIRECTORY@/include",
+      "-c",
+      "-o",
+      "CMakeFiles/calls.dir/src/range_loop.cpp.o",
+      "@DIRECTORY@/src/range_loop.cpp"
+    ],
+    "file": "@DIRECTORY@/src/range_loop.cpp"
   }
 ]

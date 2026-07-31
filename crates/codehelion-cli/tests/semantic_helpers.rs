@@ -123,6 +123,97 @@ fn semantic_rust_corpus() -> (tempfile::TempDir, LabelSet) {
     (directory, labels)
 }
 
+/// A hand-labelled Rust corpus for every initially registered same-language
+/// semantic rule. It is intentionally kept separate from the generated
+/// structural corpus because compiler-resolved constructs, rather than text
+/// mutations, define its ground truth.
+fn restricted_semantic_rust_corpus() -> (tempfile::TempDir, LabelSet) {
+    let directory = tempfile::tempdir().expect("temporary restricted semantic corpus");
+    let root = directory.path();
+    let source = repository_root().join("corpus/synthetic/rust-restricted-semantic");
+    std::fs::create_dir_all(root.join("src")).expect("create corpus source directory");
+    for relative in ["Cargo.toml", "src/lib.rs", "labels.json"] {
+        std::fs::copy(source.join(relative), root.join(relative)).unwrap_or_else(|error| {
+            panic!("copying restricted semantic corpus {relative}: {error}")
+        });
+    }
+    let labels = LabelSet::from_json(
+        &std::fs::read_to_string(root.join("labels.json"))
+            .expect("read restricted semantic corpus labels"),
+    )
+    .expect("parse restricted semantic corpus labels");
+    (directory, labels)
+}
+
+/// A hand-labelled C++ corpus for the closed standard-library serialization
+/// rule. The compilation database supplies the parse settings without ever
+/// executing a build command.
+fn restricted_semantic_cpp_corpus() -> (tempfile::TempDir, LabelSet) {
+    let directory = tempfile::tempdir().expect("temporary C++ restricted semantic corpus");
+    let root = directory.path();
+    let source = repository_root().join("corpus/synthetic/cpp-restricted-semantic");
+    std::fs::create_dir_all(root.join("cpp")).expect("create corpus C++ source directory");
+    std::fs::copy(source.join("cpp/direct.cpp"), root.join("cpp/direct.cpp"))
+        .expect("copy restricted C++ semantic corpus source");
+    let labels_text =
+        std::fs::read_to_string(source.join("labels.json")).expect("read C++ corpus labels");
+    let labels = LabelSet::from_json(&labels_text).expect("parse C++ corpus labels");
+    let mut arguments = vec![
+        "clang++".to_owned(),
+        "-std=c++17".to_owned(),
+        "-c".to_owned(),
+        "cpp/direct.cpp".to_owned(),
+    ];
+    arguments.extend(cpp_standard_library_arguments());
+    let database = serde_json::json!([{
+        "directory": root.display().to_string(),
+        "file": "cpp/direct.cpp",
+        "arguments": arguments,
+    }]);
+    std::fs::write(
+        root.join("compile_commands.json"),
+        serde_json::to_string(&database).expect("compile database is JSON"),
+    )
+    .expect("write C++ corpus compilation database");
+    (directory, labels)
+}
+
+/// A hand-labelled C++ corpus for the direct range-for forms admitted by the
+/// sequence rule. The compilation database supplies parse settings only; the
+/// scanner neither builds nor executes this source.
+fn restricted_semantic_cpp_loop_corpus() -> (tempfile::TempDir, LabelSet) {
+    let directory = tempfile::tempdir().expect("temporary C++ loop semantic corpus");
+    let root = directory.path();
+    let source = repository_root().join("corpus/synthetic/cpp-loop-restricted-semantic");
+    std::fs::create_dir_all(root.join("cpp")).expect("create corpus C++ source directory");
+    std::fs::copy(
+        source.join("cpp/range_loop.cpp"),
+        root.join("cpp/range_loop.cpp"),
+    )
+    .expect("copy restricted C++ loop corpus source");
+    let labels_text =
+        std::fs::read_to_string(source.join("labels.json")).expect("read C++ loop corpus labels");
+    let labels = LabelSet::from_json(&labels_text).expect("parse C++ loop corpus labels");
+    let mut arguments = vec![
+        "clang++".to_owned(),
+        "-std=c++17".to_owned(),
+        "-c".to_owned(),
+        "cpp/range_loop.cpp".to_owned(),
+    ];
+    arguments.extend(cpp_standard_library_arguments());
+    let database = serde_json::json!([{
+        "directory": root.display().to_string(),
+        "file": "cpp/range_loop.cpp",
+        "arguments": arguments,
+    }]);
+    std::fs::write(
+        root.join("compile_commands.json"),
+        serde_json::to_string(&database).expect("compile database is JSON"),
+    )
+    .expect("write C++ loop corpus compilation database");
+    (directory, labels)
+}
+
 fn rust_fixture() -> tempfile::TempDir {
     let directory = tempfile::tempdir().expect("temporary Rust project");
     let root = directory.path();
@@ -160,6 +251,38 @@ fn rust_pipeline_fixture() -> tempfile::TempDir {
     directory
 }
 
+/// A C++ standard-library serialization pair and a nearby non-pair. The
+/// compile database is written only for the helper; nothing in this fixture is
+/// compiled or run by the scan.
+fn cpp_serialization_fixture() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("temporary C++ serialization project");
+    let root = directory.path();
+    std::fs::create_dir_all(root.join("cpp")).expect("create C++ source directory");
+    std::fs::write(
+        root.join("cpp/direct.cpp"),
+        "#include <string>\n\nunsigned long long first(unsigned long long value) {\n    const auto text = std::to_string(value);\n    return std::stoull(text);\n}\n\nunsigned long long second(unsigned long long value) {\n    const auto text = std::to_string(value);\n    return std::stoull(text);\n}\n\nstd::size_t formats_twice(unsigned long long value) {\n    return (std::to_string(value) + std::to_string(value)).size();\n}\n",
+    )
+    .expect("write C++ serialization source");
+    let mut arguments = vec![
+        "clang++".to_owned(),
+        "-std=c++17".to_owned(),
+        "-c".to_owned(),
+        "cpp/direct.cpp".to_owned(),
+    ];
+    arguments.extend(cpp_standard_library_arguments());
+    let database = serde_json::json!([{
+        "directory": root.display().to_string(),
+        "file": "cpp/direct.cpp",
+        "arguments": arguments
+    }]);
+    std::fs::write(
+        root.join("compile_commands.json"),
+        serde_json::to_string(&database).expect("compile database is JSON"),
+    )
+    .expect("write compilation database");
+    directory
+}
+
 /// Two registered iterator pipelines embedded in larger functions. The
 /// presence checks deliberately sit outside the sequence rule's vocabulary,
 /// so a semantic finding must report only the pipeline source range.
@@ -193,7 +316,7 @@ fn rust_loop_pipeline_fixture() -> tempfile::TempDir {
     .expect("write Rust manifest");
     std::fs::write(
         root.join("src/lib.rs"),
-        "pub fn explicit(values: Vec<u64>) -> Vec<u64> {\n    let mut collected = Vec::new();\n    for value in values {\n        collected.push(value);\n    }\n    collected\n}\n\npub fn iterator(values: Vec<u64>) -> Vec<u64> {\n    values.iter().copied().collect()\n}\n\npub fn transformed(values: Vec<u64>) -> Vec<u64> {\n    let mut collected = Vec::new();\n    for value in values {\n        collected.push(value.saturating_add(1));\n    }\n    collected\n}\n",
+        "pub fn explicit<'a>(values: &'a [u64]) -> Vec<&'a u64> {\n    let mut collected = Vec::new();\n    for value in values {\n        collected.push(value);\n    }\n    collected\n}\n\npub fn iterator<'a>(values: &'a [u64]) -> Vec<&'a u64> {\n    values.iter().collect()\n}\n",
     )
     .expect("write Rust source");
     directory
@@ -278,9 +401,9 @@ fn rust_direct_propagation_fixture() -> tempfile::TempDir {
     directory
 }
 
-/// Two direct standard-`Option` presence checks and one compound negative
-/// control. The normalizer must not flatten the compound condition into the
-/// same closed validation operation.
+/// Direct standard-`Option` presence checks, a match, and two narrow early
+/// unit-return guards. Compound conditions and non-returning/value-returning
+/// negative branches remain outside the closed validation operation.
 fn rust_optional_validation_fixture() -> tempfile::TempDir {
     let directory = tempfile::tempdir().expect("temporary optional validation project");
     let root = directory.path();
@@ -292,7 +415,7 @@ fn rust_optional_validation_fixture() -> tempfile::TempDir {
     .expect("write Rust manifest");
     std::fs::write(
         root.join("src/lib.rs"),
-        "pub fn first(value: Option<u64>) -> bool {\n    if value.is_some() {\n        true\n    } else {\n        false\n    }\n}\n\npub fn second(value: Option<u64>) -> bool {\n    if value.is_some() {\n        false\n    } else {\n        true\n    }\n}\n\npub fn matched(value: Option<u64>) -> bool {\n    match value {\n        Some(_) => true,\n        None => false,\n    }\n}\n\npub fn compound(value: Option<u64>, keep: bool) -> bool {\n    if value.is_some() && keep {\n        true\n    } else {\n        false\n    }\n}\n",
+        "pub fn first(value: Option<u64>) -> bool {\n    if value.is_some() {\n        true\n    } else {\n        false\n    }\n}\n\npub fn second(value: Option<u64>) -> bool {\n    if value.is_some() {\n        false\n    } else {\n        true\n    }\n}\n\npub fn matched(value: Option<u64>) -> bool {\n    match value {\n        Some(_) => true,\n        None => false,\n    }\n}\n\npub fn early_first(value: Option<u64>) {\n    if !value.is_some() {\n        return;\n    }\n    let _ = value;\n}\n\npub fn early_second(value: Option<u64>) {\n    if !value.is_some() {\n        return;\n    }\n    let _ = value;\n}\n\npub fn compound(value: Option<u64>, keep: bool) -> bool {\n    if value.is_some() && keep {\n        true\n    } else {\n        false\n    }\n}\n\npub fn negative_nonreturn(value: Option<u64>) {\n    if !value.is_some() {\n        let _ = value;\n    }\n}\n\npub fn negative_value_return(value: Option<u64>) -> Option<u64> {\n    if !value.is_some() {\n        return None;\n    }\n    value\n}\n",
     )
     .expect("write Rust source");
     directory
@@ -347,6 +470,40 @@ fn cross_language_pipeline_fixture() -> tempfile::TempDir {
     directory
 }
 
+/// Rust and C++ direct loops whose correspondence is established by the
+/// compiler-confirmed construct form, not an inferred or invented API name.
+fn cross_language_direct_loop_fixture() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("temporary cross-language loop project");
+    let root = directory.path();
+    let corpus = repository_root().join("corpus/synthetic/rust-cpp-loop-semantic");
+    std::fs::create_dir_all(root.join("src")).expect("create Rust source directory");
+    std::fs::create_dir_all(root.join("cpp")).expect("create C++ source directory");
+    for relative in [
+        "Cargo.toml",
+        "src/lib.rs",
+        "cpp/range_loop.cpp",
+        "labels.json",
+    ] {
+        std::fs::copy(corpus.join(relative), root.join(relative)).unwrap_or_else(|error| {
+            panic!("copying cross-language loop corpus {relative}: {error}")
+        });
+    }
+    let mut arguments = vec!["clang++".to_string(), "-std=c++17".to_string()];
+    arguments.extend(cpp_standard_library_arguments());
+    arguments.extend(["-c".to_string(), "cpp/range_loop.cpp".to_string()]);
+    let database = serde_json::json!([{
+        "directory": root.display().to_string(),
+        "file": "cpp/range_loop.cpp",
+        "arguments": arguments,
+    }]);
+    std::fs::write(
+        root.join("compile_commands.json"),
+        serde_json::to_string(&database).expect("compile database is JSON"),
+    )
+    .expect("write compilation database");
+    directory
+}
+
 /// A Rust `Result` adapter and the closed C++23 `expected` identity-return
 /// counterpart. Their only cross-language relationship is the registered
 /// propagation correspondence; the C++ function has no API-call sequence to
@@ -354,23 +511,13 @@ fn cross_language_pipeline_fixture() -> tempfile::TempDir {
 fn cross_language_result_expected_fixture() -> tempfile::TempDir {
     let directory = tempfile::tempdir().expect("temporary result/expected project");
     let root = directory.path();
+    let corpus = repository_root().join("corpus/synthetic/rust-cpp-result-expected-semantic");
     std::fs::create_dir_all(root.join("src")).expect("create Rust source directory");
     std::fs::create_dir_all(root.join("cpp")).expect("create C++ source directory");
-    std::fs::write(
-        root.join("Cargo.toml"),
-        "[package]\nname = \"semantic-result-expected-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
-    )
-    .expect("write Rust manifest");
-    std::fs::write(
-        root.join("src/lib.rs"),
-        "pub fn direct(value: Result<u64, ()>) -> Result<u64, ()> {\n    Ok(value?)\n}\n\npub fn transformed(value: Result<u64, ()>) -> Result<u64, ()> {\n    Ok(value?.saturating_add(1))\n}\n\npub fn present(value: Result<u64, ()>) -> bool {\n    if value.is_ok() { true } else { false }\n}\n\npub fn present_with_flag(value: Result<u64, ()>, keep: bool) -> bool {\n    if value.is_ok() && keep { true } else { false }\n}\n",
-    )
-    .expect("write Rust source");
-    std::fs::write(
-        root.join("cpp/direct.cpp"),
-        "#include <expected>\n\nstd::expected<unsigned long, int> direct(std::expected<unsigned long, int> value) {\n  return value;\n}\n\nstd::expected<unsigned long, int> transformed(std::expected<unsigned long, int> value) {\n  return std::expected<unsigned long, int>(value.value_or(0) + 1);\n}\n\nbool present(std::expected<unsigned long, int> expected_value) {\n  if (expected_value.has_value()) return true;\n  return false;\n}\n\nbool present_with_flag(std::expected<unsigned long, int> expected_value, bool keep) {\n  if (expected_value.has_value() && keep) return true;\n  return false;\n}\n",
-    )
-    .expect("write C++ source");
+    for relative in ["Cargo.toml", "src/lib.rs", "cpp/direct.cpp", "labels.json"] {
+        std::fs::copy(corpus.join(relative), root.join(relative))
+            .unwrap_or_else(|error| panic!("copying result/expected corpus {relative}: {error}"));
+    }
     let mut arguments = vec!["clang++".to_string(), "-std=c++23".to_string()];
     arguments.extend(cpp_standard_library_arguments());
     arguments.extend(["-c".to_string(), "cpp/direct.cpp".to_string()]);
@@ -450,15 +597,13 @@ fn semantic_scan_records_registered_pipeline_evidence() {
         .as_f64()
         .expect("semantic confidence");
     assert!(
-        (confidence - 0.7).abs() < f64::EPSILON,
-        "a fully registered sequence pipeline should retain the rule confidence: {confidence}"
+        (confidence - 0.735).abs() < f64::EPSILON,
+        "matching compiler-confirmed filter/map flow should corroborate the rule: {confidence}"
     );
 
     let run_id = report["run"]["run_id"].as_i64().expect("run id");
-    let stored = Store::open(&root.join(".codehelion/audit.db"))
-        .expect("open audit database")
-        .run_groups(run_id)
-        .expect("read groups");
+    let store = Store::open(&root.join(".codehelion/audit.db")).expect("open audit database");
+    let stored = store.run_groups(run_id).expect("read groups");
     let semantic = stored
         .iter()
         .find_map(|group| group.semantic.as_ref())
@@ -467,6 +612,187 @@ fn semantic_scan_records_registered_pipeline_evidence() {
     assert!((semantic.rule_confidence - confidence).abs() < f64::EPSILON);
     assert_eq!(semantic.graphs.len(), 2);
     assert_eq!(semantic.node_mappings.len(), 4);
+    let stored_ir = store.run_compiler_units(run_id).expect("read compiler IR");
+    let data_flow = stored_ir
+        .iter()
+        .find_map(|unit| match &unit.outcome {
+            CompilerOutcome::Analyzed(ir) => Some(&ir.data_flow),
+            CompilerOutcome::Unavailable { .. } => None,
+        })
+        .expect("stored Rust compiler IR");
+    assert!(data_flow.computed);
+    assert_eq!(data_flow.flows.len(), 2, "{data_flow:?}");
+}
+
+/// C++ serialization is admitted only as its exact resolved conversion pair.
+#[test]
+#[ignore = "requires codehelion-backend-clang and libclang"]
+fn semantic_scan_matches_only_closed_cpp_serialization_round_trips() {
+    let fixture = cpp_serialization_fixture();
+    let report = scan(fixture.path());
+    let group = report["groups"]
+        .as_array()
+        .expect("groups array")
+        .iter()
+        .find(|group| {
+            group["clone_type"] == "restricted-semantic"
+                && group["semantic"]["rules"][0]["id"] == "cpp-serialization-round-trip-v1"
+        })
+        .expect("closed C++ serialization pair");
+    assert_eq!(group["members"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        group["semantic"]["graphs"][0]["nodes"]
+            .as_array()
+            .expect("serialization graph nodes")
+            .iter()
+            .map(|node| node["kind"].as_str())
+            .collect::<Vec<_>>(),
+        vec![Some("map"), Some("map")]
+    );
+}
+
+/// Every same-language rule starts enabled only because a labelled corpus
+/// exercises its positive and deliberately close negative forms through the
+/// real helper process. The assertion is a regression check, not a CI score
+/// gate or a claim that this compact corpus estimates field precision.
+#[test]
+#[ignore = "requires codehelion-backend-rust"]
+fn semantic_rules_have_closed_corpus_evidence() {
+    let (corpus, labels) = restricted_semantic_rust_corpus();
+    let report = scan(corpus.path());
+    let report_json = serde_json::to_string(&report).expect("report remains serializable");
+    let (detected, lines) =
+        detected::from_report_json(&report_json).expect("semantic report is measurable");
+    let by_rule = evaluate_by_rule(&detected, &labels, lines, DEFAULT_MATCH_THRESHOLD, 10);
+
+    for rule_id in [
+        "sequence-pipeline-v1",
+        "result-direct-propagation-v1",
+        "option-direct-propagation-v1",
+        "optional-validation-v1",
+        "result-validation-v1",
+        "resource-lifecycle-v1",
+        "rust-serialization-round-trip-v1",
+    ] {
+        let metrics = &by_rule[rule_id];
+        assert!(
+            (metrics.recall_overall - 1.0).abs() < f64::EPSILON,
+            "{rule_id}: {metrics:?}"
+        );
+        assert!(
+            (metrics.precision_overall - 1.0).abs() < f64::EPSILON,
+            "{rule_id}: {metrics:?}"
+        );
+        assert_eq!(metrics.non_clone_hits, 0, "{rule_id}: {metrics:?}");
+    }
+}
+
+/// The C++ serialization rule is enabled only after the Clang helper resolves
+/// both conversion calls in its labelled positive and negative corpus forms.
+#[test]
+#[ignore = "requires codehelion-backend-clang and libclang"]
+fn cpp_serialization_rule_has_closed_corpus_evidence() {
+    let (corpus, labels) = restricted_semantic_cpp_corpus();
+    let report = scan(corpus.path());
+    let report_json = serde_json::to_string(&report).expect("report remains serializable");
+    let (detected, lines) =
+        detected::from_report_json(&report_json).expect("semantic report is measurable");
+    let metrics = &evaluate_by_rule(&detected, &labels, lines, DEFAULT_MATCH_THRESHOLD, 10)["cpp-serialization-round-trip-v1"];
+    assert!(
+        (metrics.recall_overall - 1.0).abs() < f64::EPSILON,
+        "{metrics:?}"
+    );
+    assert!(
+        (metrics.precision_overall - 1.0).abs() < f64::EPSILON,
+        "{metrics:?}"
+    );
+    assert_eq!(metrics.non_clone_hits, 0, "{metrics:?}");
+}
+
+/// The C++ direct range-for collection and reduction forms are enabled only
+/// after their real-helper corpus accepts both registered pairs and rejects
+/// transformed near misses.
+#[test]
+#[ignore = "requires codehelion-backend-clang and libclang"]
+fn cpp_plain_range_loop_forms_have_closed_corpus_evidence() {
+    let (corpus, labels) = restricted_semantic_cpp_loop_corpus();
+    let report = scan(corpus.path());
+    let report_json = serde_json::to_string(&report).expect("report remains serializable");
+    let (detected, lines) =
+        detected::from_report_json(&report_json).expect("semantic report is measurable");
+    let metrics = &evaluate_by_rule(&detected, &labels, lines, DEFAULT_MATCH_THRESHOLD, 10)["sequence-pipeline-v1"];
+    assert!(
+        (metrics.recall_overall - 1.0).abs() < f64::EPSILON,
+        "{metrics:?}"
+    );
+    assert!(
+        (metrics.precision_overall - 1.0).abs() < f64::EPSILON,
+        "{metrics:?}"
+    );
+    assert_eq!(metrics.non_clone_hits, 0, "{metrics:?}");
+}
+
+/// Repeating a real-helper scan preserves the direct range-for findings and
+/// their rule-specific measurement.
+#[test]
+#[ignore = "requires codehelion-backend-clang and libclang"]
+fn cpp_plain_range_loop_metrics_are_stable_across_fresh_scans() {
+    let (corpus, labels) = restricted_semantic_cpp_loop_corpus();
+    let measure = |report: &Value| {
+        let report_json = serde_json::to_string(report).expect("report remains serializable");
+        let (detected, lines) =
+            detected::from_report_json(&report_json).expect("semantic report is measurable");
+        let metrics = evaluate_by_rule(&detected, &labels, lines, DEFAULT_MATCH_THRESHOLD, 10);
+        (detected, metrics)
+    };
+    let first = scan(corpus.path());
+    let second = scan(corpus.path());
+    assert_eq!(measure(&first), measure(&second));
+}
+
+/// Fresh C++ scans retain the same closed-rule findings and measurements.
+#[test]
+#[ignore = "requires codehelion-backend-clang and libclang"]
+fn cpp_serialization_rule_metrics_are_stable_across_fresh_scans() {
+    let (corpus, labels) = restricted_semantic_cpp_corpus();
+    let measure = |report: &Value| {
+        let report_json = serde_json::to_string(report).expect("report remains serializable");
+        let (detected, lines) =
+            detected::from_report_json(&report_json).expect("semantic report is measurable");
+        let metrics = evaluate_by_rule(&detected, &labels, lines, DEFAULT_MATCH_THRESHOLD, 10);
+        (detected, metrics)
+    };
+    let first = scan(corpus.path());
+    let second = scan(corpus.path());
+    assert_eq!(measure(&first), measure(&second));
+}
+
+/// Repeating a real-helper scan of the same labelled semantic corpus must
+/// preserve both the reported findings and every per-rule metric. This keeps
+/// result stability and the per-kLOC rates in the same regression contract as
+/// the closed positive and negative examples.
+#[test]
+#[ignore = "requires codehelion-backend-rust"]
+fn semantic_rule_metrics_are_stable_across_fresh_scans() {
+    let (corpus, labels) = restricted_semantic_rust_corpus();
+    let first = scan(corpus.path());
+    let second = scan(corpus.path());
+    let measure = |report: &Value| {
+        let report_json = serde_json::to_string(report).expect("report remains serializable");
+        let (detected, lines) =
+            detected::from_report_json(&report_json).expect("semantic report is measurable");
+        let metrics = evaluate_by_rule(&detected, &labels, lines, DEFAULT_MATCH_THRESHOLD, 10);
+        (detected, metrics)
+    };
+    let (first_detected, first_metrics) = measure(&first);
+    let (second_detected, second_metrics) = measure(&second);
+    assert_eq!(first_detected, second_detected);
+    assert_eq!(first_metrics, second_metrics);
+    assert!(first_metrics.values().all(|metrics| {
+        metrics.findings_per_kloc > 0.0
+            && metrics.false_positives_per_kloc == 0.0
+            && metrics.non_clone_hits == 0
+    }));
 }
 
 /// A registered sequence embedded beside unrelated registered constructs is a
@@ -511,7 +837,7 @@ fn semantic_scan_reports_partial_pipeline_source_ranges() {
 }
 
 /// A plain explicit collection loop is comparable to the registered iterator
-/// pipeline, while a transformed loop remains outside this first loop rule.
+/// collection pipeline when both represent only source and collection.
 #[test]
 #[ignore = "requires codehelion-backend-rust"]
 fn semantic_scan_matches_a_plain_collection_loop_to_an_iterator_pipeline() {
@@ -526,7 +852,9 @@ fn semantic_scan_matches_a_plain_collection_loop_to_an_iterator_pipeline() {
                 && group["semantic"]["rules"][0]["id"] == "sequence-pipeline-v1"
                 && group["members"].as_array().map(Vec::len) == Some(2)
         })
-        .expect("plain loop and iterator pipeline form a semantic finding");
+        .unwrap_or_else(|| {
+            panic!("plain loop and iterator pipeline form a semantic finding: {report}")
+        });
     for graph in group["semantic"]["graphs"]
         .as_array()
         .expect("semantic graphs")
@@ -562,6 +890,12 @@ fn semantic_scan_matches_direct_standard_file_lifetimes() {
         .unwrap_or_else(|| panic!("direct standard file lifetimes form a finding: {report}"));
     assert_eq!(group["members"].as_array().map(Vec::len), Some(3));
     assert_eq!(group["split_pair"], false);
+    assert!(
+        group["semantic"]["rules"][0]["confidence"]
+            .as_f64()
+            .is_some_and(|confidence| (confidence - 0.4725).abs() < f64::EPSILON),
+        "{group:#}"
+    );
     assert_eq!(
         group["semantic"]["node_mappings"].as_array().map(Vec::len),
         Some(4),
@@ -763,9 +1097,9 @@ fn semantic_scan_matches_only_direct_option_propagation_forms() {
     }));
 }
 
-/// Direct standard `Option::is_some` and a standard `Option` match have the
-/// same closed validation evidence. A compound condition remains outside the
-/// vocabulary rather than being partially reconstructed.
+/// Direct standard `Option::is_some`, a standard `Option` match, and the
+/// narrow early unit-return guard have the same closed validation evidence.
+/// Compound and other inverted conditions remain outside the vocabulary.
 #[test]
 #[ignore = "requires codehelion-backend-rust"]
 fn semantic_scan_matches_only_direct_option_presence_checks() {
@@ -779,7 +1113,7 @@ fn semantic_scan_matches_only_direct_option_presence_checks() {
                 && group["semantic"]["rules"][0]["id"] == "optional-validation-v1"
         })
         .unwrap_or_else(|| panic!("direct optional checks form a semantic finding: {report}"));
-    assert_eq!(group["members"].as_array().map(Vec::len), Some(3));
+    assert_eq!(group["members"].as_array().map(Vec::len), Some(5));
     for graph in group["semantic"]["graphs"]
         .as_array()
         .expect("semantic graphs")
@@ -798,7 +1132,7 @@ fn semantic_scan_matches_only_direct_option_presence_checks() {
     }
     assert!(groups.iter().all(|group| {
         group["semantic"]["rules"][0]["id"] != "optional-validation-v1"
-            || group["members"].as_array().map(Vec::len) != Some(4)
+            || group["members"].as_array().map(Vec::len) != Some(6)
     }));
 }
 
@@ -858,7 +1192,7 @@ fn semantic_cross_language_result_expected_uses_closed_propagation_evidence() {
         .iter()
         .find(|group| {
             group["rule_id"] == "cross-language-result-direct-propagation-v1"
-                && group["api_correspondence_ids"]
+                && group["correspondence_ids"]
                     == serde_json::json!(["result-expected-direct-propagation-v1"])
         })
         .unwrap_or_else(|| panic!("closed Result/expected correspondence: {comparison:?}"));
@@ -879,6 +1213,41 @@ fn semantic_cross_language_result_expected_uses_closed_propagation_evidence() {
                 || other["members"].as_array().map(Vec::len) != Some(3)
         })
     }));
+
+    let labels = LabelSet::from_json(
+        &std::fs::read_to_string(fixture.path().join("labels.json"))
+            .expect("read result/expected corpus labels"),
+    )
+    .expect("parse result/expected corpus labels");
+    let (detected, lines) = detected::from_cross_language_comparison_json(
+        &serde_json::to_string(&report).expect("comparison remains serializable"),
+    )
+    .expect("comparison is measurable");
+    let metrics = evaluate(&detected, &labels, lines, DEFAULT_MATCH_THRESHOLD, 10);
+    assert!(
+        (metrics.recall_overall - 1.0).abs() < f64::EPSILON,
+        "{metrics:?}\nlabels: {labels:?}\ndetected: {detected:?}"
+    );
+    assert!(
+        (metrics.precision_overall - 1.0).abs() < f64::EPSILON,
+        "{metrics:?}"
+    );
+    assert_eq!(metrics.non_clone_hits, 0, "{metrics:?}");
+    let by_rule = evaluate_by_rule(&detected, &labels, lines, DEFAULT_MATCH_THRESHOLD, 10);
+    for rule_id in [
+        "cross-language-result-direct-propagation-v1",
+        "cross-language-result-validation-v1",
+    ] {
+        let rule_metrics = &by_rule[rule_id];
+        assert!(
+            (rule_metrics.recall_overall - 1.0).abs() < f64::EPSILON,
+            "{rule_id}: {rule_metrics:?}"
+        );
+        assert!(
+            (rule_metrics.precision_overall - 1.0).abs() < f64::EPSILON,
+            "{rule_id}: {rule_metrics:?}"
+        );
+    }
 }
 
 /// A presence branch is compared independently from propagation: the helpers
@@ -898,7 +1267,7 @@ fn semantic_cross_language_result_expected_uses_closed_validation_evidence() {
         .iter()
         .find(|group| {
             group["rule_id"] == "cross-language-result-validation-v1"
-                && group["api_correspondence_ids"]
+                && group["correspondence_ids"]
                     == serde_json::json!(["result-expected-validation-v1"])
         })
         .unwrap_or_else(|| panic!("closed Result/expected validation: {comparison:?}"));
@@ -1021,13 +1390,11 @@ fn semantic_cross_language_comparison_records_closed_api_evidence() {
         .iter()
         .find(|group| {
             group["rule_id"] == "cross-language-sequence-pipeline-v1"
-                && group["api_correspondence_ids"]
-                    .as_array()
-                    .is_some_and(|ids| {
-                        ids.iter()
-                            .map(Value::as_str)
-                            .eq([Some("sequence-source-v1"), Some("sequence-collect-v1")])
-                    })
+                && group["correspondence_ids"].as_array().is_some_and(|ids| {
+                    ids.iter()
+                        .map(Value::as_str)
+                        .eq([Some("sequence-source-v1"), Some("sequence-collect-v1")])
+                })
         })
         .unwrap_or_else(|| panic!("closed Rust/C++ pipeline correspondence: {comparison}"));
     assert!(
@@ -1054,7 +1421,7 @@ fn semantic_cross_language_comparison_records_closed_api_evidence() {
         .iter()
         .find(|group| {
             group["rule_id"] == "cross-language-optional-validation-v1"
-                && group["api_correspondence_ids"]
+                && group["correspondence_ids"]
                     == serde_json::json!(["optional-presence-validation-v1"])
         })
         .unwrap_or_else(|| panic!("closed Rust/C++ optional correspondence: {comparison}"));
@@ -1121,6 +1488,60 @@ fn semantic_cross_language_comparison_records_closed_api_evidence() {
             .expect("count members"),
         4
     );
+}
+
+/// Direct loop correspondence stays cross-language only when both compiler
+/// helpers establish the narrow, untransformed construct form.
+#[test]
+#[ignore = "requires codehelion-backend-rust, codehelion-backend-clang, and libclang"]
+fn semantic_cross_language_direct_loops_have_closed_construct_evidence() {
+    let fixture = cross_language_direct_loop_fixture();
+    let root = fixture.path();
+    let compared = scan_comparing_languages(root);
+    let groups = compared["cross_language_comparison"]["groups"]
+        .as_array()
+        .expect("cross-language groups");
+    let direct_groups: Vec<_> = groups
+        .iter()
+        .filter(|group| {
+            group["rule_id"] == "cross-language-sequence-pipeline-v1"
+                && group["correspondence_ids"] == serde_json::json!(["direct-loop-sequence-v1"])
+        })
+        .collect();
+    assert_eq!(direct_groups.len(), 2, "{groups:?}");
+    assert!(direct_groups.iter().all(|group| {
+        group["members"].as_array().is_some_and(|members| {
+            members.iter().all(|member| {
+                member["graph"]["nodes"].as_array().is_some_and(|nodes| {
+                    nodes.len() == 2
+                        && nodes[0]["kind"] == "source"
+                        && matches!(nodes[1]["kind"].as_str(), Some("collect" | "reduce"))
+                        && nodes
+                            .iter()
+                            .all(|node| node["attributes"]["api_names"] == serde_json::json!([]))
+                })
+            })
+        })
+    }));
+
+    let labels = LabelSet::from_json(
+        &std::fs::read_to_string(root.join("labels.json")).expect("read corpus labels"),
+    )
+    .expect("parse cross-language loop labels");
+    let (detected, lines) = detected::from_cross_language_comparison_json(
+        &serde_json::to_string(&compared).expect("comparison remains serializable"),
+    )
+    .expect("comparison is measurable");
+    let metrics = &evaluate_by_rule(&detected, &labels, lines, DEFAULT_MATCH_THRESHOLD, 10)["cross-language-sequence-pipeline-v1"];
+    assert!(
+        (metrics.recall_overall - 1.0).abs() < f64::EPSILON,
+        "{metrics:?}"
+    );
+    assert!(
+        (metrics.precision_overall - 1.0).abs() < f64::EPSILON,
+        "{metrics:?}"
+    );
+    assert_eq!(metrics.non_clone_hits, 0, "{metrics:?}");
 }
 
 /// A helper re-run, rather than a reused snapshot, must return the same IR

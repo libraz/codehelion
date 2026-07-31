@@ -6,16 +6,18 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
-Rust / C / C++ のコードベースを対象に重複ロジックを検出し、その変化を追跡する、
-完全ローカル実行のコマンドラインツールです。ソースコードや解析結果を外部に送信せず、
+Rust / C / C++ のコードベースを対象に重複ロジックを検出する、完全ローカル実行の
+コマンドラインツールです。ソースコードや解析結果を外部に送信せず、
 ネットワークアクセスを必要とせず、既定では解析対象のコードを実行しません。
 
-現行リリースはビルド不要の解析モードを 2 つと、任意のコンパイラ補助モードを提供します。**Fast** はトークンレベルの
+ビルド不要の解析モードを 2 つと、任意のコンパイラ補助モードを提供します。**Fast** はトークンレベルの
 Type-1（完全一致）・Type-2（識別子リネーム・リテラル変更）検出で、数十万行を数秒、
 数百万行を数分でスキャンします。**Structural** は構文構造ベースの Type-3 検出を加え、文の追加・削除・
 変更を伴うクローンを検出したうえで、判定根拠となった次元別 similarity を報告します。
 **Semantic** は別途導入する Rust / Clang helper を使い、main CLI へ compiler API をリンクせずに
-コンパイラが解決した型・名前の情報を取り込みます。任意のコンパイル成果物解析は後続リリースで追加します。
+コンパイラが解決した型・名前の情報を取り込みます。任意の `artifact` コマンドは WASM、ELF、Mach-O、
+PE/COFF、静的アーカイブをローカルで読み取り、観測済みサイズ、重複したコード・データ、retained size、
+ソース位置の根拠を報告します。成果物をロードまたは実行することはありません。
 
 ## 特長
 
@@ -31,6 +33,9 @@ Type-1（完全一致）・Type-2（識別子リネーム・リテラル変更�
   測定なしとして報告します。
 - **ローカルの現行スキャン保存** — 最新のスキャンは SQLite データベースへ保存されます。
   text / JSON / SARIF レポートはその現行スナップショットの export です。
+- **ローカルの成果物検査** — `artifact analyze` と `artifact compare` は対応するバイナリ形式を
+  実行せずに読み取ります。デバッグ情報は ELF build ID、Mach-O UUID、または PE CodeView/PDB identity が
+  一致した場合にだけ受け入れます。
 - **分離された優先度指標** — clone confidence・maintenance risk・refactoring difficulty
   を並べて報告し、不透明な単一スコアで順序を決めません。各指標は導出に使った
   入力値とともに表示されます。
@@ -77,7 +82,15 @@ codehelion baseline           # 既知 finding の baseline を管理
 codehelion cache status       # ローカルデータベースの場所とサイズ
 codehelion config init        # コメント付き codehelion.toml テンプレートを生成
 codehelion doctor             # 利用可能な解析コンポーネントを表示
+codehelion artifact analyze path/to/binary
+codehelion artifact compare before/binary after/binary
 ```
+
+成果物検査はローカルのバイト列を parse するだけで、対象プログラムを実行しません。既定では
+512 MiB を超える入力を拒否し、30 秒の期限を持つ worker で parse します。意図的に調整する
+場合は `--max-bytes` と `--timeout-seconds` を指定できます。Linux では
+`--max-memory-bytes <bytes>` により worker の仮想メモリ上限も強制します。ほかの OS では
+このオプションを黙って無視せず、エラーとして返します。
 
 検出結果はクローングループにまとめられ、グループとメンバーそれぞれが安定 ID を
 持ちます。この ID で suppression・baseline 登録・`explain` での後日参照ができます。

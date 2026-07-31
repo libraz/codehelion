@@ -328,6 +328,7 @@ fn collect_pdb_frames(
             frames.push((
                 u64::from(rva.0),
                 codehelion_artifact::ArtifactInlineFrame {
+                    evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Pdb,
                     source: source.into_owned(),
                     line: Some(line.line_start),
                     column: line.column_start.filter(|column| *column != 0),

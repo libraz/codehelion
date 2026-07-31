@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "language": "mixed",
+  "files": ["src/lib.rs", "cpp/direct.cpp"],
+  "clone_pairs": [
+    {
+      "id": "rust-cpp-result-direct-propagation",
+      "type": "restricted-semantic",
+      "rule_id": "cross-language-result-direct-propagation-v1",
+      "fragments": [
+        {"file": "src/lib.rs", "start_line": 2, "end_line": 2},
+        {"file": "cpp/direct.cpp", "start_line": 4, "end_line": 4}
+      ]
+    },
+    {
+      "id": "rust-cpp-result-validation",
+      "type": "restricted-semantic",
+      "rule_id": "cross-language-result-validation-v1",
+      "fragments": [
+        {"file": "src/lib.rs", "start_line": 10, "end_line": 10},
+        {"file": "cpp/direct.cpp", "start_line": 12, "end_line": 12}
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "id": "rust-cpp-result-transformed",
+      "reason": "changes the success value instead of preserving both alternatives",
+      "rule_id": "cross-language-result-direct-propagation-v1",
+      "fragments": [
+        {"file": "src/lib.rs", "start_line": 5, "end_line": 7},
+        {"file": "cpp/direct.cpp", "start_line": 7, "end_line": 9}
+      ]
+    },
+    {
+      "id": "rust-cpp-result-compound-validation",
+      "reason": "compound conditions are outside the closed validation rule",
+      "rule_id": "cross-language-result-validation-v1",
+      "fragments": [
+        {"file": "src/lib.rs", "start_line": 13, "end_line": 15},
+        {"file": "cpp/direct.cpp", "start_line": 16, "end_line": 19}
+      ]
+    }
+  ]
+}

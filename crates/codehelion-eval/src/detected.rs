@@ -16,6 +16,7 @@
 use std::fmt;
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::schema::{Axes, CloneType, DetectionResult, Finding, Fragment};
 
@@ -37,6 +38,11 @@ pub enum Error {
         /// The version the document declared.
         found: u32,
     },
+    /// A field guaranteed by the current v1 report contract was omitted.
+    MissingField {
+        /// Dot-separated field path.
+        path: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -49,6 +55,9 @@ impl fmt::Display for Error {
                  {SUPPORTED_REPORT_SCHEMA}): the report shape moved and this \
                  adapter has not followed it"
             ),
+            Self::MissingField { path } => {
+                write!(f, "scan report v1 omits required field {path}")
+            }
         }
     }
 }
@@ -57,7 +66,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Parse(error) => Some(error),
-            Self::Version { .. } => None,
+            Self::Version { .. } | Self::MissingField { .. } => None,
         }
     }
 }
@@ -94,27 +103,20 @@ struct Group {
     fingerprint: String,
     clone_type: CloneType,
     priority: Priority,
-    /// Present when the group was hidden from the report by a suppression
-    /// rule. Its shape does not matter here, only whether there is one.
-    #[serde(default)]
-    suppressed: Option<serde_json::Value>,
-    /// Absent for a group whose similarity was never scored.
-    #[serde(default)]
+    /// `null` when the group was not hidden by a suppression rule. Its shape
+    /// does not matter here, only whether there is one.
+    suppressed: Option<Value>,
+    /// `null` for a group whose similarity was never scored.
     similarity: Option<Similarity>,
     /// The three report fields the default policy ranks a group down for. See
     /// [`put_forward`].
-    #[serde(default)]
     split_pair: bool,
-    #[serde(default)]
     test_code: bool,
-    #[serde(default)]
     boilerplate: Option<String>,
     /// Whether the detector read the group as one routine written once per
     /// integer width.
-    #[serde(default)]
     width_family: bool,
     /// Registered-rule evidence for a restricted-semantic group.
-    #[serde(default)]
     semantic: Option<SemanticEvidence>,
     members: Vec<Member>,
 }
@@ -154,17 +156,11 @@ fn put_forward(group: &Group) -> bool {
 
 #[derive(Debug, Deserialize)]
 struct Similarity {
-    #[serde(default)]
     confidence_band: Option<String>,
-    #[serde(default)]
     lexical: Option<f64>,
-    #[serde(default)]
     structural: Option<f64>,
-    #[serde(default)]
     control_flow: Option<f64>,
-    #[serde(default)]
     api: Option<f64>,
-    #[serde(default)]
     composite: Option<f64>,
 }
 
@@ -197,7 +193,6 @@ struct Member {
     file: String,
     start_line: u32,
     end_line: u32,
-    #[serde(default)]
     tokens: u64,
 }
 
@@ -233,7 +228,19 @@ struct CrossLanguageGroup {
     id: String,
     rule_id: String,
     semantic_confidence: f64,
-    members: Vec<Member>,
+    members: Vec<CrossLanguageMember>,
+}
+
+/// A member of the explicit comparison envelope.
+///
+/// Unlike ordinary scan-report members it carries the normalized graph, not a
+/// token count. Cross-language evaluation has no token-size metric, so it
+/// records zero rather than pretending this field belongs to that format.
+#[derive(Debug, Deserialize)]
+struct CrossLanguageMember {
+    file: String,
+    start_line: u32,
+    end_line: u32,
 }
 
 /// A scan report, read as a scorable detection result.
@@ -247,7 +254,9 @@ struct CrossLanguageGroup {
 /// Returns [`Error::Parse`] when `json` is not a scan report, and
 /// [`Error::Version`] when it is one of a version this adapter does not read.
 pub fn from_report_json(json: &str) -> Result<(DetectionResult, u32), Error> {
-    let report: ScanReport = serde_json::from_str(json)?;
+    let value: Value = serde_json::from_str(json)?;
+    validate_report_v1_contract(&value)?;
+    let report: ScanReport = serde_json::from_value(value)?;
     if report.schema_version != SUPPORTED_REPORT_SCHEMA {
         return Err(Error::Version {
             found: report.schema_version,
@@ -312,6 +321,111 @@ pub fn from_report_json(json: &str) -> Result<(DetectionResult, u32), Error> {
     ))
 }
 
+/// Reject reports that silently omit a field produced by the current v1
+/// report writer.
+///
+/// `Option<T>` accepts an absent key as well as `null`. That is useful for a
+/// genuinely optional field such as non-semantic groups' `semantic` evidence,
+/// but it must not make this evaluator accept a stale pre-release report
+/// shape. The checked fields are the complete subset this adapter reads and
+/// the writer always emits them, including as `null` when no value exists.
+fn validate_report_v1_contract(value: &Value) -> Result<(), Error> {
+    require_fields(value, "report", &["schema_version", "summary", "groups"])?;
+    let Some(summary) = value.get("summary") else {
+        return Ok(());
+    };
+    require_fields(summary, "summary", &["files", "lines"])?;
+    if let Some(files) = summary.get("files") {
+        require_fields(files, "summary.files", &["rust", "c", "cpp"])?;
+    }
+
+    let Some(groups) = value.get("groups").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for (group_index, group) in groups.iter().enumerate() {
+        let group_path = format!("groups[{group_index}]");
+        require_fields(
+            group,
+            &group_path,
+            &[
+                "fingerprint",
+                "clone_type",
+                "priority",
+                "similarity",
+                "boilerplate",
+                "test_code",
+                "width_family",
+                "split_pair",
+                "suppressed",
+                "members",
+            ],
+        )?;
+        if let Some(priority) = group.get("priority") {
+            require_fields(
+                priority,
+                &format!("{group_path}.priority"),
+                &["value", "inputs"],
+            )?;
+            if let Some(inputs) = priority.get("inputs") {
+                require_fields(
+                    inputs,
+                    &format!("{group_path}.priority.inputs"),
+                    &["largest_member_tokens"],
+                )?;
+            }
+        }
+        if let Some(similarity) = group.get("similarity").filter(|value| !value.is_null()) {
+            require_fields(
+                similarity,
+                &format!("{group_path}.similarity"),
+                &[
+                    "confidence_band",
+                    "lexical",
+                    "structural",
+                    "control_flow",
+                    "api",
+                    "composite",
+                ],
+            )?;
+        }
+        if group.get("clone_type").and_then(Value::as_str) == Some("restricted-semantic") {
+            require_fields(group, &group_path, &["semantic"])?;
+            let Some(semantic) = group.get("semantic").filter(|value| !value.is_null()) else {
+                return Err(Error::MissingField {
+                    path: format!("{group_path}.semantic"),
+                });
+            };
+            require_fields(semantic, &format!("{group_path}.semantic"), &["rules"])?;
+        }
+        if let Some(members) = group.get("members").and_then(Value::as_array) {
+            for (member_index, member) in members.iter().enumerate() {
+                require_fields(
+                    member,
+                    &format!("{group_path}.members[{member_index}]"),
+                    &["file", "start_line", "end_line", "tokens"],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Require keys only once the surrounding value is an object; type errors are
+/// intentionally left to serde so their diagnostics retain the actual value.
+fn require_fields(value: &Value, path: &str, fields: &[&str]) -> Result<(), Error> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    for field in fields {
+        if !object.contains_key(*field) {
+            return Err(Error::MissingField {
+                path: format!("{path}.{field}"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Read an explicit Rust-to-C++ comparison as restricted-semantic findings.
 ///
 /// The returned line count is the sum of selected partition reports. Corpus
@@ -349,7 +463,7 @@ pub fn from_cross_language_comparison_json(json: &str) -> Result<(DetectionResul
                     file: member.file,
                     start_line: member.start_line,
                     end_line: member.end_line,
-                    tokens: member.tokens,
+                    tokens: 0,
                 })
                 .collect(),
         })
@@ -429,11 +543,22 @@ mod tests {
           "clone_type": "type-2",
           "scope": "unit",
           "priority": {"value": 0.62, "inputs": {"largest_member_tokens": 120}},
-          "similarity": {"composite": 0.91, "confidence_band": "high"},
+          "similarity": {
+            "lexical": null,
+            "structural": null,
+            "control_flow": null,
+            "api": null,
+            "composite": 0.91,
+            "confidence_band": "high"
+          },
+          "boilerplate": null,
+          "test_code": false,
+          "width_family": false,
+          "split_pair": false,
           "suppressed": null,
           "members": [
-            {"finding_id": "m1", "file": "a.rs", "start_line": 10, "end_line": 24},
-            {"finding_id": "m2", "file": "b.rs", "start_line": 5, "end_line": 19}
+            {"finding_id": "m1", "file": "a.rs", "start_line": 10, "end_line": 24, "tokens": 12},
+            {"finding_id": "m2", "file": "b.rs", "start_line": 5, "end_line": 19, "tokens": 14}
           ]
         },
         {
@@ -441,9 +566,14 @@ mod tests {
           "clone_type": "type-1",
           "scope": "unit",
           "priority": {"value": 0.41, "inputs": {"largest_member_tokens": 90}},
+          "similarity": null,
+          "boilerplate": null,
+          "test_code": false,
+          "width_family": false,
+          "split_pair": false,
           "suppressed": {"kind": "rule", "detail": "path"},
           "members": [
-            {"finding_id": "m3", "file": "c.rs", "start_line": 1, "end_line": 4}
+            {"finding_id": "m3", "file": "c.rs", "start_line": 1, "end_line": 4, "tokens": 4}
           ]
         }
       ]
@@ -469,13 +599,13 @@ mod tests {
                     file: "a.rs".to_string(),
                     start_line: 10,
                     end_line: 24,
-                    tokens: 0,
+                    tokens: 12,
                 },
                 Fragment {
                     file: "b.rs".to_string(),
                     start_line: 5,
                     end_line: 19,
-                    tokens: 0,
+                    tokens: 14,
                 },
             ]
         );
@@ -483,12 +613,19 @@ mod tests {
 
     #[test]
     fn a_finding_the_detector_never_scored_carries_no_band() {
-        // Split pairs and fragment runs reach the report without a similarity
+        // Split pairs and fragment runs reach the report with a null similarity
         // breakdown. Reading them as an absent band rather than as a failure
         // is what lets the band table account for every judged finding.
         let unscored = REPORT.replace(
-            r#""similarity": {"composite": 0.91, "confidence_band": "high"},"#,
-            "",
+            r#""similarity": {
+            "lexical": null,
+            "structural": null,
+            "control_flow": null,
+            "api": null,
+            "composite": 0.91,
+            "confidence_band": "high"
+          },"#,
+            r#""similarity": null,"#,
         );
         let (result, _lines) = from_report_json(&unscored).expect("report reads");
         assert_eq!(result.findings[0].band, None);
@@ -507,16 +644,26 @@ mod tests {
     #[test]
     fn a_document_that_is_not_a_report_is_a_parse_error() {
         let error = from_report_json("{\"schema_version\": 1}").expect_err("no summary");
-        assert!(matches!(error, Error::Parse(_)));
+        assert!(matches!(error, Error::MissingField { .. }));
+    }
+
+    #[test]
+    fn a_v1_report_missing_a_current_contract_field_is_refused() {
+        let stale = REPORT.replacen("\"width_family\": false,", "", 1);
+        let error = from_report_json(&stale).expect_err("missing v1 field is refused");
+        assert!(matches!(
+            error,
+            Error::MissingField { ref path } if path == "groups[0].width_family"
+        ));
     }
 
     #[test]
     fn a_group_the_report_files_below_the_rest_is_read_as_one() {
         for (field, value) in [
-            ("\"suppressed\": null,", "\"split_pair\": true,"),
-            ("\"suppressed\": null,", "\"test_code\": true,"),
+            ("\"split_pair\": false,", "\"split_pair\": true,"),
+            ("\"test_code\": false,", "\"test_code\": true,"),
             (
-                "\"suppressed\": null,",
+                "\"boilerplate\": null,",
                 "\"boilerplate\": \"macro-repetition\",",
             ),
         ] {
@@ -543,8 +690,8 @@ mod tests {
     #[test]
     fn the_fold_this_reads_is_where_the_report_put_it() {
         let ordered = REPORT.replacen(
-            "\"suppressed\": {\"kind\": \"rule\", \"detail\": \"path\"},",
-            "\"suppressed\": null, \"split_pair\": true,",
+            "\"split_pair\": false,\n          \"suppressed\": {\"kind\": \"rule\", \"detail\": \"path\"},",
+            "\"split_pair\": true,\n          \"suppressed\": null,",
             1,
         );
         let (result, _lines) = from_report_json(&ordered).expect("report reads");

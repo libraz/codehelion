@@ -46,7 +46,9 @@ use codehelion_helper::ir::{
     ResolvedSymbol, ResolvedType, SemanticConstruct, SemanticConstructKind, SourceRange,
     SymbolKind, Unavailability, UnitRef, spell,
 };
+use codehelion_helper::protocol::Capability;
 
+use crate::cfg_dump;
 use crate::database::{Database, canonical};
 use crate::types::category;
 
@@ -64,6 +66,7 @@ pub(crate) fn analyze(
     unit: &UnitRef,
     database: &Database,
     selector: Option<&CompileCommandSelector>,
+    want: &[Capability],
 ) -> Outcome {
     let Some(entry) = database.unit(&unit.unit, selector) else {
         // Nothing in the database is this unit. Analysing the file under some
@@ -93,13 +96,19 @@ pub(crate) fn analyze(
     }
     let mut reading = Reading::new(&database.root);
     reading.walk(parsed.get_entity());
+    let cfg = want
+        .contains(&Capability::MirCfg)
+        .then(|| cfg_dump::produce(entry, &reading.functions))
+        .flatten();
     let mut ir = CompilerIr::empty(unit.clone());
     ir.anchored_at = Some(database.root.display().to_string());
     ir.symbols = reading.symbols;
     ir.calls = reading.calls;
     ir.semantic_constructs = reading.semantic_constructs;
+    ir.effects = codehelion_helper::effects::summarize(&ir.semantic_constructs);
     ir.instantiations = reading.instantiations;
     ir.types = reading.types.into_vec();
+    ir.cfg = cfg;
     Outcome::Analyzed(Box::new(ir))
 }
 
@@ -123,6 +132,9 @@ struct Reading<'a> {
     calls: Vec<CallSite>,
     semantic_constructs: Vec<SemanticConstruct>,
     instantiations: Vec<Instantiation>,
+    /// Function definitions whose compiler CFG dump can be anchored without
+    /// guessing from a line number or AST node ID.
+    functions: Vec<cfg_dump::FunctionAnchor>,
 }
 
 /// One file the unit read, as this analysis reports it.
@@ -163,6 +175,7 @@ impl<'a> Reading<'a> {
             calls: Vec::new(),
             semantic_constructs: Vec::new(),
             instantiations: Vec::new(),
+            functions: Vec::new(),
         }
     }
 
@@ -198,8 +211,11 @@ impl<'a> Reading<'a> {
             EntityVisitResult::Recurse
         });
         root.visit_children(|entity, parent| {
+            self.remember_function(entity);
             self.remember_instantiation(entity, parent);
             self.remember_call(entity);
+            self.remember_plain_range_collection(entity);
+            self.remember_plain_range_reduce(entity);
             self.remember_fallible_validation(entity);
             self.remember_expected_identity_propagation(entity);
             self.remember_direct_lock_lifetime(entity);
@@ -244,6 +260,41 @@ impl<'a> Reading<'a> {
             left.anchor.expansion == right.anchor.expansion
                 && left.instantiation_key == right.instantiation_key
         });
+        self.functions.sort_by(|left, right| {
+            (
+                &left.name,
+                &left.anchor.expansion.file,
+                left.anchor.expansion.start_byte,
+            )
+                .cmp(&(
+                    &right.name,
+                    &right.anchor.expansion.file,
+                    right.anchor.expansion.start_byte,
+                ))
+        });
+        self.functions.dedup_by(|left, right| {
+            left.name == right.name && left.anchor.expansion == right.anchor.expansion
+        });
+    }
+
+    /// Keep a complete definition range only when the declaration has a body.
+    /// A declaration with no compound body has no compiler CFG to associate
+    /// with it, and declarations with the same name must remain distinct until
+    /// the dump bridge rejects an ambiguity rather than merging them here.
+    fn remember_function(&mut self, entity: Entity<'_>) {
+        if !callable(entity.get_kind())
+            || !entity
+                .get_children()
+                .iter()
+                .any(|child| child.get_kind() == EntityKind::CompoundStmt)
+        {
+            return;
+        }
+        let (Some(name), Some(anchor)) = (entity.get_name(), self.anchor(entity)) else {
+            return;
+        };
+        self.functions
+            .push(cfg_dump::FunctionAnchor { name, anchor });
     }
 
     /// Remember what one written call expression was found to invoke.
@@ -282,6 +333,119 @@ impl<'a> Reading<'a> {
         });
     }
 
+    /// Record the deliberately small C++ counterpart of a plain Rust
+    /// `for value in input { output.push(value) }` collection loop.
+    ///
+    /// A range-for loop is accepted only when its written range is one direct
+    /// `std::vector` binding and its body is exactly one direct
+    /// `std::vector::push_back(binding)` call.  The compiler resolves both
+    /// vectors and the selected method; the token check only proves that the
+    /// sole argument is the range binding rather than a transformed expression.
+    fn remember_plain_range_collection(&mut self, entity: Entity<'_>) {
+        if entity.get_kind() != EntityKind::ForRangeStmt {
+            return;
+        }
+        let Some((source, binding)) = direct_range_bindings(entity) else {
+            return;
+        };
+        let Some(source_anchor) = direct_standard_vector_reference(entity, &source)
+            .and_then(|source| self.anchor(source))
+        else {
+            return;
+        };
+        let Some(body) = entity
+            .get_children()
+            .into_iter()
+            .find(|child| child.get_kind() == EntityKind::CompoundStmt)
+        else {
+            return;
+        };
+        let statements = body.get_children();
+        let [call] = statements.as_slice() else {
+            return;
+        };
+        if call.get_kind() != EntityKind::CallExpr
+            || !call.get_reference().is_some_and(is_standard_vector_push)
+            || !direct_call_argument_is(*call, &binding)
+        {
+            return;
+        }
+        let Some(collect_anchor) = self.anchor(*call) else {
+            return;
+        };
+        self.semantic_constructs.extend([
+            SemanticConstruct {
+                anchor: source_anchor,
+                kind: SemanticConstructKind::Source,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: None,
+            },
+            SemanticConstruct {
+                anchor: collect_anchor,
+                kind: SemanticConstructKind::Collect,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: None,
+            },
+        ]);
+    }
+
+    /// Record a direct numeric range-for accumulation as SOURCE/REDUCE.
+    ///
+    /// This is the exact C++ analogue of the Rust helper's closed loop rule:
+    /// one standard vector binding, one statement, numeric accumulator, and
+    /// the written loop binding as the untransformed right-hand side. It does
+    /// not infer initialization, reduction identities, guards, or calls.
+    fn remember_plain_range_reduce(&mut self, entity: Entity<'_>) {
+        if entity.get_kind() != EntityKind::ForRangeStmt {
+            return;
+        }
+        let Some((source, binding)) = direct_range_bindings(entity) else {
+            return;
+        };
+        let Some(source_anchor) = direct_standard_vector_reference(entity, &source)
+            .and_then(|source| self.anchor(source))
+        else {
+            return;
+        };
+        let Some(body) = entity
+            .get_children()
+            .into_iter()
+            .find(|child| child.get_kind() == EntityKind::CompoundStmt)
+        else {
+            return;
+        };
+        let statements = body.get_children();
+        let [accumulation] = statements.as_slice() else {
+            return;
+        };
+        if accumulation.get_kind() != EntityKind::CompoundAssignOperator
+            || !direct_numeric_accumulation(*accumulation, &binding)
+        {
+            return;
+        }
+        let Some(reduce_anchor) = self.anchor(*accumulation) else {
+            return;
+        };
+        self.semantic_constructs.extend([
+            SemanticConstruct {
+                anchor: source_anchor,
+                kind: SemanticConstructKind::Source,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: None,
+            },
+            SemanticConstruct {
+                anchor: reduce_anchor,
+                kind: SemanticConstructKind::Reduce,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: None,
+            },
+        ]);
+    }
+
     /// Keep an `if` that directly asks a standard fallible value whether it
     /// holds a value as one closed validation operation.
     ///
@@ -293,10 +457,13 @@ impl<'a> Reading<'a> {
         if entity.get_kind() != EntityKind::IfStmt {
             return;
         }
-        let Some(condition) = entity.get_child(0) else {
+        let children = entity.get_children();
+        let Some(condition) = children.first().copied() else {
             return;
         };
-        let Some(fallible_kind) = is_direct_standard_fallible_presence_check(condition) else {
+        let fallible_kind = is_direct_standard_fallible_presence_check(condition)
+            .or_else(|| direct_standard_fallible_early_return(&children, condition));
+        let Some(fallible_kind) = fallible_kind else {
             return;
         };
         // The condition is the semantic operation. Anchoring the enclosing
@@ -501,9 +668,17 @@ impl<'a> Reading<'a> {
         // Entity::get_template_arguments() requires the optional clang_3_6
         // feature. The concrete function USR still carries every substitution,
         // so it remains a stable, distinct key while `arguments` stays empty.
+        // The source definition and USR retain their existing roles. The
+        // optional artifact key is separately shaped for the correlator: a demangled C++
+        // function or a class-template member spells its specialization through
+        // a qualified display name, not through Clang's USR grammar. Keeping
+        // the two facts distinct avoids pretending those independent spellings
+        // are interchangeable stable identities.
         self.instantiations.push(Instantiation {
             anchor,
             definition: definition.0,
+            definition_end_line: definition_end_line(origin),
+            artifact_match_key: specialization_display_key(specialization),
             instantiation_key: format!("clang-usr-v1:{}", specialization_usr.0),
             arguments,
         });
@@ -675,6 +850,39 @@ impl<'a> Reading<'a> {
     }
 }
 
+/// The final line of a definition range, when Clang keeps it in one file.
+fn definition_end_line(definition: Entity<'_>) -> Option<u32> {
+    let range = definition.get_range()?;
+    let start = range.get_start().get_expansion_location();
+    let end = range.get_end().get_expansion_location();
+    (start.file?.get_id() == end.file?.get_id()).then_some(end.line)
+}
+
+/// A qualified display spelling for a compiler-resolved template specialization.
+///
+/// This is comparison evidence only. The stable specialization key remains the
+/// USR in [`Instantiation::instantiation_key`]; the artifact side can use this
+/// display form solely after it has independently demangled a function name.
+fn specialization_display_key(specialization: Entity<'_>) -> Option<String> {
+    let display = specialization.get_display_name()?;
+    let mut parents = Vec::new();
+    let mut parent = specialization.get_semantic_parent();
+    while let Some(current) = parent {
+        if matches!(
+            current.get_kind(),
+            EntityKind::Namespace | EntityKind::StructDecl | EntityKind::ClassDecl
+        ) && let Some(name) = current.get_name()
+            && !name.is_empty()
+        {
+            parents.push(name);
+        }
+        parent = current.get_semantic_parent();
+    }
+    parents.reverse();
+    parents.push(display);
+    Some(format!("clang-display-v1:{}", parents.join("::")))
+}
+
 /// Whether an implicit specialization still occupies its selected template's
 /// source location.
 ///
@@ -781,6 +989,8 @@ fn standard_api_name(entity: Entity<'_>) -> Option<String> {
             | "accumulate"
             | "collect"
             | "push_back"
+            | "to_string"
+            | "stoull"
     )
     .then(|| format!("std::{name}"))
 }
@@ -842,6 +1052,57 @@ fn is_direct_standard_fallible_presence_check(condition: Entity<'_>) -> Option<F
         .and_then(standard_fallible_presence_method)
 }
 
+/// Return the family for an exact C++ early return guard.
+///
+/// Only `if (!value.has_value()) return;` and its single-statement braced
+/// spelling enter the vocabulary. The `!` expression must contain exactly one
+/// direct standard presence check, the then branch must contain exactly a bare
+/// return, and the `if` must have no else branch. This keeps the accepted form
+/// equivalent to the Rust unit-return guard without inferring the meaning of
+/// arbitrary control flow.
+fn direct_standard_fallible_early_return(
+    if_children: &[Entity<'_>],
+    condition: Entity<'_>,
+) -> Option<FallibleKind> {
+    let [_, then_branch] = if_children else {
+        return None;
+    };
+    if condition.get_kind() != EntityKind::UnaryOperator
+        || condition
+            .get_range()
+            .map(|range| range.tokenize())
+            .is_none_or(|tokens| {
+                tokens
+                    .first()
+                    .is_none_or(|token| token.get_spelling() != "!")
+            })
+    {
+        return None;
+    }
+    let mut condition_children = condition.get_children().into_iter();
+    let operand = condition_children.next()?;
+    if condition_children.next().is_some() || !then_branch_is_unit_return(*then_branch) {
+        return None;
+    }
+    is_direct_standard_fallible_presence_check(operand)
+}
+
+/// Whether a C++ branch is precisely one bare `return;` statement.
+fn then_branch_is_unit_return(branch: Entity<'_>) -> bool {
+    let returned = match branch.get_kind() {
+        EntityKind::ReturnStmt => branch,
+        EntityKind::CompoundStmt => {
+            let statements = branch.get_children();
+            let [returned] = statements.as_slice() else {
+                return false;
+            };
+            *returned
+        }
+        _ => return false,
+    };
+    returned.get_kind() == EntityKind::ReturnStmt && returned.get_children().is_empty()
+}
+
 /// Whether `ty` resolves to the standard `expected` family.
 fn is_standard_expected_type(ty: Type<'_>) -> bool {
     ty.get_canonical_type()
@@ -884,6 +1145,153 @@ fn direct_returned_name(returned: Entity<'_>) -> Option<String> {
             return None;
         }
     }
+}
+
+/// The direct source and element bindings written in one C++ range-for loop.
+///
+/// The cursor includes compiler-generated `__range`/`__begin` variables, so
+/// user spelling is read from the loop tokens and the element binding is the
+/// unique non-generated `VarDecl` in the loop's desugaring.
+fn direct_range_bindings(loop_: Entity<'_>) -> Option<(String, String)> {
+    let tokens = loop_.get_range()?.tokenize();
+    let tokens: Vec<_> = tokens
+        .iter()
+        .map(clang::token::Token::get_spelling)
+        .collect();
+    let colon = tokens.iter().position(|token| token == ":")?;
+    let source = tokens.get(colon.checked_add(1)?)?.clone();
+    if !is_plain_identifier(&source) || tokens.get(colon.checked_add(2)?) != Some(&")".to_owned()) {
+        return None;
+    }
+    let bindings: Vec<_> = loop_
+        .get_children()
+        .into_iter()
+        .filter(|child| child.get_kind() == EntityKind::VarDecl)
+        .filter_map(|child| child.get_name())
+        .filter(|name| !name.starts_with("__"))
+        .collect();
+    let [binding] = bindings.as_slice() else {
+        return None;
+    };
+    (binding != &source).then(|| (source, binding.clone()))
+}
+
+/// Find the written range expression only if Clang resolved it as a standard
+/// `std::vector` binding.  Range customization points and project containers
+/// deliberately remain outside the first closed loop vocabulary.
+fn direct_standard_vector_reference<'clang>(
+    loop_: Entity<'clang>,
+    source: &str,
+) -> Option<Entity<'clang>> {
+    let mut references = Vec::new();
+    loop_.visit_children(|entity, _| {
+        if entity.get_kind() == EntityKind::DeclRefExpr
+            && entity.get_name().as_deref() == Some(source)
+            && entity.get_type().is_some_and(is_standard_vector_type)
+        {
+            references.push(entity);
+        }
+        EntityVisitResult::Recurse
+    });
+    (references.len() == 1).then(|| references[0])
+}
+
+/// Whether a resolved expression has exactly the standard vector family.
+fn is_standard_vector_type(ty: Type<'_>) -> bool {
+    ty.get_canonical_type()
+        .get_declaration()
+        .is_some_and(|declaration| {
+            crate::types::in_standard_namespace(declaration)
+                && declaration.get_name().as_deref() == Some("vector")
+        })
+}
+
+/// Whether a resolved call selected `std::vector::push_back`.
+fn is_standard_vector_push(method: Entity<'_>) -> bool {
+    method.get_name().as_deref() == Some("push_back")
+        && method.get_semantic_parent().is_some_and(|parent| {
+            crate::types::in_standard_namespace(parent)
+                && parent.get_name().as_deref() == Some("vector")
+        })
+}
+
+/// Whether a call's only written argument is the loop element unchanged.
+fn direct_call_argument_is(call: Entity<'_>, binding: &str) -> bool {
+    let Some(range) = call.get_range() else {
+        return false;
+    };
+    let tokens = range.tokenize();
+    let tokens: Vec<_> = tokens
+        .iter()
+        .map(clang::token::Token::get_spelling)
+        .collect();
+    let Some(opening) = tokens.iter().rposition(|token| token == "(") else {
+        return false;
+    };
+    let Some(argument) = opening.checked_add(1) else {
+        return false;
+    };
+    let Some(closing) = opening.checked_add(2) else {
+        return false;
+    };
+    let Some(after) = opening.checked_add(3) else {
+        return false;
+    };
+    tokens.get(argument).is_some_and(|token| token == binding)
+        && tokens.get(closing).is_some_and(|token| token == ")")
+        && tokens.get(after).is_none()
+}
+
+/// Whether a statement is exactly `numeric_binding += loop_binding` or `*=`.
+fn direct_numeric_accumulation(statement: Entity<'_>, binding: &str) -> bool {
+    let Some(range) = statement.get_range() else {
+        return false;
+    };
+    let tokens = range.tokenize();
+    let tokens: Vec<_> = tokens
+        .iter()
+        .map(clang::token::Token::get_spelling)
+        .collect();
+    let [accumulator, operator, value] = tokens.as_slice() else {
+        return false;
+    };
+    if !is_plain_identifier(accumulator)
+        || accumulator == binding
+        || !matches!(operator.as_str(), "+=" | "*=")
+        || value != binding
+    {
+        return false;
+    }
+    let mut references = Vec::new();
+    statement.visit_children(|entity, _| {
+        if entity.get_kind() == EntityKind::DeclRefExpr
+            && entity.get_name().as_deref() == Some(accumulator)
+            && entity.get_type().is_some_and(is_numeric_type)
+        {
+            references.push(entity);
+        }
+        EntityVisitResult::Recurse
+    });
+    references.len() == 1
+}
+
+/// Whether Clang resolved an expression as a number that a direct reduction
+/// can accumulate without inventing conversion semantics.
+fn is_numeric_type(ty: Type<'_>) -> bool {
+    matches!(
+        category(ty),
+        codehelion_helper::ir::TypeCategory::Integer | codehelion_helper::ir::TypeCategory::Float
+    )
+}
+
+/// A conservative source identifier, never a member expression, call, or
+/// qualified name that would need a broader normalizer to interpret.
+fn is_plain_identifier(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 fn identity(entity: Entity<'_>) -> String {

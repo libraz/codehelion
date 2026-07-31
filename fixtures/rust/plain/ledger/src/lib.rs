@@ -39,6 +39,36 @@ pub fn labels(entries: &[Entry]) -> Vec<String> {
     entries.iter().map(|entry| entry.label.clone()).collect()
 }
 
+/// Labels from the entries whose amount is odd.
+///
+/// The direct receiver chain is a closed def-use fixture: the `filter` output
+/// is immediately consumed by `map`.
+pub fn odd_labels(entries: &[Entry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| entry.amount % 2 != 0)
+        .map(|entry| entry.label.clone())
+        .collect()
+}
+
+/// Labels from the entries whose amount is even.
+///
+/// The binding deliberately breaks the direct receiver form. It is valid Rust
+/// but is outside the helper's limited def-use vocabulary.
+pub fn even_labels(entries: &[Entry]) -> Vec<String> {
+    let selected = entries.iter().filter(|entry| entry.amount % 2 == 0);
+    selected.map(|entry| entry.label.clone()).collect()
+}
+
+/// Round-trips an integer through the standard textual representation.
+///
+/// This is the closed serialization fixture: the helper must resolve both
+/// `ToString::to_string` and `str::parse`, rather than infer either API from
+/// its spelling.
+pub fn round_trip_number(value: u64) -> u64 {
+    value.to_string().parse::<u64>().unwrap_or_default()
+}
+
 /// Opens one standard file for the duration of this function.
 pub fn inspect_file(path: &std::path::Path) -> std::io::Result<()> {
     let _file = std::fs::File::open(path)?;

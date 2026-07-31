@@ -15,12 +15,13 @@
 //! the handshake and then refusing everything would be worse — it would look
 //! installed and working right up until a scan came back empty.
 //!
-//! # What it does not offer
+//! # Control-flow graph evidence
 //!
-//! No control-flow graph. libclang does not expose Clang's own, and a helper
-//! that claimed the capability and returned nothing would leave a run recording
-//! that it got an answer. Saying so at the handshake is what lets the missing
-//! half be reported instead.
+//! libclang does not expose Clang's own CFG. When a fixed `clang` executable
+//! is installed, the helper separately invokes it in syntax-only mode with
+//! Clang's `debug.DumpCFG` checker. The compilation database supplies only
+//! arguments that have passed a read-only filter; it never supplies an
+//! executable, plugin, response file, or output path.
 //!
 //! It also runs nothing out of a project, at any permission, and offers no
 //! execution class at all. A C++ project without a compilation database has one
@@ -35,6 +36,7 @@
 #![allow(clippy::redundant_pub_crate)]
 
 mod analysis;
+mod cfg_dump;
 mod database;
 mod types;
 
@@ -68,7 +70,10 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    let mut backend = ClangBackend { clang: &clang };
+    let mut backend = ClangBackend {
+        clang: &clang,
+        cfg_available: cfg_dump::available(),
+    };
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
     match serve(&mut backend, &mut input, &mut output) {
@@ -87,6 +92,7 @@ fn main() -> std::process::ExitCode {
 /// The compiler this process answers with.
 struct ClangBackend<'c> {
     clang: &'c clang::Clang,
+    cfg_available: bool,
 }
 
 impl Backend for ClangBackend<'_> {
@@ -99,20 +105,24 @@ impl Backend for ClangBackend<'_> {
             // compiler it uses, this one analyses with whichever libclang the
             // machine has, so the version is read rather than named.
             toolchains: vec![clang::get_version()],
-            // Only what is implemented. A capability listed here is a promise,
-            // and a helper that claims control flow and returns none is worse
-            // than one that never claimed it: the run would stop recording that
-            // it did not get any.
-            capabilities: vec![
-                Capability::Types,
-                Capability::NameResolution,
-                Capability::CallTargets,
-                // Both locations of every name, which is what the capability
-                // names: a declaration a macro produced anchors where it reads
-                // and carries where it was written.
-                Capability::MacroExpansion,
-                Capability::TemplateInstantiation,
-            ],
+            // Only what is implemented. CFG remains auxiliary and may be
+            // absent for a command whose safe frontend cannot be constructed.
+            capabilities: {
+                let mut capabilities = vec![
+                    Capability::Types,
+                    Capability::NameResolution,
+                    Capability::CallTargets,
+                    // Both locations of every name, which is what the capability
+                    // names: a declaration a macro produced anchors where it reads
+                    // and carries where it was written.
+                    Capability::MacroExpansion,
+                    Capability::TemplateInstantiation,
+                ];
+                if self.cfg_available {
+                    capabilities.push(Capability::MirCfg);
+                }
+                capabilities
+            },
             // Nothing, at any permission. Somebody who permits a configure step
             // is told this helper would not act on it, rather than left to
             // wonder why the answers did not change.
@@ -151,6 +161,7 @@ impl Backend for ClangBackend<'_> {
             &request.unit,
             &database,
             request.compile_command.as_ref(),
+            &request.want,
         ) {
             Outcome::Analyzed(mut ir) => {
                 ir.schema_version = COMPILER_IR_SCHEMA_VERSION.to_string();

@@ -106,8 +106,11 @@ fn collect_fallible_and_loop_constructs(
                 .descendants()
                 .filter_map(ast::IfExpr::cast)
                 .filter_map(|conditional| {
-                    direct_standard_fallible_presence_check(sema, &loaded.db, &conditional).map(
-                        |fallible_kind| SemanticConstruct {
+                    direct_standard_fallible_presence_check(sema, &loaded.db, &conditional)
+                        .or_else(|| {
+                            direct_standard_fallible_early_return(sema, &loaded.db, &conditional)
+                        })
+                        .map(|fallible_kind| SemanticConstruct {
                             anchor: Anchor::written_here(source_range(
                                 loaded,
                                 file_id,
@@ -117,8 +120,7 @@ fn collect_fallible_and_loop_constructs(
                             fallible_kind: Some(fallible_kind),
                             direct_propagation: None,
                             resource_kind: None,
-                        },
-                    )
+                        })
                 }),
         )
         .chain(
@@ -255,6 +257,64 @@ fn direct_standard_fallible_presence_check(
         .name_ref()
         .is_some_and(|name| name.text() == expected_name))
     .then_some(fallible_kind)
+}
+
+/// Recognize one inverted standard presence check whose only then-branch
+/// action is an early unit return.
+///
+/// A negative presence condition alone does not establish validation: it may
+/// choose an ordinary alternative. The no-`else`, one-statement `return;`
+/// form is the small shape that unambiguously leaves the current function
+/// before its normal path. Value-carrying returns, extra work, nested control
+/// flow, and compound conditions remain outside the vocabulary.
+fn direct_standard_fallible_early_return(
+    sema: &Semantics<'_, RootDatabase>,
+    db: &RootDatabase,
+    conditional: &ast::IfExpr,
+) -> Option<FallibleKind> {
+    if conditional.else_branch().is_some() || !then_branch_is_unit_return(conditional) {
+        return None;
+    }
+    let ast::Expr::PrefixExpr(prefix) = conditional.condition()? else {
+        return None;
+    };
+    if prefix.op_token().is_none_or(|token| token.text() != "!") {
+        return None;
+    }
+    let ast::Expr::MethodCallExpr(call) = prefix.expr()? else {
+        return None;
+    };
+    if call
+        .arg_list()
+        .is_none_or(|arguments| arguments.args().next().is_some())
+    {
+        return None;
+    }
+    let receiver = call.receiver()?;
+    let fallible_kind = standard_fallible_kind(sema, db, &receiver)?;
+    let expected_name = match fallible_kind {
+        FallibleKind::Option => "is_some",
+        FallibleKind::Result => "is_ok",
+    };
+    call.name_ref()
+        .is_some_and(|name| name.text() == expected_name)
+        .then_some(fallible_kind)
+}
+
+/// Whether an `if` body is exactly `return;`.
+fn then_branch_is_unit_return(conditional: &ast::IfExpr) -> bool {
+    let Some(statements) = conditional
+        .then_branch()
+        .and_then(|branch| branch.stmt_list())
+    else {
+        return false;
+    };
+    let mut statements = statements.statements();
+    let Some(ast::Stmt::ExprStmt(statement)) = statements.next() else {
+        return false;
+    };
+    statements.next().is_none()
+        && matches!(statement.expr(), Some(ast::Expr::ReturnExpr(returned)) if returned.expr().is_none())
 }
 
 /// Recognize the deliberately small explicit-loop counterpart of a plain
@@ -454,6 +514,13 @@ fn direct_try_adapter(
         FallibleKind::Option => ("Some", DirectPropagation::OptionAdapter),
     };
     if compact_syntax(&callee) != constructor {
+        return None;
+    }
+    let arguments = call.arg_list()?.args().collect::<Vec<_>>();
+    let [argument] = arguments.as_slice() else {
+        return None;
+    };
+    if argument.syntax().text_range() != tried.syntax().text_range() {
         return None;
     }
     is_standard_variant_constructor(sema, db, &call, constructor).then_some(direct_propagation)

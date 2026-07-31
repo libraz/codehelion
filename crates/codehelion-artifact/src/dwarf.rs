@@ -175,6 +175,7 @@ fn line_frames<R: Reader>(dwarf: &gimli::Dwarf<R>, unit: &gimli::Unit<R>) -> Vec
         frames.push(DwarfLineFrame {
             address: row.address(),
             frame: ArtifactInlineFrame {
+                evidence_kind: crate::ArtifactSourceLocationEvidenceKind::Dwarf,
                 source: resolve_source_path(
                     &source,
                     directory.as_deref(),
@@ -235,6 +236,7 @@ fn source_frame<R: Reader>(
         .and_then(|value| value.udata_value())
         .and_then(|value| u32::try_from(value).ok());
     Some(ArtifactInlineFrame {
+        evidence_kind: crate::ArtifactSourceLocationEvidenceKind::Dwarf,
         source: resolve_source_path(
             &source,
             directory.as_deref(),

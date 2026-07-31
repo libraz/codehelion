@@ -271,12 +271,28 @@ pub struct ArtifactSymbol {
 /// One source frame associated with an inlined artifact symbol.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactInlineFrame {
+    /// Debug metadata family that established this location.
+    pub evidence_kind: ArtifactSourceLocationEvidenceKind,
     /// Source file or source-map URL supplied by debug metadata.
     pub source: String,
     /// One-based source line, when supplied.
     pub line: Option<u32>,
     /// One-based source column, when supplied.
     pub column: Option<u32>,
+}
+
+/// Debug metadata family that established one artifact source location.
+///
+/// This is evidence provenance, not an artifact or source identity. The
+/// correlation layer preserves it so a PDB-derived location is never reported
+/// as DWARF evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactSourceLocationEvidenceKind {
+    /// DWARF debug metadata established the source location.
+    Dwarf,
+    /// PDB debug metadata established the source location.
+    Pdb,
 }
 
 /// A versioned representation used for normalized duplicate detection.

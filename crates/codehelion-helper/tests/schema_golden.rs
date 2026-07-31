@@ -135,6 +135,8 @@ fn canonical() -> CompilerIr {
                 definition: Some(range("src/generic.rs", 96)),
             },
             definition: "crate::Buffer::push".to_string(),
+            definition_end_line: None,
+            artifact_match_key: None,
             instantiation_key: "crate::Buffer::push<String>".to_string(),
             arguments: vec![0],
         }],

@@ -49,6 +49,25 @@ mutation spec, the generated variant sources and the generated `labels.json`:
   deliberately unregistered sequence transformation. Unlike the structural
   mutation cases, this case is maintained directly because its evidence is
   compiler resolution and an explicitly selected cross-language comparison.
+- `rust-cpp-result-expected-semantic/` — a hand-labelled C++23 `expected` /
+  Rust `Result` corpus. It measures the closed identity-propagation and
+  validation rules, plus altered-success-value and compound-condition
+  negatives.
+- `rust-restricted-semantic/` — a hand-labelled Rust corpus for every initial
+  same-language restricted-semantic rule. It keeps direct-adapter,
+  validation, lifecycle, serialization round-trip, and operation-sequence
+  negatives beside their positive counterparts, then measures them through the
+  Rust helper.
+- `cpp-restricted-semantic/` — a hand-labelled C++ corpus for the closed
+  `std::to_string` / `std::stoull` serialization round trip and its
+  same-operation negative, measured through the Clang helper.
+- `cpp-loop-restricted-semantic/` — a hand-labelled C++ corpus for the closed
+  direct `std::vector` range-for collection and numeric reduction forms. It
+  keeps transformed arguments and accumulations as nearby negative cases.
+- `rust-cpp-loop-semantic/` — a hand-labelled Rust/C++ porting corpus for the
+  same direct loop forms. The correspondence uses compiler-confirmed
+  constructs rather than recovering an API name, and transformed operands are
+  negative cases.
 
 Within a case:
 

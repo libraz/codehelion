@@ -22,12 +22,12 @@
 //! duplication, consistently. Keeping the definition site lets a group say "one
 //! definition, twenty expansions" instead.
 //!
-//! # What is declared but not yet filled
+//! # Auxiliary semantic evidence
 //!
-//! [`EffectSummary`] and [`DataFlowSummary`] are in the schema and empty in
-//! practice. They are here now so that filling them later is an additive change
-//! to a version this schema already names, rather than a shape change to one it
-//! does not.
+//! [`EffectSummary`] reports only closed, compiler-confirmed resource
+//! interactions. Its empty list is never a purity claim. [`DataFlowSummary`]
+//! records only bounded compiler-confirmed operation flows; absent evidence
+//! never changes which semantic findings exist.
 
 use std::path::Path;
 
@@ -529,6 +529,18 @@ pub struct Instantiation {
     pub anchor: Anchor,
     /// The generic or template it was instantiated from.
     pub definition: String,
+    /// One-based final line of the generic or template definition when the
+    /// compiler reported a complete source range.
+    ///
+    /// This is a source anchor used to contain nested members of a class
+    /// template during artifact correlation. It is not an identity.
+    pub definition_end_line: Option<u32>,
+    /// Optional compiler-produced spelling used only to correlate a source
+    /// specialization with a demangled artifact symbol.
+    ///
+    /// This is comparison evidence, not a stable identity or a replacement
+    /// for [`Self::definition`] or [`Self::instantiation_key`].
+    pub artifact_match_key: Option<String>,
     /// What groups every instantiation of that definition together.
     ///
     /// Two bodies with the same key are the same source text with different
@@ -539,12 +551,6 @@ pub struct Instantiation {
 }
 
 /// What a unit does beyond computing a value.
-///
-/// Declared and empty. Semantic clone detection wants to know whether two
-/// bodies that compute the same thing also *do* the same things — write the
-/// same state, perform the same I/O — and that analysis is not in this phase.
-/// The shape is fixed now so that filling it is an addition rather than a
-/// change.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectSummary {
     /// Whether the helper attempted this analysis at all.
@@ -554,18 +560,28 @@ pub struct EffectSummary {
     pub computed: bool,
     /// Symbols whose state the unit writes.
     pub writes: Vec<String>,
-    /// Kinds of external interaction the unit performs.
+    /// Closed external interactions observed in the unit.
+    ///
+    /// An empty list is not a proof that the unit is pure; helpers report only
+    /// interactions they can establish from their deliberately narrow
+    /// vocabulary.
     pub interactions: Vec<String>,
 }
 
 /// How values move through a unit.
 ///
-/// Declared and empty, for the same reason as [`EffectSummary`].
+/// The deliberately small initial vocabulary records only direct, resolved
+/// `filter`/`map` receiver chains.  Each endpoint is a helper-local operation
+/// reference in the form `start_byte:end_byte:resolved_api_name`; it is not a
+/// stable identifier and is meaningful only beside this unit's source and
+/// schema version.  This is evidence that one operation's output is the next
+/// operation's receiver, not a general data-flow result.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataFlowSummary {
     /// Whether the helper attempted this analysis at all.
     pub computed: bool,
-    /// Pairs of symbol ids where the first flows into the second.
+    /// Pairs of operation references where the first directly feeds the
+    /// second. The references are intentionally local to this compiler IR.
     pub flows: Vec<(String, String)>,
 }
 

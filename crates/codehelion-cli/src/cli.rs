@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
 
 /// Top-level command-line parser.
 #[derive(Debug, Parser)]
@@ -31,7 +32,7 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Explain a finding by its stable ID.
+    /// Explain a finding or explicit cross-language comparison group by its stable ID.
     Explain(ExplainArgs),
     /// Record or manage scan baselines.
     Baseline {
@@ -65,8 +66,10 @@ pub enum Mode {
     /// statement runs, judged on a similarity breakdown. Parses the sources
     /// and never runs the target code.
     Structural,
-    /// Semantic detection via out-of-process compiler helpers. Not available
-    /// in this release.
+    /// Adds the clones a registered rule recognises across differing syntax,
+    /// judged on what an out-of-process compiler helper resolved. Needs a
+    /// helper `doctor` reports as available, and runs none of the project's
+    /// own code unless `--allow-execution` names a class.
     Semantic,
 }
 
@@ -107,7 +110,7 @@ pub enum DetailFormat {
 }
 
 /// Output format for compiled-artifact analysis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 pub enum ArtifactFormat {
     /// Human-readable summary.
     Text,
@@ -118,7 +121,7 @@ pub enum ArtifactFormat {
 }
 
 /// Input artifact format accepted by the parsers in this build.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 pub enum ArtifactInputFormat {
     /// WebAssembly core module.
     Wasm,
@@ -138,8 +141,11 @@ pub enum ArtifactInputFormat {
 /// lowered for an untrusted artifact or raised deliberately for a known one.
 pub const DEFAULT_ARTIFACT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
+/// Default wall-clock ceiling for one isolated artifact worker.
+pub const DEFAULT_ARTIFACT_TIMEOUT_SECONDS: u64 = 30;
+
 /// Arguments for the `artifact` subcommand.
-#[derive(Debug, clap::Args)]
+#[derive(Debug, Clone, clap::Args, Serialize, Deserialize)]
 pub struct ArtifactArgs {
     /// Compiled artifact to inspect.
     pub path: PathBuf,
@@ -158,6 +164,22 @@ pub struct ArtifactArgs {
     /// Reject an artifact larger than this many bytes before parsing it.
     #[arg(long, default_value_t = DEFAULT_ARTIFACT_MAX_BYTES)]
     pub max_bytes: u64,
+    /// Stop the isolated artifact worker after this many seconds.
+    ///
+    /// The worker is a separate process, so this remains enforceable when a
+    /// malformed input makes a parser stop making progress.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_ARTIFACT_TIMEOUT_SECONDS,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub timeout_seconds: u64,
+    /// Require the artifact worker to stay within this virtual-memory ceiling.
+    ///
+    /// Linux enforces this through the operating system; other platforms
+    /// refuse the request rather than silently ignoring it.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub max_memory_bytes: Option<u64>,
     /// JSON manifest describing this artifact's build variant.
     #[arg(long)]
     pub build_variant: Option<PathBuf>,
@@ -190,10 +212,21 @@ pub struct ArtifactArgs {
 pub enum ArtifactAction {
     /// Analyse one compiled artifact.
     Analyze(ArtifactArgs),
+    /// Run an already validated artifact request inside the isolated worker.
+    #[command(hide = true)]
+    Isolated(ArtifactIsolatedArgs),
     /// Compare two compiled artifacts.
     Compare(ArtifactCompareArgs),
     /// Summarize controlled savings-calibration measurements.
     Calibration(ArtifactCalibrationArgs),
+}
+
+/// Private file-based request passed from an artifact command to its worker.
+#[derive(Debug, clap::Args)]
+pub struct ArtifactIsolatedArgs {
+    /// JSON request written by the parent command.
+    #[arg(long)]
+    pub request: PathBuf,
 }
 
 /// Arguments for `artifact calibration`.
@@ -217,7 +250,7 @@ pub struct ArtifactCalibrationArgs {
 }
 
 /// Arguments for `artifact compare`.
-#[derive(Debug, clap::Args)]
+#[derive(Debug, Clone, clap::Args, Serialize, Deserialize)]
 pub struct ArtifactCompareArgs {
     /// Earlier artifact.
     pub before: PathBuf,
@@ -242,6 +275,19 @@ pub struct ArtifactCompareArgs {
     /// Reject either artifact larger than this many bytes before parsing it.
     #[arg(long, default_value_t = DEFAULT_ARTIFACT_MAX_BYTES)]
     pub max_bytes: u64,
+    /// Stop the isolated artifact worker after this many seconds.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_ARTIFACT_TIMEOUT_SECONDS,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub timeout_seconds: u64,
+    /// Require the artifact worker to stay within this virtual-memory ceiling.
+    ///
+    /// Linux enforces this through the operating system; other platforms
+    /// refuse the request rather than silently ignoring it.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub max_memory_bytes: Option<u64>,
     /// Source scan that produced the clone group being calibrated.
     ///
     /// Must be used with `--clone-group`, both build-variant manifests, and
@@ -361,7 +407,7 @@ pub struct ReportArgs {
 /// Arguments for the `explain` subcommand.
 #[derive(Debug, clap::Args)]
 pub struct ExplainArgs {
-    /// Stable finding ID to explain.
+    /// Stable finding or cross-language comparison group ID to explain.
     pub finding_id: String,
     /// Output format for the detail view.
     #[arg(long, value_enum, default_value_t = DetailFormat::Text)]

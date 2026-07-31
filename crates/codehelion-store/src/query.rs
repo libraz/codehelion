@@ -311,6 +311,51 @@ pub struct OccurrenceDetail {
     pub scan_run_id: i64,
 }
 
+/// One persisted Rust-to-C++ semantic group, read for its standalone explain
+/// view rather than treated as an ordinary scan finding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrossLanguageGroupDetail {
+    /// Stable identity of the explicit comparison that recorded this group.
+    pub comparison_id_hex: String,
+    /// Version of the comparison policy.
+    pub policy_version: String,
+    /// Scan root shared by the compared partitions.
+    pub root_path: String,
+    /// Origin `BuildVariant` fingerprints retained by the comparison.
+    pub origin_variants: Vec<String>,
+    /// Stable comparison-domain semantic-group identity.
+    pub group_id_hex: String,
+    /// Registered semantic correspondence rule.
+    pub rule_id: String,
+    /// Registered rule revision.
+    pub rule_version: u32,
+    /// Confidence after the available evidence was combined.
+    pub semantic_confidence: f64,
+    /// Closed API correspondences that established the group.
+    pub correspondence_ids: Vec<String>,
+    /// Origin-aware members and their stored normalized operation graphs.
+    pub members: Vec<CrossLanguageGroupMember>,
+}
+
+/// One member of a persisted cross-language semantic group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossLanguageGroupMember {
+    /// `BuildVariant` fingerprint of the normal partition that produced it.
+    pub origin_variant: String,
+    /// Source language (`rust` or `cpp`).
+    pub language: String,
+    /// Source path relative to the comparison root.
+    pub file_path: String,
+    /// One-based source range start.
+    pub start_line: u32,
+    /// One-based source range end.
+    pub end_line: u32,
+    /// Best-effort enclosing unit name.
+    pub unit_name: Option<String>,
+    /// Revalidated normalized operation graph.
+    pub graph: SemanticOperationGraph,
+}
+
 /// Where a stored run ranked a finding, and what it read to get there.
 ///
 /// Read back rather than recomputed. The rules a run ranked under are the
@@ -557,12 +602,17 @@ pub struct SourceResolvedCall {
 pub struct SourceInstantiation {
     /// Definition spelling supplied by the compiler helper.
     pub definition: String,
+    /// Optional compiler-produced spelling for artifact correlation.
+    pub artifact_match_key: Option<String>,
     /// Versioned compiler-specific specialization key.
     pub instantiation_key: String,
     /// Definition anchor when present, otherwise the expansion anchor.
     pub file_path: String,
     /// One-based line in [`Self::file_path`].
     pub line: u32,
+    /// One-based final line of the source definition, when reported by the
+    /// compiler.
+    pub definition_end_line: Option<u32>,
     /// Translation unit or crate that reported this specialization.
     ///
     /// This is compiler evidence, not a source identity. The same header
@@ -849,9 +899,10 @@ impl Store {
         scan_run_id: i64,
     ) -> Result<Vec<SourceInstantiation>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT i.definition, i.instantiation_key, u.file_path,
+            "SELECT i.definition, i.artifact_match_key, i.instantiation_key, u.file_path,
                     COALESCE(i.definition_file, i.expansion_file),
-                    COALESCE(i.definition_start_line, i.expansion_start_line)
+                    COALESCE(i.definition_start_line, i.expansion_start_line),
+                    i.definition_end_line
              FROM compiler_instantiation i
              JOIN compiler_unit u ON u.id = i.compiler_unit_id
              WHERE u.scan_run_id = ?1
@@ -863,16 +914,26 @@ impl Store {
             .query_map([scan_run_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
             .map(
-                |(definition, instantiation_key, translation_unit, file_path, line)| {
+                |(
+                    definition,
+                    artifact_match_key,
+                    instantiation_key,
+                    translation_unit,
+                    file_path,
+                    line,
+                    definition_end_line,
+                )| {
                     let line =
                         positive_line("compiler_instantiation.definition_start_line", Some(line))?
                             .ok_or_else(|| StoreError::UnknownVocabulary {
@@ -881,9 +942,14 @@ impl Store {
                             })?;
                     Ok(SourceInstantiation {
                         definition,
+                        artifact_match_key,
                         instantiation_key,
                         file_path,
                         line,
+                        definition_end_line: positive_line(
+                            "compiler_instantiation.definition_end_line",
+                            definition_end_line,
+                        )?,
                         translation_unit,
                     })
                 },
@@ -2317,6 +2383,125 @@ impl Store {
         Ok(Some(detail))
     }
 
+    /// Look up one explicit Rust-to-C++ semantic comparison group by its
+    /// stable comparison-domain id.
+    ///
+    /// The newest persisted comparison wins when the same deterministic group
+    /// identity was recorded more than once. This does not merge comparisons:
+    /// the returned origin variants remain those of that one invocation.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::MalformedId`] when `group_hex` is not 32 hex digits;
+    /// otherwise any underlying database or persisted-SOG validation error.
+    pub fn cross_language_group(
+        &self,
+        group_hex: &str,
+    ) -> Result<Option<CrossLanguageGroupDetail>, StoreError> {
+        let group_id = parse_hex_id(group_hex)?;
+        let Some((group_row_id, comparison_row_id, mut detail)) =
+            self.cross_language_group_header(group_id)?
+        else {
+            return Ok(None);
+        };
+        detail.origin_variants = self.cross_language_origins(comparison_row_id)?;
+        detail.members = self.cross_language_members(group_row_id)?;
+        Ok(Some(detail))
+    }
+
+    fn cross_language_group_header(
+        &self,
+        group_id: [u8; 16],
+    ) -> Result<Option<(i64, i64, CrossLanguageGroupDetail)>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT g.id, c.id, lower(hex(c.comparison_id)), c.policy_version, c.root_path,
+                        lower(hex(g.group_id)), g.rule_id, g.rule_version, g.semantic_confidence,
+                        g.correspondence_ids_json
+                 FROM cross_language_semantic_group g
+                 JOIN cross_language_comparison c ON c.id = g.comparison_id
+                 WHERE g.group_id = ?1
+                 ORDER BY c.started_at DESC, c.id DESC
+                 LIMIT 1",
+                params![group_id.as_slice()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        CrossLanguageGroupDetail {
+                            comparison_id_hex: row.get(2)?,
+                            policy_version: row.get(3)?,
+                            root_path: row.get(4)?,
+                            origin_variants: Vec::new(),
+                            group_id_hex: row.get(5)?,
+                            rule_id: row.get(6)?,
+                            rule_version: row.get(7)?,
+                            semantic_confidence: row.get(8)?,
+                            correspondence_ids: serde_json::from_str::<Vec<String>>(
+                                &row.get::<_, String>(9)?,
+                            )
+                            .map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    9,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?,
+                            members: Vec::new(),
+                        },
+                    ))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn cross_language_origins(&self, comparison_row_id: i64) -> Result<Vec<String>, StoreError> {
+        self.conn
+            .prepare(
+                "SELECT build_variant_fingerprint
+                 FROM cross_language_comparison_origin
+                 WHERE comparison_id = ?1
+                 ORDER BY build_variant_fingerprint ASC",
+            )?
+            .query_map(params![comparison_row_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()
+            .map_err(Into::into)
+    }
+
+    fn cross_language_members(
+        &self,
+        group_row_id: i64,
+    ) -> Result<Vec<CrossLanguageGroupMember>, StoreError> {
+        let members: Vec<StoredCrossLanguageMemberRow> = self
+            .conn
+            .prepare(
+                "SELECT origin_variant_fingerprint, language, file_path, start_line, end_line,
+                        unit_name, graph_schema_version, graph_json
+                 FROM cross_language_semantic_member
+                 WHERE group_id = ?1
+                 ORDER BY origin_variant_fingerprint ASC, language ASC, file_path ASC,
+                          start_line ASC, end_line ASC",
+            )?
+            .query_map(params![group_row_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+        members
+            .into_iter()
+            .map(decode_cross_language_member)
+            .collect()
+    }
+
     /// Where a run ranked one group's finding, with the facts behind it.
     fn group_priority(
         &self,
@@ -2431,6 +2616,46 @@ fn map_member(row: &rusqlite::Row<'_>, content: usize) -> Result<StoredMember, r
         boilerplate: row.get(content + 2)?,
         is_canonical: row.get::<_, i64>(6)? != 0,
     })
+}
+
+type StoredCrossLanguageMemberRow = (
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    Option<String>,
+    String,
+    String,
+);
+
+fn decode_cross_language_member(
+    (origin_variant, language, file_path, start_line, end_line, unit_name, schema, graph):
+        StoredCrossLanguageMemberRow,
+) -> Result<CrossLanguageGroupMember, StoreError> {
+    Ok(CrossLanguageGroupMember {
+        origin_variant,
+        language,
+        file_path,
+        start_line: positive_cross_language_line("start_line", start_line)?,
+        end_line: positive_cross_language_line("end_line", end_line)?,
+        unit_name,
+        graph: Store::decode_stored_sog(&schema, &graph)?,
+    })
+}
+
+fn positive_cross_language_line(field: &'static str, value: i64) -> Result<u32, StoreError> {
+    u32::try_from(value)
+        .ok()
+        .filter(|line| *line > 0)
+        .ok_or_else(|| StoreError::UnknownVocabulary {
+            field: match field {
+                "start_line" => "cross_language_semantic_member.start_line",
+                "end_line" => "cross_language_semantic_member.end_line",
+                _ => "cross_language_semantic_member.line",
+            },
+            value: value.to_string(),
+        })
 }
 
 fn fingerprint_from_blob(field: &'static str, value: Vec<u8>) -> Result<[u8; 16], StoreError> {

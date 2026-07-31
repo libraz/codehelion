@@ -116,6 +116,7 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
         Command::Baseline { action } => baseline(action, out),
         Command::Artifact { action } => match action {
             ArtifactAction::Analyze(args) => artifact::run(args, out),
+            ArtifactAction::Isolated(args) => artifact::run_isolated_worker(args),
             ArtifactAction::Compare(args) => artifact::compare(args, out),
             ArtifactAction::Calibration(args) => artifact::calibration(args, out),
         },
@@ -186,9 +187,18 @@ fn doctor_artifacts(out: &mut impl Write) -> Result<()> {
     writeln!(out, "  artifacts:")?;
     writeln!(out, "    wasm: available (core modules; wasmparser)")?;
     writeln!(out, "    elf: available (sized text symbols; object)")?;
-    writeln!(out, "    macho: recognised, parser unavailable")?;
-    writeln!(out, "    pe-coff: recognised, parser unavailable")?;
-    writeln!(out, "    archive: recognised, parser unavailable")?;
+    writeln!(
+        out,
+        "    macho: available (symbols, relocations, data; matching dSYM source mappings)"
+    )?;
+    writeln!(
+        out,
+        "    pe-coff: available (symbols, relocations, data; matching PDB source mappings)"
+    )?;
+    writeln!(
+        out,
+        "    archive: available (local member enumeration and delegated parsing)"
+    )?;
     Ok(())
 }
 
@@ -502,10 +512,12 @@ fn recorded_ranking(detectors: &[(String, String)]) -> Result<report::RankingInf
     })
 }
 
-/// Look one occurrence up by its stable finding id and print its detail.
+/// Look up one ordinary finding or explicit cross-language comparison group
+/// by its stable id and print its detail.
 ///
-/// Both output formats render the same [`report::FindingDetail`] value, in
-/// the shape a scan report's member entries use.
+/// Ordinary findings render [`report::FindingDetail`]. Comparison-domain
+/// groups render [`report::CrossLanguageGroupDetail`] and remain outside normal
+/// scan snapshots, baselines, and savings.
 #[allow(
     clippy::too_many_lines,
     reason = "the lookup and both reporter forms share one complete finding detail"
@@ -519,12 +531,45 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
         );
     }
     let store = Store::open(&path)?;
-    let Some(occurrence) = store.occurrence(&args.finding_id)? else {
-        bail!(
-            "no occurrence with finding id {} in {}",
-            args.finding_id,
-            path.display()
-        );
+    let occurrence = store.occurrence(&args.finding_id)?;
+    let Some(occurrence) = occurrence else {
+        let Some(group) = store.cross_language_group(&args.finding_id)? else {
+            bail!(
+                "no occurrence or cross-language comparison group with id {} in {}",
+                args.finding_id,
+                path.display()
+            );
+        };
+        let detail = report::CrossLanguageGroupDetail {
+            schema_version: "cross-language-explain-v1",
+            group_id: group.group_id_hex,
+            comparison_id: group.comparison_id_hex,
+            policy_version: group.policy_version,
+            root_path: group.root_path,
+            origin_variants: group.origin_variants,
+            rule_id: group.rule_id,
+            rule_version: group.rule_version,
+            semantic_confidence: group.semantic_confidence,
+            correspondence_ids: group.correspondence_ids,
+            members: group
+                .members
+                .into_iter()
+                .map(|member| report::CrossLanguageGroupMemberDetail {
+                    origin_variant: member.origin_variant,
+                    language: member.language,
+                    file: member.file_path,
+                    start_line: member.start_line,
+                    end_line: member.end_line,
+                    unit: member.unit_name,
+                    graph: member.graph,
+                })
+                .collect(),
+        };
+        match args.format {
+            DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
+            DetailFormat::Text => detail.render_text(out)?,
+        }
+        return Ok(Outcome::Success);
     };
     let source_artifact_mappings = store
         .artifact_fragment_mappings(&args.finding_id)?
@@ -954,6 +999,16 @@ fn resolve_db(flag: Option<&Path>) -> Result<PathBuf> {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use codehelion_core::discovery::Language;
+    use codehelion_core::semantic::{
+        OperationAttributes, OperationEdge, OperationEdgeKind, OperationKind, OperationNode,
+        SemanticOperationGraph,
+    };
+    use codehelion_core::stable_id::{CrossLanguageComparisonId, CrossLanguageGroupId};
+    use codehelion_store::snapshot::{
+        CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow,
+        CrossLanguageSemanticMemberRow,
+    };
 
     #[test]
     fn cross_language_comparison_requires_semantic_mode() {
@@ -981,6 +1036,91 @@ mod tests {
     }
 
     #[test]
+    fn explain_reads_a_cross_language_group_without_turning_it_into_a_finding() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("audit.db");
+        let graph = SemanticOperationGraph::new(
+            Language::Rust,
+            [1; 32],
+            vec![
+                OperationNode {
+                    kind: OperationKind::Source,
+                    attributes: OperationAttributes::default(),
+                },
+                OperationNode {
+                    kind: OperationKind::Collect,
+                    attributes: OperationAttributes::default(),
+                },
+            ],
+            vec![OperationEdge {
+                from: 0,
+                to: 1,
+                kind: OperationEdgeKind::Data,
+            }],
+        )
+        .unwrap();
+        let graph_json = serde_json::to_string(&graph).unwrap();
+        let cpp_graph =
+            SemanticOperationGraph::new(Language::Cpp, [2; 32], graph.nodes, graph.edges).unwrap();
+        let cpp_graph_json = serde_json::to_string(&cpp_graph).unwrap();
+        let origins = vec!["cpp-variant".to_string(), "rust-variant".to_string()];
+        let groups = vec![CrossLanguageSemanticGroupRow {
+            group_id: CrossLanguageGroupId::from_bytes([72; 16]),
+            rule_id: "cross-language-sequence-pipeline-v1".to_string(),
+            rule_version: 1,
+            semantic_confidence: 0.55,
+            correspondence_ids: vec!["sequence-map-v1".to_string()],
+            members: vec![
+                CrossLanguageSemanticMemberRow {
+                    origin_variant: "rust-variant".to_string(),
+                    language: Language::Rust,
+                    file_path: "rust/src/lib.rs".to_string(),
+                    start_line: 3,
+                    end_line: 6,
+                    unit_name: Some("map_values".to_string()),
+                    graph_schema_version: "sog-v1".to_string(),
+                    graph_json,
+                },
+                CrossLanguageSemanticMemberRow {
+                    origin_variant: "cpp-variant".to_string(),
+                    language: Language::Cpp,
+                    file_path: "cpp/src/map.cpp".to_string(),
+                    start_line: 3,
+                    end_line: 6,
+                    unit_name: Some("map_values".to_string()),
+                    graph_schema_version: "sog-v1".to_string(),
+                    graph_json: cpp_graph_json,
+                },
+            ],
+        }];
+        let comparison = CrossLanguageComparisonSnapshot {
+            root_path: "/repo",
+            comparison_id: CrossLanguageComparisonId::from_bytes([71; 16]),
+            policy_version: "cross-language-semantic-v1",
+            started_at: "2026-07-31T00:00:00Z",
+            finished_at: "2026-07-31T00:00:01Z",
+            origins: &origins,
+            groups: &groups,
+        };
+        Store::open(&database)
+            .unwrap()
+            .record_cross_language_comparison(&comparison)
+            .unwrap();
+
+        let args = ExplainArgs {
+            finding_id: "48".repeat(16),
+            format: DetailFormat::Text,
+            db: Some(database),
+        };
+        let mut output = Vec::new();
+        assert_eq!(explain(&args, &mut output).unwrap(), Outcome::Success);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("cross-language semantic group"));
+        assert!(output.contains("sequence-map-v1"));
+        assert!(output.contains("rust rust/src/lib.rs:3-6 (rust-variant)"));
+    }
+
+    #[test]
     fn dispatch_doctor_writes_diagnostics() {
         let mut buffer = Vec::new();
         let outcome = dispatch(&Command::Doctor, &mut buffer).expect("dispatch should succeed");
@@ -993,7 +1133,7 @@ mod tests {
         assert!(text.contains("OS memory, network, and filesystem containment unavailable"));
         assert!(text.contains("artifacts:"));
         assert!(text.contains("wasm: available"));
-        assert!(text.contains("restricted semantic rules: 10 enabled"));
+        assert!(text.contains("restricted semantic rules: 12 enabled"));
     }
 
     #[test]

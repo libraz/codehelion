@@ -22,6 +22,7 @@
 mod analysis;
 mod calls;
 mod constructs;
+mod data_flow;
 mod expansions;
 mod instantiations;
 mod occurrences;
@@ -31,7 +32,6 @@ use codehelion_helper::PROTOCOL_VERSION;
 use codehelion_helper::ir::COMPILER_IR_SCHEMA_VERSION;
 use codehelion_helper::protocol::{
     Analyze, BuildDescription, Capability, DescribeBuild, Execution, Failure, HelperIdentity,
-    VersionRange,
 };
 use codehelion_helper::server::{Answer, Backend, Description, serve};
 
@@ -68,7 +68,7 @@ impl Backend for RustBackend {
         HelperIdentity {
             name: NAME.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            protocol: VersionRange::exactly(PROTOCOL_VERSION),
+            protocol: PROTOCOL_VERSION,
             // The compiler that will answer, which is this program's own. A
             // project built with a different one can still be analysed; what
             // cannot happen is this being mistaken for the project's compiler.

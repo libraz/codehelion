@@ -332,8 +332,6 @@ pub(crate) struct Backend<'a> {
 pub(crate) struct Answered {
     /// What it said about itself at the handshake.
     pub(crate) identity: HelperIdentity,
-    /// The protocol revision the two sides settled on.
-    pub(crate) agreed: u32,
     /// How many times it had to be restarted along the way.
     pub(crate) restarts: u32,
 }
@@ -393,9 +391,8 @@ pub(crate) fn ask_with_commands(
     let mut row = Vec::with_capacity(supervisors.len());
     for supervisor in &mut supervisors {
         let restarts = supervisor.restarts();
-        let answered = supervisor.spoke_with().map(|(identity, agreed)| Answered {
+        let answered = supervisor.spoke_with().map(|identity| Answered {
             identity: identity.clone(),
-            agreed,
             restarts,
         });
         row.push(answered.map(|answered| {
@@ -1723,6 +1720,8 @@ mod tests {
                 }),
             },
             definition: "c:@N@accumulate@FT@sum".into(),
+            definition_end_line: None,
+            artifact_match_key: None,
             instantiation_key: key.into(),
             arguments: vec![argument],
         }

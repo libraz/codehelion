@@ -976,10 +976,8 @@ pub struct Stability {
 /// Canonical, id-independent key for a finding: its fragments as sorted tuples.
 type FindingKey = Vec<(String, u32, u32)>;
 
-fn key_set(result: &DetectionResult) -> BTreeSet<FindingKey> {
-    result
-        .findings
-        .iter()
+fn key_set<'a>(findings: impl Iterator<Item = &'a Finding>) -> BTreeSet<FindingKey> {
+    findings
         .map(|finding| {
             let mut key: FindingKey = finding
                 .fragments
@@ -1001,10 +999,47 @@ fn key_set(result: &DetectionResult) -> BTreeSet<FindingKey> {
 /// Compare the finding sets of two runs `a` and `b` over the same input.
 #[must_use]
 pub fn stability(a: &DetectionResult, b: &DetectionResult) -> Stability {
-    let keys_a = key_set(a);
-    let keys_b = key_set(b);
-    let intersection = keys_a.intersection(&keys_b).count();
-    let union = keys_a.union(&keys_b).count();
+    stability_for_key_sets(&key_set(a.findings.iter()), &key_set(b.findings.iter()))
+}
+
+/// Compare semantic finding sets separately for every registered rule.
+///
+/// A finding established by more than one registered rule is included in each
+/// corresponding rule's set. Rules absent from one result are still present in
+/// the returned map, so a removed or newly introduced rule reports its full
+/// churn rather than disappearing from the comparison.
+#[must_use]
+pub fn stability_by_rule(a: &DetectionResult, b: &DetectionResult) -> BTreeMap<String, Stability> {
+    let rule_ids: BTreeSet<&str> = a
+        .findings
+        .iter()
+        .chain(&b.findings)
+        .flat_map(|finding| finding.rule_ids.iter().map(String::as_str))
+        .collect();
+    rule_ids
+        .into_iter()
+        .map(|rule_id| {
+            let left = key_set(
+                a.findings
+                    .iter()
+                    .filter(|finding| finding.rule_ids.iter().any(|id| id == rule_id)),
+            );
+            let right = key_set(
+                b.findings
+                    .iter()
+                    .filter(|finding| finding.rule_ids.iter().any(|id| id == rule_id)),
+            );
+            (rule_id.to_string(), stability_for_key_sets(&left, &right))
+        })
+        .collect()
+}
+
+fn stability_for_key_sets(
+    keys_a: &BTreeSet<FindingKey>,
+    keys_b: &BTreeSet<FindingKey>,
+) -> Stability {
+    let intersection = keys_a.intersection(keys_b).count();
+    let union = keys_a.union(keys_b).count();
     let jaccard = if union == 0 {
         1.0
     } else {
@@ -1358,6 +1393,32 @@ mod tests {
         let s = stability(&a, &b);
         assert!(!s.identical);
         assert!((s.jaccard - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rule_stability_exposes_a_removed_rule_without_affecting_another() {
+        let mut unchanged = finding("stable", 1.0, vec![fragment("stable.rs", 1, 4)]);
+        unchanged.rule_ids = vec!["rule-stable-v1".to_string()];
+        let mut removed = finding("removed", 1.0, vec![fragment("removed.rs", 1, 4)]);
+        removed.rule_ids = vec!["rule-removed-v1".to_string()];
+        let before = DetectionResult {
+            schema_version: 1,
+            language: "rust".to_string(),
+            findings: vec![unchanged.clone(), removed],
+            withheld: Vec::new(),
+        };
+        let after = DetectionResult {
+            schema_version: 1,
+            language: "rust".to_string(),
+            findings: vec![unchanged],
+            withheld: Vec::new(),
+        };
+
+        let by_rule = stability_by_rule(&before, &after);
+        assert!(by_rule["rule-stable-v1"].identical);
+        assert!((by_rule["rule-stable-v1"].churn).abs() < f64::EPSILON);
+        assert!(!by_rule["rule-removed-v1"].identical);
+        assert!((by_rule["rule-removed-v1"].churn - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]

@@ -805,7 +805,7 @@ mod tests {
         let tokens = sample();
         let base = unit_fingerprint(&variant(), &ctx(), &tokens, ContentNorm::Raw);
         let other_frontend = FileContext {
-            frontend_version: "test-lexer-v1",
+            frontend_version: "other-test-lexer-v1",
             ..ctx()
         };
         assert_ne!(

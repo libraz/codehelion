@@ -137,8 +137,8 @@ pub struct CrossLanguageGroup {
     pub rule_version: u32,
     /// Confidence, kept separate from ordinary clone confidence.
     pub semantic_confidence: f64,
-    /// One closed API correspondence identifier for each matched operation.
-    pub api_correspondence_ids: Vec<String>,
+    /// Closed API or compiler-construct correspondence identifiers used by the rule.
+    pub correspondence_ids: Vec<String>,
     /// Origin-aware members and their normalised graphs.
     pub members: Vec<CrossLanguageMember>,
 }
@@ -756,7 +756,6 @@ pub struct Group {
     /// per width. Stated separately from `boilerplate` because it is a
     /// statement about how the members differ rather than about what any one
     /// of them does.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub width_family: bool,
     /// Whether this is a pair reported on its own because no group could hold
     /// both its members.
@@ -1699,6 +1698,53 @@ pub struct FindingDetail {
     pub clone_group_savings: Vec<CloneGroupSavingsDetail>,
 }
 
+/// The standalone explain view of one explicitly requested Rust-to-C++
+/// semantic comparison group.
+#[derive(Debug, Serialize)]
+pub struct CrossLanguageGroupDetail {
+    /// Version of this detail document.
+    pub schema_version: &'static str,
+    /// Stable comparison-domain group identity.
+    pub group_id: String,
+    /// Stable identity of the comparison that recorded this group.
+    pub comparison_id: String,
+    /// Version of the comparison policy.
+    pub policy_version: String,
+    /// Root shared by the compared partitions.
+    pub root_path: String,
+    /// Origin build variants kept separate by the comparison.
+    pub origin_variants: Vec<String>,
+    /// Registered closed semantic rule that matched.
+    pub rule_id: String,
+    /// Registered rule revision.
+    pub rule_version: u32,
+    /// Confidence after the available semantic evidence was combined.
+    pub semantic_confidence: f64,
+    /// Closed API or compiler-construct correspondence identifiers used by the rule.
+    pub correspondence_ids: Vec<String>,
+    /// Origin-aware members and their normalized operation graphs.
+    pub members: Vec<CrossLanguageGroupMemberDetail>,
+}
+
+/// One origin-aware member of a cross-language explain result.
+#[derive(Debug, Serialize)]
+pub struct CrossLanguageGroupMemberDetail {
+    /// Origin build variant of this member's normal partition.
+    pub origin_variant: String,
+    /// Source language.
+    pub language: String,
+    /// Source location relative to the comparison root.
+    pub file: String,
+    /// One-based source range start.
+    pub start_line: u32,
+    /// One-based source range end.
+    pub end_line: u32,
+    /// Best-effort enclosing unit name.
+    pub unit: Option<String>,
+    /// Revalidated normalized operation graph.
+    pub graph: SemanticOperationGraph,
+}
+
 /// One explicit source/artifact mapping shown by `explain`.
 #[derive(Debug, Serialize)]
 pub struct SourceArtifactMappingDetail {
@@ -1886,6 +1932,18 @@ impl FindingDetail {
                     savings.model_confidence,
                     savings.savings_confidence,
                 )?;
+                writeln!(
+                    out,
+                    "      source build variant: {}",
+                    savings.source_build_variant_fingerprint
+                )?;
+                writeln!(
+                    out,
+                    "      artifact build variant: {}",
+                    savings.artifact_build_variant_fingerprint
+                )?;
+                writeln!(out, "      model schema: {}", savings.model_schema_version)?;
+                writeln!(out, "      assumptions: {}", savings.assumptions)?;
             }
         }
         writeln!(out, "  scan run: {}", self.scan_run)?;
@@ -2008,6 +2066,73 @@ impl FindingDetail {
     }
 }
 
+impl CrossLanguageGroupDetail {
+    /// The detail as pretty-printed JSON, newline-terminated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when serialization fails.
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        let mut text = serde_json::to_string_pretty(self)?;
+        text.push('\n');
+        Ok(text)
+    }
+
+    /// Render the closed correspondence and every origin-aware operation graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error from the writer.
+    pub fn render_text(&self, out: &mut impl Write) -> io::Result<()> {
+        writeln!(out, "cross-language semantic group {}", self.group_id)?;
+        writeln!(out, "  comparison: {}", self.comparison_id)?;
+        writeln!(out, "  policy: {}", self.policy_version)?;
+        writeln!(out, "  root: {}", self.root_path)?;
+        writeln!(
+            out,
+            "  origin variants: {}",
+            self.origin_variants.join(", ")
+        )?;
+        writeln!(
+            out,
+            "  rule: {}@{} (confidence {:.2})",
+            self.rule_id, self.rule_version, self.semantic_confidence
+        )?;
+        writeln!(
+            out,
+            "  Correspondences: {}",
+            self.correspondence_ids.join(", ")
+        )?;
+        for member in &self.members {
+            writeln!(
+                out,
+                "  {} {}:{}-{} ({})",
+                member.language,
+                member.file,
+                member.start_line,
+                member.end_line,
+                member.origin_variant,
+            )?;
+            if let Some(unit) = &member.unit {
+                writeln!(out, "    unit: {unit}")?;
+            }
+            let operations = member
+                .graph
+                .nodes
+                .iter()
+                .map(|node| node.kind.name())
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            writeln!(
+                out,
+                "    graph {}: {operations}",
+                member.graph.schema_version
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// What the exhausted candidate-pair ceiling cost, in the run's own numbers.
 ///
 /// How much was skipped, not only that something was: a ceiling that trimmed
@@ -2076,6 +2201,7 @@ fn severed_note(funnel: &[FunnelStage]) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(super) mod tests {
     use super::*;
+    use boon::{Compiler, Schemas};
     use codehelion_core::discovery::Language;
     use codehelion_core::semantic::{
         OperationAttributes, OperationEdge, OperationEdgeKind, OperationKind, OperationNode,
@@ -2612,12 +2738,26 @@ pub(super) mod tests {
         let group = &value["groups"][0];
         assert_eq!(group["clone_type"], "type-1");
         assert_eq!(group["priority"]["inputs"]["largest_member_tokens"], 80);
+        assert_eq!(group["width_family"], false);
         assert_eq!(group["suppressed"], serde_json::Value::Null);
         assert_eq!(group["members"][0]["canonical"], true);
         let suppressed = &value["groups"][1]["suppressed"];
         assert_eq!(suppressed["kind"], "rule");
         assert_eq!(suppressed["scope"], "path_glob");
         assert!(suppressed.get("reason").is_none());
+    }
+
+    #[test]
+    fn current_json_report_validates_against_the_shipped_v1_schema() {
+        let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA).unwrap();
+        let mut schemas = Schemas::new();
+        let mut compiler = Compiler::new();
+        let uri = "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v1.schema.json";
+        compiler.add_resource(uri, schema).unwrap();
+        let index = compiler.compile(uri, &mut schemas).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&sample_report().to_json().unwrap()).unwrap();
+        schemas.validate(&value, index).unwrap();
     }
 
     #[test]
@@ -2703,6 +2843,43 @@ pub(super) mod tests {
         assert!(text.contains("rule sequence-pipeline-v1@1"));
         assert!(text.contains("graph 1: source -> collect"));
         assert!(text.contains("node mapping: 0→0"));
+    }
+
+    #[test]
+    fn cross_language_group_detail_keeps_closed_evidence_and_origins_readable() {
+        let detail = CrossLanguageGroupDetail {
+            schema_version: "cross-language-explain-v1",
+            group_id: "ab".repeat(16),
+            comparison_id: "cd".repeat(16),
+            policy_version: "cross-language-semantic-v1".to_string(),
+            root_path: "/work/project".to_string(),
+            origin_variants: vec!["cpp-variant".to_string(), "rust-variant".to_string()],
+            rule_id: "cross-language-sequence-pipeline-v1".to_string(),
+            rule_version: 1,
+            semantic_confidence: 0.55,
+            correspondence_ids: vec!["sequence-map-v1".to_string()],
+            members: vec![CrossLanguageGroupMemberDetail {
+                origin_variant: "rust-variant".to_string(),
+                language: "rust".to_string(),
+                file: "rust/src/lib.rs".to_string(),
+                start_line: 3,
+                end_line: 6,
+                unit: Some("map_values".to_string()),
+                graph: semantic_graph(),
+            }],
+        };
+
+        let json: serde_json::Value = serde_json::from_str(&detail.to_json().unwrap()).unwrap();
+        assert_eq!(json["schema_version"], "cross-language-explain-v1");
+        assert_eq!(json["correspondence_ids"][0], "sequence-map-v1");
+        assert_eq!(json["members"][0]["graph"]["schema_version"], "sog-v1");
+        let mut text = Vec::new();
+        detail.render_text(&mut text).unwrap();
+        let text = String::from_utf8(text).unwrap();
+        assert!(text.contains("cross-language semantic group"));
+        assert!(text.contains("sequence-map-v1"));
+        assert!(text.contains("rust rust/src/lib.rs:3-6 (rust-variant)"));
+        assert!(text.contains("graph sog-v1: source -> collect"));
     }
 
     #[test]
@@ -3058,6 +3235,14 @@ pub(super) mod tests {
             -2
         );
         assert_eq!(value["clone_group_savings"][0]["model_confidence"], "low");
+        assert_eq!(
+            value["clone_group_savings"][0]["source_build_variant_fingerprint"],
+            "cd".repeat(16)
+        );
+        assert_eq!(
+            value["clone_group_savings"][0]["assumptions"][0]["kind"],
+            "shared_implementation_retains_copies"
+        );
 
         let mut buffer = Vec::new();
         detail.render_text(&mut buffer).unwrap();
@@ -3066,6 +3251,10 @@ pub(super) mod tests {
         assert!(text.contains("conflicting evidence retained"));
         assert!(text.contains("refactoring estimates (not guaranteed):"));
         assert!(text.contains("-2 estimated bytes"));
+        assert!(text.contains(&format!("source build variant: {}", "cd".repeat(16))));
+        assert!(text.contains(&format!("artifact build variant: {}", "ef".repeat(16))));
+        assert!(text.contains("model schema: refactor-savings-model-v1"));
+        assert!(text.contains("shared_implementation_retains_copies"));
     }
 
     #[test]

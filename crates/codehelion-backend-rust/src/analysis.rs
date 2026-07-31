@@ -333,6 +333,8 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
     ir.instantiations = instantiations::collect(loaded, Path::new(&unit.file), krate, &mut types);
     ir.calls = calls::collect(loaded, Path::new(&unit.file));
     ir.semantic_constructs = constructs::collect(loaded, Path::new(&unit.file));
+    ir.effects = codehelion_helper::effects::summarize(&ir.semantic_constructs);
+    ir.data_flow = crate::data_flow::collect(loaded, Path::new(&unit.file), &ir.calls);
     ir.calls.extend(macros.calls);
     ir.expressions = macros.expressions;
     ir.calls.sort_by_key(|call| {

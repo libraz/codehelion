@@ -184,6 +184,8 @@ fn full_analysis(unit: UnitRef) -> CompilerIr {
                 definition: Some(range("src/generic.rs", 96)),
             },
             definition: "crate::Buffer::push".to_string(),
+            definition_end_line: None,
+            artifact_match_key: None,
             instantiation_key: "crate::Buffer::push<String>".to_string(),
             arguments: vec![1, 2],
         }],
@@ -494,9 +496,11 @@ fn local_instantiation_anchors_remain_available_for_correlation() {
         store.source_instantiations(run).unwrap(),
         vec![codehelion_store::query::SourceInstantiation {
             definition: "crate::Buffer::push".to_owned(),
+            artifact_match_key: None,
             instantiation_key: "crate::Buffer::push<String>".to_owned(),
             file_path: "src/generic.rs".to_owned(),
             line: 4,
+            definition_end_line: None,
             translation_unit: "src/render.rs".to_owned(),
         }]
     );
@@ -752,12 +756,16 @@ fn the_expansions_of_one_definition_are_one_family_across_units() {
                 definition: Some(range("src/generic.rs", 96)),
             },
             definition: "crate::Buffer::push".to_string(),
+            definition_end_line: None,
+            artifact_match_key: None,
             instantiation_key: key.to_string(),
             arguments: vec![1],
         },
         Instantiation {
             anchor: Anchor::written_here(range("src/parse.rs", 256)),
             definition: "crate::Buffer::push".to_string(),
+            definition_end_line: None,
+            artifact_match_key: None,
             instantiation_key: "crate::Buffer::push<u32>".to_string(),
             arguments: vec![0],
         },

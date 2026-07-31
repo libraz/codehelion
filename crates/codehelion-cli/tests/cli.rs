@@ -30,7 +30,7 @@ fn doctor_reports_the_restricted_semantic_rule_registry() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "restricted semantic rules: 10 enabled",
+            "restricted semantic rules: 12 enabled",
         ))
         .stdout(predicate::str::contains("semantic-rule-registry-v1"));
 }
@@ -58,7 +58,7 @@ fn doctor_lists_supported_and_recognised_artifact_formats() {
         .stdout(predicate::str::contains("wasm: available"))
         .stdout(predicate::str::contains("elf: available"))
         .stdout(predicate::str::contains(
-            "macho: recognised, parser unavailable",
+            "macho: available (symbols, relocations, data; matching dSYM source mappings)",
         ));
 }
 
@@ -175,6 +175,50 @@ fn artifact_reports_a_minimal_wasm_without_executing_it() {
         .stdout(predicate::str::contains("\"format\": \"wasm\""))
         .stdout(predicate::str::contains("\"analysis_id\": 1"));
     assert!(db.is_file());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn artifact_accepts_an_enforced_linux_memory_ceiling() {
+    let file = tempfile::NamedTempFile::new().expect("fixture file");
+    let db_dir = tempfile::tempdir().expect("database directory");
+    let db = db_dir.path().join("artifact.db");
+    std::fs::write(file.path(), b"\0asm\x01\0\0\0").expect("write wasm fixture");
+    cmd()
+        .args([
+            "artifact",
+            "analyze",
+            file.path().to_str().expect("utf-8 fixture path"),
+            "--format",
+            "json",
+            "--db",
+            db.to_str().expect("utf-8 database path"),
+            "--max-memory-bytes",
+            "268435456",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("artifact-report-v1"));
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn artifact_refuses_an_unenforceable_memory_ceiling() {
+    let file = tempfile::NamedTempFile::new().expect("fixture file");
+    std::fs::write(file.path(), b"\0asm\x01\0\0\0").expect("write wasm fixture");
+    cmd()
+        .args([
+            "artifact",
+            "analyze",
+            file.path().to_str().expect("utf-8 fixture path"),
+            "--max-memory-bytes",
+            "268435456",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot enforce the requested artifact worker memory limit",
+        ));
 }
 
 #[test]

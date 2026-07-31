@@ -144,6 +144,15 @@ fn standard_api_name(target: &CallTarget) -> Option<String> {
         "rust::slice::iter"
     } else if symbol.ends_with("::Vec::push") {
         "rust::Vec::push"
+    } else if symbol.ends_with("::ToString::to_string")
+        || symbol.ends_with(" as ToString>::to_string")
+    {
+        "rust::ToString::to_string"
+    } else if symbol.ends_with("::str::parse")
+        || symbol.ends_with("::str::parse::<")
+        || symbol.ends_with("::str::_::parse")
+    {
+        "rust::str::parse"
     } else {
         return None;
     };

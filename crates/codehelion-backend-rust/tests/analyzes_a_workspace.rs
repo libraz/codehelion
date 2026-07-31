@@ -506,6 +506,34 @@ fn standard_iterator_calls_carry_closed_api_names() {
     assert!(names.contains(&"rust::slice::iter"), "{names:?}");
 }
 
+/// The serialization rule is allowed only when the helper resolved both
+/// standard APIs. A project method named `parse` or `to_string` cannot enter
+/// this evidence path.
+#[test]
+fn standard_text_round_trip_calls_carry_closed_api_names() {
+    let ir = analyzed(&unit("plain", "ledger", "ledger"));
+    let names = ir
+        .calls
+        .iter()
+        .filter_map(|call| call.api_name.as_deref())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"rust::ToString::to_string"), "{names:?}");
+    assert!(names.contains(&"rust::str::parse"), "{names:?}");
+}
+
+/// The limited def-use summary must prove only a direct, compiler-resolved
+/// iterator receiver chain. A binding between the calls is intentionally not
+/// treated as the same fact: following bindings would be general data-flow.
+#[test]
+fn a_direct_filter_map_receiver_chain_is_recorded_without_following_bindings() {
+    let ir = analyzed(&unit("plain", "ledger", "ledger"));
+    assert!(ir.data_flow.computed);
+    assert_eq!(ir.data_flow.flows.len(), 1, "{:?}", ir.data_flow.flows);
+    let (source, sink) = &ir.data_flow.flows[0];
+    assert!(source.ends_with(":rust::Iterator::filter"), "{source}");
+    assert!(sink.ends_with(":rust::Iterator::map"), "{sink}");
+}
+
 /// Anchors have to point at the fixture's own text, since a fragment is cut
 /// from a file and a finding anchored anywhere else is unusable.
 #[test]
@@ -951,6 +979,9 @@ fn a_plain_numeric_reduce_loop_is_reported_without_admitting_guards() {
 #[test]
 fn a_direct_standard_file_acquisition_is_paired_with_its_scope_drop() {
     let ir = analyzed(&unit("plain", "ledger", "ledger"));
+    assert!(ir.effects.computed);
+    assert_eq!(ir.effects.interactions, ["file_io"]);
+    assert!(ir.effects.writes.is_empty());
     let lifetimes = ir
         .semantic_constructs
         .iter()

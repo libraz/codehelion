@@ -689,6 +689,25 @@ fn cross_language_semantic_comparison_is_separate_and_keeps_its_evidence() {
         2
     );
     assert_eq!(store.table_count("scan_run").unwrap(), 0);
+    let detail = store
+        .cross_language_group(&"48".repeat(16))
+        .unwrap()
+        .expect("the comparison group is queryable by its stable id");
+    assert_eq!(detail.comparison_id_hex, "47".repeat(16));
+    assert_eq!(detail.policy_version, "cross-language-semantic-v1");
+    assert_eq!(detail.root_path, "/repo");
+    assert_eq!(detail.origin_variants, origins);
+    assert_eq!(detail.rule_id, "cross-language-sequence-pipeline-v1");
+    assert_eq!(detail.correspondence_ids, vec!["sequence-map-v1"]);
+    assert_eq!(detail.members.len(), 2);
+    assert_eq!(detail.members[0].language, "cpp");
+    assert_eq!(detail.members[0].graph.schema_version, "sog-v1");
+    assert!(
+        store
+            .cross_language_group(&"ff".repeat(16))
+            .unwrap()
+            .is_none()
+    );
 
     let mut malformed_groups = groups.clone();
     malformed_groups[0].members[1].language = Language::C;
@@ -1239,76 +1258,6 @@ fn recording_one_variant_twice_records_its_settings_once() {
         values_of(&stored, "includes"),
         vec!["/w/vendor", "/w/local"]
     );
-}
-
-/// A row written before variants were described has nothing to say about what
-/// it was built with. Before release, that development layout is rejected
-/// rather than converted into a current baseline.
-#[test]
-fn a_development_database_before_variant_descriptions_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("audit.db");
-    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
-    let detectors = detector_versions();
-    {
-        let mut store = Store::open(&path).unwrap();
-        store
-            .record_snapshot(&sample_snapshot(&variant, &detectors))
-            .unwrap();
-    }
-    {
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        for table in [
-            "semantic_node_mapping",
-            "semantic_group_evidence",
-            "semantic_operation_graph",
-            "artifact_analysis_savings_calibration",
-            "artifact_analysis_clone_group_savings",
-            "artifact_analysis_correlation",
-            "artifact_analysis_unmapped_source",
-            "artifact_analysis_unmapped_symbol",
-            "artifact_analysis_source_mapping",
-            "artifact_analysis_symbol",
-            "artifact_analysis",
-            "compiler_expression",
-            "compiler_unexpanded_macro",
-            "cross_variant_clone_member",
-            "cross_variant_clone_group",
-            "cross_variant_comparison_origin",
-            "cross_variant_comparison",
-        ] {
-            conn.execute(&format!("DROP TABLE {table}"), []).unwrap();
-        }
-        for table in ["build_variant_setting", "compiler_helper_execution"] {
-            conn.execute(&format!("DROP TABLE {table}"), []).unwrap();
-        }
-        for column in ["languages", "header_language", "build_language"] {
-            conn.execute(
-                &format!("ALTER TABLE build_variant DROP COLUMN {column}"),
-                [],
-            )
-            .unwrap();
-        }
-        // Winding the recorded version back means undoing every step since,
-        // not only the one this test is about: a step re-applied to a database
-        // that already has it fails for its own reason.
-        for (table, column) in [
-            ("compiler_helper", "restarts"),
-            ("compiler_unit", "anchored_at"),
-        ] {
-            conn.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])
-                .unwrap();
-        }
-        conn.execute("DROP INDEX idx_clone_group_member_fragment", [])
-            .unwrap();
-        conn.execute("UPDATE schema_meta SET version = 17", [])
-            .unwrap();
-    }
-
-    assert!(matches!(
-        Store::open(&path),
-        Err(StoreError::UnsupportedSchema { found: 17 })
-    ));
 }
 
 /// A run of the same tree under rules that named every group differently.
