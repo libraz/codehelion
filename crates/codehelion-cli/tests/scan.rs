@@ -127,6 +127,47 @@ fn scan_detects_clones_and_records_a_snapshot() {
     assert!(!findings.is_empty());
 }
 
+#[test]
+fn report_reformats_a_recorded_run_without_scanning_again() {
+    let dir = fixture();
+    let scanned = scan_json(dir.path());
+    let run_id = scanned["run"]["run_id"]
+        .as_i64()
+        .expect("scan JSON carries the recorded run id");
+
+    let json = cmd()
+        .current_dir(dir.path())
+        .args(["report", "--run", &run_id.to_string(), "--format", "json"])
+        .output()
+        .expect("reformat recorded JSON report");
+    assert!(json.status.success(), "{json:?}");
+    let rendered: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("report stdout is JSON");
+    assert_eq!(rendered["run"]["run_id"].as_i64(), Some(run_id));
+    assert_eq!(rendered["groups"], scanned["groups"]);
+    assert_eq!(
+        rendered["run"]["ranking"], scanned["run"]["ranking"],
+        "the original ranking recipe and weights are preserved"
+    );
+
+    cmd()
+        .current_dir(dir.path())
+        .args(["report", "--run", &run_id.to_string(), "--format", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("snapshot: run {run_id}")));
+
+    let sarif = cmd()
+        .current_dir(dir.path())
+        .args(["report", "--run", &run_id.to_string(), "--format", "sarif"])
+        .output()
+        .expect("reformat recorded SARIF report");
+    assert!(sarif.status.success(), "{sarif:?}");
+    let document: serde_json::Value =
+        serde_json::from_slice(&sarif.stdout).expect("report stdout is SARIF JSON");
+    assert_eq!(document["version"], "2.1.0");
+}
+
 /// Fast and Structural use their local frontends directly. This stays in the
 /// package-scoped CI job that deliberately does not build compiler helpers.
 #[test]
@@ -680,7 +721,7 @@ fn json_reports_follow_the_versioned_schema() {
     let dir = fixture();
     let value = scan_json(dir.path());
 
-    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["schema_version"], 1);
     assert_eq!(value["run"]["mode"], "fast");
     assert_eq!(value["run"]["build_variant"]["mode"], "fast");
     assert!(value["run"]["started_at"].as_str().unwrap().ends_with('Z'));
@@ -887,6 +928,19 @@ fn db_flag_overrides_the_database_location() {
         .success();
     assert!(dir.path().join("custom/audit.db").is_file());
     assert!(!dir.path().join(".codehelion/audit.db").exists());
+}
+
+#[test]
+fn default_database_is_placed_at_the_repository_root_for_a_subtree_scan() {
+    let dir = fixture();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", "src"])
+        .assert()
+        .success();
+
+    assert!(dir.path().join(".codehelion/audit.db").is_file());
+    assert!(!dir.path().join("src/.codehelion/audit.db").exists());
 }
 
 #[test]

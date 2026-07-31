@@ -928,7 +928,7 @@ mod tests {
         let group = &mut report.groups[0];
         group.clone_type = "restricted-semantic".to_string();
         group.semantic = Some(super::super::SemanticEvidence {
-            schema_version: "sog-v8".to_string(),
+            schema_version: "sog-v1".to_string(),
             rules: vec![super::super::SemanticRuleEvidence {
                 id: "sequence-pipeline-v1".to_string(),
                 version: 1,
@@ -971,7 +971,7 @@ mod tests {
         assert_eq!(properties["similarity"]["composite"], 0.82);
         assert_eq!(
             properties["similarity"]["weight_version"],
-            "structural-verify-v4"
+            "structural-verify-v1"
         );
         // The dimension the mode could not measure stays absent here too.
         assert_eq!(
@@ -1058,9 +1058,9 @@ mod tests {
     fn the_run_property_bag_keeps_what_sarif_has_no_field_for() {
         let value = sarif(&sample_report());
         let properties = &value["runs"][0]["properties"];
-        assert_eq!(properties["report_schema_version"], 2);
+        assert_eq!(properties["report_schema_version"], 1);
         assert_eq!(properties["mode"], "fast");
-        assert_eq!(properties["build_variant"]["normalization_version"], 2);
+        assert_eq!(properties["build_variant"]["normalization_version"], 1);
         assert_eq!(properties["detector_versions"][0]["component"], "fp-schema");
         assert_eq!(properties["summary"]["files"]["total"], 2);
         assert_eq!(properties["run_id"], 1);

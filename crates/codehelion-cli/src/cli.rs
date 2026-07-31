@@ -23,6 +23,8 @@ pub struct Cli {
 pub enum Command {
     /// Scan a codebase for duplicate logic.
     Scan(ScanArgs),
+    /// Reformat one recorded scan without scanning the source tree again.
+    Report(ReportArgs),
     /// Inspect or initialise configuration.
     Config {
         /// Configuration action.
@@ -122,6 +124,12 @@ pub enum ArtifactInputFormat {
     Wasm,
     /// ELF executable, shared object, or relocatable object.
     Elf,
+    /// Mach-O executable, dynamic library, or relocatable object.
+    MachO,
+    /// Static archive containing local object members.
+    Archive,
+    /// PE image or COFF relocatable object.
+    PeCoff,
 }
 
 /// Default maximum number of artifact bytes read by one command invocation.
@@ -163,10 +171,13 @@ pub struct ArtifactArgs {
     /// command never invokes a linker or builds the inspected project.
     #[arg(long, requires = "source_run")]
     pub linker_map: Option<PathBuf>,
-    /// Existing external ELF debug companion for this exact artifact build.
+    /// Existing external ELF, Mach-O, or PE debug companion for this exact artifact build.
     ///
     /// It is read locally without invoking a compiler. The artifact backend
-    /// accepts it only when both files carry the same GNU build ID.
+    /// accepts ELF companions only with the same GNU build ID, Mach-O companions
+    /// only with the same `LC_UUID`, and PE companions only with the matching
+    /// `CodeView` PDB GUID and an eligible PDB age. Without this option,
+    /// Mach-O analysis also checks its conventional sibling dSYM bundle.
     #[arg(long, requires = "source_run")]
     pub debug_file: Option<PathBuf>,
     /// Local database path, overriding the configured location.
@@ -294,6 +305,12 @@ pub struct ScanArgs {
     /// Also list suppressed groups, with the reason each was hidden.
     #[arg(long)]
     pub show_suppressed: bool,
+    /// Keep trivially-shaped predicate groups at their measured priority.
+    ///
+    /// By default these groups are reported below behavioural duplication;
+    /// this switch is for an explicit review of the predicate families.
+    #[arg(long)]
+    pub include_trivial: bool,
     /// List every group and every member instead of the summarised excerpt.
     #[arg(long)]
     pub verbose: bool,
@@ -316,6 +333,29 @@ pub struct ScanArgs {
     /// carry the setting is one the tree being scanned supplies.
     #[arg(long, value_name = "CLASS[,CLASS]")]
     pub allow_execution: Option<String>,
+}
+
+/// Arguments for the `report` subcommand.
+#[derive(Debug, clap::Args)]
+pub struct ReportArgs {
+    /// Row id of the completed scan to render again.
+    #[arg(long)]
+    pub run: i64,
+    /// Report format.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+    /// Write the report to this file instead of standard output.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    /// Also list suppressed groups, with the reason each was hidden.
+    #[arg(long)]
+    pub show_suppressed: bool,
+    /// List every group and every member instead of the summarised excerpt.
+    #[arg(long)]
+    pub verbose: bool,
+    /// Local database path, overriding the configured location.
+    #[arg(long)]
+    pub db: Option<PathBuf>,
 }
 
 /// Arguments for the `explain` subcommand.
@@ -410,6 +450,20 @@ mod tests {
     fn cli_definition_is_valid() {
         // `debug_assert` catches structural mistakes in the clap definition.
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Parsed flag state is the test subject.
+    fn include_trivial_keeps_predicate_groups_at_their_measured_priority() {
+        let parsed = Cli::try_parse_from(["codehelion", "scan", "--include-trivial"])
+            .expect("the explicit predicate-review flag parses");
+        assert!(matches!(
+            parsed.command,
+            Command::Scan(ScanArgs {
+                include_trivial: true,
+                ..
+            })
+        ));
     }
 
     #[test]

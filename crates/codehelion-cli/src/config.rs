@@ -107,7 +107,8 @@ pub enum CategoryAction {
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct BoilerplatePolicy {
     /// Bodies that move one value and do nothing else: getters, setters,
-    /// stubs. Hidden by default — a duplicated getter is not a finding.
+    /// stubs. Ranked down by default, so a deliberate review can still find
+    /// them without allowing large predicate families to lead the report.
     pub trivial_body: CategoryAction,
     /// Wrappers that delegate with a single call. Hidden by default — every
     /// such group in the labelled corpora turned out to be a lookalike.
@@ -126,7 +127,7 @@ pub struct BoilerplatePolicy {
 impl Default for BoilerplatePolicy {
     fn default() -> Self {
         Self {
-            trivial_body: CategoryAction::Hide,
+            trivial_body: CategoryAction::RankDown,
             // A wrapper looked like something worth consolidating until there
             // was real code to check it against: across the labelled projects
             // every group of them was a lookalike, and none was a duplication
@@ -412,7 +413,7 @@ pub struct Config {
     pub limits: Limits,
     /// Restricted-semantic rule selection.
     pub semantic: SemanticRules,
-    /// Audit-database location, relative to the scan root unless absolute.
+    /// Audit-database location, relative to the repository root unless absolute.
     pub database: PathBuf,
     /// Worker-thread count; `None` selects a count automatically.
     pub jobs: Option<usize>,
@@ -550,7 +551,7 @@ pub const TEMPLATE: &str = "\
 # Literal-normalization strategy: \"preserve\", \"category\" or \"full\".
 # literal-normalization = \"full\"
 
-# Audit-database location, relative to the scan root unless absolute.
+# Audit-database location, relative to the repository root unless absolute.
 # database = \".codehelion/audit.db\"
 
 # Worker-thread count; omit for automatic.
@@ -595,7 +596,7 @@ pub const TEMPLATE: &str = "\
 # shape: \"hide\", \"rank-down\" or \"report\". The classification is recorded
 # either way.
 # [suppression.boilerplate]
-# trivial-body = \"hide\"
+# trivial-body = \"rank-down\"
 # forwarding = \"hide\"
 # macro-repetition = \"rank-down\"
 # guarded-dispatch = \"hide\"
@@ -677,7 +678,7 @@ mod tests {
                 .semantic
                 .enabled("cross-language-sequence-pipeline-v1")
         );
-        assert!(config.semantic.enabled("sequence-pipeline-v2"));
+        assert!(config.semantic.enabled("unregistered-rule"));
     }
 
     #[test]
@@ -736,7 +737,7 @@ mod tests {
         let policy = Suppression::default().boilerplate;
         assert_eq!(
             policy.action(Boilerplate::TrivialBody),
-            CategoryAction::Hide
+            CategoryAction::RankDown
         );
         // A group of wrappers has never been worth acting on in the labelled
         // projects, so it is set aside rather than merely ranked down.
@@ -769,7 +770,7 @@ mod tests {
         );
         assert_eq!(
             policy.action(Boilerplate::TrivialBody),
-            CategoryAction::Hide
+            CategoryAction::RankDown
         );
         assert_eq!(
             config.suppression.generated_markers,

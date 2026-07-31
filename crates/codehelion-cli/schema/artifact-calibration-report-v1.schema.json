@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-calibration-report-v3.schema.json",
+  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-calibration-report-v1.schema.json",
   "title": "codehelion artifact calibration report",
   "description": "Local controlled-refactoring calibration summary. An optional baseline comparison is informational and never declares a threshold failure.",
   "type": "object",
   "required": ["schema_version", "source_run", "statistics", "strata"],
   "properties": {
-    "schema_version": { "const": "artifact-calibration-report-v3" },
+    "schema_version": { "const": "artifact-calibration-report-v1" },
     "source_run": { "type": "integer" },
     "statistics": { "$ref": "#/$defs/statistics" },
     "strata": {
@@ -86,3 +86,4 @@
     }
   }
 }
+

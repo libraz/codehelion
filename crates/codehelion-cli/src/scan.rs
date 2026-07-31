@@ -500,6 +500,8 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
             // Members of identical content differ in nothing, so no substitution
             // could say they were written per width either.
             similarity: None,
+            identifier_jaccard: None,
+            body_materiality: None,
             boilerplate: None,
             test_code: false,
             width_family: false,
@@ -523,6 +525,7 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
                         unit: instance
                             .unit
                             .and_then(|unit| source.units[unit].name.clone()),
+                        boilerplate: None,
                         tokens: u64::try_from(instance.token_end - instance.token_start)
                             .unwrap_or(u64::MAX),
                         canonical: position == 0,
@@ -538,21 +541,52 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
 /// Render the model in the requested format, to `--output` when given,
 /// otherwise to `out`. Colour is used only for text going to a terminal.
 pub(crate) fn write_report(args: &ScanArgs, out: &mut impl Write, model: &Report) -> Result<()> {
-    let text = match args.format {
+    write_report_options(
+        ReportOutput {
+            format: args.format,
+            output: args.output.as_deref(),
+            verbose: args.verbose,
+            show_suppressed: args.show_suppressed,
+        },
+        out,
+        model,
+    )
+}
+
+/// Output choices shared by a freshly scanned and a recorded report.
+#[derive(Clone, Copy)]
+pub(crate) struct ReportOutput<'a> {
+    /// Chosen serialization.
+    pub format: Format,
+    /// Optional destination instead of standard output.
+    pub output: Option<&'a Path>,
+    /// Whether text output lists every group and member.
+    pub verbose: bool,
+    /// Whether text output includes suppressed groups.
+    pub show_suppressed: bool,
+}
+
+/// Render a complete report with the common output path.
+pub(crate) fn write_report_options(
+    options: ReportOutput<'_>,
+    out: &mut impl Write,
+    model: &Report,
+) -> Result<()> {
+    let text = match options.format {
         Format::Json => model.to_json().context("serializing the JSON report")?,
         Format::Sarif => sarif_with_artifact_savings(model)?,
         Format::Text => {
             let options = report::TextOptions {
-                verbose: args.verbose,
-                color: args.output.is_none() && std::io::stdout().is_terminal(),
-                show_suppressed: args.show_suppressed,
+                verbose: options.verbose,
+                color: options.output.is_none() && std::io::stdout().is_terminal(),
+                show_suppressed: options.show_suppressed,
             };
             let mut buffer = Vec::new();
             model.render_text(options, &mut buffer)?;
             String::from_utf8(buffer).context("rendering the text report")?
         }
     };
-    match args.output.as_deref() {
+    match options.output {
         Some(path) => {
             std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
             writeln!(out, "wrote {}", path.display())?;
@@ -1205,19 +1239,32 @@ fn lex_one(source: &SourceUnit, timeout: std::time::Duration) -> FileOutcome<Lex
 }
 
 /// The audit-database location: an explicit flag is taken as given (relative
-/// to the working directory); the configured path resolves against the scan
-/// root unless absolute.
+/// to the working directory); the configured path resolves against the
+/// repository root unless absolute.
 pub(crate) fn database_path(root: &Path, flag: Option<&Path>, cfg: &Config) -> PathBuf {
     flag.map_or_else(
         || {
             if cfg.database.is_absolute() {
                 cfg.database.clone()
             } else {
-                root.join(&cfg.database)
+                repository_root(root).join(&cfg.database)
             }
         },
         Path::to_path_buf,
     )
+}
+
+/// Find the repository containing a scan root, falling back to the scan root
+/// when it is not inside a Git worktree.
+fn repository_root(root: &Path) -> PathBuf {
+    let mut current = Some(root);
+    while let Some(directory) = current {
+        if directory.join(".git").exists() {
+            return directory.to_path_buf();
+        }
+        current = directory.parent();
+    }
+    root.to_path_buf()
 }
 
 /// A baseline a scan was told to apply.
@@ -1392,7 +1439,7 @@ fn rank_and_record(
     Ok(ranked)
 }
 
-/// Open (creating directories and running migrations as needed) the store.
+/// Open the v1 store, creating its parent directory when needed.
 pub(crate) fn open_store(path: &Path) -> Result<Store> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -1407,10 +1454,8 @@ pub(crate) fn open_store(path: &Path) -> Result<Store> {
 ///
 /// Everything that can differ between two builds and be *seen* in the result
 /// belongs here, including the ranking recipe, which moves no identifier at
-/// all. What a difference costs is not decided by presence in this list but by
-/// [`codehelion_core::compat`], which weighs each component; recording only the
-/// id-moving ones would leave a reader unable to explain a result that changed
-/// for a reason nothing recorded.
+/// all. Baselines require this complete list to match exactly; the unreleased
+/// v1 format does not reinterpret prior detector configurations.
 fn detector_versions(weights: Weights, literals: LiteralNorm) -> Vec<(String, String)> {
     vec![
         ("fp-schema".to_string(), FP_SCHEMA_VERSION.to_string()),
@@ -1511,6 +1556,10 @@ fn snapshot_rows(
             entropy_bits: group.entropy_bits,
             suppress_reason: group.suppressed.map(|reason| reason.name().to_string()),
             boilerplate: None,
+            identifier_jaccard: None,
+            has_loop: None,
+            has_dynamic_allocation: None,
+            call_count: None,
             width_family: false,
             suppressed_by: *suppressed_by,
             priority: priority_row(&ranked[index].priority),
@@ -1527,6 +1576,7 @@ fn snapshot_rows(
                     finding: member_ids.finding,
                     language: lexed[instance.file].language,
                     host_unit: instance.unit.map(|unit| host_index[&(instance.file, unit)]),
+                    boilerplate: None,
                     file_path: lexed[instance.file].relative_path.clone(),
                     start_line: instance.start_line,
                     end_line: instance.end_line,
@@ -1675,6 +1725,7 @@ mod tests {
             compare_build_variants: false,
             compare_languages: false,
             show_suppressed: false,
+            include_trivial: false,
             verbose: false,
             fail_on_findings: false,
             untrusted,

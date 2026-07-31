@@ -127,12 +127,19 @@ fn a_gapped_clone_is_detected_and_recorded_with_its_evidence() {
     );
     // Content entropy is measured, not defaulted.
     assert!(group.entropy_bits > 1.0);
+    assert!(
+        group.identifier_jaccard.is_some(),
+        "raw identifier agreement is stored as triage evidence"
+    );
+    assert!(group.has_loop.is_some());
+    assert!(group.has_dynamic_allocation.is_some());
+    assert!(group.call_count.is_some());
 
     let similarity = group
         .similarity
         .as_ref()
         .expect("a structural group carries its breakdown");
-    assert_eq!(similarity.weight_version, "structural-verify-v5");
+    assert_eq!(similarity.weight_version, "structural-verify-v1");
     assert!(similarity.composite > 0.6);
     assert!(similarity.min_pairwise > 0.6);
     assert!(
@@ -142,6 +149,13 @@ fn a_gapped_clone_is_detected_and_recorded_with_its_evidence() {
 
     let findings = store.run_findings(run.id).unwrap();
     assert!(!findings.is_empty());
+
+    let rendered = scan_json(dir.path());
+    assert!(
+        rendered["groups"][0]["identifier_jaccard"].is_number(),
+        "the JSON report exposes raw identifier agreement without changing classification"
+    );
+    assert!(rendered["groups"][0]["body_materiality"].is_object());
 }
 
 #[test]
@@ -165,7 +179,7 @@ fn json_reports_carry_the_breakdown_and_stay_deterministic() {
     assert_eq!(documents[0], documents[1], "reruns agree token for token");
 
     let value = &documents[0];
-    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["schema_version"], 1);
     assert_eq!(value["run"]["mode"], "structural");
     assert_eq!(value["run"]["build_variant"]["mode"], "structural");
     assert!(
@@ -354,7 +368,7 @@ fn explain_resolves_a_structural_finding() {
     let detail: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
     let similarity = &detail["group"]["similarity"];
-    assert_eq!(similarity["weight_version"], "structural-verify-v5");
+    assert_eq!(similarity["weight_version"], "structural-verify-v1");
     assert!(similarity["type_similarity"].is_null());
     assert!(similarity["confidence_band"].is_string());
     assert_eq!(detail["group"]["members"], 2);
@@ -669,6 +683,36 @@ fn boilerplate_is_named_and_ranked_below_code_that_carries_behaviour() {
             .iter()
             .any(|group| group.boilerplate.as_deref() == Some("macro-repetition")),
         "the classification is recorded, not just displayed"
+    );
+    let macro_group = stored
+        .iter()
+        .find(|group| group.boilerplate.as_deref() == Some("macro-repetition"))
+        .expect("the recorded macro group");
+    assert!(
+        macro_group
+            .members
+            .iter()
+            .all(|member| member.boilerplate.as_deref() == Some("macro-repetition")),
+        "each member says why the group is classified"
+    );
+
+    let output = cmd()
+        .current_dir(dir.path())
+        .args(["report", "--run", &run.id.to_string(), "--format", "json"])
+        .output()
+        .expect("reformat the recorded structural run");
+    assert!(output.status.success(), "{output:?}");
+    let recorded: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("recorded report is JSON");
+    assert!(
+        recorded["groups"]
+            .as_array()
+            .expect("recorded groups")
+            .iter()
+            .filter(|group| group["boilerplate"] == "macro-repetition")
+            .flat_map(|group| group["members"].as_array().into_iter().flatten())
+            .all(|member| member["boilerplate"] == "macro-repetition"),
+        "reformatting reads the member classification from SQLite"
     );
 }
 

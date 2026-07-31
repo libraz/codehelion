@@ -1,20 +1,24 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v8.schema.json",
+  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v1.schema.json",
   "title": "codehelion artifact report",
-  "description": "Machine-readable analysis of one locally read compiled artifact. Additive fields may appear within this schema version; incompatible changes publish a new schema document.",
+  "description": "Machine-readable analysis of one locally read compiled artifact.",
   "type": "object",
   "required": ["schema_version", "path", "format", "fingerprint", "sizes"],
   "properties": {
-    "schema_version": { "const": "artifact-report-v8" },
+    "schema_version": { "const": "artifact-report-v1" },
     "path": { "type": "string" },
-    "format": { "type": "string", "enum": ["wasm", "elf"] },
+    "format": { "type": "string", "enum": ["wasm", "elf", "mach-o", "pe-coff", "archive"] },
     "fingerprint": { "$ref": "#/$defs/fingerprint" },
     "analysis_id": { "type": ["integer", "null"] },
     "build_variant": { "$ref": "#/$defs/build_variant" },
     "sizes": { "$ref": "#/$defs/sizes" },
     "correlation": { "$ref": "#/$defs/correlation" },
-    "generic_origins": { "type": "array" }
+    "generic_origins": { "type": "array" },
+    "archive_members": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/archive_member" }
+    }
   },
   "$defs": {
     "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
@@ -24,6 +28,19 @@
       "properties": {
         "manifest_path": { "type": "string" },
         "fingerprint": { "$ref": "#/$defs/fingerprint" }
+      }
+    },
+    "archive_member": {
+      "type": "object",
+      "required": ["name", "fingerprint", "offset", "size", "format", "thin", "parse_error"],
+      "properties": {
+        "name": { "type": "string" },
+        "fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "offset": { "type": "integer", "minimum": 0 },
+        "size": { "type": "integer", "minimum": 0 },
+        "format": { "type": ["string", "null"], "enum": ["wasm", "elf", "mach-o", "pe-coff", "archive", null] },
+        "thin": { "type": "boolean" },
+        "parse_error": { "type": ["string", "null"] }
       }
     },
     "sizes": {

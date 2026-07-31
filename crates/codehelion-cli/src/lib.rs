@@ -36,7 +36,7 @@ use codehelion_store::Store;
 
 use crate::cli::{
     ArtifactAction, BaselineAction, CacheAction, Cli, Command, ConfigAction, DetailFormat,
-    ExplainArgs, Mode, ScanArgs,
+    ExplainArgs, Mode, ReportArgs, ScanArgs,
 };
 use crate::config::ConfigSource;
 
@@ -111,6 +111,7 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
         Command::Config { action } => config_command(action, out),
         Command::Cache { action } => cache_command(action, out),
         Command::Scan(args) => scan_command(args, out),
+        Command::Report(args) => report_command(args, out),
         Command::Explain(args) => explain(args, out),
         Command::Baseline { action } => baseline(action, out),
         Command::Artifact { action } => match action {
@@ -165,15 +166,6 @@ fn interrogate(
                         .iter()
                         .map(|execution| execution.name().to_string())
                         .collect(),
-                    // Asked of the conversation rather than worked out from the
-                    // number beside it: which revision can carry which request is
-                    // the protocol's business, and a diagnostic that decided it
-                    // here would go stale the first time a request was added.
-                    predates: helper
-                        .predates()
-                        .into_iter()
-                        .map(ToString::to_string)
-                        .collect(),
                 };
                 // Failing to stop cleanly is not a reason to withhold what it
                 // already said: the answer was given before the goodbye.
@@ -214,6 +206,300 @@ fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         Mode::Structural => scan::structural::run(args, out),
         Mode::Fast => scan::run(args, out),
     }
+}
+
+/// Re-render a completed snapshot without reading the scanned source tree.
+fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<Outcome> {
+    let path = resolve_db(args.db.as_deref())?;
+    if !path.is_file() {
+        bail!(
+            "no local database at {}; run `codehelion scan` first",
+            path.display()
+        );
+    }
+    let store = Store::open(&path)?;
+    let run = store
+        .run_summary(args.run)?
+        .with_context(|| format!("no recorded run {} in {}", args.run, path.display()))?;
+    let finished_at = run
+        .finished_at
+        .as_deref()
+        .context("the selected run did not complete and cannot be reported")?;
+    let origin = store.run_origin(run.id)?;
+    let variant = store
+        .build_variant(&origin.variant_fingerprint)?
+        .context("the selected run has no stored build variant")?;
+    let summary_row = store
+        .run_summary_row(run.id)?
+        .context("the selected run has no stored summary")?;
+    let mut groups = Vec::new();
+    for group in store.run_groups(run.id)? {
+        let priority = store
+            .run_group_priority(run.id, &group.fingerprint_hex)?
+            .with_context(|| {
+                format!(
+                    "recorded run {} has no saved priority for clone group {}",
+                    run.id, group.fingerprint_hex
+                )
+            })?;
+        groups.push(recorded_group(group, &priority)?);
+    }
+    groups.sort_by(|left, right| {
+        right
+            .priority
+            .value
+            .total_cmp(&left.priority.value)
+            .then_with(|| left.fingerprint.cmp(&right.fingerprint))
+    });
+    let language_counts = store.run_language_counts(run.id)?;
+    let files = report::FileCounts {
+        total: language_counts.values().copied().sum(),
+        rust: language_counts.get("rust").copied().unwrap_or(0),
+        c: language_counts.get("c").copied().unwrap_or(0),
+        cpp: language_counts.get("cpp").copied().unwrap_or(0),
+    };
+    let ranking = recorded_ranking(&origin.detector_versions)?;
+    let model = report::Report {
+        schema_version: report::SCHEMA_VERSION,
+        run: report::RunInfo {
+            tool_version: run.tool_version,
+            mode: run.analysis_mode,
+            root: run.root_path,
+            started_at: run.started_at,
+            finished_at: finished_at.to_string(),
+            build_variant: report::BuildVariantInfo {
+                mode: variant.analysis_mode,
+                languages: variant
+                    .languages
+                    .as_deref()
+                    .map_or_else(Vec::new, |languages| {
+                        languages
+                            .split(',')
+                            .filter(|language| !language.is_empty())
+                            .map(ToOwned::to_owned)
+                            .collect()
+                    }),
+                headers: variant.header_language.filter(|header| !header.is_empty()),
+                normalization_version: u32::try_from(origin.normalization_version)
+                    .context("stored normalization version does not fit the report")?,
+                fingerprint: variant.fingerprint,
+            },
+            detector_versions: origin
+                .detector_versions
+                .iter()
+                .map(|(component, version)| report::DetectorVersion {
+                    component: component.clone(),
+                    version: version.clone(),
+                })
+                .collect(),
+            ranking,
+            database: path.display().to_string(),
+            run_id: run.id,
+        },
+        summary: report::restored(files, &summary_row, &groups),
+        groups,
+    };
+    scan::write_report_options(
+        scan::ReportOutput {
+            format: args.format,
+            output: args.output.as_deref(),
+            verbose: args.verbose,
+            show_suppressed: args.show_suppressed,
+        },
+        out,
+        &model,
+    )?;
+    Ok(Outcome::Success)
+}
+
+/// Rebuild a report group from exactly the values a snapshot persisted.
+fn recorded_group(
+    group: codehelion_store::query::StoredGroup,
+    priority: &codehelion_store::query::StoredPriority,
+) -> Result<report::Group> {
+    let stored_suppression = group.suppressed_by;
+    let suppress_reason = group.suppress_reason;
+    let count = |value: i64| u64::try_from(value).unwrap_or(0);
+    let line = |value: Option<i64>| u32::try_from(value.unwrap_or(0)).unwrap_or(0);
+    let identifier_jaccard = group.identifier_jaccard;
+    let api_similarity = group
+        .similarity
+        .as_ref()
+        .and_then(|similarity| similarity.api);
+    let body_materiality = match (
+        group.has_loop,
+        group.has_dynamic_allocation,
+        group.call_count.and_then(|count| u64::try_from(count).ok()),
+    ) {
+        (Some(has_loop), Some(has_dynamic_allocation), Some(call_count)) => {
+            Some(report::BodyMateriality {
+                has_loop,
+                has_dynamic_allocation,
+                call_count,
+            })
+        }
+        _ => None,
+    };
+    Ok(report::Group {
+        fingerprint: group.fingerprint_hex,
+        clone_type: group.clone_type,
+        scope: group.member_scope,
+        statements: group.statements.map(count),
+        confidence: group.score,
+        priority: recorded_priority_for_report(
+            priority,
+            group.score,
+            identifier_jaccard,
+            api_similarity,
+            body_materiality,
+        )?,
+        identifier_jaccard,
+        body_materiality,
+        similarity: group.similarity.map(|stored| report::Similarity {
+            weight_version: stored.weight_version,
+            lexical: stored.lexical,
+            structural: stored.structural,
+            control_flow: stored.control_flow,
+            type_similarity: stored.type_similarity,
+            api: stored.api,
+            composite: stored.composite,
+            min_pairwise: stored.min_pairwise,
+            confidence_band: stored.confidence_band,
+        }),
+        boilerplate: group.boilerplate,
+        test_code: group.test_code,
+        width_family: group.width_family,
+        split_pair: group.split_pair,
+        suppressed: recorded_suppression(suppress_reason, stored_suppression),
+        semantic: group.semantic.map(|evidence| report::SemanticEvidence {
+            schema_version: evidence.schema_version,
+            rules: vec![report::SemanticRuleEvidence {
+                id: evidence.rule_id,
+                version: evidence.rule_version,
+                confidence: evidence.rule_confidence,
+            }],
+            graphs: evidence.graphs,
+            node_mappings: evidence
+                .node_mappings
+                .into_iter()
+                .map(|mapping| report::SemanticNodeMapping {
+                    corresponding_member: mapping.corresponding_member,
+                    canonical: mapping.canonical,
+                    corresponding: mapping.corresponding,
+                })
+                .collect(),
+        }),
+        members: group
+            .members
+            .into_iter()
+            .map(|member| report::Member {
+                finding_id: member.finding_hex,
+                content: member.content_hex,
+                file: member.file_path,
+                language: member.language,
+                start_line: line(member.start_line),
+                end_line: line(member.end_line),
+                unit: member.unit_name,
+                boilerplate: member.boilerplate,
+                tokens: count(member.token_count),
+                canonical: member.is_canonical,
+            })
+            .collect(),
+    })
+}
+
+/// Convert the ranking values saved with one group without re-applying rules.
+fn recorded_priority_for_report(
+    stored: &codehelion_store::query::StoredPriority,
+    similarity: f64,
+    identifier_jaccard: Option<f64>,
+    api_similarity: Option<f64>,
+    body_materiality: Option<report::BodyMateriality>,
+) -> Result<report::Priority> {
+    let count = |value: i64| u64::try_from(value).unwrap_or(0);
+    Ok(report::Priority {
+        value: stored.final_priority,
+        clone_confidence: stored.clone_confidence,
+        maintenance_risk: stored
+            .maintenance_risk
+            .context("recorded priority is missing maintenance risk")?,
+        refactoring_difficulty: stored
+            .refactoring_difficulty
+            .context("recorded priority is missing refactoring difficulty")?,
+        semantic_confidence: stored.semantic_confidence,
+        source_artifact_confidence: stored.source_artifact_confidence,
+        savings_confidence: stored.savings_confidence,
+        inputs: report::PriorityInputs {
+            smallest_member_tokens: count(stored.facts.smallest_member_tokens),
+            largest_member_tokens: count(stored.facts.largest_member_tokens),
+            instances: count(stored.facts.instances),
+            similarity,
+            files: count(stored.facts.files),
+            directories: count(stored.facts.directories),
+            languages: count(stored.facts.languages),
+            min_clone_tokens: count(
+                stored
+                    .facts
+                    .min_clone_tokens
+                    .context("recorded priority is missing the clone-length floor")?,
+            ),
+            identifier_jaccard,
+            api_similarity,
+            has_loop: body_materiality.map(|body| body.has_loop),
+            has_dynamic_allocation: body_materiality.map(|body| body.has_dynamic_allocation),
+            call_count: body_materiality.map(|body| body.call_count),
+            churn: None,
+            ownership_spread: None,
+        },
+    })
+}
+
+/// Rebuild the suppression label that the snapshot recorded for one group.
+fn recorded_suppression(
+    reason: Option<String>,
+    rule: Option<codehelion_store::query::StoredSuppressionRef>,
+) -> Option<report::Suppression> {
+    reason.map_or_else(
+        || {
+            rule.map(|rule| report::Suppression {
+                kind: report::SuppressionKind::Rule,
+                reason: None,
+                scope: Some(rule.scope),
+                pattern: Some(rule.pattern),
+            })
+        },
+        |reason| {
+            Some(report::Suppression {
+                kind: report::SuppressionKind::Noise,
+                reason: Some(reason),
+                scope: None,
+                pattern: None,
+            })
+        },
+    )
+}
+
+/// Recover the recorded ranking weights from their persisted recipe.
+fn recorded_ranking(detectors: &[(String, String)]) -> Result<report::RankingInfo> {
+    let recipe = detectors
+        .iter()
+        .find_map(|(component, version)| (component == "ranking").then_some(version))
+        .context("the selected run has no stored ranking recipe")?;
+    let (with_risk, ease) = recipe
+        .rsplit_once("-ease")
+        .context("stored ranking recipe has no ease weight")?;
+    let (_, risk) = with_risk
+        .rsplit_once("-risk")
+        .context("stored ranking recipe has no maintenance-risk weight")?;
+    Ok(report::RankingInfo {
+        recipe: recipe.clone(),
+        maintenance_risk: risk
+            .parse()
+            .context("stored ranking maintenance-risk weight is invalid")?,
+        refactoring_ease: ease
+            .parse()
+            .context("stored ranking refactoring-ease weight is invalid")?,
+    })
 }
 
 /// Look one occurrence up by its stable finding id and print its detail.
@@ -293,6 +579,7 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
             start_line: line(occurrence.member.start_line),
             end_line: line(occurrence.member.end_line),
             unit: occurrence.member.unit_name,
+            boilerplate: occurrence.member.boilerplate,
             tokens: u64::try_from(occurrence.member.token_count).unwrap_or(0),
             canonical: occurrence.member.is_canonical,
         },
@@ -684,6 +971,7 @@ mod tests {
             compare_build_variants: false,
             compare_languages: true,
             show_suppressed: false,
+            include_trivial: false,
             verbose: false,
             fail_on_findings: false,
             untrusted: false,

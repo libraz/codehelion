@@ -182,8 +182,8 @@ const ORDERINGS: &[Ordering] = &[
     Ordering {
         name: "priority",
         at_10: 1.0,
-        at_50: 0.96,
-        map: 0.9247,
+        at_50: 0.98,
+        map: 0.9354,
     },
     Ordering {
         name: "size",

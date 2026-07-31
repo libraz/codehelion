@@ -655,8 +655,10 @@ fn run_with(
         ),
     )?;
     let regions = reportable_regions(&analysis);
+    let mut presentation_cfg = cfg.clone();
+    presentation_cfg.suppression = presentation_suppression(&cfg, args.include_trivial);
     let suppressed = evaluate_suppression(
-        &cfg,
+        &presentation_cfg,
         &mut rules,
         &analysis,
         &regions,
@@ -682,7 +684,7 @@ fn run_with(
         group_suppressed: &suppressed.groups,
         regions: &regions,
         region_suppressed: &suppressed.regions,
-        suppression: &cfg.suppression,
+        suppression: &presentation_cfg.suppression,
         pair_suppressed: &suppressed.pairs,
         semantic_pair_suppressed: &suppressed.semantic_pairs,
         semantic_group_suppressed: &suppressed.semantic_groups,
@@ -784,8 +786,10 @@ fn run_semantic_partition(
         ),
     )?;
     let regions = reportable_regions(&analysis);
+    let mut presentation_cfg = cfg.clone();
+    presentation_cfg.suppression = presentation_suppression(cfg, args.include_trivial);
     let suppressed = evaluate_suppression(
-        cfg,
+        &presentation_cfg,
         &mut rules,
         &analysis,
         &regions,
@@ -810,7 +814,7 @@ fn run_semantic_partition(
         group_suppressed: &suppressed.groups,
         regions: &regions,
         region_suppressed: &suppressed.regions,
-        suppression: &cfg.suppression,
+        suppression: &presentation_cfg.suppression,
         pair_suppressed: &suppressed.pairs,
         semantic_pair_suppressed: &suppressed.semantic_pairs,
         semantic_group_suppressed: &suppressed.semantic_groups,
@@ -2061,6 +2065,19 @@ struct SuppressionVerdicts {
     semantic_groups: Vec<Option<usize>>,
 }
 
+/// The presentation policy for this invocation after explicit CLI intent.
+///
+/// The configuration remains the source of every durable policy choice. The
+/// flag only changes where a known predicate family appears in this one
+/// report; it neither changes clone detection nor writes configuration back.
+fn presentation_suppression(cfg: &Config, include_trivial: bool) -> config::Suppression {
+    let mut presentation = cfg.suppression.clone();
+    if include_trivial {
+        presentation.boilerplate.trivial_body = CategoryAction::Report;
+    }
+    presentation
+}
+
 /// Evaluate the configured suppression against everything the report lists.
 ///
 /// Every kind of finding is judged by the same rules read at its own
@@ -2570,6 +2587,8 @@ fn build_semantic_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group
             confidence: pair.semantic_confidence,
             priority: report::Priority::unranked(),
             similarity: None,
+            identifier_jaccard: None,
+            body_materiality: None,
             boilerplate: None,
             test_code: members
                 .iter()
@@ -2609,6 +2628,7 @@ fn build_semantic_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group
                         start_line: member.start_line,
                         end_line: member.end_line,
                         unit: unit.name.as_deref().map(ToString::to_string),
+                        boilerplate: unit.boilerplate.map(|shape| shape.name().to_string()),
                         tokens: u64::try_from(member.token_count).unwrap_or(u64::MAX),
                         canonical: position == 0,
                     }
@@ -2652,6 +2672,8 @@ fn build_semantic_group(inputs: &ReportInputs<'_>, index: usize) -> report::Grou
             confidence: semantic_group.semantic_confidence,
             priority: report::Priority::unranked(),
             similarity: None,
+            identifier_jaccard: None,
+            body_materiality: None,
             boilerplate: None,
             test_code: semantic_group
                 .members
@@ -2695,6 +2717,7 @@ fn build_semantic_group(inputs: &ReportInputs<'_>, index: usize) -> report::Grou
                         start_line: member.start_line,
                         end_line: member.end_line,
                         unit: unit.name.as_ref().map(ToString::to_string),
+                        boilerplate: unit.boilerplate.map(|shape| shape.name().to_string()),
                         tokens: u64::try_from(member.token_count).unwrap_or(u64::MAX),
                         canonical: position == 0,
                     }
@@ -2995,6 +3018,12 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             confidence: group.min_pairwise,
             priority: report::Priority::unranked(),
             similarity: Some(similarity(group, detail)),
+            identifier_jaccard: Some(detail.identifier_jaccard),
+            body_materiality: Some(report::BodyMateriality {
+                has_loop: detail.body_materiality.has_loop,
+                has_dynamic_allocation: detail.body_materiality.has_dynamic_allocation,
+                call_count: detail.body_materiality.call_count,
+            }),
             boilerplate: detail
                 .boilerplate
                 .map(|category| category.name().to_string()),
@@ -3027,6 +3056,7 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                         start_line: unit.start_line,
                         end_line: unit.end_line,
                         unit: unit.name.as_deref().map(ToString::to_string),
+                        boilerplate: unit.boilerplate.map(|shape| shape.name().to_string()),
                         tokens: u64::try_from(unit.token_end.saturating_sub(unit.token_start))
                             .unwrap_or(u64::MAX),
                         canonical: position == 0,
@@ -3073,6 +3103,8 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             confidence: pair.similarity,
             priority: report::Priority::unranked(),
             similarity: None,
+            identifier_jaccard: None,
+            body_materiality: None,
             boilerplate: None,
             test_code: members
                 .iter()
@@ -3106,6 +3138,7 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                         start_line: unit.start_line,
                         end_line: unit.end_line,
                         unit: unit.name.as_deref().map(ToString::to_string),
+                        boilerplate: unit.boilerplate.map(|shape| shape.name().to_string()),
                         tokens: u64::try_from(unit.token_end.saturating_sub(unit.token_start))
                             .unwrap_or(u64::MAX),
                         canonical: position == 0,
@@ -3137,6 +3170,8 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             // Confirmed by content equality, not scored across dimensions: there
             // is no breakdown to report.
             similarity: None,
+            identifier_jaccard: None,
+            body_materiality: None,
             // Boilerplate is classified over whole units; a run inside one carries
             // no such classification.
             boilerplate: None,
@@ -3167,6 +3202,7 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                         start_line: occurrence.start_line,
                         end_line: occurrence.end_line,
                         unit: unit.name.as_deref().map(ToString::to_string),
+                        boilerplate: None,
                         tokens: u64::try_from(
                             occurrence.token_end.saturating_sub(occurrence.token_start),
                         )
@@ -3372,7 +3408,6 @@ fn compiler_rows(
         .iter()
         .map(|helper| CompilerHelperRow {
             identity: helper.identity.clone(),
-            protocol_agreed: helper.agreed,
             restarts: Some(helper.restarts),
         })
         .collect();
@@ -3546,6 +3581,10 @@ fn semantic_pair_row(
         suppress_reason: inputs.semantic_pair_suppressed[index]
             .map(|rule| inputs.rules.rows[rule].pattern.clone()),
         boilerplate: None,
+        identifier_jaccard: None,
+        has_loop: None,
+        has_dynamic_allocation: None,
+        call_count: None,
         width_family: false,
         suppressed_by: inputs.semantic_pair_suppressed[index],
         priority: recorded_ranking(ranking, &fingerprint.to_hex())?,
@@ -3579,6 +3618,7 @@ fn semantic_pair_row(
                     ),
                     language: file.language,
                     host_unit: Some(host_index[&member.unit]),
+                    boilerplate: unit.boilerplate,
                     file_path: file.relative_path.clone(),
                     start_line: member.start_line,
                     end_line: member.end_line,
@@ -3641,6 +3681,10 @@ fn semantic_group_row(
         suppress_reason: inputs.semantic_group_suppressed[index]
             .map(|rule| inputs.rules.rows[rule].pattern.clone()),
         boilerplate: None,
+        identifier_jaccard: None,
+        has_loop: None,
+        has_dynamic_allocation: None,
+        call_count: None,
         width_family: false,
         suppressed_by: inputs.semantic_group_suppressed[index],
         priority: recorded_ranking(ranking, &fingerprint.to_hex())?,
@@ -3675,6 +3719,7 @@ fn semantic_group_row(
                     ),
                     language: file.language,
                     host_unit: Some(host_index[&member.unit]),
+                    boilerplate: unit.boilerplate,
                     file_path: file.relative_path.clone(),
                     start_line: member.start_line,
                     end_line: member.end_line,
@@ -3743,6 +3788,10 @@ fn unit_group_row(
         suppressed_by: inputs.group_suppressed[index],
         priority: recorded_ranking(ranking, &detail.fingerprint.to_hex())?,
         similarity: Some(breakdown_row(group, detail)),
+        identifier_jaccard: Some(detail.identifier_jaccard),
+        has_loop: Some(detail.body_materiality.has_loop),
+        has_dynamic_allocation: Some(detail.body_materiality.has_dynamic_allocation),
+        call_count: Some(detail.body_materiality.call_count),
         semantic: None,
         members: group
             .members
@@ -3763,6 +3812,7 @@ fn unit_group_row(
                     ),
                     language: file.language,
                     host_unit: Some(host_index[&member]),
+                    boilerplate: unit.boilerplate,
                     file_path: file.relative_path.clone(),
                     start_line: unit.start_line,
                     end_line: unit.end_line,
@@ -3815,6 +3865,10 @@ fn split_pair_row(
         entropy_bits: engine::content_entropy_bits(inputs.unit_tokens(canonical), inputs.literals),
         suppress_reason: None,
         boilerplate: None,
+        identifier_jaccard: None,
+        has_loop: None,
+        has_dynamic_allocation: None,
+        call_count: None,
         width_family: false,
         suppressed_by: inputs.pair_suppressed[index],
         priority: recorded_ranking(ranking, &pair.fingerprint.to_hex())?,
@@ -3841,6 +3895,7 @@ fn split_pair_row(
                     ),
                     language: file.language,
                     host_unit: Some(host_index[&member]),
+                    boilerplate: unit.boilerplate,
                     file_path: file.relative_path.clone(),
                     start_line: unit.start_line,
                     end_line: unit.end_line,
@@ -3876,6 +3931,10 @@ fn region_row(
         entropy_bits: engine::content_entropy_bits(&canonical, inputs.literals),
         suppress_reason: None,
         boilerplate: None,
+        identifier_jaccard: None,
+        has_loop: None,
+        has_dynamic_allocation: None,
+        call_count: None,
         width_family: false,
         suppressed_by: inputs.region_suppressed[index],
         priority: recorded_ranking(ranking, &region.fingerprint.to_hex())?,
@@ -3897,6 +3956,7 @@ fn region_row(
                     ),
                     language: file.language,
                     host_unit: Some(host_index[&occurrence.unit]),
+                    boilerplate: None,
                     file_path: file.relative_path.clone(),
                     start_line: occurrence.start_line,
                     end_line: occurrence.end_line,
@@ -3927,15 +3987,34 @@ fn breakdown_row(group: &StructuralGroup, detail: &GroupDetail) -> SimilarityBre
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        Compilers, Config, CrossLanguageCandidateInput, ExecutionPolicy, Language,
+        CategoryAction, Compilers, Config, CrossLanguageCandidateInput, ExecutionPolicy, Language,
         LanguageSelection, SandboxRequest, ScanArgs, SemanticCandidateConfig,
         SemanticOperationGraph, StructuralConfig, enabled_cross_language_matches,
-        extract_cross_language_candidates, run_with, semantic_sandbox, structural_config,
-        verify_cross_language_candidates,
+        extract_cross_language_candidates, presentation_suppression, run_with, semantic_sandbox,
+        structural_config, verify_cross_language_candidates,
     };
     use crate::cli::{Format, Mode};
     use codehelion_core::semantic::{OperationAttributes, OperationKind, OperationNode};
     use std::path::PathBuf;
+
+    #[test]
+    fn include_trivial_overrides_only_this_invocations_presentation_policy() {
+        let config = Config::default();
+        assert_eq!(
+            config.suppression.boilerplate.trivial_body,
+            CategoryAction::RankDown
+        );
+        let presentation = presentation_suppression(&config, true);
+        assert_eq!(
+            presentation.boilerplate.trivial_body,
+            CategoryAction::Report
+        );
+        assert_eq!(
+            config.suppression.boilerplate.trivial_body,
+            CategoryAction::RankDown,
+            "the flag does not change the persisted configuration"
+        );
+    }
 
     /// Whether a helper is installed is a property of the machine, so what is
     /// fixed here is the pairing: without one, the message names the programs
@@ -3978,6 +4057,7 @@ mod tests {
             compare_build_variants: false,
             compare_languages: false,
             show_suppressed: false,
+            include_trivial: false,
             verbose: false,
             fail_on_findings: false,
             untrusted: true,
@@ -4034,6 +4114,7 @@ mod tests {
             compare_build_variants: false,
             compare_languages: false,
             show_suppressed: false,
+            include_trivial: false,
             verbose: false,
             fail_on_findings: false,
             untrusted: false,

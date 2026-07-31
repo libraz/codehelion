@@ -10,10 +10,7 @@
 //! JSON reports carry a top-level `schema_version` field, currently
 //! [`SCHEMA_VERSION`]. The JSON Schema document shipped with this crate
 //! ([`JSON_SCHEMA`], `schema/scan-report-v1.schema.json`) describes the
-//! format. A change that breaks field compatibility — renaming or removing
-//! a field, or changing a field's type or meaning — must increment the
-//! version and ship a new schema document; purely additive fields keep the
-//! version.
+//! complete current format.
 //!
 //! [`sarif`] renders the same value as a SARIF 2.1.0 log for static-analysis
 //! consumers.
@@ -34,10 +31,10 @@ use serde::{Deserialize, Serialize};
 use crate::config::Suppression as SuppressionConfig;
 
 /// Version of the JSON report format.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// The JSON Schema document describing [`Report`]'s JSON form.
-pub const JSON_SCHEMA: &str = include_str!("../schema/scan-report-v2.schema.json");
+pub const JSON_SCHEMA: &str = include_str!("../schema/scan-report-v1.schema.json");
 
 /// [`Group::scope`] value of a group whose members are runs of statements.
 const SCOPE_FRAGMENT: &str = "fragment";
@@ -736,10 +733,18 @@ pub struct Group {
     /// Per-dimension similarity evidence, when the mode measured it; `None`
     /// in modes that match content exactly and score no dimensions.
     pub similarity: Option<Similarity>,
-    /// The boilerplate shape every member matches, when they all match one
-    /// (`trivial-body`, `forwarding`, `macro-repetition`). What the report
-    /// does with such a group is configured per category; the classification
-    /// is stated either way.
+    /// Minimum raw-identifier Jaccard agreement against the canonical member.
+    ///
+    /// This supports human triage only; it is not part of matching or priority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identifier_jaccard: Option<f64>,
+    /// Material work shared by every member, when Structural mode measured it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_materiality: Option<BodyMateriality>,
+    /// The boilerplate shape shared by at least four fifths of members
+    /// (`trivial-body`, `forwarding`, `macro-repetition`). Member-level
+    /// classifications keep any exceptions visible; the configured category
+    /// policy is stated either way.
     pub boilerplate: Option<String>,
     /// Whether every member is test code, recognised from the test marker in
     /// the source. A group spanning a suite and the code it exercises is not
@@ -845,6 +850,17 @@ pub struct Similarity {
     pub confidence_band: Option<String>,
 }
 
+/// Conservative material-body evidence shared by every group member.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct BodyMateriality {
+    /// Whether every member contains at least one loop.
+    pub has_loop: bool,
+    /// Whether every member calls a recognised allocation API.
+    pub has_dynamic_allocation: bool,
+    /// Fewest recovered call sites in any member.
+    pub call_count: u64,
+}
+
 /// Where a group belongs in the report, as separated measures.
 ///
 /// [`value`](Self::value) is what the report is ordered by, and it never
@@ -901,6 +917,22 @@ pub struct PriorityInputs {
     pub languages: u64,
     /// The run's minimum clone length, which the sizes are read against.
     pub min_clone_tokens: u64,
+    /// Minimum raw identifier-set Jaccard agreement against the canonical
+    /// member, when Structural mode measured it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identifier_jaccard: Option<f64>,
+    /// Weakest call-surface agreement, when Structural mode measured one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_similarity: Option<f64>,
+    /// Whether every member contains a loop, when Structural mode measured it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_loop: Option<bool>,
+    /// Whether every member calls a recognised allocation API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_dynamic_allocation: Option<bool>,
+    /// Fewest call sites in any member, when Structural mode measured them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_count: Option<u64>,
     /// How often the duplicated code changed. Absent: no mode reads repository
     /// history yet.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -951,6 +983,11 @@ impl Priority {
                 directories: 0,
                 languages: 0,
                 min_clone_tokens: 0,
+                identifier_jaccard: None,
+                api_similarity: None,
+                has_loop: None,
+                has_dynamic_allocation: None,
+                call_count: None,
                 churn: None,
                 ownership_spread: None,
             },
@@ -1002,6 +1039,16 @@ impl Group {
                     .collect(),
             ),
             min_clone_tokens,
+            identifier_jaccard: self.identifier_jaccard,
+            api_similarity: self
+                .similarity
+                .as_ref()
+                .and_then(|similarity| similarity.api),
+            has_loop: self.body_materiality.map(|body| body.has_loop),
+            has_dynamic_allocation: self
+                .body_materiality
+                .map(|body| body.has_dynamic_allocation),
+            call_count: self.body_materiality.map(|body| body.call_count),
             churn: None,
             ownership_spread: None,
         }
@@ -1038,6 +1085,11 @@ pub fn ranked(mut group: Group, weights: &Weights, min_clone_tokens: u64) -> Gro
             directories: facts.directories,
             languages: facts.languages,
             min_clone_tokens: facts.min_clone_tokens,
+            identifier_jaccard: facts.identifier_jaccard,
+            api_similarity: facts.api_similarity,
+            has_loop: facts.has_loop,
+            has_dynamic_allocation: facts.has_dynamic_allocation,
+            call_count: facts.call_count,
             churn: facts.churn,
             ownership_spread: facts.ownership_spread,
         },
@@ -1148,7 +1200,15 @@ pub struct Member {
     /// 1-based last line.
     pub end_line: u32,
     /// Name of the enclosing unit, when anchored to one.
+    ///
+    /// `None` denotes a top-level fragment such as a file-scope initializer;
+    /// it never means that the reporter failed to resolve an available unit.
     pub unit: Option<String>,
+    /// Boilerplate shape of the enclosing whole unit, when Structural mode
+    /// classified it. A missing value for a fragment means it has no whole
+    /// body to classify; for a unit, no conservative shape fit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boilerplate: Option<String>,
     /// Size in tokens.
     pub tokens: u64,
     /// Whether this is the group's canonical instance.
@@ -1497,9 +1557,14 @@ fn render_group(
         _ => String::new(),
     };
     let priority = &group.priority;
+    let spread = match (priority.inputs.files, priority.inputs.directories) {
+        (0 | 1, _) => "within one file",
+        (_, 0 | 1) => "within one directory",
+        _ => "across directories",
+    };
     writeln!(
         out,
-        "  {} {}{scope} priority {:.2}{overlap}{marker}",
+        "  {} {}{scope} priority {:.2} [{spread}]{overlap}{marker}",
         palette.cyan(&group.fingerprint),
         group.clone_type,
         priority.value,
@@ -1507,10 +1572,13 @@ fn render_group(
     // The composed number is never shown on its own: the three measures that
     // made it say why the finding is where it is, and disagreeing with the
     // placement means disagreeing with one of them.
+    let identifier_evidence = group.identifier_jaccard.map_or_else(String::new, |value| {
+        format!(", raw identifiers {value:.2} Jaccard")
+    });
     writeln!(
         out,
         "    confidence {:.2}, maintenance risk {:.2}, refactoring difficulty {:.2} \
-         ({} instances, {}-{} tokens, {:.2} similarity, {} file(s))",
+         ({} instances, {}-{} tokens, {:.2} similarity{}, {} file(s))",
         priority.clone_confidence,
         priority.maintenance_risk,
         priority.refactoring_difficulty,
@@ -1518,10 +1586,24 @@ fn render_group(
         priority.inputs.smallest_member_tokens,
         priority.inputs.largest_member_tokens,
         priority.inputs.similarity,
+        identifier_evidence,
         priority.inputs.files,
     )?;
     if let Some(similarity) = &group.similarity {
         writeln!(out, "    {}", similarity.line())?;
+    }
+    if let Some(body) = group.body_materiality {
+        writeln!(
+            out,
+            "    body evidence: loop {}, recognised allocation {}, at least {} call site(s)",
+            if body.has_loop { "yes" } else { "no" },
+            if body.has_dynamic_allocation {
+                "yes"
+            } else {
+                "no"
+            },
+            body.call_count,
+        )?;
     }
     let limit = if opts.verbose {
         group.members.len()
@@ -1529,10 +1611,10 @@ fn render_group(
         TEXT_MEMBER_LIMIT
     };
     for member in group.members.iter().take(limit) {
-        let unit = member
-            .unit
-            .as_deref()
-            .map_or_else(String::new, |name| format!(" ({name})"));
+        let unit = member.unit.as_deref().map_or_else(
+            || " [no enclosing unit]".to_string(),
+            |name| format!(" ({name})"),
+        );
         let canonical = if member.canonical { " [canonical]" } else { "" };
         writeln!(
             out,
@@ -2039,7 +2121,7 @@ pub(super) mod tests {
                     mode: "fast".to_string(),
                     languages: vec!["rust".to_string()],
                     headers: Some("c".to_string()),
-                    normalization_version: 2,
+                    normalization_version: 1,
                     fingerprint: "aa".repeat(32),
                 },
                 detector_versions: vec![DetectorVersion {
@@ -2114,6 +2196,8 @@ pub(super) mod tests {
                 confidence: 1.0,
                 priority: Priority::unranked(),
                 similarity: None,
+                identifier_jaccard: None,
+                body_materiality: None,
                 boilerplate: None,
                 test_code: false,
                 width_family: false,
@@ -2129,6 +2213,7 @@ pub(super) mod tests {
                         start_line: 1,
                         end_line: 9,
                         unit: Some("checksum".to_string()),
+                        boilerplate: None,
                         tokens: 80,
                         canonical: index == 0,
                     })
@@ -2150,6 +2235,8 @@ pub(super) mod tests {
                 confidence: 1.0,
                 priority: Priority::unranked(),
                 similarity: None,
+                identifier_jaccard: None,
+                body_materiality: None,
                 boilerplate: None,
                 test_code: false,
                 width_family: false,
@@ -2170,6 +2257,7 @@ pub(super) mod tests {
                         start_line: 1,
                         end_line: 5,
                         unit: None,
+                        boilerplate: None,
                         tokens: 30,
                         canonical: true,
                     },
@@ -2181,6 +2269,7 @@ pub(super) mod tests {
                         start_line: 1,
                         end_line: 5,
                         unit: None,
+                        boilerplate: None,
                         tokens: 30,
                         canonical: false,
                     },
@@ -2203,7 +2292,7 @@ pub(super) mod tests {
                 confidence: 0.79,
                 priority: Priority::unranked(),
                 similarity: Some(Similarity {
-                    weight_version: "structural-verify-v4".to_string(),
+                    weight_version: "structural-verify-v1".to_string(),
                     lexical: 0.71,
                     structural: 0.88,
                     control_flow: 0.90,
@@ -2212,6 +2301,12 @@ pub(super) mod tests {
                     composite: 0.82,
                     min_pairwise: 0.79,
                     confidence_band: Some("medium".to_string()),
+                }),
+                identifier_jaccard: Some(0.5),
+                body_materiality: Some(BodyMateriality {
+                    has_loop: true,
+                    has_dynamic_allocation: false,
+                    call_count: 3,
                 }),
                 boilerplate: None,
                 test_code: false,
@@ -2228,6 +2323,7 @@ pub(super) mod tests {
                         start_line: 10,
                         end_line: 30,
                         unit: Some("parse_header".to_string()),
+                        boilerplate: None,
                         tokens: 60,
                         canonical: true,
                     },
@@ -2239,6 +2335,7 @@ pub(super) mod tests {
                         start_line: 40,
                         end_line: 62,
                         unit: Some("parse_trailer".to_string()),
+                        boilerplate: None,
                         tokens: 58,
                         canonical: false,
                     },
@@ -2261,6 +2358,8 @@ pub(super) mod tests {
                 confidence: 1.0,
                 priority: Priority::unranked(),
                 similarity: None,
+                identifier_jaccard: None,
+                body_materiality: None,
                 boilerplate: None,
                 test_code: false,
                 width_family: false,
@@ -2276,6 +2375,7 @@ pub(super) mod tests {
                         start_line: 17,
                         end_line: 21,
                         unit: Some("render_rows".to_string()),
+                        boilerplate: None,
                         tokens: 39,
                         canonical: true,
                     },
@@ -2287,6 +2387,7 @@ pub(super) mod tests {
                         start_line: 11,
                         end_line: 15,
                         unit: Some("audit_entries".to_string()),
+                        boilerplate: None,
                         tokens: 39,
                         canonical: false,
                     },
@@ -2503,9 +2604,9 @@ pub(super) mod tests {
     fn json_view_serializes_the_documented_shape() {
         let value: serde_json::Value =
             serde_json::from_str(&sample_report().to_json().unwrap()).unwrap();
-        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["schema_version"], 1);
         assert_eq!(value["run"]["mode"], "fast");
-        assert_eq!(value["run"]["build_variant"]["normalization_version"], 2);
+        assert_eq!(value["run"]["build_variant"]["normalization_version"], 1);
         assert_eq!(value["summary"]["files"]["total"], 2);
         assert_eq!(value["summary"]["pair_budget_exhausted"], false);
         let group = &value["groups"][0];
@@ -2525,7 +2626,7 @@ pub(super) mod tests {
         let group = &mut report.groups[0];
         group.clone_type = "restricted-semantic".to_string();
         group.semantic = Some(SemanticEvidence {
-            schema_version: "sog-v8".to_string(),
+            schema_version: "sog-v1".to_string(),
             rules: vec![SemanticRuleEvidence {
                 id: "sequence-pipeline-v1".to_string(),
                 version: 1,
@@ -2570,7 +2671,7 @@ pub(super) mod tests {
                 split_pair: true,
                 similarity: None,
                 semantic: Some(SemanticEvidence {
-                    schema_version: "sog-v8".to_string(),
+                    schema_version: "sog-v1".to_string(),
                     rules: vec![SemanticRuleEvidence {
                         id: "sequence-pipeline-v1".to_string(),
                         version: 1,
@@ -2598,7 +2699,7 @@ pub(super) mod tests {
         let mut text = Vec::new();
         detail.render_text(&mut text).unwrap();
         let text = String::from_utf8(text).unwrap();
-        assert!(text.contains("semantic evidence: sog-v8"));
+        assert!(text.contains("semantic evidence: sog-v1"));
         assert!(text.contains("rule sequence-pipeline-v1@1"));
         assert!(text.contains("graph 1: source -> collect"));
         assert!(text.contains("node mapping: 0→0"));
@@ -2614,8 +2715,18 @@ pub(super) mod tests {
         let similarity = &value["groups"][2]["similarity"];
         assert_eq!(similarity["composite"], 0.82);
         assert_eq!(similarity["min_pairwise"], 0.79);
-        assert_eq!(similarity["weight_version"], "structural-verify-v4");
+        assert_eq!(similarity["weight_version"], "structural-verify-v1");
         assert_eq!(similarity["confidence_band"], "medium");
+        assert_eq!(value["groups"][2]["identifier_jaccard"], 0.5);
+        assert_eq!(
+            value["groups"][2]["priority"]["inputs"]["identifier_jaccard"],
+            0.5
+        );
+        assert_eq!(
+            value["groups"][2]["priority"]["inputs"]["api_similarity"],
+            0.75
+        );
+        assert_eq!(value["groups"][2]["body_materiality"]["call_count"], 3);
         // Unavailable, not guessed: the dimension is reported as absent.
         assert_eq!(similarity["type_similarity"], serde_json::Value::Null);
         // A mode that scores no dimensions says so rather than omitting the key.
@@ -2631,8 +2742,10 @@ pub(super) mod tests {
         assert!(text.contains(
             "similarity: composite 0.82 (lexical 0.71, structural 0.88, \
              control-flow 0.90, type n/a, api 0.75); cohesion 0.79; \
-             confidence medium [structural-verify-v4]"
+             confidence medium [structural-verify-v1]"
         ));
+        assert!(text.contains("raw identifiers 0.50 Jaccard"));
+        assert!(text.contains("body evidence: loop yes"));
     }
 
     #[test]
@@ -2757,6 +2870,28 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn text_view_states_each_groups_file_spread() {
+        let mut report = sample_report();
+        report.groups[0].priority.inputs.files = 1;
+        report.groups[1].priority.inputs.files = 2;
+        report.groups[1].priority.inputs.directories = 1;
+        report.groups[1].suppressed = None;
+        let mut third = fragment_group();
+        third.priority.inputs.files = 2;
+        third.priority.inputs.directories = 2;
+        report.groups.push(third);
+
+        let mut buffer = Vec::new();
+        report
+            .render_text(TextOptions::default(), &mut buffer)
+            .unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        assert!(text.contains("[within one file]"));
+        assert!(text.contains("[within one directory]"));
+        assert!(text.contains("[across directories]"));
+    }
+
+    #[test]
     fn verbose_text_lists_every_member_and_suppressed_section_is_opt_in() {
         let opts = TextOptions {
             verbose: true,
@@ -2818,6 +2953,7 @@ pub(super) mod tests {
                 start_line: 3,
                 end_line: 12,
                 unit: Some("checksum".to_string()),
+                boilerplate: None,
                 tokens: 64,
                 canonical: true,
             },
@@ -2943,6 +3079,7 @@ pub(super) mod tests {
                 start_line: 1,
                 end_line: 20,
                 unit: Some("beta".to_string()),
+                boilerplate: None,
                 tokens: 90,
                 canonical: false,
             },
@@ -2957,7 +3094,7 @@ pub(super) mod tests {
                 test_code: false,
                 split_pair: false,
                 similarity: Some(Similarity {
-                    weight_version: "structural-verify-v4".to_string(),
+                    weight_version: "structural-verify-v1".to_string(),
                     lexical: 0.71,
                     structural: 0.92,
                     control_flow: 1.0,
@@ -2994,7 +3131,7 @@ pub(super) mod tests {
     #[test]
     fn an_unrecorded_confidence_band_prints_as_absent() {
         let similarity = Similarity {
-            weight_version: "structural-verify-v4".to_string(),
+            weight_version: "structural-verify-v1".to_string(),
             lexical: 0.5,
             structural: 0.5,
             control_flow: 0.5,

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v2.schema.json",
+  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v1.schema.json",
   "title": "codehelion scan report",
-  "description": "Machine-readable result of one codehelion scan. A change that breaks field compatibility increments schema_version and ships a new schema document; purely additive fields keep the version.",
+  "description": "Machine-readable result of one codehelion scan. The complete current report contract for the unreleased product.",
   "type": "object",
   "required": [
     "schema_version",
@@ -12,7 +12,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 2
+      "const": 1
     },
     "run": {
       "$ref": "#/$defs/run"
@@ -519,6 +519,22 @@
           ],
           "description": "Null in modes that match content exactly and score no dimensions."
         },
+        "identifier_jaccard": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Minimum raw identifier-set Jaccard agreement against the canonical member. It never affects clone detection; priority uses it only as weak refactoring-difficulty evidence."
+        },
+        "body_materiality": {
+          "type": "object",
+          "description": "Conservative syntactic work shared by every member; maintenance evidence, not a generated-code-size prediction.",
+          "required": ["has_loop", "has_dynamic_allocation", "call_count"],
+          "properties": {
+            "has_loop": {"type": "boolean"},
+            "has_dynamic_allocation": {"type": "boolean"},
+            "call_count": {"type": "integer", "minimum": 0}
+          }
+        },
         "boilerplate": {
           "enum": [
             "trivial-body",
@@ -526,7 +542,7 @@
             "macro-repetition",
             null
           ],
-          "description": "The boilerplate shape every member matches; null when they do not all match one."
+          "description": "The boilerplate shape matching at least four fifths of members; null when no shape is dominant. Individual member classifications retain the exceptions."
         },
         "test_code": {
           "type": "boolean",
@@ -843,7 +859,18 @@
               "type": "null"
             }
           ],
-          "description": "Name of the enclosing unit, when anchored to one."
+          "description": "Enclosing source unit, or null for a top-level fragment with no enclosing unit."
+        },
+        "boilerplate": {
+          "type": "string",
+          "enum": [
+            "trivial-body",
+            "forwarding",
+            "macro-repetition",
+            "guarded-dispatch",
+            "configured-answer"
+          ],
+          "description": "Structural classification of the enclosing whole unit. Omitted for fragments and for units that match no conservative boilerplate shape."
         },
         "tokens": {
           "type": "integer"
@@ -934,6 +961,31 @@
           "type": "integer",
           "minimum": 0,
           "description": "The run's minimum clone length, which the sizes are read against."
+        },
+        "identifier_jaccard": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Minimum raw identifier-set agreement against the canonical member, when Structural mode measured it."
+        },
+        "api_similarity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Weakest call-surface agreement, when Structural mode measured one."
+        },
+        "has_loop": {
+          "type": "boolean",
+          "description": "Whether every member contains a loop, when Structural mode measured it."
+        },
+        "has_dynamic_allocation": {
+          "type": "boolean",
+          "description": "Whether every member calls a recognised allocation API."
+        },
+        "call_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Fewest recovered call sites in any member, when Structural mode measured them."
         },
         "churn": {
           "type": "number",
