@@ -8,35 +8,41 @@
 
 Rust / C / C++ のコードベースを対象に重複ロジックを検出し、その変化を追跡する、
 完全ローカル実行のコマンドラインツールです。ソースコードや解析結果を外部に送信せず、
-ネットワークアクセスを必要とせず、解析対象のコードを実行することもありません。
+ネットワークアクセスを必要とせず、既定では解析対象のコードを実行しません。
 
-現行リリースはビルド不要の解析モードを 2 つ提供します。**Fast** はトークンレベルの
+現行リリースはビルド不要の解析モードを 2 つと、任意のコンパイラ補助モードを提供します。**Fast** はトークンレベルの
 Type-1（完全一致）・Type-2（識別子リネーム・リテラル変更）検出で、数十万行を数秒、
 数百万行を数分でスキャンします。**Structural** は構文構造ベースの Type-3 検出を加え、文の追加・削除・
 変更を伴うクローンを検出したうえで、判定根拠となった次元別 similarity を報告します。
-Semantic モードと任意のコンパイル成果物解析は後続リリースで追加します。
+**Semantic** は別途導入する Rust / Clang helper を使い、main CLI へ compiler API をリンクせずに
+コンパイラが解決した型・名前の情報を取り込みます。任意のコンパイル成果物解析は後続リリースで追加します。
 
 ## 特長
 
 - **ビルド不要のスキャン** — エラー耐性のある lexer が Rust / C / C++ ソースを
   直接処理します。コンパイラ・ビルドシステム・`compile_commands.json` は不要です。
+- **任意のコンパイラ補助スキャン** — Semantic モードは Rust / Clang helper を別プロセスで実行し、
+  答えられなかったファイルと理由も記録します。既定ではプロジェクトの build script など実行可能な
+  build input を動かさず、許可する実行分類は CLI で個別に明示します。
 - **安定した finding ID** — 検出結果は行番号ではなく内容 fingerprint で識別され、
-  無関係な編集で監査履歴が揺れません。
+  無関係な編集で ID が変わりません。
 - **単一スコアではなく根拠** — gapped クローンは lexical / structural / control-flow /
   type / API の similarity を個別に報告します。そのモードで測定できない次元は推測せず、
   測定なしとして報告します。
-- **ローカル監査履歴** — 各スキャンは SQLite データベースへスナップショットされます。
-  text / JSON / SARIF レポートは export であり、正本はデータベースです。
-  `audit` は前回スキャンから各グループがどうなったかを報告します。
+- **ローカルの現行スキャン保存** — 最新のスキャンは SQLite データベースへ保存されます。
+  text / JSON / SARIF レポートはその現行スナップショットの export です。
 - **分離された優先度指標** — clone confidence・maintenance risk・refactoring difficulty
   を並べて報告し、不透明な単一スコアで順序を決めません。各指標は導出に使った
   入力値とともに表示されます。
 - **決定的な出力** — 同一入力からはバイト単位で一致するレポートが得られます。
-  誰も触っていないツリーは再解析せず、それを読んだ記録済み run から報告します。
 - **可視化された上限** — 発火したリソース上限（ファイルサイズ・parse timeout・
   候補 budget）はすべてレポートに計上され、黙って適用されることはありません。
   候補 budget が探索を打ち切るほど大きなツリーでは、**未検査のまま残したペア数を
   レポートが明示します** — 部分的な答えを完全な答えとして提示しません。
+- **保守性の指標であってサイズの指標ではない** — 検出結果が示すのは読み手が同期を
+  取り続ける必要のあるコードであり、コンパイラが出力するバイト数ではありません。
+  最適化器はソース上で重複したままのコードを日常的に畳むため、報告されたクローンを
+  解消しても成果物が小さくなるとは限りません。
 
 ## インストール
 
@@ -47,6 +53,15 @@ cargo install --path crates/codehelion-cli
 
 生成されるのは自己完結の単一バイナリで、SQLite は同梱されています。
 
+Semantic スキャンでは、解析したい言語ごとの helper も必要です。helper を `PATH` に導入し、
+`doctor` で protocol と compiler の利用可否を確認してください。
+
+```sh
+cargo install --path crates/codehelion-backend-rust
+cargo install --path crates/codehelion-backend-clang # システムの libclang も必要
+codehelion doctor
+```
+
 ## 使い方
 
 ```sh
@@ -56,12 +71,10 @@ codehelion scan --mode semantic             # コンパイラが解決した型�
 codehelion scan --format json --output report.json path/to/repo
 codehelion scan --format sarif --output report.sarif   # SARIF 2.1.0 ログ
 codehelion scan --verbose     # 全クローングループと全メンバーを列挙
-codehelion scan --no-reuse    # 同一ツリーの記録があっても解析し直す
 codehelion scan --untrusted   # 素性の分からないツリーを低い上限で読む
-codehelion audit              # 前回から重複がどうなったかを報告
-codehelion explain <ID>       # 監査データベースから finding を表示
+codehelion explain <ID>       # ローカルデータベースから finding を表示
 codehelion baseline           # 既知 finding の baseline を管理
-codehelion cache status       # 監査データベースの場所とサイズ
+codehelion cache status       # ローカルデータベースの場所とサイズ
 codehelion config init        # コメント付き codehelion.toml テンプレートを生成
 codehelion doctor             # 利用可能な解析コンポーネントを表示
 ```
@@ -69,20 +82,9 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 検出結果はクローングループにまとめられ、グループとメンバーそれぞれが安定 ID を
 持ちます。この ID で suppression・baseline 登録・`explain` での後日参照ができます。
 
-`codehelion audit` は記録済みの 2 つのスキャンを比較し、各グループが新規なのか、
-変化していないのか、解消されたのか、出現数が増減したのか、移動したのか、内容が
-乖離したのか、クローン種別が変わったのかを報告します。グループは行番号ではなく
-内容で対応付けるため、ファイルの再インデントやクローン直上へのコメント追加で
-履歴が途切れることはありません。
-
 判断済みの finding は `codehelion baseline create` で凍結でき、以降のスキャンは
-その後に現れたものだけを報告します。リリースで ID の作り方そのものが変わると
-（リテラル畳み込み方式の変更、正規化規則の更新など）記録済みの ID はすべて動き、
-何も一致しなくなった baseline は正常に抑止できた baseline と見分けがつきません。
-そのためこの種の変更は黙って適用せず報告し、`codehelion baseline migrate` が
-凍結済みの判断と履歴を新しい ID の上へ書き換えます。引き継げなかった項目は
-破棄せず 1 件ずつ名指しします。読む順序だけを変える変更では ID は 1 つも動かず、
-利用者側のコストはゼロです。
+既知のものを抑止できます。BuildVariant または detector version が異なる場合は、
+履歴を引き継がず現行スキャンから baseline を作り直します。
 
 ## 設定
 
@@ -92,7 +94,7 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 ```toml
 # min-clone-tokens = 20             # 報告する最小クローン長（トークン数）
 # literal-normalization = "full"    # "preserve" / "category" / "full"
-# database = ".codehelion/audit.db" # 監査データベースの場所
+# database = ".codehelion/audit.db" # ローカルデータベースの場所
 
 [languages]
 # headers = "detect"                # 拡張子 ".h" を読む文法。"detect" / "c" / "cpp"
@@ -112,6 +114,7 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 [limits]                            # リソース上限。発火時は必ずレポートに計上
 # max-file-bytes = 2097152
 # parse-timeout-ms = 10000
+# helper-timeout-ms = 300000       # Semantic helper 応答の期限
 # posting-cap = 64                  # 未設定ならモードごとの既定値のまま
 # pair-budget = 1000000             # ペア生成 pass ごと。pass 間で共有しない
 # max-component = 1024
