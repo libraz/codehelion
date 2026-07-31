@@ -43,7 +43,7 @@ use std::path::Path;
 use codehelion_helper::PROTOCOL_VERSION;
 use codehelion_helper::ir::{COMPILER_IR_SCHEMA_VERSION, Unavailability};
 use codehelion_helper::protocol::{
-    Analyze, BuildDescription, Capability, DescribeBuild, HelperIdentity, VersionRange,
+    Analyze, BuildDescription, Capability, DescribeBuild, HelperIdentity,
 };
 use codehelion_helper::server::{Answer, Backend, Description, serve};
 
@@ -94,7 +94,7 @@ impl Backend for ClangBackend<'_> {
         HelperIdentity {
             name: NAME.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            protocol: VersionRange::exactly(PROTOCOL_VERSION),
+            protocol: PROTOCOL_VERSION,
             // The compiler that will answer. Unlike a helper that ships the
             // compiler it uses, this one analyses with whichever libclang the
             // machine has, so the version is read rather than named.

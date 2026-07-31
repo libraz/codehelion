@@ -26,6 +26,55 @@ use codehelion_helper::{Analysis, COMPILER_IR_SCHEMA_VERSION, CompilerIr, Helper
 /// machine is slower than the protocol's default.
 const PATIENT: Duration = Duration::from_secs(120);
 
+/// Fixture prelude that includes `<expected>` where the standard library behind
+/// this build has it, and records which way that went in a form the analysis
+/// carries back.
+///
+/// Which standard library a machine compiles against is not this repository's
+/// to pin, and it is not stable either: the same runner image has come with one
+/// that has `<expected>` and one that does not on consecutive days. A case that
+/// needs the type therefore reads back what was compiled rather than assuming
+/// it, because the alternative reports the machine's standard library as a
+/// defect in this code. What the case is about — that Clang resolved the
+/// standard declaration — is unchanged where the type is there.
+const EXPECTED_AVAILABILITY: &str = concat!(
+    "#if __has_include(<version>)\n",
+    "#include <version>\n",
+    "#endif\n",
+    "#if __has_include(<expected>) && defined(__cpp_lib_expected)\n",
+    "#include <expected>\n",
+    "#define CODEHELION_EXPECTED 1\n",
+    "#endif\n",
+    // Named rather than inspected as a macro: a preprocessor answer only
+    // reaches this side of the helper by being compiled into something the
+    // analysis reports, and a call is what puts a name in the symbol table.
+    "namespace expected_availability {\n",
+    "#ifdef CODEHELION_EXPECTED\n",
+    "void standard_expected_is_present() {}\n",
+    "void probe() { standard_expected_is_present(); }\n",
+    "#else\n",
+    "void standard_expected_is_absent() {}\n",
+    "void probe() { standard_expected_is_absent(); }\n",
+    "#endif\n",
+    "}  // namespace expected_availability\n",
+);
+
+/// Whether the analyzed unit was compiled against a standard library carrying
+/// `std::expected`, as [`EXPECTED_AVAILABILITY`] recorded it.
+fn standard_expected_available(ir: &CompilerIr) -> bool {
+    let present = ir
+        .symbols
+        .iter()
+        .any(|symbol| symbol.name == "standard_expected_is_present");
+    if !present {
+        println!(
+            "this build's standard library has no <expected>, so the C++23 half of this case \
+             was compiled out and not judged"
+        );
+    }
+    present
+}
+
 fn helper() -> Helper {
     Helper::start(
         Path::new(env!("CARGO_BIN_EXE_codehelion-backend-clang")),
@@ -515,7 +564,7 @@ fn standard_optional_presence_checks_are_validation_constructs() {
     let path = planted.root.join("src/calls.cpp");
     let source = std::fs::read_to_string(&path).expect("read C++ fixture");
     let source = format!(
-        "#include <optional>\n#include <expected>\n\
+        "#include <optional>\n{EXPECTED_AVAILABILITY}\
          #define HAS_OPTION_VALUE(value) ((value).has_value())\n\
          {source}\n\
          namespace optional_checks {{\n\
@@ -545,6 +594,7 @@ fn standard_optional_presence_checks_are_validation_constructs() {
            if (value.has_value() && keep) {{ return true; }}\n\
            return false;\n\
          }}\n\
+         #ifdef CODEHELION_EXPECTED\n\
          bool expected_standard(std::expected<long, int> expected_value) {{\n\
            if (expected_value.has_value()) {{ return true; }}\n\
            return false;\n\
@@ -557,6 +607,7 @@ fn standard_optional_presence_checks_are_validation_constructs() {
            if (expected_value.has_value() && keep) {{ return true; }}\n\
            return false;\n\
          }}\n\
+         #endif\n\
          }}  // namespace optional_checks\n"
     );
     std::fs::write(&path, &source).expect("extend C++ fixture");
@@ -566,12 +617,20 @@ fn standard_optional_presence_checks_are_validation_constructs() {
         .expect("enable C++23 expected fixture");
 
     let ir = overload_ir(&planted);
+    // The two `expected` checks the fixture accepts, where the type was there
+    // to compile. The `optional` half stands on its own either way.
+    let expected_validations = usize::from(standard_expected_available(&ir)) * 2;
     let validates = ir
         .semantic_constructs
         .iter()
         .filter(|construct| construct.kind == SemanticConstructKind::Validate)
         .collect::<Vec<_>>();
-    assert_eq!(validates.len(), 5, "{:?}", ir.semantic_constructs);
+    assert_eq!(
+        validates.len(),
+        3 + expected_validations,
+        "{:?}",
+        ir.semantic_constructs
+    );
     assert_eq!(
         validates
             .iter()
@@ -584,7 +643,7 @@ fn standard_optional_presence_checks_are_validation_constructs() {
             .iter()
             .filter(|construct| construct.fallible_kind == Some(FallibleKind::Result))
             .count(),
-        2
+        expected_validations
     );
     let invocation = u64::try_from(
         source
@@ -618,10 +677,11 @@ fn standard_optional_presence_checks_are_validation_constructs() {
             .any(|spelling| spelling.contains("value.has_value()"))
     );
     assert!(spellings.iter().any(|spelling| spelling.trim() == "value"));
-    assert!(
+    assert_eq!(
         spellings
             .iter()
-            .any(|spelling| spelling.contains("expected_value.has_value()"))
+            .any(|spelling| spelling.contains("expected_value.has_value()")),
+        expected_validations > 0
     );
     assert!(
         spellings
@@ -640,7 +700,8 @@ fn standard_expected_identity_return_is_a_propagation_construct() {
     let path = planted.root.join("src/calls.cpp");
     let source = std::fs::read_to_string(&path).expect("read C++ fixture");
     let source = format!(
-        "#include <expected>\n{source}\n\
+        "{EXPECTED_AVAILABILITY}{source}\n\
+         #ifdef CODEHELION_EXPECTED\n\
          namespace expected_checks {{\n\
          std::expected<long, int> direct(std::expected<long, int> value) {{\n\
            return value;\n\
@@ -652,7 +713,8 @@ fn standard_expected_identity_return_is_a_propagation_construct() {
            auto copy = value;\n\
            return value;\n\
          }}\n\
-         }}  // namespace expected_checks\n"
+         }}  // namespace expected_checks\n\
+         #endif\n"
     );
     std::fs::write(&path, &source).expect("extend C++ fixture");
 
@@ -676,6 +738,11 @@ fn standard_expected_identity_return_is_a_propagation_construct() {
     .expect("select C++23 for expected");
 
     let ir = overload_ir(&planted);
+    // The whole case is about `std::expected`, so a build without the type has
+    // nothing here to judge. It still says the fixture reached the compiler.
+    if !standard_expected_available(&ir) {
+        return;
+    }
     let propagated = ir
         .semantic_constructs
         .iter()
