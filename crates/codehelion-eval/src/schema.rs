@@ -160,6 +160,13 @@ pub struct Finding {
     pub id: String,
     /// Reported clone category.
     pub clone_type: CloneType,
+    /// Registered semantic rules the detector used to establish this finding.
+    ///
+    /// Empty for textual and structural findings. A finding can carry more
+    /// than one rule because a future bounded rewrite may require a declared
+    /// sequence of registered rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_ids: Vec<String>,
     /// Detector confidence in `[0.0, 1.0]`; higher is more confident.
     pub score: f64,
     /// Size of the largest fragment, in tokens.

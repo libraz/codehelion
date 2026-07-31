@@ -1,8 +1,8 @@
 //! Schema definition and forward-only migration.
 //!
-//! The schema covers every audit entity: `ScanRun`, `BuildVariant`,
-//! `SourceUnit`, `Fragment`, `Fingerprint`, `CloneGroup`, `GroupLineage`,
-//! `Finding`, `Suppression`, `Artifact`, `ArtifactSymbol`,
+//! The schema covers every scan entity: `ScanRun`, `BuildVariant`,
+//! `SourceUnit`, `Fragment`, `Fingerprint`, `CloneGroup`, `Finding`,
+//! `Suppression`, `Artifact`, `ArtifactSymbol`,
 //! `SourceArtifactMapping` and `DetectorVersion`, plus the candidate-index
 //! feature tables `FeatureFingerprint`, `FeatureOccurrence` and `UnitFeature`,
 //! the per-group `CloneGroupSimilarity` breakdown, and the per-run report
@@ -45,22 +45,21 @@
 //! - Savings and confidence live in separate columns; there is no single
 //!   collapsed score column.
 //!
-//! Migrations are forward-only. `schema_meta` stores the version; opening a
-//! database written by a newer tool fails with an explicit error instead of
-//! guessing (downgrade is unsupported by design).
+//! Before the first release, schema fragments are assembled into one baseline.
+//! `schema_meta` records that baseline as version one. A database from an
+//! earlier development layout is rejected and recreated rather than migrated.
 
 use rusqlite::Connection;
 
 use crate::StoreError;
 
-/// Current schema version. Bump together with an appended migration.
-pub const SCHEMA_VERSION: i64 = 22;
+/// The single unreleased development schema baseline.
+pub const SCHEMA_VERSION: i64 = 1;
 
-/// Migration scripts, applied in order; index `i` migrates version `i` to
-/// `i + 1`. Existing entries are frozen — schema changes append.
+/// SQL fragments composing the current development baseline.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V13, V14, V15, V16, V17, V18, V19, V20, V21, V22,
+    V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38, V39, V40, V41,
 ];
 
 /// Version 1: the full entity set.
@@ -168,15 +167,6 @@ CREATE TABLE clone_group_member (
 ) STRICT;
 CREATE INDEX idx_member_finding ON clone_group_member (finding_id);
 
-CREATE TABLE group_lineage (
-    id                     INTEGER PRIMARY KEY,
-    lineage_id             BLOB CHECK (lineage_id IS NULL OR length(lineage_id) = 16),
-    group_fingerprint_id   INTEGER NOT NULL REFERENCES fingerprint (id),
-    previous_lineage_id    INTEGER REFERENCES group_lineage (id),
-    first_seen_scan_run_id INTEGER REFERENCES scan_run (id),
-    last_seen_scan_run_id  INTEGER REFERENCES scan_run (id)
-) STRICT;
-
 CREATE TABLE suppression (
     id      INTEGER PRIMARY KEY,
     scope   TEXT NOT NULL CHECK (scope IN
@@ -191,9 +181,6 @@ CREATE TABLE finding (
     id                                 INTEGER PRIMARY KEY,
     scan_run_id                        INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
     clone_group_id                     INTEGER NOT NULL REFERENCES clone_group (id) ON DELETE CASCADE,
-    audit_state                        TEXT NOT NULL CHECK (audit_state IN
-                                           ('new', 'unchanged', 'resolved', 'expanded',
-                                            'reduced', 'moved', 'diverged', 'reclassified')),
     suppression_id                     INTEGER REFERENCES suppression (id),
     clone_confidence                   REAL NOT NULL,
     semantic_confidence                REAL,
@@ -454,16 +441,12 @@ CREATE INDEX idx_clone_group_run ON clone_group (scan_run_id);
 CREATE INDEX idx_clone_group_fp ON clone_group (group_fingerprint_id);
 ";
 
-/// Version 11: the files a run read, with the hash of what it read.
+/// The files the current snapshot read, with their content hashes.
 ///
-/// A run's findings say what was found, not what was looked at, and the
-/// difference is what a later run needs: a file that vanished between two
-/// scans leaves no trace in either set of findings. One row per discovered
-/// file makes the tree a run saw recoverable, so the next scan of it can say
-/// what moved and, later, reuse what did not.
-///
-/// The hash is of bytes and nothing else — no timestamp, no size shortcut — so
-/// the comparison never depends on a filesystem's bookkeeping.
+/// Findings say what was detected, not every file that was considered. One
+/// row per discovered file keeps current-snapshot coverage and language counts
+/// inspectable. The hash is of bytes and nothing else — no timestamp or size
+/// shortcut — so it stays an exact record of the input the snapshot read.
 const V11: &str = "
 CREATE TABLE scanned_file (
     scan_run_id   INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
@@ -473,48 +456,6 @@ CREATE TABLE scanned_file (
     byte_len      INTEGER NOT NULL,
     PRIMARY KEY (scan_run_id, relative_path)
 ) STRICT;
-";
-
-/// Version 12: which history each group belongs to, and what connects it
-/// there.
-///
-/// The V1 shape carried one `previous_lineage_id` per row, which can express a
-/// group that continued and a group that split, but not two groups that merged
-/// into one — a case the comparison genuinely produces. Connections move into
-/// their own table, where a child can have several parents and the run that
-/// observed each connection is on the row: a lineage edge is something one
-/// audit concluded, not a timeless fact about the code.
-///
-/// `last_seen_scan_run_id` and `first_seen_scan_run_id` go with it. Both are
-/// the extremes of the rows already present for a lineage, and a stored copy
-/// of a derivable value is a second answer waiting to disagree with the first.
-///
-/// The table is replaced rather than rebuilt through a copy. No release
-/// between V1 and V11 wrote a row into it — the schema was the contract and
-/// the population came later — so there is nothing to carry over, and a copy
-/// statement would only bind this migration to column names that a database
-/// restored from an older shape need not still have.
-const V12: &str = "
-DROP TABLE IF EXISTS group_lineage;
-CREATE TABLE group_lineage (
-    scan_run_id          INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
-    lineage_id           BLOB NOT NULL CHECK (length(lineage_id) = 16),
-    group_fingerprint_id INTEGER NOT NULL REFERENCES fingerprint (id),
-    PRIMARY KEY (scan_run_id, group_fingerprint_id)
-) STRICT;
-CREATE INDEX idx_group_lineage_id ON group_lineage (lineage_id);
-
-CREATE TABLE group_lineage_edge (
-    scan_run_id                 INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
-    child_group_fingerprint_id  INTEGER NOT NULL REFERENCES fingerprint (id),
-    parent_group_fingerprint_id INTEGER NOT NULL REFERENCES fingerprint (id),
-    parent_lineage_id           BLOB NOT NULL CHECK (length(parent_lineage_id) = 16),
-    is_primary                  INTEGER NOT NULL CHECK (is_primary IN (0, 1)),
-    shared_content              INTEGER NOT NULL,
-    overlap                     REAL NOT NULL,
-    PRIMARY KEY (scan_run_id, child_group_fingerprint_id, parent_group_fingerprint_id)
-) STRICT;
-CREATE INDEX idx_group_lineage_edge_parent ON group_lineage_edge (parent_group_fingerprint_id);
 ";
 
 /// Version 13: the length floor a run reported under.
@@ -783,6 +724,7 @@ CREATE TABLE compiler_call (
     resolution            TEXT NOT NULL CHECK (resolution IN
                               ('static', 'dynamic', 'unresolved')),
     target_symbol         TEXT,
+    api_name              TEXT,
     expansion_file        TEXT NOT NULL,
     expansion_start_byte  INTEGER NOT NULL,
     expansion_end_byte    INTEGER NOT NULL,
@@ -795,6 +737,7 @@ CREATE TABLE compiler_call (
     CHECK ((resolution = 'static') = (target_symbol IS NOT NULL))
 ) STRICT;
 CREATE INDEX idx_compiler_call_target ON compiler_call (target_symbol);
+CREATE INDEX idx_compiler_call_api_name ON compiler_call (api_name);
 
 CREATE TABLE compiler_call_candidate (
     compiler_call_id INTEGER NOT NULL REFERENCES compiler_call (id) ON DELETE CASCADE,
@@ -1000,8 +943,489 @@ ALTER TABLE build_variant_setting_rebuilt RENAME TO build_variant_setting;
 CREATE INDEX idx_build_variant_setting ON build_variant_setting (name, value);
 ";
 
-/// Bring `conn` to the current schema version, applying any pending
-/// forward migrations inside one transaction per step.
+/// Version 23: opt-in comparisons across independent build variants.
+///
+/// These rows intentionally do not reference `scan_run` or `clone_group`:
+/// a comparison is neither a synthetic variant nor another normal audit run.
+const V23: &str = "
+CREATE TABLE cross_variant_comparison (
+    id                    INTEGER PRIMARY KEY,
+    comparison_id         BLOB NOT NULL CHECK (length(comparison_id) = 16),
+    policy_version        TEXT NOT NULL,
+    root_path             TEXT NOT NULL,
+    started_at            TEXT NOT NULL,
+    finished_at           TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_cross_variant_comparison_identity
+    ON cross_variant_comparison (comparison_id, started_at DESC);
+
+CREATE TABLE cross_variant_comparison_origin (
+    comparison_id              INTEGER NOT NULL REFERENCES cross_variant_comparison (id) ON DELETE CASCADE,
+    build_variant_fingerprint  TEXT NOT NULL,
+    PRIMARY KEY (comparison_id, build_variant_fingerprint)
+) STRICT;
+
+CREATE TABLE cross_variant_clone_group (
+    id                    INTEGER PRIMARY KEY,
+    comparison_id         INTEGER NOT NULL REFERENCES cross_variant_comparison (id) ON DELETE CASCADE,
+    group_id              BLOB NOT NULL CHECK (length(group_id) = 16),
+    clone_type            TEXT NOT NULL CHECK (clone_type IN ('type-1')),
+    member_count          INTEGER NOT NULL
+) STRICT;
+CREATE INDEX idx_cross_variant_clone_group_comparison
+    ON cross_variant_clone_group (comparison_id);
+
+CREATE TABLE cross_variant_clone_member (
+    group_id                  INTEGER NOT NULL REFERENCES cross_variant_clone_group (id) ON DELETE CASCADE,
+    origin_variant_fingerprint TEXT NOT NULL,
+    language                  TEXT NOT NULL CHECK (language IN ('c', 'cpp')),
+    file_path                 TEXT NOT NULL,
+    start_line                INTEGER NOT NULL,
+    end_line                  INTEGER NOT NULL,
+    unit_name                 TEXT,
+    token_count               INTEGER NOT NULL,
+    PRIMARY KEY (group_id, origin_variant_fingerprint, file_path, start_line, end_line)
+) STRICT;
+";
+
+/// Version 24: individual macro invocations skipped by a compiler helper.
+const V24: &str = "
+CREATE TABLE compiler_unexpanded_macro (
+    compiler_unit_id      INTEGER NOT NULL REFERENCES compiler_unit (id) ON DELETE CASCADE,
+    ordinal               INTEGER NOT NULL,
+    reason                TEXT NOT NULL CHECK (reason IN
+                             ('requires_execution', 'unresolved', 'expansion_unavailable')),
+    invocation_file       TEXT NOT NULL,
+    invocation_start_byte INTEGER NOT NULL,
+    invocation_end_byte   INTEGER NOT NULL,
+    invocation_start_line INTEGER NOT NULL,
+    PRIMARY KEY (compiler_unit_id, ordinal)
+) STRICT;
+CREATE INDEX idx_compiler_unexpanded_macro_site
+    ON compiler_unexpanded_macro (invocation_file, invocation_start_byte);
+";
+
+/// Version 25: types resolved for expressions produced by macro expansion.
+const V25: &str = "
+CREATE TABLE compiler_expression (
+    compiler_unit_id      INTEGER NOT NULL REFERENCES compiler_unit (id) ON DELETE CASCADE,
+    ordinal               INTEGER NOT NULL,
+    type_index            INTEGER NOT NULL,
+    expansion_file        TEXT NOT NULL,
+    expansion_start_byte  INTEGER NOT NULL,
+    expansion_end_byte    INTEGER NOT NULL,
+    expansion_start_line  INTEGER NOT NULL,
+    definition_file       TEXT,
+    definition_start_byte INTEGER,
+    definition_end_byte   INTEGER,
+    definition_start_line INTEGER,
+    PRIMARY KEY (compiler_unit_id, ordinal)
+) STRICT;
+CREATE INDEX idx_compiler_expression_site
+    ON compiler_expression (expansion_file, expansion_start_byte);
+";
+
+/// Version 26: standalone artifact analyses are not source scan runs.
+///
+/// The original `artifact` and `artifact_symbol` tables attach an artifact to
+/// a source `scan_run`, which is useful only after source mapping. A direct
+/// artifact inspection has no source run to fabricate, so it receives its
+/// own atomic parent row. Its content-derived fingerprints remain suitable
+/// for a later mapping table without conflating the two evidence sources.
+const V26: &str = "
+CREATE TABLE artifact_analysis (
+    id                INTEGER PRIMARY KEY,
+    schema_version    TEXT NOT NULL,
+    path              TEXT NOT NULL,
+    format            TEXT NOT NULL CHECK (format IN ('wasm', 'elf', 'macho', 'pe-coff', 'archive')),
+    content_fingerprint BLOB NOT NULL CHECK (length(content_fingerprint) = 16),
+    observed_bytes    INTEGER NOT NULL,
+    started_at        TEXT NOT NULL,
+    finished_at       TEXT NOT NULL,
+    status            TEXT NOT NULL CHECK (status IN ('completed'))
+) STRICT;
+CREATE INDEX idx_artifact_analysis_path_started
+    ON artifact_analysis (path, started_at DESC);
+
+CREATE TABLE artifact_analysis_symbol (
+    analysis_id             INTEGER NOT NULL REFERENCES artifact_analysis (id) ON DELETE CASCADE,
+    ordinal                 INTEGER NOT NULL,
+    fingerprint             BLOB NOT NULL CHECK (length(fingerprint) = 16),
+    name                    TEXT,
+    section_index           INTEGER,
+    offset                  INTEGER NOT NULL,
+    size_bytes              INTEGER NOT NULL,
+    size_inferred           INTEGER NOT NULL CHECK (size_inferred IN (0, 1)),
+    code_fingerprint        BLOB NOT NULL CHECK (length(code_fingerprint) = 16),
+    normalization_version   TEXT,
+    normalization_fingerprint BLOB,
+    PRIMARY KEY (analysis_id, ordinal),
+    CHECK (normalization_fingerprint IS NULL OR length(normalization_fingerprint) = 16)
+) STRICT;
+CREATE INDEX idx_artifact_analysis_symbol_fingerprint
+    ON artifact_analysis_symbol (fingerprint);
+";
+
+/// Version 27: parser-established exported roots on artifact symbols.
+const V27: &str = "
+ALTER TABLE artifact_analysis_symbol
+    ADD COLUMN exported INTEGER NOT NULL DEFAULT 0 CHECK (exported IN (0, 1));
+";
+
+/// Version 28: retain every parser-established artifact fact canonically.
+///
+/// Summary columns remain queryable, while the versioned IR document preserves
+/// format-specific evidence for later source-artifact correlation without
+/// fabricating a source scan or dropping fields the current store does not
+/// index yet.
+const V28: &str = "
+ALTER TABLE artifact_analysis
+    ADD COLUMN ir_json TEXT NOT NULL DEFAULT '{}';
+";
+
+/// Version 29: standalone artifact analyses retain supplied build evidence.
+const V29: &str = "
+ALTER TABLE artifact_analysis
+    ADD COLUMN build_variant_manifest_path TEXT;
+ALTER TABLE artifact_analysis
+    ADD COLUMN build_variant_fingerprint BLOB
+        CHECK (build_variant_fingerprint IS NULL OR length(build_variant_fingerprint) = 16);
+CREATE INDEX idx_artifact_analysis_build_variant
+    ON artifact_analysis (build_variant_fingerprint);
+";
+
+/// Version 30: stable, standalone source-to-artifact evidence.
+///
+/// These mappings intentionally do not reference `source_unit` or `fragment` row
+/// IDs: those rows are run-local anchors, while correlation must remain
+/// comparable across scans and build variants. The old source-scan table stays
+/// in place for historical compatibility; new artifact analyses use these
+/// content-addressed references.
+const V30: &str = "
+CREATE TABLE artifact_analysis_source_mapping (
+    id                          INTEGER PRIMARY KEY,
+    schema_version              TEXT NOT NULL,
+    artifact_analysis_id        INTEGER NOT NULL REFERENCES artifact_analysis (id) ON DELETE CASCADE,
+    artifact_symbol_fingerprint BLOB NOT NULL CHECK (length(artifact_symbol_fingerprint) = 16),
+    source_kind                 TEXT NOT NULL CHECK (source_kind IN ('unit', 'fragment')),
+    source_fingerprint          BLOB NOT NULL CHECK (length(source_fingerprint) = 16),
+    evidence_json               TEXT NOT NULL,
+    mapping_confidence          TEXT NOT NULL CHECK (mapping_confidence IN ('exact', 'strong', 'weak', 'ambiguous')),
+    attributed_bytes            INTEGER,
+    build_variant_fingerprint   BLOB NOT NULL CHECK (length(build_variant_fingerprint) = 16),
+    CHECK (attributed_bytes IS NULL OR attributed_bytes >= 0),
+    UNIQUE (
+        schema_version, artifact_analysis_id, artifact_symbol_fingerprint,
+        source_kind, source_fingerprint, evidence_json
+    )
+) STRICT;
+CREATE INDEX idx_artifact_analysis_mapping_symbol
+    ON artifact_analysis_source_mapping (artifact_analysis_id, artifact_symbol_fingerprint);
+CREATE INDEX idx_artifact_analysis_mapping_source
+    ON artifact_analysis_source_mapping (source_kind, source_fingerprint);
+
+CREATE TABLE artifact_analysis_unmapped_symbol (
+    artifact_analysis_id        INTEGER NOT NULL REFERENCES artifact_analysis (id) ON DELETE CASCADE,
+    artifact_symbol_fingerprint BLOB NOT NULL CHECK (length(artifact_symbol_fingerprint) = 16),
+    reason                      TEXT NOT NULL CHECK (reason IN
+                                    ('debug_info_missing', 'stripped', 'demangle_failed',
+                                     'outside_source_scope', 'evidence_conflict')),
+    PRIMARY KEY (artifact_analysis_id, artifact_symbol_fingerprint)
+) STRICT;
+";
+
+/// Version 31: source identities that did not reach an artifact stay explicit.
+const V31: &str = "
+CREATE TABLE artifact_analysis_unmapped_source (
+    artifact_analysis_id      INTEGER NOT NULL REFERENCES artifact_analysis (id) ON DELETE CASCADE,
+    source_kind               TEXT NOT NULL CHECK (source_kind IN ('unit', 'fragment')),
+    source_fingerprint        BLOB NOT NULL CHECK (length(source_fingerprint) = 16),
+    reason                    TEXT NOT NULL CHECK (reason IN
+                                 ('dead_code', 'inlined_away', 'lto_absorbed',
+                                  'not_compiled_for_variant', 'evidence_conflict')),
+    PRIMARY KEY (artifact_analysis_id, source_kind, source_fingerprint)
+) STRICT;
+CREATE INDEX idx_artifact_analysis_unmapped_source_reason
+    ON artifact_analysis_unmapped_source (artifact_analysis_id, reason);
+";
+
+/// Version 32: source references retain the build variant that minted them.
+const V32: &str = "
+ALTER TABLE artifact_analysis_source_mapping
+    ADD COLUMN source_build_variant_fingerprint BLOB
+        CHECK (source_build_variant_fingerprint IS NULL OR length(source_build_variant_fingerprint) = 16);
+ALTER TABLE artifact_analysis_unmapped_source
+    ADD COLUMN source_build_variant_fingerprint BLOB
+        CHECK (source_build_variant_fingerprint IS NULL OR length(source_build_variant_fingerprint) = 16);
+";
+
+/// Version 33: a source-run correlation keeps its coverage figures with the
+/// artifact analysis without making ordinary source scans depend on artifacts.
+const V33: &str = "
+CREATE TABLE artifact_analysis_correlation (
+    artifact_analysis_id       INTEGER PRIMARY KEY REFERENCES artifact_analysis (id) ON DELETE CASCADE,
+    schema_version             TEXT NOT NULL,
+    source_scan_run_id         INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE RESTRICT,
+    mapping_count              INTEGER NOT NULL CHECK (mapping_count >= 0),
+    artifact_symbol_count      INTEGER NOT NULL CHECK (artifact_symbol_count >= 0),
+    mapped_symbol_count        INTEGER NOT NULL
+        CHECK (mapped_symbol_count >= 0 AND mapped_symbol_count <= artifact_symbol_count),
+    artifact_symbol_bytes      INTEGER NOT NULL CHECK (artifact_symbol_bytes >= 0),
+    mapped_symbol_bytes        INTEGER NOT NULL
+        CHECK (mapped_symbol_bytes >= 0 AND mapped_symbol_bytes <= artifact_symbol_bytes)
+) STRICT;
+CREATE INDEX idx_artifact_analysis_correlation_source_run
+    ON artifact_analysis_correlation (source_scan_run_id);
+";
+
+/// Version 34: source units with no established artifact correspondence are
+/// recorded without guessing that dead code, inlining, or LTO caused it.
+const V34: &str = "
+CREATE TABLE artifact_analysis_unmapped_source_v34 (
+    artifact_analysis_id      INTEGER NOT NULL REFERENCES artifact_analysis (id) ON DELETE CASCADE,
+    source_kind               TEXT NOT NULL CHECK (source_kind IN ('unit', 'fragment')),
+    source_fingerprint        BLOB NOT NULL CHECK (length(source_fingerprint) = 16),
+    reason                    TEXT NOT NULL CHECK (reason IN
+                                 ('no_artifact_evidence', 'dead_code', 'inlined_away', 'lto_absorbed',
+                                  'not_compiled_for_variant', 'evidence_conflict')),
+    source_build_variant_fingerprint BLOB
+        CHECK (source_build_variant_fingerprint IS NULL OR length(source_build_variant_fingerprint) = 16),
+    PRIMARY KEY (artifact_analysis_id, source_kind, source_fingerprint)
+) STRICT;
+INSERT INTO artifact_analysis_unmapped_source_v34
+    (artifact_analysis_id, source_kind, source_fingerprint, reason, source_build_variant_fingerprint)
+SELECT artifact_analysis_id, source_kind, source_fingerprint, reason, source_build_variant_fingerprint
+FROM artifact_analysis_unmapped_source;
+DROP TABLE artifact_analysis_unmapped_source;
+ALTER TABLE artifact_analysis_unmapped_source_v34 RENAME TO artifact_analysis_unmapped_source;
+CREATE INDEX idx_artifact_analysis_unmapped_source_reason
+    ON artifact_analysis_unmapped_source (artifact_analysis_id, reason);
+";
+
+/// Version 35: source/artifact correlation reads clone members by fragment.
+const V35: &str = "
+CREATE INDEX idx_clone_group_member_fragment
+    ON clone_group_member (fragment_id, clone_group_id);
+";
+
+/// Version 36: content-identical clone occurrences retain their stable
+/// `FindingId` alongside the shared fragment fingerprint in correlation rows.
+const V36: &str = "
+CREATE TABLE artifact_analysis_source_mapping_v36 (
+    id                          INTEGER PRIMARY KEY,
+    schema_version              TEXT NOT NULL,
+    artifact_analysis_id        INTEGER NOT NULL REFERENCES artifact_analysis (id) ON DELETE CASCADE,
+    artifact_symbol_fingerprint BLOB NOT NULL CHECK (length(artifact_symbol_fingerprint) = 16),
+    source_kind                 TEXT NOT NULL CHECK (source_kind IN ('unit', 'fragment')),
+    source_fingerprint          BLOB NOT NULL CHECK (length(source_fingerprint) = 16),
+    source_instance_fingerprint BLOB NOT NULL CHECK (length(source_instance_fingerprint) = 16),
+    evidence_json               TEXT NOT NULL,
+    mapping_confidence          TEXT NOT NULL CHECK (mapping_confidence IN ('exact', 'strong', 'weak', 'ambiguous')),
+    attributed_bytes            INTEGER,
+    build_variant_fingerprint   BLOB NOT NULL CHECK (length(build_variant_fingerprint) = 16),
+    source_build_variant_fingerprint BLOB
+        CHECK (source_build_variant_fingerprint IS NULL OR length(source_build_variant_fingerprint) = 16),
+    CHECK (attributed_bytes IS NULL OR attributed_bytes >= 0),
+    UNIQUE (
+        schema_version, artifact_analysis_id, artifact_symbol_fingerprint,
+        source_kind, source_fingerprint, source_instance_fingerprint, evidence_json
+    )
+) STRICT;
+INSERT INTO artifact_analysis_source_mapping_v36
+    (id, schema_version, artifact_analysis_id, artifact_symbol_fingerprint,
+     source_kind, source_fingerprint, source_instance_fingerprint, evidence_json,
+     mapping_confidence, attributed_bytes, build_variant_fingerprint,
+     source_build_variant_fingerprint)
+SELECT id, schema_version, artifact_analysis_id, artifact_symbol_fingerprint,
+       source_kind, source_fingerprint, source_fingerprint, evidence_json,
+       mapping_confidence, attributed_bytes, build_variant_fingerprint,
+       source_build_variant_fingerprint
+FROM artifact_analysis_source_mapping;
+DROP TABLE artifact_analysis_source_mapping;
+ALTER TABLE artifact_analysis_source_mapping_v36 RENAME TO artifact_analysis_source_mapping;
+CREATE INDEX idx_artifact_analysis_mapping_symbol
+    ON artifact_analysis_source_mapping (artifact_analysis_id, artifact_symbol_fingerprint);
+CREATE INDEX idx_artifact_analysis_mapping_source
+    ON artifact_analysis_source_mapping
+       (source_kind, source_fingerprint, source_instance_fingerprint);
+
+CREATE TABLE artifact_analysis_unmapped_source_v36 (
+    artifact_analysis_id      INTEGER NOT NULL REFERENCES artifact_analysis (id) ON DELETE CASCADE,
+    source_kind               TEXT NOT NULL CHECK (source_kind IN ('unit', 'fragment')),
+    source_fingerprint        BLOB NOT NULL CHECK (length(source_fingerprint) = 16),
+    source_instance_fingerprint BLOB NOT NULL CHECK (length(source_instance_fingerprint) = 16),
+    reason                    TEXT NOT NULL CHECK (reason IN
+                                 ('no_artifact_evidence', 'dead_code', 'inlined_away', 'lto_absorbed',
+                                  'not_compiled_for_variant', 'evidence_conflict')),
+    source_build_variant_fingerprint BLOB
+        CHECK (source_build_variant_fingerprint IS NULL OR length(source_build_variant_fingerprint) = 16),
+    PRIMARY KEY (artifact_analysis_id, source_kind, source_fingerprint, source_instance_fingerprint)
+) STRICT;
+INSERT INTO artifact_analysis_unmapped_source_v36
+    (artifact_analysis_id, source_kind, source_fingerprint, source_instance_fingerprint,
+     reason, source_build_variant_fingerprint)
+SELECT artifact_analysis_id, source_kind, source_fingerprint, source_fingerprint,
+       reason, source_build_variant_fingerprint
+FROM artifact_analysis_unmapped_source;
+DROP TABLE artifact_analysis_unmapped_source;
+ALTER TABLE artifact_analysis_unmapped_source_v36 RENAME TO artifact_analysis_unmapped_source;
+CREATE INDEX idx_artifact_analysis_unmapped_source_reason
+    ON artifact_analysis_unmapped_source (artifact_analysis_id, reason);
+";
+
+/// Version 37: persist conservative clone-group refactoring estimates beside
+/// the standalone artifact analysis that supplied the mappings.
+const V37: &str = "
+CREATE TABLE artifact_analysis_clone_group_savings (
+    id                              INTEGER PRIMARY KEY,
+    schema_version                  TEXT NOT NULL,
+    artifact_analysis_id            INTEGER NOT NULL REFERENCES artifact_analysis (id) ON DELETE CASCADE,
+    source_scan_run_id              INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE RESTRICT,
+    clone_group_fingerprint         BLOB NOT NULL CHECK (length(clone_group_fingerprint) = 16),
+    source_build_variant_fingerprint BLOB NOT NULL CHECK (length(source_build_variant_fingerprint) = 16),
+    artifact_build_variant_fingerprint BLOB NOT NULL CHECK (length(artifact_build_variant_fingerprint) = 16),
+    duplicated_bytes                INTEGER NOT NULL CHECK (duplicated_bytes >= 0),
+    estimated_refactor_savings_bytes INTEGER NOT NULL,
+    mapping_confidence              TEXT NOT NULL CHECK (mapping_confidence IN ('high', 'medium', 'low', 'unavailable')),
+    clone_confidence                REAL NOT NULL,
+    model_confidence                TEXT NOT NULL CHECK (model_confidence IN ('high', 'medium', 'low', 'unavailable')),
+    savings_confidence              TEXT NOT NULL CHECK (savings_confidence IN ('high', 'medium', 'low', 'unavailable')),
+    model_schema_version            TEXT NOT NULL,
+    assumptions_json                TEXT NOT NULL,
+    UNIQUE (artifact_analysis_id, source_scan_run_id, clone_group_fingerprint,
+            source_build_variant_fingerprint, artifact_build_variant_fingerprint)
+) STRICT;
+CREATE INDEX idx_artifact_analysis_savings_source_run
+    ON artifact_analysis_clone_group_savings (source_scan_run_id, clone_group_fingerprint);
+";
+
+/// Version 38: retain one measured before/after outcome beside the exact
+/// clone-group estimate it evaluates. Both artifact variants are first-class,
+/// so calibration never blends measurements from different build conditions.
+const V38: &str = "
+CREATE TABLE artifact_analysis_savings_calibration (
+    id                              INTEGER PRIMARY KEY,
+    schema_version                  TEXT NOT NULL,
+    artifact_analysis_id            INTEGER NOT NULL REFERENCES artifact_analysis (id) ON DELETE CASCADE,
+    source_scan_run_id              INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE RESTRICT,
+    clone_group_fingerprint         BLOB NOT NULL CHECK (length(clone_group_fingerprint) = 16),
+    source_build_variant_fingerprint BLOB NOT NULL CHECK (length(source_build_variant_fingerprint) = 16),
+    before_artifact_build_variant_fingerprint BLOB NOT NULL CHECK (length(before_artifact_build_variant_fingerprint) = 16),
+    after_artifact_fingerprint      BLOB NOT NULL CHECK (length(after_artifact_fingerprint) = 16),
+    after_artifact_build_variant_fingerprint BLOB NOT NULL CHECK (length(after_artifact_build_variant_fingerprint) = 16),
+    estimated_refactor_savings_bytes INTEGER NOT NULL,
+    verified_savings_bytes          INTEGER NOT NULL,
+    absolute_error_bytes            INTEGER NOT NULL CHECK (absolute_error_bytes >= 0),
+    relative_error                  REAL,
+    recorded_at                     TEXT NOT NULL,
+    UNIQUE (artifact_analysis_id, source_scan_run_id, clone_group_fingerprint,
+            source_build_variant_fingerprint, before_artifact_build_variant_fingerprint,
+            after_artifact_fingerprint, after_artifact_build_variant_fingerprint)
+) STRICT;
+CREATE INDEX idx_artifact_savings_calibration_group
+    ON artifact_analysis_savings_calibration (source_scan_run_id, clone_group_fingerprint);
+";
+
+/// Version 39: persist the SOGs and registered-rule evidence that justify a
+/// restricted semantic finding. Graphs attach to member fragments so a group
+/// can grow without replacing one member's normalized evidence with another's.
+const V39: &str = "
+CREATE TABLE semantic_operation_graph (
+    fragment_id     INTEGER PRIMARY KEY REFERENCES fragment (id) ON DELETE CASCADE,
+    schema_version  TEXT NOT NULL,
+    graph_json      TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE semantic_group_evidence (
+    clone_group_id  INTEGER PRIMARY KEY REFERENCES clone_group (id) ON DELETE CASCADE,
+    schema_version  TEXT NOT NULL,
+    rule_id         TEXT NOT NULL,
+    rule_version    INTEGER NOT NULL CHECK (rule_version > 0),
+    rule_confidence REAL NOT NULL CHECK (rule_confidence >= 0 AND rule_confidence <= 1)
+) STRICT;
+
+CREATE TABLE semantic_node_mapping (
+    clone_group_id INTEGER NOT NULL REFERENCES clone_group (id) ON DELETE CASCADE,
+    corresponding_member INTEGER NOT NULL CHECK (corresponding_member > 0),
+    canonical_node INTEGER NOT NULL CHECK (canonical_node >= 0),
+    corresponding_node INTEGER NOT NULL CHECK (corresponding_node >= 0),
+    PRIMARY KEY (clone_group_id, corresponding_member, canonical_node, corresponding_node)
+) STRICT;
+CREATE INDEX idx_semantic_node_mapping_group ON semantic_node_mapping (clone_group_id);
+";
+
+/// Version 40: compiler-confirmed restricted semantic constructs.
+const V40: &str = "
+CREATE TABLE compiler_semantic_construct (
+    compiler_unit_id INTEGER NOT NULL REFERENCES compiler_unit (id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('source', 'collect', 'reduce', 'propagate_error', 'validate', 'acquire_resource', 'release_resource')),
+    fallible_kind TEXT CHECK (fallible_kind IN ('option', 'result')),
+    direct_propagation TEXT CHECK (direct_propagation IN ('result_adapter', 'option_adapter')),
+    resource_kind TEXT,
+    expansion_file TEXT NOT NULL,
+    expansion_start_byte INTEGER NOT NULL,
+    expansion_end_byte INTEGER NOT NULL,
+    expansion_start_line INTEGER NOT NULL,
+    definition_file TEXT,
+    definition_start_byte INTEGER,
+    definition_end_byte INTEGER,
+    definition_start_line INTEGER,
+    PRIMARY KEY (compiler_unit_id, ordinal)
+) STRICT;
+";
+
+/// Current-baseline addition: opt-in Rust-to-C++ semantic comparisons.
+///
+/// This is not a schema migration: unreleased databases are always created
+/// from the complete baseline. The comparison has its own tables so it cannot
+/// become a normal scan snapshot or baseline input.
+const V41: &str = "
+CREATE TABLE cross_language_comparison (
+    id                    INTEGER PRIMARY KEY,
+    comparison_id         BLOB NOT NULL CHECK (length(comparison_id) = 16),
+    policy_version        TEXT NOT NULL,
+    root_path             TEXT NOT NULL,
+    started_at            TEXT NOT NULL,
+    finished_at           TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_cross_language_comparison_identity
+    ON cross_language_comparison (comparison_id, started_at DESC);
+
+CREATE TABLE cross_language_comparison_origin (
+    comparison_id              INTEGER NOT NULL REFERENCES cross_language_comparison (id) ON DELETE CASCADE,
+    build_variant_fingerprint  TEXT NOT NULL,
+    PRIMARY KEY (comparison_id, build_variant_fingerprint)
+) STRICT;
+
+CREATE TABLE cross_language_semantic_group (
+    id                       INTEGER PRIMARY KEY,
+    comparison_id            INTEGER NOT NULL REFERENCES cross_language_comparison (id) ON DELETE CASCADE,
+    group_id                 BLOB NOT NULL CHECK (length(group_id) = 16),
+    rule_id                  TEXT NOT NULL,
+    rule_version             INTEGER NOT NULL,
+    semantic_confidence      REAL NOT NULL,
+    correspondence_ids_json  TEXT NOT NULL,
+    member_count             INTEGER NOT NULL
+) STRICT;
+CREATE INDEX idx_cross_language_semantic_group_comparison
+    ON cross_language_semantic_group (comparison_id);
+
+CREATE TABLE cross_language_semantic_member (
+    group_id                   INTEGER NOT NULL REFERENCES cross_language_semantic_group (id) ON DELETE CASCADE,
+    origin_variant_fingerprint TEXT NOT NULL,
+    language                   TEXT NOT NULL CHECK (language IN ('rust', 'cpp')),
+    file_path                  TEXT NOT NULL,
+    start_line                 INTEGER NOT NULL,
+    end_line                   INTEGER NOT NULL,
+    unit_name                  TEXT,
+    graph_schema_version       TEXT NOT NULL,
+    graph_json                 TEXT NOT NULL,
+    PRIMARY KEY (group_id, origin_variant_fingerprint, file_path, start_line, end_line)
+) STRICT;
+";
+
+/// Create the current development schema from its single baseline.
 pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_meta (
@@ -1020,8 +1444,7 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             supported: SCHEMA_VERSION,
         });
     }
-    let start = usize::try_from(found).unwrap_or(usize::MAX);
-    if start >= MIGRATIONS.len() {
+    if found == SCHEMA_VERSION {
         return Ok(());
     }
     // A migration that widens a `CHECK` has to rebuild its table, and with
@@ -1035,30 +1458,22 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     // `foreign_keys` is a no-op inside one.
     let enforced = conn.pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))?;
     conn.pragma_update(None, "foreign_keys", false)?;
-    let outcome = apply(conn, start);
+    let outcome = apply_baseline(conn);
     let checked = outcome.and_then(|()| orphans(conn));
     conn.pragma_update(None, "foreign_keys", enforced != 0)?;
     checked
 }
 
-/// Run every migration from `start` onwards, one transaction per step.
-fn apply(conn: &mut Connection, start: usize) -> Result<(), StoreError> {
-    for step in start..MIGRATIONS.len() {
-        apply_one(conn, step)?;
-    }
-    Ok(())
-}
-
-/// Migrate version `step` to `step + 1` in one transaction, recording the new
-/// version with the change it describes.
-fn apply_one(conn: &mut Connection, step: usize) -> Result<(), StoreError> {
+/// Apply all fragments atomically and record baseline version one.
+fn apply_baseline(conn: &mut Connection) -> Result<(), StoreError> {
     let tx = conn.transaction()?;
-    tx.execute_batch(MIGRATIONS[step])?;
-    let next = i64::try_from(step + 1).unwrap_or(i64::MAX);
+    for script in MIGRATIONS {
+        tx.execute_batch(script)?;
+    }
     tx.execute(
-        "INSERT INTO schema_meta (id, version) VALUES (1, ?1)
+        "INSERT INTO schema_meta (id, version) VALUES (1, 1)
          ON CONFLICT (id) DO UPDATE SET version = excluded.version",
-        [next],
+        [],
     )?;
     tx.commit()?;
     Ok(())
@@ -1117,25 +1532,15 @@ INSERT INTO clone_group_member (clone_group_id, fragment_id, finding_id, is_cano
     VALUES (1, 1, randomblob(16), 1);
 ";
 
-    /// A database genuinely at `version`, seeded with a group and its one
-    /// member.
-    ///
-    /// The migrations up to `version` are the ones that run: winding the
-    /// recorded version back after applying all of them would leave a database
-    /// that has already seen the step under test, and a step that cannot be
-    /// applied twice — adding a column, say — would fail for that reason
-    /// rather than for the reason the test is about.
-    fn seeded(version: i64) -> Connection {
+    /// A current baseline database seeded with a group and its one member.
+    fn seeded() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1),
                                        version INTEGER NOT NULL) STRICT;",
         )
         .unwrap();
-        let stop = usize::try_from(version).unwrap();
-        for step in 0..stop {
-            apply_one(&mut conn, step).unwrap();
-        }
+        apply_baseline(&mut conn).unwrap();
         conn.execute_batch(SEED).unwrap();
         conn
     }
@@ -1147,25 +1552,21 @@ INSERT INTO clone_group_member (clone_group_id, fragment_id, finding_id, is_cano
         .unwrap()
     }
 
-    /// Rebuilding a table under enforced foreign keys deletes everything that
-    /// cascades off it: `DROP TABLE` runs an implicit `DELETE FROM` first. The
-    /// group survives either way — it is the member that says whether the
-    /// rebuild took the rest of the audit with it.
+    /// Creating the baseline under enforced foreign keys leaves its seeded
+    /// relation rows intact.
     #[test]
-    fn rebuilding_a_table_keeps_what_hangs_off_it() {
-        // One version short of current, so the newest migration runs here
-        // whatever it turns out to be, and a later rebuild is covered too.
-        let mut conn = seeded(i64::try_from(MIGRATIONS.len()).unwrap() - 1);
+    fn baseline_creation_keeps_related_rows() {
+        let mut conn = seeded();
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         migrate(&mut conn).unwrap();
         assert_eq!(count(&conn, "clone_group"), 1);
         assert_eq!(count(&conn, "clone_group_member"), 1);
     }
 
-    /// Enforcement is off while migrating, so it has to be back on afterwards.
+    /// Baseline creation restores the caller's foreign-key setting.
     #[test]
-    fn migrating_leaves_foreign_keys_as_it_found_them() {
-        let mut conn = seeded(i64::try_from(MIGRATIONS.len()).unwrap() - 1);
+    fn baseline_creation_leaves_foreign_keys_as_it_found_them() {
+        let mut conn = seeded();
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         migrate(&mut conn).unwrap();
         let enforced: i64 = conn
@@ -1174,20 +1575,26 @@ INSERT INTO clone_group_member (clone_group_id, fragment_id, finding_id, is_cano
         assert_eq!(enforced, 1);
     }
 
-    /// A reference left pointing nowhere is reported rather than carried
-    /// forward: with enforcement off, nothing else would notice.
     #[test]
-    fn a_reference_left_pointing_nowhere_fails_the_migration() {
-        let mut conn = seeded(i64::try_from(MIGRATIONS.len()).unwrap() - 1);
-        // Off first, so the delete leaves the member pointing nowhere
-        // instead of taking it along: a database can arrive in this state,
-        // and migrating it must say so.
-        conn.pragma_update(None, "foreign_keys", false).unwrap();
-        conn.execute("DELETE FROM fragment", []).unwrap();
-        let error = migrate(&mut conn).unwrap_err();
+    fn clone_fragment_reverse_lookup_uses_its_dedicated_index() {
+        let conn = seeded();
+        let mut statement = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT clone_group_id
+                 FROM clone_group_member
+                 WHERE fragment_id = ?1",
+            )
+            .unwrap();
+        let plan = statement
+            .query_map([1_i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert!(
-            matches!(error, StoreError::MigrationOrphanedRows { rows } if rows == 1),
-            "unexpected error: {error}"
+            plan.iter()
+                .any(|step| step.contains("idx_clone_group_member_fragment")),
+            "the reverse lookup does not use its index: {plan:?}"
         );
     }
 }

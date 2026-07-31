@@ -1,0 +1,151 @@
+{
+  "anchored_at": "<fixture>",
+  "calls": [],
+  "expressions": [],
+  "unexpanded_macros": [],
+  "cfg": null,
+  "data_flow": {
+    "computed": false,
+    "flows": []
+  },
+  "effects": {
+    "computed": false,
+    "interactions": [],
+    "writes": []
+  },
+  "instantiations": [],
+  "schema_version": "compiler-ir-v3",
+  "symbols": [
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 24,
+          "file": "src/counter.c",
+          "start_byte": 0,
+          "start_line": 1
+        }
+      },
+      "external": false,
+      "id": "c:counter.c@T@Counter",
+      "kind": "type",
+      "name": "Counter",
+      "type_index": 0
+    },
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 80,
+          "file": "src/counter.c",
+          "start_byte": 26,
+          "start_line": 2
+        }
+      },
+      "external": false,
+      "id": "c:@F@increment",
+      "kind": "function",
+      "name": "increment",
+      "type_index": 1
+    },
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 33,
+          "file": "src/counter.c",
+          "start_byte": 26,
+          "start_line": 2
+        }
+      },
+      "external": false,
+      "id": "c:counter.c@T@Counter",
+      "kind": "type",
+      "name": "Counter",
+      "type_index": 0
+    },
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 57,
+          "file": "src/counter.c",
+          "start_byte": 44,
+          "start_line": 2
+        }
+      },
+      "external": false,
+      "id": "c:counter.c@44@F@increment@value",
+      "kind": "binding",
+      "name": "value",
+      "type_index": 0
+    },
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 51,
+          "file": "src/counter.c",
+          "start_byte": 44,
+          "start_line": 2
+        }
+      },
+      "external": false,
+      "id": "c:counter.c@T@Counter",
+      "kind": "type",
+      "name": "Counter",
+      "type_index": 0
+    },
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 73,
+          "file": "src/counter.c",
+          "start_byte": 68,
+          "start_line": 2
+        }
+      },
+      "external": false,
+      "id": "c:counter.c@44@F@increment@value",
+      "kind": "binding",
+      "name": "value",
+      "type_index": 0
+    },
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 73,
+          "file": "src/counter.c",
+          "start_byte": 68,
+          "start_line": 2
+        }
+      },
+      "external": false,
+      "id": "c:counter.c@44@F@increment@value",
+      "kind": "binding",
+      "name": "value",
+      "type_index": 0
+    }
+  ],
+  "types": [
+    {
+      "arguments": [],
+      "category": "integer",
+      "definition": null,
+      "display": "unsigned int"
+    },
+    {
+      "arguments": [],
+      "category": "callable",
+      "definition": null,
+      "display": "unsigned int (unsigned int)"
+    }
+  ],
+  "unit": {
+    "file": "<fixture>/src/counter.c",
+    "unit": "<fixture>/src/counter.c",
+    "variant": "<variant>"
+  }
+}

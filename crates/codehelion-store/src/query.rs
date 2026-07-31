@@ -7,22 +7,21 @@
 //! yields the same output.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 
-use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::features::FeatureKind;
-use codehelion_core::lineage::{Anchor, GroupSnapshot, MemberSnapshot};
-use codehelion_core::stable_id::{CloneGroupFingerprint, FragmentFingerprint, GroupLineageId};
+use codehelion_core::semantic::{SOG_SCHEMA_VERSION, SemanticOperationGraph};
 use rusqlite::{OptionalExtension, params};
 
+use crate::artifact::{
+    ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION,
+    ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION,
+    ARTIFACT_ANALYSIS_SAVINGS_CALIBRATION_SCHEMA_VERSION, ArtifactAnalysisCloneGroupSavings,
+    ArtifactAnalysisMappingConfidence, ArtifactAnalysisSavingsCalibration,
+    ArtifactAnalysisSavingsConfidence, ArtifactAnalysisSourceKind, ArtifactAnalysisUnmappedReason,
+    ArtifactAnalysisUnmappedSourceReason, MappingEvidence, SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION,
+};
 use crate::snapshot::{FunnelDropRow, FunnelStageRow, SummaryRow, UnparsedRow, UnusedRuleRow};
 use crate::{Store, StoreError};
-
-/// A recorded run and the tree it read, by path relative to the scan root.
-///
-/// The hashes are hex as stored; turning them back into content fingerprints
-/// is the caller's, because this layer does not depend on how they were made.
-pub type PreviousTree = (i64, BTreeMap<PathBuf, String>);
 
 /// Summary of one recorded scan run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +40,19 @@ pub struct RunSummary {
     pub finished_at: Option<String>,
     /// Number of clone groups recorded for the run.
     pub group_count: i64,
+}
+
+/// Content and `BuildVariant` identities of one standalone artifact analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredArtifactAnalysisIdentity {
+    /// Standalone analysis row id.
+    pub analysis_id: i64,
+    /// Format label recorded by the artifact backend.
+    pub format: String,
+    /// Content-derived artifact identity.
+    pub content_fingerprint: [u8; 16],
+    /// Build-configuration identity, when one was supplied at analysis time.
+    pub build_variant_fingerprint: Option<[u8; 16]>,
 }
 
 /// Where a recorded run came from: enough of its identity to say whether a
@@ -70,32 +82,6 @@ pub struct RunOrigin {
     pub normalization_version: i64,
     /// Every recorded `(component, version)` pair, ordered by component.
     pub detector_versions: Vec<(String, String)>,
-}
-
-/// What a recorded run was told to do, as opposed to what it found.
-///
-/// Everything here is an input: the tree, the settings, the release. Two runs
-/// that agree on all of it and read the same bytes have the same answer, which
-/// is what lets one of them be reported again instead of recomputed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunRecord {
-    /// Row id of the run.
-    pub id: i64,
-    /// Scanned root path.
-    pub root_path: String,
-    /// Tool version that wrote the run.
-    pub tool_version: String,
-    /// Hash of the effective configuration it ran under.
-    pub config_hash: String,
-    /// Analysis mode name.
-    pub analysis_mode: String,
-    /// RFC 3339 start time.
-    pub started_at: String,
-    /// RFC 3339 finish time.
-    pub finished_at: String,
-    /// The shortest clone the run would report. `None` for a run recorded
-    /// before runs stored the floor they reported under.
-    pub min_clone_tokens: Option<i64>,
 }
 
 /// A stored build variant, as what it was rather than as the hash it is
@@ -201,8 +187,39 @@ pub struct StoredGroup {
     /// The rule that hid the group in its run, when one matched. Absent for a
     /// group the run reported.
     pub suppressed_by: Option<StoredSuppressionRef>,
+    /// Registered SOG evidence for a restricted semantic group.
+    pub semantic: Option<StoredSemanticEvidence>,
     /// The group's occurrences.
     pub members: Vec<StoredMember>,
+}
+
+/// Registered-rule evidence read back for a restricted semantic group.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredSemanticEvidence {
+    /// SOG schema version interpreted by the rule.
+    pub schema_version: String,
+    /// Stable registered-rule identifier.
+    pub rule_id: String,
+    /// Rule semantics revision.
+    pub rule_version: u32,
+    /// Conservative rule confidence before auxiliary evidence.
+    pub rule_confidence: f64,
+    /// The normalized graphs in canonical-member order, decoded from the
+    /// versioned JSON stored with each member fragment.
+    pub graphs: Vec<SemanticOperationGraph>,
+    /// Explainable graph-local node correspondences in canonical order.
+    pub node_mappings: Vec<StoredSemanticNodeMapping>,
+}
+
+/// One graph-local correspondence read from semantic evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredSemanticNodeMapping {
+    /// Zero-based position of the graph containing the corresponding node.
+    pub corresponding_member: u32,
+    /// Node index in the canonical graph.
+    pub canonical: u32,
+    /// Node index in the corresponding graph.
+    pub corresponding: u32,
 }
 
 /// A stored group's similarity breakdown, one measured dimension per field.
@@ -231,13 +248,11 @@ pub struct StoredSimilarity {
     pub confidence_band: Option<String>,
 }
 
-/// One stored finding: the audited row of a group in a run.
+/// One stored finding: the ranked row of a group in a scan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredFinding {
-    /// Hex form of the group fingerprint the finding audits.
+    /// Hex form of the group fingerprint the finding belongs to.
     pub group_fingerprint_hex: String,
-    /// Audit state (`new`, `unchanged`, `resolved`, ...).
-    pub audit_state: String,
     /// Clone confidence.
     pub clone_confidence: f64,
     /// Final priority; the derivation inputs stay on the group and its
@@ -274,6 +289,8 @@ pub struct OccurrenceDetail {
     pub split_pair: bool,
     /// The owning group's similarity breakdown, when the mode measured one.
     pub similarity: Option<StoredSimilarity>,
+    /// Registered SOG evidence, when the owning group is restricted semantic.
+    pub semantic: Option<StoredSemanticEvidence>,
     /// Where the run ranked the finding, and the facts it ranked on. Absent
     /// for a group with no audited finding row.
     pub priority: Option<StoredPriority>,
@@ -357,7 +374,1117 @@ pub struct FeatureOccurrence {
     pub extent: i64,
 }
 
+/// One source-to-artifact correspondence read from a standalone artifact analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredArtifactMapping {
+    /// Row id of the artifact analysis which supplied the mapping.
+    pub analysis_id: i64,
+    /// Version of this mapping record's evidence vocabulary.
+    pub schema_version: String,
+    /// Content-derived artifact symbol identity.
+    pub artifact_symbol_fingerprint: [u8; 16],
+    /// Whether the source reference identifies a unit or fragment.
+    pub source_kind: ArtifactAnalysisSourceKind,
+    /// Content-derived source unit or fragment identity.
+    pub source_fingerprint: [u8; 16],
+    /// Stable discriminator of this source occurrence (`FindingId` for fragments).
+    pub source_instance_fingerprint: [u8; 16],
+    /// Build variant that minted the source identity.
+    pub source_build_variant_fingerprint: [u8; 16],
+    /// Versioned independent facts that justify the correspondence.
+    pub evidence: MappingEvidence,
+    /// Confidence that the stored evidence supports the correspondence.
+    pub confidence: ArtifactAnalysisMappingConfidence,
+    /// Bytes attributed to this source, when the evidence supports a split.
+    pub attributed_bytes: Option<u64>,
+    /// Build variant under which the correspondence was established.
+    pub build_variant_fingerprint: [u8; 16],
+}
+
+/// A symbol deliberately left without a source correspondence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredArtifactUnmappedSymbol {
+    /// Content-derived artifact symbol identity.
+    pub artifact_symbol_fingerprint: [u8; 16],
+    /// Parser-established reason that a correspondence was not recorded.
+    pub reason: ArtifactAnalysisUnmappedReason,
+}
+
+/// A source identity explicitly absent from one artifact analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredArtifactUnmappedSource {
+    /// Whether the source reference identifies a unit or fragment.
+    pub source_kind: ArtifactAnalysisSourceKind,
+    /// Content-derived source unit or fragment identity.
+    pub source_fingerprint: [u8; 16],
+    /// Stable discriminator of this unmatched source occurrence.
+    pub source_instance_fingerprint: [u8; 16],
+    /// Build variant that minted the source identity.
+    pub source_build_variant_fingerprint: [u8; 16],
+    /// Parser- or correlation-established reason for the absence.
+    pub reason: ArtifactAnalysisUnmappedSourceReason,
+}
+
+/// Persisted coverage figures for one explicit source-run correlation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredArtifactAnalysisCorrelation {
+    /// Version of the stored summary shape.
+    pub schema_version: String,
+    /// Source scan whose stable identities were considered.
+    pub source_scan_run_id: i64,
+    /// Number of retained correspondence rows.
+    pub mapping_count: u64,
+    /// Number of symbols observed in the artifact analysis.
+    pub artifact_symbol_count: u64,
+    /// Number of observed symbols with at least one retained mapping.
+    pub mapped_symbol_count: u64,
+    /// Sum of observed symbol sizes.
+    pub artifact_symbol_bytes: u64,
+    /// Sum of observed mapped symbol sizes.
+    pub mapped_symbol_bytes: u64,
+}
+
+/// One source unit available as a candidate for artifact correlation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceUnitIdentity {
+    /// Content-derived stable unit identity.
+    pub fingerprint: [u8; 16],
+    /// Build variant that minted this unit identity.
+    pub build_variant_fingerprint: [u8; 16],
+    /// Path relative to the scan root.
+    pub file_path: String,
+    /// Best-effort declared unit name, when the frontend established one.
+    ///
+    /// This is display evidence rather than an identity. A caller using it
+    /// for source/artifact correlation must retain all equal-name candidates.
+    pub name: Option<String>,
+    /// First source line covered by the unit, when available.
+    pub start_line: Option<u32>,
+    /// Last source line covered by the unit, when available.
+    pub end_line: Option<u32>,
+}
+
+/// A clone finding fragment available for source/artifact correlation.
+///
+/// Only fragments that belong to a persisted clone group are returned. Parser
+/// implementation fragments that never became findings do not need a durable
+/// artifact-absence record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceFragmentIdentity {
+    /// Content-derived stable fragment identity.
+    pub fingerprint: [u8; 16],
+    /// Stable identifier of this clone-member occurrence.
+    pub finding_id: [u8; 16],
+    /// Content-derived group identity owning this occurrence.
+    pub clone_group_fingerprint: [u8; 16],
+    /// Whether this occurrence is the group's retained canonical member.
+    pub is_canonical: bool,
+    /// Clone similarity score recorded for the owning group.
+    pub clone_confidence: f64,
+    /// Build variant that minted this fragment identity.
+    pub build_variant_fingerprint: [u8; 16],
+    /// Path containing this finding occurrence.
+    pub file_path: String,
+    /// First source line covered by the occurrence, when available.
+    pub start_line: Option<u32>,
+    /// Last source line covered by the occurrence, when available.
+    pub end_line: Option<u32>,
+}
+
+/// A compiler-resolved callable anchor available to source/artifact correlation.
+///
+/// It is intentionally not linked to a source unit in storage. The caller
+/// performs the containment check against the scan's unit anchors, preserving
+/// the distinction between compiler fact and correlation inference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceResolvedSymbol {
+    /// Resolved compiler spelling for a callable defined in the scan tree.
+    pub name: String,
+    /// Definition anchor when present, otherwise the expansion anchor.
+    pub file_path: String,
+    /// One-based line in [`Self::file_path`].
+    pub line: u32,
+}
+
+/// A statically resolved source call available to artifact-call correlation.
+///
+/// The source unit containing the call remains a caller-side containment
+/// check, and dynamic or unresolved dispatch is deliberately absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceResolvedCall {
+    /// Compiler-resolved target spelling.
+    pub target_name: String,
+    /// Definition anchor when present, otherwise the expansion anchor.
+    pub file_path: String,
+    /// One-based line in [`Self::file_path`].
+    pub line: u32,
+}
+
+/// A compiler-reported generic or template specialization anchor.
+///
+/// The key is only evidence when an artifact's demangled full name can be
+/// normalized to the same specialization spelling. It is not an identity for
+/// a source unit or an artifact symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceInstantiation {
+    /// Definition spelling supplied by the compiler helper.
+    pub definition: String,
+    /// Versioned compiler-specific specialization key.
+    pub instantiation_key: String,
+    /// Definition anchor when present, otherwise the expansion anchor.
+    pub file_path: String,
+    /// One-based line in [`Self::file_path`].
+    pub line: u32,
+    /// Translation unit or crate that reported this specialization.
+    ///
+    /// This is compiler evidence, not a source identity. The same header
+    /// definition can legitimately appear under many translation units.
+    pub translation_unit: String,
+}
+
 impl Store {
+    /// Source units recorded by one scan, in deterministic path and anchor order.
+    ///
+    /// The returned identities carry their own build variants. A caller must
+    /// retain that value when it turns a path match into a correspondence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored fingerprints cannot be represented by
+    /// this build's stable fingerprint schema.
+    pub fn source_units(&self, scan_run_id: i64) -> Result<Vec<SourceUnitIdentity>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.hash, bv.variant_fingerprint, u.file_path, u.name, u.start_line, u.end_line
+             FROM source_unit u
+             JOIN fingerprint f ON f.id = u.fingerprint_id
+             JOIN build_variant bv ON bv.id = f.build_variant_id
+             WHERE u.scan_run_id = ?1
+             ORDER BY u.file_path ASC, u.start_line ASC, u.end_line ASC, f.hash ASC",
+        )?;
+        let rows = stmt
+            .query_map([scan_run_id], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(
+                |(fingerprint, build_variant, file_path, name, start_line, end_line)| {
+                    Ok(SourceUnitIdentity {
+                        fingerprint: fingerprint_from_blob("fingerprint.hash", fingerprint)?,
+                        build_variant_fingerprint: parse_build_variant_reference(&build_variant)?,
+                        file_path,
+                        name,
+                        start_line: positive_line("source_unit.start_line", start_line)?,
+                        end_line: positive_line("source_unit.end_line", end_line)?,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    /// Clone finding fragments recorded by one scan, in stable identity order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a stored fingerprint cannot be represented by
+    /// this build's stable fingerprint schema.
+    pub fn source_clone_fragments(
+        &self,
+        scan_run_id: i64,
+    ) -> Result<Vec<SourceFragmentIdentity>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT f.hash, m.finding_id, gf.hash, m.is_canonical, g.score,
+                    bv.variant_fingerprint, r.file_path,
+                    r.start_line, r.end_line
+             FROM fragment r
+             JOIN clone_group_member m ON m.fragment_id = r.id
+             JOIN clone_group g ON g.id = m.clone_group_id
+             JOIN fingerprint f ON f.id = r.fingerprint_id
+             JOIN fingerprint gf ON gf.id = g.group_fingerprint_id
+             JOIN build_variant bv ON bv.id = f.build_variant_id
+             WHERE r.scan_run_id = ?1 AND g.scan_run_id = ?1
+             ORDER BY gf.hash ASC, m.is_canonical DESC, m.finding_id ASC,
+                      f.hash ASC, bv.variant_fingerprint ASC, r.file_path ASC,
+                      r.start_line ASC, r.end_line ASC, r.id ASC",
+        )?;
+        let rows = stmt
+            .query_map([scan_run_id], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, f64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(
+                |(
+                    fingerprint,
+                    finding_id,
+                    clone_group_fingerprint,
+                    is_canonical,
+                    clone_confidence,
+                    build_variant,
+                    file_path,
+                    start_line,
+                    end_line,
+                )| {
+                    Ok(SourceFragmentIdentity {
+                        fingerprint: fingerprint_from_blob("fingerprint.hash", fingerprint)?,
+                        finding_id: fingerprint_from_blob(
+                            "clone_group_member.finding_id",
+                            finding_id,
+                        )?,
+                        clone_group_fingerprint: fingerprint_from_blob(
+                            "clone_group.group_fingerprint",
+                            clone_group_fingerprint,
+                        )?,
+                        is_canonical: is_canonical != 0,
+                        clone_confidence,
+                        build_variant_fingerprint: parse_build_variant_reference(&build_variant)?,
+                        file_path,
+                        start_line: positive_line("fragment.start_line", start_line)?,
+                        end_line: positive_line("fragment.end_line", end_line)?,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    /// Local compiler-resolved function anchors from one source scan.
+    ///
+    /// Only symbols the compiler marked as belonging to the scanned tree are
+    /// returned. The source unit relationship remains a caller-side
+    /// containment check rather than a persisted assertion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a recorded compiler anchor has an invalid line.
+    pub fn source_resolved_symbols(
+        &self,
+        scan_run_id: i64,
+    ) -> Result<Vec<SourceResolvedSymbol>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.name, COALESCE(s.definition_file, s.expansion_file),
+                    COALESCE(s.definition_start_line, s.expansion_start_line)
+             FROM compiler_symbol s
+             JOIN compiler_unit u ON u.id = s.compiler_unit_id
+             WHERE u.scan_run_id = ?1
+               AND s.symbol_kind = 'function'
+               AND s.external = 0
+             ORDER BY s.name ASC, COALESCE(s.definition_file, s.expansion_file) ASC,
+                      COALESCE(s.definition_start_line, s.expansion_start_line) ASC, s.id ASC",
+        )?;
+        let rows = stmt
+            .query_map([scan_run_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(name, file_path, line)| {
+                let line = positive_line("compiler_symbol.definition_start_line", Some(line))?
+                    .ok_or_else(|| StoreError::UnknownVocabulary {
+                        field: "compiler_symbol.definition_start_line",
+                        value: "NULL".to_owned(),
+                    })?;
+                Ok(SourceResolvedSymbol {
+                    name,
+                    file_path,
+                    line,
+                })
+            })
+            .collect()
+    }
+
+    /// Statically resolved local call anchors from one source scan.
+    ///
+    /// Dynamic and unresolved dispatch cannot establish an independent
+    /// call-graph correspondence, so they are not returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a recorded compiler call anchor has an invalid line.
+    pub fn source_resolved_calls(
+        &self,
+        scan_run_id: i64,
+    ) -> Result<Vec<SourceResolvedCall>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.target_symbol, COALESCE(c.definition_file, c.expansion_file),
+                    COALESCE(c.definition_start_line, c.expansion_start_line)
+             FROM compiler_call c
+             JOIN compiler_unit u ON u.id = c.compiler_unit_id
+             WHERE u.scan_run_id = ?1 AND c.resolution = 'static'
+             ORDER BY c.target_symbol ASC,
+                      COALESCE(c.definition_file, c.expansion_file) ASC,
+                      COALESCE(c.definition_start_line, c.expansion_start_line) ASC, c.id ASC",
+        )?;
+        let rows = stmt
+            .query_map([scan_run_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(target_name, file_path, line)| {
+                let line = positive_line("compiler_call.definition_start_line", Some(line))?
+                    .ok_or_else(|| StoreError::UnknownVocabulary {
+                        field: "compiler_call.definition_start_line",
+                        value: "NULL".to_owned(),
+                    })?;
+                Ok(SourceResolvedCall {
+                    target_name,
+                    file_path,
+                    line,
+                })
+            })
+            .collect()
+    }
+
+    /// Local compiler-reported generic and template instantiation anchors.
+    ///
+    /// These rows remain separate from source units; correlation performs the
+    /// containment check and only accepts a key that agrees with an artifact's
+    /// demangled full name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a recorded instantiation anchor has an invalid line.
+    pub fn source_instantiations(
+        &self,
+        scan_run_id: i64,
+    ) -> Result<Vec<SourceInstantiation>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT i.definition, i.instantiation_key, u.file_path,
+                    COALESCE(i.definition_file, i.expansion_file),
+                    COALESCE(i.definition_start_line, i.expansion_start_line)
+             FROM compiler_instantiation i
+             JOIN compiler_unit u ON u.id = i.compiler_unit_id
+             WHERE u.scan_run_id = ?1
+             ORDER BY i.instantiation_key ASC,
+                      COALESCE(i.definition_file, i.expansion_file) ASC,
+                      COALESCE(i.definition_start_line, i.expansion_start_line) ASC, i.id ASC",
+        )?;
+        let rows = stmt
+            .query_map([scan_run_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(
+                |(definition, instantiation_key, translation_unit, file_path, line)| {
+                    let line =
+                        positive_line("compiler_instantiation.definition_start_line", Some(line))?
+                            .ok_or_else(|| StoreError::UnknownVocabulary {
+                                field: "compiler_instantiation.definition_start_line",
+                                value: "NULL".to_owned(),
+                            })?;
+                    Ok(SourceInstantiation {
+                        definition,
+                        instantiation_key,
+                        file_path,
+                        line,
+                        translation_unit,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    /// Every mapping recorded for one artifact analysis, in stable evidence order.
+    ///
+    /// The result retains all ambiguous candidates. Callers must not collapse
+    /// them to a single source merely because they share an artifact symbol.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be read or contains a value
+    /// from a newer mapping vocabulary.
+    pub fn artifact_mappings(
+        &self,
+        analysis_id: i64,
+    ) -> Result<Vec<StoredArtifactMapping>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT schema_version, artifact_symbol_fingerprint, source_kind,
+                    source_fingerprint, source_instance_fingerprint, evidence_json, mapping_confidence,
+                    attributed_bytes, build_variant_fingerprint, source_build_variant_fingerprint
+             FROM artifact_analysis_source_mapping
+             WHERE artifact_analysis_id = ?1
+             ORDER BY artifact_symbol_fingerprint ASC, source_kind ASC,
+                      source_fingerprint ASC, source_instance_fingerprint ASC, evidence_json ASC",
+        )?;
+        let rows = stmt
+            .query_map([analysis_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Vec<u8>>(8)?,
+                    row.get::<_, Option<Vec<u8>>>(9)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(
+                |(
+                    schema_version,
+                    artifact_symbol_fingerprint,
+                    source_kind,
+                    source_fingerprint,
+                    source_instance_fingerprint,
+                    evidence_json,
+                    confidence,
+                    attributed_bytes,
+                    build_variant_fingerprint,
+                    source_build_variant_fingerprint,
+                )| {
+                    if !matches!(
+                        schema_version.as_str(),
+                        "source-artifact-mapping-v2" | SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION
+                    ) {
+                        return Err(StoreError::InvalidMappingEvidence {
+                            reason: "unknown source-artifact mapping schema".to_owned(),
+                        });
+                    }
+                    Ok(StoredArtifactMapping {
+                        analysis_id,
+                        schema_version,
+                        artifact_symbol_fingerprint: fingerprint_from_blob(
+                            "artifact_analysis_source_mapping.artifact_symbol_fingerprint",
+                            artifact_symbol_fingerprint,
+                        )?,
+                        source_kind: ArtifactAnalysisSourceKind::from_sql(&source_kind)?,
+                        source_fingerprint: fingerprint_from_blob(
+                            "artifact_analysis_source_mapping.source_fingerprint",
+                            source_fingerprint,
+                        )?,
+                        source_instance_fingerprint: fingerprint_from_blob(
+                            "artifact_analysis_source_mapping.source_instance_fingerprint",
+                            source_instance_fingerprint,
+                        )?,
+                        source_build_variant_fingerprint: source_build_variant_fingerprint
+                            .ok_or_else(|| StoreError::InvalidMappingEvidence {
+                                reason: "source build variant is absent".to_owned(),
+                            })
+                            .and_then(|value| {
+                                fingerprint_from_blob(
+                                    "artifact_analysis_source_mapping.source_build_variant_fingerprint",
+                                    value,
+                                )
+                            })?,
+                        evidence: MappingEvidence::from_json(&evidence_json)?,
+                        confidence: ArtifactAnalysisMappingConfidence::from_sql(&confidence)?,
+                        attributed_bytes: attributed_bytes.map(u64::try_from).transpose().map_err(
+                            |_| StoreError::UnknownVocabulary {
+                                field: "artifact_analysis_source_mapping.attributed_bytes",
+                                value: attributed_bytes.unwrap_or_default().to_string(),
+                            },
+                        )?,
+                        build_variant_fingerprint: fingerprint_from_blob(
+                            "artifact_analysis_source_mapping.build_variant_fingerprint",
+                            build_variant_fingerprint,
+                        )?,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    /// Identity facts for one standalone artifact analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns malformed stored fingerprints rather than using an analysis
+    /// whose content or `BuildVariant` cannot be established.
+    pub fn artifact_analysis_identity(
+        &self,
+        analysis_id: i64,
+    ) -> Result<Option<StoredArtifactAnalysisIdentity>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT format, content_fingerprint, build_variant_fingerprint
+                 FROM artifact_analysis WHERE id = ?1",
+                [analysis_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Option<Vec<u8>>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(format, content_fingerprint, build_variant_fingerprint)| {
+                Ok(StoredArtifactAnalysisIdentity {
+                    analysis_id,
+                    format,
+                    content_fingerprint: fingerprint_from_blob(
+                        "artifact_analysis.content_fingerprint",
+                        content_fingerprint,
+                    )?,
+                    build_variant_fingerprint: build_variant_fingerprint
+                        .map(|value| {
+                            fingerprint_from_blob(
+                                "artifact_analysis.build_variant_fingerprint",
+                                value,
+                            )
+                        })
+                        .transpose()?,
+                })
+            })
+            .transpose()
+    }
+
+    /// Clone classification recorded for one source-run group.
+    ///
+    /// # Errors
+    ///
+    /// Returns malformed group identities rather than assigning a calibration
+    /// measurement to a guessed stratum.
+    pub fn clone_group_type(
+        &self,
+        source_scan_run_id: i64,
+        clone_group_fingerprint_hex: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let fingerprint = parse_hex_id(clone_group_fingerprint_hex)?;
+        self.conn
+            .query_row(
+                "SELECT clone_group.clone_type
+                 FROM clone_group
+                 JOIN fingerprint ON fingerprint.id = clone_group.group_fingerprint_id
+                 WHERE clone_group.scan_run_id = ?1 AND fingerprint.hash = ?2
+                 ORDER BY clone_group.id ASC
+                 LIMIT 1",
+                params![source_scan_run_id, fingerprint.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Every fragment mapping whose stable occurrence discriminator is
+    /// `finding_hex`, across every artifact analysis.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::MalformedId`] when `finding_hex` is not a stable ID;
+    /// otherwise the same errors as [`Self::artifact_mappings`].
+    pub fn artifact_fragment_mappings(
+        &self,
+        finding_hex: &str,
+    ) -> Result<Vec<StoredArtifactMapping>, StoreError> {
+        let finding_id = parse_hex_id(finding_hex)?;
+        let analysis_ids: Vec<i64> = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT artifact_analysis_id
+                 FROM artifact_analysis_source_mapping
+                 WHERE source_kind = 'fragment' AND source_instance_fingerprint = ?1
+                 ORDER BY artifact_analysis_id ASC",
+            )?
+            .query_map([finding_id.as_slice()], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        let mut mappings = Vec::new();
+        for analysis_id in analysis_ids {
+            mappings.extend(
+                self.artifact_mappings(analysis_id)?
+                    .into_iter()
+                    .filter(|mapping| {
+                        mapping.source_kind == ArtifactAnalysisSourceKind::Fragment
+                            && mapping.source_instance_fingerprint == finding_id
+                    }),
+            );
+        }
+        Ok(mappings)
+    }
+
+    /// Every persisted savings record for one source run and clone group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the group fingerprint is malformed or a stored
+    /// savings row carries unknown vocabulary.
+    pub fn clone_group_savings(
+        &self,
+        source_scan_run_id: i64,
+        clone_group_fingerprint_hex: &str,
+    ) -> Result<Vec<(i64, ArtifactAnalysisCloneGroupSavings)>, StoreError> {
+        let fingerprint = parse_hex_id(clone_group_fingerprint_hex)?;
+        let analysis_ids: Vec<i64> = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT artifact_analysis_id
+                 FROM artifact_analysis_clone_group_savings
+                 WHERE source_scan_run_id = ?1 AND clone_group_fingerprint = ?2
+                 ORDER BY artifact_analysis_id ASC",
+            )?
+            .query_map(params![source_scan_run_id, fingerprint.as_slice()], |row| {
+                row.get(0)
+            })?
+            .collect::<Result<_, _>>()?;
+        let mut savings = Vec::new();
+        for analysis_id in analysis_ids {
+            savings.extend(
+                self.artifact_clone_group_savings(analysis_id)?
+                    .into_iter()
+                    .filter(|estimate| {
+                        estimate.source_scan_run_id == source_scan_run_id
+                            && estimate.clone_group_fingerprint == fingerprint
+                    })
+                    .map(|estimate| (analysis_id, estimate)),
+            );
+        }
+        Ok(savings)
+    }
+
+    /// Symbols that one artifact analysis explicitly left unmapped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be read or contains a value
+    /// from a newer unmapped-reason vocabulary.
+    pub fn artifact_unmapped_symbols(
+        &self,
+        analysis_id: i64,
+    ) -> Result<Vec<StoredArtifactUnmappedSymbol>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT artifact_symbol_fingerprint, reason
+             FROM artifact_analysis_unmapped_symbol
+             WHERE artifact_analysis_id = ?1
+             ORDER BY artifact_symbol_fingerprint ASC",
+        )?;
+        let rows = stmt
+            .query_map([analysis_id], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(fingerprint, reason)| {
+                Ok(StoredArtifactUnmappedSymbol {
+                    artifact_symbol_fingerprint: fingerprint_from_blob(
+                        "artifact_analysis_unmapped_symbol.artifact_symbol_fingerprint",
+                        fingerprint,
+                    )?,
+                    reason: ArtifactAnalysisUnmappedReason::from_sql(&reason)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Source identities that one artifact analysis explicitly left unmatched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be read or contains a value
+    /// from a newer unmapped-source vocabulary.
+    pub fn artifact_unmapped_sources(
+        &self,
+        analysis_id: i64,
+    ) -> Result<Vec<StoredArtifactUnmappedSource>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_kind, source_fingerprint, source_instance_fingerprint, reason,
+                    source_build_variant_fingerprint
+             FROM artifact_analysis_unmapped_source
+             WHERE artifact_analysis_id = ?1
+             ORDER BY source_kind ASC, source_fingerprint ASC, source_instance_fingerprint ASC",
+        )?;
+        let rows = stmt
+            .query_map([analysis_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<Vec<u8>>>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(source_kind, source_fingerprint, source_instance_fingerprint, reason, source_build_variant_fingerprint)| {
+                Ok(StoredArtifactUnmappedSource {
+                    source_kind: ArtifactAnalysisSourceKind::from_sql(&source_kind)?,
+                    source_fingerprint: fingerprint_from_blob(
+                        "artifact_analysis_unmapped_source.source_fingerprint",
+                        source_fingerprint,
+                    )?,
+                    source_instance_fingerprint: fingerprint_from_blob(
+                        "artifact_analysis_unmapped_source.source_instance_fingerprint",
+                        source_instance_fingerprint,
+                    )?,
+                    source_build_variant_fingerprint: source_build_variant_fingerprint
+                        .ok_or_else(|| StoreError::InvalidMappingEvidence {
+                            reason: "source build variant is absent".to_owned(),
+                        })
+                        .and_then(|value| {
+                            fingerprint_from_blob(
+                                "artifact_analysis_unmapped_source.source_build_variant_fingerprint",
+                                value,
+                            )
+                        })?,
+                    reason: ArtifactAnalysisUnmappedSourceReason::from_sql(&reason)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Persisted clone-group refactoring estimates for one artifact analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a row carries an unknown schema or vocabulary.
+    pub fn artifact_clone_group_savings(
+        &self,
+        analysis_id: i64,
+    ) -> Result<Vec<ArtifactAnalysisCloneGroupSavings>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT schema_version, source_scan_run_id, clone_group_fingerprint,
+                    source_build_variant_fingerprint, artifact_build_variant_fingerprint,
+                    duplicated_bytes, estimated_refactor_savings_bytes,
+                    mapping_confidence, clone_confidence, model_confidence,
+                    savings_confidence, model_schema_version, assumptions_json
+             FROM artifact_analysis_clone_group_savings
+             WHERE artifact_analysis_id = ?1
+             ORDER BY clone_group_fingerprint ASC, source_build_variant_fingerprint ASC,
+                      artifact_build_variant_fingerprint ASC",
+        )?;
+        let rows = stmt
+            .query_map([analysis_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, f64>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, String>(12)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(
+                schema_version,
+                source_scan_run_id,
+                clone_group_fingerprint,
+                source_build_variant_fingerprint,
+                artifact_build_variant_fingerprint,
+                duplicated_bytes,
+                estimated_refactor_savings_bytes,
+                mapping_confidence,
+                clone_confidence,
+                model_confidence,
+                savings_confidence,
+                model_schema_version,
+                assumptions_json,
+            )| {
+                if schema_version != ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION {
+                    return Err(StoreError::InvalidMappingEvidence {
+                        reason: "unknown artifact clone-group savings schema".to_owned(),
+                    });
+                }
+                let assumptions: serde_json::Value = serde_json::from_str(&assumptions_json)
+                    .map_err(|_| StoreError::InvalidMappingEvidence {
+                        reason: "savings assumptions are not valid JSON".to_owned(),
+                    })?;
+                if !assumptions.is_array() {
+                    return Err(StoreError::InvalidMappingEvidence {
+                        reason: "savings assumptions are not a JSON array".to_owned(),
+                    });
+                }
+                Ok(ArtifactAnalysisCloneGroupSavings {
+                    schema_version,
+                    source_scan_run_id,
+                    clone_group_fingerprint: fingerprint_from_blob(
+                        "artifact_analysis_clone_group_savings.clone_group_fingerprint",
+                        clone_group_fingerprint,
+                    )?,
+                    source_build_variant_fingerprint: fingerprint_from_blob(
+                        "artifact_analysis_clone_group_savings.source_build_variant_fingerprint",
+                        source_build_variant_fingerprint,
+                    )?,
+                    artifact_build_variant_fingerprint: fingerprint_from_blob(
+                        "artifact_analysis_clone_group_savings.artifact_build_variant_fingerprint",
+                        artifact_build_variant_fingerprint,
+                    )?,
+                    duplicated_bytes: nonnegative_u64(
+                        "artifact_analysis_clone_group_savings.duplicated_bytes",
+                        duplicated_bytes,
+                    )?,
+                    estimated_refactor_savings_bytes,
+                    mapping_confidence: ArtifactAnalysisSavingsConfidence::from_sql(
+                        &mapping_confidence,
+                    )?,
+                    clone_confidence,
+                    model_confidence: ArtifactAnalysisSavingsConfidence::from_sql(
+                        &model_confidence,
+                    )?,
+                    savings_confidence: ArtifactAnalysisSavingsConfidence::from_sql(
+                        &savings_confidence,
+                    )?,
+                    model_schema_version,
+                    assumptions_json,
+                })
+            })
+            .collect()
+    }
+
+    /// Controlled before/after measurements recorded for one source group.
+    ///
+    /// # Errors
+    ///
+    /// Returns malformed IDs, unknown schema versions, and invalid numeric
+    /// values instead of silently treating them as calibration data.
+    pub fn artifact_savings_calibrations(
+        &self,
+        source_scan_run_id: i64,
+        clone_group_fingerprint_hex: &str,
+    ) -> Result<Vec<ArtifactAnalysisSavingsCalibration>, StoreError> {
+        let fingerprint = parse_hex_id(clone_group_fingerprint_hex)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT schema_version, artifact_analysis_id, source_build_variant_fingerprint,
+                    before_artifact_build_variant_fingerprint, after_artifact_fingerprint,
+                    after_artifact_build_variant_fingerprint, estimated_refactor_savings_bytes,
+                    verified_savings_bytes, absolute_error_bytes, relative_error, recorded_at
+             FROM artifact_analysis_savings_calibration
+             WHERE source_scan_run_id = ?1 AND clone_group_fingerprint = ?2
+             ORDER BY artifact_analysis_id ASC, after_artifact_fingerprint ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![source_scan_run_id, fingerprint.as_slice()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<f64>>(9)?,
+                    row.get::<_, String>(10)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(
+                schema_version,
+                artifact_analysis_id,
+                source_build_variant_fingerprint,
+                before_artifact_build_variant_fingerprint,
+                after_artifact_fingerprint,
+                after_artifact_build_variant_fingerprint,
+                estimated_refactor_savings_bytes,
+                verified_savings_bytes,
+                absolute_error_bytes,
+                relative_error,
+                recorded_at,
+            )| {
+                if schema_version != ARTIFACT_ANALYSIS_SAVINGS_CALIBRATION_SCHEMA_VERSION {
+                    return Err(StoreError::InvalidMappingEvidence {
+                        reason: "unknown artifact savings calibration schema".to_owned(),
+                    });
+                }
+                if relative_error
+                    .is_some_and(|value| !value.is_finite() || value.is_sign_negative())
+                {
+                    return Err(StoreError::InvalidMappingEvidence {
+                        reason: "calibration relative error must be finite and nonnegative"
+                            .to_owned(),
+                    });
+                }
+                Ok(ArtifactAnalysisSavingsCalibration {
+                    schema_version,
+                    artifact_analysis_id,
+                    source_scan_run_id,
+                    clone_group_fingerprint: fingerprint,
+                    source_build_variant_fingerprint: fingerprint_from_blob(
+                        "artifact_analysis_savings_calibration.source_build_variant_fingerprint",
+                        source_build_variant_fingerprint,
+                    )?,
+                    before_artifact_build_variant_fingerprint: fingerprint_from_blob(
+                        "artifact_analysis_savings_calibration.before_artifact_build_variant_fingerprint",
+                        before_artifact_build_variant_fingerprint,
+                    )?,
+                    after_artifact_fingerprint: fingerprint_from_blob(
+                        "artifact_analysis_savings_calibration.after_artifact_fingerprint",
+                        after_artifact_fingerprint,
+                    )?,
+                    after_artifact_build_variant_fingerprint: fingerprint_from_blob(
+                        "artifact_analysis_savings_calibration.after_artifact_build_variant_fingerprint",
+                        after_artifact_build_variant_fingerprint,
+                    )?,
+                    estimated_refactor_savings_bytes,
+                    verified_savings_bytes,
+                    absolute_error_bytes: nonnegative_u64(
+                        "artifact_analysis_savings_calibration.absolute_error_bytes",
+                        absolute_error_bytes,
+                    )?,
+                    relative_error,
+                    recorded_at,
+                })
+            })
+            .collect()
+    }
+
+    /// Every controlled calibration retained for one source run, ordered by
+    /// stable clone-group fingerprint and then by artifact identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns malformed stored group identities rather than omitting their
+    /// measurements from a corpus-level statistic.
+    pub fn artifact_savings_calibrations_for_run(
+        &self,
+        source_scan_run_id: i64,
+    ) -> Result<Vec<ArtifactAnalysisSavingsCalibration>, StoreError> {
+        let groups: Vec<Vec<u8>> = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT clone_group_fingerprint
+                 FROM artifact_analysis_savings_calibration
+                 WHERE source_scan_run_id = ?1
+                 ORDER BY clone_group_fingerprint ASC",
+            )?
+            .query_map([source_scan_run_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        let mut calibrations = Vec::new();
+        for group in groups {
+            let fingerprint = fingerprint_from_blob(
+                "artifact_analysis_savings_calibration.clone_group_fingerprint",
+                group,
+            )?;
+            let hex = hex_fingerprint(fingerprint);
+            calibrations.extend(self.artifact_savings_calibrations(source_scan_run_id, &hex)?);
+        }
+        Ok(calibrations)
+    }
+
+    /// Coverage figures recorded with one explicit source-run correlation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be read or contains an
+    /// unknown correlation-summary schema.
+    pub fn artifact_correlation(
+        &self,
+        analysis_id: i64,
+    ) -> Result<Option<StoredArtifactAnalysisCorrelation>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT schema_version, source_scan_run_id, mapping_count, artifact_symbol_count,
+                        mapped_symbol_count, artifact_symbol_bytes, mapped_symbol_bytes
+                 FROM artifact_analysis_correlation
+                 WHERE artifact_analysis_id = ?1",
+                [analysis_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(
+                |(
+                    schema_version,
+                    source_scan_run_id,
+                    mapping_count,
+                    artifact_symbol_count,
+                    mapped_symbol_count,
+                    artifact_symbol_bytes,
+                    mapped_symbol_bytes,
+                )| {
+                    if schema_version != ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION {
+                        return Err(StoreError::InvalidMappingEvidence {
+                            reason: "unknown artifact correlation summary schema".to_owned(),
+                        });
+                    }
+                    Ok(StoredArtifactAnalysisCorrelation {
+                        schema_version,
+                        source_scan_run_id,
+                        mapping_count: nonnegative_u64(
+                            "artifact_analysis_correlation.mapping_count",
+                            mapping_count,
+                        )?,
+                        artifact_symbol_count: nonnegative_u64(
+                            "artifact_analysis_correlation.artifact_symbol_count",
+                            artifact_symbol_count,
+                        )?,
+                        mapped_symbol_count: nonnegative_u64(
+                            "artifact_analysis_correlation.mapped_symbol_count",
+                            mapped_symbol_count,
+                        )?,
+                        artifact_symbol_bytes: nonnegative_u64(
+                            "artifact_analysis_correlation.artifact_symbol_bytes",
+                            artifact_symbol_bytes,
+                        )?,
+                        mapped_symbol_bytes: nonnegative_u64(
+                            "artifact_analysis_correlation.mapped_symbol_bytes",
+                            mapped_symbol_bytes,
+                        )?,
+                    })
+                },
+            )
+            .transpose()
+    }
+
+    /// Number of separately recorded cross-build-variant comparisons.
+    ///
+    /// This deliberately reads a table outside `scan_run`: normal scan
+    /// history must not be interpreted as comparison history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the comparison table cannot be read.
+    pub fn cross_variant_comparison_count(&self) -> Result<i64, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM cross_variant_comparison", [], |row| {
+                row.get(0)
+            })?)
+    }
+
     /// The posting list of one feature hash: every occurrence of `kind`/`hash`,
     /// deterministically ordered by run, unit and anchor. This is the read the
     /// candidate index builds on.
@@ -422,42 +1549,6 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    /// The most recent completed run over `root_path` under `variant`, and
-    /// the tree it read.
-    ///
-    /// A run is comparable with this one only when it looked at the same tree
-    /// under the same build variant: a file whose bytes did not move still
-    /// has to be re-analysed when the rules for analysing it did. Both are
-    /// therefore part of the lookup rather than checks made afterwards.
-    ///
-    /// Returns `None` when no such run exists, which is the ordinary state of
-    /// a first scan and not an error. A run that recorded no files — every
-    /// run written before the tree was recorded at all — answers the same
-    /// way, because "read nothing" and "did not say" are not distinguishable
-    /// after the fact and the safe reading is the second.
-    ///
-    /// # Errors
-    ///
-    /// Returns any underlying database error.
-    pub fn previous_tree(
-        &self,
-        root_path: &str,
-        variant_fingerprint: &str,
-    ) -> Result<Option<PreviousTree>, StoreError> {
-        let Some(run_id) = self.completed_run_id(root_path, Some(variant_fingerprint))? else {
-            return Ok(None);
-        };
-        let tree: BTreeMap<PathBuf, String> = self
-            .run_tree(run_id)?
-            .into_iter()
-            .map(|(path, hash)| (PathBuf::from(path), hash))
-            .collect();
-        if tree.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some((run_id, tree)))
-    }
-
     /// The files one run read, by path relative to the scan root, each with
     /// the hash of what it held.
     ///
@@ -483,24 +1574,6 @@ impl Store {
             tree.insert(path, hash);
         }
         Ok(tree)
-    }
-
-    /// Row id of the newest completed run over `root_path` under `variant`,
-    /// which is the run a scan about to record compares itself against.
-    ///
-    /// Unlike [`Self::previous_tree`] this answers even for a run that
-    /// recorded no files: what a run found is recorded whether or not what it
-    /// read was, and the findings are what a lineage comparison reads.
-    ///
-    /// # Errors
-    ///
-    /// Returns any underlying database error.
-    pub fn previous_run(
-        &self,
-        root_path: &str,
-        variant_fingerprint: &str,
-    ) -> Result<Option<i64>, StoreError> {
-        self.completed_run_id(root_path, Some(variant_fingerprint))
     }
 
     /// Row id of the newest completed run over `root_path`, optionally
@@ -531,43 +1604,6 @@ impl Store {
             .optional()?)
     }
 
-    /// What the newest completed run over `root_path` under `variant` was told
-    /// to do, or `None` when there is no such run or it never finished.
-    ///
-    /// # Errors
-    ///
-    /// Returns any underlying database error.
-    pub fn previous_run_record(
-        &self,
-        root_path: &str,
-        variant_fingerprint: &str,
-    ) -> Result<Option<RunRecord>, StoreError> {
-        let Some(run_id) = self.completed_run_id(root_path, Some(variant_fingerprint))? else {
-            return Ok(None);
-        };
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT root_path, tool_version, config_hash, analysis_mode,
-                        started_at, finished_at, min_clone_tokens
-                 FROM scan_run WHERE id = ?1 AND finished_at IS NOT NULL",
-                params![run_id],
-                |row| {
-                    Ok(RunRecord {
-                        id: run_id,
-                        root_path: row.get(0)?,
-                        tool_version: row.get(1)?,
-                        config_hash: row.get(2)?,
-                        analysis_mode: row.get(3)?,
-                        started_at: row.get(4)?,
-                        finished_at: row.get(5)?,
-                        min_clone_tokens: row.get(6)?,
-                    })
-                },
-            )
-            .optional()?)
-    }
-
     /// How many files of each language a run read, by language name.
     ///
     /// # Errors
@@ -591,9 +1627,9 @@ impl Store {
     /// The newest completed run over `root_path`, with the identity a
     /// judgement about its results has to be qualified by.
     ///
-    /// Unlike [`Self::previous_tree`] this does not narrow to a variant: the
-    /// caller is reading a run in order to record what it was, so the variant
-    /// is an answer rather than a question.
+    /// This does not narrow to a variant: the caller is reading the current
+    /// snapshot in order to record what it was, so the variant is an answer
+    /// rather than a question.
     ///
     /// # Errors
     ///
@@ -697,130 +1733,6 @@ impl Store {
         Ok(Some(variant))
     }
 
-    /// Every completed run over `root_path`, newest first, at most `limit` of
-    /// them.
-    ///
-    /// # Errors
-    ///
-    /// Returns any underlying database error.
-    pub fn completed_runs(
-        &self,
-        root_path: &str,
-        limit: usize,
-    ) -> Result<Vec<RunOrigin>, StoreError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT r.id
-             FROM scan_run r
-             WHERE r.root_path = ?1 AND r.status = 'completed'
-             ORDER BY r.started_at DESC, r.id DESC
-             LIMIT ?2",
-        )?;
-        let ids: Vec<i64> = stmt
-            .query_map(
-                params![root_path, i64::try_from(limit).unwrap_or(i64::MAX)],
-                |row| row.get(0),
-            )?
-            .collect::<Result<_, _>>()?;
-        ids.into_iter().map(|id| self.run_origin(id)).collect()
-    }
-
-    /// Every clone group of `run_id` reduced to what history compares:
-    /// content fingerprints, anchors, and the lineage the run recorded.
-    ///
-    /// Read in one pass rather than through [`Self::run_groups`], which fans
-    /// out into per-group queries for evidence a comparison never looks at.
-    ///
-    /// # Errors
-    ///
-    /// [`StoreError::UnknownVocabulary`] when a row names a clone type or
-    /// member scope this build does not know; otherwise any underlying
-    /// database error.
-    pub fn run_group_snapshots(&self, run_id: i64) -> Result<Vec<GroupSnapshot>, StoreError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT lower(hex(gf.hash)), g.clone_type, g.member_scope, g.score,
-                    lower(hex(ff.hash)), fr.file_path, u.name, m.is_canonical,
-                    lower(hex(gl.lineage_id))
-             FROM clone_group g
-             JOIN fingerprint gf ON gf.id = g.group_fingerprint_id
-             JOIN clone_group_member m ON m.clone_group_id = g.id
-             JOIN fragment fr ON fr.id = m.fragment_id
-             JOIN fingerprint ff ON ff.id = fr.fingerprint_id
-             LEFT JOIN source_unit u ON u.id = fr.source_unit_id
-             LEFT JOIN group_lineage gl ON gl.scan_run_id = g.scan_run_id
-                                       AND gl.group_fingerprint_id = g.group_fingerprint_id
-             WHERE g.scan_run_id = ?1
-             ORDER BY gf.hash ASC, fr.file_path ASC, fr.start_line ASC, fr.id ASC",
-        )?;
-        let rows = stmt.query_map(params![run_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, f64>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, i64>(7)? != 0,
-                row.get::<_, Option<String>>(8)?,
-            ))
-        })?;
-
-        let mut groups: Vec<GroupSnapshot> = Vec::new();
-        for row in rows {
-            let (
-                fingerprint,
-                clone_type,
-                member_scope,
-                score,
-                content,
-                file,
-                unit,
-                canonical,
-                lineage,
-            ) = row?;
-            let content = FragmentFingerprint::from_bytes(parse_hex_id(&content)?);
-            if groups
-                .last()
-                .is_none_or(|group| group.fingerprint.to_hex() != fingerprint)
-            {
-                groups.push(GroupSnapshot {
-                    fingerprint: CloneGroupFingerprint::from_bytes(parse_hex_id(&fingerprint)?),
-                    clone_type: CloneClass::from_name(&clone_type).ok_or_else(|| {
-                        StoreError::UnknownVocabulary {
-                            field: "clone_type",
-                            value: clone_type.clone(),
-                        }
-                    })?,
-                    scope: CloneScope::from_name(&member_scope).ok_or_else(|| {
-                        StoreError::UnknownVocabulary {
-                            field: "member_scope",
-                            value: member_scope.clone(),
-                        }
-                    })?,
-                    score,
-                    canonical: None,
-                    lineage: lineage
-                        .as_deref()
-                        .map(parse_hex_id)
-                        .transpose()?
-                        .map(GroupLineageId::from_bytes),
-                    members: Vec::new(),
-                });
-            }
-            let Some(group) = groups.last_mut() else {
-                continue;
-            };
-            if canonical {
-                group.canonical = Some(content);
-            }
-            group.members.push(MemberSnapshot {
-                content,
-                anchor: Anchor { file, unit },
-            });
-        }
-        Ok(groups)
-    }
-
     /// Every clone group of `run_id`, deterministically ordered by
     /// fingerprint bytes, each with its members.
     ///
@@ -858,6 +1770,7 @@ impl Store {
                         width_family: row.get(12)?,
                         statements: row.get(13)?,
                         similarity: None,
+                        semantic: None,
                         suppressed_by: scope
                             .zip(pattern)
                             .map(|(scope, pattern)| StoredSuppressionRef { scope, pattern }),
@@ -870,10 +1783,108 @@ impl Store {
         let mut groups = Vec::with_capacity(rows.len());
         for (group_row_id, mut group) in rows {
             group.similarity = self.group_similarity(group_row_id)?;
+            group.semantic = self.group_semantic_evidence(group_row_id)?;
             group.members = self.group_members(group_row_id)?;
             groups.push(group);
         }
         Ok(groups)
+    }
+
+    /// Registered SOG evidence attached to one clone group, when the group
+    /// was recorded by restricted semantic detection.
+    fn group_semantic_evidence(
+        &self,
+        group_row_id: i64,
+    ) -> Result<Option<StoredSemanticEvidence>, StoreError> {
+        let evidence = self
+            .conn
+            .query_row(
+                "SELECT schema_version, rule_id, rule_version, rule_confidence
+                 FROM semantic_group_evidence
+                 WHERE clone_group_id = ?1",
+                params![group_row_id],
+                |row| {
+                    Ok(StoredSemanticEvidence {
+                        schema_version: row.get(0)?,
+                        rule_id: row.get(1)?,
+                        rule_version: row.get(2)?,
+                        rule_confidence: row.get(3)?,
+                        graphs: Vec::new(),
+                        node_mappings: Vec::new(),
+                    })
+                },
+            )
+            .optional()?;
+        let Some(mut evidence) = evidence else {
+            return Ok(None);
+        };
+        evidence.node_mappings = self
+            .conn
+            .prepare(
+                "SELECT corresponding_member, canonical_node, corresponding_node
+                 FROM semantic_node_mapping
+                 WHERE clone_group_id = ?1
+                 ORDER BY corresponding_member ASC, canonical_node ASC, corresponding_node ASC",
+            )?
+            .query_map(params![group_row_id], |row| {
+                Ok(StoredSemanticNodeMapping {
+                    corresponding_member: row.get(0)?,
+                    canonical: row.get(1)?,
+                    corresponding: row.get(2)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        let graph_json: Vec<String> = self
+            .conn
+            .prepare(
+                "SELECT sog.graph_json
+                 FROM semantic_operation_graph sog
+                 JOIN clone_group_member member ON member.fragment_id = sog.fragment_id
+                 JOIN fragment fragment ON fragment.id = sog.fragment_id
+                 JOIN fingerprint fingerprint ON fingerprint.id = fragment.fingerprint_id
+                 WHERE member.clone_group_id = ?1
+                 ORDER BY member.is_canonical DESC, fingerprint.hash ASC",
+            )?
+            .query_map(params![group_row_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        evidence.graphs = graph_json
+            .into_iter()
+            .map(|graph| Self::decode_stored_sog(&evidence.schema_version, &graph))
+            .collect::<Result<_, _>>()?;
+        Ok(Some(evidence))
+    }
+
+    /// Decode and revalidate stored graph JSON before handing it to a report.
+    fn decode_stored_sog(
+        evidence_schema_version: &str,
+        graph_json: &str,
+    ) -> Result<SemanticOperationGraph, StoreError> {
+        if evidence_schema_version != SOG_SCHEMA_VERSION {
+            return Err(StoreError::InvalidSemanticEvidence {
+                reason: format!(
+                    "stored group schema {evidence_schema_version} is not supported ({SOG_SCHEMA_VERSION})"
+                ),
+            });
+        }
+        let graph: SemanticOperationGraph = serde_json::from_str(graph_json).map_err(|error| {
+            StoreError::InvalidSemanticEvidence {
+                reason: format!("decoding stored SOG: {error}"),
+            }
+        })?;
+        if graph.schema_version != evidence_schema_version {
+            return Err(StoreError::InvalidSemanticEvidence {
+                reason: "stored graph schema does not match group evidence".to_string(),
+            });
+        }
+        SemanticOperationGraph::new(
+            graph.language,
+            graph.build_variant_fingerprint,
+            graph.nodes,
+            graph.edges,
+        )
+        .map_err(|error| StoreError::InvalidSemanticEvidence {
+            reason: format!("stored graph violates the SOG contract: {error}"),
+        })
     }
 
     /// What the run reported about itself beyond its findings, or `None` for a
@@ -1052,7 +2063,7 @@ impl Store {
     /// Returns any underlying database error.
     pub fn run_findings(&self, run_id: i64) -> Result<Vec<StoredFinding>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT lower(hex(gf.hash)), fi.audit_state, fi.clone_confidence, fi.final_priority,
+            "SELECT lower(hex(gf.hash)), fi.clone_confidence, fi.final_priority,
                     s.scope
              FROM finding fi
              JOIN clone_group g ON g.id = fi.clone_group_id
@@ -1065,10 +2076,9 @@ impl Store {
             .query_map(params![run_id], |row| {
                 Ok(StoredFinding {
                     group_fingerprint_hex: row.get(0)?,
-                    audit_state: row.get(1)?,
-                    clone_confidence: row.get(2)?,
-                    final_priority: row.get(3)?,
-                    suppression_scope: row.get(4)?,
+                    clone_confidence: row.get(1)?,
+                    final_priority: row.get(2)?,
+                    suppression_scope: row.get(3)?,
                 })
             })?
             .collect::<Result<_, _>>()?;
@@ -1154,6 +2164,7 @@ impl Store {
                             test_code: row.get(17)?,
                             split_pair: row.get(18)?,
                             similarity: None,
+                            semantic: None,
                             priority: None,
                             suppression,
                         },
@@ -1166,6 +2177,7 @@ impl Store {
             return Ok(None);
         };
         detail.similarity = self.group_similarity(group_row_id)?;
+        detail.semantic = self.group_semantic_evidence(group_row_id)?;
         detail.priority = self.group_priority(group_row_id, detail.scan_run_id)?;
         Ok(Some(detail))
     }
@@ -1258,6 +2270,16 @@ impl Store {
     }
 }
 
+fn hex_fingerprint(fingerprint: [u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(fingerprint.len().saturating_mul(2));
+    for byte in fingerprint {
+        hex.push(char::from(HEX[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    hex
+}
+
 /// Read one member from a row whose first seven columns are the member's, and
 /// whose content and language columns start at `content` — the two queries
 /// that select members place the pair differently but always adjacently.
@@ -1272,6 +2294,54 @@ fn map_member(row: &rusqlite::Row<'_>, content: usize) -> Result<StoredMember, r
         token_count: row.get(4)?,
         unit_name: row.get(5)?,
         is_canonical: row.get::<_, i64>(6)? != 0,
+    })
+}
+
+fn fingerprint_from_blob(field: &'static str, value: Vec<u8>) -> Result<[u8; 16], StoreError> {
+    let length = value.len();
+    value
+        .try_into()
+        .map_err(|_| StoreError::MalformedFingerprint { field, length })
+}
+
+fn positive_line(field: &'static str, value: Option<i64>) -> Result<Option<u32>, StoreError> {
+    value
+        .map(|line| {
+            u32::try_from(line)
+                .ok()
+                .filter(|line| *line > 0)
+                .ok_or_else(|| StoreError::UnknownVocabulary {
+                    field,
+                    value: line.to_string(),
+                })
+        })
+        .transpose()
+}
+
+/// Reduce the 32-byte build-variant digest stored by `build_variant` to the
+/// 16-byte content-fingerprint reference used by source/artifact mappings.
+///
+/// The database records a full BLAKE3 digest for variant lookup, while mapping
+/// rows use the project's standard 128-bit fingerprint width. Taking the
+/// leading bytes preserves a deterministic reference without confusing this
+/// representation with one of the stable IDs parsed by [`parse_hex_id`].
+fn parse_build_variant_reference(hex: &str) -> Result<[u8; 16], StoreError> {
+    let malformed = || StoreError::MalformedId { id: hex.to_owned() };
+    if hex.len() != 64 || !hex.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err(malformed());
+    }
+    let mut out = [0_u8; 16];
+    for (index, chunk) in hex.as_bytes().chunks_exact(2).take(out.len()).enumerate() {
+        let pair = core::str::from_utf8(chunk).map_err(|_| malformed())?;
+        out[index] = u8::from_str_radix(pair, 16).map_err(|_| malformed())?;
+    }
+    Ok(out)
+}
+
+fn nonnegative_u64(field: &'static str, value: i64) -> Result<u64, StoreError> {
+    u64::try_from(value).map_err(|_| StoreError::UnknownVocabulary {
+        field,
+        value: value.to_string(),
     })
 }
 
@@ -1304,5 +2374,18 @@ mod tests {
         assert!(parse_hex_id("").is_err());
         assert!(parse_hex_id("zz0102030405060708090a0b0c0d0e0f").is_err());
         assert!(parse_hex_id("00010203").is_err());
+    }
+
+    #[test]
+    fn build_variant_references_keep_the_first_128_bits_of_the_full_digest() {
+        let parsed = parse_build_variant_reference(
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+        assert!(parse_build_variant_reference("00010203").is_err());
     }
 }

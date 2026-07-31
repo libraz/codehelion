@@ -1,0 +1,159 @@
+{
+  "schema_version": "artifact-ir-v2",
+  "format": "elf",
+  "capabilities": {
+    "symbols": true,
+    "call_graph": false,
+    "source_mapping": false,
+    "relocations": false,
+    "data_segments": true
+  },
+  "fingerprint": [
+    119,
+    70,
+    174,
+    179,
+    17,
+    189,
+    191,
+    220,
+    18,
+    235,
+    101,
+    198,
+    10,
+    52,
+    163,
+    49
+  ],
+  "observed_bytes": 576,
+  "sections": [
+    {
+      "name": ".text",
+      "offset": 64,
+      "size": 2,
+      "executable": true
+    },
+    {
+      "name": ".rodata",
+      "offset": 66,
+      "size": 17,
+      "executable": false
+    },
+    {
+      "name": ".symtab",
+      "offset": 88,
+      "size": 48,
+      "executable": false
+    },
+    {
+      "name": ".strtab",
+      "offset": 136,
+      "size": 11,
+      "executable": false
+    },
+    {
+      "name": ".shstrtab",
+      "offset": 147,
+      "size": 41,
+      "executable": false
+    }
+  ],
+  "imports": [],
+  "symbols": [
+    {
+      "fingerprint": [
+        9,
+        154,
+        227,
+        185,
+        26,
+        159,
+        97,
+        83,
+        77,
+        14,
+        190,
+        251,
+        209,
+        252,
+        95,
+        155
+      ],
+      "name": "returning",
+      "exported": true,
+      "section": 1,
+      "offset": 64,
+      "size": 2,
+      "size_inferred": false,
+      "code": [
+        144,
+        195
+      ],
+      "normalized": {
+        "version": "x86-operand-shape-v1",
+        "bytes": [
+          44,
+          1,
+          0,
+          0,
+          0,
+          140,
+          1,
+          0,
+          0,
+          0
+        ]
+      },
+      "inline_stack": []
+    }
+  ],
+  "entry_points": [],
+  "indirect_references": [],
+  "calls": [],
+  "relocations": [],
+  "source_mappings": [],
+  "data_segments": [
+    {
+      "fingerprint": [
+        179,
+        97,
+        92,
+        68,
+        81,
+        5,
+        160,
+        132,
+        67,
+        218,
+        12,
+        40,
+        253,
+        177,
+        3,
+        242
+      ],
+      "section": 2,
+      "offset": 66,
+      "bytes": [
+        114,
+        101,
+        97,
+        100,
+        45,
+        111,
+        110,
+        108,
+        121,
+        32,
+        102,
+        105,
+        120,
+        116,
+        117,
+        114,
+        101
+      ]
+    }
+  ]
+}

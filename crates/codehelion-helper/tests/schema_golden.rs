@@ -12,11 +12,14 @@
 
 use codehelion_helper::ir::{
     Anchor, BasicBlock, COMPILER_IR_SCHEMA_VERSION, CallSite, CallTarget, CompilerIr,
-    ControlFlowGraph, DataFlowSummary, Edge, EdgeKind, EffectSummary, Instantiation,
-    ResolvedSymbol, ResolvedType, SourceRange, SymbolKind, TypeCategory, UnitRef,
+    ControlFlowGraph, DataFlowSummary, DirectPropagation, Edge, EdgeKind, EffectSummary,
+    FallibleKind, Instantiation, ResolvedExpression, ResolvedSymbol, ResolvedType,
+    SemanticConstruct, SemanticConstructKind, SourceRange, SymbolKind, TypeCategory,
+    UnexpandedMacro, UnexpandedMacroReason, UnitRef,
 };
 
 /// Every field of every message occupied, so nothing can change unobserved.
+#[allow(clippy::too_many_lines)]
 fn canonical() -> CompilerIr {
     CompilerIr {
         schema_version: COMPILER_IR_SCHEMA_VERSION.to_string(),
@@ -67,18 +70,56 @@ fn canonical() -> CompilerIr {
                 target: CallTarget::Static {
                     symbol: "crate::escape".to_string(),
                 },
+                api_name: Some("std::push_back".to_string()),
             },
             CallSite {
                 anchor: Anchor::written_here(range("src/render.rs", 256)),
                 target: CallTarget::Dynamic {
                     candidates: vec!["crate::Html".to_string()],
                 },
+                api_name: None,
             },
             CallSite {
                 anchor: Anchor::written_here(range("src/render.rs", 320)),
                 target: CallTarget::Unresolved,
+                api_name: None,
             },
         ],
+        semantic_constructs: vec![
+            SemanticConstruct {
+                anchor: Anchor::written_here(range("src/render.rs", 336)),
+                kind: SemanticConstructKind::PropagateError,
+                fallible_kind: Some(FallibleKind::Result),
+                direct_propagation: Some(DirectPropagation::ResultAdapter),
+                resource_kind: None,
+            },
+            SemanticConstruct {
+                anchor: Anchor::written_here(range("src/render.rs", 400)),
+                kind: SemanticConstructKind::Validate,
+                fallible_kind: Some(FallibleKind::Option),
+                direct_propagation: None,
+                resource_kind: None,
+            },
+            SemanticConstruct {
+                anchor: Anchor::written_here(range("src/render.rs", 464)),
+                kind: SemanticConstructKind::Source,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: None,
+            },
+            SemanticConstruct {
+                anchor: Anchor::written_here(range("src/render.rs", 528)),
+                kind: SemanticConstructKind::Collect,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: None,
+            },
+        ],
+        expressions: sample_expressions(),
+        unexpanded_macros: vec![UnexpandedMacro {
+            invocation: range("src/render.rs", 352),
+            reason: UnexpandedMacroReason::RequiresExecution,
+        }],
         cfg: Some(ControlFlowGraph {
             blocks: vec![BasicBlock {
                 anchor: Anchor::written_here(range("src/render.rs", 0)),
@@ -120,10 +161,50 @@ fn range(file: &str, start: u64) -> SourceRange {
     }
 }
 
+fn sample_expressions() -> Vec<ResolvedExpression> {
+    vec![ResolvedExpression {
+        anchor: Anchor {
+            expansion: range("src/render.rs", 352),
+            definition: Some(range("src/macros.rs", 32)),
+        },
+        type_index: 0,
+    }]
+}
+
 /// The stored document for the version this build writes. A new version means
 /// a new file beside the last, not an edit to it — the shapes that have been
 /// shipped stay on disk to say what a stored analysis written against them
 /// meant.
+const GOLDEN_V11: &str = include_str!("golden/compiler-ir-v11.json");
+
+/// The shape before explicit loop reductions were retained.
+const GOLDEN_V10: &str = include_str!("golden/compiler-ir-v10.json");
+
+/// The shape before resource categories were retained on semantic constructs.
+const GOLDEN_V9: &str = include_str!("golden/compiler-ir-v9.json");
+
+/// The shape before compiler-confirmed API names accompanied call identities.
+const GOLDEN_V8: &str = include_str!("golden/compiler-ir-v8.json");
+
+/// The shape before direct propagation forms were retained.
+const GOLDEN_V7: &str = include_str!("golden/compiler-ir-v7.json");
+
+/// The shape before explicit loop operations were retained.
+const GOLDEN_V6: &str = include_str!("golden/compiler-ir-v6.json");
+
+/// The shape before standard fallible container kinds were retained.
+const GOLDEN_V5: &str = include_str!("golden/compiler-ir-v5.json");
+
+/// The shape before compiler-confirmed validation constructs were reported.
+const GOLDEN_V4: &str = include_str!("golden/compiler-ir-v4.json");
+
+/// The shape before compiler-confirmed semantic constructs were reported.
+const GOLDEN_V3: &str = include_str!("golden/compiler-ir-v3.json");
+
+/// The shape before expanded expression types were reported.
+const GOLDEN_V2: &str = include_str!("golden/compiler-ir-v2.json");
+
+/// The shape before skipped macro invocations were made visible.
 const GOLDEN_V1: &str = include_str!("golden/compiler-ir-v1.json");
 
 /// The shape before the analysis said what its paths were spelled against.
@@ -131,14 +212,9 @@ const GOLDEN_V0: &str = include_str!("golden/compiler-ir-v0.json");
 
 #[test]
 fn the_wire_shape_matches_the_document_for_this_version() {
-    assert_eq!(COMPILER_IR_SCHEMA_VERSION, "compiler-ir-v1");
+    assert_eq!(COMPILER_IR_SCHEMA_VERSION, "compiler-ir-v11");
     let written = serde_json::to_string_pretty(&canonical()).unwrap();
-    assert_eq!(
-        written.trim(),
-        GOLDEN_V1.trim(),
-        "the compiler IR no longer serializes as compiler-ir-v1 does; \
-         a shape change needs a new schema version and a new document"
-    );
+    assert_eq!(written, GOLDEN_V11.trim_end());
 }
 
 /// The document is also what a reader of that version has to accept, so it is
@@ -146,9 +222,83 @@ fn the_wire_shape_matches_the_document_for_this_version() {
 /// wrong would pass the check above.
 #[test]
 fn the_document_reads_back_as_what_produced_it() {
-    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V1).unwrap();
+    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V11).unwrap();
     assert_eq!(parsed, canonical());
     assert!(parsed.is_readable());
+}
+
+/// Resource categories are optional for older producers, but when a current
+/// helper establishes one the wire document must preserve it exactly.
+#[test]
+fn a_resource_category_round_trips_when_present() {
+    let construct = SemanticConstruct {
+        anchor: Anchor::written_here(range("src/render.rs", 640)),
+        kind: SemanticConstructKind::AcquireResource,
+        fallible_kind: None,
+        direct_propagation: None,
+        resource_kind: Some("file".to_owned()),
+    };
+    let written = serde_json::to_string(&construct).unwrap();
+    assert!(written.contains("\"resource_kind\":\"file\""));
+    assert_eq!(
+        serde_json::from_str::<SemanticConstruct>(&written).unwrap(),
+        construct
+    );
+}
+
+#[test]
+fn the_previous_document_remains_parseable_as_thin_coverage() {
+    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V10).unwrap();
+    assert!(
+        parsed
+            .semantic_constructs
+            .iter()
+            .all(|construct| construct.kind != SemanticConstructKind::Reduce)
+    );
+    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V9).unwrap();
+    assert!(
+        parsed
+            .semantic_constructs
+            .iter()
+            .all(|construct| construct.resource_kind.is_none())
+    );
+    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V8).unwrap();
+    assert!(parsed.calls.iter().all(|call| call.api_name.is_none()));
+    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V7).unwrap();
+    assert!(
+        parsed
+            .semantic_constructs
+            .iter()
+            .all(|construct| construct.direct_propagation.is_none())
+    );
+    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V6).unwrap();
+    assert!(parsed.semantic_constructs.iter().all(|construct| {
+        matches!(
+            construct.kind,
+            SemanticConstructKind::PropagateError | SemanticConstructKind::Validate
+        )
+    }));
+    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V5).unwrap();
+    assert!(
+        parsed
+            .semantic_constructs
+            .iter()
+            .all(|construct| construct.fallible_kind.is_none())
+    );
+    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V4).unwrap();
+    assert!(
+        parsed
+            .semantic_constructs
+            .iter()
+            .all(|construct| { construct.kind == SemanticConstructKind::PropagateError })
+    );
+    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V3).unwrap();
+    assert!(parsed.semantic_constructs.is_empty());
+    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V2).unwrap();
+    assert!(parsed.expressions.is_empty());
+    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V1).unwrap();
+    assert!(parsed.expressions.is_empty());
+    assert!(parsed.unexpanded_macros.is_empty());
 }
 
 /// An analysis from an earlier schema has to arrive before it can be turned

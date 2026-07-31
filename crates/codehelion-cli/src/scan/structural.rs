@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use codehelion_core::boilerplate::{BOILERPLATE_VERSION, Boilerplate};
@@ -27,25 +27,36 @@ use codehelion_core::discovery::{
 use codehelion_core::engine::{self, LiteralNorm};
 use codehelion_core::features::FEATURE_SCHEMA_VERSION;
 use codehelion_core::frontend::Token;
-use codehelion_core::grouping::{GROUPING_VERSION, StructuralGroup};
-use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
+use codehelion_core::grouping::{GROUPING_VERSION, GroupingConfig, StructuralGroup};
+use codehelion_core::ir::{ByteRange, StructuralFrontend, SyntaxIrFile};
 use codehelion_core::priority::Weights;
+use codehelion_core::semantic::{
+    CrossLanguageCandidateInput, SEMANTIC_CANDIDATE_INDEX_VERSION, SEMANTIC_RULE_REGISTRY_VERSION,
+    SEMANTIC_WINDOWING_VERSION, SOG_SCHEMA_VERSION, SemanticCandidateConfig,
+    SemanticCandidateStats, SemanticGroupingStats, SemanticGroupingUnit, SemanticOperationGraph,
+    SemanticRule, VerifiedSemanticPair, extract_cross_language_candidates,
+    extract_registered_candidates, group_verified_semantic_pairs, registered_semantic_windows,
+    verify_cross_language_candidates, verify_registered_candidates,
+};
 use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION, UnitFingerprint};
 use codehelion_core::structural::{
-    self, GroupDetail, RegionOccurrence, StructuralConfig, StructuralRegion, StructuralReport,
-    StructuralUnit, VerifiedPair,
+    self, CrossVariantUnit, GroupDetail, RegionOccurrence, StructuralConfig, StructuralRegion,
+    StructuralReport, StructuralUnit, VerifiedPair,
 };
 use codehelion_core::test_code::{self, TEST_CODE_VERSION};
 use codehelion_core::verify::{SimilarityBreakdown, WEIGHT_VERSION};
 use codehelion_store::compiler::{self as store_compiler, CompilerHelperRow, CompilerOutcome};
 use codehelion_store::snapshot::{
-    FileRow, GroupOrigin, GroupRow, MemberRow, PriorityRow, SimilarityBreakdownRow, Snapshot,
-    SummaryRow, UnitRow, UnparsedRow,
+    CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow, CrossLanguageSemanticMemberRow,
+    CrossVariantComparisonSnapshot, CrossVariantGroupRow, CrossVariantMemberRow, FileRow, GroupRow,
+    MemberRow, PriorityRow, SemanticEvidenceRow, SemanticNodeMappingRow, SemanticOperationGraphRow,
+    SimilarityBreakdownRow, Snapshot, SummaryRow, UnitRow, UnparsedRow,
 };
 
 use super::{
     FileOutcome, ScanBaseline, as_u64, database_path, discover_sources, effective_jobs,
-    filter_globs, literal_norm, map_sources, open_store, rfc3339_now, write_report,
+    filter_globs, literal_norm, map_sources, open_store, rfc3339_now, write_partitioned_reports,
+    write_report,
 };
 
 use crate::Outcome;
@@ -56,8 +67,8 @@ use crate::semantic;
 use crate::suppress;
 use codehelion_core::doctor;
 use codehelion_core::execution::ExecutionPolicy;
-use codehelion_helper::Helper;
-use codehelion_helper::protocol::Execution;
+use codehelion_helper::protocol::{CompileCommandSelector, Execution};
+use codehelion_helper::{Helper, SandboxRequest};
 
 /// The reporting metadata of one parsed source file.
 struct SourceMeta {
@@ -78,6 +89,105 @@ struct SourceMeta {
 struct ParsedSource {
     meta: SourceMeta,
     ir: SyntaxIrFile,
+}
+
+/// One normalized SOG anchored to the syntactic unit it describes.
+#[derive(Debug, Clone)]
+struct SemanticUnitGraph {
+    unit: usize,
+    /// Exact source bytes for this semantic window, used only for reporting.
+    range: ByteRange,
+    /// First source line covered by this semantic window.
+    start_line: u32,
+    /// Last source line covered by this semantic window.
+    end_line: u32,
+    /// Parsed tokens covered by this semantic window.
+    token_count: usize,
+    graph: SemanticOperationGraph,
+    content: stable_id::FragmentFingerprint,
+    /// How completely the closed API registry described this parser-owned
+    /// unit. This may lower semantic confidence but never invents or removes
+    /// a registered-rule match.
+    normalization_confidence: f64,
+}
+
+/// One registered semantic correspondence between two whole units that no
+/// cohesive semantic group jointly represents.
+#[derive(Debug, Clone)]
+struct SemanticPair {
+    canonical: SemanticUnitGraph,
+    corresponding: SemanticUnitGraph,
+    rule: SemanticRule,
+    /// Rule confidence after the two normalizations' coverage is considered.
+    semantic_confidence: f64,
+}
+
+/// A cohesive registered-rule correspondence group, with a medoid chosen by
+/// the core-owned complete-linkage adapter.
+#[derive(Debug, Clone)]
+struct SemanticGroup {
+    canonical: SemanticUnitGraph,
+    /// The canonical member is first; every other member has a separately
+    /// verified correspondence to every member in this group.
+    members: Vec<SemanticUnitGraph>,
+    rule: SemanticRule,
+    semantic_confidence: f64,
+}
+
+/// Bounded registered-semantic matching plus the accounting that makes every
+/// omitted candidate visible in the scan funnel.
+#[derive(Debug, Clone)]
+struct SemanticDetection {
+    groups: Vec<SemanticGroup>,
+    pairs: Vec<SemanticPair>,
+    /// Every normalized graph retained for an explicit cross-language
+    /// comparison. Ordinary partition reports never inspect this collection.
+    units: Vec<SemanticUnitGraph>,
+    candidates: SemanticCandidateStats,
+    /// Compiler-resolved API observations accepted by the closed registry.
+    registered_observations: usize,
+    /// Compiler-resolved API observations that the closed registry declined
+    /// to normalize. They remain visible in the funnel but never become a
+    /// semantic finding by approximation.
+    excluded_observations: usize,
+    /// Parser-owned units with no registered operation after normalization.
+    unrepresentable_units: usize,
+    verified_pairs: usize,
+    disabled_pairs: usize,
+    grouping: SemanticGroupingStats,
+}
+
+/// One owned unit retained solely until an opt-in cross-variant comparison is
+/// recorded. Normal partition reports never hold or consume these values.
+struct CrossComparisonUnit {
+    origin_variant: String,
+    language: Language,
+    file_path: String,
+    start_line: u32,
+    end_line: u32,
+    name: Option<String>,
+    tokens: Vec<Token>,
+}
+
+/// One owned semantic unit retained solely for an opt-in Rust-to-C++ comparison.
+struct CrossLanguageComparisonUnit {
+    origin_variant: String,
+    language: Language,
+    file_path: String,
+    start_line: u32,
+    end_line: u32,
+    name: Option<String>,
+    graph: SemanticOperationGraph,
+    content: stable_id::FragmentFingerprint,
+    normalization_confidence: f64,
+}
+
+/// The ordinary report plus source units available to an opt-in comparison.
+struct PartitionOutcome {
+    outcome: Outcome,
+    report: Report,
+    comparison_units: Vec<CrossComparisonUnit>,
+    cross_language_units: Vec<CrossLanguageComparisonUnit>,
 }
 
 /// Execute `codehelion scan` in Structural mode.
@@ -106,17 +216,36 @@ pub fn semantic(
     permitted: &ExecutionPolicy,
     out: &mut impl Write,
 ) -> Result<Outcome> {
-    let compilers = Compilers::found(permitted)?;
+    let sandbox = semantic_sandbox(args)?;
+    let compilers = Compilers::found(permitted, sandbox)?;
     run_with(args, out, Some(&compilers))
+}
+
+/// Containment requested for compiler helpers in this semantic run.
+///
+/// The untrusted profile requires the core profile's subprocess ceiling. A
+/// platform that cannot apply it fails before any helper is launched rather
+/// than analysing an untrusted tree with an unenforced policy.
+fn semantic_sandbox(args: &ScanArgs) -> Result<SandboxRequest> {
+    if !args.untrusted {
+        return Ok(SandboxRequest::unrestricted());
+    }
+    let Some(bytes) = codehelion_core::execution::Limits::untrusted().max_subprocess_bytes else {
+        bail!("the untrusted profile must require a subprocess memory ceiling");
+    };
+    let request = SandboxRequest::require_memory_limit(bytes);
+    codehelion_helper::sandbox::validate(request)?;
+    Ok(request)
 }
 
 /// One helper a semantic run can ask, what it said about itself, and what it
 /// is allowed to run while answering.
 struct Installed {
     component: doctor::HelperComponent,
-    program: std::path::PathBuf,
+    program: PathBuf,
     greeting: doctor::Greeting,
     permitted: Vec<Execution>,
+    sandbox: SandboxRequest,
 }
 
 impl Installed {
@@ -178,12 +307,14 @@ impl Installed {
     /// and a scan of an unchanged tree is answered from what was recorded
     /// without a compiler being asked about a single file.
     fn describe(&self, root: &Path) -> Result<codehelion_helper::BuildDescription> {
-        let mut helper = Helper::start(&self.program, DESCRIBE_TIMEOUT).with_context(|| {
-            format!(
-                "asking {} what this tree is built with",
-                self.program.display()
-            )
-        })?;
+        let mut helper =
+            Helper::start_with_sandbox(&self.program, &[], DESCRIBE_TIMEOUT, self.sandbox)
+                .with_context(|| {
+                    format!(
+                        "asking {} what this tree is built with",
+                        self.program.display()
+                    )
+                })?;
         let described = helper.describe(root);
         let _ = helper.shutdown();
         described.with_context(|| {
@@ -219,10 +350,10 @@ impl Compilers {
     /// that is dropped for that helper rather than sent and ignored, because
     /// the answer that comes back from ignoring it is thinner than the one that
     /// was asked for and looks exactly like the project's own.
-    fn found(permitted: &ExecutionPolicy) -> Result<Self> {
+    fn found(permitted: &ExecutionPolicy, sandbox: SandboxRequest) -> Result<Self> {
         let mut installed = Vec::new();
         for component in doctor::OPTIONAL_HELPERS {
-            let Some(facts) = crate::interrogate(component.binary, None) else {
+            let Some(facts) = crate::interrogate(component.binary, None, sandbox) else {
                 continue;
             };
             match facts.state {
@@ -231,6 +362,7 @@ impl Compilers {
                     component,
                     program: facts.path,
                     greeting,
+                    sandbox,
                 }),
                 // Installed and unable to answer is its own problem, and
                 // telling someone to install what they have already installed
@@ -385,11 +517,15 @@ fn acted_on(permitted: &ExecutionPolicy, greeting: &doctor::Greeting) -> Vec<Exe
 /// what analysing it costs but is still somebody else's process doing work.
 const DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+#[allow(clippy::too_many_lines)]
 fn run_with(
     args: &ScanArgs,
     out: &mut impl Write,
     compilers: Option<&Compilers>,
 ) -> Result<Outcome> {
+    if args.compare_languages && compilers.is_none() {
+        bail!("--compare-languages requires --mode semantic");
+    }
     let started_at = rfc3339_now();
     let root = args
         .path
@@ -407,18 +543,78 @@ fn run_with(
     let (sources, glob_excluded) = filter_globs(&cfg, sources)?;
 
     let asking = asking_about(compilers, &sources)?;
+    if compilers.is_some() {
+        let compiler_version = clang_toolchain(asking.as_deref());
+        let mut partitions =
+            cpp_partitions(&discovered, &sources, &cfg, compiler_version.as_deref());
+        if let Some(unconfigured) = unconfigured_cpp_partition(&discovered, &sources) {
+            partitions.push(unconfigured);
+        }
+        if let Some(rust) = rust_partition(
+            &sources,
+            asking.as_deref(),
+            discovered.header_language,
+            &root,
+        )? {
+            partitions.push(rust);
+        }
+        partitions.sort_by_cached_key(|partition| partition.variant.fingerprint());
+        if !partitions.is_empty() {
+            let db_path = database_path(&root, args.db.as_deref(), &cfg);
+            let mut reports = Vec::with_capacity(partitions.len());
+            let mut comparison_units = Vec::new();
+            let mut cross_language_units = Vec::new();
+            let mut outcome = Outcome::Success;
+            for (index, partition) in partitions.into_iter().enumerate() {
+                let partition = run_semantic_partition(
+                    args,
+                    &cfg,
+                    guardrails.as_ref(),
+                    jobs,
+                    &root,
+                    &db_path,
+                    &discovered,
+                    &partition.sources,
+                    glob_excluded,
+                    asking.as_deref(),
+                    &partition,
+                    index == 0,
+                )?;
+                if partition.outcome == Outcome::FindingsPresent {
+                    outcome = Outcome::FindingsPresent;
+                }
+                comparison_units.extend(partition.comparison_units);
+                cross_language_units.extend(partition.cross_language_units);
+                reports.push(partition.report);
+            }
+            let comparison = if args.compare_build_variants {
+                record_cross_variant_comparison(&db_path, &root, &started_at, &comparison_units)?
+            } else {
+                None
+            };
+            let cross_language_comparison = if args.compare_languages {
+                record_cross_language_comparison(
+                    &db_path,
+                    &root,
+                    &started_at,
+                    &cross_language_units,
+                    &cfg,
+                )?
+            } else {
+                None
+            };
+            write_partitioned_reports(
+                args,
+                out,
+                &reports,
+                comparison.as_ref(),
+                cross_language_comparison.as_ref(),
+            )?;
+            return Ok(outcome);
+        }
+    }
     let variant = variant_of(asking.as_deref(), &cfg, discovered.header_language, &root)?;
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
-    // A recorded semantic run holds what a compiler said about the tree, so
-    // reporting it back keeps the part that says how much of it a compiler
-    // could speak for; a record that cannot say that in full is not reused.
-    if let Some(mut model) = crate::scan::reusable(args, &cfg, &root, &db_path, &variant, &sources)?
-    {
-        model.summary.guardrails = guardrails;
-        write_report(args, out, &model)?;
-        return Ok(crate::scan::outcome(args, &model));
-    }
-
     let timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
     let (parsed, unreadable, timed_out) =
         map_sources(&sources, jobs, |source| parse_one(source, timeout))?;
@@ -428,9 +624,25 @@ fn run_with(
         .unzip();
     mark_test_modules(&files, &mut irs);
 
-    let (asked, resolved) = resolve(asking.as_deref(), &sources, &files, &variant);
+    let (asked, resolved) = resolve(
+        asking.as_deref(),
+        &sources,
+        &files,
+        &variant,
+        &BTreeMap::new(),
+        std::time::Duration::from_millis(cfg.limits.helper_timeout_ms),
+    );
     let analysis =
         structural::analyze_resolved(&irs, &variant, &structural_config(&cfg), &resolved);
+    let semantic = registered_semantic_pairs(
+        asked.as_ref(),
+        &sources,
+        &files,
+        &irs,
+        &analysis,
+        &variant,
+        &cfg,
+    )?;
 
     let mut rules = compile_rules(&cfg, &files, &analysis)?;
     let baseline = crate::scan::load_baseline(
@@ -443,11 +655,18 @@ fn run_with(
         ),
     )?;
     let regions = reportable_regions(&analysis);
-    let suppressed = evaluate_suppression(&cfg, &mut rules, &analysis, &regions);
+    let suppressed = evaluate_suppression(
+        &cfg,
+        &mut rules,
+        &analysis,
+        &regions,
+        &semantic.groups,
+        &semantic.pairs,
+        &variant,
+    );
 
-    let changes = crate::scan::tree_changes(&db_path, &root, &variant, &sources)?;
     let finished_at = rfc3339_now();
-    let mut inputs = ReportInputs {
+    let inputs = ReportInputs {
         root: &root,
         db_path: &db_path,
         started_at: &started_at,
@@ -456,18 +675,21 @@ fn run_with(
         files: &files,
         irs: &irs,
         analysis: &analysis,
+        semantic_groups: &semantic.groups,
+        semantic_pairs: &semantic.pairs,
+        semantic_detection: &semantic,
         rules: &rules.rules,
         group_suppressed: &suppressed.groups,
         regions: &regions,
         region_suppressed: &suppressed.regions,
         suppression: &cfg.suppression,
         pair_suppressed: &suppressed.pairs,
+        semantic_pair_suppressed: &suppressed.semantic_pairs,
+        semantic_group_suppressed: &suppressed.semantic_groups,
         literals: literal_norm(cfg.literal_normalization),
         glob_excluded,
         unreadable,
         timed_out,
-        changes,
-        audit: None,
         weights: cfg.priority.weights(),
         min_clone_tokens: u64::from(cfg.min_clone_tokens),
     };
@@ -480,15 +702,15 @@ fn run_with(
         &discovered,
         baseline.as_ref().map(ScanBaseline::digest),
     );
-    let (run_id, audit) = record(
+    let run_id = record(
         &cfg,
         &inputs,
         &groups,
         crate::scan::file_rows(&sources),
         &stored,
         asked.as_ref(),
+        true,
     )?;
-    inputs.audit = audit;
     let mut model = build_report(&inputs, run_id, &stored, groups);
     model.summary.guardrails = guardrails;
     model.summary.compiler = asked.as_ref().map(coverage);
@@ -499,6 +721,476 @@ fn run_with(
         .map(|baseline| crate::scan::baseline_status(baseline, &model.groups));
     write_report(args, out, &model)?;
     Ok(crate::scan::outcome(args, &model))
+}
+
+/// Execute and record one semantic partition.
+///
+/// The parser is intentionally run per partition for now. It never executes
+/// target code, and keeping its products private to the partition makes it
+/// impossible for a future resolved-type refinement to accidentally reconnect
+/// clone grouping across build variants.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn run_semantic_partition(
+    args: &ScanArgs,
+    cfg: &Config,
+    guardrails: Option<&report::Guardrails>,
+    jobs: usize,
+    root: &Path,
+    db_path: &Path,
+    discovered: &DiscoveryReport,
+    sources: &[SourceUnit],
+    glob_excluded: usize,
+    asking: Option<&[&Installed]>,
+    partition: &SemanticPartition,
+    replace_existing: bool,
+) -> Result<PartitionOutcome> {
+    let started_at = rfc3339_now();
+    let timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
+    let (parsed, unreadable, timed_out) =
+        map_sources(sources, jobs, |source| parse_one(source, timeout))?;
+    let (files, mut irs): (Vec<SourceMeta>, Vec<SyntaxIrFile>) = parsed
+        .into_iter()
+        .map(|source| (source.meta, source.ir))
+        .unzip();
+    mark_test_modules(&files, &mut irs);
+
+    let (asked, resolved) = resolve(
+        asking,
+        sources,
+        &files,
+        &partition.variant,
+        &partition.commands,
+        std::time::Duration::from_millis(cfg.limits.helper_timeout_ms),
+    );
+    let analysis =
+        structural::analyze_resolved(&irs, &partition.variant, &structural_config(cfg), &resolved);
+    let semantic = registered_semantic_pairs(
+        asked.as_ref(),
+        sources,
+        &files,
+        &irs,
+        &analysis,
+        &partition.variant,
+        cfg,
+    )?;
+    let mut rules = compile_rules(cfg, &files, &analysis)?;
+    let baseline = crate::scan::load_baseline(
+        args.baseline.as_deref(),
+        &mut rules.rules,
+        &partition.variant,
+        &detector_versions(
+            cfg.priority.weights(),
+            literal_norm(cfg.literal_normalization),
+        ),
+    )?;
+    let regions = reportable_regions(&analysis);
+    let suppressed = evaluate_suppression(
+        cfg,
+        &mut rules,
+        &analysis,
+        &regions,
+        &semantic.groups,
+        &semantic.pairs,
+        &partition.variant,
+    );
+    let finished_at = rfc3339_now();
+    let inputs = ReportInputs {
+        root,
+        db_path,
+        started_at: &started_at,
+        finished_at: &finished_at,
+        variant: &partition.variant,
+        files: &files,
+        irs: &irs,
+        analysis: &analysis,
+        semantic_groups: &semantic.groups,
+        semantic_pairs: &semantic.pairs,
+        semantic_detection: &semantic,
+        rules: &rules.rules,
+        group_suppressed: &suppressed.groups,
+        regions: &regions,
+        region_suppressed: &suppressed.regions,
+        suppression: &cfg.suppression,
+        pair_suppressed: &suppressed.pairs,
+        semantic_pair_suppressed: &suppressed.semantic_pairs,
+        semantic_group_suppressed: &suppressed.semantic_groups,
+        literals: literal_norm(cfg.literal_normalization),
+        glob_excluded,
+        unreadable,
+        timed_out,
+        weights: cfg.priority.weights(),
+        min_clone_tokens: u64::from(cfg.min_clone_tokens),
+    };
+    let groups = build_groups(&inputs);
+    let stored = summary_row(
+        &inputs,
+        discovered,
+        baseline.as_ref().map(ScanBaseline::digest),
+    );
+    let run_id = record(
+        cfg,
+        &inputs,
+        &groups,
+        crate::scan::file_rows(sources),
+        &stored,
+        asked.as_ref(),
+        replace_existing,
+    )?;
+    let mut model = build_report(&inputs, run_id, &stored, groups);
+    model.summary.guardrails = guardrails.map(copy_guardrails);
+    model.summary.compiler = asked.as_ref().map(coverage);
+    model.summary.baseline = baseline
+        .as_ref()
+        .map(|baseline| crate::scan::baseline_status(baseline, &model.groups));
+    let comparison_units =
+        maybe_cross_comparison_units(args, &partition.variant, &files, &irs, &analysis);
+    let cross_language_units = maybe_cross_language_comparison_units(
+        args,
+        &partition.variant,
+        &files,
+        &analysis,
+        &semantic,
+    );
+    let outcome = crate::scan::outcome(args, &model);
+    Ok(PartitionOutcome {
+        outcome,
+        report: model,
+        comparison_units,
+        cross_language_units,
+    })
+}
+
+fn maybe_cross_comparison_units(
+    args: &ScanArgs,
+    variant: &BuildVariant,
+    files: &[SourceMeta],
+    irs: &[SyntaxIrFile],
+    analysis: &StructuralReport,
+) -> Vec<CrossComparisonUnit> {
+    if args.compare_build_variants {
+        cross_comparison_units(variant, files, irs, analysis)
+    } else {
+        Vec::new()
+    }
+}
+
+fn maybe_cross_language_comparison_units(
+    args: &ScanArgs,
+    variant: &BuildVariant,
+    files: &[SourceMeta],
+    analysis: &StructuralReport,
+    semantic: &SemanticDetection,
+) -> Vec<CrossLanguageComparisonUnit> {
+    if !args.compare_languages {
+        return Vec::new();
+    }
+    let origin_variant = variant.fingerprint();
+    semantic
+        .units
+        .iter()
+        .filter_map(|semantic_unit| {
+            let unit = analysis.units.get(semantic_unit.unit)?;
+            let file = files.get(unit.file)?;
+            matches!(file.language, Language::Rust | Language::Cpp).then_some(())?;
+            Some(CrossLanguageComparisonUnit {
+                origin_variant: origin_variant.clone(),
+                language: file.language,
+                file_path: file.relative_path.clone(),
+                start_line: semantic_unit.start_line,
+                end_line: semantic_unit.end_line,
+                name: unit.name.as_ref().map(ToString::to_string),
+                graph: semantic_unit.graph.clone(),
+                content: semantic_unit.content,
+                normalization_confidence: semantic_unit.normalization_confidence,
+            })
+        })
+        .collect()
+}
+
+const fn copy_guardrails(guardrails: &report::Guardrails) -> report::Guardrails {
+    report::Guardrails {
+        profile: guardrails.profile,
+        max_file_bytes: guardrails.max_file_bytes,
+        parse_timeout_ms: guardrails.parse_timeout_ms,
+        pair_budget: guardrails.pair_budget,
+    }
+}
+
+/// Retain C/C++ units from one completed partition for an explicitly requested
+/// comparison. The normal report owns neither this data nor its interpretation.
+fn cross_comparison_units(
+    variant: &BuildVariant,
+    files: &[SourceMeta],
+    irs: &[SyntaxIrFile],
+    analysis: &StructuralReport,
+) -> Vec<CrossComparisonUnit> {
+    let origin_variant = variant.fingerprint();
+    analysis
+        .units
+        .iter()
+        .filter_map(|unit| {
+            let file = files.get(unit.file)?;
+            matches!(file.language, Language::C | Language::Cpp).then_some(())?;
+            let tokens = irs
+                .get(unit.file)?
+                .tokens
+                .get(unit.token_start..unit.token_end)?;
+            Some(CrossComparisonUnit {
+                origin_variant: origin_variant.clone(),
+                language: file.language,
+                file_path: file.relative_path.clone(),
+                start_line: unit.start_line,
+                end_line: unit.end_line,
+                name: unit.name.as_ref().map(ToString::to_string),
+                tokens: tokens.to_vec(),
+            })
+        })
+        .collect()
+}
+
+/// Directly compare the completed C/C++ partitions and persist the result in
+/// tables outside normal snapshots. This opt-in invocation records what it
+/// compared now.
+fn record_cross_variant_comparison(
+    db_path: &Path,
+    root: &Path,
+    started_at: &str,
+    units: &[CrossComparisonUnit],
+) -> Result<Option<report::CrossVariantComparison>> {
+    let inputs: Vec<CrossVariantUnit<'_>> = units
+        .iter()
+        .map(|unit| CrossVariantUnit {
+            origin_variant: &unit.origin_variant,
+            language: unit.language,
+            file_path: &unit.file_path,
+            start_line: unit.start_line,
+            end_line: unit.end_line,
+            name: unit.name.as_deref(),
+            tokens: &unit.tokens,
+        })
+        .collect();
+    let Some(comparison) = structural::compare_build_variants(&inputs) else {
+        return Ok(None);
+    };
+    let groups: Vec<CrossVariantGroupRow> = comparison
+        .groups
+        .iter()
+        .map(|group| CrossVariantGroupRow {
+            group_id: group.id,
+            clone_type: group.clone_type,
+            members: group
+                .members
+                .iter()
+                .map(|member| CrossVariantMemberRow {
+                    origin_variant: member.origin_variant.clone(),
+                    language: member.language,
+                    file_path: member.file_path.clone(),
+                    start_line: member.start_line,
+                    end_line: member.end_line,
+                    unit_name: member.name.clone(),
+                    token_count: member.token_count,
+                })
+                .collect(),
+        })
+        .collect();
+    let finished_at = rfc3339_now();
+    let root_path = root.to_string_lossy();
+    let snapshot = CrossVariantComparisonSnapshot {
+        root_path: &root_path,
+        comparison_id: comparison.id,
+        policy_version: stable_id::CROSS_VARIANT_POLICY_VERSION,
+        started_at,
+        finished_at: &finished_at,
+        origins: &comparison.origin_variants,
+        groups: &groups,
+    };
+    let mut store = open_store(db_path)?;
+    store.record_cross_variant_comparison(&snapshot)?;
+    Ok(Some(report::CrossVariantComparison {
+        policy_version: stable_id::CROSS_VARIANT_POLICY_VERSION.to_string(),
+        comparison_id: comparison.id.to_hex(),
+        comparison_kind: "exact-type-1-whole-units".to_string(),
+        origin_variants: comparison.origin_variants,
+        groups: comparison
+            .groups
+            .into_iter()
+            .map(|group| report::CrossVariantGroup {
+                id: group.id.to_hex(),
+                clone_type: group.clone_type.name().to_string(),
+                members: group
+                    .members
+                    .into_iter()
+                    .map(|member| report::CrossVariantMember {
+                        origin_variant: member.origin_variant,
+                        language: member.language.name().to_string(),
+                        file: member.file_path,
+                        start_line: member.start_line,
+                        end_line: member.end_line,
+                        name: member.name,
+                        token_count: member.token_count,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }))
+}
+
+/// Directly compare the completed Rust and C++ semantic partitions and retain
+/// the closed API correspondence evidence outside normal snapshots.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the comparison boundary constructs report and persistence evidence together"
+)]
+fn record_cross_language_comparison(
+    db_path: &Path,
+    root: &Path,
+    started_at: &str,
+    units: &[CrossLanguageComparisonUnit],
+    cfg: &Config,
+) -> Result<Option<report::CrossLanguageComparison>> {
+    let mut origins: Vec<String> = units
+        .iter()
+        .map(|unit| unit.origin_variant.clone())
+        .collect();
+    origins.sort_unstable();
+    origins.dedup();
+    if origins.len() < 2
+        || !units.iter().any(|unit| unit.language == Language::Rust)
+        || !units.iter().any(|unit| unit.language == Language::Cpp)
+    {
+        return Ok(None);
+    }
+
+    let comparison_id = stable_id::cross_language_comparison_id(&origins);
+    let inputs: Vec<CrossLanguageCandidateInput> = units
+        .iter()
+        .map(|unit| CrossLanguageCandidateInput {
+            comparison_partition: *comparison_id.as_bytes(),
+            graph: unit.graph.clone(),
+        })
+        .collect();
+    let max_candidate_pairs = cfg
+        .limits
+        .pair_budget
+        .unwrap_or_else(|| SemanticCandidateConfig::default().max_candidate_pairs);
+    let candidates = extract_cross_language_candidates(
+        &inputs,
+        SemanticCandidateConfig {
+            max_bucket_members: SemanticCandidateConfig::default().max_bucket_members,
+            max_candidate_pairs,
+        },
+    );
+    let verified = enabled_cross_language_matches(
+        verify_cross_language_candidates(&inputs, &candidates.pairs),
+        cfg,
+    );
+    let mut store_groups = Vec::with_capacity(verified.len());
+    let mut report_groups = Vec::with_capacity(verified.len());
+    for (candidate, matched) in verified {
+        let left = &units[candidate.left];
+        let right = &units[candidate.right];
+        let group_id = stable_id::cross_language_group_id(
+            &comparison_id,
+            matched.rule.id,
+            matched.rule.version,
+            &[left.content, right.content],
+        );
+        let semantic_confidence = semantic_confidence(
+            matched.rule.confidence,
+            left.normalization_confidence,
+            right.normalization_confidence,
+        );
+        let correspondence_ids: Vec<String> = matched
+            .api_correspondence_ids
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect();
+        let members = [left, right];
+        let store_members = members
+            .iter()
+            .map(|unit| {
+                Ok(CrossLanguageSemanticMemberRow {
+                    origin_variant: unit.origin_variant.clone(),
+                    language: unit.language,
+                    file_path: unit.file_path.clone(),
+                    start_line: unit.start_line,
+                    end_line: unit.end_line,
+                    unit_name: unit.name.clone(),
+                    graph_schema_version: unit.graph.schema_version.clone(),
+                    graph_json: serde_json::to_string(&unit.graph)
+                        .context("serializing cross-language semantic graph")?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        store_groups.push(CrossLanguageSemanticGroupRow {
+            group_id,
+            rule_id: matched.rule.id.to_string(),
+            rule_version: matched.rule.version,
+            semantic_confidence,
+            correspondence_ids: correspondence_ids.clone(),
+            members: store_members,
+        });
+        report_groups.push(report::CrossLanguageGroup {
+            id: group_id.to_hex(),
+            rule_id: matched.rule.id.to_string(),
+            rule_version: matched.rule.version,
+            semantic_confidence,
+            api_correspondence_ids: correspondence_ids,
+            members: members
+                .iter()
+                .map(|unit| report::CrossLanguageMember {
+                    origin_variant: unit.origin_variant.clone(),
+                    language: unit.language.name().to_string(),
+                    file: unit.file_path.clone(),
+                    start_line: unit.start_line,
+                    end_line: unit.end_line,
+                    name: unit.name.clone(),
+                    graph: unit.graph.clone(),
+                })
+                .collect(),
+        });
+    }
+    let finished_at = rfc3339_now();
+    let root_path = root.to_string_lossy();
+    let snapshot = CrossLanguageComparisonSnapshot {
+        root_path: &root_path,
+        comparison_id,
+        policy_version: stable_id::CROSS_LANGUAGE_POLICY_VERSION,
+        started_at,
+        finished_at: &finished_at,
+        origins: &origins,
+        groups: &store_groups,
+    };
+    let mut store = open_store(db_path)?;
+    store.record_cross_language_comparison(&snapshot)?;
+    Ok(Some(report::CrossLanguageComparison {
+        policy_version: stable_id::CROSS_LANGUAGE_POLICY_VERSION.to_string(),
+        comparison_id: comparison_id.to_hex(),
+        comparison_kind: "restricted-semantic-rust-cpp-pipelines".to_string(),
+        origin_variants: origins,
+        groups: report_groups,
+    }))
+}
+
+/// Keep only opt-in cross-language rule applications enabled for this project.
+///
+/// The candidate index remains independent of configuration for complete,
+/// deterministic accounting; this policy boundary decides only whether an
+/// already explained correspondence may become a reported finding.
+fn enabled_cross_language_matches(
+    verified: Vec<(
+        codehelion_core::semantic::SemanticCandidatePair,
+        codehelion_core::semantic::CrossLanguageRuleMatch,
+    )>,
+    cfg: &Config,
+) -> Vec<(
+    codehelion_core::semantic::SemanticCandidatePair,
+    codehelion_core::semantic::CrossLanguageRuleMatch,
+)> {
+    verified
+        .into_iter()
+        .filter(|(_, matched)| cfg.semantic.enabled(matched.rule.id))
+        .collect()
 }
 
 /// What the results belong to.
@@ -528,13 +1220,185 @@ fn variant_of(
     Ok(BuildVariant::semantic(languages, headers, builds))
 }
 
-/// How long one unit's analysis may take before the helper is given up on.
+/// One independently recorded semantic program. Headers are present in every
+/// C/C++ partition because the selected translation units are what give them
+/// meaning; their compiler answers never cross this boundary.
+struct SemanticPartition {
+    variant: BuildVariant,
+    sources: Vec<SourceUnit>,
+    commands: BTreeMap<PathBuf, CompileCommandSelector>,
+}
+
+/// Split a C/C++ scan by the exact command-derived build variant.
 ///
-/// Longer than anything this program does itself: the first request loads a
-/// workspace, which reads a sysroot and a dependency graph. A ceiling short
-/// enough to be comfortable here would report a cold machine as a broken
-/// helper.
-const ANALYSIS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+fn cpp_partitions(
+    discovered: &DiscoveryReport,
+    sources: &[SourceUnit],
+    cfg: &Config,
+    compiler_version: Option<&str>,
+) -> Vec<SemanticPartition> {
+    let Some(database) = &discovered.compile_commands else {
+        return Vec::new();
+    };
+    let languages = LanguageSelection {
+        rust: false,
+        c: cfg.languages.c,
+        cpp: cfg.languages.cpp,
+    };
+    database
+        .build_partitions()
+        .into_values()
+        .filter_map(|entries| {
+            let first = entries.first()?;
+            let mut command_build = first.build(database.content_hash.clone());
+            command_build.compiler_version = compiler_version.map(ToString::to_string);
+            let build = BuildConfiguration::Cpp(Box::new(command_build));
+            let mut commands = BTreeMap::new();
+            let entry_paths: BTreeSet<PathBuf> = entries
+                .iter()
+                .map(|entry| {
+                    entry
+                        .file
+                        .canonicalize()
+                        .unwrap_or_else(|_| entry.file.clone())
+                })
+                .collect();
+            for entry in entries {
+                let (file, directory, arguments) = entry.selector_fields();
+                let path = entry
+                    .file
+                    .canonicalize()
+                    .unwrap_or_else(|_| entry.file.clone());
+                commands.insert(
+                    path,
+                    CompileCommandSelector {
+                        file,
+                        directory,
+                        arguments,
+                    },
+                );
+            }
+            let selected = sources
+                .iter()
+                .filter(|source| {
+                    source.is_header
+                        || (matches!(source.language, Language::C | Language::Cpp)
+                            && entry_paths.contains(&source.absolute_path))
+                })
+                .cloned()
+                .collect();
+            Some(SemanticPartition {
+                variant: BuildVariant::semantic(languages, discovered.header_language, vec![build]),
+                sources: selected,
+                commands,
+            })
+        })
+        .collect()
+}
+
+/// C/C++ source a database did not name, recorded as an explicit no-build
+/// partition rather than silently dropped or assigned to a real command.
+fn unconfigured_cpp_partition(
+    discovered: &DiscoveryReport,
+    sources: &[SourceUnit],
+) -> Option<SemanticPartition> {
+    let database = discovered.compile_commands.as_ref()?;
+    let configured: BTreeSet<PathBuf> = database
+        .entries
+        .iter()
+        .map(|entry| {
+            entry
+                .file
+                .canonicalize()
+                .unwrap_or_else(|_| entry.file.clone())
+        })
+        .collect();
+    let selected: Vec<SourceUnit> = sources
+        .iter()
+        .filter(|source| {
+            matches!(source.language, Language::C | Language::Cpp)
+                && !source.is_header
+                && !configured.contains(&source.absolute_path)
+        })
+        .cloned()
+        .collect();
+    if selected.is_empty() {
+        return None;
+    }
+    let mut languages = LanguageSelection {
+        rust: false,
+        c: false,
+        cpp: false,
+    };
+    for source in &selected {
+        match source.language {
+            Language::C => languages.c = true,
+            Language::Cpp => languages.cpp = true,
+            Language::Rust => {}
+        }
+    }
+    Some(SemanticPartition {
+        variant: BuildVariant::semantic(languages, discovered.header_language, Vec::new()),
+        sources: selected,
+        commands: BTreeMap::new(),
+    })
+}
+
+/// The runtime Clang that actually produced semantic answers.
+fn clang_toolchain(asking: Option<&[&Installed]>) -> Option<String> {
+    asking.and_then(|helpers| {
+        helpers
+            .iter()
+            .find(|helper| {
+                helper.component.analyses.contains(&Language::C)
+                    || helper.component.analyses.contains(&Language::Cpp)
+            })
+            .map(|helper| helper.greeting.toolchains.join(", "))
+    })
+}
+
+/// The existing single Rust semantic build, kept apart from C/C++ command
+/// variants without adding per-source or per-feature Rust partitioning.
+fn rust_partition(
+    sources: &[SourceUnit],
+    asking: Option<&[&Installed]>,
+    headers: Language,
+    root: &Path,
+) -> Result<Option<SemanticPartition>> {
+    let selected: Vec<SourceUnit> = sources
+        .iter()
+        .filter(|source| source.language == Language::Rust)
+        .cloned()
+        .collect();
+    if selected.is_empty() {
+        return Ok(None);
+    }
+    let helper = asking.and_then(|helpers| {
+        helpers
+            .iter()
+            .copied()
+            .find(|helper| helper.component.analyses.contains(&Language::Rust))
+    });
+    let builds = helper
+        .map(|helper| helper.build(root))
+        .transpose()?
+        .into_iter()
+        .collect();
+    let variant = BuildVariant::semantic(
+        LanguageSelection {
+            rust: true,
+            c: false,
+            cpp: false,
+        },
+        headers,
+        builds,
+    );
+    Ok(Some(SemanticPartition {
+        variant,
+        sources: selected,
+        commands: BTreeMap::new(),
+    }))
+}
 
 /// Ask each helper about the sources it reads, under the variant the results
 /// belong to.
@@ -542,6 +1406,8 @@ fn ask_about(
     asking: &[&Installed],
     sources: &[SourceUnit],
     variant: &BuildVariant,
+    commands: &BTreeMap<PathBuf, CompileCommandSelector>,
+    timeout: std::time::Duration,
 ) -> semantic::Answers {
     let backends: Vec<semantic::Backend<'_>> = asking
         .iter()
@@ -549,9 +1415,16 @@ fn ask_about(
             program: &helper.program,
             analyzes: helper.component.analyses,
             permitted: &helper.permitted,
+            sandbox: helper.sandbox,
         })
         .collect();
-    semantic::ask(&backends, sources, &variant.fingerprint(), ANALYSIS_TIMEOUT)
+    semantic::ask_with_commands(
+        &backends,
+        sources,
+        &variant.fingerprint(),
+        commands,
+        timeout,
+    )
 }
 
 /// Ask the helpers about the tree, and index what they resolved as the analysis
@@ -567,8 +1440,10 @@ fn resolve(
     sources: &[SourceUnit],
     files: &[SourceMeta],
     variant: &BuildVariant,
+    commands: &BTreeMap<PathBuf, CompileCommandSelector>,
+    timeout: std::time::Duration,
 ) -> (Option<semantic::Answers>, structural::ResolvedTypes) {
-    let asked = asking.map(|asking| ask_about(asking, sources, variant));
+    let asked = asking.map(|asking| ask_about(asking, sources, variant, commands, timeout));
     let resolved = asked
         .as_ref()
         .map_or_else(structural::ResolvedTypes::default, |asked| {
@@ -600,23 +1475,354 @@ fn resolved_types(
         .zip(&asked.per_source)
         .filter_map(|(source, answer)| Some((source.relative_path.to_str()?, (source, answer))))
         .collect();
-    structural::ResolvedTypes::per_file(
-        files
-            .iter()
-            .map(|meta| {
-                answered
-                    .get(meta.relative_path.as_str())
-                    .and_then(|(source, answer)| {
-                        let ir = answer.analysis()?;
-                        Some(semantic::resolved_types_for(
-                            ir,
-                            &ir.spelling(&source.absolute_path),
-                        ))
-                    })
-                    .unwrap_or_default()
-            })
-            .collect(),
+    let resolved: Vec<_> = files
+        .iter()
+        .map(|meta| {
+            answered
+                .get(meta.relative_path.as_str())
+                .and_then(|(source, answer)| {
+                    let ir = answer.analysis()?;
+                    let spelling = ir.spelling(&source.absolute_path);
+                    Some((
+                        semantic::resolved_types_for(ir, &spelling),
+                        semantic::resolved_api_for(ir, &spelling),
+                    ))
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    structural::ResolvedTypes::per_file_with_apis(
+        resolved.iter().map(|(types, _)| types.clone()).collect(),
+        resolved.into_iter().map(|(_, apis)| apis).collect(),
     )
+}
+
+/// Normalize compiler-resolved calls within each parser-owned unit and match
+/// only the pairs selected by the bounded core-owned SOG index.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the adapter keeps compiler answers, range ownership, and bounded matching in one auditable boundary"
+)]
+fn registered_semantic_pairs(
+    asked: Option<&semantic::Answers>,
+    sources: &[SourceUnit],
+    files: &[SourceMeta],
+    irs: &[SyntaxIrFile],
+    analysis: &StructuralReport,
+    variant: &BuildVariant,
+    cfg: &Config,
+) -> Result<SemanticDetection> {
+    let Some(asked) = asked else {
+        return Ok(SemanticDetection {
+            groups: Vec::new(),
+            pairs: Vec::new(),
+            units: Vec::new(),
+            candidates: SemanticCandidateStats::default(),
+            registered_observations: 0,
+            excluded_observations: 0,
+            unrepresentable_units: 0,
+            verified_pairs: 0,
+            disabled_pairs: 0,
+            grouping: SemanticGroupingStats::default(),
+        });
+    };
+    let variant_fingerprint = semantic_variant_fingerprint(variant)?;
+    let answered: BTreeMap<&str, (&SourceUnit, &semantic::Answer)> = sources
+        .iter()
+        .zip(&asked.per_source)
+        .filter_map(|(source, answer)| Some((source.relative_path.to_str()?, (source, answer))))
+        .collect();
+    let mut units = Vec::new();
+    let mut registered_observations = 0_usize;
+    let mut excluded_observations = 0_usize;
+    let mut unrepresentable_units = 0_usize;
+    for (unit_index, unit) in analysis.units.iter().enumerate() {
+        let Some(file) = files.get(unit.file) else {
+            continue;
+        };
+        let Some((source, answer)) = answered.get(file.relative_path.as_str()) else {
+            continue;
+        };
+        let Some(ir) = answer.analysis() else {
+            continue;
+        };
+        let spelling = ir.spelling(&source.absolute_path);
+        let normalized = semantic::registered_sog_in_range(
+            ir,
+            &spelling,
+            file.language,
+            variant_fingerprint,
+            Some(unit.range),
+        )
+        .with_context(|| {
+            format!(
+                "normalizing registered semantic APIs in {}:{}-{}",
+                file.relative_path, unit.start_line, unit.end_line
+            )
+        })?;
+        excluded_observations =
+            excluded_observations.saturating_add(normalized.excluded_observations);
+        let Some(graph) = normalized.graph.as_ref() else {
+            unrepresentable_units = unrepresentable_units.saturating_add(1);
+            continue;
+        };
+        registered_observations = registered_observations.saturating_add(graph.nodes.len());
+        let normalization_confidence =
+            normalization_confidence(graph.nodes.len(), normalized.excluded_observations);
+        let windows = registered_semantic_windows(&normalized).with_context(|| {
+            format!(
+                "extracting bounded registered semantic windows in {}:{}-{}",
+                file.relative_path, unit.start_line, unit.end_line
+            )
+        })?;
+        if windows.is_empty() {
+            unrepresentable_units = unrepresentable_units.saturating_add(1);
+        }
+        let Some(ir) = irs.get(unit.file) else {
+            continue;
+        };
+        for window in windows {
+            let range = ByteRange {
+                start: usize::try_from(window.source_range.start)
+                    .context("semantic source range start exceeds this platform")?,
+                end: usize::try_from(window.source_range.end)
+                    .context("semantic source range end exceeds this platform")?,
+            };
+            let (start_line, end_line, token_count) = semantic_window_location(ir, unit, range);
+            let content = stable_id::semantic_fragment_fingerprint(variant, &window.graph);
+            units.push(SemanticUnitGraph {
+                unit: unit_index,
+                range,
+                start_line,
+                end_line,
+                token_count,
+                graph: window.graph,
+                content,
+                normalization_confidence,
+            });
+        }
+    }
+    let graphs: Vec<_> = units.iter().map(|unit| unit.graph.clone()).collect();
+    let max_candidate_pairs = cfg
+        .limits
+        .pair_budget
+        .unwrap_or_else(|| SemanticCandidateConfig::default().max_candidate_pairs);
+    let candidates = extract_registered_candidates(
+        &graphs,
+        SemanticCandidateConfig {
+            max_bucket_members: SemanticCandidateConfig::default().max_bucket_members,
+            max_candidate_pairs,
+        },
+    );
+    let verified = verify_registered_candidates(&graphs, &candidates.pairs);
+    let verified_pairs = verified.len();
+    let disabled_pairs = verified
+        .iter()
+        .filter(|(_, matched)| !cfg.semantic.enabled(matched.rule.id))
+        .count();
+    let enabled = verified
+        .into_iter()
+        .filter(|(_, matched)| cfg.semantic.enabled(matched.rule.id))
+        .map(|(candidate, matched)| VerifiedSemanticPair { candidate, matched })
+        .collect::<Vec<_>>();
+    let grouping_units = units
+        .iter()
+        .map(|unit| SemanticGroupingUnit {
+            key: *unit.content.as_bytes(),
+        })
+        .collect::<Vec<_>>();
+    let grouped =
+        group_verified_semantic_pairs(&grouping_units, &enabled, &GroupingConfig::default());
+    let grouping = grouped.stats.clone();
+    let mut groups = grouped
+        .groups
+        .into_iter()
+        .map(|group| {
+            let members = group
+                .members
+                .into_iter()
+                .map(|index| units[index].clone())
+                .collect::<Vec<_>>();
+            SemanticGroup {
+                canonical: units[group.canonical].clone(),
+                semantic_confidence: semantic_group_confidence(group.rule.confidence, &members),
+                members,
+                rule: group.rule,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut pairs = grouped
+        .ungrouped
+        .into_iter()
+        .map(|ungrouped| semantic_pair_from_indices(&units, ungrouped.pair))
+        .collect::<Vec<_>>();
+    groups.sort_by(|left, right| {
+        (left.canonical.content, left.rule.id, left.members.len()).cmp(&(
+            right.canonical.content,
+            right.rule.id,
+            right.members.len(),
+        ))
+    });
+    pairs.sort_by(|left, right| {
+        (
+            left.canonical.content,
+            left.corresponding.content,
+            left.rule.id,
+        )
+            .cmp(&(
+                right.canonical.content,
+                right.corresponding.content,
+                right.rule.id,
+            ))
+    });
+    Ok(SemanticDetection {
+        groups,
+        pairs,
+        units,
+        candidates: candidates.stats,
+        registered_observations,
+        excluded_observations,
+        unrepresentable_units,
+        verified_pairs,
+        disabled_pairs,
+        grouping,
+    })
+}
+
+/// Build one pair finding from a verified relation the semantic grouping could
+/// not express as a cohesive group.
+fn semantic_pair_from_indices(
+    units: &[SemanticUnitGraph],
+    verified: VerifiedSemanticPair,
+) -> SemanticPair {
+    let left = units[verified.candidate.left].clone();
+    let right = units[verified.candidate.right].clone();
+    let pair_confidence = semantic_confidence(
+        verified.matched.rule.confidence,
+        left.normalization_confidence,
+        right.normalization_confidence,
+    );
+    let (canonical, corresponding) = if (left.content, left.unit) <= (right.content, right.unit) {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    SemanticPair {
+        semantic_confidence: pair_confidence,
+        canonical,
+        corresponding,
+        rule: verified.matched.rule,
+    }
+}
+
+/// Coverage of one unit by the closed operation registry.
+///
+/// A call the registry does not recognise cannot be assumed irrelevant, so it
+/// lowers only confidence. It never changes candidate extraction or rule
+/// matching: doing so would turn incomplete helper evidence into a different
+/// semantic claim.
+fn normalization_confidence(registered: usize, excluded: usize) -> f64 {
+    let total = registered.saturating_add(excluded);
+    if total == 0 {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    {
+        registered as f64 / total as f64
+    }
+}
+
+/// Translate one semantic byte window into report coordinates using the
+/// already-parsed token stream. Empty point spans retain their host unit's
+/// location, which is the compatibility path for adapters without full
+/// anchors; current compiler adapters always provide non-empty spans.
+fn semantic_window_location(
+    ir: &SyntaxIrFile,
+    host: &StructuralUnit,
+    range: ByteRange,
+) -> (u32, u32, usize) {
+    let tokens = ir
+        .tokens
+        .get(host.token_start..host.token_end)
+        .unwrap_or_default();
+    let mut matching = tokens
+        .iter()
+        .filter(|token| token.span.start_byte < range.end && range.start < token.span.end_byte);
+    let Some(first) = matching.next() else {
+        return (host.start_line, host.end_line, 0);
+    };
+    let mut end_line = first.span.start_line;
+    let mut token_count = 1;
+    for token in matching {
+        end_line = token.span.start_line;
+        token_count += 1;
+    }
+    (first.span.start_line, end_line, token_count)
+}
+
+/// Combine a rule's measured base confidence with non-authoritative coverage
+/// evidence. Missing data-flow or CFG evidence is intentionally absent here:
+/// it may adjust future confidence but must never be required for a finding.
+fn semantic_confidence(rule_confidence: f64, left: f64, right: f64) -> f64 {
+    rule_confidence * left.min(right)
+}
+
+/// Apply one rule's confidence to the least-complete member of a cohesive
+/// semantic group. Every relation was independently verified; coverage only
+/// communicates how much registered evidence each graph retained.
+fn semantic_group_confidence(rule_confidence: f64, members: &[SemanticUnitGraph]) -> f64 {
+    let coverage = members
+        .iter()
+        .map(|member| member.normalization_confidence)
+        .fold(1.0_f64, f64::min);
+    rule_confidence * coverage
+}
+
+/// Select the narrowest truthful scope for a semantic finding.
+fn semantic_scope<'a>(
+    members: impl IntoIterator<Item = &'a SemanticUnitGraph>,
+    analysis: &StructuralReport,
+) -> CloneScope {
+    if members
+        .into_iter()
+        .all(|member| analysis.units[member.unit].range == member.range)
+    {
+        CloneScope::Unit
+    } else {
+        CloneScope::Fragment
+    }
+}
+
+/// Assign stable per-host occurrence ranks without making source positions an
+/// input to a semantic content or group fingerprint.
+fn semantic_member_ranks<'a>(members: impl IntoIterator<Item = &'a SemanticUnitGraph>) -> Vec<u32> {
+    let members: Vec<_> = members.into_iter().collect();
+    let mut ordered: Vec<_> = members.iter().enumerate().collect();
+    ordered.sort_by_key(|(_, member)| (member.unit, member.range, member.content));
+    let mut ranks = vec![0_u32; members.len()];
+    let mut next_by_unit = BTreeMap::new();
+    for (position, member) in ordered {
+        let rank = next_by_unit.entry(member.unit).or_insert(0_u32);
+        ranks[position] = *rank;
+        *rank = rank.saturating_add(1);
+    }
+    ranks
+}
+
+/// Decode the full 256-bit `BuildVariant` identity that SOG stores as bytes.
+fn semantic_variant_fingerprint(variant: &BuildVariant) -> Result<[u8; 32]> {
+    let hex = variant.fingerprint();
+    let mut bytes = [0_u8; 32];
+    if hex.len() != bytes.len() * 2 {
+        bail!("BuildVariant fingerprint {hex:?} is not 256-bit hex");
+    }
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        let start = index * 2;
+        let end = start + 2;
+        *byte = u8::from_str_radix(&hex[start..end], 16)
+            .with_context(|| format!("BuildVariant fingerprint {hex:?} is not hexadecimal"))?;
+    }
+    Ok(bytes)
 }
 
 /// What the compilers managed to say about the tree, as the report puts it.
@@ -759,6 +1965,30 @@ impl StructuralRules {
         first
     }
 
+    /// The rule suppressing a semantic finding: each partial window is judged
+    /// at its own line range while retaining the host unit for symbol rules.
+    fn semantic_rule<'a>(
+        &self,
+        members: impl Iterator<Item = &'a SemanticUnitGraph>,
+        analysis: &StructuralReport,
+        local_units: &[usize],
+    ) -> Option<usize> {
+        let mut first = None;
+        for member in members {
+            let unit = &analysis.units[member.unit];
+            let rule = self.rules.member_rule(
+                &self.files[unit.file],
+                member.start_line,
+                member.end_line,
+                Some(local_units[member.unit]),
+            )?;
+            if first.is_none() {
+                first = Some(rule);
+            }
+        }
+        first
+    }
+
     /// The rule hiding a whole duplicated run: present only when *every*
     /// occurrence is suppressed, evaluated at the occurrence's own line span
     /// inside its host unit.
@@ -825,18 +2055,29 @@ struct SuppressionVerdicts {
     regions: Vec<Option<usize>>,
     /// Parallel to the verified pairs no group could hold.
     pairs: Vec<Option<usize>>,
+    /// Parallel to the registered restricted-semantic correspondences.
+    semantic_pairs: Vec<Option<usize>>,
+    /// Parallel to cohesive registered restricted-semantic groups.
+    semantic_groups: Vec<Option<usize>>,
 }
 
 /// Evaluate the configured suppression against everything the report lists.
 ///
-/// The three kinds of finding are judged by the same rules read at their own
+/// Every kind of finding is judged by the same rules read at its own
 /// place in the code: a marker or a path glob is an instruction about where
 /// code sits, and a run or a pair sits somewhere as much as a group does.
+#[allow(
+    clippy::too_many_lines,
+    reason = "suppression precedence for each finding shape is intentionally visible in one audit boundary"
+)]
 fn evaluate_suppression(
     cfg: &Config,
     rules: &mut StructuralRules,
     analysis: &StructuralReport,
     regions: &ReportableRegions,
+    semantic_groups: &[SemanticGroup],
+    semantic_pairs: &[SemanticPair],
+    variant: &BuildVariant,
 ) -> SuppressionVerdicts {
     let hidden = hidden_boilerplate(&mut rules.rules, &cfg.suppression.boilerplate, analysis);
     let hidden_width_family = hidden_width_family(&mut rules.rules, cfg, analysis);
@@ -901,10 +2142,64 @@ fn evaluate_suppression(
                 .or_else(|| rules.rules.baseline_rule(&pair.fingerprint.to_hex()))
         })
         .collect();
+    let semantic_pairs = semantic_pairs
+        .iter()
+        .map(|pair| {
+            let fingerprint = stable_id::semantic_clone_group_fingerprint(
+                variant,
+                pair.rule.id,
+                pair.rule.version,
+                &[pair.canonical.content, pair.corresponding.content],
+            );
+            let members = [&pair.canonical, &pair.corresponding];
+            rules
+                .rules
+                .clone_id_rule(&fingerprint.to_hex())
+                .or_else(|| rules.semantic_rule(members.into_iter(), analysis, &local_units))
+                .or_else(|| {
+                    hidden_test_code.filter(|_| {
+                        members
+                            .iter()
+                            .all(|member| analysis.units[member.unit].test_code)
+                    })
+                })
+                .or_else(|| rules.rules.baseline_rule(&fingerprint.to_hex()))
+        })
+        .collect();
+    let semantic_groups = semantic_groups
+        .iter()
+        .map(|group| {
+            let fingerprint = stable_id::semantic_clone_group_fingerprint(
+                variant,
+                group.rule.id,
+                group.rule.version,
+                &group
+                    .members
+                    .iter()
+                    .map(|member| member.content)
+                    .collect::<Vec<_>>(),
+            );
+            let members = group.members.iter();
+            rules
+                .rules
+                .clone_id_rule(&fingerprint.to_hex())
+                .or_else(|| rules.semantic_rule(members.clone(), analysis, &local_units))
+                .or_else(|| {
+                    hidden_test_code.filter(|_| {
+                        members
+                            .clone()
+                            .all(|member| analysis.units[member.unit].test_code)
+                    })
+                })
+                .or_else(|| rules.rules.baseline_rule(&fingerprint.to_hex()))
+        })
+        .collect();
     SuppressionVerdicts {
         groups,
         regions: region_verdicts,
         pairs,
+        semantic_pairs,
+        semantic_groups,
     }
 }
 
@@ -1112,6 +2407,13 @@ struct ReportInputs<'a> {
     files: &'a [SourceMeta],
     irs: &'a [SyntaxIrFile],
     analysis: &'a StructuralReport,
+    /// Cohesive registered-rule findings from complete-linkage refinement.
+    semantic_groups: &'a [SemanticGroup],
+    /// Explainable restricted-semantic correspondences produced from compiler
+    /// facts for this exact `BuildVariant`.
+    semantic_pairs: &'a [SemanticPair],
+    /// Bounded-candidate accounting for the restricted-semantic branch.
+    semantic_detection: &'a SemanticDetection,
     rules: &'a suppress::Rules,
     group_suppressed: &'a [Option<usize>],
     /// The duplicated runs the report lists.
@@ -1125,14 +2427,17 @@ struct ReportInputs<'a> {
     /// The rule hiding each verified pair no group could hold, parallel to
     /// the analysis's own list of them.
     pair_suppressed: &'a [Option<usize>],
+    /// The rule hiding each restricted-semantic pair, parallel to
+    /// [`Self::semantic_pairs`].
+    semantic_pair_suppressed: &'a [Option<usize>],
+    /// The rule hiding each cohesive semantic group, parallel to
+    /// [`Self::semantic_groups`].
+    semantic_group_suppressed: &'a [Option<usize>],
     /// Literal strategy the group content is scored under.
     literals: LiteralNorm,
     glob_excluded: usize,
     unreadable: u64,
     timed_out: u64,
-    /// What moved since the previous scan of this tree, when comparable.
-    changes: Option<report::TreeChanges>,
-    audit: Option<report::AuditSummary>,
     /// How the run weighs the priority measures against one another.
     weights: Weights,
     /// The run's minimum clone length, which the ranking reads sizes against.
@@ -1156,6 +2461,8 @@ impl ReportInputs<'_> {
             .iter()
             .chain(self.region_suppressed)
             .chain(self.pair_suppressed)
+            .chain(self.semantic_pair_suppressed)
+            .chain(self.semantic_group_suppressed)
             .filter_map(|rule| *rule)
             .collect();
         self.rules
@@ -1221,9 +2528,212 @@ fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
         .chain(
             (0..inputs.analysis.unrepresented.len()).map(|index| build_split_pair(inputs, index)),
         )
+        .chain((0..inputs.semantic_groups.len()).map(|index| build_semantic_group(inputs, index)))
+        .chain((0..inputs.semantic_pairs.len()).map(|index| build_semantic_pair(inputs, index)))
         .collect();
     report::order(&mut entries, inputs.suppression);
     entries
+}
+
+/// Turn one verified semantic relation left outside every cohesive group into
+/// a split-pair restricted semantic finding.
+fn build_semantic_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
+    let pair = &inputs.semantic_pairs[index];
+    let fingerprint = stable_id::semantic_clone_group_fingerprint(
+        inputs.variant,
+        pair.rule.id,
+        pair.rule.version,
+        &[pair.canonical.content, pair.corresponding.content],
+    );
+    let members = [&pair.canonical, &pair.corresponding];
+    let member_ranks = semantic_member_ranks(members.iter().copied());
+    let node_mappings = (0..pair.canonical.graph.nodes.len())
+        .filter_map(|index| {
+            let index = u32::try_from(index).ok()?;
+            Some(report::SemanticNodeMapping {
+                corresponding_member: 1,
+                canonical: index,
+                corresponding: index,
+            })
+        })
+        .collect();
+    let mut group = report::ranked(
+        report::Group {
+            fingerprint: fingerprint.to_hex(),
+            clone_type: codehelion_core::clone_class::CloneClass::RestrictedSemantic
+                .name()
+                .to_string(),
+            scope: semantic_scope(members.iter().copied(), inputs.analysis)
+                .name()
+                .to_string(),
+            statements: None,
+            confidence: pair.semantic_confidence,
+            priority: report::Priority::unranked(),
+            similarity: None,
+            boilerplate: None,
+            test_code: members
+                .iter()
+                .all(|member| inputs.analysis.units[member.unit].test_code),
+            width_family: false,
+            split_pair: true,
+            suppressed: inputs.semantic_pair_suppressed[index].map(|rule| inputs.suppression(rule)),
+            semantic: Some(report::SemanticEvidence {
+                schema_version: pair.canonical.graph.schema_version.clone(),
+                rules: vec![report::SemanticRuleEvidence {
+                    id: pair.rule.id.to_string(),
+                    version: pair.rule.version,
+                    confidence: pair.semantic_confidence,
+                }],
+                graphs: vec![
+                    pair.canonical.graph.clone(),
+                    pair.corresponding.graph.clone(),
+                ],
+                node_mappings,
+            }),
+            members: members
+                .iter()
+                .enumerate()
+                .map(|(position, member)| {
+                    let unit = &inputs.analysis.units[member.unit];
+                    let file = &inputs.files[unit.file];
+                    report::Member {
+                        finding_id: stable_id::finding_id(
+                            &fingerprint,
+                            Some(&unit.fingerprint),
+                            member_ranks[position],
+                        )
+                        .to_hex(),
+                        content: member.content.to_hex(),
+                        file: file.relative_path.clone(),
+                        language: file.language.name().to_string(),
+                        start_line: member.start_line,
+                        end_line: member.end_line,
+                        unit: unit.name.as_deref().map(ToString::to_string),
+                        tokens: u64::try_from(member.token_count).unwrap_or(u64::MAX),
+                        canonical: position == 0,
+                    }
+                })
+                .collect(),
+        },
+        &inputs.weights,
+        inputs.min_clone_tokens,
+    );
+    group.priority.semantic_confidence = Some(pair.semantic_confidence);
+    group
+}
+
+/// Turn one complete-linkage semantic group into a restricted semantic
+/// finding. Each mapping names the corresponding member explicitly so a
+/// multi-member group remains explainable after it leaves the scan process.
+fn build_semantic_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
+    let semantic_group = &inputs.semantic_groups[index];
+    let fingerprint = stable_id::semantic_clone_group_fingerprint(
+        inputs.variant,
+        semantic_group.rule.id,
+        semantic_group.rule.version,
+        &semantic_group
+            .members
+            .iter()
+            .map(|member| member.content)
+            .collect::<Vec<_>>(),
+    );
+    let node_mappings = semantic_node_mappings(&semantic_group.canonical, &semantic_group.members);
+    let member_ranks = semantic_member_ranks(semantic_group.members.iter());
+    let mut group = report::ranked(
+        report::Group {
+            fingerprint: fingerprint.to_hex(),
+            clone_type: codehelion_core::clone_class::CloneClass::RestrictedSemantic
+                .name()
+                .to_string(),
+            scope: semantic_scope(semantic_group.members.iter(), inputs.analysis)
+                .name()
+                .to_string(),
+            statements: None,
+            confidence: semantic_group.semantic_confidence,
+            priority: report::Priority::unranked(),
+            similarity: None,
+            boilerplate: None,
+            test_code: semantic_group
+                .members
+                .iter()
+                .all(|member| inputs.analysis.units[member.unit].test_code),
+            width_family: false,
+            split_pair: false,
+            suppressed: inputs.semantic_group_suppressed[index]
+                .map(|rule| inputs.suppression(rule)),
+            semantic: Some(report::SemanticEvidence {
+                schema_version: semantic_group.canonical.graph.schema_version.clone(),
+                rules: vec![report::SemanticRuleEvidence {
+                    id: semantic_group.rule.id.to_string(),
+                    version: semantic_group.rule.version,
+                    confidence: semantic_group.semantic_confidence,
+                }],
+                graphs: semantic_group
+                    .members
+                    .iter()
+                    .map(|member| member.graph.clone())
+                    .collect(),
+                node_mappings,
+            }),
+            members: semantic_group
+                .members
+                .iter()
+                .enumerate()
+                .map(|(position, member)| {
+                    let unit = &inputs.analysis.units[member.unit];
+                    let file = &inputs.files[unit.file];
+                    report::Member {
+                        finding_id: stable_id::finding_id(
+                            &fingerprint,
+                            Some(&unit.fingerprint),
+                            member_ranks[position],
+                        )
+                        .to_hex(),
+                        content: member.content.to_hex(),
+                        file: file.relative_path.clone(),
+                        language: file.language.name().to_string(),
+                        start_line: member.start_line,
+                        end_line: member.end_line,
+                        unit: unit.name.as_ref().map(ToString::to_string),
+                        tokens: u64::try_from(member.token_count).unwrap_or(u64::MAX),
+                        canonical: position == 0,
+                    }
+                })
+                .collect(),
+        },
+        &inputs.weights,
+        inputs.min_clone_tokens,
+    );
+    group.priority.semantic_confidence = Some(semantic_group.semantic_confidence);
+    group
+}
+
+/// Produce explicit canonical-to-member node mappings for an entire cohesive
+/// group. Rules admitted to grouping retain aligned fixed SOG sequences.
+fn semantic_node_mappings(
+    canonical: &SemanticUnitGraph,
+    members: &[SemanticUnitGraph],
+) -> Vec<report::SemanticNodeMapping> {
+    members
+        .iter()
+        .enumerate()
+        .skip(1)
+        .flat_map(|(member, corresponding)| {
+            (0..canonical
+                .graph
+                .nodes
+                .len()
+                .min(corresponding.graph.nodes.len()))
+                .filter_map(move |node| {
+                    let node = u32::try_from(node).ok()?;
+                    Some(report::SemanticNodeMapping {
+                        corresponding_member: u32::try_from(member).ok()?,
+                        canonical: node,
+                        corresponding: node,
+                    })
+                })
+        })
+        .collect()
 }
 
 /// The structural pipeline's pass counts, stage by stage.
@@ -1233,11 +2743,18 @@ fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
 /// folded back into the maximal runs they describe and confirmed against the
 /// tokens they cover. The confirmed-run counts therefore continue the seed
 /// line, not the verified-pair line.
-fn funnel(stats: &structural::StructuralStats) -> Vec<report::FunnelStage> {
+#[allow(
+    clippy::too_many_lines,
+    reason = "the report deliberately presents the entire cross-mode funnel in one ordered definition"
+)]
+fn funnel(
+    stats: &structural::StructuralStats,
+    semantic: &SemanticDetection,
+) -> Vec<report::FunnelStage> {
     let near = &stats.near_match;
     let grouping = &stats.grouping;
     let maximal = &stats.maximal;
-    vec![
+    let mut stages = vec![
         report::FunnelStage::new("units", as_u64(stats.units)),
         report::FunnelStage::new("indexed fragments", as_u64(stats.candidate.fragments))
             .dropping("high_frequency", as_u64(stats.candidate.stop_fingerprints))
@@ -1303,7 +2820,49 @@ fn funnel(stats: &structural::StructuralStats) -> Vec<report::FunnelStage> {
             .dropping("overlapping_occurrence", as_u64(stats.region_overlapping))
             .dropping("adjoining_occurrence", as_u64(stats.region_adjoining))
             .dropping("subsumed", as_u64(stats.region_subsumed)),
-    ]
+    ];
+    let candidates = &semantic.candidates;
+    stages.extend([
+        report::FunnelStage::new(
+            "semantic API observations",
+            as_u64(semantic.registered_observations)
+                .saturating_add(as_u64(semantic.excluded_observations)),
+        )
+        .dropping(
+            "outside_registered_vocabulary",
+            as_u64(semantic.excluded_observations),
+        ),
+        report::FunnelStage::new("semantic graphs", as_u64(candidates.graphs))
+            .dropping("ineligible", as_u64(candidates.ineligible_graphs))
+            .dropping(
+                "no_registered_operations",
+                as_u64(semantic.unrepresentable_units),
+            ),
+        report::FunnelStage::new("semantic candidate pairs", as_u64(candidates.pairs_emitted))
+            .dropping("high_frequency", as_u64(candidates.oversized_buckets))
+            .dropping("pair_budget", as_u64(candidates.pairs_budget_dropped)),
+        report::FunnelStage::new("semantic verified pairs", as_u64(semantic.verified_pairs))
+            .dropping("rule_disabled", as_u64(semantic.disabled_pairs)),
+        report::FunnelStage::new(
+            "semantic pairs represented by groups",
+            as_u64(semantic.grouping.grouped_pairs),
+        ),
+        report::FunnelStage::new("restricted semantic groups", as_u64(semantic.groups.len()))
+            .dropping(
+                "invalid_grouping_input",
+                as_u64(semantic.grouping.invalid_pairs),
+            ),
+        report::FunnelStage::new("restricted semantic pairs", as_u64(semantic.pairs.len()))
+            .dropping(
+                "no_group_holds_both",
+                as_u64(semantic.grouping.ungrouped_pairs),
+            )
+            .dropping(
+                "the_ceiling_cut_the_set",
+                as_u64(semantic.grouping.ceiling_severed_pairs),
+            ),
+    ]);
+    stages
 }
 
 /// Assemble the report model both output formats render from.
@@ -1346,7 +2905,6 @@ fn build_report(
             },
             database: inputs.db_path.display().to_string(),
             run_id,
-            reused: false,
         },
         summary: build_summary(inputs, stored, &groups),
         groups,
@@ -1388,9 +2946,10 @@ fn summary_row(
         // potentially incomplete.
         pair_budget_exhausted: stats.candidate.budget_exhausted
             || stats.near_match.budget_exhausted
-            || stats.control_flow.budget_exhausted,
+            || stats.control_flow.budget_exhausted
+            || inputs.semantic_detection.candidates.pairs_budget_dropped > 0,
         baseline_digest,
-        funnel: report::stored_funnel(&funnel(stats)),
+        funnel: report::stored_funnel(&funnel(stats, inputs.semantic_detection)),
         unused_suppressions: report::stored_rules(&inputs.unused_suppressions()),
     }
 }
@@ -1418,10 +2977,7 @@ fn build_summary(
         c: count(Language::C),
         cpp: count(Language::Cpp),
     };
-    let mut summary = report::restored(files, stored, groups);
-    summary.changes = inputs.changes;
-    summary.audit.clone_from(&inputs.audit);
-    summary
+    report::restored(files, stored, groups)
 }
 
 /// One group of the report model, with its similarity evidence and its
@@ -1446,6 +3002,7 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             width_family: detail.width_family,
             suppressed,
             split_pair: false,
+            semantic: None,
             members: group
                 .members
                 .iter()
@@ -1525,6 +3082,7 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             width_family: false,
             suppressed,
             split_pair: true,
+            semantic: None,
             members: members
                 .iter()
                 .zip(ranks_within_host(member_hosts(
@@ -1587,6 +3145,7 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             width_family: false,
             suppressed: inputs.region_suppressed[index].map(|rule| inputs.suppression(rule)),
             split_pair: false,
+            semantic: None,
             members: region
                 .occurrences
                 .iter()
@@ -1721,6 +3280,19 @@ pub(crate) fn detector_versions(weights: Weights, literals: LiteralNorm) -> Vec<
         ("verify-weights".to_string(), WEIGHT_VERSION.to_string()),
         ("boilerplate".to_string(), BOILERPLATE_VERSION.to_string()),
         ("test-code".to_string(), TEST_CODE_VERSION.to_string()),
+        ("sog-schema".to_string(), SOG_SCHEMA_VERSION.to_string()),
+        (
+            "semantic-candidate-index".to_string(),
+            SEMANTIC_CANDIDATE_INDEX_VERSION.to_string(),
+        ),
+        (
+            "semantic-windowing".to_string(),
+            SEMANTIC_WINDOWING_VERSION.to_string(),
+        ),
+        (
+            "semantic-rule-registry".to_string(),
+            SEMANTIC_RULE_REGISTRY_VERSION.to_string(),
+        ),
         (
             "frontend.rust".to_string(),
             codehelion_frontend_rust::ir::STRUCTURAL_FRONTEND_VERSION.to_string(),
@@ -1744,11 +3316,10 @@ fn record(
     files: Vec<FileRow>,
     summary: &SummaryRow,
     asked: Option<&semantic::Answers>,
-) -> Result<(i64, Option<report::AuditSummary>)> {
-    let (units, mut groups) = snapshot_rows(inputs, ranked)?;
+    replace_existing: bool,
+) -> Result<i64> {
+    let (units, groups) = snapshot_rows(inputs, ranked)?;
     let mut store = open_store(inputs.db_path)?;
-    let audit =
-        crate::scan::attach_history(&store, inputs.root, inputs.variant, &units, &mut groups)?;
     let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
     let detector_versions = detector_versions(
         cfg.priority.weights(),
@@ -1779,7 +3350,9 @@ fn record(
         compiler_units,
         summary: summary.clone(),
     };
-    Ok((store.record_snapshot(&snapshot)?, audit))
+    store
+        .record_snapshot_part(&snapshot, replace_existing)
+        .map_err(Into::into)
 }
 
 /// What a compiler said about the tree, as the snapshot records it.
@@ -1868,6 +3441,15 @@ fn snapshot_rows(
             host_index.entry(member).or_insert(0);
         }
     }
+    for pair in inputs.semantic_pairs {
+        host_index.entry(pair.canonical.unit).or_insert(0);
+        host_index.entry(pair.corresponding.unit).or_insert(0);
+    }
+    for group in inputs.semantic_groups {
+        for member in &group.members {
+            host_index.entry(member.unit).or_insert(0);
+        }
+    }
     let mut units = Vec::with_capacity(host_index.len());
     for (row, (unit_index, slot)) in host_index.iter_mut().enumerate() {
         *slot = row;
@@ -1891,12 +3473,243 @@ fn snapshot_rows(
     let split_pairs = (0..inputs.analysis.unrepresented.len())
         .map(|index| split_pair_row(inputs, index, &host_index, &ranking))
         .collect::<Result<Vec<_>>>()?;
+    let semantic_pairs = (0..inputs.semantic_pairs.len())
+        .map(|index| semantic_pair_row(inputs, index, &host_index, &ranking))
+        .collect::<Result<Vec<_>>>()?;
+    let semantic_groups = (0..inputs.semantic_groups.len())
+        .map(|index| semantic_group_row(inputs, index, &host_index, &ranking))
+        .collect::<Result<Vec<_>>>()?;
     let groups = (0..inputs.analysis.groups.groups.len())
         .map(|index| unit_group_row(inputs, index, &host_index, &ranking))
         .chain(regions.into_iter().map(Ok))
         .chain(split_pairs.into_iter().map(Ok))
+        .chain(semantic_groups.into_iter().map(Ok))
+        .chain(semantic_pairs.into_iter().map(Ok))
         .collect::<Result<Vec<_>>>()?;
     Ok((units, groups))
+}
+
+/// Store one restricted semantic pair with its normalized graphs and rule
+/// evidence. It remains a pair for the same non-transitivity reason the
+/// report names with `split_pair`.
+fn semantic_pair_row(
+    inputs: &ReportInputs<'_>,
+    index: usize,
+    host_index: &BTreeMap<usize, usize>,
+    ranking: &BTreeMap<&str, &report::Priority>,
+) -> Result<GroupRow> {
+    let pair = &inputs.semantic_pairs[index];
+    let fingerprint = stable_id::semantic_clone_group_fingerprint(
+        inputs.variant,
+        pair.rule.id,
+        pair.rule.version,
+        &[pair.canonical.content, pair.corresponding.content],
+    );
+    let members = [&pair.canonical, &pair.corresponding];
+    let member_ranks = semantic_member_ranks(members.iter().copied());
+    let graph_json = members
+        .iter()
+        .map(|member| {
+            serde_json::to_string(&member.graph).with_context(|| {
+                format!(
+                    "serializing normalized SOG for {}",
+                    inputs.files[inputs.analysis.units[member.unit].file].relative_path
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let node_mappings = (0..pair.canonical.graph.nodes.len())
+        .filter_map(|index| {
+            let index = u32::try_from(index).ok()?;
+            Some(SemanticNodeMappingRow {
+                corresponding_member: 1,
+                canonical: index,
+                corresponding: index,
+            })
+        })
+        .collect();
+    let canonical_unit = &inputs.analysis.units[pair.canonical.unit];
+    Ok(GroupRow {
+        fingerprint,
+        clone_type: codehelion_core::clone_class::CloneClass::RestrictedSemantic,
+        member_scope: semantic_scope(members.iter().copied(), inputs.analysis),
+        statements: None,
+        test_code: members
+            .iter()
+            .all(|member| inputs.analysis.units[member.unit].test_code),
+        split_pair: true,
+        score: pair.semantic_confidence,
+        entropy_bits: engine::content_entropy_bits(
+            inputs.unit_tokens(canonical_unit),
+            inputs.literals,
+        ),
+        suppress_reason: inputs.semantic_pair_suppressed[index]
+            .map(|rule| inputs.rules.rows[rule].pattern.clone()),
+        boilerplate: None,
+        width_family: false,
+        suppressed_by: inputs.semantic_pair_suppressed[index],
+        priority: recorded_ranking(ranking, &fingerprint.to_hex())?,
+        similarity: None,
+        semantic: Some(SemanticEvidenceRow {
+            schema_version: pair.canonical.graph.schema_version.clone(),
+            rule_id: pair.rule.id.to_string(),
+            rule_version: pair.rule.version,
+            rule_confidence: pair.semantic_confidence,
+            graphs: graph_json
+                .into_iter()
+                .map(|graph_json| SemanticOperationGraphRow {
+                    schema_version: pair.canonical.graph.schema_version.clone(),
+                    graph_json,
+                })
+                .collect(),
+            node_mappings,
+        }),
+        members: members
+            .iter()
+            .enumerate()
+            .map(|(position, member)| {
+                let unit = &inputs.analysis.units[member.unit];
+                let file = &inputs.files[unit.file];
+                MemberRow {
+                    content: member.content,
+                    finding: stable_id::finding_id(
+                        &fingerprint,
+                        Some(&unit.fingerprint),
+                        member_ranks[position],
+                    ),
+                    language: file.language,
+                    host_unit: Some(host_index[&member.unit]),
+                    file_path: file.relative_path.clone(),
+                    start_line: member.start_line,
+                    end_line: member.end_line,
+                    token_count: member.token_count,
+                }
+            })
+            .collect(),
+    })
+}
+
+/// Store one cohesive restricted-semantic group with member-qualified SOG
+/// node correspondences.
+fn semantic_group_row(
+    inputs: &ReportInputs<'_>,
+    index: usize,
+    host_index: &BTreeMap<usize, usize>,
+    ranking: &BTreeMap<&str, &report::Priority>,
+) -> Result<GroupRow> {
+    let group = &inputs.semantic_groups[index];
+    let fingerprint = stable_id::semantic_clone_group_fingerprint(
+        inputs.variant,
+        group.rule.id,
+        group.rule.version,
+        &group
+            .members
+            .iter()
+            .map(|member| member.content)
+            .collect::<Vec<_>>(),
+    );
+    let graph_json = group
+        .members
+        .iter()
+        .map(|member| {
+            serde_json::to_string(&member.graph).with_context(|| {
+                format!(
+                    "serializing normalized SOG for {}",
+                    inputs.files[inputs.analysis.units[member.unit].file].relative_path
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let node_mappings = semantic_store_node_mappings(&group.canonical, &group.members);
+    let member_ranks = semantic_member_ranks(group.members.iter());
+    let canonical_unit = &inputs.analysis.units[group.canonical.unit];
+    Ok(GroupRow {
+        fingerprint,
+        clone_type: codehelion_core::clone_class::CloneClass::RestrictedSemantic,
+        member_scope: semantic_scope(group.members.iter(), inputs.analysis),
+        statements: None,
+        test_code: group
+            .members
+            .iter()
+            .all(|member| inputs.analysis.units[member.unit].test_code),
+        split_pair: false,
+        score: group.semantic_confidence,
+        entropy_bits: engine::content_entropy_bits(
+            inputs.unit_tokens(canonical_unit),
+            inputs.literals,
+        ),
+        suppress_reason: inputs.semantic_group_suppressed[index]
+            .map(|rule| inputs.rules.rows[rule].pattern.clone()),
+        boilerplate: None,
+        width_family: false,
+        suppressed_by: inputs.semantic_group_suppressed[index],
+        priority: recorded_ranking(ranking, &fingerprint.to_hex())?,
+        similarity: None,
+        semantic: Some(SemanticEvidenceRow {
+            schema_version: group.canonical.graph.schema_version.clone(),
+            rule_id: group.rule.id.to_string(),
+            rule_version: group.rule.version,
+            rule_confidence: group.semantic_confidence,
+            graphs: graph_json
+                .into_iter()
+                .map(|graph_json| SemanticOperationGraphRow {
+                    schema_version: group.canonical.graph.schema_version.clone(),
+                    graph_json,
+                })
+                .collect(),
+            node_mappings,
+        }),
+        members: group
+            .members
+            .iter()
+            .enumerate()
+            .map(|(position, member)| {
+                let unit = &inputs.analysis.units[member.unit];
+                let file = &inputs.files[unit.file];
+                MemberRow {
+                    content: member.content,
+                    finding: stable_id::finding_id(
+                        &fingerprint,
+                        Some(&unit.fingerprint),
+                        member_ranks[position],
+                    ),
+                    language: file.language,
+                    host_unit: Some(host_index[&member.unit]),
+                    file_path: file.relative_path.clone(),
+                    start_line: member.start_line,
+                    end_line: member.end_line,
+                    token_count: member.token_count,
+                }
+            })
+            .collect(),
+    })
+}
+
+/// Store canonical node correspondences once for each non-canonical member.
+fn semantic_store_node_mappings(
+    canonical: &SemanticUnitGraph,
+    members: &[SemanticUnitGraph],
+) -> Vec<SemanticNodeMappingRow> {
+    members
+        .iter()
+        .enumerate()
+        .skip(1)
+        .flat_map(|(member, corresponding)| {
+            (0..canonical
+                .graph
+                .nodes
+                .len()
+                .min(corresponding.graph.nodes.len()))
+                .filter_map(move |node| {
+                    let node = u32::try_from(node).ok()?;
+                    Some(SemanticNodeMappingRow {
+                        corresponding_member: u32::try_from(member).ok()?,
+                        canonical: node,
+                        corresponding: node,
+                    })
+                })
+        })
+        .collect()
 }
 
 /// One duplicated-unit group as a store row, with its occurrences.
@@ -1916,7 +3729,6 @@ fn unit_group_row(
     let medoid = &inputs.analysis.units[group.canonical];
     Ok(GroupRow {
         fingerprint: detail.fingerprint,
-        history: GroupOrigin::unconnected(&detail.fingerprint),
         clone_type: group.clone_type,
         member_scope: CloneScope::Unit,
         statements: None,
@@ -1931,6 +3743,7 @@ fn unit_group_row(
         suppressed_by: inputs.group_suppressed[index],
         priority: recorded_ranking(ranking, &detail.fingerprint.to_hex())?,
         similarity: Some(breakdown_row(group, detail)),
+        semantic: None,
         members: group
             .members
             .iter()
@@ -1990,7 +3803,6 @@ fn split_pair_row(
     let canonical = &inputs.analysis.units[pair.canonical];
     Ok(GroupRow {
         fingerprint: pair.fingerprint,
-        history: GroupOrigin::unconnected(&pair.fingerprint),
         clone_type: pair.class,
         member_scope: CloneScope::Unit,
         statements: None,
@@ -2010,6 +3822,7 @@ fn split_pair_row(
         // not re-run against a medoid, so there is no per-dimension row to
         // record without inventing one.
         similarity: None,
+        semantic: None,
         members: pair_members(pair)
             .iter()
             .zip(ranks_within_host(member_hosts(
@@ -2054,7 +3867,6 @@ fn region_row(
         });
     Ok(GroupRow {
         fingerprint: region.fingerprint,
-        history: GroupOrigin::unconnected(&region.fingerprint),
         clone_type: region.clone_type,
         member_scope: CloneScope::Fragment,
         statements: Some(region.statements),
@@ -2068,6 +3880,7 @@ fn region_row(
         suppressed_by: inputs.region_suppressed[index],
         priority: recorded_ranking(ranking, &region.fingerprint.to_hex())?,
         similarity: None,
+        semantic: None,
         members: region
             .occurrences
             .iter()
@@ -2114,10 +3927,15 @@ fn breakdown_row(group: &StructuralGroup, detail: &GroupDetail) -> SimilarityBre
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        Compilers, Config, ExecutionPolicy, Language, LanguageSelection, ScanArgs,
-        StructuralConfig, run_with, structural_config,
+        Compilers, Config, CrossLanguageCandidateInput, ExecutionPolicy, Language,
+        LanguageSelection, SandboxRequest, ScanArgs, SemanticCandidateConfig,
+        SemanticOperationGraph, StructuralConfig, enabled_cross_language_matches,
+        extract_cross_language_candidates, run_with, semantic_sandbox, structural_config,
+        verify_cross_language_candidates,
     };
     use crate::cli::{Format, Mode};
+    use codehelion_core::semantic::{OperationAttributes, OperationKind, OperationNode};
+    use std::path::PathBuf;
 
     /// Whether a helper is installed is a property of the machine, so what is
     /// fixed here is the pairing: without one, the message names the programs
@@ -2125,7 +3943,7 @@ mod tests {
     /// knows which compiler answered.
     #[test]
     fn a_run_that_needs_a_compiler_says_which_program_supplies_it() {
-        match Compilers::found(&ExecutionPolicy::deny_all()) {
+        match Compilers::found(&ExecutionPolicy::deny_all(), SandboxRequest::unrestricted()) {
             Err(error) => {
                 let text = format!("{error:#}");
                 assert!(
@@ -2144,13 +3962,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn untrusted_semantic_requires_an_enforceable_memory_limit() {
+        let args = ScanArgs {
+            path: PathBuf::from("."),
+            mode: Mode::Semantic,
+            format: Format::Text,
+            output: None,
+            config: None,
+            no_ignore: false,
+            jobs: None,
+            db: None,
+            baseline: None,
+            allow_execution: None,
+            compare_build_variants: false,
+            compare_languages: false,
+            show_suppressed: false,
+            verbose: false,
+            fail_on_findings: false,
+            untrusted: true,
+        };
+        let error = semantic_sandbox(&args).expect_err("portable build cannot enforce it");
+        assert!(
+            format!("{error:#}").contains("OS memory containment is unavailable"),
+            "{error:#}"
+        );
+    }
+
     /// A helper that reads none of the languages the tree holds has nothing to
     /// answer about, and a run that counted it would file its results under a
     /// compiler that never saw the project — giving one tree two identities
     /// depending on what happens to be installed beside the scanner.
     #[test]
     fn a_helper_that_reads_nothing_in_this_tree_is_not_part_of_the_run() {
-        let Ok(compilers) = Compilers::found(&ExecutionPolicy::deny_all()) else {
+        let Ok(compilers) =
+            Compilers::found(&ExecutionPolicy::deny_all(), SandboxRequest::unrestricted())
+        else {
             return;
         };
         let rust_only = LanguageSelection {
@@ -2184,13 +4031,16 @@ mod tests {
             db: Some(dir.path().join("audit.db")),
             baseline: None,
             allow_execution: None,
-            no_reuse: false,
+            compare_build_variants: false,
+            compare_languages: false,
             show_suppressed: false,
             verbose: false,
             fail_on_findings: false,
             untrusted: false,
         };
-        let Ok(compilers) = Compilers::found(&ExecutionPolicy::deny_all()) else {
+        let Ok(compilers) =
+            Compilers::found(&ExecutionPolicy::deny_all(), SandboxRequest::unrestricted())
+        else {
             return;
         };
         let mut out = Vec::new();
@@ -2243,5 +4093,121 @@ mod tests {
         ] {
             assert_eq!(budget, 11);
         }
+    }
+
+    #[test]
+    fn semantic_candidate_cuts_are_visible_in_the_shared_funnel() {
+        let detection = super::SemanticDetection {
+            groups: Vec::new(),
+            pairs: Vec::new(),
+            units: Vec::new(),
+            candidates: codehelion_core::semantic::SemanticCandidateStats {
+                graphs: 8,
+                ineligible_graphs: 2,
+                buckets: 3,
+                oversized_buckets: 1,
+                pairs_available: 9,
+                pairs_budget_dropped: 4,
+                pairs_emitted: 5,
+            },
+            registered_observations: 8,
+            excluded_observations: 6,
+            unrepresentable_units: 2,
+            verified_pairs: 3,
+            disabled_pairs: 1,
+            grouping: codehelion_core::semantic::SemanticGroupingStats::default(),
+        };
+        let funnel = super::funnel(
+            &codehelion_core::structural::StructuralStats::default(),
+            &detection,
+        );
+        let candidate = funnel
+            .iter()
+            .find(|stage| stage.stage == "semantic candidate pairs")
+            .expect("semantic candidate stage");
+        assert_eq!(candidate.passed, 5);
+        assert!(
+            candidate
+                .dropped
+                .iter()
+                .any(|drop| drop.cause == "pair_budget" && drop.count == 4)
+        );
+        let observations = funnel
+            .iter()
+            .find(|stage| stage.stage == "semantic API observations")
+            .expect("semantic observation stage");
+        assert_eq!(observations.passed, 14);
+        assert!(
+            observations
+                .dropped
+                .iter()
+                .any(|drop| drop.cause == "outside_registered_vocabulary" && drop.count == 6)
+        );
+        let graphs = funnel
+            .iter()
+            .find(|stage| stage.stage == "semantic graphs")
+            .expect("semantic graph stage");
+        assert!(
+            graphs
+                .dropped
+                .iter()
+                .any(|drop| drop.cause == "no_registered_operations" && drop.count == 2)
+        );
+        let verified = funnel
+            .iter()
+            .find(|stage| stage.stage == "semantic verified pairs")
+            .expect("semantic verification stage");
+        assert!(
+            verified
+                .dropped
+                .iter()
+                .any(|drop| drop.cause == "rule_disabled" && drop.count == 1)
+        );
+    }
+
+    #[test]
+    fn incomplete_normalization_lowers_confidence_without_affecting_matching() {
+        assert!((super::normalization_confidence(3, 0) - 1.0).abs() < f64::EPSILON);
+        assert!((super::normalization_confidence(0, 2) - 0.0).abs() < f64::EPSILON);
+        assert!((super::semantic_confidence(0.7, 1.0, 0.5) - 0.35).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_disabled_cross_language_rule_cannot_reach_the_comparison_report() {
+        let graph = |language, variant| {
+            SemanticOperationGraph::new(
+                language,
+                variant,
+                vec![OperationNode {
+                    kind: OperationKind::Validate,
+                    attributes: OperationAttributes {
+                        fallible_kind: Some(codehelion_core::semantic::FallibleKind::Option),
+                        ..OperationAttributes::default()
+                    },
+                }],
+                Vec::new(),
+            )
+            .expect("closed optional validation graph")
+        };
+        let inputs = vec![
+            CrossLanguageCandidateInput {
+                comparison_partition: [1; 16],
+                graph: graph(Language::Rust, [2; 32]),
+            },
+            CrossLanguageCandidateInput {
+                comparison_partition: [1; 16],
+                graph: graph(Language::Cpp, [3; 32]),
+            },
+        ];
+        let candidates =
+            extract_cross_language_candidates(&inputs, SemanticCandidateConfig::default());
+        let verified = verify_cross_language_candidates(&inputs, &candidates.pairs);
+        assert_eq!(verified.len(), 1);
+
+        let config = Config::from_toml(
+            "[semantic]\ndisabled = [\"cross-language-optional-validation-v1\"]\n",
+        )
+        .expect("registered cross-language rule is configurable");
+        assert!(enabled_cross_language_matches(verified, &config).is_empty());
     }
 }

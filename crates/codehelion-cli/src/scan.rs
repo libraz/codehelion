@@ -20,31 +20,27 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use codehelion_core::clone_class::CloneScope;
 use codehelion_core::discovery::{
-    self, AnalysisMode, BuildVariant, ContentHash, DEFAULT_SCAN_LINES, DiscoveryConfig,
-    DiscoveryReport, GeneratedMarkers, Language, LanguageSelection, NORMALIZATION_VERSION,
-    SourceUnit,
+    self, BuildVariant, ContentHash, DEFAULT_SCAN_LINES, DiscoveryConfig, DiscoveryReport,
+    GeneratedMarkers, Language, LanguageSelection, NORMALIZATION_VERSION, SourceUnit,
 };
 use codehelion_core::engine::{
     self, CloneGroup, EngineConfig, EngineReport, InputFile, LiteralNorm,
 };
 use codehelion_core::execution::ExecutionPolicy;
 use codehelion_core::frontend::{Frontend, Token, Unit};
-use codehelion_core::incremental;
-use codehelion_core::lineage;
 use codehelion_core::priority::Weights;
 use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION, FileContext, GroupIds};
 use codehelion_store::Store;
 use codehelion_store::snapshot::{
-    FileRow, GroupOrigin, GroupRow, LineageParent, MemberRow, PriorityRow, Snapshot, SummaryRow,
-    UnitRow,
+    FileRow, GroupRow, MemberRow, PriorityRow, Snapshot, SummaryRow, UnitRow,
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use serde_json::{Value, json};
 
 use crate::Outcome;
 use crate::cli::{Format, Mode, ScanArgs};
 use crate::config::{self, Config, LiteralNormalization};
 use crate::report::{self, Report};
-use crate::reuse;
 use crate::suppress;
 
 /// One lexed source file, ready for the engine.
@@ -88,23 +84,6 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let (sources, glob_excluded) = filter_globs(&cfg, sources)?;
 
     let db_path = database_path(&root, args.db.as_deref(), &cfg);
-    if let Some(mut model) = reusable(
-        args,
-        &cfg,
-        &root,
-        &db_path,
-        &discovered.build_variant,
-        &sources,
-    )? {
-        // A recorded run is only reused when it worked under these ceilings, so
-        // saying which they were is as true of the reused report as of a fresh
-        // one — and leaving it off would make the same reading print differently
-        // depending on whether it happened just now.
-        model.summary.guardrails = guardrails;
-        write_report(args, out, &model)?;
-        return Ok(outcome(args, &model));
-    }
-
     let lex_timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
     let (lexed, unreadable, timed_out) = lex_sources(&sources, jobs, lex_timeout)?;
 
@@ -140,7 +119,6 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         groups: group_suppressed,
     } = suppression;
 
-    let changes = tree_changes(&db_path, &root, &discovered.build_variant, &sources)?;
     let finished_at = rfc3339_now();
     let mut inputs = BuildInputs {
         root: &root,
@@ -148,7 +126,6 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         // Both filled in from the recording below, which cannot run until the
         // entries it records the ranking of exist.
         run_id: 0,
-        audit: None,
         started_at: &started_at,
         finished_at: &finished_at,
         discovered: &discovered,
@@ -160,7 +137,6 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         ids: &ids,
         rules: &rules,
         group_suppressed: &group_suppressed,
-        changes,
         suppression: &cfg.suppression,
         weights: cfg.priority.weights(),
         min_clone_tokens: u64::from(cfg.min_clone_tokens),
@@ -208,51 +184,6 @@ pub(crate) fn permitted(args: &ScanArgs) -> Result<ExecutionPolicy> {
         );
     }
     ExecutionPolicy::parse(names).map_err(Into::into)
-}
-
-/// The recorded run to report again instead of scanning, or `None` when this
-/// invocation has to do the work.
-///
-/// Called once discovery has read and hashed the tree and before anything is
-/// parsed, which is where the cost is. Both modes ask the same question, and
-/// the variant they pass is what keeps their answers apart.
-///
-/// # Errors
-///
-/// Returns an error when the baseline or the audit database cannot be read.
-pub(crate) fn reusable(
-    args: &ScanArgs,
-    cfg: &Config,
-    root: &Path,
-    db_path: &Path,
-    variant: &BuildVariant,
-    sources: &[SourceUnit],
-) -> Result<Option<Report>> {
-    if args.no_reuse {
-        return Ok(None);
-    }
-    let literals = literal_norm(cfg.literal_normalization);
-    // Semantic runs the structural pipeline over what a compiler resolved, so
-    // it records the structural detector versions; only Fast has its own.
-    let versions = match variant.mode {
-        AnalysisMode::Fast => detector_versions(cfg.priority.weights(), literals),
-        _ => structural::detector_versions(cfg.priority.weights(), literals),
-    };
-    let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
-    reuse::recorded(&reuse::Request {
-        root,
-        db_path,
-        variant,
-        config_hash: config_hash.as_str(),
-        detector_versions: &versions,
-        baseline_digest: reuse::baseline_ids(args.baseline.as_deref())?
-            .as_ref()
-            .map(reuse::baseline_digest),
-        weights: cfg.priority.weights(),
-        suppression: &cfg.suppression,
-        min_clone_tokens: u64::from(cfg.min_clone_tokens),
-        sources,
-    })
 }
 
 /// What a finished scan exits with: findings present only when the caller
@@ -344,8 +275,6 @@ struct BuildInputs<'a> {
     ids: &'a [GroupIds],
     rules: &'a suppress::Rules,
     group_suppressed: &'a [Option<usize>],
-    changes: Option<report::TreeChanges>,
-    audit: Option<report::AuditSummary>,
     /// What the report does with each classification a group can carry, which
     /// is what decides where a classified group is listed.
     suppression: &'a config::Suppression,
@@ -478,10 +407,7 @@ fn build_summary(
         c: count(Language::C),
         cpp: count(Language::Cpp),
     };
-    let mut summary = report::restored(files, stored, groups);
-    summary.changes = inputs.changes;
-    summary.audit.clone_from(&inputs.audit);
-    summary
+    report::restored(files, stored, groups)
 }
 
 /// Assemble the report model both output formats render from, from the groups
@@ -532,7 +458,6 @@ fn run_info(inputs: &BuildInputs<'_>) -> report::RunInfo {
             refactoring_ease: inputs.weights.refactoring_ease,
         },
         database: inputs.db_path.display().to_string(),
-        reused: false,
         run_id: inputs.run_id,
     }
 }
@@ -580,6 +505,7 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
             width_family: false,
             suppressed,
             split_pair: false,
+            semantic: None,
             members: group
                 .members
                 .iter()
@@ -614,7 +540,7 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
 pub(crate) fn write_report(args: &ScanArgs, out: &mut impl Write, model: &Report) -> Result<()> {
     let text = match args.format {
         Format::Json => model.to_json().context("serializing the JSON report")?,
-        Format::Sarif => model.to_sarif().context("serializing the SARIF report")?,
+        Format::Sarif => sarif_with_artifact_savings(model)?,
         Format::Text => {
             let options = report::TextOptions {
                 verbose: args.verbose,
@@ -628,7 +554,360 @@ pub(crate) fn write_report(args: &ScanArgs, out: &mut impl Write, model: &Report
     };
     match args.output.as_deref() {
         Some(path) => {
-            std::fs::write(path, &text).with_context(|| format!("writing {}", path.display()))?;
+            std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+            writeln!(out, "wrote {}", path.display())?;
+        }
+        None => out.write_all(text.as_bytes())?,
+    }
+    Ok(())
+}
+
+/// Render source SARIF and attach artifact data only where local correlation
+/// established a group-level estimate. Source-only scans therefore retain the
+/// exact SARIF shape they had before artifact analysis existed.
+fn sarif_with_artifact_savings(model: &Report) -> Result<String> {
+    let mut sarif: Value =
+        serde_json::from_str(&model.to_sarif()?).context("parsing the generated SARIF document")?;
+    let store = Store::open(Path::new(&model.run.database))
+        .with_context(|| format!("opening audit database {}", model.run.database))?;
+    let mut savings = BTreeMap::new();
+    for group in &model.groups {
+        let entries = store.clone_group_savings(model.run.run_id, &group.fingerprint)?;
+        if !entries.is_empty() {
+            savings.insert(
+                group.fingerprint.clone(),
+                Value::Array(
+                    entries
+                        .into_iter()
+                        .map(|(analysis_id, entry)| {
+                            json!({
+                                "artifact_analysis_id": analysis_id,
+                                "source_build_variant_fingerprint": artifact_fingerprint_hex(entry.source_build_variant_fingerprint),
+                                "artifact_build_variant_fingerprint": artifact_fingerprint_hex(entry.artifact_build_variant_fingerprint),
+                                "duplicated_bytes": entry.duplicated_bytes,
+                                "estimated_refactor_savings_bytes": entry.estimated_refactor_savings_bytes,
+                                "mapping_confidence": artifact_savings_confidence(entry.mapping_confidence),
+                                "clone_confidence": entry.clone_confidence,
+                                "model_confidence": artifact_savings_confidence(entry.model_confidence),
+                                "savings_confidence": artifact_savings_confidence(entry.savings_confidence),
+                                "model_schema_version": entry.model_schema_version,
+                            })
+                        })
+                        .collect(),
+                ),
+            );
+        }
+    }
+    attach_sarif_artifact_savings(&mut sarif, &savings)?;
+    let mut text = serde_json::to_string_pretty(&sarif)?;
+    text.push('\n');
+    Ok(text)
+}
+
+fn attach_sarif_artifact_savings(
+    sarif: &mut Value,
+    savings: &BTreeMap<String, Value>,
+) -> Result<()> {
+    let results = sarif
+        .pointer_mut("/runs/0/results")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("generated SARIF has no result array"))?;
+    for result in results {
+        let Some(fingerprint) = result
+            .pointer("/partialFingerprints/cloneGroupFingerprint~1v1")
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(group_savings) = savings.get(fingerprint) else {
+            continue;
+        };
+        let properties = result
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow::anyhow!("generated SARIF result has no property bag"))?;
+        properties.insert("artifact_savings".to_owned(), group_savings.clone());
+    }
+    Ok(())
+}
+
+fn artifact_fingerprint_hex(fingerprint: [u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(fingerprint.len().saturating_mul(2));
+    for byte in fingerprint {
+        text.push(char::from(HEX[usize::from(byte >> 4)]));
+        text.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    text
+}
+
+const fn artifact_savings_confidence(
+    confidence: codehelion_store::artifact::ArtifactAnalysisSavingsConfidence,
+) -> &'static str {
+    use codehelion_store::artifact::ArtifactAnalysisSavingsConfidence;
+    match confidence {
+        ArtifactAnalysisSavingsConfidence::High => "high",
+        ArtifactAnalysisSavingsConfidence::Medium => "medium",
+        ArtifactAnalysisSavingsConfidence::Low => "low",
+        ArtifactAnalysisSavingsConfidence::Unavailable => "unavailable",
+    }
+}
+
+/// Render independent semantic reports without inventing a combined variant.
+///
+/// A compilation database can describe several programs in one source tree.
+/// JSON therefore names every report under `partitions`; text separates whole
+/// reports, and SARIF joins its standard `runs` array. None of those sums
+/// findings or coverage across different build variants.
+pub(crate) fn write_partitioned_reports(
+    args: &ScanArgs,
+    out: &mut impl Write,
+    models: &[Report],
+    cross_variant: Option<&report::CrossVariantComparison>,
+    cross_language: Option<&report::CrossLanguageComparison>,
+) -> Result<()> {
+    if let ([model], None, None) = (models, cross_variant, cross_language) {
+        return write_report(args, out, model);
+    }
+    let text = match args.format {
+        Format::Json => partitioned_json(models, cross_variant, cross_language)?,
+        Format::Sarif => partitioned_sarif(models, cross_variant, cross_language)?,
+        Format::Text => partitioned_text(args, models, cross_variant, cross_language)?,
+    };
+    write_partitioned_text(args, out, &text)
+}
+
+fn partitioned_json(
+    models: &[Report],
+    cross_variant: Option<&report::CrossVariantComparison>,
+    cross_language: Option<&report::CrossLanguageComparison>,
+) -> Result<String> {
+    let mut value = serde_json::Map::new();
+    value.insert("partitions".to_string(), serde_json::json!(models));
+    if let Some(comparison) = cross_variant {
+        value.insert(
+            "cross_variant_comparison".to_string(),
+            serde_json::json!(comparison),
+        );
+    }
+    if let Some(comparison) = cross_language {
+        value.insert(
+            "cross_language_comparison".to_string(),
+            serde_json::json!(comparison),
+        );
+    }
+    serde_json::to_string_pretty(&Value::Object(value))
+        .context("serializing partitioned JSON reports")
+}
+
+fn partitioned_sarif(
+    models: &[Report],
+    cross_variant: Option<&report::CrossVariantComparison>,
+    cross_language: Option<&report::CrossLanguageComparison>,
+) -> Result<String> {
+    let mut runs = Vec::new();
+    for model in models {
+        let log: Value = serde_json::from_str(
+            &model
+                .to_sarif()
+                .context("serializing a partitioned SARIF report")?,
+        )
+        .context("reading a partitioned SARIF report")?;
+        if let Some(mut contained) = log.get("runs").and_then(Value::as_array).cloned() {
+            runs.append(&mut contained);
+        }
+    }
+    if let Some(comparison) = cross_variant {
+        runs.push(cross_variant_sarif_run(comparison));
+    }
+    if let Some(comparison) = cross_language {
+        runs.push(cross_language_sarif_run(comparison));
+    }
+    serde_json::to_string_pretty(&serde_json::json!({
+        "version": "2.1.0",
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "runs": runs,
+    }))
+    .context("serializing partitioned SARIF reports")
+}
+
+fn cross_variant_sarif_run(comparison: &report::CrossVariantComparison) -> Value {
+    serde_json::json!({
+        "tool": { "driver": {
+            "name": "codehelion", "version": env!("CARGO_PKG_VERSION"),
+            "semanticVersion": env!("CARGO_PKG_VERSION"), "rules": [{
+                "id": "comparison/cross-build-variant-exact",
+                "name": "CrossBuildVariantExactClone",
+                "shortDescription": { "text": "Exact clone across build variants" }
+            }]
+        }},
+        "automationDetails": { "id": "codehelion/cross-build-variants" },
+        "results": comparison.groups.iter().map(cross_variant_sarif_result).collect::<Vec<_>>(),
+        "properties": { "crossVariantComparison": comparison }
+    })
+}
+
+fn cross_variant_sarif_result(group: &report::CrossVariantGroup) -> Value {
+    serde_json::json!({
+        "ruleId": "comparison/cross-build-variant-exact", "level": "note",
+        "message": { "text": "Exact Type-1 clone across independent build variants" },
+        "partialFingerprints": { "crossVariantGroupFingerprint/v1": group.id },
+        "locations": group.members.first().map(cross_variant_sarif_location).into_iter().collect::<Vec<_>>(),
+        "relatedLocations": group.members.iter().map(cross_variant_sarif_location).collect::<Vec<_>>()
+    })
+}
+
+fn cross_variant_sarif_location(member: &report::CrossVariantMember) -> Value {
+    serde_json::json!({
+        "physicalLocation": { "artifactLocation": { "uri": member.file },
+            "region": { "startLine": member.start_line, "endLine": member.end_line } },
+        "properties": { "originVariant": member.origin_variant }
+    })
+}
+
+fn cross_language_sarif_run(comparison: &report::CrossLanguageComparison) -> Value {
+    serde_json::json!({
+        "tool": { "driver": {
+            "name": "codehelion", "version": env!("CARGO_PKG_VERSION"),
+            "semanticVersion": env!("CARGO_PKG_VERSION"), "rules": [{
+                "id": "comparison/cross-language-semantic",
+                "name": "CrossLanguageRestrictedSemantic",
+                "shortDescription": { "text": "Registered Rust-to-C++ semantic pipeline" }
+            }]
+        }},
+        "automationDetails": { "id": "codehelion/cross-language" },
+        "results": comparison.groups.iter().map(cross_language_sarif_result).collect::<Vec<_>>(),
+        "properties": { "crossLanguageComparison": comparison }
+    })
+}
+
+fn cross_language_sarif_result(group: &report::CrossLanguageGroup) -> Value {
+    serde_json::json!({
+        "ruleId": "comparison/cross-language-semantic", "level": "note",
+        "message": { "text": format!("Registered cross-language semantic rule {}", group.rule_id) },
+        "partialFingerprints": { "crossLanguageGroupFingerprint/v1": group.id },
+        "locations": group.members.first().map(cross_language_sarif_location).into_iter().collect::<Vec<_>>(),
+        "relatedLocations": group.members.iter().map(cross_language_sarif_location).collect::<Vec<_>>(),
+        "properties": {
+            "ruleVersion": group.rule_version,
+            "semanticConfidence": group.semantic_confidence,
+            "apiCorrespondenceIds": group.api_correspondence_ids,
+        }
+    })
+}
+
+fn cross_language_sarif_location(member: &report::CrossLanguageMember) -> Value {
+    serde_json::json!({
+        "physicalLocation": { "artifactLocation": { "uri": member.file },
+            "region": { "startLine": member.start_line, "endLine": member.end_line } },
+        "properties": { "originVariant": member.origin_variant, "language": member.language }
+    })
+}
+
+fn partitioned_text(
+    args: &ScanArgs,
+    models: &[Report],
+    cross_variant: Option<&report::CrossVariantComparison>,
+    cross_language: Option<&report::CrossLanguageComparison>,
+) -> Result<String> {
+    let options = report::TextOptions {
+        verbose: args.verbose,
+        color: args.output.is_none() && std::io::stdout().is_terminal(),
+        show_suppressed: args.show_suppressed,
+    };
+    let mut rendered = Vec::new();
+    for model in models {
+        model.render_text(options, &mut rendered)?;
+        rendered.extend_from_slice(b"\n\n");
+    }
+    let mut text = String::from_utf8(rendered).context("rendering partitioned text reports")?;
+    if let Some(comparison) = cross_variant {
+        append_cross_variant_text(&mut text, comparison)?;
+    }
+    if let Some(comparison) = cross_language {
+        if cross_variant.is_some() {
+            text.push('\n');
+        }
+        append_cross_language_text(&mut text, comparison)?;
+    }
+    Ok(text)
+}
+
+fn append_cross_variant_text(
+    text: &mut String,
+    comparison: &report::CrossVariantComparison,
+) -> Result<()> {
+    use std::fmt::Write as _;
+    writeln!(
+        text,
+        "Cross-build-variant comparison (exact Type-1 units only)"
+    )?;
+    writeln!(text, "policy: {}", comparison.policy_version)?;
+    writeln!(text, "comparison: {}", comparison.comparison_id)?;
+    writeln!(
+        text,
+        "origin variants: {}",
+        comparison.origin_variants.join(", ")
+    )?;
+    for group in &comparison.groups {
+        writeln!(text, "  {} ({})", group.id, group.clone_type)?;
+        for member in &group.members {
+            writeln!(
+                text,
+                "    [{}] {}:{}-{}",
+                member.origin_variant, member.file, member.start_line, member.end_line
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn append_cross_language_text(
+    text: &mut String,
+    comparison: &report::CrossLanguageComparison,
+) -> Result<()> {
+    use std::fmt::Write as _;
+    writeln!(
+        text,
+        "Cross-language comparison (registered semantic pipelines only)"
+    )?;
+    writeln!(text, "policy: {}", comparison.policy_version)?;
+    writeln!(text, "comparison: {}", comparison.comparison_id)?;
+    writeln!(
+        text,
+        "origin variants: {}",
+        comparison.origin_variants.join(", ")
+    )?;
+    for group in &comparison.groups {
+        writeln!(
+            text,
+            "  {} ({} v{}, confidence {:.2})",
+            group.id, group.rule_id, group.rule_version, group.semantic_confidence
+        )?;
+        writeln!(
+            text,
+            "    APIs: {}",
+            group.api_correspondence_ids.join(", ")
+        )?;
+        for member in &group.members {
+            writeln!(
+                text,
+                "    [{} {}] {}:{}-{}",
+                member.origin_variant,
+                member.language,
+                member.file,
+                member.start_line,
+                member.end_line
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn write_partitioned_text(args: &ScanArgs, out: &mut impl Write, text: &str) -> Result<()> {
+    match args.output.as_deref() {
+        Some(path) => {
+            std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
             writeln!(out, "wrote {}", path.display())?;
         }
         None => out.write_all(text.as_bytes())?,
@@ -941,44 +1220,6 @@ pub(crate) fn database_path(root: &Path, flag: Option<&Path>, cfg: &Config) -> P
     )
 }
 
-/// What moved since the previous scan of this tree, if there was one.
-///
-/// Read before the new run is recorded: afterwards the new run is the latest
-/// one, and the tree would be compared against itself.
-///
-/// # Errors
-///
-/// Returns an error when the audit database cannot be opened or read. That is
-/// not treated as "no previous run": a scan that cannot reach its database is
-/// about to fail recording anyway, and saying so here names the cause.
-pub(crate) fn tree_changes(
-    db_path: &Path,
-    root: &Path,
-    variant: &BuildVariant,
-    sources: &[SourceUnit],
-) -> Result<Option<report::TreeChanges>> {
-    let store = open_store(db_path)?;
-    let root_path = root.to_string_lossy();
-    let Some((since_run_id, recorded)) = store
-        .previous_tree(&root_path, &variant.fingerprint())
-        .with_context(|| format!("reading the previous scan of {root_path}"))?
-    else {
-        return Ok(None);
-    };
-    let previous: incremental::PreviousFiles = recorded
-        .into_iter()
-        .map(|(path, hash)| (path, ContentHash::from_recorded(hash)))
-        .collect();
-    let changes = incremental::compare(&previous, sources);
-    Ok(Some(report::TreeChanges {
-        since_run_id,
-        unchanged: as_u64(changes.unchanged.len()),
-        modified: as_u64(changes.modified.len()),
-        added: as_u64(changes.added.len()),
-        removed: as_u64(changes.removed.len()),
-    }))
-}
-
 /// A baseline a scan was told to apply.
 pub(crate) struct ScanBaseline {
     /// The file as it was named on the command line.
@@ -1076,86 +1317,6 @@ pub(crate) fn baseline_status(
     }
 }
 
-/// Settle what became of every group this run found, against the previous
-/// audit of the same tree under the same build variant.
-///
-/// Written into the rows before they are recorded, rather than computed later
-/// on demand: the run that produced a finding is the only one that can record
-/// what the finding *was*, and a stored state of `new` for a group that has
-/// been there for a year is a lie the schema would keep repeating.
-///
-/// A tree with no previous run under this variant compares against nothing,
-/// which leaves every group at the [`GroupOrigin::unconnected`] the rows were
-/// built with and reports no summary — there is no audit to be since.
-///
-/// # Errors
-///
-/// Returns an error when the previous run cannot be read. A scan that cannot
-/// read its own database is about to fail recording anyway.
-pub(crate) fn attach_history(
-    store: &Store,
-    root: &Path,
-    variant: &BuildVariant,
-    units: &[UnitRow],
-    groups: &mut [GroupRow],
-) -> Result<Option<report::AuditSummary>> {
-    let root_path = root.to_string_lossy();
-    let Some(since_run_id) = store
-        .previous_run(&root_path, &variant.fingerprint())
-        .with_context(|| format!("reading the previous audit of {root_path}"))?
-    else {
-        return Ok(None);
-    };
-    let previous = store
-        .run_group_snapshots(since_run_id)
-        .with_context(|| format!("reading the groups of run {since_run_id}"))?;
-    let current: Vec<lineage::GroupSnapshot> =
-        groups.iter().map(|group| group.snapshot(units)).collect();
-    let diff = lineage::diff(&previous, &current);
-
-    let mut by_fingerprint: BTreeMap<String, &lineage::GroupHistory> = BTreeMap::new();
-    for entry in &diff.entries {
-        if let Some(current) = entry.current {
-            by_fingerprint.insert(current.fingerprint.to_hex(), entry);
-        }
-    }
-    for group in groups.iter_mut() {
-        let Some(entry) = by_fingerprint.get(&group.fingerprint.to_hex()) else {
-            continue;
-        };
-        group.history = GroupOrigin {
-            state: entry.state,
-            lineage: entry.lineage,
-            parents: parents_of(entry, &diff),
-        };
-    }
-    Ok(Some(report::AuditSummary {
-        since_run_id,
-        states: report::state_counts(&diff),
-    }))
-}
-
-/// The connections back from one group, primary first.
-fn parents_of(entry: &lineage::GroupHistory, diff: &lineage::AuditDiff) -> Vec<LineageParent> {
-    let Some(current) = entry.current else {
-        return Vec::new();
-    };
-    let mut parents: Vec<LineageParent> = diff
-        .edges
-        .iter()
-        .filter(|edge| edge.current == current.fingerprint)
-        .map(|edge| LineageParent {
-            fingerprint: edge.previous,
-            lineage: edge.previous_lineage,
-            primary: edge.primary,
-            shared_content: edge.shared,
-            overlap: edge.overlap,
-        })
-        .collect();
-    parents.sort_by_key(|parent| std::cmp::Reverse(parent.primary));
-    parents
-}
-
 /// The tree a scan read, as rows to record beside its findings.
 ///
 /// Every discovered file is here, including the ones that yielded no unit: a
@@ -1191,7 +1352,7 @@ fn rank_and_record(
         .map(|index| build_group(inputs, index))
         .collect();
     let variant = &inputs.discovered.build_variant;
-    let (units, mut groups) = snapshot_rows(
+    let (units, groups) = snapshot_rows(
         inputs.lexed,
         contexts,
         variant,
@@ -1201,7 +1362,6 @@ fn rank_and_record(
         &ranked,
     );
     let mut store = open_store(inputs.db_path)?;
-    let audit = attach_history(&store, inputs.root, variant, &units, &mut groups)?;
     let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
     let detector_versions = detector_versions(
         cfg.priority.weights(),
@@ -1229,7 +1389,6 @@ fn rank_and_record(
         summary: summary.clone(),
     };
     inputs.run_id = store.record_snapshot(&snapshot)?;
-    inputs.audit = audit;
     Ok(ranked)
 }
 
@@ -1339,9 +1498,6 @@ fn snapshot_rows(
         .enumerate()
         .map(|(index, ((group, group_ids), suppressed_by))| GroupRow {
             fingerprint: group_ids.fingerprint,
-            // Overwritten by the comparison against the previous audit, when
-            // there is one to compare against.
-            history: GroupOrigin::unconnected(&group_ids.fingerprint),
             clone_type: group.clone_type,
             member_scope: CloneScope::Unit,
             // A whole unit's extent is the unit; only a run inside one has a
@@ -1361,6 +1517,7 @@ fn snapshot_rows(
             // Fast mode measures no similarity breakdown and classifies no
             // boilerplate shapes.
             similarity: None,
+            semantic: None,
             members: group
                 .members
                 .iter()
@@ -1426,6 +1583,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cross_language_comparison_stays_in_its_own_report_domain() {
+        let comparison = report::CrossLanguageComparison {
+            policy_version: "cross-language-semantic-v1".to_string(),
+            comparison_id: "aabb".to_string(),
+            comparison_kind: "restricted-semantic-rust-cpp-pipelines".to_string(),
+            origin_variants: vec!["cpp".to_string(), "rust".to_string()],
+            groups: Vec::new(),
+        };
+        let json: Value = serde_json::from_str(
+            &partitioned_json(&[], None, Some(&comparison)).expect("JSON report"),
+        )
+        .expect("valid JSON");
+        assert!(json.get("cross_variant_comparison").is_none());
+        assert_eq!(
+            json["cross_language_comparison"]["comparison_kind"],
+            "restricted-semantic-rust-cpp-pipelines"
+        );
+
+        let sarif: Value = serde_json::from_str(
+            &partitioned_sarif(&[], None, Some(&comparison)).expect("SARIF report"),
+        )
+        .expect("valid SARIF JSON");
+        assert_eq!(
+            sarif["runs"][0]["automationDetails"]["id"],
+            "codehelion/cross-language"
+        );
+    }
+
+    #[test]
+    fn sarif_attaches_artifact_savings_only_to_matching_results() {
+        let mut sarif = json!({
+            "runs": [{
+                "results": [
+                    {
+                        "partialFingerprints": { "cloneGroupFingerprint/v1": "aabb" },
+                        "properties": {}
+                    },
+                    {
+                        "partialFingerprints": { "cloneGroupFingerprint/v1": "ccdd" },
+                        "properties": {}
+                    }
+                ]
+            }]
+        });
+        let savings = BTreeMap::from([(
+            "aabb".to_owned(),
+            json!([{ "estimated_refactor_savings_bytes": 9 }]),
+        )]);
+        attach_sarif_artifact_savings(&mut sarif, &savings).unwrap();
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["properties"]["artifact_savings"][0]["estimated_refactor_savings_bytes"],
+            9
+        );
+        assert!(
+            sarif["runs"][0]["results"][1]["properties"]
+                .get("artifact_savings")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn civil_conversion_matches_known_dates() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(1), (1970, 1, 2));
@@ -1454,7 +1672,8 @@ mod tests {
             db: None,
             baseline: None,
             allow_execution: None,
-            no_reuse: false,
+            compare_build_variants: false,
+            compare_languages: false,
             show_suppressed: false,
             verbose: false,
             fail_on_findings: false,
@@ -1501,11 +1720,10 @@ mod tests {
         assert_eq!(tightened.limits.pair_budget, Some(10));
     }
 
-    /// What keeps a distrusting scan from being answered with a recorded run
-    /// that read more of the tree: the ceilings are part of the configuration
-    /// the reuse check hashes, so the two runs are not the same reading.
+    /// A distrusting scan keeps the stricter ceilings in its effective
+    /// configuration, so it never reads more of the tree than requested.
     #[test]
-    fn distrust_changes_the_configuration_a_reused_run_is_matched_on() {
+    fn distrust_changes_the_effective_configuration() {
         let plain = Config::default().to_toml().unwrap();
         let (tightened, _) = guarded(Config::default(), &scan_args(true));
         assert_ne!(tightened.to_toml().unwrap(), plain);

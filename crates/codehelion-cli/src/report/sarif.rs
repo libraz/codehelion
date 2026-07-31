@@ -93,7 +93,7 @@ struct RuleSpec {
 /// The rule set, in the order it is emitted: a result's `ruleIndex` is a
 /// position in this table. The table is fixed rather than derived from the
 /// groups present, so the same rule keeps the same index across scans.
-const RULES: [RuleSpec; 3] = [
+const RULES: [RuleSpec; 4] = [
     RuleSpec {
         class: "type-1",
         id: "clone/type-1",
@@ -118,6 +118,15 @@ const RULES: [RuleSpec; 3] = [
         full: "Two or more code fragments agree structurally but differ by \
                added, removed or changed statements. Each result carries the \
                per-dimension similarity evidence it was judged on.",
+    },
+    RuleSpec {
+        class: "restricted-semantic",
+        id: "clone/restricted-semantic",
+        name: "RestrictedSemanticClone",
+        short: "Duplicate processing justified by a registered semantic rule",
+        full: "Two or more code fragments match under an explicitly registered, \
+               bounded semantic correspondence rule. This does not claim general \
+               semantic equivalence.",
     },
 ];
 
@@ -586,6 +595,7 @@ impl<'a> From<&'a Group> for ResultEntry<'a> {
                 test_code: group.test_code,
                 split_pair: group.split_pair,
                 suppressed: group.suppressed.as_ref(),
+                semantic: group.semantic.as_ref(),
             },
         }
     }
@@ -758,6 +768,8 @@ struct ResultProperties<'a> {
     split_pair: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     suppressed: Option<&'a Suppression>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    semantic: Option<&'a super::SemanticEvidence>,
 }
 
 /// Percent-encode a path as a URI reference relative to [`SRCROOT`].
@@ -840,9 +852,10 @@ mod tests {
         // The rule table is fixed, so a rule index means the same thing in
         // every log this tool writes.
         let rules = driver["rules"].as_array().unwrap();
-        assert_eq!(rules.len(), 3);
+        assert_eq!(rules.len(), 4);
         assert_eq!(rules[2]["id"], "clone/type-3");
         assert_eq!(rules[2]["defaultConfiguration"]["level"], "note");
+        assert_eq!(rules[3]["id"], "clone/restricted-semantic");
 
         let run = &value["runs"][0];
         assert_eq!(run["automationDetails"]["id"], "codehelion/fast");
@@ -906,6 +919,37 @@ mod tests {
         assert_eq!(
             result["partialFingerprints"][FINGERPRINT_KEY],
             "0b".repeat(16)
+        );
+    }
+
+    #[test]
+    fn restricted_semantic_group_uses_its_own_rule_and_preserves_evidence() {
+        let mut report = sample_report();
+        let group = &mut report.groups[0];
+        group.clone_type = "restricted-semantic".to_string();
+        group.semantic = Some(super::super::SemanticEvidence {
+            schema_version: "sog-v8".to_string(),
+            rules: vec![super::super::SemanticRuleEvidence {
+                id: "sequence-pipeline-v1".to_string(),
+                version: 1,
+                confidence: 0.7,
+            }],
+            graphs: vec![
+                super::super::tests::semantic_graph(),
+                super::super::tests::semantic_graph(),
+            ],
+            node_mappings: vec![super::super::SemanticNodeMapping {
+                corresponding_member: 1,
+                canonical: 0,
+                corresponding: 0,
+            }],
+        });
+        let value = sarif(&report);
+        let result = &value["runs"][0]["results"][0];
+        assert_eq!(result["ruleId"], "clone/restricted-semantic");
+        assert_eq!(
+            result["properties"]["semantic"]["rules"][0]["id"],
+            "sequence-pipeline-v1"
         );
     }
 

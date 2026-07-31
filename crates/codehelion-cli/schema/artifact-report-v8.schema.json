@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v8.schema.json",
+  "title": "codehelion artifact report",
+  "description": "Machine-readable analysis of one locally read compiled artifact. Additive fields may appear within this schema version; incompatible changes publish a new schema document.",
+  "type": "object",
+  "required": ["schema_version", "path", "format", "fingerprint", "sizes"],
+  "properties": {
+    "schema_version": { "const": "artifact-report-v8" },
+    "path": { "type": "string" },
+    "format": { "type": "string", "enum": ["wasm", "elf"] },
+    "fingerprint": { "$ref": "#/$defs/fingerprint" },
+    "analysis_id": { "type": ["integer", "null"] },
+    "build_variant": { "$ref": "#/$defs/build_variant" },
+    "sizes": { "$ref": "#/$defs/sizes" },
+    "correlation": { "$ref": "#/$defs/correlation" },
+    "generic_origins": { "type": "array" }
+  },
+  "$defs": {
+    "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "build_variant": {
+      "type": ["object", "null"],
+      "required": ["manifest_path", "fingerprint"],
+      "properties": {
+        "manifest_path": { "type": "string" },
+        "fingerprint": { "$ref": "#/$defs/fingerprint" }
+      }
+    },
+    "sizes": {
+      "type": "object",
+      "required": [
+        "observed_bytes", "duplicated_bytes", "retained_bytes",
+        "shared_dependency_bytes", "duplicated_data_bytes",
+        "upper_bound_savings_bytes", "estimated_refactor_savings_bytes",
+        "verified_savings_bytes", "clone_confidence", "savings_confidence", "assumptions"
+      ],
+      "properties": {
+        "observed_bytes": { "type": "integer", "minimum": 0 },
+        "duplicated_bytes": { "type": "integer", "minimum": 0 },
+        "retained_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "shared_dependency_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "duplicated_data_bytes": { "type": "integer", "minimum": 0 },
+        "upper_bound_savings_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "estimated_refactor_savings_bytes": { "type": ["integer", "null"] },
+        "verified_savings_bytes": { "type": ["integer", "null"] },
+        "clone_confidence": { "type": "string" },
+        "savings_confidence": { "type": "string" },
+        "assumptions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "correlation": {
+      "type": ["object", "null"],
+      "properties": {
+        "source_run": { "type": "integer" },
+        "mappings": { "type": "integer", "minimum": 0 },
+        "mapping_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+        "mapped_symbol_bytes_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+        "estimated_refactor_savings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "clone_group_fingerprint", "source_build_variant_fingerprint",
+              "artifact_build_variant_fingerprint", "estimated_refactor_savings_bytes"
+            ],
+            "properties": {
+              "clone_group_fingerprint": { "$ref": "#/$defs/fingerprint" },
+              "source_build_variant_fingerprint": { "$ref": "#/$defs/fingerprint" },
+              "artifact_build_variant_fingerprint": { "$ref": "#/$defs/fingerprint" },
+              "estimated_refactor_savings_bytes": { "type": "integer" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

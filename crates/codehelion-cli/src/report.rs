@@ -25,8 +25,9 @@ use std::io::{self, Write};
 
 use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::{CloneClass, CloneScope};
-use codehelion_core::lineage::{AuditDiff, AuditState};
 use codehelion_core::priority::{self, GroupFacts, Weights};
+use codehelion_core::semantic::SemanticOperationGraph;
+use codehelion_store::artifact::MappingEvidence;
 use codehelion_store::snapshot::{FunnelDropRow, FunnelStageRow, SummaryRow, UnusedRuleRow};
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +62,110 @@ pub struct Report {
     pub groups: Vec<Group>,
 }
 
+/// An explicitly requested comparison across independent build variants.
+///
+/// This is intentionally outside [`Report`]: it does not aggregate ordinary
+/// findings, coverage, savings, or baselines.
+#[derive(Debug, Serialize)]
+pub struct CrossVariantComparison {
+    /// Comparison-domain schema and policy version.
+    pub policy_version: String,
+    /// Stable comparison-domain identity.
+    pub comparison_id: String,
+    /// What was actually compared, never a claim about all structural output.
+    pub comparison_kind: String,
+    /// Sorted fingerprints of every origin partition in scope.
+    pub origin_variants: Vec<String>,
+    /// Exact groups found directly across the origin variants.
+    pub groups: Vec<CrossVariantGroup>,
+}
+
+/// One cross-build-variant group in an exported comparison.
+#[derive(Debug, Serialize)]
+pub struct CrossVariantGroup {
+    /// Stable comparison-domain group id.
+    pub id: String,
+    /// Clone classification under the comparison policy.
+    pub clone_type: String,
+    /// Origin-aware members.
+    pub members: Vec<CrossVariantMember>,
+}
+
+/// One origin-aware comparison member.
+#[derive(Debug, Serialize)]
+pub struct CrossVariantMember {
+    /// Normal partition that produced this member.
+    pub origin_variant: String,
+    /// Source language.
+    pub language: String,
+    /// Source anchor relative to the scan root.
+    pub file: String,
+    /// 1-based start line.
+    pub start_line: u32,
+    /// 1-based end line.
+    pub end_line: u32,
+    /// Best-effort unit name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Matched token count.
+    pub token_count: usize,
+}
+
+/// An explicitly requested Rust-to-C++ semantic comparison.
+///
+/// It is deliberately outside [`Report`]: normal snapshots, savings,
+/// baselines stay partition-local.
+#[derive(Debug, Serialize)]
+pub struct CrossLanguageComparison {
+    /// Comparison-domain policy version.
+    pub policy_version: String,
+    /// Stable comparison-domain identity.
+    pub comparison_id: String,
+    /// What the comparison actually verified.
+    pub comparison_kind: String,
+    /// Sorted fingerprints of every origin partition in scope.
+    pub origin_variants: Vec<String>,
+    /// Verified Rust-to-C++ groups.
+    pub groups: Vec<CrossLanguageGroup>,
+}
+
+/// One verified cross-language restricted-semantic group.
+#[derive(Debug, Serialize)]
+pub struct CrossLanguageGroup {
+    /// Stable comparison-domain group identifier.
+    pub id: String,
+    /// Applied registered rule identifier.
+    pub rule_id: String,
+    /// Applied registered rule revision.
+    pub rule_version: u32,
+    /// Confidence, kept separate from ordinary clone confidence.
+    pub semantic_confidence: f64,
+    /// One closed API correspondence identifier for each matched operation.
+    pub api_correspondence_ids: Vec<String>,
+    /// Origin-aware members and their normalised graphs.
+    pub members: Vec<CrossLanguageMember>,
+}
+
+/// One member of a cross-language semantic group.
+#[derive(Debug, Serialize)]
+pub struct CrossLanguageMember {
+    /// Fingerprint of the partition that produced this graph.
+    pub origin_variant: String,
+    /// Source language.
+    pub language: String,
+    /// File relative to the comparison root.
+    pub file: String,
+    /// 1-based start line.
+    pub start_line: u32,
+    /// 1-based end line.
+    pub end_line: u32,
+    /// Best-effort unit name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Normalized graph that justified this member.
+    pub graph: SemanticOperationGraph,
+}
+
 /// Metadata identifying one scan run.
 #[derive(Debug, Serialize)]
 pub struct RunInfo {
@@ -80,19 +185,10 @@ pub struct RunInfo {
     pub detector_versions: Vec<DetectorVersion>,
     /// How the run composed its ranking.
     pub ranking: RankingInfo,
-    /// Path of the audit database the snapshot was recorded in.
+    /// Path of the local database the snapshot was recorded in.
     pub database: String,
     /// Row id of the recorded scan run.
     pub run_id: i64,
-    /// Whether this is a recorded run's report, shown again because nothing
-    /// the run read has changed since.
-    ///
-    /// The timestamps and the run id are that run's, not this invocation's,
-    /// and no new run was recorded — there was nothing to record. Absent from
-    /// the JSON of a scan that analysed the tree, which is every scan that
-    /// does not say otherwise.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub reused: bool,
 }
 
 /// The build variant a scan's results belong to.
@@ -141,13 +237,6 @@ pub struct Summary {
     pub unparsed: Option<UnparsedCounts>,
     /// Files the scan dropped, by cause.
     pub excluded: ExcludedCounts,
-    /// What moved since the previous scan of this tree, when there is one to
-    /// compare against.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub changes: Option<TreeChanges>,
-    /// What became of the duplication since the previous audit of this tree.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub audit: Option<AuditSummary>,
     /// What the baseline hid, when the scan was given one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline: Option<BaselineStatus>,
@@ -386,8 +475,6 @@ pub fn restored(files: FileCounts, stored: &SummaryRow, groups: &[Group]) -> Sum
             by_glob: stored.excluded_by_glob,
             skipped: stored.excluded_skipped,
         },
-        changes: None,
-        audit: None,
         baseline: None,
         // Not stored: the ceilings come from the invocation, and a recorded
         // run cannot say what the next one will be told to do.
@@ -400,6 +487,9 @@ pub fn restored(files: FileCounts, stored: &SummaryRow, groups: &[Group]) -> Sum
             type_1: count(&|group| group.clone_type == CloneClass::Type1.name()),
             type_2: count(&|group| group.clone_type == CloneClass::Type2.name()),
             type_3: count(&|group| group.clone_type == CloneClass::Type3.name()),
+            restricted_semantic: count(&|group| {
+                group.clone_type == CloneClass::RestrictedSemantic.name()
+            }),
             fragment_scope: count(&|group| group.scope == CloneScope::Fragment.name()),
             folded_runs: stored.folded_runs,
             subsumed_runs: stored.subsumed_runs,
@@ -472,70 +562,6 @@ pub struct FileCounts {
     pub c: u64,
     /// C++ files.
     pub cpp: u64,
-}
-
-/// What moved in the tree since the previous scan of it.
-///
-/// Absent when there is no run to compare against: the first scan of a tree,
-/// a scan under settings nothing has been scanned under before, or a database
-/// written before runs recorded the files they read. Absent means "not
-/// comparable", never "nothing changed".
-#[derive(Debug, Clone, Copy, Serialize)]
-pub struct TreeChanges {
-    /// Row id of the run this is measured against.
-    pub since_run_id: i64,
-    /// Files present in both scans, hashing the same.
-    pub unchanged: u64,
-    /// Files present in both scans, hashing differently.
-    pub modified: u64,
-    /// Files this scan read and the previous one did not.
-    pub added: u64,
-    /// Files the previous scan read and this one did not.
-    pub removed: u64,
-}
-
-/// What became of the tree's duplication since the previous audit of it.
-///
-/// The counts are of clone groups, not of files: two scans of a tree nobody
-/// touched agree here trivially, and the interesting case is the tree that
-/// changed in ways that left the duplication where it was. `codehelion audit`
-/// lists which group is in which state; this says how many, so a scan that
-/// found something new says so without being asked.
-#[derive(Debug, Clone, Serialize)]
-pub struct AuditSummary {
-    /// Row id of the run this is measured against.
-    pub since_run_id: i64,
-    /// How many groups are in each state, states with no group omitted, in
-    /// the order the states are listed.
-    pub states: Vec<StateCount>,
-}
-
-/// How many groups one audit state holds.
-#[derive(Debug, Clone, Serialize)]
-pub struct StateCount {
-    /// State name (`new`, `unchanged`, `resolved`, ...).
-    pub state: String,
-    /// Groups in it.
-    pub count: u64,
-}
-
-/// Count each state of a comparison, dropping the ones nothing is in.
-///
-/// An empty list is the honest report of two runs that share no groups at all,
-/// and it is distinguishable from an absent summary, which means there was
-/// nothing to compare against.
-#[must_use]
-pub fn state_counts(diff: &AuditDiff) -> Vec<StateCount> {
-    AuditState::all()
-        .into_iter()
-        .filter_map(|state| {
-            let count = diff.count(state);
-            (count > 0).then(|| StateCount {
-                state: state.name().to_string(),
-                count: count as u64,
-            })
-        })
-        .collect()
 }
 
 /// What a baseline did to this run's findings.
@@ -656,6 +682,9 @@ pub struct GroupCounts {
     /// Gapped (Type-3) groups. Always zero in modes that report no gapped
     /// clones.
     pub type_3: u64,
+    /// Findings justified by registered semantic rules only. Always zero in
+    /// modes that do not ask compiler helpers.
+    pub restricted_semantic: u64,
     /// How many of the total describe a duplicated run inside units that are
     /// not clones of each other, rather than whole duplicated units. Always
     /// zero in modes that only compare whole units.
@@ -686,7 +715,8 @@ pub struct SuppressedCounts {
 pub struct Group {
     /// Stable clone-group fingerprint, hex-encoded.
     pub fingerprint: String,
-    /// Clone classification (`type-1`, `type-2`, `type-3`).
+    /// Clone classification (`type-1`, `type-2`, `type-3`, or
+    /// `restricted-semantic`).
     pub clone_type: String,
     /// What each member is: `unit` for a whole duplicated unit, `fragment`
     /// for a run of statements duplicated inside units that need not be
@@ -735,8 +765,51 @@ pub struct Group {
     pub split_pair: bool,
     /// Why the group is hidden from default reports; `None` when visible.
     pub suppressed: Option<Suppression>,
+    /// Registered-rule evidence for a restricted semantic finding. Absent for
+    /// textual and structural clone classes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<SemanticEvidence>,
     /// Every occurrence, the canonical instance first.
     pub members: Vec<Member>,
+}
+
+/// Explainable evidence attached to a restricted semantic finding.
+#[derive(Debug, Clone, Serialize)]
+pub struct SemanticEvidence {
+    /// Version of the normalized operation-graph schema the rules read.
+    pub schema_version: String,
+    /// Every registered rule applied to establish this correspondence.
+    pub rules: Vec<SemanticRuleEvidence>,
+    /// The normalized operation graphs for the canonical and corresponding
+    /// members, in that order.
+    pub graphs: Vec<SemanticOperationGraph>,
+    /// Graph-local node correspondences, in canonical source order.
+    pub node_mappings: Vec<SemanticNodeMapping>,
+}
+
+/// One registered rule contributing to a semantic finding.
+#[derive(Debug, Clone, Serialize)]
+pub struct SemanticRuleEvidence {
+    /// Stable registry identifier.
+    pub id: String,
+    /// Rule semantics revision.
+    pub version: u32,
+    /// Semantic confidence after this rule's base confidence and available
+    /// normalization coverage are combined.
+    pub confidence: f64,
+}
+
+/// One explainable correspondence between graph-local operation positions.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SemanticNodeMapping {
+    /// Zero-based position of the corresponding member in the semantic
+    /// evidence's graph list. Zero is the canonical graph and is not a valid
+    /// corresponding position.
+    pub corresponding_member: u32,
+    /// Node position in the canonical member graph.
+    pub canonical: u32,
+    /// Node position in the corresponding member graph.
+    pub corresponding: u32,
 }
 
 /// A group's similarity evidence, one measured dimension per field.
@@ -1236,41 +1309,6 @@ impl Report {
                 writeln!(out, "    {count} {reason}")?;
             }
         }
-        // Said only when there is a run to say it against. A first scan
-        // reports nothing here rather than calling every file new, which
-        // would read as a tree that had just been written from scratch.
-        if let Some(changes) = &summary.changes {
-            writeln!(
-                out,
-                "  since run {}: {} unchanged, {} modified, {} added, {} removed",
-                changes.since_run_id,
-                changes.unchanged,
-                changes.modified,
-                changes.added,
-                changes.removed,
-            )?;
-        }
-        // What the tree did and what its duplication did are separate facts:
-        // a refactor can rewrite half the files and leave every clone group
-        // exactly where it was, and an edit to one file can be the moment a
-        // clone group starts to drift.
-        if let Some(audit) = &summary.audit {
-            let states: Vec<String> = audit
-                .states
-                .iter()
-                .map(|entry| format!("{} {}", entry.count, entry.state))
-                .collect();
-            writeln!(
-                out,
-                "  audit since run {}: {}",
-                audit.since_run_id,
-                if states.is_empty() {
-                    "no groups on either side".to_string()
-                } else {
-                    states.join(", ")
-                },
-            )?;
-        }
         if let Some(baseline) = &summary.baseline {
             writeln!(
                 out,
@@ -1299,15 +1337,6 @@ impl Report {
             palette.bold(&format!("codehelion scan ({} mode)", self.run.mode))
         )?;
         writeln!(out, "  root: {}", self.run.root)?;
-        // Said before anything it qualifies: every number below belongs to
-        // that run, and the reader is looking at a date rather than at now.
-        if self.run.reused {
-            writeln!(
-                out,
-                "  reporting run {} again, finished {}: nothing it read has changed since",
-                self.run.run_id, self.run.finished_at,
-            )?;
-        }
         self.render_inputs(out)?;
         // A recovering parser reports no failure, so the share it could not
         // follow is the only thing separating "little duplication here" from
@@ -1325,11 +1354,12 @@ impl Report {
         }
         writeln!(
             out,
-            "  clone groups: {} (type-1 {}, type-2 {}, type-3 {}; suppressed: {} noise, {} by rule)",
+            "  clone groups: {} (type-1 {}, type-2 {}, type-3 {}, restricted-semantic {}; suppressed: {} noise, {} by rule)",
             summary.groups.total,
             summary.groups.type_1,
             summary.groups.type_2,
             summary.groups.type_3,
+            summary.groups.restricted_semantic,
             summary.suppressed.noise,
             summary.suppressed.by_rule,
         )?;
@@ -1579,6 +1609,58 @@ pub struct FindingDetail {
     pub group: GroupRef,
     /// Row id of the scan run the occurrence belongs to.
     pub scan_run: i64,
+    /// Source/artifact mappings for this exact fragment occurrence.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub source_artifact_mappings: Vec<SourceArtifactMappingDetail>,
+    /// Refactoring estimates retained for this finding's group.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub clone_group_savings: Vec<CloneGroupSavingsDetail>,
+}
+
+/// One explicit source/artifact mapping shown by `explain`.
+#[derive(Debug, Serialize)]
+pub struct SourceArtifactMappingDetail {
+    /// Standalone artifact analysis which supplied the correspondence.
+    pub artifact_analysis_id: i64,
+    /// Mapped artifact symbol identity.
+    pub artifact_symbol_fingerprint: String,
+    /// Source and artifact `BuildVariant` identities, never merged.
+    pub source_build_variant_fingerprint: String,
+    /// Artifact `BuildVariant` identity.
+    pub artifact_build_variant_fingerprint: String,
+    /// Derived mapping confidence label.
+    pub confidence: String,
+    /// Independent facts that justify the correspondence.
+    pub evidence: MappingEvidence,
+    /// Observed bytes attributed to this occurrence, when uniquely established.
+    pub attributed_bytes: Option<u64>,
+}
+
+/// One persisted clone-group refactoring estimate shown by `explain`.
+#[derive(Debug, Serialize)]
+pub struct CloneGroupSavingsDetail {
+    /// Artifact analysis which stored this estimate.
+    pub artifact_analysis_id: i64,
+    /// Source and artifact `BuildVariant` identities, never merged.
+    pub source_build_variant_fingerprint: String,
+    /// Artifact `BuildVariant` identity.
+    pub artifact_build_variant_fingerprint: String,
+    /// Fully attributed observed duplicate bytes.
+    pub duplicated_bytes: u64,
+    /// Estimated refactoring reduction; negative values remain visible.
+    pub estimated_refactor_savings_bytes: i64,
+    /// Mapping, source-clone, model, and estimate confidence remain separate.
+    pub mapping_confidence: String,
+    /// Source clone score.
+    pub clone_confidence: f64,
+    /// Confidence in the model assumptions.
+    pub model_confidence: String,
+    /// Confidence in this estimate.
+    pub savings_confidence: String,
+    /// Version of the structured assumptions model.
+    pub model_schema_version: String,
+    /// Structured model assumptions.
+    pub assumptions: serde_json::Value,
 }
 
 /// A reference to an occurrence's owning group, carrying the evidence that
@@ -1608,6 +1690,11 @@ pub struct GroupRef {
     pub split_pair: bool,
     /// Per-dimension evidence, absent when the mode measured none (Fast).
     pub similarity: Option<Similarity>,
+    /// Registered semantic evidence, when this is a restricted-semantic
+    /// finding. `explain` retains the stored graphs rather than summarizing
+    /// them into an opaque score.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<SemanticEvidence>,
     /// The rule that suppressed the group in the recorded run, if one
     /// matched. A suppressed finding is still recorded and still explainable.
     pub suppressed: Option<Suppression>,
@@ -1680,7 +1767,81 @@ impl FindingDetail {
         if let Some(cause) = &self.group.suppressed {
             writeln!(out, "  suppressed: {}", cause.label())?;
         }
+        self.render_semantic_evidence(out)?;
+        if !self.source_artifact_mappings.is_empty() {
+            writeln!(out, "  source-artifact mappings:")?;
+            for mapping in &self.source_artifact_mappings {
+                writeln!(
+                    out,
+                    "    analysis {}: {} ({}) — {} bytes, {} facts, {} candidate(s){}",
+                    mapping.artifact_analysis_id,
+                    mapping.artifact_symbol_fingerprint,
+                    mapping.confidence,
+                    mapping
+                        .attributed_bytes
+                        .map_or_else(|| "unattributed".to_owned(), |bytes| bytes.to_string()),
+                    mapping.evidence.facts.len(),
+                    mapping.evidence.candidate_count,
+                    if mapping.evidence.has_conflict {
+                        "; conflicting evidence retained"
+                    } else {
+                        ""
+                    },
+                )?;
+            }
+        }
+        if !self.clone_group_savings.is_empty() {
+            writeln!(out, "  refactoring estimates (not guaranteed):")?;
+            for savings in &self.clone_group_savings {
+                writeln!(
+                    out,
+                    "    analysis {}: {} estimated bytes from {} attributed duplicate bytes; mapping {}, clone {:.3}, model {}, savings {}",
+                    savings.artifact_analysis_id,
+                    savings.estimated_refactor_savings_bytes,
+                    savings.duplicated_bytes,
+                    savings.mapping_confidence,
+                    savings.clone_confidence,
+                    savings.model_confidence,
+                    savings.savings_confidence,
+                )?;
+            }
+        }
         writeln!(out, "  scan run: {}", self.scan_run)?;
+        Ok(())
+    }
+
+    /// Render the persisted graph evidence without collapsing it into a
+    /// confidence score, so a reader can check the exact registered rule.
+    fn render_semantic_evidence(&self, out: &mut impl Write) -> io::Result<()> {
+        let Some(semantic) = &self.group.semantic else {
+            return Ok(());
+        };
+        writeln!(out, "  semantic evidence: {}", semantic.schema_version)?;
+        for rule in &semantic.rules {
+            writeln!(
+                out,
+                "    rule {}@{} (confidence {:.2})",
+                rule.id, rule.version, rule.confidence
+            )?;
+        }
+        for (member, graph) in semantic.graphs.iter().enumerate() {
+            let operations = graph
+                .nodes
+                .iter()
+                .map(|node| node.kind.name())
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            writeln!(out, "    graph {}: {operations}", member + 1)?;
+        }
+        if !semantic.node_mappings.is_empty() {
+            let mappings = semantic
+                .node_mappings
+                .iter()
+                .map(|mapping| format!("{}→{}", mapping.canonical, mapping.corresponding))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(out, "    node mapping: {mappings}")?;
+        }
         Ok(())
     }
 
@@ -1833,6 +1994,35 @@ fn severed_note(funnel: &[FunnelStage]) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(super) mod tests {
     use super::*;
+    use codehelion_core::discovery::Language;
+    use codehelion_core::semantic::{
+        OperationAttributes, OperationEdge, OperationEdgeKind, OperationKind, OperationNode,
+        SemanticOperationGraph,
+    };
+    use codehelion_store::artifact::MappingEvidenceFact;
+
+    pub(super) fn semantic_graph() -> SemanticOperationGraph {
+        SemanticOperationGraph::new(
+            Language::Rust,
+            [1; 32],
+            vec![
+                OperationNode {
+                    kind: OperationKind::Source,
+                    attributes: OperationAttributes::default(),
+                },
+                OperationNode {
+                    kind: OperationKind::Collect,
+                    attributes: OperationAttributes::default(),
+                },
+            ],
+            vec![OperationEdge {
+                from: 0,
+                to: 1,
+                kind: OperationEdgeKind::Data,
+            }],
+        )
+        .expect("test graph")
+    }
 
     /// A two-group report whose second group is hidden by a path rule; shared
     /// with the sibling reporter tests.
@@ -1863,10 +2053,8 @@ pub(super) mod tests {
                 },
                 database: ".codehelion/audit.db".to_string(),
                 run_id: 1,
-                reused: false,
             },
             summary: Summary {
-                audit: None,
                 files: FileCounts {
                     total: 2,
                     rust: 2,
@@ -1882,13 +2070,13 @@ pub(super) mod tests {
                     by_glob: 0,
                     skipped: 0,
                 },
-                changes: None,
                 baseline: None,
                 groups: GroupCounts {
                     total: 2,
                     type_1: 2,
                     type_2: 0,
                     type_3: 0,
+                    restricted_semantic: 0,
                     fragment_scope: 0,
                     folded_runs: 0,
                     subsumed_runs: 0,
@@ -1931,6 +2119,7 @@ pub(super) mod tests {
                 width_family: false,
                 suppressed: None,
                 split_pair: false,
+                semantic: None,
                 members: (0..7)
                     .map(|index| Member {
                         finding_id: format!("{index:032x}"),
@@ -1971,6 +2160,7 @@ pub(super) mod tests {
                     pattern: Some("vendor/**".to_string()),
                 }),
                 split_pair: false,
+                semantic: None,
                 members: vec![
                     Member {
                         finding_id: "1".repeat(32),
@@ -2028,6 +2218,7 @@ pub(super) mod tests {
                 width_family: false,
                 suppressed: None,
                 split_pair: false,
+                semantic: None,
                 members: vec![
                     Member {
                         finding_id: "3".repeat(32),
@@ -2075,6 +2266,7 @@ pub(super) mod tests {
                 width_family: false,
                 suppressed: None,
                 split_pair: false,
+                semantic: None,
                 members: vec![
                     Member {
                         finding_id: "5".repeat(32),
@@ -2225,9 +2417,12 @@ pub(super) mod tests {
                 test_code: true,
                 split_pair: false,
                 similarity: None,
+                semantic: None,
                 suppressed: None,
             },
             scan_run: 3,
+            source_artifact_mappings: Vec::new(),
+            clone_group_savings: Vec::new(),
         };
         let mut buffer = Vec::new();
         detail.render_text(&mut buffer).unwrap();
@@ -2253,9 +2448,12 @@ pub(super) mod tests {
                 test_code: false,
                 split_pair: false,
                 similarity: None,
+                semantic: None,
                 suppressed: None,
             },
             scan_run: 3,
+            source_artifact_mappings: Vec::new(),
+            clone_group_savings: Vec::new(),
         };
         let mut buffer = Vec::new();
         detail.render_text(&mut buffer).unwrap();
@@ -2319,6 +2517,91 @@ pub(super) mod tests {
         assert_eq!(suppressed["kind"], "rule");
         assert_eq!(suppressed["scope"], "path_glob");
         assert!(suppressed.get("reason").is_none());
+    }
+
+    #[test]
+    fn restricted_semantic_evidence_is_explicit_in_json() {
+        let mut report = sample_report();
+        let group = &mut report.groups[0];
+        group.clone_type = "restricted-semantic".to_string();
+        group.semantic = Some(SemanticEvidence {
+            schema_version: "sog-v8".to_string(),
+            rules: vec![SemanticRuleEvidence {
+                id: "sequence-pipeline-v1".to_string(),
+                version: 1,
+                confidence: 0.7,
+            }],
+            graphs: vec![semantic_graph(), semantic_graph()],
+            node_mappings: vec![SemanticNodeMapping {
+                corresponding_member: 1,
+                canonical: 0,
+                corresponding: 0,
+            }],
+        });
+        let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+        assert_eq!(
+            value["groups"][0]["semantic"]["rules"][0]["id"],
+            "sequence-pipeline-v1"
+        );
+        assert_eq!(
+            value["groups"][0]["semantic"]["graphs"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA).unwrap();
+        assert!(schema["$defs"]["group"]["properties"]["semantic"].is_object());
+        assert!(schema["$defs"]["semantic_evidence"].is_object());
+    }
+
+    #[test]
+    fn semantic_finding_detail_keeps_graphs_and_mappings_readable() {
+        let detail = FindingDetail {
+            member: fragment_group().members.remove(0),
+            group: GroupRef {
+                fingerprint: "0e".repeat(16),
+                clone_type: "restricted-semantic".to_string(),
+                scope: CloneScope::Unit.name().to_string(),
+                confidence: 0.7,
+                priority: None,
+                members: 2,
+                boilerplate: None,
+                test_code: false,
+                split_pair: true,
+                similarity: None,
+                semantic: Some(SemanticEvidence {
+                    schema_version: "sog-v8".to_string(),
+                    rules: vec![SemanticRuleEvidence {
+                        id: "sequence-pipeline-v1".to_string(),
+                        version: 1,
+                        confidence: 0.7,
+                    }],
+                    graphs: vec![semantic_graph(), semantic_graph()],
+                    node_mappings: vec![SemanticNodeMapping {
+                        corresponding_member: 1,
+                        canonical: 0,
+                        corresponding: 0,
+                    }],
+                }),
+                suppressed: None,
+            },
+            scan_run: 3,
+            source_artifact_mappings: Vec::new(),
+            clone_group_savings: Vec::new(),
+        };
+        let json: serde_json::Value = serde_json::from_str(&detail.to_json().unwrap()).unwrap();
+        assert_eq!(
+            json["group"]["semantic"]["graphs"].as_array().map(Vec::len),
+            Some(2)
+        );
+
+        let mut text = Vec::new();
+        detail.render_text(&mut text).unwrap();
+        let text = String::from_utf8(text).unwrap();
+        assert!(text.contains("semantic evidence: sog-v8"));
+        assert!(text.contains("rule sequence-pipeline-v1@1"));
+        assert!(text.contains("graph 1: source -> collect"));
+        assert!(text.contains("node mapping: 0→0"));
     }
 
     #[test]
@@ -2549,9 +2832,12 @@ pub(super) mod tests {
                 test_code: false,
                 split_pair: false,
                 similarity: None,
+                semantic: None,
                 suppressed: None,
             },
             scan_run: 7,
+            source_artifact_mappings: Vec::new(),
+            clone_group_savings: Vec::new(),
         };
         let value: serde_json::Value = serde_json::from_str(&detail.to_json().unwrap()).unwrap();
         assert_eq!(value["finding_id"], "ab".repeat(16));
@@ -2568,6 +2854,82 @@ pub(super) mod tests {
         assert!(text.contains("location: src/lib.rs:3-12"));
         assert!(text.contains("canonical: yes"));
         assert!(text.contains("2 instances"));
+    }
+
+    #[test]
+    fn finding_detail_exposes_mapping_evidence_and_separate_estimate_confidences() {
+        let detail = FindingDetail {
+            member: fragment_group().members.remove(0),
+            group: GroupRef {
+                fingerprint: "0e".repeat(16),
+                clone_type: "type-1".to_string(),
+                scope: SCOPE_FRAGMENT.to_string(),
+                confidence: 1.0,
+                priority: None,
+                members: 2,
+                boilerplate: None,
+                test_code: false,
+                split_pair: false,
+                similarity: None,
+                semantic: None,
+                suppressed: None,
+            },
+            scan_run: 3,
+            source_artifact_mappings: vec![SourceArtifactMappingDetail {
+                artifact_analysis_id: 12,
+                artifact_symbol_fingerprint: "ab".repeat(16),
+                source_build_variant_fingerprint: "cd".repeat(16),
+                artifact_build_variant_fingerprint: "ef".repeat(16),
+                confidence: "ambiguous".to_string(),
+                evidence: MappingEvidence::new(
+                    vec![MappingEvidenceFact::Dwarf {
+                        source_path: "src/lib.rs".to_string(),
+                    }],
+                    1,
+                    true,
+                ),
+                attributed_bytes: Some(8),
+            }],
+            clone_group_savings: vec![CloneGroupSavingsDetail {
+                artifact_analysis_id: 12,
+                source_build_variant_fingerprint: "cd".repeat(16),
+                artifact_build_variant_fingerprint: "ef".repeat(16),
+                duplicated_bytes: 8,
+                estimated_refactor_savings_bytes: -2,
+                mapping_confidence: "high".to_string(),
+                clone_confidence: 1.0,
+                model_confidence: "low".to_string(),
+                savings_confidence: "low".to_string(),
+                model_schema_version: "refactor-savings-model-v1".to_string(),
+                assumptions: serde_json::json!([{
+                    "kind": "shared_implementation_retains_copies",
+                    "copies": 1,
+                }]),
+            }],
+        };
+
+        let value: serde_json::Value = serde_json::from_str(&detail.to_json().unwrap()).unwrap();
+        assert_eq!(
+            value["source_artifact_mappings"][0]["evidence"]["facts"][0]["kind"],
+            "dwarf"
+        );
+        assert_eq!(
+            value["source_artifact_mappings"][0]["evidence"]["has_conflict"],
+            true
+        );
+        assert_eq!(
+            value["clone_group_savings"][0]["estimated_refactor_savings_bytes"],
+            -2
+        );
+        assert_eq!(value["clone_group_savings"][0]["model_confidence"], "low");
+
+        let mut buffer = Vec::new();
+        detail.render_text(&mut buffer).unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        assert!(text.contains("source-artifact mappings:"));
+        assert!(text.contains("conflicting evidence retained"));
+        assert!(text.contains("refactoring estimates (not guaranteed):"));
+        assert!(text.contains("-2 estimated bytes"));
     }
 
     #[test]
@@ -2605,6 +2967,7 @@ pub(super) mod tests {
                     min_pairwise: 0.87,
                     confidence_band: Some("medium".to_string()),
                 }),
+                semantic: None,
                 suppressed: Some(Suppression {
                     kind: SuppressionKind::Rule,
                     reason: None,
@@ -2613,6 +2976,8 @@ pub(super) mod tests {
                 }),
             },
             scan_run: 9,
+            source_artifact_mappings: Vec::new(),
+            clone_group_savings: Vec::new(),
         };
         let mut buffer = Vec::new();
         detail.render_text(&mut buffer).unwrap();

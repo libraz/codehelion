@@ -36,7 +36,7 @@ use crate::candidate::{self, CandidateConfig, CandidateStats};
 use crate::clone_class::CloneClass;
 use crate::conditional::ArmPath;
 use crate::control_flow::{self, ControlFlowConfig, ControlFlowStats};
-use crate::discovery::BuildVariant;
+use crate::discovery::{BuildVariant, Language};
 use crate::engine::LiteralNorm;
 use crate::features::{self, FileFeatures};
 use crate::frontend::{Lexeme, Token, UnitKind};
@@ -47,11 +47,12 @@ use crate::ir::{ByteRange, IrNode, Shape, SyntaxIrFile};
 use crate::maximal::{self, MaximalConfig, RegionSide, RegionStats, SharedRegion};
 use crate::near_match::{self, NearMatchConfig, NearMatchStats};
 use crate::stable_id::{
-    self, CloneGroupFingerprint, ContentNorm, FileContext, FragmentFingerprint, UnitFingerprint,
+    self, CloneGroupFingerprint, ContentNorm, CrossVariantComparisonId, CrossVariantGroupId,
+    FileContext, FragmentFingerprint, UnitFingerprint,
 };
 use crate::substitution;
 use crate::test_code;
-use crate::types::{TypeEvidence, TypeTag};
+use crate::types::{ApiEvidence, TypeEvidence, TypeTag};
 use crate::verify::{self, SimilarityBreakdown, UnitView, VerifyConfig};
 
 /// Default largest shape-mix divergence a candidate pair may span.
@@ -342,6 +343,147 @@ pub struct StructuralReport {
     pub stats: StructuralStats,
 }
 
+/// One unit offered to an explicit build-variant comparison.
+///
+/// The unit still records the variant that produced it. This is deliberately
+/// not a `BuildVariant`-less intermediate representation: comparison is an
+/// opt-in relation between independent programs, not another program.
+#[derive(Debug, Clone, Copy)]
+pub struct CrossVariantUnit<'a> {
+    /// Fingerprint of the partition that produced this unit.
+    pub origin_variant: &'a str,
+    /// Language of the source unit.
+    pub language: Language,
+    /// Reporting anchor relative to the scanned root.
+    pub file_path: &'a str,
+    /// Reporting anchor, 1-based.
+    pub start_line: u32,
+    /// Reporting anchor, 1-based.
+    pub end_line: u32,
+    /// The unit's declared name, when parsing recovered it.
+    pub name: Option<&'a str>,
+    /// Tokens covering precisely this unit.
+    pub tokens: &'a [Token],
+}
+
+/// A member of a cross-build-variant exact clone group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossVariantMember {
+    /// The normal partition that produced this member; never synthesized.
+    pub origin_variant: String,
+    /// Language of the source unit.
+    pub language: Language,
+    /// Reporting anchor relative to the scanned root.
+    pub file_path: String,
+    /// Reporting anchor, 1-based.
+    pub start_line: u32,
+    /// Reporting anchor, 1-based.
+    pub end_line: u32,
+    /// Best-effort unit name.
+    pub name: Option<String>,
+    /// Token count of the matched unit.
+    pub token_count: usize,
+}
+
+/// One exact group found across independent build variants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossVariantGroup {
+    /// Comparison-domain stable identifier, distinct from clone-group ids.
+    pub id: CrossVariantGroupId,
+    /// Exact clones only in the current policy.
+    pub clone_type: CloneClass,
+    /// Every occurrence, each retaining its origin variant.
+    pub members: Vec<CrossVariantMember>,
+}
+
+/// The result of an explicit cross-build-variant comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossVariantComparison {
+    /// Comparison-domain identity, including policy and the origin set.
+    pub id: CrossVariantComparisonId,
+    /// Sorted, deduplicated fingerprints of all partitions compared.
+    pub origin_variants: Vec<String>,
+    /// Exact groups with members from at least two origin variants.
+    pub groups: Vec<CrossVariantGroup>,
+}
+
+/// Compare exact whole units across C/C++ build partitions.
+///
+/// This deliberately covers Type-1 units only. It is a separate, bounded
+/// operation from a partition's structural pipeline: normal Type-2/3 groups,
+/// their snapshots, baselines and histories remain partition-local. The
+/// function does compare source units directly; it never joins groups that a
+/// partition happened to report.
+#[must_use]
+pub fn compare_build_variants(units: &[CrossVariantUnit<'_>]) -> Option<CrossVariantComparison> {
+    let mut origins: Vec<String> = units
+        .iter()
+        .map(|unit| unit.origin_variant.to_string())
+        .collect();
+    origins.sort_unstable();
+    origins.dedup();
+    if origins.len() < 2 {
+        return None;
+    }
+    let id = stable_id::cross_variant_comparison_id(&origins);
+    let mut classes: BTreeMap<(String, [u8; 16]), Vec<&CrossVariantUnit<'_>>> = BTreeMap::new();
+    for unit in units {
+        let mut content = blake3::Hasher::new();
+        content.update(b"cross-variant-raw-unit-v1");
+        for token in unit.tokens {
+            content.update(&[token.kind.tag()]);
+            let length = u32::try_from(token.text.len()).unwrap_or(u32::MAX);
+            content.update(&length.to_le_bytes());
+            content.update(token.text.as_bytes());
+        }
+        let mut digest = [0_u8; 16];
+        digest.copy_from_slice(&content.finalize().as_bytes()[..16]);
+        classes
+            .entry((unit.language.name().to_string(), digest))
+            .or_default()
+            .push(unit);
+    }
+    let mut groups = Vec::new();
+    for ((_, content), members) in classes {
+        let origins_in_group: BTreeSet<&str> =
+            members.iter().map(|member| member.origin_variant).collect();
+        if origins_in_group.len() < 2 {
+            continue;
+        }
+        let mut members: Vec<CrossVariantMember> = members
+            .into_iter()
+            .map(|member| CrossVariantMember {
+                origin_variant: member.origin_variant.to_string(),
+                language: member.language,
+                file_path: member.file_path.to_string(),
+                start_line: member.start_line,
+                end_line: member.end_line,
+                name: member.name.map(ToString::to_string),
+                token_count: member.tokens.len(),
+            })
+            .collect();
+        members.sort_by(|left, right| {
+            left.origin_variant
+                .cmp(&right.origin_variant)
+                .then_with(|| left.file_path.cmp(&right.file_path))
+                .then_with(|| left.start_line.cmp(&right.start_line))
+                .then_with(|| left.end_line.cmp(&right.end_line))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        groups.push(CrossVariantGroup {
+            id: stable_id::cross_variant_group_id(&id, CloneClass::Type1, &content),
+            clone_type: CloneClass::Type1,
+            members,
+        });
+    }
+    groups.sort_by_key(|group| group.id);
+    Some(CrossVariantComparison {
+        id,
+        origin_variants: origins,
+        groups,
+    })
+}
+
 /// One analysed unit's data, held together for verification and grouping.
 struct Unit {
     file: usize,
@@ -370,6 +512,7 @@ struct Unit {
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedTypes {
     per_file: Vec<Vec<(ByteRange, TypeTag)>>,
+    apis_per_file: Vec<Vec<(ByteRange, String)>>,
 }
 
 impl ResolvedTypes {
@@ -383,13 +526,38 @@ impl ResolvedTypes {
         for file in &mut per_file {
             file.sort_by_key(|(range, _)| (range.start, range.end));
         }
-        Self { per_file }
+        Self {
+            per_file,
+            apis_per_file: Vec::new(),
+        }
     }
 
-    /// Whether nothing was resolved anywhere.
+    /// Collect types and compiler-resolved call targets by file.
+    ///
+    /// Target strings are opaque stable symbols or canonical candidate-set
+    /// keys. They cross the compiler boundary as data, never as compiler API
+    /// types, preserving the core's helper independence.
+    #[must_use]
+    pub fn per_file_with_apis(
+        mut per_file: Vec<Vec<(ByteRange, TypeTag)>>,
+        mut apis_per_file: Vec<Vec<(ByteRange, String)>>,
+    ) -> Self {
+        for file in &mut per_file {
+            file.sort_by_key(|(range, _)| (range.start, range.end));
+        }
+        for file in &mut apis_per_file {
+            file.sort_by_key(|(range, _)| (range.start, range.end));
+        }
+        Self {
+            per_file,
+            apis_per_file,
+        }
+    }
+
+    /// Whether no type or call target was resolved anywhere.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.per_file.iter().all(Vec::is_empty)
+        self.per_file.iter().all(Vec::is_empty) && self.apis_per_file.iter().all(Vec::is_empty)
     }
 
     /// The evidence for one unit: everything resolved within its bytes.
@@ -407,6 +575,39 @@ impl ResolvedTypes {
             .map(|(_, tag)| *tag);
         let evidence = TypeEvidence::from_tags(tags);
         (!evidence.is_empty()).then_some(evidence)
+    }
+
+    /// Compiler-resolved call targets whose source anchors sit within `unit`.
+    fn apis_within(&self, unit: &Unit) -> Option<ApiEvidence> {
+        let file = self.apis_per_file.get(unit.file)?;
+        let from = file.partition_point(|(range, _)| range.start < unit.range.start);
+        let targets = file[from..]
+            .iter()
+            .take_while(|(range, _)| range.start < unit.range.end)
+            .filter(|(range, _)| range.end <= unit.range.end)
+            .map(|(_, target)| target.clone());
+        let evidence = ApiEvidence::from_targets(targets);
+        (!evidence.is_empty()).then_some(evidence)
+    }
+}
+
+/// Compiler evidence attributed to each parsed unit.
+///
+/// Keeping the parallel dimensions together ensures every verification path
+/// receives the same byte-to-unit attribution without growing its argument
+/// list whenever Semantic mode learns another comparison fact.
+struct UnitEvidence {
+    types: Vec<Option<TypeEvidence>>,
+    apis: Vec<Option<ApiEvidence>>,
+}
+
+fn unit_evidence(units: &[Unit], resolved: &ResolvedTypes) -> UnitEvidence {
+    UnitEvidence {
+        types: units.iter().map(|unit| resolved.within(unit)).collect(),
+        apis: units
+            .iter()
+            .map(|unit| resolved.apis_within(unit))
+            .collect(),
     }
 }
 
@@ -438,7 +639,7 @@ pub fn analyze_resolved(
     let feature_files: Vec<FileFeatures> = files.iter().map(features::extract).collect();
 
     let (units, offsets) = flatten_units(files, variant);
-    let typed: Vec<Option<TypeEvidence>> = units.iter().map(|unit| resolved.within(unit)).collect();
+    let evidence = unit_evidence(&units, resolved);
 
     // Stage: candidate extraction (exact seeds, near matches and shared
     // control-flow skeletons), lifted to distinct unit pairs.
@@ -484,7 +685,7 @@ pub fn analyze_resolved(
         &units,
         files,
         &feature_files,
-        &typed,
+        &evidence,
         &config.verify,
     );
 
@@ -508,7 +709,7 @@ pub fn analyze_resolved(
                 &units,
                 files,
                 &feature_files,
-                &typed,
+                &evidence,
                 variant,
                 config,
             )
@@ -583,13 +784,13 @@ fn verify_pairs(
     units: &[Unit],
     files: &[SyntaxIrFile],
     feature_files: &[FileFeatures],
-    typed: &[Option<TypeEvidence>],
+    evidence: &UnitEvidence,
     config: &VerifyConfig,
 ) -> Vec<SimilarityEdge> {
     let mut edges: Vec<SimilarityEdge> = Vec::new();
     for &(a, b) in pairs {
-        let view_a = view(a, units, files, feature_files, typed);
-        let view_b = view(b, units, files, feature_files, typed);
+        let view_a = view(a, units, files, feature_files, evidence);
+        let view_b = view(b, units, files, feature_files, evidence);
         let verdict = verify::verify(&view_a, &view_b, config);
         if let (Some(class), Some(confidence)) = (verdict.class, verdict.confidence) {
             edges.push(SimilarityEdge {
@@ -1059,18 +1260,18 @@ fn group_detail(
     units: &[Unit],
     files: &[SyntaxIrFile],
     feature_files: &[FileFeatures],
-    typed: &[Option<TypeEvidence>],
+    evidence: &UnitEvidence,
     variant: &BuildVariant,
     config: &StructuralConfig,
 ) -> GroupDetail {
-    let medoid_view = view(group.canonical, units, files, feature_files, typed);
+    let medoid_view = view(group.canonical, units, files, feature_files, evidence);
     let member_breakdowns = group
         .members
         .iter()
         .map(|&member| {
             verify::verify(
                 &medoid_view,
-                &view(member, units, files, feature_files, typed),
+                &view(member, units, files, feature_files, evidence),
                 &config.verify,
             )
             .breakdown
@@ -1281,7 +1482,7 @@ fn view<'a>(
     units: &'a [Unit],
     files: &'a [SyntaxIrFile],
     feature_files: &'a [FileFeatures],
-    typed: &'a [Option<TypeEvidence>],
+    evidence: &'a UnitEvidence,
 ) -> UnitView<'a> {
     let unit = &units[index];
     UnitView {
@@ -1289,7 +1490,8 @@ fn view<'a>(
         tokens: &files[unit.file].tokens,
         features: &feature_files[unit.file].units[unit.local],
         // Absent unless a compiler resolved types inside this unit's bytes.
-        types: typed.get(index).and_then(Option::as_ref),
+        types: evidence.types.get(index).and_then(Option::as_ref),
+        apis: evidence.apis.get(index).and_then(Option::as_ref),
     }
 }
 
@@ -1603,12 +1805,13 @@ const fn encloses(a: &Unit, b: &Unit) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        CloneClass, Confirmed, RegionOccurrence, RegionSide, ResolvedTypes, StructuralRegion, Unit,
-        drop_subsumed, merge_adjacent,
+        CloneClass, Confirmed, CrossVariantUnit, RegionOccurrence, RegionSide, ResolvedTypes,
+        StructuralRegion, Unit, compare_build_variants, drop_subsumed, merge_adjacent,
     };
     use crate::candidate::StatementRun;
     use crate::conditional::ArmPath;
-    use crate::frontend::UnitKind;
+    use crate::discovery::Language;
+    use crate::frontend::{SourceSpan, Token, TokenKind, UnitKind};
     use crate::ir::ByteRange;
     use crate::stable_id::{CloneGroupFingerprint, FragmentFingerprint, UnitFingerprint};
     use crate::types::TypeTag;
@@ -1714,6 +1917,19 @@ mod tests {
     fn a_type_reaching_past_a_unit_is_not_counted_inside_it() {
         let resolved = ResolvedTypes::per_file(vec![vec![at(30, 60, TypeTag::Sequence)]]);
         assert!(resolved.within(&unit_at(0, 0, 40)).is_none());
+    }
+
+    #[test]
+    fn a_resolved_api_inside_a_unit_is_evidence_about_that_unit() {
+        let resolved = ResolvedTypes::per_file_with_apis(
+            vec![Vec::new()],
+            vec![vec![
+                (ByteRange { start: 30, end: 33 }, "static:kept".into()),
+                (ByteRange { start: 90, end: 93 }, "static:other".into()),
+            ]],
+        );
+        assert!(resolved.apis_within(&unit_at(0, 0, 40)).is_some());
+        assert!(resolved.apis_within(&unit_at(0, 40, 80)).is_none());
     }
 
     #[test]
@@ -1918,5 +2134,44 @@ mod tests {
         let reversed: Vec<Confirmed> = build().into_iter().rev().collect();
         assert_eq!(forward, merge_adjacent(&reversed));
         assert!(!forward.is_empty());
+    }
+
+    #[test]
+    fn cross_variant_comparison_keeps_origins_and_is_order_stable() {
+        let tokens = [Token {
+            kind: TokenKind::Identifier,
+            text: "same".into(),
+            span: SourceSpan {
+                start_byte: 0,
+                end_byte: 4,
+                start_line: 1,
+                start_column: 1,
+            },
+        }];
+        let left = CrossVariantUnit {
+            origin_variant: "b",
+            language: Language::Cpp,
+            file_path: "left.cpp",
+            start_line: 2,
+            end_line: 4,
+            name: Some("left"),
+            tokens: &tokens,
+        };
+        let right = CrossVariantUnit {
+            origin_variant: "a",
+            language: Language::Cpp,
+            file_path: "right.cpp",
+            start_line: 5,
+            end_line: 7,
+            name: Some("right"),
+            tokens: &tokens,
+        };
+        let forward = compare_build_variants(&[left, right]).unwrap();
+        let reverse = compare_build_variants(&[right, left]).unwrap();
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.origin_variants, vec!["a", "b"]);
+        assert_eq!(forward.groups.len(), 1);
+        assert_eq!(forward.groups[0].members[0].origin_variant, "a");
+        assert!(compare_build_variants(&[left]).is_none());
     }
 }

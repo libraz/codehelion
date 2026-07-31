@@ -1,0 +1,222 @@
+{
+  "schema_version": "artifact-ir-v2",
+  "format": "wasm",
+  "capabilities": {
+    "symbols": true,
+    "call_graph": true,
+    "source_mapping": false,
+    "relocations": false,
+    "data_segments": true
+  },
+  "fingerprint": [
+    73,
+    58,
+    171,
+    199,
+    166,
+    23,
+    211,
+    183,
+    10,
+    217,
+    116,
+    103,
+    173,
+    85,
+    95,
+    216
+  ],
+  "observed_bytes": 67,
+  "sections": [
+    {
+      "name": "type",
+      "offset": 10,
+      "size": 4,
+      "executable": false
+    },
+    {
+      "name": "function",
+      "offset": 16,
+      "size": 3,
+      "executable": false
+    },
+    {
+      "name": "export",
+      "offset": 21,
+      "size": 7,
+      "executable": false
+    },
+    {
+      "name": "code",
+      "offset": 30,
+      "size": 9,
+      "executable": true
+    },
+    {
+      "name": "data",
+      "offset": 41,
+      "size": 6,
+      "executable": false
+    },
+    {
+      "name": "custom",
+      "offset": 49,
+      "size": 18,
+      "executable": false
+    }
+  ],
+  "imports": [],
+  "symbols": [
+    {
+      "fingerprint": [
+        49,
+        207,
+        154,
+        35,
+        67,
+        196,
+        17,
+        130,
+        213,
+        90,
+        165,
+        226,
+        77,
+        19,
+        139,
+        1
+      ],
+      "name": "foo",
+      "exported": true,
+      "section": 10,
+      "offset": 32,
+      "size": 4,
+      "size_inferred": false,
+      "code": [
+        0,
+        16,
+        1,
+        11
+      ],
+      "normalized": {
+        "version": "wasm-opcode-v1",
+        "bytes": [
+          16,
+          11
+        ]
+      },
+      "inline_stack": []
+    },
+    {
+      "fingerprint": [
+        170,
+        143,
+        164,
+        221,
+        50,
+        159,
+        40,
+        159,
+        14,
+        154,
+        198,
+        45,
+        201,
+        47,
+        81,
+        66
+      ],
+      "name": "bar",
+      "exported": false,
+      "section": 10,
+      "offset": 37,
+      "size": 2,
+      "size_inferred": false,
+      "code": [
+        0,
+        11
+      ],
+      "normalized": {
+        "version": "wasm-opcode-v1",
+        "bytes": [
+          11
+        ]
+      },
+      "inline_stack": []
+    }
+  ],
+  "entry_points": [],
+  "indirect_references": [],
+  "calls": [
+    {
+      "caller": [
+        49,
+        207,
+        154,
+        35,
+        67,
+        196,
+        17,
+        130,
+        213,
+        90,
+        165,
+        226,
+        77,
+        19,
+        139,
+        1
+      ],
+      "target": [
+        170,
+        143,
+        164,
+        221,
+        50,
+        159,
+        40,
+        159,
+        14,
+        154,
+        198,
+        45,
+        201,
+        47,
+        81,
+        66
+      ],
+      "unresolved": null
+    }
+  ],
+  "relocations": [],
+  "source_mappings": [],
+  "data_segments": [
+    {
+      "fingerprint": [
+        25,
+        234,
+        139,
+        187,
+        164,
+        197,
+        9,
+        111,
+        28,
+        227,
+        27,
+        26,
+        73,
+        201,
+        29,
+        103
+      ],
+      "section": 11,
+      "offset": 42,
+      "bytes": [
+        97,
+        98,
+        99
+      ]
+    }
+  ]
+}

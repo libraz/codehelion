@@ -1,0 +1,22 @@
+[package]
+name = "codehelion-artifact-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "WebAssembly artifact parser backend for codehelion."
+
+[dependencies]
+codehelion-artifact = { version = "0.1.0", path = "../codehelion-artifact" }
+cpp_demangle = "0.5"
+rustc-demangle = "0.1"
+wasmparser = "0.254"
+
+[dev-dependencies]
+proptest = "1.6"
+serde_json = "1"
+
+[lints]
+workspace = true

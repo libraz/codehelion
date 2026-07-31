@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use codehelion_helper::ir::{
-    CallSite, CallTarget, ResolvedType, TypeCategory, Unavailability, UnitRef,
+    CallSite, CallTarget, FallibleKind, ResolvedType, SemanticConstructKind, TypeCategory,
+    Unavailability, UnitRef,
 };
 use codehelion_helper::protocol::{Capability, Execution};
 use codehelion_helper::{Analysis, COMPILER_IR_SCHEMA_VERSION, CompilerIr, Helper};
@@ -477,6 +478,321 @@ fn direct_calls_keep_the_selected_callable_usr() {
     assert_ne!(external, direct);
 }
 
+/// A standard-library API label is supplementary evidence: the USR remains
+/// the static call identity, while a closed semantic normalizer can use the
+/// label without parsing a platform-specific USR spelling.
+#[test]
+fn standard_library_calls_carry_closed_api_names() {
+    let planted = plant("overload-resolution");
+    let ir = overload_ir(&planted);
+    let begin = ir
+        .calls
+        .iter()
+        .find(|call| call.api_name.as_deref() == Some("std::begin"))
+        .expect("standard begin call");
+    let push = ir
+        .calls
+        .iter()
+        .find(|call| call.api_name.as_deref() == Some("std::push_back"))
+        .expect("standard push_back call");
+    assert_eq!(begin.api_name.as_deref(), Some("std::begin"));
+    assert_eq!(push.api_name.as_deref(), Some("std::push_back"));
+    assert!(matches!(begin.target, CallTarget::Static { .. }));
+    assert!(matches!(push.target, CallTarget::Static { .. }));
+}
+
+/// An `optional` check enters the restricted vocabulary only after Clang has
+/// resolved the selected method or conversion to the standard-library
+/// declaration. A local lookalike is ordinary control flow, not evidence of
+/// optional validation.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fixture keeps the accepted standard forms and rejected lookalikes under the same compiler invocation"
+)]
+fn standard_optional_presence_checks_are_validation_constructs() {
+    let planted = plant("overload-resolution");
+    let path = planted.root.join("src/calls.cpp");
+    let source = std::fs::read_to_string(&path).expect("read C++ fixture");
+    let source = format!(
+        "#include <optional>\n#include <expected>\n\
+         #define HAS_OPTION_VALUE(value) ((value).has_value())\n\
+         {source}\n\
+         namespace optional_checks {{\n\
+         struct Lookalike {{ bool has_value() const {{ return true; }} }};\n\
+         struct ConversionLookalike {{ explicit operator bool() const {{ return true; }} }};\n\
+         bool standard(std::optional<long> value) {{\n\
+           if (value.has_value()) {{ return true; }}\n\
+           return false;\n\
+         }}\n\
+         bool direct_conversion(std::optional<long> value) {{\n\
+           if (value) {{ return true; }}\n\
+           return false;\n\
+         }}\n\
+         bool macro_standard(std::optional<long> value) {{\n\
+           if (HAS_OPTION_VALUE(value)) {{ return true; }}\n\
+           return false;\n\
+         }}\n\
+         bool lookalike(Lookalike value) {{\n\
+           if (value.has_value()) {{ return true; }}\n\
+           return false;\n\
+         }}\n\
+         bool conversion_lookalike(ConversionLookalike value) {{\n\
+           if (value) {{ return true; }}\n\
+           return false;\n\
+         }}\n\
+         bool compound(std::optional<long> value, bool keep) {{\n\
+           if (value.has_value() && keep) {{ return true; }}\n\
+           return false;\n\
+         }}\n\
+         bool expected_standard(std::expected<long, int> expected_value) {{\n\
+           if (expected_value.has_value()) {{ return true; }}\n\
+           return false;\n\
+         }}\n\
+         bool expected_direct_conversion(std::expected<long, int> expected_value) {{\n\
+           if (expected_value) {{ return true; }}\n\
+           return false;\n\
+         }}\n\
+         bool expected_compound(std::expected<long, int> expected_value, bool keep) {{\n\
+           if (expected_value.has_value() && keep) {{ return true; }}\n\
+           return false;\n\
+         }}\n\
+         }}  // namespace optional_checks\n"
+    );
+    std::fs::write(&path, &source).expect("extend C++ fixture");
+    let database_path = planted.root.join("compile_commands.json");
+    let database = std::fs::read_to_string(&database_path).expect("read compilation database");
+    std::fs::write(&database_path, database.replace("-std=c++17", "-std=c++23"))
+        .expect("enable C++23 expected fixture");
+
+    let ir = overload_ir(&planted);
+    let validates = ir
+        .semantic_constructs
+        .iter()
+        .filter(|construct| construct.kind == SemanticConstructKind::Validate)
+        .collect::<Vec<_>>();
+    assert_eq!(validates.len(), 5, "{:?}", ir.semantic_constructs);
+    assert_eq!(
+        validates
+            .iter()
+            .filter(|construct| construct.fallible_kind == Some(FallibleKind::Option))
+            .count(),
+        3
+    );
+    assert_eq!(
+        validates
+            .iter()
+            .filter(|construct| construct.fallible_kind == Some(FallibleKind::Result))
+            .count(),
+        2
+    );
+    let invocation = u64::try_from(
+        source
+            .rfind("HAS_OPTION_VALUE(value)")
+            .expect("macro invocation"),
+    )
+    .expect("source offset fits in u64");
+    let macro_validation = validates
+        .iter()
+        .find(|construct| {
+            construct.fallible_kind == Some(FallibleKind::Option)
+                && construct.anchor.expansion.start_byte == invocation
+        })
+        .expect("macro optional check is anchored at the invocation");
+    assert!(
+        macro_validation.anchor.definition.is_some(),
+        "macro-origin validation keeps its written definition"
+    );
+    let spellings = validates
+        .iter()
+        .map(|construct| {
+            let start =
+                usize::try_from(construct.anchor.expansion.start_byte).expect("range start");
+            let end = usize::try_from(construct.anchor.expansion.end_byte).expect("range end");
+            source[start..end].to_string()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        spellings
+            .iter()
+            .any(|spelling| spelling.contains("value.has_value()"))
+    );
+    assert!(spellings.iter().any(|spelling| spelling.trim() == "value"));
+    assert!(
+        spellings
+            .iter()
+            .any(|spelling| spelling.contains("expected_value.has_value()"))
+    );
+    assert!(
+        spellings
+            .iter()
+            .all(|spelling| !spelling.contains("&& keep"))
+    );
+}
+
+/// A standard `expected` is a direct propagation adapter only when the whole
+/// function forwards its single same-typed parameter unchanged. This gives the
+/// cross-language normalizer a compiler-confirmed counterpart to Rust's
+/// `Ok(value?)` without treating ordinary expected-using functions as such.
+#[test]
+fn standard_expected_identity_return_is_a_propagation_construct() {
+    let planted = plant("overload-resolution");
+    let path = planted.root.join("src/calls.cpp");
+    let source = std::fs::read_to_string(&path).expect("read C++ fixture");
+    let source = format!(
+        "#include <expected>\n{source}\n\
+         namespace expected_checks {{\n\
+         std::expected<long, int> direct(std::expected<long, int> value) {{\n\
+           return value;\n\
+         }}\n\
+         std::expected<long, int> transformed(std::expected<long, int> value) {{\n\
+           return std::expected<long, int>(value.value_or(0));\n\
+         }}\n\
+         std::expected<long, int> extra(std::expected<long, int> value) {{\n\
+           auto copy = value;\n\
+           return value;\n\
+         }}\n\
+         }}  // namespace expected_checks\n"
+    );
+    std::fs::write(&path, &source).expect("extend C++ fixture");
+
+    let database_path = planted.root.join("compile_commands.json");
+    let mut database: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&database_path).expect("read the compilation database"),
+    )
+    .expect("the database is JSON");
+    let arguments = database[0]["arguments"]
+        .as_array_mut()
+        .expect("the fixture uses an arguments array");
+    let standard = arguments
+        .iter_mut()
+        .find(|argument| argument.as_str() == Some("-std=c++17"))
+        .expect("fixture declares C++17");
+    *standard = serde_json::Value::String("-std=c++23".to_string());
+    std::fs::write(
+        &database_path,
+        serde_json::to_vec_pretty(&database).expect("render the database"),
+    )
+    .expect("select C++23 for expected");
+
+    let ir = overload_ir(&planted);
+    let propagated = ir
+        .semantic_constructs
+        .iter()
+        .filter(|construct| construct.kind == SemanticConstructKind::PropagateError)
+        .collect::<Vec<_>>();
+    assert_eq!(propagated.len(), 1, "{:?}", ir.semantic_constructs);
+    assert_eq!(propagated[0].fallible_kind, Some(FallibleKind::Result));
+    assert_eq!(
+        propagated[0].direct_propagation,
+        Some(codehelion_helper::ir::DirectPropagation::ResultAdapter)
+    );
+    let start = usize::try_from(propagated[0].anchor.expansion.start_byte).expect("range start");
+    let end = usize::try_from(propagated[0].anchor.expansion.end_byte).expect("range end");
+    assert_eq!(&source[start..end], "return value");
+}
+
+/// A direct standard `lock_guard` binding has a compiler-known acquisition and
+/// the lexical function endpoint where its destructor releases the lock.
+/// Multiple direct guards and a nested guard remain outside this first form.
+#[test]
+fn direct_standard_lock_guard_lifetimes_are_reported_at_function_scope() {
+    let planted = plant("overload-resolution");
+    let ir = overload_ir(&planted);
+    let lifetimes = ir
+        .semantic_constructs
+        .iter()
+        .filter(|construct| {
+            matches!(
+                construct.kind,
+                SemanticConstructKind::AcquireResource | SemanticConstructKind::ReleaseResource
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(lifetimes.len(), 4, "{:?}", ir.semantic_constructs);
+    for pair in lifetimes.chunks_exact(2) {
+        assert_eq!(pair[0].kind, SemanticConstructKind::AcquireResource);
+        assert_eq!(pair[1].kind, SemanticConstructKind::ReleaseResource);
+        assert_eq!(pair[0].resource_kind.as_deref(), Some("lock"));
+        assert_eq!(pair[1].resource_kind.as_deref(), Some("lock"));
+        assert!(pair[0].anchor.expansion.start_byte < pair[1].anchor.expansion.start_byte);
+    }
+}
+
+/// `unique_lock` has the same compiler-known lexical release boundary as
+/// `lock_guard` when it is directly bound once in a function body. It remains
+/// a closed standard type check rather than a name-based project convention.
+#[test]
+fn direct_standard_unique_lock_lifetimes_are_reported_at_function_scope() {
+    let planted = plant("overload-resolution");
+    let path = planted.root.join("src/calls.cpp");
+    let source = std::fs::read_to_string(&path).expect("read C++ fixture");
+    let appended_at = u64::try_from(source.len()).expect("fixture offset fits in u64");
+    let source = format!(
+        "{source}\nnamespace unique_lock_checks {{\n\
+         std::mutex mutex;\n\
+         void first() {{ std::unique_lock<std::mutex> guard(mutex); }}\n\
+         void second() {{ std::unique_lock<std::mutex> guard(mutex); }}\n\
+         void multiple() {{\n\
+           std::unique_lock<std::mutex> first_guard(mutex);\n\
+           std::unique_lock<std::mutex> second_guard(mutex);\n\
+         }}\n\
+         void nested() {{\n\
+           if (true) {{ std::unique_lock<std::mutex> guard(mutex); }}\n\
+         }}\n\
+         }}  // namespace unique_lock_checks\n"
+    );
+    std::fs::write(&path, source).expect("append unique lock fixture");
+
+    let ir = overload_ir(&planted);
+    let lifetimes = ir
+        .semantic_constructs
+        .iter()
+        .filter(|construct| construct.anchor.expansion.start_byte >= appended_at)
+        .filter(|construct| {
+            matches!(
+                construct.kind,
+                SemanticConstructKind::AcquireResource | SemanticConstructKind::ReleaseResource
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(lifetimes.len(), 4, "{:?}", ir.semantic_constructs);
+    for pair in lifetimes.chunks_exact(2) {
+        assert_eq!(pair[0].kind, SemanticConstructKind::AcquireResource);
+        assert_eq!(pair[1].kind, SemanticConstructKind::ReleaseResource);
+        assert_eq!(pair[0].resource_kind.as_deref(), Some("lock"));
+        assert_eq!(pair[1].resource_kind.as_deref(), Some("lock"));
+    }
+}
+
+#[test]
+fn standard_algorithm_calls_carry_closed_api_names() {
+    let planted = plant("overload-resolution");
+    let ir = overload_ir(&planted);
+    assert_eq!(
+        ir.calls
+            .iter()
+            .filter(|call| call.api_name.as_deref() == Some("std::transform"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        ir.calls
+            .iter()
+            .filter(|call| call.api_name.as_deref() == Some("std::copy_if"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        ir.calls
+            .iter()
+            .filter(|call| call.api_name.as_deref() == Some("std::begin"))
+            .count(),
+        6,
+        "two collection, two transform, and two filter functions each contribute one input source"
+    );
+}
+
 /// A qualified virtual call names one base implementation. An ordinary
 /// virtual call does not: libclang cannot enumerate all derived overrides, so
 /// emitting a partial dynamic candidate list would overstate the answer.
@@ -553,7 +869,7 @@ fn macro_calls_are_anchored_at_the_invocation_and_results_are_stable() {
             .iter()
             .filter(|call| call.anchor.expansion.file == "src/calls.cpp")
             .count(),
-        11,
+        57,
         "every written source CallExpr is represented exactly once"
     );
     assert_eq!(

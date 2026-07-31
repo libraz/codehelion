@@ -1,0 +1,198 @@
+{
+  "anchored_at": "<fixture>",
+  "calls": [
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 51,
+          "file": "src/lib.rs",
+          "start_byte": 38,
+          "start_line": 1
+        }
+      },
+      "target": {
+        "resolution": "static",
+        "symbol": "core::slice::_::iter"
+      }
+    },
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 57,
+          "file": "src/lib.rs",
+          "start_byte": 38,
+          "start_line": 1
+        }
+      },
+      "target": {
+        "resolution": "static",
+        "symbol": "core::iter::traits::iterator::Iterator::sum"
+      }
+    }
+  ],
+  "expressions": [],
+  "unexpanded_macros": [],
+  "cfg": null,
+  "data_flow": {
+    "computed": false,
+    "flows": []
+  },
+  "effects": {
+    "computed": false,
+    "interactions": [],
+    "writes": []
+  },
+  "instantiations": [],
+  "schema_version": "compiler-ir-v3",
+  "symbols": [
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 59,
+          "file": "src/lib.rs",
+          "start_byte": 0,
+          "start_line": 1
+        }
+      },
+      "external": false,
+      "id": "semantic_fixture::total",
+      "kind": "function",
+      "name": "total",
+      "type_index": 0
+    },
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 12,
+          "file": "src/lib.rs",
+          "start_byte": 7,
+          "start_line": 1
+        }
+      },
+      "external": false,
+      "id": "semantic_fixture::total",
+      "kind": "function",
+      "name": "total",
+      "type_index": null
+    },
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 19,
+          "file": "src/lib.rs",
+          "start_byte": 13,
+          "start_line": 1
+        }
+      },
+      "external": false,
+      "id": "semantic_fixture::values@src/lib.rs:13",
+      "kind": "binding",
+      "name": "values",
+      "type_index": 1
+    },
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 26,
+          "file": "src/lib.rs",
+          "start_byte": 23,
+          "start_line": 1
+        }
+      },
+      "external": true,
+      "id": "u64",
+      "kind": "type",
+      "name": "u64",
+      "type_index": null
+    },
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 35,
+          "file": "src/lib.rs",
+          "start_byte": 32,
+          "start_line": 1
+        }
+      },
+      "external": true,
+      "id": "u64",
+      "kind": "type",
+      "name": "u64",
+      "type_index": null
+    },
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 44,
+          "file": "src/lib.rs",
+          "start_byte": 38,
+          "start_line": 1
+        }
+      },
+      "external": false,
+      "id": "semantic_fixture::values@src/lib.rs:13",
+      "kind": "binding",
+      "name": "values",
+      "type_index": 1
+    },
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 49,
+          "file": "src/lib.rs",
+          "start_byte": 45,
+          "start_line": 1
+        }
+      },
+      "external": true,
+      "id": "core::slice::iter",
+      "kind": "function",
+      "name": "iter",
+      "type_index": null
+    },
+    {
+      "anchor": {
+        "definition": null,
+        "expansion": {
+          "end_byte": 55,
+          "file": "src/lib.rs",
+          "start_byte": 52,
+          "start_line": 1
+        }
+      },
+      "external": true,
+      "id": "core::iter::traits::iterator::sum",
+      "kind": "function",
+      "name": "sum",
+      "type_index": null
+    }
+  ],
+  "types": [
+    {
+      "arguments": [],
+      "category": "integer",
+      "definition": null,
+      "display": "integer"
+    },
+    {
+      "arguments": [],
+      "category": "handle",
+      "definition": null,
+      "display": "handle"
+    }
+  ],
+  "unit": {
+    "file": "<fixture>/src/lib.rs",
+    "unit": "semantic_fixture",
+    "variant": "<variant>"
+  }
+}

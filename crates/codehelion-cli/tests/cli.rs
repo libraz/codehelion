@@ -23,6 +23,59 @@ fn doctor_reports_own_version() {
         .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
+#[test]
+fn doctor_reports_the_restricted_semantic_rule_registry() {
+    cmd()
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "restricted semantic rules: 10 enabled",
+        ))
+        .stdout(predicate::str::contains("semantic-rule-registry-v8"));
+}
+
+#[test]
+fn doctor_reports_the_portable_sandbox_limitations() {
+    cmd()
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "child-process isolation and request timeouts available",
+        ))
+        .stdout(predicate::str::contains(
+            "OS memory, network, and filesystem containment unavailable",
+        ));
+}
+
+#[test]
+fn doctor_lists_supported_and_recognised_artifact_formats() {
+    cmd()
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wasm: available"))
+        .stdout(predicate::str::contains("elf: available"))
+        .stdout(predicate::str::contains(
+            "macho: recognised, parser unavailable",
+        ));
+}
+
+#[test]
+fn untrusted_semantic_refuses_an_unenforceable_helper_memory_limit() {
+    cmd()
+        .args(["scan", ".", "--mode", "semantic", "--untrusted"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot enforce the requested helper memory limit",
+        ))
+        .stderr(predicate::str::contains(
+            "OS memory containment is unavailable",
+        ));
+}
+
 /// Every helper is listed whether or not this machine has it, and every one is
 /// optional. A report that left out the ones nobody installed would answer
 /// "what can this do here" by saying only what it can already do.
@@ -100,28 +153,46 @@ fn help_flag_succeeds() {
         .stdout(predicate::str::contains("codehelion"));
 }
 
-/// The commands whose engine support is not built yet say so rather than
-/// doing something smaller under the same name.
 #[test]
-fn a_command_this_release_cannot_run_says_which_one() {
-    for command in ["artifact", "divergence"] {
-        cmd()
-            .arg(command)
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("not available in this release"));
-    }
+fn artifact_reports_a_minimal_wasm_without_executing_it() {
+    let file = tempfile::NamedTempFile::new().expect("fixture file");
+    let db_dir = tempfile::tempdir().expect("database directory");
+    let db = db_dir.path().join("artifact.db");
+    std::fs::write(file.path(), b"\0asm\x01\0\0\0").expect("write wasm fixture");
+    cmd()
+        .args([
+            "artifact",
+            "analyze",
+            file.path().to_str().expect("utf-8 fixture path"),
+            "--format",
+            "json",
+            "--db",
+            db.to_str().expect("utf-8 database path"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("artifact-report-v8"))
+        .stdout(predicate::str::contains("\"format\": \"wasm\""))
+        .stdout(predicate::str::contains("\"analysis_id\": 1"));
+    assert!(db.is_file());
 }
 
 #[test]
-fn auditing_a_tree_that_was_never_scanned_says_to_scan_it() {
-    let dir = tempfile::tempdir().expect("temp dir");
+fn artifact_compare_reports_the_measured_byte_delta() {
+    let before = tempfile::NamedTempFile::new().expect("before fixture");
+    let after = tempfile::NamedTempFile::new().expect("after fixture");
+    std::fs::write(before.path(), b"\0asm\x01\0\0\0").expect("write before wasm");
+    std::fs::write(after.path(), b"\0asm\x01\0\0\0").expect("write after wasm");
     cmd()
-        .current_dir(dir.path())
-        .arg("audit")
+        .args([
+            "artifact",
+            "compare",
+            before.path().to_str().expect("utf-8 before path"),
+            after.path().to_str().expect("utf-8 after path"),
+        ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("run `codehelion scan` first"));
+        .success()
+        .stdout(predicate::str::contains("size_delta_bytes: +0"));
 }
 
 #[test]

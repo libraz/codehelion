@@ -30,6 +30,7 @@ use crate::discovery::{BuildVariant, Language};
 use crate::engine::normalize::{self, LiteralNorm, NormAtom};
 use crate::engine::{EngineReport, InputFile};
 use crate::frontend::Token;
+use crate::semantic::{SOG_SCHEMA_VERSION, SemanticOperationGraph};
 
 /// Version of the identifier-hashing recipe. Bump on any change to the hash
 /// inputs, their encoding or their order.
@@ -100,14 +101,34 @@ stable_id!(
     FindingId
 );
 stable_id!(
-    /// Identifier tying a clone group's history together across scans.
+    /// Identity of an opt-in comparison across distinct build variants.
     ///
-    /// Derived from the group fingerprint the history started at (see
-    /// [`group_lineage_id`]) and carried forward unchanged by every later
-    /// group the lineage reaches, so it survives the membership drift that
-    /// moves the group fingerprint.
-    GroupLineageId
+    /// This deliberately lives outside every normal scan and clone-group
+    /// domain: a cross-variant result is not a new build variant.
+    CrossVariantComparisonId
 );
+stable_id!(
+    /// Stable identity of one group found by a cross-variant comparison.
+    CrossVariantGroupId
+);
+stable_id!(
+    /// Identity of an explicitly requested Rust-to-C++ semantic comparison.
+    ///
+    /// It lives outside normal snapshots and cross-build exact comparisons:
+    /// the same origin variants may be compared under both policies without
+    /// making either result look like a continuation of the other.
+    CrossLanguageComparisonId
+);
+stable_id!(
+    /// Stable identity of one group found by a Rust-to-C++ semantic comparison.
+    CrossLanguageGroupId
+);
+
+/// Version of the policy that defines cross-build-variant comparisons.
+pub const CROSS_VARIANT_POLICY_VERSION: &str = "cross-variant-exact-v1";
+
+/// Version of the explicit Rust-to-C++ semantic comparison policy.
+pub const CROSS_LANGUAGE_POLICY_VERSION: &str = "cross-language-semantic-v1";
 
 /// How content is folded before hashing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,14 +290,72 @@ pub fn fragment_fingerprint(
     FragmentFingerprint(hasher.finish())
 }
 
+/// Fingerprint one normalized semantic graph as a finding fragment.
+///
+/// The graph material is written directly instead of serializing an
+/// implementation-specific helper IR. It includes the SOG schema, the
+/// graph's language and the full `BuildVariant` context, while source
+/// positions remain absent. This makes a normalization-rule revision an
+/// explicit identity boundary rather than an accidental finding rename.
+#[must_use]
+pub fn semantic_fragment_fingerprint(
+    variant: &BuildVariant,
+    graph: &SemanticOperationGraph,
+) -> FragmentFingerprint {
+    let mut hasher = IdHasher::new("fragment-semantic");
+    hasher.write_context(
+        variant,
+        &FileContext {
+            frontend_version: SOG_SCHEMA_VERSION,
+            language: graph.language,
+        },
+        ContentNorm::Raw,
+    );
+    hasher.write_str(&graph.schema_version);
+    hasher.write_u32(u32::try_from(graph.nodes.len()).unwrap_or(u32::MAX));
+    for node in &graph.nodes {
+        hasher.write_str(node.kind.name());
+        match node.attributes.type_tag {
+            Some(tag) => {
+                hasher.write_u8(1);
+                hasher.write_str(tag.name());
+            }
+            None => hasher.write_u8(0),
+        }
+        match node.attributes.structure_fingerprint {
+            Some(fingerprint) => {
+                hasher.write_u8(1);
+                hasher.write_bytes(&fingerprint);
+            }
+            None => hasher.write_u8(0),
+        }
+        hasher.write_u32(u32::try_from(node.attributes.api_names.len()).unwrap_or(u32::MAX));
+        for api_name in &node.attributes.api_names {
+            hasher.write_str(api_name);
+        }
+        match &node.attributes.resource_kind {
+            Some(resource_kind) => {
+                hasher.write_u8(1);
+                hasher.write_str(resource_kind);
+            }
+            None => hasher.write_u8(0),
+        }
+    }
+    hasher.write_u32(u32::try_from(graph.edges.len()).unwrap_or(u32::MAX));
+    for edge in &graph.edges {
+        hasher.write_u32(edge.from);
+        hasher.write_u32(edge.to);
+        hasher.write_str(edge.kind.name());
+    }
+    FragmentFingerprint(hasher.finish())
+}
+
 /// Fingerprint a clone group from its members' content fingerprints.
 ///
 /// Member fingerprints are sorted and deduplicated first, so the digest is
 /// independent of member order and of how many occurrences share identical
 /// content: adding another copy of known content leaves the group fingerprint
-/// unchanged, while genuinely new member content changes it. Continuity
-/// across membership drift is [`GroupLineageId`]'s job, not proximity of
-/// group fingerprints.
+/// unchanged, while genuinely new member content changes it.
 #[must_use]
 pub fn clone_group_fingerprint(
     variant: &BuildVariant,
@@ -300,6 +379,38 @@ pub fn clone_group_fingerprint(
     CloneGroupFingerprint(hasher.finish())
 }
 
+/// Fingerprint a restricted-semantic group after a registered rule matched.
+///
+/// This keeps rule identity and revision separate from the normalized graph
+/// fragments. A future change to a rule cannot silently claim continuity with
+/// a finding justified by different semantics.
+#[must_use]
+pub fn semantic_clone_group_fingerprint(
+    variant: &BuildVariant,
+    rule_id: &str,
+    rule_version: u32,
+    members: &[FragmentFingerprint],
+) -> CloneGroupFingerprint {
+    let mut distinct: Vec<[u8; 16]> = members.iter().map(|member| member.0).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+
+    let mut hasher = IdHasher::new("group-semantic");
+    hasher.write_str(FP_SCHEMA_VERSION);
+    hasher.write_str(HASH_ALGORITHM);
+    hasher.write_str(variant.mode.name());
+    hasher.write_str(&variant.canonical());
+    hasher.write_str(CloneClass::RestrictedSemantic.name());
+    hasher.write_str(SOG_SCHEMA_VERSION);
+    hasher.write_str(rule_id);
+    hasher.write_u32(rule_version);
+    hasher.write_u32(u32::try_from(distinct.len()).unwrap_or(u32::MAX));
+    for bytes in &distinct {
+        hasher.write_bytes(bytes);
+    }
+    CloneGroupFingerprint(hasher.finish())
+}
+
 /// Fingerprint a Structural (Type-3) clone group, anchored on its canonical
 /// instance.
 ///
@@ -311,8 +422,7 @@ pub fn clone_group_fingerprint(
 /// medoid keeps the identity tied to a concrete instance; folding in the whole
 /// member set means adding genuinely new member content changes the
 /// fingerprint, while reordering members or repeating identical content does
-/// not. Continuity across membership drift (a member editing away, the medoid
-/// being replaced) is [`GroupLineageId`]'s concern, not this fingerprint's.
+/// not.
 ///
 /// The `canonical` fingerprint should also appear in `members`; it is hashed a
 /// second time, in a distinct anchor position, so two groups with the same
@@ -371,26 +481,93 @@ pub fn finding_id(
     FindingId(hasher.finish())
 }
 
-/// Identify the history a clone group belongs to, from the group fingerprint
-/// that history started at.
+/// Identify an opt-in comparison over the sorted set of origin variants.
 ///
-/// A group fingerprint answers "is this the same duplication?" and moves as
-/// soon as the duplicated content does; a lineage identifier answers "is this
-/// the same history?" and must not. The two therefore cannot be the same
-/// value, and a lineage identifier cannot be derived from the group it
-/// currently names — it is derived once, from the first group the history was
-/// observed at, and inherited unchanged by every successor
-/// [`lineage`](crate::lineage) connects to it.
-///
-/// "First observed" is not "first existing": a duplication that predates the
-/// first scan starts its recorded history at that scan. The identifier says
-/// where the record begins, and claims nothing about what happened before it.
+/// The caller supplies variant fingerprints rather than a synthesized
+/// [`BuildVariant`]: comparison members remain attributed to the program that
+/// produced them.
 #[must_use]
-pub fn group_lineage_id(origin: &CloneGroupFingerprint) -> GroupLineageId {
-    let mut hasher = IdHasher::new("lineage");
+pub fn cross_variant_comparison_id(origins: &[String]) -> CrossVariantComparisonId {
+    let mut origins = origins.to_vec();
+    origins.sort_unstable();
+    origins.dedup();
+    let mut hasher = IdHasher::new("cross-variant-comparison");
     hasher.write_str(FP_SCHEMA_VERSION);
-    hasher.write_bytes(&origin.0);
-    GroupLineageId(hasher.finish())
+    hasher.write_str(CROSS_VARIANT_POLICY_VERSION);
+    hasher.write_u32(u32::try_from(origins.len()).unwrap_or(u32::MAX));
+    for origin in origins {
+        hasher.write_str(&origin);
+    }
+    CrossVariantComparisonId(hasher.finish())
+}
+
+/// Identify an explicit Rust-to-C++ semantic comparison over origin variants.
+///
+/// The origin list is canonicalised before hashing, while every compared graph
+/// retains its own full `BuildVariant` fingerprint. This identifier is only the
+/// comparison domain used to prevent unrelated requests from joining.
+#[must_use]
+pub fn cross_language_comparison_id(origins: &[String]) -> CrossLanguageComparisonId {
+    let mut origins = origins.to_vec();
+    origins.sort_unstable();
+    origins.dedup();
+    let mut hasher = IdHasher::new("cross-language-comparison");
+    hasher.write_str(FP_SCHEMA_VERSION);
+    hasher.write_str(CROSS_LANGUAGE_POLICY_VERSION);
+    hasher.write_u32(u32::try_from(origins.len()).unwrap_or(u32::MAX));
+    for origin in origins {
+        hasher.write_str(&origin);
+    }
+    CrossLanguageComparisonId(hasher.finish())
+}
+
+/// Identify a verified group from an explicit Rust-to-C++ semantic comparison.
+///
+/// Member fingerprints already include each graph's language, schema and full
+/// `BuildVariant` context. The comparison identity, rule revision and sorted
+/// member set make this separate from normal semantic and exact-comparison
+/// group identities.
+#[must_use]
+pub fn cross_language_group_id(
+    comparison: &CrossLanguageComparisonId,
+    rule_id: &str,
+    rule_version: u32,
+    members: &[FragmentFingerprint],
+) -> CrossLanguageGroupId {
+    let mut members = members.to_vec();
+    members.sort_unstable();
+    members.dedup();
+    let mut hasher = IdHasher::new("cross-language-group");
+    hasher.write_str(FP_SCHEMA_VERSION);
+    hasher.write_str(CROSS_LANGUAGE_POLICY_VERSION);
+    hasher.write_bytes(comparison.as_bytes());
+    hasher.write_str(rule_id);
+    hasher.write_u32(rule_version);
+    hasher.write_u32(u32::try_from(members.len()).unwrap_or(u32::MAX));
+    for member in members {
+        hasher.write_bytes(member.as_bytes());
+    }
+    CrossLanguageGroupId(hasher.finish())
+}
+
+/// Identify an exact group produced by a cross-build-variant comparison.
+///
+/// `content` is a position-free digest of the matched token stream. The
+/// comparison id carries the complete origin-variant set, so adding another
+/// compared program cannot silently continue an older comparison's history.
+#[must_use]
+pub fn cross_variant_group_id(
+    comparison: &CrossVariantComparisonId,
+    class: CloneClass,
+    content: &[u8; 16],
+) -> CrossVariantGroupId {
+    let mut hasher = IdHasher::new("cross-variant-group");
+    hasher.write_str(FP_SCHEMA_VERSION);
+    hasher.write_str(CROSS_VARIANT_POLICY_VERSION);
+    hasher.write_bytes(comparison.as_bytes());
+    hasher.write_str(class.name());
+    hasher.write_bytes(content);
+    CrossVariantGroupId(hasher.finish())
 }
 
 /// Stable identifiers of one group member, parallel to
@@ -436,7 +613,9 @@ pub fn report_ids(
         .map(|group| {
             let norm = match group.clone_type {
                 CloneClass::Type1 => ContentNorm::Raw,
-                CloneClass::Type2 | CloneClass::Type3 => ContentNorm::Normalized(literals),
+                CloneClass::Type2 | CloneClass::Type3 | CloneClass::RestrictedSemantic => {
+                    ContentNorm::Normalized(literals)
+                }
             };
             let member_fps: Vec<FragmentFingerprint> = group
                 .members
@@ -492,6 +671,7 @@ mod tests {
     use super::*;
     use crate::discovery::LanguageSelection;
     use crate::frontend::{LiteralKind, SourceSpan, TokenKind};
+    use crate::semantic::{OperationObservation, normalize_registered_apis};
 
     fn variant() -> BuildVariant {
         BuildVariant::fast(LanguageSelection::default(), Language::C)
@@ -695,6 +875,105 @@ mod tests {
         let grown =
             structural_clone_group_fingerprint(&variant(), CloneClass::Type3, &a, &[a, b, c]);
         assert_ne!(forward, grown);
+    }
+
+    #[test]
+    fn semantic_fingerprints_are_position_free_and_rule_versioned() {
+        let graph = |offset| {
+            normalize_registered_apis(
+                Language::Rust,
+                [13; 32],
+                vec![
+                    OperationObservation {
+                        source_offset: offset,
+                        api_name: "rust::Iterator::filter".to_owned(),
+                        type_tag: None,
+                    },
+                    OperationObservation {
+                        source_offset: offset + 1,
+                        api_name: "rust::Iterator::collect".to_owned(),
+                        type_tag: None,
+                    },
+                ],
+            )
+            .expect("registered observations normalize")
+            .graph
+            .expect("registered observations produce a graph")
+        };
+        let first = semantic_fragment_fingerprint(&variant(), &graph(5));
+        let moved = semantic_fragment_fingerprint(&variant(), &graph(500));
+        assert_eq!(first, moved);
+        let group = semantic_clone_group_fingerprint(
+            &variant(),
+            "sequence-pipeline-v1",
+            1,
+            &[first, moved],
+        );
+        let reversed = semantic_clone_group_fingerprint(
+            &variant(),
+            "sequence-pipeline-v1",
+            1,
+            &[moved, first],
+        );
+        assert_eq!(group, reversed);
+        assert_ne!(
+            group,
+            semantic_clone_group_fingerprint(
+                &variant(),
+                "sequence-pipeline-v1",
+                2,
+                &[first, moved],
+            )
+        );
+    }
+
+    #[test]
+    fn cross_language_comparison_identity_is_order_independent_and_policy_distinct() {
+        let origins = vec!["cpp-variant".to_string(), "rust-variant".to_string()];
+        let reverse = vec!["rust-variant".to_string(), "cpp-variant".to_string()];
+        let language = cross_language_comparison_id(&origins);
+        assert_eq!(language, cross_language_comparison_id(&reverse));
+        assert_ne!(
+            language.to_hex(),
+            cross_variant_comparison_id(&origins).to_hex(),
+            "the exact-build and semantic policies cannot share a comparison domain"
+        );
+    }
+
+    #[test]
+    fn cross_language_group_identity_is_member_order_independent_and_rule_bound() {
+        let comparison =
+            cross_language_comparison_id(&["cpp-variant".to_string(), "rust-variant".to_string()]);
+        let first = fragment_fingerprint(&variant(), &ctx(), "first", &sample(), ContentNorm::Raw);
+        let second = fragment_fingerprint(
+            &variant(),
+            &ctx(),
+            "second",
+            &renamed_sample(),
+            ContentNorm::Raw,
+        );
+        let forward = cross_language_group_id(
+            &comparison,
+            "cross-language-sequence-pipeline-v1",
+            1,
+            &[first, second],
+        );
+        let reverse = cross_language_group_id(
+            &comparison,
+            "cross-language-sequence-pipeline-v1",
+            1,
+            &[second, first],
+        );
+        assert_eq!(forward, reverse);
+        assert_ne!(
+            forward,
+            cross_language_group_id(
+                &comparison,
+                "cross-language-sequence-pipeline-v1",
+                2,
+                &[first, second],
+            )
+        );
     }
 
     #[test]

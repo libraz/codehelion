@@ -123,7 +123,7 @@ fn standard_shape(declaration: Entity<'_>) -> Option<TypeCategory> {
 /// between `std` and everything in it: `std::__1::vector` is `std::vector`, and
 /// a check that only looked at the immediate parent would miss every type in
 /// the library that ships it.
-fn in_standard_namespace(entity: Entity<'_>) -> bool {
+pub(crate) fn in_standard_namespace(entity: Entity<'_>) -> bool {
     let mut parent = entity.get_semantic_parent();
     while let Some(current) = parent {
         if current.get_kind() == EntityKind::Namespace

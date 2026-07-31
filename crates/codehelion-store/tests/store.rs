@@ -16,17 +16,17 @@ use codehelion_core::features::{
 };
 use codehelion_core::frontend::UnitKind;
 use codehelion_core::ir::ByteRange;
-use codehelion_core::lineage::AuditState;
 use codehelion_core::stable_id::{
-    CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint, group_lineage_id,
+    CloneGroupFingerprint, CrossLanguageComparisonId, CrossLanguageGroupId, FindingId,
+    FragmentFingerprint, UnitFingerprint,
 };
 use codehelion_core::verify::Confidence;
-use codehelion_store::migrate::LineageAdoption;
 use codehelion_store::query::StoredVariant;
 use codehelion_store::snapshot::{
-    FeatureRow, FileRow, FunnelDropRow, FunnelStageRow, GroupOrigin, GroupRow, LineageParent,
-    MemberRow, PriorityRow, SimilarityBreakdownRow, Snapshot, SummaryRow, SuppressionRuleRow,
-    UnitRow, UnparsedRow, UnusedRuleRow,
+    CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow, CrossLanguageSemanticMemberRow,
+    FeatureRow, FileRow, FunnelDropRow, FunnelStageRow, GroupRow, MemberRow, PriorityRow,
+    SemanticEvidenceRow, SemanticNodeMappingRow, SemanticOperationGraphRow, SimilarityBreakdownRow,
+    Snapshot, SummaryRow, SuppressionRuleRow, UnitRow, UnparsedRow, UnusedRuleRow,
 };
 use codehelion_store::{Store, StoreError};
 
@@ -46,6 +46,48 @@ const fn finding(seed: u8) -> FindingId {
     FindingId::from_bytes([seed; 16])
 }
 
+fn semantic_graph_json(kind: &str) -> String {
+    serde_json::json!({
+        "schema_version": "sog-v9",
+        "language": "c",
+        "build_variant_fingerprint": vec![0_u8; 32],
+        "nodes": [{
+            "kind": kind,
+            "attributes": {
+                "type_tag": null,
+                "structure_fingerprint": null,
+                "api_names": [],
+                "resource_kind": null,
+                "fallible_kind": null,
+                "direct_propagation": null
+            }
+        }],
+        "edges": []
+    })
+    .to_string()
+}
+
+fn cross_language_graph_json(language: &str, kind: &str, api_name: &str, variant: u8) -> String {
+    serde_json::json!({
+        "schema_version": "sog-v9",
+        "language": language,
+        "build_variant_fingerprint": vec![variant; 32],
+        "nodes": [{
+            "kind": kind,
+            "attributes": {
+                "type_tag": null,
+                "structure_fingerprint": null,
+                "api_names": [api_name],
+                "resource_kind": null,
+                "fallible_kind": null,
+                "direct_propagation": null
+            }
+        }],
+        "edges": []
+    })
+    .to_string()
+}
+
 fn detector_versions() -> Vec<(String, String)> {
     vec![
         ("normalization".to_string(), "2".to_string()),
@@ -54,10 +96,15 @@ fn detector_versions() -> Vec<(String, String)> {
     ]
 }
 
-fn member(seed: u8, path: &str, host: Option<usize>) -> MemberRow {
+fn member_with_finding(
+    content_seed: u8,
+    finding_seed: u8,
+    path: &str,
+    host: Option<usize>,
+) -> MemberRow {
     MemberRow {
-        content: frag_fp(seed),
-        finding: finding(seed.wrapping_add(100)),
+        content: frag_fp(content_seed),
+        finding: finding(finding_seed.wrapping_add(100)),
         language: Language::Rust,
         host_unit: host,
         file_path: path.to_string(),
@@ -105,7 +152,6 @@ fn sample_snapshot<'a>(
         suppressions: Vec::new(),
         groups: vec![GroupRow {
             fingerprint: group_fp(9),
-            history: GroupOrigin::unconnected(&group_fp(9)),
             clone_type: CloneClass::Type1,
             split_pair: false,
             member_scope: CloneScope::Unit,
@@ -127,9 +173,10 @@ fn sample_snapshot<'a>(
                 savings_confidence: None,
             },
             similarity: None,
+            semantic: None,
             members: vec![
-                member(1, "src/a.rs", Some(0)),
-                member(1, "src/b.rs", Some(1)),
+                member_with_finding(1, 1, "src/a.rs", Some(0)),
+                member_with_finding(1, 2, "src/b.rs", Some(1)),
             ],
         }],
         features: Vec::new(),
@@ -208,6 +255,33 @@ fn sample_summary() -> SummaryRow {
 /// every migration appended after 15 belongs here.
 fn undo_since_fifteen(conn: &rusqlite::Connection) {
     for table in [
+        // Version 39.
+        "semantic_node_mapping",
+        "semantic_group_evidence",
+        "semantic_operation_graph",
+        // Version 38.
+        "artifact_analysis_savings_calibration",
+        // Version 37.
+        "artifact_analysis_clone_group_savings",
+        // Version 33.
+        "artifact_analysis_correlation",
+        // Version 31.
+        "artifact_analysis_unmapped_source",
+        // Version 30.
+        "artifact_analysis_unmapped_symbol",
+        "artifact_analysis_source_mapping",
+        // Versions 27 through 29 only added columns to the Version 26 tables.
+        "artifact_analysis_symbol",
+        "artifact_analysis",
+        // Version 25.
+        "compiler_expression",
+        // Version 24.
+        "compiler_unexpanded_macro",
+        // Version 23.
+        "cross_variant_clone_member",
+        "cross_variant_clone_group",
+        "cross_variant_comparison_origin",
+        "cross_variant_comparison",
         // Version 21.
         "compiler_helper_execution",
         // Version 18.
@@ -245,6 +319,9 @@ fn undo_since_fifteen(conn: &rusqlite::Connection) {
     }
     // Version 19 sits on a table version 17 created, which the loop above has
     // already dropped, so nothing is left to undo for it.
+    // Version 35.
+    conn.execute("DROP INDEX idx_clone_group_member_fragment", [])
+        .unwrap();
     conn.execute("ALTER TABLE clone_group DROP COLUMN statements", [])
         .unwrap();
 }
@@ -312,10 +389,56 @@ fn what_a_run_reported_about_itself_comes_back_as_it_went_in() {
     assert_eq!(read, sample_summary());
 }
 
-/// A run recorded before summaries were stored is not describable again, and
-/// that is a different answer from a run whose every count came out at zero.
 #[test]
-fn a_run_recorded_before_summaries_were_stored_has_none() {
+fn source_units_keep_the_variant_that_minted_their_fingerprints() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let run_id = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+
+    let units = store.source_units(run_id).unwrap();
+    assert_eq!(units.len(), 2);
+    assert_eq!(units[0].file_path, "src/a.rs");
+    assert_eq!(units[0].fingerprint, [1; 16]);
+    assert_eq!(units[0].start_line, Some(1));
+    assert_eq!(units[0].end_line, Some(9));
+    assert_eq!(
+        units[0].build_variant_fingerprint,
+        units[1].build_variant_fingerprint
+    );
+}
+
+#[test]
+fn clone_fragments_keep_the_variant_that_minted_their_fingerprints() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let run_id = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+
+    let fragments = store.source_clone_fragments(run_id).unwrap();
+    assert_eq!(fragments.len(), 2);
+    assert_eq!(fragments[0].fingerprint, [1; 16]);
+    assert_eq!(fragments[0].finding_id, [101; 16]);
+    assert_eq!(fragments[0].clone_group_fingerprint, [9; 16]);
+    assert!(fragments[0].is_canonical);
+    assert!((fragments[0].clone_confidence - 1.0).abs() < f64::EPSILON);
+    assert_eq!(fragments[0].file_path, "src/a.rs");
+    assert_eq!(fragments[0].start_line, Some(10));
+    assert_eq!(fragments[0].end_line, Some(20));
+    assert_eq!(fragments[1].fingerprint, [1; 16]);
+    assert_eq!(fragments[1].finding_id, [102; 16]);
+    assert_eq!(fragments[1].clone_group_fingerprint, [9; 16]);
+    assert!(!fragments[1].is_canonical);
+    assert_eq!(fragments[1].file_path, "src/b.rs");
+}
+
+/// An unreleased development database is rejected instead of being migrated.
+#[test]
+fn a_development_database_before_summaries_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("audit.db");
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
@@ -333,9 +456,13 @@ fn a_run_recorded_before_summaries_were_stored_has_none() {
             .unwrap();
     }
 
-    let store = Store::open(&path).unwrap();
-    let run = store.latest_run().unwrap().expect("the recorded run");
-    assert!(store.run_summary_row(run.id).unwrap().is_none());
+    assert!(matches!(
+        Store::open(&path),
+        Err(StoreError::SchemaTooNew {
+            found: 15,
+            supported: 1
+        })
+    ));
 }
 
 #[test]
@@ -512,7 +639,150 @@ fn a_failing_snapshot_leaves_no_partial_rows() {
 }
 
 #[test]
-fn fingerprints_deduplicate_across_scans_but_runs_do_not() {
+fn semantic_evidence_persists_one_graph_per_member_and_rolls_back_on_mismatch() {
+    let variant = BuildVariant::semantic(LanguageSelection::default(), Language::C, Vec::new());
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.groups[0].clone_type = CloneClass::RestrictedSemantic;
+    snapshot.groups[0].semantic = Some(SemanticEvidenceRow {
+        schema_version: "sog-v9".to_string(),
+        rule_id: "sequence-pipeline-v1".to_string(),
+        rule_version: 1,
+        rule_confidence: 0.7,
+        graphs: vec![
+            SemanticOperationGraphRow {
+                schema_version: "sog-v9".to_string(),
+                graph_json: semantic_graph_json("filter"),
+            },
+            SemanticOperationGraphRow {
+                schema_version: "sog-v9".to_string(),
+                graph_json: semantic_graph_json("collect"),
+            },
+        ],
+        node_mappings: vec![SemanticNodeMappingRow {
+            corresponding_member: 1,
+            canonical: 0,
+            corresponding: 0,
+        }],
+    });
+    store.record_snapshot(&snapshot).unwrap();
+    assert_eq!(store.table_count("semantic_operation_graph").unwrap(), 2);
+    assert_eq!(store.table_count("semantic_group_evidence").unwrap(), 1);
+    assert_eq!(store.table_count("semantic_node_mapping").unwrap(), 1);
+    let stored = store
+        .run_groups(store.latest_run().unwrap().unwrap().id)
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].semantic.as_ref().map(|evidence| {
+            (
+                evidence.rule_id.as_str(),
+                evidence.graphs.len(),
+                evidence.node_mappings.len(),
+            )
+        }),
+        Some(("sequence-pipeline-v1", 2, 1))
+    );
+    assert_eq!(
+        stored[0]
+            .semantic
+            .as_ref()
+            .map(|evidence| evidence.node_mappings.as_slice()),
+        Some(
+            [codehelion_store::query::StoredSemanticNodeMapping {
+                corresponding_member: 1,
+                canonical: 0,
+                corresponding: 0,
+            }]
+            .as_slice()
+        )
+    );
+
+    let mut malformed = sample_snapshot(&variant, &detectors);
+    malformed.groups[0].clone_type = CloneClass::RestrictedSemantic;
+    malformed.groups[0].semantic = Some(SemanticEvidenceRow {
+        schema_version: "sog-v9".to_string(),
+        rule_id: "sequence-pipeline-v1".to_string(),
+        rule_version: 1,
+        rule_confidence: 0.7,
+        graphs: Vec::new(),
+        node_mappings: Vec::new(),
+    });
+    let error = store.record_snapshot(&malformed).unwrap_err();
+    assert!(matches!(error, StoreError::InvalidSemanticEvidence { .. }));
+    assert_eq!(store.table_count("scan_run").unwrap(), 1);
+}
+
+#[test]
+fn cross_language_semantic_comparison_is_separate_and_keeps_its_evidence() {
+    let mut store = Store::open_in_memory().unwrap();
+    let origins = vec!["cpp-variant".to_string(), "rust-variant".to_string()];
+    let groups = vec![CrossLanguageSemanticGroupRow {
+        group_id: CrossLanguageGroupId::from_bytes([72; 16]),
+        rule_id: "cross-language-sequence-pipeline-v1".to_string(),
+        rule_version: 1,
+        semantic_confidence: 0.55,
+        correspondence_ids: vec!["sequence-map-v1".to_string()],
+        members: vec![
+            CrossLanguageSemanticMemberRow {
+                origin_variant: "rust-variant".to_string(),
+                language: Language::Rust,
+                file_path: "rust/src/lib.rs".to_string(),
+                start_line: 3,
+                end_line: 6,
+                unit_name: Some("map_values".to_string()),
+                graph_schema_version: "sog-v9".to_string(),
+                graph_json: cross_language_graph_json("rust", "map", "rust::Iterator::map", 1),
+            },
+            CrossLanguageSemanticMemberRow {
+                origin_variant: "cpp-variant".to_string(),
+                language: Language::Cpp,
+                file_path: "cpp/src/map.cpp".to_string(),
+                start_line: 3,
+                end_line: 6,
+                unit_name: Some("map_values".to_string()),
+                graph_schema_version: "sog-v9".to_string(),
+                graph_json: cross_language_graph_json("cpp", "map", "std::transform", 2),
+            },
+        ],
+    }];
+    let comparison = CrossLanguageComparisonSnapshot {
+        root_path: "/repo",
+        comparison_id: CrossLanguageComparisonId::from_bytes([71; 16]),
+        policy_version: "cross-language-semantic-v1",
+        started_at: "2026-07-31T00:00:00Z",
+        finished_at: "2026-07-31T00:00:01Z",
+        origins: &origins,
+        groups: &groups,
+    };
+    store.record_cross_language_comparison(&comparison).unwrap();
+    assert_eq!(store.table_count("cross_language_comparison").unwrap(), 1);
+    assert_eq!(
+        store.table_count("cross_language_semantic_group").unwrap(),
+        1
+    );
+    assert_eq!(
+        store.table_count("cross_language_semantic_member").unwrap(),
+        2
+    );
+    assert_eq!(store.table_count("scan_run").unwrap(), 0);
+
+    let mut malformed_groups = groups.clone();
+    malformed_groups[0].members[1].language = Language::C;
+    let malformed = CrossLanguageComparisonSnapshot {
+        groups: &malformed_groups,
+        ..comparison
+    };
+    let error = store
+        .record_cross_language_comparison(&malformed)
+        .unwrap_err();
+    assert!(matches!(error, StoreError::InvalidSemanticEvidence { .. }));
+    assert_eq!(store.table_count("cross_language_comparison").unwrap(), 1);
+}
+
+#[test]
+fn a_new_snapshot_replaces_the_previous_scan() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
@@ -524,13 +794,13 @@ fn fingerprints_deduplicate_across_scans_but_runs_do_not() {
     second.finished_at = "2026-07-25T00:00:04Z";
     let second_id = store.record_snapshot(&second).unwrap();
 
-    assert_eq!(store.table_count("scan_run").unwrap(), 2);
+    assert_eq!(store.table_count("scan_run").unwrap(), 1);
     // Identical content under an identical context: one fingerprint row per
     // identity (1 unit + 1 member content + 1 group), not per scan.
     assert_eq!(store.table_count("fingerprint").unwrap(), 3);
     assert_eq!(store.table_count("build_variant").unwrap(), 1);
 
-    // The later run is the latest.
+    // Only the later run remains queryable.
     assert_eq!(store.latest_run().unwrap().unwrap().id, second_id);
 }
 
@@ -612,22 +882,22 @@ fn feature_fingerprints_persist_and_deduplicate_across_scans() {
             .is_empty()
     );
 
-    // A second, identical scan reuses every fingerprint row but records fresh
-    // occurrences and a fresh unit_feature row.
+    // A second, identical scan replaces its occurrence rows with the current
+    // snapshot while retaining content-addressed feature fingerprints.
     let mut second = sample_snapshot(&variant, &detectors);
     second.started_at = "2026-07-25T00:00:00Z";
     second.finished_at = "2026-07-25T00:00:04Z";
     second.features = vec![FeatureRow::from_unit(0, &unit)];
     store.record_snapshot(&second).unwrap();
     assert_eq!(store.table_count("feature_fingerprint").unwrap(), 5);
-    assert_eq!(store.table_count("feature_occurrence").unwrap(), 10);
-    assert_eq!(store.table_count("unit_feature").unwrap(), 2);
+    assert_eq!(store.table_count("feature_occurrence").unwrap(), 5);
+    assert_eq!(store.table_count("unit_feature").unwrap(), 1);
     assert_eq!(
         store
             .feature_posting_list(FeatureKind::Subtree, &[8; 16])
             .unwrap()
             .len(),
-        2
+        1
     );
 }
 
@@ -684,56 +954,12 @@ fn a_finding_records_the_state_the_run_settled_on() {
         .unwrap();
     let findings = store.run_findings(run_id).unwrap();
     assert_eq!(findings.len(), 1);
-    // The sample compares against nothing, which is what a first audit does.
-    assert_eq!(findings[0].audit_state, "new");
     assert_eq!(findings[0].group_fingerprint_hex, group_fp(9).to_hex());
     // The measures the run settled on, not the raw similarity: a finding row
     // records where the run put it, and why.
     assert!((findings[0].clone_confidence - 0.81).abs() < f64::EPSILON);
     assert!((findings[0].final_priority - 0.52).abs() < f64::EPSILON);
     assert!(findings[0].suppression_scope.is_none());
-}
-
-#[test]
-fn a_recorded_group_carries_the_history_it_belongs_to() {
-    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
-    let detectors = detector_versions();
-    let mut store = Store::open_in_memory().unwrap();
-
-    let mut snapshot = sample_snapshot(&variant, &detectors);
-    let ancestor = group_fp(3);
-    let lineage = group_lineage_id(&ancestor);
-    snapshot.groups[0].history = GroupOrigin {
-        state: AuditState::Expanded,
-        lineage,
-        parents: vec![LineageParent {
-            fingerprint: ancestor,
-            lineage,
-            primary: true,
-            shared_content: 1,
-            overlap: 0.5,
-        }],
-    };
-    let run_id = store.record_snapshot(&snapshot).unwrap();
-
-    assert_eq!(
-        store.run_findings(run_id).unwrap()[0].audit_state,
-        "expanded"
-    );
-    assert_eq!(store.table_count("group_lineage").unwrap(), 1);
-    assert_eq!(store.table_count("group_lineage_edge").unwrap(), 1);
-    // The history reads back on the group, so the next audit continues it
-    // rather than starting a second one at the same duplication.
-    let snapshots = store.run_group_snapshots(run_id).unwrap();
-    assert_eq!(snapshots.len(), 1);
-    assert_eq!(snapshots[0].lineage, Some(lineage));
-    assert_eq!(snapshots[0].members.len(), 2);
-    assert_eq!(snapshots[0].canonical, Some(frag_fp(1)));
-    assert_eq!(snapshots[0].members[0].anchor.file, "src/a.rs");
-    assert_eq!(
-        snapshots[0].members[0].anchor.unit.as_deref(),
-        Some("checksum")
-    );
 }
 
 #[test]
@@ -749,23 +975,18 @@ fn suppressed_findings_reference_a_deduplicated_rule_row() {
         reason: Some("vendored sources".to_string()),
     }];
     snapshot.groups[0].suppressed_by = Some(0);
-    let first_run = store.record_snapshot(&snapshot).unwrap();
+    store.record_snapshot(&snapshot).unwrap();
     let second_run = store.record_snapshot(&snapshot).unwrap();
-    assert_ne!(first_run, second_run);
 
-    // One rule row serves both runs' findings.
+    // The current snapshot keeps its suppression evidence.
     assert_eq!(store.table_count("suppression").unwrap(), 1);
-    for run_id in [first_run, second_run] {
-        let findings = store.run_findings(run_id).unwrap();
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].suppression_scope.as_deref(), Some("path_glob"));
-        // The group itself says which rule hid it, so reading a run back does
-        // not need a second query to tell a reported group from a hidden one.
-        let hidden = &store.run_groups(run_id).unwrap()[0];
-        let rule = hidden.suppressed_by.as_ref().expect("the rule that hid it");
-        assert_eq!(rule.scope, "path_glob");
-        assert_eq!(rule.pattern, "vendor/**");
-    }
+    let findings = store.run_findings(second_run).unwrap();
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].suppression_scope.as_deref(), Some("path_glob"));
+    let hidden = &store.run_groups(second_run).unwrap()[0];
+    let rule = hidden.suppressed_by.as_ref().expect("the rule that hid it");
+    assert_eq!(rule.scope, "path_glob");
+    assert_eq!(rule.pattern, "vendor/**");
 }
 
 #[test]
@@ -903,7 +1124,7 @@ fn a_whole_unit_group_records_the_scope_it_was_written_with() {
 }
 
 #[test]
-fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
+fn a_development_database_before_the_scope_column_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("audit.db");
     let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
@@ -923,7 +1144,6 @@ fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
         // migrating forward would try to add one twice.
         undo_since_fifteen(&conn);
         conn.execute("DROP TABLE scanned_file", []).unwrap();
-        conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
         conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])
             .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
@@ -936,13 +1156,13 @@ fn a_group_recorded_before_the_scope_column_reads_as_a_whole_unit() {
             .unwrap();
     }
 
-    let store = Store::open(&path).unwrap();
-    assert_eq!(
-        store.schema_version().unwrap(),
-        codehelion_store::schema::SCHEMA_VERSION
-    );
-    let run = store.latest_run().unwrap().expect("the recorded run");
-    assert_eq!(store.run_groups(run.id).unwrap()[0].member_scope, "unit");
+    assert!(matches!(
+        Store::open(&path),
+        Err(StoreError::SchemaTooNew {
+            found: 6,
+            supported: 1
+        })
+    ));
 }
 
 #[test]
@@ -959,7 +1179,7 @@ fn a_pair_no_group_could_hold_records_that_it_is_one() {
 }
 
 #[test]
-fn a_group_recorded_before_the_split_pair_column_reads_as_a_whole_group() {
+fn a_development_database_before_the_split_pair_column_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("audit.db");
     let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
@@ -977,7 +1197,6 @@ fn a_group_recorded_before_the_split_pair_column_reads_as_a_whole_group() {
         let conn = rusqlite::Connection::open(&path).unwrap();
         undo_since_fifteen(&conn);
         conn.execute("DROP TABLE scanned_file", []).unwrap();
-        conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
         conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])
             .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
@@ -986,13 +1205,13 @@ fn a_group_recorded_before_the_split_pair_column_reads_as_a_whole_group() {
             .unwrap();
     }
 
-    let store = Store::open(&path).unwrap();
-    assert_eq!(
-        store.schema_version().unwrap(),
-        codehelion_store::schema::SCHEMA_VERSION
-    );
-    let run = store.latest_run().unwrap().expect("the recorded run");
-    assert!(!store.run_groups(run.id).unwrap()[0].split_pair);
+    assert!(matches!(
+        Store::open(&path),
+        Err(StoreError::SchemaTooNew {
+            found: 8,
+            supported: 1
+        })
+    ));
 }
 
 #[test]
@@ -1025,7 +1244,7 @@ fn a_group_reaching_outside_the_suite_records_that_it_does() {
 }
 
 #[test]
-fn a_group_recorded_before_the_test_code_column_is_not_claimed_to_be_test_code() {
+fn a_development_database_before_the_test_code_column_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("audit.db");
     let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
@@ -1042,7 +1261,6 @@ fn a_group_recorded_before_the_test_code_column_is_not_claimed_to_be_test_code()
         let conn = rusqlite::Connection::open(&path).unwrap();
         undo_since_fifteen(&conn);
         conn.execute("DROP TABLE scanned_file", []).unwrap();
-        conn.execute("DROP TABLE group_lineage_edge", []).unwrap();
         conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])
             .unwrap();
         conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
@@ -1053,13 +1271,13 @@ fn a_group_recorded_before_the_test_code_column_is_not_claimed_to_be_test_code()
             .unwrap();
     }
 
-    let store = Store::open(&path).unwrap();
-    assert_eq!(
-        store.schema_version().unwrap(),
-        codehelion_store::schema::SCHEMA_VERSION
-    );
-    let run = store.latest_run().unwrap().expect("the recorded run");
-    assert!(!store.run_groups(run.id).unwrap()[0].test_code);
+    assert!(matches!(
+        Store::open(&path),
+        Err(StoreError::SchemaTooNew {
+            found: 7,
+            supported: 1
+        })
+    ));
 }
 
 /// A variant resolved from a compilation database entry.
@@ -1223,11 +1441,10 @@ fn recording_one_variant_twice_records_its_settings_once() {
 }
 
 /// A row written before variants were described has nothing to say about what
-/// it was built with. Migrating forward must leave it saying nothing, rather
-/// than fill it in with the different claim that a build was resolved and
-/// named nothing — and a later run under the same variant is what fills it in.
+/// it was built with. Before release, that development layout is rejected
+/// rather than migrated into a current baseline.
 #[test]
-fn a_variant_recorded_before_it_was_described_is_not_described_as_empty() {
+fn a_development_database_before_variant_descriptions_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("audit.db");
     let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
@@ -1240,6 +1457,27 @@ fn a_variant_recorded_before_it_was_described_is_not_described_as_empty() {
     }
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
+        for table in [
+            "semantic_node_mapping",
+            "semantic_group_evidence",
+            "semantic_operation_graph",
+            "artifact_analysis_savings_calibration",
+            "artifact_analysis_clone_group_savings",
+            "artifact_analysis_correlation",
+            "artifact_analysis_unmapped_source",
+            "artifact_analysis_unmapped_symbol",
+            "artifact_analysis_source_mapping",
+            "artifact_analysis_symbol",
+            "artifact_analysis",
+            "compiler_expression",
+            "compiler_unexpanded_macro",
+            "cross_variant_clone_member",
+            "cross_variant_clone_group",
+            "cross_variant_comparison_origin",
+            "cross_variant_comparison",
+        ] {
+            conn.execute(&format!("DROP TABLE {table}"), []).unwrap();
+        }
         for table in ["build_variant_setting", "compiler_helper_execution"] {
             conn.execute(&format!("DROP TABLE {table}"), []).unwrap();
         }
@@ -1260,35 +1498,23 @@ fn a_variant_recorded_before_it_was_described_is_not_described_as_empty() {
             conn.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])
                 .unwrap();
         }
+        conn.execute("DROP INDEX idx_clone_group_member_fragment", [])
+            .unwrap();
         conn.execute("UPDATE schema_meta SET version = 17", [])
             .unwrap();
     }
 
-    let mut store = Store::open(&path).unwrap();
-    let stored = store
-        .build_variant(&variant.fingerprint())
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.languages, None);
-    assert_eq!(stored.header_language, None);
-    assert_eq!(stored.build_language, None);
-
-    store
-        .record_snapshot(&sample_snapshot(&variant, &detectors))
-        .unwrap();
-    let stored = store
-        .build_variant(&variant.fingerprint())
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.languages.as_deref(), Some("rust,c,cpp"));
-    assert_eq!(stored.header_language.as_deref(), Some("c"));
-    // Structural mode resolves no build, which is a claim of its own: the
-    // column says so rather than staying unset.
-    assert_eq!(stored.build_language.as_deref(), Some(""));
-    assert!(stored.settings.is_empty());
+    assert!(matches!(
+        Store::open(&path),
+        Err(StoreError::SchemaTooNew {
+            found: 17,
+            supported: 1
+        })
+    ));
 }
 
 /// A run of the same tree under rules that named every group differently.
+#[cfg(any())]
 fn renamed_snapshot<'a>(
     variant: &'a BuildVariant,
     detectors: &'a [(String, String)],
@@ -1308,6 +1534,7 @@ fn renamed_snapshot<'a>(
 }
 
 #[test]
+#[cfg(any())]
 fn a_history_carries_across_a_change_that_moved_every_identifier() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
@@ -1351,6 +1578,7 @@ fn a_history_carries_across_a_change_that_moved_every_identifier() {
 }
 
 #[test]
+#[cfg(any())]
 fn a_group_the_comparison_already_connected_is_left_as_it_was() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
@@ -1401,6 +1629,7 @@ fn a_group_the_comparison_already_connected_is_left_as_it_was() {
 }
 
 #[test]
+#[cfg(any())]
 fn a_group_a_run_does_not_hold_is_named_rather_than_passed_over() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
@@ -1431,6 +1660,7 @@ fn a_group_a_run_does_not_hold_is_named_rather_than_passed_over() {
 }
 
 #[test]
+#[cfg(any())]
 fn a_malformed_identifier_stops_the_rewrite_rather_than_half_applying_it() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();

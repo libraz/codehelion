@@ -41,12 +41,12 @@
 //! Not every difference is fatal, and treating them alike would be its own
 //! failure: a release that changed the order findings are read in would throw
 //! away every frozen judgement in the project. Which differences matter is
-//! decided by [`codehelion_core::compat`], and the ones that do can be carried
-//! across rather than surrendered — see [`crate::migrate`].
+//! decided by [`codehelion_core::compat`]. A baseline is deliberately a
+//! standalone snapshot: it neither rewrites nor depends on an earlier scan.
 //!
 //! [`CloneGroupFingerprint`]: codehelion_core::stable_id::CloneGroupFingerprint
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -54,17 +54,12 @@ use codehelion_core::compat::{self, Impact};
 use codehelion_store::query::{RunOrigin, StoredGroup};
 use serde::{Deserialize, Serialize};
 
-use crate::migrate::Mapping;
 use crate::report::DetectorVersion;
 
 /// Version of the baseline file schema.
 ///
-/// A change that stops an older file being readable must increment this. The
-/// loader accepts every version up to this one and refuses only what was
-/// written by a later build: refusing a file it could still read would make
-/// the migration mechanism unreachable for exactly the users who need it,
-/// since the file needing rewriting is by definition the older one.
-pub const SCHEMA_VERSION: u32 = 2;
+/// This unreleased product starts its baseline format at version one.
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// A baseline file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,34 +80,6 @@ pub struct Baseline {
     pub detector_versions: Vec<DetectorVersion>,
     /// The frozen findings, ordered by group id.
     pub entries: Vec<Entry>,
-    /// Rewrites this file has been through, oldest first. Absent from a file
-    /// that has never been rewritten.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub migrations: Vec<Migration>,
-    /// Judgements a rewrite could not carry to the new identifiers, kept
-    /// because a frozen finding is a decision somebody made and dropping it
-    /// without saying so loses the decision along with the id. Nothing matches
-    /// on them; they are here to be read.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stale: Vec<Entry>,
-}
-
-/// One rewrite of a baseline's identifiers onto a run made under changed
-/// rules.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Migration {
-    /// When it was applied, RFC 3339.
-    pub at: String,
-    /// The run the entries were written in terms of before.
-    pub from_run: i64,
-    /// The run they are written in terms of now.
-    pub to_run: i64,
-    /// Entries whose duplication the newer run found in the same places.
-    pub carried: u64,
-    /// Entries the newer run had nothing standing where they stood.
-    pub stale: u64,
-    /// The version differences that made the rewrite necessary, one line each.
-    pub drift: Vec<String>,
 }
 
 /// The build variant a baseline's ids belong to.
@@ -193,8 +160,6 @@ impl Baseline {
                 })
                 .collect(),
             entries,
-            migrations: Vec::new(),
-            stale: Vec::new(),
         }
     }
 
@@ -317,7 +282,7 @@ impl Baseline {
             mismatch: named(Impact::Identifiers).map(|listed| {
                 format!(
                     "recorded under detector versions that name findings differently ({listed}); \
-                     `codehelion baseline migrate` rewrites it onto this run"
+                     recreate the baseline from this scan before using it"
                 )
             }),
             caveat: named(Impact::Grouping).map(|listed| {
@@ -326,77 +291,6 @@ impl Baseline {
                      so an entry whose group gained or lost an occurrence reads as stale"
                 )
             }),
-        }
-    }
-
-    /// Rewrite the entries onto the identifiers a later run uses.
-    ///
-    /// Entries the mapping could not carry move to [`Self::stale`] rather than
-    /// being dropped: the id is what went stale, and the judgement behind it
-    /// is a decision somebody made about their code.
-    ///
-    /// The result describes the later run, and says so — the recorded variant,
-    /// detector versions and originating run all move with the entries. A file
-    /// that claimed to describe the run it no longer speaks the language of
-    /// would fail the very check this exists to satisfy.
-    #[must_use]
-    pub fn migrated(
-        &self,
-        mapping: &Mapping,
-        target: &RunOrigin,
-        at: &str,
-        drift: &[String],
-    ) -> Self {
-        let carried: BTreeMap<&str, &crate::migrate::Carried> = mapping
-            .carried
-            .iter()
-            .map(|entry| (entry.from.as_str(), entry))
-            .collect();
-        let mut entries = Vec::with_capacity(self.entries.len());
-        let mut stale = self.stale.clone();
-        for entry in &self.entries {
-            match carried.get(entry.group.as_str()) {
-                Some(moved) => entries.push(Entry {
-                    group: moved.to.clone(),
-                    findings: moved.findings.clone(),
-                    ..entry.clone()
-                }),
-                None => stale.push(entry.clone()),
-            }
-        }
-        entries.sort_by(|a, b| a.group.cmp(&b.group));
-        entries.dedup_by(|a, b| a.group == b.group);
-        let mut migrations = self.migrations.clone();
-        migrations.push(Migration {
-            at: at.to_string(),
-            from_run: self.from_run,
-            to_run: target.id,
-            carried: as_u64(entries.len()),
-            stale: as_u64(stale.len() - self.stale.len()),
-            drift: drift.to_vec(),
-        });
-        Self {
-            schema_version: SCHEMA_VERSION,
-            created_at: self.created_at.clone(),
-            tool_version: target.tool_version.clone(),
-            root: self.root.clone(),
-            from_run: target.id,
-            build_variant: Provenance {
-                mode: target.analysis_mode.clone(),
-                normalization_version: target.normalization_version,
-                fingerprint: target.variant_fingerprint.clone(),
-            },
-            detector_versions: target
-                .detector_versions
-                .iter()
-                .map(|(component, version)| DetectorVersion {
-                    component: component.clone(),
-                    version: version.clone(),
-                })
-                .collect(),
-            entries,
-            migrations,
-            stale,
         }
     }
 }
@@ -408,10 +302,6 @@ pub struct Compatibility {
     pub mismatch: Option<String>,
     /// What differs without stopping the entries matching.
     pub caveat: Option<String>,
-}
-
-fn as_u64(value: usize) -> u64 {
-    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 impl Entry {
@@ -494,6 +384,7 @@ mod tests {
             width_family: false,
             statements: None,
             similarity: None,
+            semantic: None,
             suppressed_by: None,
             members: vec![
                 member("f1", "src/a.rs", true),
@@ -571,28 +462,6 @@ mod tests {
     }
 
     #[test]
-    fn a_file_from_an_earlier_schema_still_loads() {
-        // The file that needs rewriting is by definition the older one, so a
-        // loader that refused everything but the current version would put the
-        // migration mechanism out of reach of the users who need it.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("baseline.json");
-        let mut baseline = Baseline::from_run(&origin(), &[group("aa11")], "2026-07-27T01:00:00Z");
-        baseline.schema_version = 1;
-        baseline.write(&path).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            !text.contains("migrations") && !text.contains("\"stale\""),
-            "a file with nothing to say about rewrites says nothing: {text}"
-        );
-
-        let loaded = Baseline::load(&path).unwrap();
-        assert_eq!(loaded.entries.len(), 1);
-        assert!(loaded.migrations.is_empty());
-        assert!(loaded.stale.is_empty());
-    }
-
-    #[test]
     fn a_file_from_a_schema_this_build_does_not_read_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("baseline.json");
@@ -625,6 +494,6 @@ mod tests {
             .mismatch
             .expect("a moved fingerprint schema is a mismatch");
         assert!(other_detector.contains("fp-schema fp-schema-v1 -> fp-schema-v2"));
-        assert!(other_detector.contains("baseline migrate"));
+        assert!(other_detector.contains("recreate the baseline"));
     }
 }

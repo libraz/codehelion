@@ -44,28 +44,36 @@
 //! reason the run is thin. They are separate outcomes and stay separate.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use codehelion_core::discovery::{Language, SourceUnit};
 use codehelion_core::engine::normalize::Resolution;
 use codehelion_core::ir::ByteRange;
+use codehelion_core::semantic::{
+    ApiNormalization, ConstructObservation, DirectPropagation as CoreDirectPropagation,
+    FallibleKind as CoreFallibleKind, OperationKind, OperationObservation, SemanticGraphError,
+    SemanticSourceRange, normalize_registered_observations_with_ranges,
+};
 use codehelion_core::types::TypeTag;
 use codehelion_helper::ir::{
-    CallSite, CompilerIr, Instantiation, ResolvedSymbol, ResolvedType, Unavailability, UnitRef,
+    CallSite, CallTarget, CompilerIr, DirectPropagation as HelperDirectPropagation,
+    FallibleKind as HelperFallibleKind, Instantiation, ResolvedExpression, ResolvedSymbol,
+    ResolvedType, SemanticConstructKind, Unavailability, UnexpandedMacro, UnitRef,
 };
-use codehelion_helper::protocol::{Capability, Execution, HelperIdentity};
-use codehelion_helper::{Analysis, Supervisor};
+use codehelion_helper::protocol::{Capability, CompileCommandSelector, Execution, HelperIdentity};
+use codehelion_helper::{Analysis, SandboxRequest, Supervisor};
 
 /// Everything a run can use from a compiler.
 ///
 /// Asked for as one set: a helper narrows the request to what it said it
 /// offers, so asking for more than one helper supplies costs nothing and
 /// stops the request from being the place a capability is forgotten.
-pub(crate) const WANTED: [Capability; 5] = [
+pub(crate) const WANTED: [Capability; 6] = [
     Capability::Types,
     Capability::NameResolution,
     Capability::CallTargets,
+    Capability::MirCfg,
     Capability::MacroExpansion,
     Capability::TemplateInstantiation,
 ];
@@ -126,7 +134,8 @@ impl Answer {
 /// about nothing.
 #[must_use]
 pub(crate) fn resolved_types_for(ir: &CompilerIr, file: &str) -> Vec<(ByteRange, TypeTag)> {
-    ir.symbols
+    let symbols = ir
+        .symbols
         .iter()
         .filter(|symbol| symbol.anchor.expansion.file == file)
         .filter_map(|symbol| {
@@ -140,8 +149,165 @@ pub(crate) fn resolved_types_for(ir: &CompilerIr, file: &str) -> Vec<(ByteRange,
                 },
                 tag,
             ))
+        });
+    let expressions = ir.expressions.iter().filter_map(|expression| {
+        let index = usize::try_from(expression.type_index).ok()?;
+        let tag = TypeTag::from_category(ir.types.get(index)?.category.name())?;
+        let range = &expression.anchor.expansion;
+        (range.file == file).then_some((
+            ByteRange {
+                start: usize::try_from(range.start_byte).ok()?,
+                end: usize::try_from(range.end_byte).ok()?,
+            },
+            tag,
+        ))
+    });
+    symbols.chain(expressions).collect()
+}
+
+/// The call targets `ir` resolved inside `file`, at their call-site bytes.
+///
+/// A dynamic target is kept as one canonical candidate-set key. Treating each
+/// candidate as an independent call would make two overlapping dispatch sets
+/// look like the same API; the helper's protocol says the set itself is the
+/// fact it learned. Unresolved calls contribute no compiler evidence, so the
+/// verifier can retain its Structural call-name comparison.
+#[must_use]
+pub(crate) fn resolved_api_for(ir: &CompilerIr, file: &str) -> Vec<(ByteRange, String)> {
+    ir.calls
+        .iter()
+        .filter(|call| call.anchor.expansion.file == file)
+        .filter_map(|call| {
+            let range = &call.anchor.expansion;
+            let target = match &call.target {
+                CallTarget::Static { symbol } => format!("static:{symbol}"),
+                CallTarget::Dynamic { candidates } if !candidates.is_empty() => {
+                    let mut candidates = candidates.clone();
+                    candidates.sort_unstable();
+                    candidates.dedup();
+                    format!("dynamic:{}", candidates.join("\u{1f}"))
+                }
+                CallTarget::Dynamic { .. } | CallTarget::Unresolved => return None,
+            };
+            Some((
+                ByteRange {
+                    start: usize::try_from(range.start_byte).ok()?,
+                    end: usize::try_from(range.end_byte).ok()?,
+                },
+                call.api_name.clone().unwrap_or(target),
+            ))
         })
         .collect()
+}
+
+/// Convert compiler facts into the core-owned restricted SOG input.
+///
+/// This is the only protocol-aware step: core receives source order, resolved
+/// API names, and coarse type evidence, never a helper IR value.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn registered_sog_for(
+    ir: &CompilerIr,
+    file: &str,
+    language: Language,
+    build_variant_fingerprint: [u8; 32],
+) -> Result<ApiNormalization, SemanticGraphError> {
+    registered_sog_in_range(ir, file, language, build_variant_fingerprint, None)
+}
+
+/// Convert compiler facts from one syntactic unit into restricted SOG input.
+///
+/// A file may hold several unrelated pipelines. Restricting observations to a
+/// parser-owned unit range keeps them from becoming one invented sequence;
+/// `None` is retained only for callers that explicitly ask for whole-file
+/// normalization.
+pub(crate) fn registered_sog_in_range(
+    ir: &CompilerIr,
+    file: &str,
+    language: Language,
+    build_variant_fingerprint: [u8; 32],
+    range: Option<ByteRange>,
+) -> Result<ApiNormalization, SemanticGraphError> {
+    let types = resolved_types_for(ir, file);
+    let observations = resolved_api_for(ir, file)
+        .into_iter()
+        .filter(|(call_range, _)| range.is_none_or(|unit_range| unit_range.contains(call_range)))
+        .filter_map(|(range, api_name)| {
+            Some((
+                OperationObservation {
+                    source_offset: u64::try_from(range.start).ok()?,
+                    api_name,
+                    type_tag: types
+                        .iter()
+                        .filter(|(type_range, _)| type_range.contains(&range))
+                        .min_by_key(|(type_range, _)| type_range.len())
+                        .map(|(_, tag)| *tag)
+                        // A call target's function type is not the type of the value
+                        // the SOG operation consumes or produces. Keeping it would
+                        // make Rust and C++ disagree merely because their compiler
+                        // IR anchors a resolved call differently.
+                        .filter(|tag| *tag != TypeTag::Callable),
+                },
+                SemanticSourceRange {
+                    start: u64::try_from(range.start).ok()?,
+                    end: u64::try_from(range.end).ok()?,
+                },
+            ))
+        })
+        .collect();
+    let constructs = ir
+        .semantic_constructs
+        .iter()
+        .filter(|construct| construct.anchor.expansion.file == file)
+        .filter_map(|construct| {
+            let construct_range = ByteRange {
+                start: usize::try_from(construct.anchor.expansion.start_byte).ok()?,
+                end: usize::try_from(construct.anchor.expansion.end_byte).ok()?,
+            };
+            range
+                .is_none_or(|unit_range| unit_range.contains(&construct_range))
+                .then_some((
+                    ConstructObservation {
+                        source_offset: u64::try_from(construct_range.start).ok()?,
+                        kind: match construct.kind {
+                            SemanticConstructKind::Source => OperationKind::Source,
+                            SemanticConstructKind::Collect => OperationKind::Collect,
+                            SemanticConstructKind::Reduce => OperationKind::Reduce,
+                            SemanticConstructKind::PropagateError => OperationKind::PropagateError,
+                            SemanticConstructKind::Validate => OperationKind::Validate,
+                            SemanticConstructKind::AcquireResource => {
+                                OperationKind::AcquireResource
+                            }
+                            SemanticConstructKind::ReleaseResource => {
+                                OperationKind::ReleaseResource
+                            }
+                        },
+                        fallible_kind: construct.fallible_kind.map(|kind| match kind {
+                            HelperFallibleKind::Option => CoreFallibleKind::Option,
+                            HelperFallibleKind::Result => CoreFallibleKind::Result,
+                        }),
+                        direct_propagation: construct.direct_propagation.map(|form| match form {
+                            HelperDirectPropagation::ResultAdapter => {
+                                CoreDirectPropagation::ResultAdapter
+                            }
+                            HelperDirectPropagation::OptionAdapter => {
+                                CoreDirectPropagation::OptionAdapter
+                            }
+                        }),
+                        resource_kind: construct.resource_kind.clone(),
+                    },
+                    SemanticSourceRange {
+                        start: u64::try_from(construct_range.start).ok()?,
+                        end: u64::try_from(construct_range.end).ok()?,
+                    },
+                ))
+        })
+        .collect();
+    normalize_registered_observations_with_ranges(
+        language,
+        build_variant_fingerprint,
+        observations,
+        constructs,
+    )
 }
 
 /// A helper program, the languages it answers about, and what it may run.
@@ -157,6 +323,8 @@ pub(crate) struct Backend<'a> {
     /// Already narrowed to classes the helper said it acts on, so nothing here
     /// is a permission that will be silently dropped at the other end.
     pub(crate) permitted: &'a [Execution],
+    /// The containment policy every process for this backend must satisfy.
+    pub(crate) sandbox: SandboxRequest,
 }
 
 /// One helper that took part, as it described itself.
@@ -185,16 +353,15 @@ pub(crate) struct Answers {
     pub(crate) per_source: Vec<Answer>,
 }
 
-/// Ask each backend about the sources it analyses, one at a time.
+/// Ask helpers with the exact compile commands selected for this partition.
 ///
-/// Every helper runs under its own [`Supervisor`], so a source that kills one
-/// costs that source rather than the run — and rather than the other language:
-/// what one helper could not survive comes back as an unavailability like any
-/// other while the other helper is still answering.
-pub(crate) fn ask(
+/// Only C and C++ source paths appear in `commands`; Rust units keep their
+/// crate-derived identity and have no compilation-database entry to select.
+pub(crate) fn ask_with_commands(
     backends: &[Backend<'_>],
     sources: &[SourceUnit],
     variant: &str,
+    commands: &BTreeMap<PathBuf, CompileCommandSelector>,
     timeout: Duration,
 ) -> Answers {
     let mut supervisors: Vec<Supervisor> = backends
@@ -202,16 +369,23 @@ pub(crate) fn ask(
         .map(|backend| {
             Supervisor::new(backend.program.to_path_buf(), Vec::new(), timeout)
                 .permitting(backend.permitted.to_vec())
+                .sandboxed(backend.sandbox)
         })
         .collect();
     let analyzes: Vec<&[Language]> = backends.iter().map(|backend| backend.analyzes).collect();
-    let mut gathered = gather(&analyzes, sources, variant, &mut |backend, unit| {
-        supervisors
-            .get_mut(backend)
-            .map_or(Analysis::Missing(Unavailability::NotSupported), |helper| {
-                helper.analyze(unit, &WANTED)
-            })
-    });
+    let mut gathered = gather(
+        &analyzes,
+        sources,
+        variant,
+        commands,
+        &mut |backend, unit, command| {
+            supervisors
+                .get_mut(backend)
+                .map_or(Analysis::Missing(Unavailability::NotSupported), |helper| {
+                    helper.analyze_with_command(unit, command, &WANTED)
+                })
+        },
+    );
     read_by_other_units(&mut gathered, sources);
     // A backend that never said who it was leaves no row to point at, so the
     // rows are compacted and what the answers point at is moved with them.
@@ -295,11 +469,13 @@ fn gather(
     analyzes: &[&[Language]],
     sources: &[SourceUnit],
     variant: &str,
-    ask_one: &mut dyn FnMut(usize, &UnitRef) -> Analysis,
+    commands: &BTreeMap<PathBuf, CompileCommandSelector>,
+    ask_one: &mut dyn FnMut(usize, &UnitRef, Option<&CompileCommandSelector>) -> Analysis,
 ) -> Vec<Gathered> {
     sources
         .iter()
         .map(|source| {
+            let command = commands.get(&source.absolute_path);
             let unit = unit_ref(source, variant);
             let Some(backend) = analyzes
                 .iter()
@@ -316,7 +492,7 @@ fn gather(
                     reason: Unavailability::NoBuildInformation,
                 };
             }
-            match ask_one(backend, &unit) {
+            match ask_one(backend, &unit, command) {
                 Analysis::Done(ir) => Gathered::Analyzed { backend, ir },
                 Analysis::Missing(reason) => Gathered::Unavailable {
                     backend,
@@ -383,6 +559,24 @@ fn read_by_other_units(gathered: &mut [Gathered], sources: &[SourceUnit]) {
                     .push((*backend, ir));
             }
         }
+        for expression in &ir.expressions {
+            let file = expression.anchor.expansion.file.as_str();
+            if seen.insert(file) {
+                readers
+                    .entry((root, file))
+                    .or_default()
+                    .push((*backend, ir));
+            }
+        }
+        for macro_ in &ir.unexpanded_macros {
+            let file = macro_.invocation.file.as_str();
+            if seen.insert(file) {
+                readers
+                    .entry((root, file))
+                    .or_default()
+                    .push((*backend, ir));
+            }
+        }
     }
     let mut filled: Vec<(usize, Gathered)> = Vec::new();
     for (at, (answer, source)) in gathered.iter().zip(sources).enumerate() {
@@ -435,9 +629,10 @@ fn read_by_other_units(gathered: &mut [Gathered], sources: &[SourceUnit]) {
 /// compared as it is written, which is what a run with no compiler would have
 /// done with it and is the direction that cannot mislead.
 ///
-/// `None` when no symbol, instantiation or call survived, which is a file its
-/// readers say nothing common about — reported as unanswerable rather than as
-/// an analysis that found nothing, because those are different claims.
+/// `None` when no symbol, instantiation, call, expression, or unexpanded macro survived,
+/// which is a file its readers say nothing common about — reported as
+/// unanswerable rather than as an analysis that found nothing, because those
+/// are different claims.
 ///
 /// What the result is filed under keeps naming the file, and names the unit
 /// only when one unit read it. An agreement between several is an answer about
@@ -476,7 +671,26 @@ fn agreed(file: UnitRef, readings: &[(usize, &CompilerIr, String)]) -> Option<Co
         let other = calls_in(ir, file);
         calls.retain(|at, held| other.get(at).is_some_and(|found| *found == *held));
     }
-    if kept.is_empty() && instantiations.is_empty() && calls.is_empty() {
+    let mut expressions = expressions_in(first, first_file);
+    for (_, ir, file) in readings.iter().skip(1) {
+        let other = expressions_in(ir, file);
+        expressions.retain(|at, held| {
+            other
+                .get(at)
+                .is_some_and(|found| same_expression(ir, found, first, held))
+        });
+    }
+    let mut unexpanded_macros = unexpanded_macros_in(first, first_file);
+    for (_, ir, file) in readings.iter().skip(1) {
+        let other = unexpanded_macros_in(ir, file);
+        unexpanded_macros.retain(|at, held| other.get(at).is_some_and(|found| *found == *held));
+    }
+    if kept.is_empty()
+        && instantiations.is_empty()
+        && calls.is_empty()
+        && expressions.is_empty()
+        && unexpanded_macros.is_empty()
+    {
         return None;
     }
     let mut merged = CompilerIr::empty(unit);
@@ -501,6 +715,16 @@ fn agreed(file: UnitRef, readings: &[(usize, &CompilerIr, String)]) -> Option<Co
         })
         .collect();
     merged.calls = calls.into_values().cloned().collect();
+    merged.expressions = expressions
+        .into_values()
+        .filter_map(|expression| {
+            Some(ResolvedExpression {
+                anchor: expression.anchor.clone(),
+                type_index: types.copy(first, expression.type_index)?,
+            })
+        })
+        .collect();
+    merged.unexpanded_macros = unexpanded_macros.into_values().cloned().collect();
     merged.types = types.types;
     Some(merged)
 }
@@ -627,6 +851,63 @@ fn calls_in<'a>(ir: &'a CompilerIr, file: &str) -> BTreeMap<(u64, u64), &'a Call
         .collect()
 }
 
+/// Expression types written in `file`, lined up by the observable invocation
+/// range. Their type is deliberately a value rather than a key: a type that
+/// changes across translation units is a disagreement, not another expression.
+fn expressions_in<'a>(
+    ir: &'a CompilerIr,
+    file: &str,
+) -> BTreeMap<(u64, u64), &'a ResolvedExpression> {
+    ir.expressions
+        .iter()
+        .filter(|expression| expression.anchor.expansion.file == file)
+        .map(|expression| {
+            (
+                (
+                    expression.anchor.expansion.start_byte,
+                    expression.anchor.expansion.end_byte,
+                ),
+                expression,
+            )
+        })
+        .collect()
+}
+
+/// Whether two readers gave an expanded expression the same type and origin.
+fn same_expression(
+    ir: &CompilerIr,
+    expression: &ResolvedExpression,
+    against: &CompilerIr,
+    held: &ResolvedExpression,
+) -> bool {
+    let resolved = |ir: &CompilerIr, expression: &ResolvedExpression| {
+        ir.types
+            .get(usize::try_from(expression.type_index).ok()?)
+            .map(|ty| (ty.display.clone(), ty.category))
+    };
+    expression.anchor.definition == held.anchor.definition
+        && resolved(ir, expression) == resolved(against, held)
+}
+
+/// Unexpanded macro invocations written in `file`, lined up by their source
+/// range. The reason stays a value so differing coverage reports contradict
+/// each other instead of appearing as independent invocations.
+fn unexpanded_macros_in<'a>(
+    ir: &'a CompilerIr,
+    file: &str,
+) -> BTreeMap<(u64, u64), &'a UnexpandedMacro> {
+    ir.unexpanded_macros
+        .iter()
+        .filter(|macro_| macro_.invocation.file == file)
+        .map(|macro_| {
+            (
+                (macro_.invocation.start_byte, macro_.invocation.end_byte),
+                macro_,
+            )
+        })
+        .collect()
+}
+
 /// Types copied out of the analyses they were resolved in.
 #[derive(Default)]
 struct Interned {
@@ -726,8 +1007,11 @@ pub fn resolution_for(ir: &CompilerIr, file: &str) -> Resolution {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use codehelion_core::semantic::OperationEdgeKind;
     use codehelion_helper::ir::{
-        Anchor, CallTarget, ResolvedSymbol, SourceRange, SymbolKind, UnitRef,
+        Anchor, CallTarget, FallibleKind as HelperFallibleKind, ResolvedExpression, ResolvedSymbol,
+        ResolvedType, SemanticConstruct, SemanticConstructKind, SourceRange, SymbolKind,
+        TypeCategory, UnexpandedMacro, UnexpandedMacroReason, UnitRef,
     };
 
     fn symbol(name: &str, file: &str, start: u64, width: u64, external: bool) -> ResolvedSymbol {
@@ -774,6 +1058,307 @@ mod tests {
         });
     }
 
+    #[test]
+    fn compiler_ir_api_facts_cross_the_protocol_boundary_into_sog() {
+        let mut analysis = ir(Vec::new());
+        analysis.calls.push(CallSite {
+            anchor: Anchor::written_here(SourceRange {
+                file: "src/lib.rs".to_owned(),
+                start_byte: 12,
+                end_byte: 20,
+                start_line: 1,
+            }),
+            target: CallTarget::Static {
+                symbol: "Iterator::filter".to_owned(),
+            },
+            api_name: Some("rust::Iterator::filter".to_owned()),
+        });
+        let normalized = registered_sog_for(&analysis, "src/lib.rs", Language::Rust, [9; 32])
+            .expect("adapter only forwards validated core observations");
+        let graph = normalized.graph.expect("registered API produces SOG");
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].kind.name(), "filter");
+    }
+
+    #[test]
+    fn compiler_confirmed_api_name_overrides_an_opaque_call_identity() {
+        let mut analysis = ir(Vec::new());
+        analysis.calls.push(CallSite {
+            anchor: Anchor::written_here(SourceRange {
+                file: "src/lib.rs".to_owned(),
+                start_byte: 12,
+                end_byte: 20,
+                start_line: 1,
+            }),
+            target: CallTarget::Static {
+                symbol: "c:@N@std@S@vector@F@push_back#".to_owned(),
+            },
+            api_name: Some("std::push_back".to_owned()),
+        });
+        let normalized = registered_sog_for(&analysis, "src/lib.rs", Language::Cpp, [15; 32])
+            .expect("adapter only forwards compiler-confirmed API names");
+        let graph = normalized.graph.expect("recognized C++ API produces a SOG");
+        assert_eq!(graph.nodes[0].kind, OperationKind::Collect);
+        assert_eq!(
+            graph.nodes[0].attributes.api_names,
+            BTreeSet::from(["std::push_back".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_call_target_function_type_is_not_pipeline_value_type_evidence() {
+        let mut analysis = ir(Vec::new());
+        analysis.types.push(ResolvedType {
+            display: "fn(&[u64]) -> Vec<u64>".into(),
+            category: TypeCategory::Callable,
+            arguments: Vec::new(),
+            definition: None,
+        });
+        analysis.expressions.push(ResolvedExpression {
+            anchor: Anchor::written_here(SourceRange {
+                file: "src/lib.rs".to_owned(),
+                start_byte: 12,
+                end_byte: 20,
+                start_line: 1,
+            }),
+            type_index: 0,
+        });
+        analysis.calls.push(CallSite {
+            anchor: Anchor::written_here(SourceRange {
+                file: "src/lib.rs".to_owned(),
+                start_byte: 12,
+                end_byte: 20,
+                start_line: 1,
+            }),
+            target: CallTarget::Static {
+                symbol: "Iterator::collect".to_owned(),
+            },
+            api_name: Some("rust::Iterator::collect".to_owned()),
+        });
+
+        let normalized = registered_sog_for(&analysis, "src/lib.rs", Language::Rust, [16; 32])
+            .expect("adapter only forwards validated core observations");
+        let graph = normalized.graph.expect("registered API produces a SOG");
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].attributes.type_tag, None);
+    }
+
+    #[test]
+    fn compiler_confirmed_validation_crosses_the_protocol_boundary_into_sog() {
+        let mut analysis = ir(Vec::new());
+        analysis.semantic_constructs.push(SemanticConstruct {
+            anchor: Anchor::written_here(SourceRange {
+                file: "src/lib.rs".to_owned(),
+                start_byte: 12,
+                end_byte: 48,
+                start_line: 1,
+            }),
+            kind: SemanticConstructKind::Validate,
+            fallible_kind: Some(HelperFallibleKind::Option),
+            direct_propagation: None,
+            resource_kind: None,
+        });
+        let normalized = registered_sog_for(&analysis, "src/lib.rs", Language::Rust, [11; 32])
+            .expect("adapter only forwards compiler-confirmed constructs");
+        let graph = normalized.graph.expect("validation construct produces SOG");
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].kind, OperationKind::Validate);
+        assert_eq!(
+            graph.nodes[0].attributes.fallible_kind,
+            Some(CoreFallibleKind::Option)
+        );
+    }
+
+    #[test]
+    fn direct_result_propagation_crosses_the_protocol_boundary_into_sog() {
+        let mut analysis = ir(Vec::new());
+        analysis.semantic_constructs.push(SemanticConstruct {
+            anchor: Anchor::written_here(SourceRange {
+                file: "src/lib.rs".to_owned(),
+                start_byte: 12,
+                end_byte: 24,
+                start_line: 1,
+            }),
+            kind: SemanticConstructKind::PropagateError,
+            fallible_kind: Some(HelperFallibleKind::Result),
+            direct_propagation: Some(HelperDirectPropagation::ResultAdapter),
+            resource_kind: None,
+        });
+        let normalized = registered_sog_for(&analysis, "src/lib.rs", Language::Rust, [13; 32])
+            .expect("adapter only forwards compiler-confirmed constructs");
+        let graph = normalized
+            .graph
+            .expect("propagation construct produces a SOG");
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].kind, OperationKind::PropagateError);
+        assert_eq!(
+            graph.nodes[0].attributes.direct_propagation,
+            Some(CoreDirectPropagation::ResultAdapter)
+        );
+    }
+
+    #[test]
+    fn direct_option_propagation_crosses_the_protocol_boundary_into_sog() {
+        let mut analysis = ir(Vec::new());
+        analysis.semantic_constructs.push(SemanticConstruct {
+            anchor: Anchor::written_here(SourceRange {
+                file: "src/lib.rs".to_owned(),
+                start_byte: 12,
+                end_byte: 24,
+                start_line: 1,
+            }),
+            kind: SemanticConstructKind::PropagateError,
+            fallible_kind: Some(HelperFallibleKind::Option),
+            direct_propagation: Some(HelperDirectPropagation::OptionAdapter),
+            resource_kind: None,
+        });
+        let normalized = registered_sog_for(&analysis, "src/lib.rs", Language::Rust, [14; 32])
+            .expect("adapter only forwards compiler-confirmed constructs");
+        let graph = normalized.graph.expect("option propagation produces a SOG");
+        assert_eq!(
+            graph.nodes[0].attributes.direct_propagation,
+            Some(CoreDirectPropagation::OptionAdapter)
+        );
+    }
+
+    #[test]
+    fn compiler_confirmed_loop_operations_cross_the_protocol_boundary_into_sog() {
+        let mut analysis = ir(Vec::new());
+        for (offset, kind) in [
+            (12, SemanticConstructKind::Source),
+            (36, SemanticConstructKind::Collect),
+        ] {
+            analysis.semantic_constructs.push(SemanticConstruct {
+                anchor: Anchor::written_here(SourceRange {
+                    file: "src/lib.rs".to_owned(),
+                    start_byte: offset,
+                    end_byte: offset + 4,
+                    start_line: 1,
+                }),
+                kind,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: None,
+            });
+        }
+        let normalized = registered_sog_for(&analysis, "src/lib.rs", Language::Rust, [12; 32])
+            .expect("adapter only forwards compiler-confirmed constructs");
+        let graph = normalized.graph.expect("loop constructs produce SOG");
+        assert_eq!(
+            graph.nodes.iter().map(|node| node.kind).collect::<Vec<_>>(),
+            vec![OperationKind::Source, OperationKind::Collect]
+        );
+    }
+
+    #[test]
+    fn compiler_confirmed_resource_lifetime_crosses_the_protocol_boundary_into_sog() {
+        let mut analysis = ir(Vec::new());
+        for (offset, kind) in [
+            (12, SemanticConstructKind::AcquireResource),
+            (36, SemanticConstructKind::ReleaseResource),
+        ] {
+            analysis.semantic_constructs.push(SemanticConstruct {
+                anchor: Anchor::written_here(SourceRange {
+                    file: "src/lib.rs".to_owned(),
+                    start_byte: offset,
+                    end_byte: offset + 4,
+                    start_line: 1,
+                }),
+                kind,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: Some("file".to_owned()),
+            });
+        }
+        let normalized = registered_sog_for(&analysis, "src/lib.rs", Language::Rust, [19; 32])
+            .expect("adapter only forwards compiler-confirmed constructs");
+        let graph = normalized.graph.expect("resource constructs produce SOG");
+        assert_eq!(
+            graph.nodes.iter().map(|node| node.kind).collect::<Vec<_>>(),
+            vec![
+                OperationKind::AcquireResource,
+                OperationKind::ReleaseResource
+            ]
+        );
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == OperationEdgeKind::ResourceLifetime && edge.from == 0 && edge.to == 1
+        }));
+    }
+
+    #[test]
+    fn unit_range_keeps_unrelated_compiler_calls_out_of_one_sog_sequence() {
+        let mut analysis = ir(Vec::new());
+        analysis.calls = vec![
+            CallSite {
+                anchor: Anchor::written_here(SourceRange {
+                    file: "src/lib.rs".to_owned(),
+                    start_byte: 12,
+                    end_byte: 20,
+                    start_line: 1,
+                }),
+                target: CallTarget::Static {
+                    symbol: "Iterator::filter".to_owned(),
+                },
+                api_name: Some("rust::Iterator::filter".to_owned()),
+            },
+            CallSite {
+                anchor: Anchor::written_here(SourceRange {
+                    file: "src/lib.rs".to_owned(),
+                    start_byte: 120,
+                    end_byte: 128,
+                    start_line: 10,
+                }),
+                target: CallTarget::Static {
+                    symbol: "Iterator::collect".to_owned(),
+                },
+                api_name: Some("rust::Iterator::collect".to_owned()),
+            },
+        ];
+        let normalized = registered_sog_in_range(
+            &analysis,
+            "src/lib.rs",
+            Language::Rust,
+            [10; 32],
+            Some(ByteRange { start: 0, end: 64 }),
+        )
+        .expect("adapter only forwards validated core observations");
+        let graph = normalized.graph.expect("the first call is in the unit");
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].kind.name(), "filter");
+    }
+
+    #[test]
+    fn an_expanded_expression_contributes_type_evidence_at_its_invocation() {
+        let mut analysis = ir(Vec::new());
+        analysis.types.push(ResolvedType {
+            display: "i64".into(),
+            category: TypeCategory::Integer,
+            arguments: Vec::new(),
+            definition: None,
+        });
+        analysis.expressions.push(ResolvedExpression {
+            anchor: Anchor {
+                expansion: SourceRange {
+                    file: "src/lib.rs".into(),
+                    start_byte: 40,
+                    end_byte: 70,
+                    start_line: 3,
+                },
+                definition: Some(SourceRange {
+                    file: "src/macros.rs".into(),
+                    start_byte: 8,
+                    end_byte: 36,
+                    start_line: 1,
+                }),
+            },
+            type_index: 0,
+        });
+        assert_eq!(
+            resolved_types_for(&analysis, "src/lib.rs"),
+            vec![(ByteRange { start: 40, end: 70 }, TypeTag::Integer)]
+        );
+    }
+
     /// Offsets are per file. A crate's other files answering for this one would
     /// be wrong in whichever direction their bytes happened to line up.
     #[test]
@@ -807,10 +1392,15 @@ mod tests {
         assert!(resolution.is_empty());
     }
 
+    #[test]
+    fn semantic_requests_control_flow_capability() {
+        assert!(WANTED.contains(&Capability::MirCfg));
+    }
+
     fn source(path: &str, language: Language, crate_name: Option<&str>) -> SourceUnit {
         SourceUnit {
-            relative_path: std::path::PathBuf::from(path),
-            absolute_path: std::path::PathBuf::from("/repo").join(path),
+            relative_path: PathBuf::from(path),
+            absolute_path: PathBuf::from("/repo").join(path),
             language,
             is_header: false,
             content_hash: codehelion_core::discovery::ContentHash::of(b""),
@@ -835,10 +1425,16 @@ mod tests {
             source("build.rs", Language::Rust, None),
         ];
         let mut asked = Vec::new();
-        let answers = gather(&RUST_ONLY, &sources, "host", &mut |_, unit| {
-            asked.push(unit.clone());
-            Analysis::Done(Box::new(CompilerIr::empty(unit.clone())))
-        });
+        let answers = gather(
+            &RUST_ONLY,
+            &sources,
+            "host",
+            &BTreeMap::new(),
+            &mut |_, unit, _| {
+                asked.push(unit.clone());
+                Analysis::Done(Box::new(CompilerIr::empty(unit.clone())))
+            },
+        );
         assert!(matches!(answers[0], Gathered::Analyzed { .. }));
         // A C file, with no helper here that reads C.
         assert!(matches!(
@@ -871,9 +1467,13 @@ mod tests {
             source("src/lib.rs", Language::Rust, Some("ledger")),
             source("src/native.c", Language::C, None),
         ];
-        let answers = gather(&RUST_ONLY, &sources, "host", &mut |_, _| {
-            Analysis::Missing(Unavailability::RequiresExecution)
-        });
+        let answers = gather(
+            &RUST_ONLY,
+            &sources,
+            "host",
+            &BTreeMap::new(),
+            &mut |_, _, _| Analysis::Missing(Unavailability::RequiresExecution),
+        );
         let Gathered::Unavailable { unit, reason, .. } = &answers[0] else {
             panic!("the helper was asked and could not answer");
         };
@@ -892,9 +1492,13 @@ mod tests {
     #[test]
     fn a_file_nobody_was_asked_about_is_named_without_a_unit_being_invented() {
         let sources = [source("build.rs", Language::Rust, None)];
-        let answers = gather(&RUST_ONLY, &sources, "host", &mut |_, _| {
-            panic!("nothing should be asked")
-        });
+        let answers = gather(
+            &RUST_ONLY,
+            &sources,
+            "host",
+            &BTreeMap::new(),
+            &mut |_, _, _| panic!("nothing should be asked"),
+        );
         let Gathered::NotAsked { unit, reason } = &answers[0] else {
             panic!("nobody was asked about it");
         };
@@ -915,10 +1519,16 @@ mod tests {
             source("src/native.c", Language::C, None),
         ];
         let mut asked: Vec<(usize, String)> = Vec::new();
-        let answers = gather(&analyzes, &sources, "host", &mut |backend, unit| {
-            asked.push((backend, unit.unit.clone()));
-            Analysis::Done(Box::new(CompilerIr::empty(unit.clone())))
-        });
+        let answers = gather(
+            &analyzes,
+            &sources,
+            "host",
+            &BTreeMap::new(),
+            &mut |backend, unit, _| {
+                asked.push((backend, unit.unit.clone()));
+                Analysis::Done(Box::new(CompilerIr::empty(unit.clone())))
+            },
+        );
         assert!(
             answers
                 .iter()
@@ -945,9 +1555,13 @@ mod tests {
     fn a_cpp_file_is_not_ruled_out_for_belonging_to_no_crate() {
         let analyzes: [&[Language]; 1] = [&[Language::C, Language::Cpp]];
         let sources = [source("src/accumulate.cpp", Language::Cpp, None)];
-        let answers = gather(&analyzes, &sources, "host", &mut |_, unit| {
-            Analysis::Done(Box::new(CompilerIr::empty(unit.clone())))
-        });
+        let answers = gather(
+            &analyzes,
+            &sources,
+            "host",
+            &BTreeMap::new(),
+            &mut |_, unit, _| Analysis::Done(Box::new(CompilerIr::empty(unit.clone()))),
+        );
         assert!(matches!(answers[0], Gathered::Analyzed { .. }));
     }
 
@@ -986,6 +1600,27 @@ mod tests {
         gathered
     }
 
+    fn read_with_unexpanded_macros(unit: &str, macros: Vec<UnexpandedMacro>) -> Gathered {
+        let mut gathered = read(unit, Vec::new(), Vec::new());
+        let Gathered::Analyzed { ir, .. } = &mut gathered else {
+            unreachable!("read always produces an analysis");
+        };
+        ir.unexpanded_macros = macros;
+        gathered
+    }
+
+    fn unexpanded_macro(start: u64, reason: UnexpandedMacroReason) -> UnexpandedMacro {
+        UnexpandedMacro {
+            invocation: SourceRange {
+                file: "include/accumulate.hpp".into(),
+                start_byte: start,
+                end_byte: start + 12,
+                start_line: 20,
+            },
+            reason,
+        }
+    }
+
     fn call(start: u64, target: CallTarget, definition: Option<&str>) -> CallSite {
         CallSite {
             anchor: Anchor {
@@ -1003,7 +1638,48 @@ mod tests {
                 }),
             },
             target,
+            api_name: None,
         }
+    }
+
+    #[test]
+    fn resolved_api_targets_keep_static_and_dynamic_calls_distinct() {
+        let gathered = read_with_calls(
+            "fixture.cpp",
+            vec![
+                call(
+                    10,
+                    CallTarget::Static {
+                        symbol: "c:@F@run#I#".into(),
+                    },
+                    None,
+                ),
+                call(
+                    20,
+                    CallTarget::Dynamic {
+                        candidates: vec!["c:@F@right#".into(), "c:@F@left#".into()],
+                    },
+                    None,
+                ),
+                call(30, CallTarget::Unresolved, None),
+            ],
+        );
+        let Gathered::Analyzed { ir, .. } = gathered else {
+            panic!("the fixture helper answer is analyzed");
+        };
+        assert_eq!(
+            resolved_api_for(&ir, "include/accumulate.hpp"),
+            vec![
+                (
+                    ByteRange { start: 10, end: 18 },
+                    "static:c:@F@run#I#".into(),
+                ),
+                (
+                    ByteRange { start: 20, end: 28 },
+                    "dynamic:c:@F@left#\u{1f}c:@F@right#".into(),
+                ),
+            ]
+        );
     }
 
     fn typed(mut symbol: ResolvedSymbol, at: u32) -> ResolvedSymbol {
@@ -1024,7 +1700,7 @@ mod tests {
     fn integer(display: &str) -> ResolvedType {
         ResolvedType {
             display: display.into(),
-            category: codehelion_helper::ir::TypeCategory::Integer,
+            category: TypeCategory::Integer,
             arguments: Vec::new(),
             definition: None,
         }
@@ -1356,6 +2032,47 @@ mod tests {
             matches!(gathered[2], Gathered::Unavailable { .. }),
             "one translation unit's call target was selected"
         );
+    }
+
+    /// A header can carry only a coverage fact. Retain it when every reader
+    /// agrees, so a failed direct query does not turn a known macro gap into a
+    /// claim that nothing was found.
+    #[test]
+    fn header_unexpanded_macros_survive_only_exact_agreement() {
+        let sources = [
+            source("src/narrow.cpp", Language::Cpp, None),
+            source("src/wide.cpp", Language::Cpp, None),
+            header(),
+        ];
+        let stable = unexpanded_macro(700, UnexpandedMacroReason::RequiresExecution);
+        let mut gathered = vec![
+            read_with_unexpanded_macros("narrow.cpp", vec![stable.clone()]),
+            read_with_unexpanded_macros("wide.cpp", vec![stable.clone()]),
+            unanswerable(&sources[2]),
+        ];
+
+        read_by_other_units(&mut gathered, &sources);
+        let Gathered::Analyzed { ir, .. } = &gathered[2] else {
+            panic!("the agreed coverage fact answers the header");
+        };
+        assert!(ir.symbols.is_empty());
+        assert!(ir.instantiations.is_empty());
+        assert!(ir.calls.is_empty());
+        assert_eq!(
+            ir.unexpanded_macros.as_slice(),
+            std::slice::from_ref(&stable)
+        );
+
+        let mut disagreeing = vec![
+            read_with_unexpanded_macros("narrow.cpp", vec![stable]),
+            read_with_unexpanded_macros(
+                "wide.cpp",
+                vec![unexpanded_macro(700, UnexpandedMacroReason::Unresolved)],
+            ),
+            unanswerable(&sources[2]),
+        ];
+        read_by_other_units(&mut disagreeing, &sources);
+        assert!(matches!(disagreeing[2], Gathered::Unavailable { .. }));
     }
 
     /// A file that is its own unit was answered about the program it actually

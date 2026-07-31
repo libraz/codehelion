@@ -30,10 +30,11 @@ use crate::ir::{CompilerIr, Unavailability, UnitRef};
 /// Bumped when a change would make an older peer misread a message. Additive
 /// fields with defaults do not need it; removing or repurposing one does.
 ///
-/// Revision 2 added [`RequestBody::DescribeBuild`]. A helper from revision 1
-/// cannot parse it, which is why asking is gated on what the handshake settled
-/// rather than on what this build would like to send.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// Revision 2 added [`RequestBody::DescribeBuild`]. Revision 3 added an exact
+/// [`CompileCommandSelector`] to [`Analyze`]. A helper from an older revision
+/// cannot select between two commands for one source file, so the caller must
+/// not send such a request until the handshake settled on revision 3.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The oldest revision this build can still talk to.
 ///
@@ -277,6 +278,14 @@ pub struct BuildDescription {
 pub struct Analyze {
     /// Which unit.
     pub unit: UnitRef,
+    /// The exact compilation-database entry to use for a C or C++ request.
+    ///
+    /// A source path is not enough: a database may intentionally list it more
+    /// than once under different `-D` settings. This carries the complete
+    /// recorded command identity rather than a database index, because an
+    /// index changes when an unrelated command is inserted or reordered.
+    #[serde(default)]
+    pub compile_command: Option<CompileCommandSelector>,
     /// What to spend time on.
     ///
     /// Never more than the helper offered at handshake. Asking for less than it
@@ -290,6 +299,22 @@ pub struct Analyze {
     /// runs nothing, which is the outcome that needs no permission.
     #[serde(default)]
     pub permitted: Vec<Execution>,
+}
+
+/// One stable, exact selector for an entry in `compile_commands.json`.
+///
+/// The path is the entry's source after resolving it against `directory`; the
+/// command remains one argument per element so quoting cannot alter its
+/// meaning between the scanner and helper. Together they name one database
+/// entry without relying on its position in a generated file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompileCommandSelector {
+    /// The translation-unit source path.
+    pub file: String,
+    /// The command's working directory, when the database recorded one.
+    pub directory: Option<String>,
+    /// The recorded compiler invocation, including its compiler and source.
+    pub arguments: Vec<String>,
 }
 
 /// Something a helper may be permitted to run out of the project it is

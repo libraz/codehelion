@@ -17,13 +17,11 @@
 //! `1` in `main`, and `clap` uses `2` for usage errors. Commands whose engine
 //! or store support is not built yet fail with an explicit message.
 
-pub mod audit;
+pub mod artifact;
 pub mod baseline;
 pub mod cli;
 pub mod config;
-pub mod migrate;
 pub mod report;
-pub mod reuse;
 pub mod scan;
 pub mod semantic;
 pub mod suppress;
@@ -37,8 +35,8 @@ use codehelion_core::doctor;
 use codehelion_store::Store;
 
 use crate::cli::{
-    BaselineAction, CacheAction, Cli, Command, ConfigAction, DetailFormat, ExplainArgs,
-    MigrateArgs, Mode, ScanArgs,
+    ArtifactAction, BaselineAction, CacheAction, Cli, Command, ConfigAction, DetailFormat,
+    ExplainArgs, Mode, ScanArgs,
 };
 use crate::config::ConfigSource;
 
@@ -88,9 +86,26 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
             // a program is this layer's business, and keeping it out of the
             // engine is what stops a compiler helper from becoming something
             // the analysis crates link.
-            doctor::render(&doctor::diagnose_with(&|name| interrogate(name, None)), out)?;
+            doctor::render(
+                &doctor::diagnose_with(&|name| {
+                    interrogate(
+                        name,
+                        None,
+                        codehelion_helper::SandboxRequest::unrestricted(),
+                    )
+                }),
+                out,
+            )?;
+            writeln!(out, "  {}", codehelion_helper::doctor_summary())?;
+            writeln!(
+                out,
+                "  restricted semantic rules: {} enabled (registry {})",
+                codehelion_core::semantic::registered_rules().len(),
+                codehelion_core::semantic::SEMANTIC_RULE_REGISTRY_VERSION,
+            )?;
             doctor_install(out)?;
             doctor_database(out)?;
+            doctor_artifacts(out)?;
             Ok(Outcome::Success)
         }
         Command::Config { action } => config_command(action, out),
@@ -98,9 +113,11 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
         Command::Scan(args) => scan_command(args, out),
         Command::Explain(args) => explain(args, out),
         Command::Baseline { action } => baseline(action, out),
-        Command::Audit(args) => audit::run(args, out),
-        Command::Artifact => bail!("artifact analysis is not available in this release"),
-        Command::Divergence => bail!("divergence reporting is not available in this release"),
+        Command::Artifact { action } => match action {
+            ArtifactAction::Analyze(args) => artifact::run(args, out),
+            ArtifactAction::Compare(args) => artifact::compare(args, out),
+            ArtifactAction::Calibration(args) => artifact::calibration(args, out),
+        },
     }
 }
 
@@ -120,47 +137,73 @@ const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 /// whether a semantic run is worth starting.
 ///
 /// The helper is shut down again. `doctor` inspects; it does not leave a
-/// process running behind a command that printed a table and returned.
-fn interrogate(name: &str, configured: Option<&Path>) -> Option<doctor::HelperFacts> {
+/// process running behind a command that printed a table and returned. The
+/// caller supplies containment so semantic discovery and later analysis start
+/// under the same policy.
+fn interrogate(
+    name: &str,
+    configured: Option<&Path>,
+    sandbox: codehelion_helper::SandboxRequest,
+) -> Option<doctor::HelperFacts> {
     let path = codehelion_helper::locate(name, configured)?;
-    let state = match codehelion_helper::Helper::start(&path, HANDSHAKE_TIMEOUT) {
-        Ok(helper) => {
-            let identity = helper.identity();
-            let greeting = doctor::Greeting {
-                version: identity.version.clone(),
-                protocol: helper.protocol_version(),
-                toolchains: identity.toolchains.clone(),
-                capabilities: identity
-                    .capabilities
-                    .iter()
-                    .map(|capability| capability.name().to_string())
-                    .collect(),
-                executes: identity
-                    .executes
-                    .iter()
-                    .map(|execution| execution.name().to_string())
-                    .collect(),
-                // Asked of the conversation rather than worked out from the
-                // number beside it: which revision can carry which request is
-                // the protocol's business, and a diagnostic that decided it
-                // here would go stale the first time a request was added.
-                predates: helper
-                    .predates()
-                    .into_iter()
-                    .map(ToString::to_string)
-                    .collect(),
-            };
-            // Failing to stop cleanly is not a reason to withhold what it
-            // already said: the answer was given before the goodbye.
-            drop(helper.shutdown());
-            doctor::HelperState::Answered(greeting)
-        }
-        Err(error) => doctor::HelperState::Silent(format!("{error}")),
-    };
+    let state =
+        match codehelion_helper::Helper::start_with_sandbox(&path, &[], HANDSHAKE_TIMEOUT, sandbox)
+        {
+            Ok(helper) => {
+                let identity = helper.identity();
+                let greeting = doctor::Greeting {
+                    version: identity.version.clone(),
+                    protocol: helper.protocol_version(),
+                    toolchains: identity.toolchains.clone(),
+                    capabilities: identity
+                        .capabilities
+                        .iter()
+                        .map(|capability| capability.name().to_string())
+                        .collect(),
+                    executes: identity
+                        .executes
+                        .iter()
+                        .map(|execution| execution.name().to_string())
+                        .collect(),
+                    // Asked of the conversation rather than worked out from the
+                    // number beside it: which revision can carry which request is
+                    // the protocol's business, and a diagnostic that decided it
+                    // here would go stale the first time a request was added.
+                    predates: helper
+                        .predates()
+                        .into_iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                };
+                // Failing to stop cleanly is not a reason to withhold what it
+                // already said: the answer was given before the goodbye.
+                drop(helper.shutdown());
+                doctor::HelperState::Answered(greeting)
+            }
+            Err(error) => doctor::HelperState::Silent(format!("{error}")),
+        };
     Some(doctor::HelperFacts { path, state })
 }
 
+/// Describe artifact formats this build can inspect without running them.
+///
+/// Kept in the composition root alongside helper discovery: format backends
+/// are optional CLI capabilities and are not dependencies of the source
+/// clone engine.
+fn doctor_artifacts(out: &mut impl Write) -> Result<()> {
+    writeln!(out, "  artifacts:")?;
+    writeln!(out, "    wasm: available (core modules; wasmparser)")?;
+    writeln!(out, "    elf: available (sized text symbols; object)")?;
+    writeln!(out, "    macho: recognised, parser unavailable")?;
+    writeln!(out, "    pe-coff: recognised, parser unavailable")?;
+    writeln!(out, "    archive: recognised, parser unavailable")?;
+    Ok(())
+}
+
 fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
+    if args.compare_languages && args.mode != Mode::Semantic {
+        bail!("--compare-languages requires --mode semantic");
+    }
     // Resolved before the mode is dispatched on, because a permission that
     // nothing in the chosen mode could act on is refused rather than accepted:
     // Fast and Structural run nothing whatever they are told, and somebody who
@@ -177,11 +220,15 @@ fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
 ///
 /// Both output formats render the same [`report::FindingDetail`] value, in
 /// the shape a scan report's member entries use.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the lookup and both reporter forms share one complete finding detail"
+)]
 fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
     let path = resolve_db(args.db.as_deref())?;
     if !path.is_file() {
         bail!(
-            "no audit database at {}; run `codehelion scan` first",
+            "no local database at {}; run `codehelion scan` first",
             path.display()
         );
     }
@@ -193,6 +240,49 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
             path.display()
         );
     };
+    let source_artifact_mappings = store
+        .artifact_fragment_mappings(&args.finding_id)?
+        .into_iter()
+        .map(|mapping| report::SourceArtifactMappingDetail {
+            artifact_analysis_id: mapping.analysis_id,
+            artifact_symbol_fingerprint: mapping_fingerprint_hex(
+                mapping.artifact_symbol_fingerprint,
+            ),
+            source_build_variant_fingerprint: mapping_fingerprint_hex(
+                mapping.source_build_variant_fingerprint,
+            ),
+            artifact_build_variant_fingerprint: mapping_fingerprint_hex(
+                mapping.build_variant_fingerprint,
+            ),
+            confidence: mapping_confidence_label(mapping.confidence).to_owned(),
+            evidence: mapping.evidence,
+            attributed_bytes: mapping.attributed_bytes,
+        })
+        .collect();
+    let clone_group_savings = store
+        .clone_group_savings(occurrence.scan_run_id, &occurrence.group_fingerprint_hex)?
+        .into_iter()
+        .map(|(artifact_analysis_id, savings)| {
+            Ok(report::CloneGroupSavingsDetail {
+                artifact_analysis_id,
+                source_build_variant_fingerprint: mapping_fingerprint_hex(
+                    savings.source_build_variant_fingerprint,
+                ),
+                artifact_build_variant_fingerprint: mapping_fingerprint_hex(
+                    savings.artifact_build_variant_fingerprint,
+                ),
+                duplicated_bytes: savings.duplicated_bytes,
+                estimated_refactor_savings_bytes: savings.estimated_refactor_savings_bytes,
+                mapping_confidence: savings_confidence_label(savings.mapping_confidence).to_owned(),
+                clone_confidence: savings.clone_confidence,
+                model_confidence: savings_confidence_label(savings.model_confidence).to_owned(),
+                savings_confidence: savings_confidence_label(savings.savings_confidence).to_owned(),
+                model_schema_version: savings.model_schema_version,
+                assumptions: serde_json::from_str(&savings.assumptions_json)
+                    .context("parsing persisted structured savings assumptions")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let line = |value: Option<i64>| u32::try_from(value.unwrap_or(0)).unwrap_or(0);
     let detail = report::FindingDetail {
         member: report::Member {
@@ -227,6 +317,26 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
                 min_pairwise: stored.min_pairwise,
                 confidence_band: stored.confidence_band,
             }),
+            semantic: occurrence
+                .semantic
+                .map(|evidence| report::SemanticEvidence {
+                    schema_version: evidence.schema_version,
+                    rules: vec![report::SemanticRuleEvidence {
+                        id: evidence.rule_id,
+                        version: evidence.rule_version,
+                        confidence: evidence.rule_confidence,
+                    }],
+                    graphs: evidence.graphs,
+                    node_mappings: evidence
+                        .node_mappings
+                        .into_iter()
+                        .map(|mapping| report::SemanticNodeMapping {
+                            corresponding_member: mapping.corresponding_member,
+                            canonical: mapping.canonical,
+                            corresponding: mapping.corresponding,
+                        })
+                        .collect(),
+                }),
             suppressed: occurrence.suppression.map(|rule| report::Suppression {
                 kind: report::SuppressionKind::Rule,
                 reason: None,
@@ -235,12 +345,46 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
             }),
         },
         scan_run: occurrence.scan_run_id,
+        source_artifact_mappings,
+        clone_group_savings,
     };
     match args.format {
         DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
         DetailFormat::Text => detail.render_text(out)?,
     }
     Ok(Outcome::Success)
+}
+
+fn mapping_fingerprint_hex(fingerprint: [u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(fingerprint.len().saturating_mul(2));
+    for byte in fingerprint {
+        hex.push(char::from(HEX[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    hex
+}
+
+const fn mapping_confidence_label(
+    confidence: codehelion_store::artifact::ArtifactAnalysisMappingConfidence,
+) -> &'static str {
+    match confidence {
+        codehelion_store::artifact::ArtifactAnalysisMappingConfidence::Exact => "exact",
+        codehelion_store::artifact::ArtifactAnalysisMappingConfidence::Strong => "strong",
+        codehelion_store::artifact::ArtifactAnalysisMappingConfidence::Weak => "weak",
+        codehelion_store::artifact::ArtifactAnalysisMappingConfidence::Ambiguous => "ambiguous",
+    }
+}
+
+const fn savings_confidence_label(
+    confidence: codehelion_store::artifact::ArtifactAnalysisSavingsConfidence,
+) -> &'static str {
+    match confidence {
+        codehelion_store::artifact::ArtifactAnalysisSavingsConfidence::High => "high",
+        codehelion_store::artifact::ArtifactAnalysisSavingsConfidence::Medium => "medium",
+        codehelion_store::artifact::ArtifactAnalysisSavingsConfidence::Low => "low",
+        codehelion_store::artifact::ArtifactAnalysisSavingsConfidence::Unavailable => "unavailable",
+    }
 }
 
 /// A stored ranking as the detail view shows it.
@@ -311,7 +455,7 @@ fn install_channel(exe: &Path) -> &'static str {
     "standalone (archive or manual install)"
 }
 
-/// Append the audit database's location to the doctor report, with a hint
+/// Append the local database's location to the doctor report, with a hint
 /// when the database would be committed to version control.
 fn doctor_database(out: &mut impl Write) -> Result<()> {
     let cwd = std::env::current_dir().context("resolving the current directory")?;
@@ -325,17 +469,17 @@ fn doctor_database(out: &mut impl Write) -> Result<()> {
     match std::fs::metadata(&db_abs) {
         Ok(meta) => writeln!(
             out,
-            "  audit database: {} ({} bytes)",
+            "  local database: {} ({} bytes)",
             db.display(),
             meta.len()
         )?,
-        Err(_) => writeln!(out, "  audit database: {} (absent)", db.display())?,
+        Err(_) => writeln!(out, "  local database: {} (absent)", db.display())?,
     }
     if let Some(repo_root) = find_git_root(&cwd) {
         if !is_git_ignored(&repo_root, &db_abs) {
             writeln!(
                 out,
-                "  hint: the audit database is not matched by .gitignore; \
+                "  hint: the local database is not matched by .gitignore; \
                  consider ignoring it (for example, add `.codehelion/`)"
             )?;
         }
@@ -379,7 +523,6 @@ fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
     let (args, create) = match action {
         BaselineAction::Create(args) => (args, true),
         BaselineAction::Update(args) => (args, false),
-        BaselineAction::Migrate(args) => return baseline_migrate(args, out),
     };
     let root = args
         .path
@@ -389,7 +532,7 @@ fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
     let db_path = scan::database_path(&root, args.db.as_deref(), &cfg);
     if !db_path.is_file() {
         bail!(
-            "no audit database at {}; run `codehelion scan` first",
+            "no local database at {}; run `codehelion scan` first",
             db_path.display()
         );
     }
@@ -456,227 +599,6 @@ fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
     Ok(Outcome::Success)
 }
 
-/// Rewrite a baseline's identifiers onto a run made under changed rules, and
-/// carry the recorded history of each group across with them.
-///
-/// Both runs are read out of the audit database rather than rescanned. A
-/// migration is a statement about two results that already exist, and scanning
-/// again here would produce a third one whose relationship to the frozen
-/// judgements is exactly the question being asked.
-///
-/// A project with no baseline still has a history worth carrying, so a missing
-/// file is not an error: the recorded lineage is migrated on its own, and the
-/// two runs to migrate between are then the newest pair, the same ones an
-/// audit would compare.
-fn baseline_migrate(args: &MigrateArgs, out: &mut impl Write) -> Result<Outcome> {
-    let root = args
-        .path
-        .canonicalize()
-        .with_context(|| format!("resolving path {}", args.path.display()))?;
-    let cfg = config::load(None, &root)?.config;
-    let db_path = scan::database_path(&root, args.db.as_deref(), &cfg);
-    if !db_path.is_file() {
-        bail!(
-            "no audit database at {}; run `codehelion scan` first",
-            db_path.display()
-        );
-    }
-    let mut store = scan::open_store(&db_path)?;
-    let existing = args
-        .file
-        .is_file()
-        .then(|| baseline::Baseline::load(&args.file))
-        .transpose()?;
-    let (source, target) = migration_runs(&store, &root, &db_path, args, existing.as_ref())?;
-
-    let drift: Vec<String> =
-        codehelion_core::compat::drift(&source.detector_versions, &target.detector_versions)
-            .iter()
-            .map(codehelion_core::compat::Drift::describe)
-            .collect();
-    let mapping = migrate::by_place(&store.run_groups(source.id)?, &store.run_groups(target.id)?);
-    let rewritten = existing
-        .as_ref()
-        .map(|baseline| baseline.migrated(&mapping, &target, &scan::rfc3339_now(), &drift));
-
-    let verb = if args.dry_run {
-        "would rewrite"
-    } else {
-        "rewriting"
-    };
-    writeln!(out, "{verb} run {} -> run {}", source.id, target.id)?;
-    for line in &drift {
-        writeln!(out, "  version drift: {line}")?;
-    }
-    match (existing.as_ref(), rewritten.as_ref()) {
-        (Some(existing), Some(rewritten)) => {
-            writeln!(
-                out,
-                "  {} of {} entries carried, {} stale",
-                rewritten.entries.len(),
-                existing.entries.len(),
-                rewritten.stale.len() - existing.stale.len(),
-            )?;
-            for entry in rewritten.stale.iter().skip(existing.stale.len()) {
-                writeln!(
-                    out,
-                    "  stale: {} — run {} found no duplication where it stood",
-                    entry.group, target.id
-                )?;
-            }
-        }
-        _ => writeln!(
-            out,
-            "  no baseline at {}; carrying the recorded history only",
-            args.file.display()
-        )?,
-    }
-    if args.dry_run {
-        return Ok(Outcome::Success);
-    }
-
-    if let Some(rewritten) = &rewritten {
-        rewritten.write(&args.file)?;
-    }
-    let adoptions = adoptions(&store, source.id, &mapping)?;
-    let adopted = store.adopt_lineage(target.id, source.id, &adoptions)?;
-    writeln!(
-        out,
-        "  {} of {} groups in run {} now continue a history from before the change",
-        adopted.taken.len(),
-        mapping.continuations.len(),
-        target.id,
-    )?;
-    for id in &adopted.already_connected {
-        writeln!(out, "  already connected: {id}")?;
-    }
-    if rewritten.is_some() {
-        writeln!(out, "wrote {}", args.file.display())?;
-    }
-    Ok(Outcome::Success)
-}
-
-/// Settle which two recorded runs a rewrite is between, and refuse the pairs
-/// it cannot honestly map.
-///
-/// A migration maps one result of a tree onto another result of the *same*
-/// text. Across two different trees it would be answering "what changed in the
-/// code" with a mechanism built for "what changed in the rules", and afterwards
-/// the two answers are indistinguishable.
-fn migration_runs(
-    store: &Store,
-    root: &Path,
-    db_path: &Path,
-    args: &MigrateArgs,
-    existing: Option<&baseline::Baseline>,
-) -> Result<(
-    codehelion_store::query::RunOrigin,
-    codehelion_store::query::RunOrigin,
-)> {
-    let root_path = root.to_string_lossy();
-    let recent = store.completed_runs(&root_path, 2)?;
-    let target = match args.to_run {
-        Some(id) => store
-            .run_origin(id)
-            .with_context(|| format!("reading run {id} from {}", db_path.display()))?,
-        None => recent.first().cloned().ok_or_else(|| {
-            anyhow::anyhow!(
-                "{} holds no completed scan of {}; run `codehelion scan` first",
-                db_path.display(),
-                root.display()
-            )
-        })?,
-    };
-    let source = match existing {
-        Some(baseline) => store.run_origin(baseline.from_run).with_context(|| {
-            format!(
-                "{} was recorded from run {}, which {} no longer holds",
-                args.file.display(),
-                baseline.from_run,
-                db_path.display()
-            )
-        })?,
-        None => recent
-            .into_iter()
-            .find(|run| run.id != target.id)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "only one scan of {} is recorded (run {}); \
-                     there is no earlier result to carry forward",
-                    root.display(),
-                    target.id
-                )
-            })?,
-    };
-    if source.id == target.id {
-        bail!(
-            "{} already describes run {}: there is nothing to rewrite it onto",
-            args.file.display(),
-            target.id
-        );
-    }
-    let before = store.run_tree(source.id)?;
-    let after = store.run_tree(target.id)?;
-    if before.is_empty() || after.is_empty() {
-        bail!(
-            "run {} or run {} did not record what it read, so this build cannot \
-             establish that both saw the same text; re-record the baseline with \
-             `baseline create --force`",
-            source.id,
-            target.id
-        );
-    }
-    if before != after {
-        bail!(
-            "run {} and run {} read different source; a migration rewrites one \
-             reading of a tree onto another reading of the same text, and the \
-             ordinary `codehelion audit` is what compares two trees",
-            source.id,
-            target.id
-        );
-    }
-    Ok((source, target))
-}
-
-/// Pair each continuing group with the history its predecessor belonged to.
-///
-/// A predecessor whose history the store does not hold is left out rather than
-/// given a fresh one: inventing a history here would record the group as having
-/// existed since the migration, which is the claim the migration exists to
-/// avoid making.
-fn adoptions(
-    store: &Store,
-    previous_run: i64,
-    mapping: &migrate::Mapping,
-) -> Result<Vec<codehelion_store::migrate::LineageAdoption>> {
-    let history = lineage_by_group(store, previous_run)?;
-    Ok(mapping
-        .continuations
-        .iter()
-        .filter_map(|carried| {
-            Some(codehelion_store::migrate::LineageAdoption {
-                group: carried.group.clone(),
-                previous_group: carried.previous_group.clone(),
-                lineage: history.get(&carried.previous_group)?.clone(),
-                shared: carried.shared,
-                overlap: carried.overlap,
-            })
-        })
-        .collect())
-}
-
-/// The history each group of a run belongs to, by hex group fingerprint.
-fn lineage_by_group(
-    store: &Store,
-    run_id: i64,
-) -> Result<std::collections::BTreeMap<String, String>> {
-    Ok(store
-        .run_group_snapshots(run_id)?
-        .into_iter()
-        .filter_map(|group| Some((group.fingerprint.to_hex(), group.lineage?.to_hex())))
-        .collect())
-}
-
 fn config_command(action: &ConfigAction, out: &mut impl Write) -> Result<Outcome> {
     match action {
         ConfigAction::Show { config } => {
@@ -731,7 +653,7 @@ fn cache_command(action: &CacheAction, out: &mut impl Write) -> Result<Outcome> 
     }
 }
 
-/// Resolve the audit-database path: an explicit flag wins, otherwise the
+/// Resolve the local-database path: an explicit flag wins, otherwise the
 /// configured location (discovered `codehelion.toml` or defaults).
 fn resolve_db(flag: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = flag {
@@ -742,9 +664,33 @@ fn resolve_db(flag: Option<&Path>) -> Result<PathBuf> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cross_language_comparison_requires_semantic_mode() {
+        let args = ScanArgs {
+            path: PathBuf::from("."),
+            mode: Mode::Fast,
+            format: cli::Format::Text,
+            output: None,
+            config: None,
+            no_ignore: false,
+            jobs: None,
+            db: None,
+            baseline: None,
+            allow_execution: None,
+            compare_build_variants: false,
+            compare_languages: true,
+            show_suppressed: false,
+            verbose: false,
+            fail_on_findings: false,
+            untrusted: false,
+        };
+        let error = scan_command(&args, &mut Vec::new()).expect_err("mode must be semantic");
+        assert!(format!("{error:#}").contains("--compare-languages requires --mode semantic"));
+    }
 
     #[test]
     fn dispatch_doctor_writes_diagnostics() {
@@ -756,6 +702,28 @@ mod tests {
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
         // The test binary runs from the cargo target directory.
         assert!(text.contains("install: local build"));
+        assert!(text.contains("OS memory, network, and filesystem containment unavailable"));
+        assert!(text.contains("artifacts:"));
+        assert!(text.contains("wasm: available"));
+        assert!(text.contains("restricted semantic rules: 10 enabled"));
+    }
+
+    #[test]
+    fn interrogating_a_helper_honours_the_requested_containment() {
+        let program = tempfile::NamedTempFile::new().expect("creating placeholder helper");
+        let facts = interrogate(
+            "placeholder-helper",
+            Some(program.path()),
+            codehelion_helper::SandboxRequest::require_memory_limit(4096),
+        )
+        .expect("configured file is considered for interrogation");
+        let doctor::HelperState::Silent(why) = facts.state else {
+            panic!("an unenforceable limit must stop before starting: {facts:?}");
+        };
+        assert!(
+            why.contains("OS memory containment is unavailable"),
+            "{why}"
+        );
     }
 
     #[test]

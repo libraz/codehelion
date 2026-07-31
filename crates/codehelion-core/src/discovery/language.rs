@@ -27,8 +27,11 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 /// A source language codehelion can enumerate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Language {
     /// Rust.
     Rust,

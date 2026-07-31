@@ -34,7 +34,7 @@ use ra_ap_hir::{
     AsAssocItem, AssocItem, AssocItemContainer, Function, Impl, PathResolution, Semantics, Trait,
 };
 use ra_ap_ide_db::RootDatabase;
-use ra_ap_syntax::{AstNode, ast};
+use ra_ap_syntax::{AstNode, SyntaxNode, ast};
 
 use crate::analysis::{Loaded, file_of, path_of, source_range};
 
@@ -55,19 +55,126 @@ pub(crate) fn collect(loaded: &Loaded, file: &Path) -> Vec<CallSite> {
     };
     let source = sema.parse(editioned);
     for node in source.syntax().descendants() {
-        let (range, target) = if let Some(call) = ast::MethodCallExpr::cast(node.clone()) {
-            (call.syntax().text_range(), through_method(&sema, db, &call))
-        } else if let Some(call) = ast::CallExpr::cast(node.clone()) {
-            (call.syntax().text_range(), through_name(&sema, db, &call))
-        } else {
-            continue;
-        };
-        found.push(CallSite {
-            anchor: Anchor::written_here(source_range(loaded, file_id, range)),
-            target,
-        });
+        if let Some(target) = target_for(&sema, db, &node) {
+            found.push(CallSite {
+                anchor: Anchor::written_here(source_range(
+                    loaded,
+                    file_id,
+                    written_callee_range(&node),
+                )),
+                api_name: standard_api_name(&target),
+                target,
+            });
+        }
     }
     found
+}
+
+/// The spelling that selects a call target, rather than the whole nested call.
+///
+/// A fluent call chain nests every outer call around the calls before it. Its
+/// expression range therefore starts at the same source byte for `iter`,
+/// `filter`, and `collect`; using that range would turn source order into an
+/// incidental lexical sort in the SOG adapter. Method names and direct callee
+/// expressions have their own ranges, so they retain the order a reader sees.
+fn written_callee_range(node: &SyntaxNode) -> ra_ap_syntax::TextRange {
+    ast::MethodCallExpr::cast(node.clone())
+        .and_then(|call| call.name_ref().map(|name| name.syntax().text_range()))
+        .or_else(|| {
+            ast::CallExpr::cast(node.clone()).and_then(|call| {
+                call.expr()
+                    .map(|expression| expression.syntax().text_range())
+            })
+        })
+        .unwrap_or_else(|| node.text_range())
+}
+
+/// Calls a declarative macro produced, all anchored at its invocation.
+///
+/// An expansion has no physical source range of its own. Reusing the
+/// invocation's two-sided anchor says both what a fragment can point at and
+/// where the generated expression was actually written, while still allowing
+/// the compiler to resolve the call in the expanded syntax tree.
+pub(crate) fn collect_expansion(
+    sema: &Semantics<'_, RootDatabase>,
+    db: &RootDatabase,
+    syntax: &SyntaxNode,
+    anchor: &Anchor,
+) -> Vec<CallSite> {
+    syntax
+        .descendants()
+        .filter_map(|node| {
+            target_for(sema, db, &node).map(|target| CallSite {
+                anchor: anchor.clone(),
+                api_name: standard_api_name(&target),
+                target,
+            })
+        })
+        .collect()
+}
+
+/// The closed Rust standard-library vocabulary that semantic rules may use.
+///
+/// The stable call target remains the primary identity.  This supplemental
+/// name exists only for calls whose resolved definition is in a language crate
+/// and whose operation belongs to the small cross-language correspondence
+/// table.  A workspace method merely named `map` or `push` therefore never
+/// gains semantic API evidence.
+fn standard_api_name(target: &CallTarget) -> Option<String> {
+    let CallTarget::Static { symbol } = target else {
+        return None;
+    };
+    let standard_library = ["core::", "alloc::", "std::"]
+        .iter()
+        .any(|prefix| symbol.starts_with(prefix));
+    if !standard_library {
+        return None;
+    }
+    let api_name = if standard_iterator_method(symbol, "filter") {
+        "rust::Iterator::filter"
+    } else if standard_iterator_method(symbol, "map") {
+        "rust::Iterator::map"
+    } else if standard_iterator_method(symbol, "fold") {
+        "rust::Iterator::fold"
+    } else if standard_iterator_method(symbol, "collect") {
+        "rust::Iterator::collect"
+    } else if symbol.ends_with("::IntoIterator::into_iter") {
+        "rust::IntoIterator::into_iter"
+    } else if symbol.ends_with("::slice::iter") || symbol.ends_with("::slice::_::iter") {
+        "rust::slice::iter"
+    } else if symbol.ends_with("::Vec::push") {
+        "rust::Vec::push"
+    } else {
+        return None;
+    };
+    Some(api_name.to_string())
+}
+
+/// Whether a resolved standard symbol denotes one `Iterator` trait method.
+///
+/// rust-analyzer spells an implementation-selected call as either
+/// `...::Iterator::method` or `...<Concrete as Iterator>::method`. Both name
+/// the standard trait operation; the concrete receiver does not broaden the
+/// closed vocabulary.
+fn standard_iterator_method(symbol: &str, method: &str) -> bool {
+    let Some(prefix) = symbol.strip_suffix(method) else {
+        return false;
+    };
+    prefix.ends_with("::Iterator::")
+        || prefix.ends_with("::Iterator>::")
+        || prefix.ends_with(" as Iterator>::")
+}
+
+/// The target selected for one syntax node, when it is a call expression.
+fn target_for(
+    sema: &Semantics<'_, RootDatabase>,
+    db: &RootDatabase,
+    node: &SyntaxNode,
+) -> Option<CallTarget> {
+    ast::MethodCallExpr::cast(node.clone()).map_or_else(
+        || ast::CallExpr::cast(node.clone()).map(|call| through_name(sema, db, &call)),
+        |call| Some(through_method(sema, db, &call)),
+    )
 }
 
 /// What `receiver.method(..)` reaches.
@@ -213,5 +320,32 @@ pub(crate) fn identity(function: Function, db: &RootDatabase) -> String {
             path_of(&qualified, module, db)
         }
         None => path_of(name, module, db),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lowered_slice_iteration_keeps_its_closed_standard_api_name() {
+        let target = CallTarget::Static {
+            symbol: "core::slice::_::iter".to_owned(),
+        };
+        assert_eq!(
+            standard_api_name(&target),
+            Some("rust::slice::iter".to_owned())
+        );
+    }
+
+    #[test]
+    fn implementation_selected_iterator_fold_keeps_its_closed_standard_api_name() {
+        let target = CallTarget::Static {
+            symbol: "core::slice::iter::<Iter as Iterator>::fold".to_owned(),
+        };
+        assert_eq!(
+            standard_api_name(&target),
+            Some("rust::Iterator::fold".to_owned())
+        );
     }
 }

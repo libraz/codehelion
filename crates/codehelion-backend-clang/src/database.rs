@@ -20,6 +20,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use codehelion_helper::CompileCommandSelector;
 use serde::Deserialize;
 
 /// Where a database can sit relative to the directory a project is rooted at.
@@ -38,6 +39,8 @@ pub(crate) struct Entry {
     pub(crate) arguments: Vec<String>,
     /// The macros defined on the command line, as the flags spelled them.
     pub(crate) definitions: Vec<String>,
+    /// The complete database identity used to select this entry.
+    pub(crate) selector: CompileCommandSelector,
 }
 
 /// A compilation database, and the directory a project rooted at it spells its
@@ -101,11 +104,16 @@ impl Database {
     /// not the root the database was found from, and a name matched only one
     /// way would come back unanswerable for every unit of a project scanned
     /// from a subdirectory.
-    pub(crate) fn unit(&self, unit: &str) -> Option<&Entry> {
+    pub(crate) fn unit(
+        &self,
+        unit: &str,
+        selector: Option<&CompileCommandSelector>,
+    ) -> Option<&Entry> {
         let absolute = canonical(Path::new(unit));
         self.entries.iter().find(|entry| {
-            codehelion_helper::ir::spell(Some(&self.root), &entry.file) == unit
-                || entry.file == absolute
+            selector.is_none_or(|wanted| entry.selector == *wanted)
+                && (codehelion_helper::ir::spell(Some(&self.root), &entry.file) == unit
+                    || entry.file == absolute)
         })
     }
 
@@ -156,10 +164,18 @@ impl RawEntry {
         // sources as `../src/a.cpp` while a caller naming the same file names
         // it as it is. The two are one file and no plain string comparison
         // says so.
+        let file = canonical(&written);
         let mut entry = Entry {
-            file: canonical(&written),
+            file: file.clone(),
             arguments: Vec::new(),
             definitions: Vec::new(),
+            selector: CompileCommandSelector {
+                file: file.display().to_string(),
+                directory: directory
+                    .as_ref()
+                    .map(|path| canonical(path).display().to_string()),
+                arguments: words.clone(),
+            },
         };
         // Matched against the path as the command spells it rather than as the
         // filesystem does: the argument to drop is the one the command carries,
@@ -432,13 +448,55 @@ mod tests {
                 .expect("the entry carries a command"),
             ],
         };
-        assert!(database.unit("src/a.cpp").is_some());
-        assert!(database.unit("/work/src/a.cpp").is_some());
+        assert!(database.unit("src/a.cpp", None).is_some());
+        assert!(database.unit("/work/src/a.cpp", None).is_some());
         // A file this database says nothing about stays unanswerable, whichever
         // way it is named: finding the nearest entry would analyse one unit and
         // report it as another.
-        assert!(database.unit("/work/src/b.cpp").is_none());
-        assert!(database.unit("src/b.cpp").is_none());
+        assert!(database.unit("/work/src/b.cpp", None).is_none());
+        assert!(database.unit("src/b.cpp", None).is_none());
+    }
+
+    #[test]
+    fn an_exact_selector_never_falls_back_to_another_command_for_the_same_file() {
+        let narrow = RawEntry {
+            file: "/work/src/a.cpp".to_string(),
+            directory: Some("/work".to_string()),
+            arguments: Some(
+                ["clang++", "-DNARROW", "-c", "/work/src/a.cpp"]
+                    .map(str::to_string)
+                    .to_vec(),
+            ),
+            command: None,
+        }
+        .entry()
+        .expect("the entry carries a command");
+        let wide = RawEntry {
+            file: "/work/src/a.cpp".to_string(),
+            directory: Some("/work".to_string()),
+            arguments: Some(
+                ["clang++", "-DWIDE", "-c", "/work/src/a.cpp"]
+                    .map(str::to_string)
+                    .to_vec(),
+            ),
+            command: None,
+        }
+        .entry()
+        .expect("the entry carries a command");
+        let database = Database {
+            root: PathBuf::from("/work"),
+            entries: vec![narrow, wide],
+        };
+        let wide_selector = database.entries[1].selector.clone();
+        let selected = database
+            .unit("/work/src/a.cpp", Some(&wide_selector))
+            .expect("the requested command is present");
+        assert_eq!(selected.selector, wide_selector);
+        let missing = CompileCommandSelector {
+            arguments: vec!["clang++".to_string(), "-DOTHER".to_string()],
+            ..wide_selector
+        };
+        assert!(database.unit("/work/src/a.cpp", Some(&missing)).is_none());
     }
 
     /// A generator run from a build directory names its sources through the

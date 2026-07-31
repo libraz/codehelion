@@ -22,18 +22,16 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-// The whole point of this crate is to hold the process boundary that keeps
-// compiler dependencies out of the analysis crates, so it is the one place a
-// child process is spawned. The workspace lint bans the type everywhere else.
 #[allow(clippy::disallowed_types)]
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin};
 
 use crate::ir::{CompilerIr, Unavailability, UnitRef};
 use crate::protocol::{
-    Analyze, BuildDescription, Capability, ClientIdentity, DescribeBuild, Execution, FrameError,
-    HelperIdentity, OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, Request, RequestBody, Response,
-    ResponseBody, VersionRange, read_frame, write_frame,
+    Analyze, BuildDescription, Capability, ClientIdentity, CompileCommandSelector, DescribeBuild,
+    Execution, FrameError, HelperIdentity, OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, Request,
+    RequestBody, Response, ResponseBody, VersionRange, read_frame, write_frame,
 };
+use crate::sandbox::{SandboxError, SandboxRequest, spawn};
 
 /// How long a request waits before the helper is treated as unresponsive.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -65,14 +63,6 @@ pub enum HelperError {
     NotFound {
         /// The helper that was wanted.
         name: String,
-    },
-    /// The program could not be started.
-    #[error("the helper at {path} could not be started: {source}")]
-    NotStarted {
-        /// Where it was.
-        path: PathBuf,
-        /// Why it would not start.
-        source: std::io::Error,
     },
     /// Core and helper have no protocol revision in common.
     #[error(
@@ -126,6 +116,17 @@ pub enum HelperError {
         /// The id that was asked.
         expected: u64,
     },
+    /// The helper changed the protocol revision after the conversation had
+    /// already settled on one.
+    #[error(
+        "the helper answered using protocol {received}, but this conversation settled on {expected}"
+    )]
+    ProtocolMismatch {
+        /// Revision carried by the response frame.
+        received: u32,
+        /// Revision the request and response must use after negotiation.
+        expected: u32,
+    },
     /// The helper reported that it could not do the thing.
     #[error("the helper refused: {code}: {message}")]
     Refused {
@@ -137,6 +138,9 @@ pub enum HelperError {
     /// The conversation itself broke.
     #[error(transparent)]
     Frame(#[from] FrameError),
+    /// The requested helper containment cannot be enforced on this platform.
+    #[error(transparent)]
+    Sandbox(#[from] SandboxError),
 }
 
 /// Render collected standard error for an error message.
@@ -198,7 +202,7 @@ impl Helper {
     /// build, cannot supply a capability that [`Capability::absence`] calls
     /// load-bearing, or does not answer the handshake in time.
     pub fn start(path: &Path, timeout: Duration) -> Result<Self, HelperError> {
-        Self::start_with(path, &[], timeout)
+        Self::start_with_sandbox(path, &[], timeout, SandboxRequest::unrestricted())
     }
 
     /// Start the helper at `path` with `args`, then as [`Helper::start`].
@@ -210,17 +214,24 @@ impl Helper {
     ///
     /// As [`Helper::start`].
     pub fn start_with(path: &Path, args: &[&str], timeout: Duration) -> Result<Self, HelperError> {
-        #[allow(clippy::disallowed_types)]
-        let mut child = Command::new(path)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| HelperError::NotStarted {
-                path: path.to_path_buf(),
-                source,
-            })?;
+        Self::start_with_sandbox(path, args, timeout, SandboxRequest::unrestricted())
+    }
+
+    /// Start the helper with a containment request, then as [`Helper::start`].
+    ///
+    /// A required OS-level memory limit is rejected before spawning when this
+    /// build cannot enforce it; it is never silently ignored.
+    ///
+    /// # Errors
+    ///
+    /// As [`Helper::start`], or if the requested containment is unavailable.
+    pub fn start_with_sandbox(
+        path: &Path,
+        args: &[&str],
+        timeout: Duration,
+        sandbox: SandboxRequest,
+    ) -> Result<Self, HelperError> {
+        let mut child = spawn(path, args, sandbox)?;
 
         let Some(stdin) = child.stdin.take() else {
             return Err(HelperError::Died {
@@ -347,6 +358,32 @@ impl Helper {
         unit: &UnitRef,
         want: &[Capability],
     ) -> Result<Analysis, HelperError> {
+        self.analyze_with_command(unit, None, want)
+    }
+
+    /// Ask for one unit's compiler IR under one exact C/C++ command.
+    ///
+    /// The selector is optional because Rust crates have no compilation
+    /// database. When present it needs protocol revision 3: older helpers
+    /// would silently select their first matching entry, which is precisely
+    /// the ambiguity this field removes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the helper cannot be contacted, does not support
+    /// the selector protocol revision, or cannot return a readable answer.
+    pub fn analyze_with_command(
+        &mut self,
+        unit: &UnitRef,
+        compile_command: Option<&CompileCommandSelector>,
+        want: &[Capability],
+    ) -> Result<Analysis, HelperError> {
+        if compile_command.is_some() && self.protocol_version < 3 {
+            return Err(HelperError::TooOld {
+                agreed: self.protocol_version,
+                request: "select an exact compilation command",
+            });
+        }
         let want = want
             .iter()
             .copied()
@@ -354,6 +391,7 @@ impl Helper {
             .collect();
         let id = self.send(RequestBody::Analyze(Analyze {
             unit: unit.clone(),
+            compile_command: compile_command.cloned(),
             want,
             // Not narrowed to what the helper said it acts on. A permission it
             // will not act on has to be refused where somebody can be told
@@ -460,6 +498,22 @@ impl Helper {
     fn receive(&mut self, expected: u64) -> Result<ResponseBody, HelperError> {
         match self.responses.recv_timeout(self.timeout) {
             Ok(Ok(response)) => {
+                // A handshake may be framed at any revision this client still
+                // accepts: negotiation has not chosen one yet. Every later
+                // response must use the negotiated revision, otherwise a peer
+                // from another protocol could be mistaken for an answer.
+                let valid_revision = if self.identity.name.is_empty() {
+                    (OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION)
+                        .contains(&response.protocol_version)
+                } else {
+                    response.protocol_version == self.protocol_version
+                };
+                if !valid_revision {
+                    return Err(HelperError::ProtocolMismatch {
+                        received: response.protocol_version,
+                        expected: self.protocol_version,
+                    });
+                }
                 if response.id == expected {
                     match response.body {
                         ResponseBody::Failed(failure) => Err(HelperError::Refused {
@@ -531,6 +585,7 @@ pub struct Supervisor {
     program: PathBuf,
     args: Vec<String>,
     timeout: Duration,
+    sandbox: SandboxRequest,
     max_restarts: u32,
     restarts: u32,
     helper: Option<Helper>,
@@ -561,6 +616,7 @@ impl Supervisor {
             program,
             args,
             timeout,
+            sandbox: SandboxRequest::unrestricted(),
             max_restarts: DEFAULT_MAX_RESTARTS,
             restarts: 0,
             helper: None,
@@ -576,6 +632,13 @@ impl Supervisor {
     #[must_use]
     pub const fn with_max_restarts(mut self, restarts: u32) -> Self {
         self.max_restarts = restarts;
+        self
+    }
+
+    /// Require this containment policy for every helper start and restart.
+    #[must_use]
+    pub const fn sandboxed(mut self, sandbox: SandboxRequest) -> Self {
+        self.sandbox = sandbox;
         self
     }
 
@@ -620,6 +683,19 @@ impl Supervisor {
     /// Never fails: every way this can go wrong is a reason the unit has no
     /// compiler IR, which is a result a scan can report and carry on from.
     pub fn analyze(&mut self, unit: &UnitRef, want: &[Capability]) -> Analysis {
+        self.analyze_with_command(unit, None, want)
+    }
+
+    /// Get one unit's compiler IR under one exact compilation command.
+    ///
+    /// The retry boundary remains the unit: a selector only refines how a C or
+    /// C++ unit is read, and each semantic build partition owns its supervisor.
+    pub fn analyze_with_command(
+        &mut self,
+        unit: &UnitRef,
+        compile_command: Option<&CompileCommandSelector>,
+        want: &[Capability],
+    ) -> Analysis {
         if self.given_up {
             return Analysis::Missing(Unavailability::HelperDied);
         }
@@ -628,14 +704,14 @@ impl Supervisor {
             // restart and answers nothing new.
             return Analysis::Missing(Unavailability::HelperDied);
         }
-        match self.attempt(unit, want) {
+        match self.attempt(unit, compile_command, want) {
             Ok(analysis) => analysis,
             Err(first) => {
                 if !unavailability(&first).worth_retrying() {
                     return Analysis::Missing(unavailability(&first));
                 }
                 self.helper = None;
-                match self.attempt(unit, want) {
+                match self.attempt(unit, compile_command, want) {
                     Ok(analysis) => analysis,
                     Err(second) => {
                         // Twice on the same unit: the unit is what the helper
@@ -650,7 +726,12 @@ impl Supervisor {
     }
 
     /// One attempt, starting the helper if it is not running.
-    fn attempt(&mut self, unit: &UnitRef, want: &[Capability]) -> Result<Analysis, HelperError> {
+    fn attempt(
+        &mut self,
+        unit: &UnitRef,
+        compile_command: Option<&CompileCommandSelector>,
+        want: &[Capability],
+    ) -> Result<Analysis, HelperError> {
         if self.helper.is_none() {
             if self.started {
                 if self.restarts >= self.max_restarts {
@@ -661,21 +742,22 @@ impl Supervisor {
             }
             self.started = true;
             let arguments: Vec<&str> = self.args.iter().map(String::as_str).collect();
-            let helper = Helper::start_with(&self.program, &arguments, self.timeout)
-                .inspect_err(|_| {
-                    // A helper that will not start will not start for the next
-                    // unit either, so the run stops asking rather than paying a
-                    // process spawn per file to be told the same thing.
-                    self.given_up = true;
-                })?
-                .permitting(self.permitted.clone());
+            let helper =
+                Helper::start_with_sandbox(&self.program, &arguments, self.timeout, self.sandbox)
+                    .inspect_err(|_| {
+                        // A helper that will not start will not start for the next
+                        // unit either, so the run stops asking rather than paying a
+                        // process spawn per file to be told the same thing.
+                        self.given_up = true;
+                    })?
+                    .permitting(self.permitted.clone());
             self.spoke_with = Some((helper.identity().clone(), helper.protocol_version()));
             self.helper = Some(helper);
         }
         let Some(helper) = self.helper.as_mut() else {
             return Ok(Analysis::Missing(Unavailability::HelperDied));
         };
-        helper.analyze(unit, want)
+        helper.analyze_with_command(unit, compile_command, want)
     }
 
     /// Stop the helper, if one is running.
@@ -692,7 +774,8 @@ const fn unavailability(error: &HelperError) -> Unavailability {
         HelperError::TimedOut { .. } => Unavailability::HelperTimedOut,
         HelperError::NoCommonProtocol { .. }
         | HelperError::MissingRequiredCapability { .. }
-        | HelperError::TooOld { .. } => Unavailability::ToolchainMismatch,
+        | HelperError::TooOld { .. }
+        | HelperError::ProtocolMismatch { .. } => Unavailability::ToolchainMismatch,
         _ => Unavailability::HelperDied,
     }
 }
@@ -775,6 +858,7 @@ fn drain_stderr(stream: std::process::ChildStderr, sink: Arc<Mutex<Vec<String>>>
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::sandbox::SandboxError;
 
     #[test]
     fn a_configured_path_that_is_not_there_is_not_replaced_by_one_that_is() {
@@ -787,5 +871,20 @@ mod tests {
     #[test]
     fn a_helper_nobody_has_installed_is_not_found() {
         assert_eq!(locate("codehelion-backend-nothing-at-all", None), None);
+    }
+
+    #[test]
+    fn a_required_memory_limit_is_rejected_before_starting_the_helper() {
+        let error = Helper::start_with_sandbox(
+            Path::new("/this/helper/does/not/need/to/exist"),
+            &[],
+            DEFAULT_TIMEOUT,
+            SandboxRequest::require_memory_limit(4096),
+        )
+        .expect_err("the unavailable memory limit must be reported before spawn");
+        assert!(matches!(
+            error,
+            HelperError::Sandbox(SandboxError::MemoryLimitUnavailable { bytes: 4096 })
+        ));
     }
 }

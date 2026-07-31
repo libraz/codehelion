@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 /// Recorded beside every stored result: a stored IR whose schema this build
 /// cannot read must be recognised as such rather than read as if it were
 /// current.
-pub const COMPILER_IR_SCHEMA_VERSION: &str = "compiler-ir-v1";
+pub const COMPILER_IR_SCHEMA_VERSION: &str = "compiler-ir-v11";
 
 /// A half-open byte range in one file, with the line its start falls on.
 ///
@@ -237,6 +237,214 @@ pub struct CallSite {
     pub anchor: Anchor,
     /// What it calls.
     pub target: CallTarget,
+    /// A compiler-confirmed standard-library API name, when the helper can
+    /// establish it without deriving it from the stable target identifier.
+    ///
+    /// `None` retains compatibility with older IR and with calls outside the
+    /// deliberately small API vocabulary used by restricted semantic rules.
+    #[serde(default)]
+    pub api_name: Option<String>,
+}
+
+/// One compiler-confirmed construct that a restricted semantic rule may
+/// normalize without reconstructing syntax in the analysis process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticConstruct {
+    /// Where the construct occurs, preserving macro expansion provenance.
+    pub anchor: Anchor,
+    /// The closed meaning the helper established for this construct.
+    pub kind: SemanticConstructKind,
+    /// The standard fallible container the compiler resolved, when this
+    /// construct operates on one.
+    ///
+    /// Older helper documents did not retain this distinction. `None` means
+    /// the document predates it, not that the helper inferred an unknown type.
+    #[serde(default)]
+    pub fallible_kind: Option<FallibleKind>,
+    /// A closed form that makes this propagation directly comparable to a
+    /// different spelling without general equivalence reasoning.
+    #[serde(default)]
+    pub direct_propagation: Option<DirectPropagation>,
+    /// Closed resource category for a compiler-confirmed acquire or release.
+    /// It is absent for every other construct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_kind: Option<String>,
+}
+
+/// A standard library fallible container established by the compiler.
+///
+/// This is deliberately narrower than a general algebraic-data-type category:
+/// registered rules must not treat a project enum with similarly named arms as
+/// a `Result` or `Option`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallibleKind {
+    /// `core::option::Option` or its standard-library re-export.
+    Option,
+    /// `core::result::Result` or its standard-library re-export.
+    Result,
+}
+
+impl FallibleKind {
+    /// Stable storage spelling.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Option => "option",
+            Self::Result => "result",
+        }
+    }
+
+    /// Parse the stable storage spelling.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "option" => Some(Self::Option),
+            "result" => Some(Self::Result),
+            _ => None,
+        }
+    }
+}
+
+/// A compiler-confirmed direct spelling of a fallible propagation operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectPropagation {
+    /// `Ok(value?)` or an identity `Result` match.
+    ResultAdapter,
+    /// `Some(value?)` or an identity `Option` match.
+    OptionAdapter,
+}
+
+impl DirectPropagation {
+    /// Stable storage spelling.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ResultAdapter => "result_adapter",
+            Self::OptionAdapter => "option_adapter",
+        }
+    }
+
+    /// Parse the stable storage spelling.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "result_adapter" => Some(Self::ResultAdapter),
+            "option_adapter" => Some(Self::OptionAdapter),
+            _ => None,
+        }
+    }
+}
+
+/// Closed semantic constructs that compiler helpers may report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticConstructKind {
+    /// A compiler-verified sequence consumed by a restricted explicit loop.
+    Source,
+    /// A compiler-verified explicit loop materialized one element per iteration.
+    Collect,
+    /// A compiler-verified explicit loop accumulated every sequence element.
+    Reduce,
+    /// Rust `?` propagated an error-like value to the surrounding caller.
+    PropagateError,
+    /// Rust selected a branch after checking a fallible or optional value.
+    Validate,
+    /// A compiler-confirmed standard operation acquired a tracked resource.
+    AcquireResource,
+    /// A lexical scope ended and released a tracked resource.
+    ReleaseResource,
+}
+
+impl SemanticConstructKind {
+    /// Stable storage spelling.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Collect => "collect",
+            Self::Reduce => "reduce",
+            Self::PropagateError => "propagate_error",
+            Self::Validate => "validate",
+            Self::AcquireResource => "acquire_resource",
+            Self::ReleaseResource => "release_resource",
+        }
+    }
+
+    /// Parse the stable storage spelling.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "source" => Some(Self::Source),
+            "collect" => Some(Self::Collect),
+            "reduce" => Some(Self::Reduce),
+            "propagate_error" => Some(Self::PropagateError),
+            "validate" => Some(Self::Validate),
+            "acquire_resource" => Some(Self::AcquireResource),
+            "release_resource" => Some(Self::ReleaseResource),
+            _ => None,
+        }
+    }
+}
+
+/// The type the compiler resolved for an expression with no physical source
+/// token of its own, such as the body a declarative macro generated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedExpression {
+    /// Where the expression is observable and where it was written.
+    pub anchor: Anchor,
+    /// Its entry in [`CompilerIr::types`].
+    pub type_index: u32,
+}
+
+/// A macro invocation the helper deliberately did not expand.
+///
+/// This is coverage information, not a failed unit. A procedural macro can
+/// leave the surrounding crate meaningful while its generated declarations
+/// remain unavailable; recording the invocation prevents that thin answer
+/// from reading as a complete one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnexpandedMacro {
+    /// The invocation written in the analysed source.
+    pub invocation: SourceRange,
+    /// Why its expansion is absent.
+    pub reason: UnexpandedMacroReason,
+}
+
+/// Why an individual macro invocation was not expanded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnexpandedMacroReason {
+    /// Expanding the invocation would execute a procedural macro.
+    RequiresExecution,
+    /// The analysis engine could not resolve the invocation to a macro.
+    Unresolved,
+    /// A declarative macro was known but its expansion was unavailable.
+    ExpansionUnavailable,
+}
+
+impl UnexpandedMacroReason {
+    /// Stable spelling for storage and reporting.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::RequiresExecution => "requires_execution",
+            Self::Unresolved => "unresolved",
+            Self::ExpansionUnavailable => "expansion_unavailable",
+        }
+    }
+
+    /// Parse the stable storage spelling.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "requires_execution" => Some(Self::RequiresExecution),
+            "unresolved" => Some(Self::Unresolved),
+            "expansion_unavailable" => Some(Self::ExpansionUnavailable),
+            _ => None,
+        }
+    }
 }
 
 /// What a call resolves to.
@@ -419,6 +627,16 @@ pub struct CompilerIr {
     pub types: Vec<ResolvedType>,
     /// Calls and what they call.
     pub calls: Vec<CallSite>,
+    /// Compiler-confirmed constructs available to restricted semantic rules.
+    #[serde(default)]
+    pub semantic_constructs: Vec<SemanticConstruct>,
+    /// Expression types whose anchor may cover an invocation rather than one
+    /// source token.
+    #[serde(default)]
+    pub expressions: Vec<ResolvedExpression>,
+    /// Macro invocations that were not expanded, and why.
+    #[serde(default)]
+    pub unexpanded_macros: Vec<UnexpandedMacro>,
     /// Control flow, when the helper offers it.
     pub cfg: Option<ControlFlowGraph>,
     /// Generic and template instantiations.
@@ -440,6 +658,9 @@ impl CompilerIr {
             symbols: Vec::new(),
             types: Vec::new(),
             calls: Vec::new(),
+            semantic_constructs: Vec::new(),
+            expressions: Vec::new(),
+            unexpanded_macros: Vec::new(),
             cfg: None,
             instantiations: Vec::new(),
             effects: EffectSummary::default(),

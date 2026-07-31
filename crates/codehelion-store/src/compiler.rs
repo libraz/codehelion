@@ -22,9 +22,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use codehelion_helper::ir::{
-    Anchor, BasicBlock, CallSite, CallTarget, CompilerIr, ControlFlowGraph, DataFlowSummary, Edge,
-    EdgeKind, EffectSummary, Instantiation, ResolvedSymbol, ResolvedType, SourceRange, SymbolKind,
-    TypeCategory, Unavailability, UnitRef,
+    Anchor, BasicBlock, CallSite, CallTarget, CompilerIr, ControlFlowGraph, DataFlowSummary,
+    DirectPropagation, Edge, EdgeKind, EffectSummary, FallibleKind, Instantiation,
+    ResolvedExpression, ResolvedSymbol, ResolvedType, SemanticConstruct, SemanticConstructKind,
+    SourceRange, SymbolKind, TypeCategory, Unavailability, UnexpandedMacro, UnexpandedMacroReason,
+    UnitRef,
 };
 use codehelion_helper::protocol::{Capability, Execution, HelperIdentity};
 use rusqlite::{Row, Transaction, params};
@@ -339,12 +341,106 @@ fn write_payload(tx: &Transaction<'_>, ir: &CompilerIr, unit_id: i64) -> Result<
     write_types(tx, &ir.types, unit_id)?;
     write_symbols(tx, &ir.symbols, unit_id)?;
     write_calls(tx, &ir.calls, unit_id)?;
+    write_semantic_constructs(tx, &ir.semantic_constructs, unit_id)?;
+    write_expressions(tx, &ir.expressions, unit_id)?;
+    write_unexpanded_macros(tx, &ir.unexpanded_macros, unit_id)?;
     if let Some(cfg) = &ir.cfg {
         write_cfg(tx, cfg, unit_id)?;
     }
     write_instantiations(tx, &ir.instantiations, unit_id)?;
     write_effects(tx, &ir.effects, unit_id)?;
     write_data_flow(tx, &ir.data_flow, unit_id)?;
+    Ok(())
+}
+
+fn write_semantic_constructs(
+    tx: &Transaction<'_>,
+    constructs: &[SemanticConstruct],
+    unit_id: i64,
+) -> Result<(), StoreError> {
+    for (ordinal, construct) in constructs.iter().enumerate() {
+        let cells = AnchorCells::of(&construct.anchor);
+        tx.execute(
+            "INSERT INTO compiler_semantic_construct
+             (compiler_unit_id, ordinal, kind, fallible_kind, direct_propagation, resource_kind, expansion_file, expansion_start_byte,
+              expansion_end_byte, expansion_start_line, definition_file,
+              definition_start_byte, definition_end_byte, definition_start_line)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                unit_id,
+                index_of(ordinal),
+                construct.kind.name(),
+                construct.fallible_kind.map(FallibleKind::name),
+                construct.direct_propagation.map(DirectPropagation::name),
+                construct.resource_kind,
+                cells.file,
+                cells.start_byte,
+                cells.end_byte,
+                cells.start_line,
+                cells.definition_file,
+                cells.definition_start_byte,
+                cells.definition_end_byte,
+                cells.definition_start_line
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn write_expressions(
+    tx: &Transaction<'_>,
+    expressions: &[ResolvedExpression],
+    unit_id: i64,
+) -> Result<(), StoreError> {
+    for (ordinal, expression) in expressions.iter().enumerate() {
+        let cells = AnchorCells::of(&expression.anchor);
+        tx.execute(
+            "INSERT INTO compiler_expression
+                 (compiler_unit_id, ordinal, type_index, expansion_file,
+                  expansion_start_byte, expansion_end_byte, expansion_start_line,
+                  definition_file, definition_start_byte, definition_end_byte,
+                  definition_start_line)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                unit_id,
+                index_of(ordinal),
+                i64::from(expression.type_index),
+                cells.file,
+                cells.start_byte,
+                cells.end_byte,
+                cells.start_line,
+                cells.definition_file,
+                cells.definition_start_byte,
+                cells.definition_end_byte,
+                cells.definition_start_line,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn write_unexpanded_macros(
+    tx: &Transaction<'_>,
+    macros: &[UnexpandedMacro],
+    unit_id: i64,
+) -> Result<(), StoreError> {
+    for (ordinal, macro_) in macros.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO compiler_unexpanded_macro
+                 (compiler_unit_id, ordinal, reason, invocation_file,
+                  invocation_start_byte, invocation_end_byte, invocation_start_line)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                unit_id,
+                index_of(ordinal),
+                macro_.reason.name(),
+                macro_.invocation.file,
+                offset(macro_.invocation.start_byte),
+                offset(macro_.invocation.end_byte),
+                macro_.invocation.start_line,
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -425,16 +521,17 @@ fn write_calls(tx: &Transaction<'_>, sites: &[CallSite], unit_id: i64) -> Result
         };
         tx.execute(
             "INSERT INTO compiler_call
-                 (compiler_unit_id, ordinal, resolution, target_symbol,
+                 (compiler_unit_id, ordinal, resolution, target_symbol, api_name,
                   expansion_file, expansion_start_byte, expansion_end_byte, expansion_start_line,
                   definition_file, definition_start_byte, definition_end_byte,
                   definition_start_line)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 unit_id,
                 index_of(ordinal),
                 resolution,
                 target,
+                call.api_name,
                 cells.file,
                 cells.start_byte,
                 cells.end_byte,
@@ -634,10 +731,12 @@ mod read {
 
     use super::{
         BasicBlock, CallSite, CallTarget, Capability, CompilerCoverage, CompilerHelperRow,
-        CompilerIr, CompilerOutcome, ControlFlowGraph, DataFlowSummary, Edge, EdgeKind,
-        EffectSummary, Execution, HelperIdentity, Instantiation, ResolvedSymbol, ResolvedType, Row,
-        StoreError, StoredCompilerUnit, StoredExpansion, StoredHelperRef, SymbolKind, TypeCategory,
-        Unavailability, UnitRef, anchor_at, params,
+        CompilerIr, CompilerOutcome, ControlFlowGraph, DataFlowSummary, DirectPropagation, Edge,
+        EdgeKind, EffectSummary, Execution, FallibleKind, HelperIdentity, Instantiation,
+        ResolvedExpression, ResolvedSymbol, ResolvedType, Row, SemanticConstruct,
+        SemanticConstructKind, SourceRange, StoreError, StoredCompilerUnit, StoredExpansion,
+        StoredHelperRef, SymbolKind, TypeCategory, Unavailability, UnexpandedMacro,
+        UnexpandedMacroReason, UnitRef, anchor_at, params,
     };
     use codehelion_helper::protocol::VersionRange;
 
@@ -869,11 +968,118 @@ mod read {
             symbols: symbols(conn, id)?,
             types: types(conn, id)?,
             calls: calls(conn, id)?,
+            semantic_constructs: semantic_constructs(conn, id)?,
+            expressions: expressions(conn, id)?,
+            unexpanded_macros: unexpanded_macros(conn, id)?,
             cfg: if has_cfg { Some(cfg(conn, id)?) } else { None },
             instantiations: instantiations(conn, id)?,
             effects: effects(conn, id, effects_computed)?,
             data_flow: data_flow(conn, id, data_flow_computed)?,
         })
+    }
+
+    fn semantic_constructs(
+        conn: &Connection,
+        id: i64,
+    ) -> Result<Vec<SemanticConstruct>, StoreError> {
+        let mut statement = conn.prepare(
+            "SELECT kind, fallible_kind, direct_propagation, resource_kind, expansion_file, expansion_start_byte, expansion_end_byte,
+                    expansion_start_line, definition_file, definition_start_byte,
+                    definition_end_byte, definition_start_line
+             FROM compiler_semantic_construct WHERE compiler_unit_id = ?1 ORDER BY ordinal",
+        )?;
+        statement
+            .query_map([id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    anchor_at(row, 4)?,
+                ))
+            })?
+            .map(|row| {
+                let (kind, fallible_kind, direct_propagation, resource_kind, anchor) = row?;
+                let kind = SemanticConstructKind::parse(&kind).ok_or_else(|| {
+                    StoreError::UnknownVocabulary {
+                        field: "semantic construct kind",
+                        value: kind,
+                    }
+                })?;
+                let fallible_kind = fallible_kind
+                    .map(|kind| {
+                        FallibleKind::parse(&kind).ok_or(StoreError::UnknownVocabulary {
+                            field: "semantic construct fallible kind",
+                            value: kind,
+                        })
+                    })
+                    .transpose()?;
+                let direct_propagation = direct_propagation
+                    .map(|form| {
+                        DirectPropagation::parse(&form).ok_or(StoreError::UnknownVocabulary {
+                            field: "semantic construct direct propagation",
+                            value: form,
+                        })
+                    })
+                    .transpose()?;
+                Ok(SemanticConstruct {
+                    anchor,
+                    kind,
+                    fallible_kind,
+                    direct_propagation,
+                    resource_kind,
+                })
+            })
+            .collect()
+    }
+
+    fn expressions(conn: &Connection, id: i64) -> Result<Vec<ResolvedExpression>, StoreError> {
+        let mut statement = conn.prepare(
+            "SELECT type_index, expansion_file, expansion_start_byte, expansion_end_byte,
+                    expansion_start_line, definition_file, definition_start_byte,
+                    definition_end_byte, definition_start_line
+             FROM compiler_expression WHERE compiler_unit_id = ?1 ORDER BY ordinal",
+        )?;
+        statement
+            .query_map([id], |row| {
+                Ok(ResolvedExpression {
+                    type_index: slot(row.get::<_, i64>(0)?),
+                    anchor: anchor_at(row, 1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    fn unexpanded_macros(conn: &Connection, id: i64) -> Result<Vec<UnexpandedMacro>, StoreError> {
+        let mut statement = conn.prepare(
+            "SELECT reason, invocation_file, invocation_start_byte, invocation_end_byte,
+                    invocation_start_line
+             FROM compiler_unexpanded_macro WHERE compiler_unit_id = ?1 ORDER BY ordinal",
+        )?;
+        statement
+            .query_map([id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    SourceRange {
+                        file: row.get(1)?,
+                        start_byte: extent(row.get(2)?),
+                        end_byte: extent(row.get(3)?),
+                        start_line: row.get(4)?,
+                    },
+                ))
+            })?
+            .map(|row| {
+                let (reason, invocation) = row?;
+                let reason = UnexpandedMacroReason::parse(&reason).ok_or_else(|| {
+                    StoreError::UnknownVocabulary {
+                        field: "unexpanded macro reason",
+                        value: reason,
+                    }
+                })?;
+                Ok(UnexpandedMacro { invocation, reason })
+            })
+            .collect()
     }
 
     fn types(conn: &Connection, id: i64) -> Result<Vec<ResolvedType>, StoreError> {
@@ -962,7 +1168,7 @@ mod read {
             candidates.entry(call_id).or_default().push(symbol);
         }
         let mut statement = conn.prepare(
-            "SELECT id, resolution, target_symbol,
+            "SELECT id, resolution, target_symbol, api_name,
                     expansion_file, expansion_start_byte, expansion_end_byte,
                     expansion_start_line, definition_file, definition_start_byte,
                     definition_end_byte, definition_start_line
@@ -974,12 +1180,13 @@ mod read {
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
-                    anchor_at(row, 3)?,
+                    row.get::<_, Option<String>>(3)?,
+                    anchor_at(row, 4)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(call_id, resolution, target, anchor)| {
+            .map(|(call_id, resolution, target, api_name, anchor)| {
                 let target = match (resolution.as_str(), target) {
                     ("static", Some(symbol)) => CallTarget::Static { symbol },
                     ("dynamic", _) => CallTarget::Dynamic {
@@ -993,7 +1200,11 @@ mod read {
                         });
                     }
                 };
-                Ok(CallSite { anchor, target })
+                Ok(CallSite {
+                    anchor,
+                    target,
+                    api_name,
+                })
             })
             .collect()
     }

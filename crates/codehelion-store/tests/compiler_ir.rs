@@ -7,9 +7,11 @@ use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::engine::normalize::Resolution;
 use codehelion_core::types::{TypeEvidence, TypeTag};
 use codehelion_helper::ir::{
-    Anchor, BasicBlock, CallSite, CallTarget, CompilerIr, ControlFlowGraph, DataFlowSummary, Edge,
-    EdgeKind, EffectSummary, Instantiation, ResolvedSymbol, ResolvedType, SourceRange, SymbolKind,
-    TypeCategory, Unavailability, UnitRef,
+    Anchor, BasicBlock, CallSite, CallTarget, CompilerIr, ControlFlowGraph, DataFlowSummary,
+    DirectPropagation, Edge, EdgeKind, EffectSummary, FallibleKind, Instantiation,
+    ResolvedExpression, ResolvedSymbol, ResolvedType, SemanticConstruct, SemanticConstructKind,
+    SourceRange, SymbolKind, TypeCategory, Unavailability, UnexpandedMacro, UnexpandedMacroReason,
+    UnitRef,
 };
 use codehelion_helper::protocol::{Capability, Execution, HelperIdentity, VersionRange};
 use codehelion_store::compiler::{CompilerHelperRow, CompilerOutcome, CompilerUnitRow};
@@ -37,7 +39,7 @@ fn peek(path: &Path) -> Connection {
 }
 
 /// Every table the compiler IR writes into, parents before children.
-const COMPILER_TABLES: [&str; 15] = [
+const COMPILER_TABLES: [&str; 18] = [
     "compiler_helper",
     "compiler_helper_capability",
     "compiler_helper_toolchain",
@@ -47,6 +49,9 @@ const COMPILER_TABLES: [&str; 15] = [
     "compiler_symbol",
     "compiler_call",
     "compiler_call_candidate",
+    "compiler_semantic_construct",
+    "compiler_expression",
+    "compiler_unexpanded_macro",
     "compiler_block",
     "compiler_edge",
     "compiler_instantiation",
@@ -115,6 +120,64 @@ fn full_analysis(unit: UnitRef) -> CompilerIr {
         symbols: sample_symbols(),
         types: sample_types(),
         calls: sample_calls(),
+        semantic_constructs: vec![
+            SemanticConstruct {
+                anchor: Anchor {
+                    expansion: range("src/render.rs", 400),
+                    definition: Some(range("src/macros.rs", 144)),
+                },
+                kind: SemanticConstructKind::PropagateError,
+                fallible_kind: Some(FallibleKind::Result),
+                direct_propagation: Some(DirectPropagation::ResultAdapter),
+                resource_kind: None,
+            },
+            SemanticConstruct {
+                anchor: Anchor::written_here(range("src/render.rs", 464)),
+                kind: SemanticConstructKind::Validate,
+                fallible_kind: Some(FallibleKind::Option),
+                direct_propagation: None,
+                resource_kind: None,
+            },
+            SemanticConstruct {
+                anchor: Anchor::written_here(range("src/render.rs", 496)),
+                kind: SemanticConstructKind::PropagateError,
+                fallible_kind: Some(FallibleKind::Option),
+                direct_propagation: Some(DirectPropagation::OptionAdapter),
+                resource_kind: None,
+            },
+            SemanticConstruct {
+                anchor: Anchor::written_here(range("src/render.rs", 528)),
+                kind: SemanticConstructKind::Source,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: None,
+            },
+            SemanticConstruct {
+                anchor: Anchor::written_here(range("src/render.rs", 592)),
+                kind: SemanticConstructKind::Collect,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: None,
+            },
+            SemanticConstruct {
+                anchor: Anchor::written_here(range("src/render.rs", 624)),
+                kind: SemanticConstructKind::Reduce,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: None,
+            },
+        ],
+        expressions: vec![ResolvedExpression {
+            anchor: Anchor {
+                expansion: range("src/render.rs", 416),
+                definition: Some(range("src/macros.rs", 160)),
+            },
+            type_index: 2,
+        }],
+        unexpanded_macros: vec![UnexpandedMacro {
+            invocation: range("src/render.rs", 448),
+            reason: UnexpandedMacroReason::RequiresExecution,
+        }],
         cfg: Some(sample_cfg()),
         instantiations: vec![Instantiation {
             anchor: Anchor {
@@ -193,16 +256,19 @@ fn sample_calls() -> Vec<CallSite> {
             target: CallTarget::Static {
                 symbol: "crate::escape".to_string(),
             },
+            api_name: Some("crate::escape".to_string()),
         },
         CallSite {
             anchor: Anchor::written_here(range("src/render.rs", 256)),
             target: CallTarget::Dynamic {
                 candidates: vec!["crate::Html".to_string(), "crate::Text".to_string()],
             },
+            api_name: None,
         },
         CallSite {
             anchor: Anchor::written_here(range("src/render.rs", 320)),
             target: CallTarget::Unresolved,
+            api_name: None,
         },
     ]
 }
@@ -306,6 +372,97 @@ fn everything_a_compiler_answered_comes_back_unchanged() {
     assert_eq!(round_trip(written.clone()), written);
 }
 
+#[test]
+fn a_resource_category_survives_the_sqlite_round_trip() {
+    let mut written = full_analysis(unit_ref("render", "src/render.rs"));
+    written.semantic_constructs.push(SemanticConstruct {
+        anchor: Anchor::written_here(range("src/render.rs", 656)),
+        kind: SemanticConstructKind::AcquireResource,
+        fallible_kind: None,
+        direct_propagation: None,
+        resource_kind: Some("file".to_owned()),
+    });
+    written.semantic_constructs.push(SemanticConstruct {
+        anchor: Anchor::written_here(range("src/render.rs", 720)),
+        kind: SemanticConstructKind::ReleaseResource,
+        fallible_kind: None,
+        direct_propagation: None,
+        resource_kind: Some("file".to_owned()),
+    });
+    assert_eq!(round_trip(written.clone()), written);
+}
+
+#[test]
+fn local_resolved_function_anchors_remain_available_for_correlation() {
+    let (_dir, mut store, _path) = on_disk();
+    let variant = variant();
+    let run = store
+        .record_snapshot(&snapshot(
+            "/tree",
+            &variant,
+            vec![helper_row()],
+            vec![answered(full_analysis(unit_ref("render", "src/render.rs")))],
+        ))
+        .unwrap();
+
+    assert_eq!(
+        store.source_resolved_symbols(run).unwrap(),
+        vec![codehelion_store::query::SourceResolvedSymbol {
+            name: "render".to_owned(),
+            file_path: "src/render.rs".to_owned(),
+            line: 1,
+        }]
+    );
+}
+
+#[test]
+fn local_resolved_call_anchors_remain_available_for_correlation() {
+    let (_dir, mut store, _path) = on_disk();
+    let variant = variant();
+    let run = store
+        .record_snapshot(&snapshot(
+            "/tree",
+            &variant,
+            vec![helper_row()],
+            vec![answered(full_analysis(unit_ref("render", "src/render.rs")))],
+        ))
+        .unwrap();
+
+    assert_eq!(
+        store.source_resolved_calls(run).unwrap(),
+        vec![codehelion_store::query::SourceResolvedCall {
+            target_name: "crate::escape".to_owned(),
+            file_path: "src/render.rs".to_owned(),
+            line: 7,
+        }]
+    );
+}
+
+#[test]
+fn local_instantiation_anchors_remain_available_for_correlation() {
+    let (_dir, mut store, _path) = on_disk();
+    let variant = variant();
+    let run = store
+        .record_snapshot(&snapshot(
+            "/tree",
+            &variant,
+            vec![helper_row()],
+            vec![answered(full_analysis(unit_ref("render", "src/render.rs")))],
+        ))
+        .unwrap();
+
+    assert_eq!(
+        store.source_instantiations(run).unwrap(),
+        vec![codehelion_store::query::SourceInstantiation {
+            definition: "crate::Buffer::push".to_owned(),
+            instantiation_key: "crate::Buffer::push<String>".to_owned(),
+            file_path: "src/generic.rs".to_owned(),
+            line: 4,
+            translation_unit: "src/render.rs".to_owned(),
+        }]
+    );
+}
+
 /// A unit nobody could analyse is an outcome of scanning a real project, not
 /// a gap in the record: it has a row, and the row says which reason applied.
 #[test]
@@ -350,8 +507,8 @@ fn a_unit_nobody_could_analyse_is_recorded_with_the_reason() {
     );
 }
 
-/// A run that asked nothing and a run whose every answer was unavailable are
-/// different records, and the second is the one with rows.
+/// A scan that asked nothing and one whose every answer was unavailable are
+/// different records, and only the latter has compiler-unit rows.
 #[test]
 fn asking_and_failing_does_not_read_as_never_asking() {
     let (_dir, mut store, _path) = on_disk();
@@ -359,6 +516,8 @@ fn asking_and_failing_does_not_read_as_never_asking() {
     let silent = store
         .record_snapshot(&snapshot("/a", &variant, Vec::new(), Vec::new()))
         .unwrap();
+    assert!(store.run_compiler_units(silent).unwrap().is_empty());
+
     let asked = store
         .record_snapshot(&snapshot(
             "/b",
@@ -371,7 +530,6 @@ fn asking_and_failing_does_not_read_as_never_asking() {
             )],
         ))
         .unwrap();
-    assert!(store.run_compiler_units(silent).unwrap().is_empty());
     assert_eq!(store.run_compiler_units(asked).unwrap().len(), 1);
     // A run that started no helper restarted nothing, which is a count rather
     // than a gap in the record: nothing was left uncounted.
@@ -518,10 +676,12 @@ fn a_dynamic_call_with_no_candidates_is_not_an_unresolved_one() {
             target: CallTarget::Dynamic {
                 candidates: Vec::new(),
             },
+            api_name: None,
         },
         CallSite {
             anchor: Anchor::written_here(range("src/lib.rs", 64)),
             target: CallTarget::Unresolved,
+            api_name: None,
         },
     ];
     let stored = round_trip(ir);
@@ -637,17 +797,14 @@ fn the_family_query_reaches_the_instantiation_index() {
 #[test]
 fn a_run_holding_compiler_ir_declares_the_schema_it_used() {
     let (_dir, mut store, path) = on_disk();
-    let variant = variant();
+    let build_variant = variant();
     let with = store
         .record_snapshot(&snapshot(
             "/a",
-            &variant,
+            &build_variant,
             vec![helper_row()],
             vec![answered(full_analysis(unit_ref("crate", "src/lib.rs")))],
         ))
-        .unwrap();
-    let without = store
-        .record_snapshot(&snapshot("/b", &variant, Vec::new(), Vec::new()))
         .unwrap();
 
     drop(store);
@@ -656,8 +813,17 @@ fn a_run_holding_compiler_ir_declares_the_schema_it_used() {
         declared(&conn, with),
         vec![codehelion_helper::ir::COMPILER_IR_SCHEMA_VERSION.to_string()]
     );
-    // A run that asked no compiler claims no IR schema: declaring one would
-    // say the run used something it never did.
+
+    let (_dir, mut store, path) = on_disk();
+    let variant = variant();
+    let without = store
+        .record_snapshot(&snapshot("/b", &variant, Vec::new(), Vec::new()))
+        .unwrap();
+
+    drop(store);
+    let conn = peek(&path);
+    // A scan that asked no compiler claims no IR schema: declaring one would
+    // say the scan used something it never did.
     assert!(declared(&conn, without).is_empty());
 }
 

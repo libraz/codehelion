@@ -214,6 +214,72 @@ pub fn evaluate(
     }
 }
 
+/// Evaluate every registered semantic rule explicitly named by the labels.
+///
+/// A rule contributes only findings that name it and labels that name it. This
+/// keeps an unlabelled rule from changing another rule's precision, while
+/// retaining the normal [`evaluate`] semantics inside each labelled slice.
+/// Rules with no labelled positive or negative examples are intentionally not
+/// returned: their precision and recall have no corpus basis yet.
+#[must_use]
+pub fn evaluate_by_rule(
+    results: &DetectionResult,
+    labels: &LabelSet,
+    loc: u32,
+    threshold: f64,
+    top_k: usize,
+) -> BTreeMap<String, Metrics> {
+    let rule_ids: BTreeSet<&str> = labels
+        .clone_pairs
+        .iter()
+        .filter_map(|pair| pair.rule_id.as_deref())
+        .chain(
+            labels
+                .non_clones
+                .iter()
+                .filter_map(|non_clone| non_clone.rule_id.as_deref()),
+        )
+        .collect();
+
+    rule_ids
+        .into_iter()
+        .map(|rule_id| {
+            let scoped_results = DetectionResult {
+                schema_version: results.schema_version,
+                language: results.language.clone(),
+                findings: results
+                    .findings
+                    .iter()
+                    .filter(|finding| finding.rule_ids.iter().any(|id| id == rule_id))
+                    .cloned()
+                    .collect(),
+                withheld: Vec::new(),
+            };
+            let scoped_labels = LabelSet {
+                schema_version: labels.schema_version,
+                language: labels.language.clone(),
+                files: labels.files.clone(),
+                clone_pairs: labels
+                    .clone_pairs
+                    .iter()
+                    .filter(|pair| pair.rule_id.as_deref() == Some(rule_id))
+                    .cloned()
+                    .collect(),
+                non_clones: labels
+                    .non_clones
+                    .iter()
+                    .filter(|non_clone| non_clone.rule_id.as_deref() == Some(rule_id))
+                    .cloned()
+                    .collect(),
+            };
+            (
+                rule_id.to_string(),
+                evaluate(&scoped_results, &scoped_labels, loc, threshold, top_k),
+            )
+        })
+        .collect()
+}
+
 /// What a partial label set says about one detection run.
 ///
 /// Every finding falls into exactly one of confirmed / refuted / conflicting /
@@ -979,6 +1045,7 @@ mod tests {
             size_tokens: 0,
             id: id.to_string(),
             clone_type: CloneType::Type2,
+            rule_ids: Vec::new(),
             score,
             band: None,
             actionable: true,
@@ -1025,17 +1092,20 @@ mod tests {
                 LabelPair {
                     id: "cp-001".to_string(),
                     clone_type: CloneType::Type2,
+                    rule_id: None,
                     fragments: vec![fragment("x.rs", 1, 10), fragment("y.rs", 1, 10)],
                 },
                 LabelPair {
                     id: "cp-002".to_string(),
                     clone_type: CloneType::Type3,
+                    rule_id: None,
                     fragments: vec![fragment("x.rs", 100, 110), fragment("y.rs", 100, 110)],
                 },
             ],
             non_clones: vec![NonClone {
                 id: "nc-001".to_string(),
                 reason: "unrelated".to_string(),
+                rule_id: None,
                 fragments: vec![fragment("x.rs", 200, 210), fragment("y.rs", 200, 210)],
             }],
         };
@@ -1065,6 +1135,29 @@ mod tests {
 
         // Top-3 precision equals overall precision here.
         assert!((metrics.precision_at_k - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn evaluate_by_rule_keeps_registered_rules_and_their_labels_separate() {
+        let (mut results, mut labels) = self_test_inputs();
+        results.findings[0].rule_ids = vec!["rule-a".to_string()];
+        results.findings[1].rule_ids = vec!["rule-b".to_string()];
+        results.findings[2].rule_ids = vec!["rule-a".to_string()];
+        labels.clone_pairs[0].rule_id = Some("rule-a".to_string());
+        labels.clone_pairs[1].rule_id = Some("rule-b".to_string());
+        labels.non_clones[0].rule_id = Some("rule-a".to_string());
+
+        let by_rule = evaluate_by_rule(&results, &labels, 100, DEFAULT_MATCH_THRESHOLD, 10);
+
+        let rule_a = &by_rule["rule-a"];
+        assert!((rule_a.recall_overall - 1.0).abs() < f64::EPSILON);
+        assert!((rule_a.precision_overall - 0.5).abs() < f64::EPSILON);
+        assert_eq!(rule_a.non_clone_hits, 1);
+
+        let rule_b = &by_rule["rule-b"];
+        assert!(rule_b.recall_overall.abs() < f64::EPSILON);
+        assert!(rule_b.precision_overall.abs() < f64::EPSILON);
+        assert_eq!(rule_b.total_findings, 1);
     }
 
     #[test]
@@ -1121,6 +1214,7 @@ mod tests {
         labels.clone_pairs.push(LabelPair {
             id: "cp-003".to_string(),
             clone_type: CloneType::Type1,
+            rule_id: None,
             fragments: vec![fragment("x.rs", 200, 210), fragment("y.rs", 200, 210)],
         });
 
@@ -1249,6 +1343,7 @@ mod tests {
                     size_tokens: 0,
                     id: "b2".to_string(),
                     clone_type: CloneType::Type1,
+                    rule_ids: Vec::new(),
                     score: 1.0,
                     band: None,
                     actionable: true,

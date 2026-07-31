@@ -77,15 +77,11 @@
         },
         "database": {
           "type": "string",
-          "description": "Path of the audit database the snapshot was recorded in."
+          "description": "Path of the local database holding the current snapshot."
         },
         "run_id": {
           "type": "integer",
           "description": "Row id of the recorded scan run."
-        },
-        "reused": {
-          "type": "boolean",
-          "description": "Present and true when this is a recorded run's report, shown again because nothing it read has changed. The timestamps and the run id are that run's, and no new run was recorded. Absent from a scan that analysed the tree."
         },
         "ranking": {
           "$ref": "#/$defs/ranking"
@@ -232,76 +228,6 @@
             }
           }
         },
-        "changes": {
-          "type": "object",
-          "description": "What moved since the previous scan of this tree under these settings. Absent when there is no run to compare against, which means 'not comparable' rather than 'nothing changed'.",
-          "required": [
-            "since_run_id",
-            "unchanged",
-            "modified",
-            "added",
-            "removed"
-          ],
-          "properties": {
-            "since_run_id": {
-              "type": "integer"
-            },
-            "unchanged": {
-              "type": "integer"
-            },
-            "modified": {
-              "type": "integer"
-            },
-            "added": {
-              "type": "integer"
-            },
-            "removed": {
-              "type": "integer"
-            }
-          }
-        },
-        "audit": {
-          "type": "object",
-          "description": "What became of the tree's duplication since the previous audit of it. Absent when there is no earlier run under these settings to compare against.",
-          "required": [
-            "since_run_id",
-            "states"
-          ],
-          "properties": {
-            "since_run_id": {
-              "type": "integer"
-            },
-            "states": {
-              "type": "array",
-              "description": "How many clone groups are in each audit state, states holding none omitted.",
-              "items": {
-                "type": "object",
-                "required": [
-                  "state",
-                  "count"
-                ],
-                "properties": {
-                  "state": {
-                    "enum": [
-                      "new",
-                      "expanded",
-                      "diverged",
-                      "reclassified",
-                      "moved",
-                      "reduced",
-                      "resolved",
-                      "unchanged"
-                    ]
-                  },
-                  "count": {
-                    "type": "integer",
-                    "minimum": 0
-                  }
-                }
-              }
-            }
-          }
-        },
         "baseline": {
           "type": "object",
           "description": "What the baseline the scan was given did to its findings. Absent when no baseline was given.",
@@ -357,6 +283,10 @@
             "type_3": {
               "type": "integer",
               "description": "Gapped groups; zero in modes that report no gapped clones."
+            },
+            "restricted_semantic": {
+              "type": "integer",
+              "description": "Findings justified by registered semantic rules; zero in modes without compiler semantic analysis."
             },
             "fragment_scope": {
               "type": "integer",
@@ -617,6 +547,9 @@
           ],
           "description": "Null when the group is visible in default reports."
         },
+        "semantic": {
+          "$ref": "#/$defs/semantic_evidence"
+        },
         "members": {
           "type": "array",
           "minItems": 2,
@@ -748,6 +681,98 @@
             "medium",
             "low"
           ]
+        }
+      }
+    },
+    "semantic_evidence": {
+      "type": "object",
+      "required": ["schema_version", "rules", "graphs", "node_mappings"],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "version", "confidence"],
+            "properties": {
+              "id": { "type": "string" },
+              "version": { "type": "integer", "minimum": 1 },
+              "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        },
+        "graphs": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/$defs/semantic_graph" }
+        },
+        "node_mappings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["corresponding_member", "canonical", "corresponding"],
+            "properties": {
+              "corresponding_member": { "type": "integer", "minimum": 1 },
+              "canonical": { "type": "integer", "minimum": 0 },
+              "corresponding": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "semantic_graph": {
+      "type": "object",
+      "required": ["schema_version", "language", "build_variant_fingerprint", "nodes", "edges"],
+      "properties": {
+        "schema_version": { "type": "string" },
+        "language": { "enum": ["rust", "c", "cpp"] },
+        "build_variant_fingerprint": {
+          "type": "array",
+          "minItems": 32,
+          "maxItems": 32,
+          "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "attributes"],
+            "properties": {
+              "kind": {
+                "enum": ["source", "filter", "map", "reduce", "collect", "validate", "propagate_error", "acquire_resource", "release_resource"]
+              },
+              "attributes": {
+                "type": "object",
+                "required": ["type_tag", "structure_fingerprint", "api_names", "resource_kind"],
+                "properties": {
+                  "type_tag": { "type": ["string", "null"] },
+                  "structure_fingerprint": {
+                    "type": ["array", "null"],
+                    "minItems": 16,
+                    "maxItems": 16,
+                    "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+                  },
+                  "api_names": { "type": "array", "items": { "type": "string" } },
+                  "resource_kind": { "type": ["string", "null"] }
+                }
+              }
+            }
+          }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["from", "to", "kind"],
+            "properties": {
+              "from": { "type": "integer", "minimum": 0 },
+              "to": { "type": "integer", "minimum": 0 },
+              "kind": { "enum": ["data", "ordering", "resource_lifetime"] }
+            }
+          }
         }
       }
     },

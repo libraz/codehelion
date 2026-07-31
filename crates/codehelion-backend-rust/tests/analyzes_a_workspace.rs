@@ -15,7 +15,9 @@
 use std::time::Duration;
 
 use codehelion_helper::ir::{
-    CallTarget, Instantiation, ResolvedSymbol, SymbolKind, TypeCategory, Unavailability, UnitRef,
+    CallTarget, DirectPropagation, FallibleKind, Instantiation, ResolvedSymbol,
+    SemanticConstructKind, SymbolKind, TypeCategory, Unavailability, UnexpandedMacroReason,
+    UnitRef,
 };
 use codehelion_helper::protocol::{Capability, Execution};
 use codehelion_helper::{Analysis, COMPILER_IR_SCHEMA_VERSION, CompilerIr, Helper};
@@ -321,12 +323,13 @@ fn repeated() -> Box<CompilerIr> {
 fn what_a_declarative_macro_declared_is_reported() {
     let ir = repeated();
     for produced in ["Reads", "Writes"] {
-        // Exactly one: the declaration walk passes over what it cannot place,
-        // and this pass places it. Both reporting it would put two of one type
-        // in a unit that holds one.
+        // Exactly one declaration: a macro expansion can also contain an
+        // ordinary type use with the same spelling, which is symbol evidence
+        // rather than another declaration. The two-sided anchor is what
+        // distinguishes the one this expansion declared.
         let found = names(&ir, produced)
             .into_iter()
-            .filter(|symbol| symbol.kind == SymbolKind::Type)
+            .filter(|symbol| symbol.kind == SymbolKind::Type && symbol.anchor.definition.is_some())
             .count();
         assert_eq!(
             found,
@@ -356,6 +359,50 @@ fn two_expansions_of_one_macro_share_the_place_it_was_written() {
     );
 }
 
+/// A call produced by a declarative macro is compiler-resolved from the
+/// expanded syntax, but it remains attached to the invocation and macro
+/// definition rather than claiming a source range that does not exist.
+#[test]
+fn a_call_from_a_macro_expression_keeps_the_two_sided_anchor() {
+    let ir = repeated();
+    let call = ir
+        .calls
+        .iter()
+        .find(|call| {
+            matches!(
+                &call.target,
+                CallTarget::Static { symbol } if symbol.ends_with("Reads::count")
+            )
+        })
+        .expect("the call produced by the macro expression");
+    let source = std::fs::read_to_string(
+        codehelion_fixtures::rust("macro-rules")
+            .unwrap()
+            .join("src/lib.rs"),
+    )
+    .expect("the macro fixture source is readable");
+    let start = usize::try_from(call.anchor.expansion.start_byte).unwrap();
+    let end = usize::try_from(call.anchor.expansion.end_byte).unwrap();
+    assert!(source[start..end].contains("count_from_expansion!(reads)"));
+    let definition = call
+        .anchor
+        .definition
+        .as_ref()
+        .expect("a macro expression has a definition anchor");
+    let start = usize::try_from(definition.start_byte).unwrap();
+    let end = usize::try_from(definition.end_byte).unwrap();
+    assert!(source[start..end].contains("macro_rules! count_from_expansion"));
+    let expression = ir
+        .expressions
+        .iter()
+        .find(|expression| expression.anchor == call.anchor)
+        .expect("the macro expansion's expression type");
+    assert_eq!(
+        ir.types[usize::try_from(expression.type_index).unwrap()].category,
+        TypeCategory::Integer
+    );
+}
+
 /// And what somebody typed carries no second place, or the distinction the
 /// definition site draws would be no distinction at all.
 #[test]
@@ -367,6 +414,32 @@ fn what_was_typed_out_is_not_attributed_to_a_macro() {
         .find(|symbol| symbol.name == "Manual")
         .expect("the hand-written type");
     assert_eq!(manual.anchor.definition, None);
+}
+
+/// A procedural macro is not silently treated as a macro that produced no
+/// declarations. The helper never runs it by default, but the surrounding
+/// crate remains useful enough to analyse, so this is per-invocation coverage
+/// rather than a unit-level refusal.
+#[test]
+fn a_proc_macro_invocation_is_recorded_as_unexpanded() {
+    let ir = analyzed(&unit("proc-macro", "catalogue", "catalogue"));
+    let skipped = ir
+        .unexpanded_macros
+        .iter()
+        .filter(|macro_| macro_.reason == UnexpandedMacroReason::Unresolved)
+        .collect::<Vec<_>>();
+    assert_eq!(skipped.len(), 2, "{:#?}", ir.unexpanded_macros);
+    let source = std::fs::read_to_string(
+        codehelion_fixtures::rust("proc-macro")
+            .unwrap()
+            .join("catalogue/src/lib.rs"),
+    )
+    .expect("the proc-macro fixture source is readable");
+    for macro_ in skipped {
+        let start = usize::try_from(macro_.invocation.start_byte).unwrap();
+        let end = usize::try_from(macro_.invocation.end_byte).unwrap();
+        assert!(source[start..end].contains("derive(Labelled)"));
+    }
 }
 
 /// An expansion anchors at the invocation, because that is the only place in
@@ -415,6 +488,22 @@ fn a_plain_workspace_comes_back_with_types_a_reader_can_check() {
     assert_eq!(category_of(&ir, "label"), TypeCategory::Text);
     assert_eq!(category_of(&ir, "labels"), TypeCategory::Sequence);
     assert_eq!(category_of(&ir, "debits"), TypeCategory::Integer);
+}
+
+/// Closed standard API evidence is separate from the stable definition
+/// identity, so a later cross-language rule never recovers meaning from an
+/// arbitrary workspace method name.
+#[test]
+fn standard_iterator_calls_carry_closed_api_names() {
+    let ir = analyzed(&unit("plain", "ledger", "ledger"));
+    let names = ir
+        .calls
+        .iter()
+        .filter_map(|call| call.api_name.as_deref())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"rust::Iterator::map"), "{names:?}");
+    assert!(names.contains(&"rust::Iterator::collect"), "{names:?}");
+    assert!(names.contains(&"rust::slice::iter"), "{names:?}");
 }
 
 /// Anchors have to point at the fixture's own text, since a fragment is cut
@@ -573,6 +662,66 @@ fn a_project_says_which_features_it_is_read_with() {
     );
 }
 
+/// A member can change a direct dependency's features without moving the
+/// lockfile. Those flags alter the resolved program, so describing only the
+/// member's own feature set would let two different readings share a variant.
+#[test]
+fn a_direct_dependency_feature_is_part_of_the_build_description() {
+    let directory = tempfile::tempdir().expect("temporary workspace");
+    let root = directory.path();
+    std::fs::create_dir_all(root.join("app/src")).expect("create app source");
+    std::fs::create_dir_all(root.join("support/src")).expect("create dependency source");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\", \"support\"]\nresolver = \"2\"\n",
+    )
+    .expect("write workspace manifest");
+    let app_manifest = |features: &str| {
+        format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n\
+             [dependencies]\nsupport = {{ path = \"../support\"{features} }}\n"
+        )
+    };
+    std::fs::write(root.join("app/Cargo.toml"), app_manifest(""))
+        .expect("write app manifest without the dependency feature");
+    std::fs::write(
+        root.join("app/src/lib.rs"),
+        "pub fn answer() -> u8 { 42 }\n",
+    )
+    .expect("write app source");
+    std::fs::write(
+        root.join("support/Cargo.toml"),
+        "[package]\nname = \"support\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n\
+         [features]\ndefault = [\"wide\"]\nwide = []\nextra = []\n",
+    )
+    .expect("write dependency manifest");
+    std::fs::write(root.join("support/src/lib.rs"), "pub struct Support;\n")
+        .expect("write dependency source");
+
+    let without_extra = describe(root);
+    assert!(
+        !without_extra
+            .features
+            .iter()
+            .any(|feature| feature == "support/extra"),
+        "{without_extra:?}"
+    );
+
+    std::fs::write(
+        root.join("app/Cargo.toml"),
+        app_manifest(", features = [\"extra\"]"),
+    )
+    .expect("enable dependency feature");
+    let with_extra = describe(root);
+    assert!(
+        with_extra
+            .features
+            .iter()
+            .any(|feature| feature == "support/extra"),
+        "{with_extra:?}"
+    );
+}
+
 /// A tree with no project in it is described as having no build, which is not
 /// the same as failing to describe it: every run over such a tree reads it the
 /// same way, so an empty answer is the answer.
@@ -621,6 +770,218 @@ fn stamped() -> Box<CompilerIr> {
         file: file.display().to_string(),
         variant: "host".to_string(),
     })
+}
+
+/// The helper reports Rust `?` as a compiler-parsed, closed construct rather
+/// than asking the semantic core to infer it from a token sequence.
+#[test]
+fn an_error_propagation_operator_is_reported_as_a_semantic_construct() {
+    let ir = stamped();
+    let source = source_of("generic");
+    let constructs = ir
+        .semantic_constructs
+        .iter()
+        .filter(|construct| construct.kind == SemanticConstructKind::PropagateError)
+        .collect::<Vec<_>>();
+    assert_eq!(constructs.len(), 4, "{:?}", ir.semantic_constructs);
+    let try_expression_count = constructs
+        .iter()
+        .filter(|construct| {
+            let range = &construct.anchor.expansion;
+            let start = usize::try_from(range.start_byte).expect("range start fits");
+            let end = usize::try_from(range.end_byte).expect("range end fits");
+            source[start..end].ends_with('?')
+        })
+        .count();
+    assert_eq!(try_expression_count, 3, "{:?}", ir.semantic_constructs);
+    assert_eq!(constructs[0].fallible_kind, Some(FallibleKind::Option));
+}
+
+/// Standard `Result` and `Option` matches, plus direct standard presence
+/// conditions, become closed validation constructs. A project enum's branches
+/// and compound presence conditions remain outside the vocabulary.
+#[test]
+fn standard_fallible_matches_are_reported_as_validation_constructs() {
+    let ir = stamped();
+    let source = source_of("generic");
+    let validates = ir
+        .semantic_constructs
+        .iter()
+        .filter(|construct| construct.kind == SemanticConstructKind::Validate)
+        .collect::<Vec<_>>();
+    assert_eq!(validates.len(), 3, "{:?}", ir.semantic_constructs);
+    let spellings = validates
+        .iter()
+        .map(|construct| {
+            let range = &construct.anchor.expansion;
+            let start = usize::try_from(range.start_byte).expect("range start fits");
+            let end = usize::try_from(range.end_byte).expect("range end fits");
+            source[start..end].to_string()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        spellings
+            .iter()
+            .any(|spelling| spelling.starts_with("match "))
+    );
+    assert!(
+        spellings
+            .iter()
+            .any(|spelling| spelling.starts_with("if value.is_some()"))
+    );
+    assert!(
+        spellings
+            .iter()
+            .any(|spelling| spelling.starts_with("if value.is_ok()"))
+    );
+    assert!(
+        spellings
+            .iter()
+            .all(|spelling| !spelling.contains("&& keep"))
+    );
+    let kinds = validates
+        .iter()
+        .map(|construct| construct.fallible_kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            Some(FallibleKind::Option),
+            Some(FallibleKind::Option),
+            Some(FallibleKind::Result),
+        ]
+    );
+}
+
+/// Direct `Result` propagation has two deliberately closed spellings. A
+/// transformed success value is retained as a normal propagation operation.
+#[test]
+fn direct_result_propagation_forms_are_reported_without_admitting_transformations() {
+    let ir = stamped();
+    let source = source_of("generic");
+    let direct = ir
+        .semantic_constructs
+        .iter()
+        .filter(|construct| construct.direct_propagation == Some(DirectPropagation::ResultAdapter))
+        .collect::<Vec<_>>();
+    assert_eq!(direct.len(), 2, "{:?}", ir.semantic_constructs);
+    assert!(direct.iter().all(|construct| {
+        construct.kind == SemanticConstructKind::PropagateError
+            && construct.fallible_kind == Some(FallibleKind::Result)
+    }));
+    let transformed = ir.semantic_constructs.iter().find(|construct| {
+        let range = &construct.anchor.expansion;
+        let start = usize::try_from(range.start_byte).expect("range start fits");
+        let end = usize::try_from(range.end_byte).expect("range end fits");
+        &source[start..end] == "value?"
+            && construct.fallible_kind == Some(FallibleKind::Result)
+            && construct.direct_propagation.is_none()
+    });
+    assert!(transformed.is_some(), "{:?}", ir.semantic_constructs);
+}
+
+/// A `for` loop only enters the closed vocabulary when it is a compiler-typed
+/// standard-sequence to standard-`Vec` transfer of the exact loop binding.
+#[test]
+fn a_plain_vec_collection_loop_is_reported_without_guessing_transforms() {
+    let ir = stamped();
+    let source = source_of("generic");
+    let loop_constructs = ir
+        .semantic_constructs
+        .iter()
+        .filter(|construct| {
+            matches!(
+                construct.kind,
+                SemanticConstructKind::Source | SemanticConstructKind::Collect
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(loop_constructs.len(), 3, "{:?}", ir.semantic_constructs);
+    assert_eq!(loop_constructs[1].kind, SemanticConstructKind::Source);
+    assert_eq!(loop_constructs[2].kind, SemanticConstructKind::Collect);
+    let source_start =
+        usize::try_from(loop_constructs[1].anchor.expansion.start_byte).expect("source start fits");
+    let source_end =
+        usize::try_from(loop_constructs[1].anchor.expansion.end_byte).expect("source end fits");
+    assert_eq!(&source[source_start..source_end], "values");
+    let collect_start = usize::try_from(loop_constructs[2].anchor.expansion.start_byte)
+        .expect("collect start fits");
+    let collect_end =
+        usize::try_from(loop_constructs[2].anchor.expansion.end_byte).expect("collect end fits");
+    assert_eq!(&source[collect_start..collect_end], "push");
+}
+
+/// A direct numeric accumulation is the closed loop counterpart of an
+/// iterator reduction. The conditional loop in the same fixture remains
+/// outside this form: a guard changes which values reach the accumulator.
+#[test]
+fn a_plain_numeric_reduce_loop_is_reported_without_admitting_guards() {
+    let ir = stamped();
+    let source = source_of("generic");
+    let reductions = ir
+        .semantic_constructs
+        .iter()
+        .filter(|construct| construct.kind == SemanticConstructKind::Reduce)
+        .collect::<Vec<_>>();
+    assert_eq!(reductions.len(), 1, "{:?}", ir.semantic_constructs);
+    let source_construct = ir
+        .semantic_constructs
+        .iter()
+        .find(|construct| {
+            construct.kind == SemanticConstructKind::Source
+                && construct.anchor.expansion.start_line
+                    == reductions[0].anchor.expansion.start_line.saturating_sub(1)
+        })
+        .expect("the reduction retains its immediately preceding sequence source");
+    let source_start =
+        usize::try_from(source_construct.anchor.expansion.start_byte).expect("source start fits");
+    let source_end =
+        usize::try_from(source_construct.anchor.expansion.end_byte).expect("source end fits");
+    assert_eq!(&source[source_start..source_end], "values");
+    let reduce_start =
+        usize::try_from(reductions[0].anchor.expansion.start_byte).expect("reduce start fits");
+    let reduce_end =
+        usize::try_from(reductions[0].anchor.expansion.end_byte).expect("reduce end fits");
+    assert_eq!(&source[reduce_start..reduce_end], "sum += *value");
+}
+
+/// A direct standard-file binding has one compiler-resolved acquisition and a
+/// Rust scope-end `Drop`. A function holding two files remains absent rather
+/// than being reduced to a guessed pair.
+#[test]
+fn a_direct_standard_file_acquisition_is_paired_with_its_scope_drop() {
+    let ir = analyzed(&unit("plain", "ledger", "ledger"));
+    let lifetimes = ir
+        .semantic_constructs
+        .iter()
+        .filter(|construct| {
+            matches!(
+                construct.kind,
+                SemanticConstructKind::AcquireResource | SemanticConstructKind::ReleaseResource
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(lifetimes.len(), 2, "{:?}", ir.semantic_constructs);
+    assert_eq!(lifetimes[0].kind, SemanticConstructKind::AcquireResource);
+    assert_eq!(lifetimes[1].kind, SemanticConstructKind::ReleaseResource);
+    assert!(
+        lifetimes
+            .iter()
+            .all(|construct| construct.resource_kind.as_deref() == Some("file"))
+    );
+    assert!(lifetimes[0].anchor.expansion.start_byte < lifetimes[1].anchor.expansion.start_byte);
+    let source = std::fs::read_to_string(
+        codehelion_fixtures::rust("plain")
+            .expect("plain fixture exists")
+            .join("ledger/src/lib.rs"),
+    )
+    .expect("plain fixture source is readable");
+    let two_files = source
+        .find("pub fn inspect_two_files")
+        .expect("fixture holds the multi-resource negative case");
+    assert!(lifetimes.iter().all(|construct| {
+        usize::try_from(construct.anchor.expansion.start_byte).is_ok_and(|start| start < two_files)
+    }));
 }
 
 /// Every instantiation of one definition, in the order they were written.

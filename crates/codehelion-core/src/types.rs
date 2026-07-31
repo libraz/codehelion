@@ -19,11 +19,14 @@
 //! spelled type names compares vocabularies rather than programs. What
 //! survives translation is the shape.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
 
 /// The normalized kind of a type, coarse enough to mean the same thing in
 /// every language this tool reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TypeTag {
     /// Any integer width or signedness.
     Integer,
@@ -176,6 +179,47 @@ impl TypeEvidence {
     }
 }
 
+/// The compiler-resolved call targets inside one unit.
+///
+/// The targets are a set rather than a count. A repeated call to the same
+/// definition is not a broader API surface, while two different definitions
+/// with the same source spelling are. The strings are opaque stable symbols or
+/// canonical dynamic-candidate-set keys supplied by the boundary layer; this
+/// crate deliberately does not learn the helper protocol's target shape.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApiEvidence {
+    targets: BTreeSet<String>,
+}
+
+impl ApiEvidence {
+    /// Collect the distinct compiler-resolved targets in a unit.
+    #[must_use]
+    pub fn from_targets(targets: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            targets: targets.into_iter().collect(),
+        }
+    }
+
+    /// Whether no call target was resolved in this unit.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
+
+    /// Agreement with `other`, or `None` when neither side has a resolved
+    /// target. This is set Jaccard, matching the Structural API dimension.
+    #[must_use]
+    pub fn agreement(&self, other: &Self) -> Option<f64> {
+        if self.is_empty() && other.is_empty() {
+            return None;
+        }
+        let shared = self.targets.intersection(&other.targets).count();
+        let total = self.targets.len() + other.targets.len() - shared;
+        #[allow(clippy::cast_precision_loss)]
+        Some(shared as f64 / total as f64)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -273,5 +317,24 @@ mod tests {
         ] {
             assert_eq!(TypeTag::from_category(tag.name()), Some(tag), "{tag:?}");
         }
+    }
+
+    #[test]
+    fn api_evidence_compares_resolved_targets_not_source_spellings() {
+        let left = ApiEvidence::from_targets(["crate::left::run".to_string()]);
+        let right = ApiEvidence::from_targets(["crate::right::run".to_string()]);
+        assert_eq!(left.agreement(&right), Some(0.0));
+        assert_eq!(
+            left.agreement(&ApiEvidence::from_targets(["crate::left::run".to_string()])),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn empty_api_evidence_is_not_agreement() {
+        assert_eq!(
+            ApiEvidence::default().agreement(&ApiEvidence::default()),
+            None
+        );
     }
 }

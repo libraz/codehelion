@@ -210,6 +210,21 @@ fn an_answer_to_a_question_nobody_asked_is_not_taken_as_an_answer() {
     assert!(matches!(error, HelperError::Mismatched { .. }), "{error:?}");
 }
 
+/// A matching request id is not enough: after negotiation, every response
+/// must use the revision the conversation settled on.
+#[test]
+fn a_response_that_changes_protocol_revision_is_rejected() {
+    let mut helper = start("wrong-revision-after-setup", DEADLINE)
+        .expect("the mock establishes a normal handshake");
+    let error = helper
+        .analyze(&unit("src/lib.rs"), &[Capability::Types])
+        .expect_err("the response changes revision after setup");
+    assert!(
+        matches!(error, HelperError::ProtocolMismatch { .. }),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn a_helper_that_refuses_says_why_in_its_own_words() {
     let error = start("refuses", DEADLINE).expect_err("it declines the handshake");

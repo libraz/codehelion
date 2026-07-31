@@ -20,6 +20,9 @@ pub enum CloneClass {
     /// Similar but not identical: a gapped clone, with inserted, deleted or
     /// modified statements.
     Type3,
+    /// A correspondence justified only by one or more registered semantic
+    /// rules, never by a general equivalence claim.
+    RestrictedSemantic,
 }
 
 impl CloneClass {
@@ -30,6 +33,7 @@ impl CloneClass {
             Self::Type1 => "type-1",
             Self::Type2 => "type-2",
             Self::Type3 => "type-3",
+            Self::RestrictedSemantic => "restricted-semantic",
         }
     }
 
@@ -44,6 +48,7 @@ impl CloneClass {
             "type-1" => Some(Self::Type1),
             "type-2" => Some(Self::Type2),
             "type-3" => Some(Self::Type3),
+            "restricted-semantic" => Some(Self::RestrictedSemantic),
             _ => None,
         }
     }
@@ -51,8 +56,8 @@ impl CloneClass {
     /// Whether the class asserts equality rather than resemblance.
     ///
     /// Type-1 and Type-2 both mean the copies agree statement for statement,
-    /// verbatim or up to renaming. Type-3 means only that they are alike
-    /// overall, and says nothing about any particular stretch.
+    /// verbatim or up to renaming. Type-3 and restricted semantic findings
+    /// are explainable correspondences, not claims of textual equality.
     #[must_use]
     pub const fn is_exact(self) -> bool {
         matches!(self, Self::Type1 | Self::Type2)
@@ -106,13 +111,19 @@ mod tests {
         assert_eq!(CloneClass::Type1.name(), "type-1");
         assert_eq!(CloneClass::Type2.name(), "type-2");
         assert_eq!(CloneClass::Type3.name(), "type-3");
+        assert_eq!(CloneClass::RestrictedSemantic.name(), "restricted-semantic");
         assert_eq!(CloneScope::Unit.name(), "unit");
         assert_eq!(CloneScope::Fragment.name(), "fragment");
     }
 
     #[test]
     fn a_recorded_name_reads_back_as_what_wrote_it() {
-        for class in [CloneClass::Type1, CloneClass::Type2, CloneClass::Type3] {
+        for class in [
+            CloneClass::Type1,
+            CloneClass::Type2,
+            CloneClass::Type3,
+            CloneClass::RestrictedSemantic,
+        ] {
             assert_eq!(CloneClass::from_name(class.name()), Some(class));
         }
         for scope in [CloneScope::Unit, CloneScope::Fragment] {
@@ -126,11 +137,21 @@ mod tests {
 
     #[test]
     fn ordering_runs_from_exact_to_gapped() {
-        let mut classes = [CloneClass::Type3, CloneClass::Type1, CloneClass::Type2];
+        let mut classes = [
+            CloneClass::RestrictedSemantic,
+            CloneClass::Type3,
+            CloneClass::Type1,
+            CloneClass::Type2,
+        ];
         classes.sort_unstable();
         assert_eq!(
             classes,
-            [CloneClass::Type1, CloneClass::Type2, CloneClass::Type3]
+            [
+                CloneClass::Type1,
+                CloneClass::Type2,
+                CloneClass::Type3,
+                CloneClass::RestrictedSemantic,
+            ]
         );
     }
 }

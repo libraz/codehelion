@@ -17,7 +17,7 @@ use clap::Parser;
 
 use codehelion_eval::detected;
 use codehelion_eval::labels::LabelSet;
-use codehelion_eval::metrics::{DEFAULT_MATCH_THRESHOLD, evaluate, stability};
+use codehelion_eval::metrics::{DEFAULT_MATCH_THRESHOLD, evaluate, evaluate_by_rule, stability};
 use codehelion_eval::schema::DetectionResult;
 
 /// Score detection-prototype output against a labelled corpus.
@@ -27,6 +27,9 @@ struct Args {
     /// Scan report JSON, as `codehelion scan --format json` writes it.
     #[arg(long)]
     results: PathBuf,
+    /// Read `--results` as the dedicated `--compare-languages` JSON envelope.
+    #[arg(long)]
+    cross_language: bool,
     /// Corpus label JSON to score against.
     #[arg(long)]
     labels: PathBuf,
@@ -46,17 +49,21 @@ struct Args {
 }
 
 /// Read a scan report as a scorable result, with the line count it measured.
-fn read_detection(path: &PathBuf) -> Result<(DetectionResult, u32)> {
+fn read_detection(path: &PathBuf, cross_language: bool) -> Result<(DetectionResult, u32)> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("reading results file {}", path.display()))?;
-    detected::from_report_json(&text)
-        .with_context(|| format!("reading scan report {}", path.display()))
+    let read = if cross_language {
+        detected::from_cross_language_comparison_json(&text)
+    } else {
+        detected::from_report_json(&text)
+    };
+    read.with_context(|| format!("reading results {}", path.display()))
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let (results, scanned_lines) = read_detection(&args.results)?;
+    let (results, scanned_lines) = read_detection(&args.results, args.cross_language)?;
     let labels_text = fs::read_to_string(&args.labels)
         .with_context(|| format!("reading labels file {}", args.labels.display()))?;
     let labels = LabelSet::from_json(&labels_text)
@@ -65,9 +72,13 @@ fn main() -> Result<()> {
     let loc = args.loc.unwrap_or(scanned_lines);
     let metrics = evaluate(&results, &labels, loc, args.threshold, args.top_k);
     println!("{metrics}");
+    for (rule_id, metrics) in evaluate_by_rule(&results, &labels, loc, args.threshold, args.top_k) {
+        println!("\nrule {rule_id}");
+        println!("{metrics}");
+    }
 
     if let Some(compare_path) = &args.compare {
-        let (other, _) = read_detection(compare_path)?;
+        let (other, _) = read_detection(compare_path, args.cross_language)?;
         let stability = stability(&results, &other);
         println!();
         println!("stability vs {}", compare_path.display());

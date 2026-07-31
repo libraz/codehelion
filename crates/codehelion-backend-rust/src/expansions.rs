@@ -17,17 +17,20 @@
 //!
 //! Expanding a `macro_rules!` is reading it. Expanding a procedural macro is
 //! running the crate that defines it, which nothing here does. A procedural
-//! macro invocation is therefore passed over rather than reported as having
-//! produced nothing.
+//! macro invocation is therefore not expanded; the protocol records the
+//! invocation and why it was left uncovered.
 
 use std::path::Path;
 
-use codehelion_helper::ir::{Anchor, SourceRange};
+use codehelion_helper::ir::{
+    Anchor, ResolvedExpression, SourceRange, UnexpandedMacro, UnexpandedMacroReason,
+};
 use ra_ap_hir::{Adt, HasSource, Macro, ModuleDef, Semantics};
 use ra_ap_ide_db::RootDatabase;
 use ra_ap_syntax::{AstNode, ast};
 
-use crate::analysis::{Loaded, file_of, real_file, source_range};
+use crate::analysis::{Loaded, TypeTable, file_of, real_file, source_range};
+use crate::calls;
 
 /// One declaration a macro produced, and where to say it is.
 pub(crate) struct Expanded {
@@ -37,9 +40,26 @@ pub(crate) struct Expanded {
     pub(crate) anchor: Anchor,
 }
 
+/// The declaration results and explicit gaps from a file's macro invocations.
+pub(crate) struct Collected {
+    /// Declarations safely read from declarative macro expansions.
+    pub(crate) expanded: Vec<Expanded>,
+    /// Calls resolved inside declarative macro expansions.
+    pub(crate) calls: Vec<codehelion_helper::ir::CallSite>,
+    /// The type of each expansion's outer expression, when known.
+    pub(crate) expressions: Vec<ResolvedExpression>,
+    /// Invocations intentionally or necessarily left unexpanded.
+    pub(crate) unexpanded: Vec<UnexpandedMacro>,
+}
+
 /// Everything the macros invoked in `file` declared.
-pub(crate) fn collect(loaded: &Loaded, file: &Path) -> Vec<Expanded> {
-    let mut found = Vec::new();
+pub(crate) fn collect(loaded: &Loaded, file: &Path, types: &mut TypeTable) -> Collected {
+    let mut found = Collected {
+        expanded: Vec::new(),
+        calls: Vec::new(),
+        expressions: Vec::new(),
+        unexpanded: Vec::new(),
+    };
     let Some(file_id) = file_of(loaded, file) else {
         return found;
     };
@@ -55,15 +75,31 @@ pub(crate) fn collect(loaded: &Loaded, file: &Path) -> Vec<Expanded> {
         .filter_map(ast::MacroCall::cast)
     {
         let Some(macro_) = sema.resolve_macro_call(&call) else {
+            found.unexpanded.push(UnexpandedMacro {
+                invocation: source_range(loaded, file_id, call.syntax().text_range()),
+                reason: UnexpandedMacroReason::Unresolved,
+            });
             continue;
         };
         if macro_.is_proc_macro() {
+            found.unexpanded.push(UnexpandedMacro {
+                invocation: source_range(loaded, file_id, call.syntax().text_range()),
+                reason: UnexpandedMacroReason::RequiresExecution,
+            });
             continue;
         }
         let Some(written) = written_at(loaded, macro_, db) else {
+            found.unexpanded.push(UnexpandedMacro {
+                invocation: source_range(loaded, file_id, call.syntax().text_range()),
+                reason: UnexpandedMacroReason::ExpansionUnavailable,
+            });
             continue;
         };
         let Some(expansion) = sema.expand_macro_call(&call) else {
+            found.unexpanded.push(UnexpandedMacro {
+                invocation: source_range(loaded, file_id, call.syntax().text_range()),
+                reason: UnexpandedMacroReason::ExpansionUnavailable,
+            });
             continue;
         };
         let anchor = Anchor {
@@ -72,13 +108,51 @@ pub(crate) fn collect(loaded: &Loaded, file: &Path) -> Vec<Expanded> {
         };
         for item in expansion.value.descendants().filter_map(ast::Item::cast) {
             if let Some(definition) = declared(&sema, &item) {
-                found.push(Expanded {
+                found.expanded.push(Expanded {
                     definition,
                     anchor: anchor.clone(),
                 });
             }
         }
+        found.calls.extend(calls::collect_expansion(
+            &sema,
+            db,
+            &expansion.value,
+            &anchor,
+        ));
+        if let Some(expression) = expansion.value.descendants().find_map(ast::Expr::cast)
+            && let Some(info) = sema.type_of_expr(&expression)
+        {
+            found.expressions.push(ResolvedExpression {
+                anchor,
+                type_index: types.intern(&info.original(), db),
+            });
+        }
     }
+    // Derive macros are attributes rather than `MacroCall` syntax nodes. With
+    // the procedural-macro server disabled rust-analyzer cannot resolve their
+    // defining crate, but their source attribute is still an exact statement
+    // that the helper did not expand. Record it as unresolved rather than
+    // pretending the generated methods never existed.
+    for attribute in source.syntax().descendants().filter_map(ast::Attr::cast) {
+        let text = attribute.syntax().text().to_string();
+        if text.trim_start().starts_with("#[derive") {
+            found.unexpanded.push(UnexpandedMacro {
+                invocation: source_range(loaded, file_id, attribute.syntax().text_range()),
+                reason: UnexpandedMacroReason::Unresolved,
+            });
+        }
+    }
+    found.unexpanded.sort_by_key(|macro_| {
+        (
+            macro_.invocation.start_byte,
+            macro_.invocation.end_byte,
+            macro_.reason.name(),
+        )
+    });
+    found
+        .unexpanded
+        .dedup_by(|left, right| left.invocation == right.invocation && left.reason == right.reason);
     found
 }
 

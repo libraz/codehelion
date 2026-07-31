@@ -113,7 +113,22 @@ struct Group {
     /// integer width.
     #[serde(default)]
     width_family: bool,
+    /// Registered-rule evidence for a restricted-semantic group.
+    #[serde(default)]
+    semantic: Option<SemanticEvidence>,
     members: Vec<Member>,
+}
+
+/// The subset of semantic report evidence used by per-rule evaluation.
+#[derive(Debug, Deserialize)]
+struct SemanticEvidence {
+    rules: Vec<SemanticRuleEvidence>,
+}
+
+/// One rule contributing to a semantic finding.
+#[derive(Debug, Deserialize)]
+struct SemanticRuleEvidence {
+    id: String,
 }
 
 /// Boilerplate category the default policy ranks down rather than hides.
@@ -186,6 +201,41 @@ struct Member {
     tokens: u64,
 }
 
+/// The additive envelope emitted by `scan --compare-languages --format json`.
+///
+/// Cross-language comparisons are deliberately outside ordinary scan history,
+/// so they have no scan-report schema version to borrow. The small dedicated
+/// adapter below reads only the explicit comparison evidence and the measured
+/// partition line counts used for a corpus rate.
+#[derive(Debug, Deserialize)]
+struct CrossLanguageOutput {
+    partitions: Vec<CrossLanguagePartition>,
+    cross_language_comparison: CrossLanguageComparison,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrossLanguagePartition {
+    summary: CrossLanguageSummary,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrossLanguageSummary {
+    lines: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrossLanguageComparison {
+    groups: Vec<CrossLanguageGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrossLanguageGroup {
+    id: String,
+    rule_id: String,
+    semantic_confidence: f64,
+    members: Vec<Member>,
+}
+
 /// A scan report, read as a scorable detection result.
 ///
 /// Returns the result together with the line count the scan itself measured,
@@ -216,6 +266,9 @@ pub fn from_report_json(json: &str) -> Result<(DetectionResult, u32), Error> {
                 Finding {
                     id: group.fingerprint.clone(),
                     clone_type: group.clone_type,
+                    rule_ids: group.semantic.as_ref().map_or_else(Vec::new, |semantic| {
+                        semantic.rules.iter().map(|rule| rule.id.clone()).collect()
+                    }),
                     // The ranking the tool would show, which is what
                     // precision@k is a statement about. The metrics read it for
                     // order alone.
@@ -259,6 +312,59 @@ pub fn from_report_json(json: &str) -> Result<(DetectionResult, u32), Error> {
     ))
 }
 
+/// Read an explicit Rust-to-C++ comparison as restricted-semantic findings.
+///
+/// The returned line count is the sum of selected partition reports. Corpus
+/// fixtures use one Rust and one C++ partition; callers comparing repeated
+/// C++ build variants should treat this denominator as comparison work, not a
+/// count of unique source lines.
+///
+/// # Errors
+///
+/// Returns [`Error::Parse`] when the document lacks the dedicated comparison
+/// envelope or its members cannot be decoded.
+pub fn from_cross_language_comparison_json(json: &str) -> Result<(DetectionResult, u32), Error> {
+    let output: CrossLanguageOutput = serde_json::from_str(json)?;
+    let lines = output.partitions.iter().fold(0_u32, |total, partition| {
+        total.saturating_add(partition.summary.lines)
+    });
+    let findings = output
+        .cross_language_comparison
+        .groups
+        .into_iter()
+        .map(|group| Finding {
+            id: group.id,
+            clone_type: CloneType::RestrictedSemantic,
+            rule_ids: vec![group.rule_id],
+            score: group.semantic_confidence,
+            size_tokens: 0,
+            band: None,
+            actionable: true,
+            axes: Axes::default(),
+            width_family: false,
+            fragments: group
+                .members
+                .into_iter()
+                .map(|member| Fragment {
+                    file: member.file,
+                    start_line: member.start_line,
+                    end_line: member.end_line,
+                    tokens: member.tokens,
+                })
+                .collect(),
+        })
+        .collect();
+    Ok((
+        DetectionResult {
+            schema_version: crate::schema::SCHEMA_VERSION,
+            language: "mixed".to_string(),
+            findings,
+            withheld: Vec::new(),
+        },
+        lines,
+    ))
+}
+
 /// The corpus language, as the file counts describe it. A corpus that mixes
 /// languages says so rather than picking whichever was counted first.
 fn language_of(files: &FileCounts) -> String {
@@ -278,6 +384,35 @@ fn language_of(files: &FileCounts) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    const CROSS_LANGUAGE_REPORT: &str = r#"{
+      "partitions": [{"summary":{"lines":3}}, {"summary":{"lines":5}}],
+      "cross_language_comparison": {
+        "groups": [{
+          "id":"cross-1", "rule_id":"cross-language-sequence-pipeline-v1", "semantic_confidence":0.55,
+          "members":[
+            {"file":"src/lib.rs","start_line":1,"end_line":3},
+            {"file":"cpp/copied.cpp","start_line":4,"end_line":8}
+          ]
+        }]
+      }
+    }"#;
+
+    #[test]
+    fn a_cross_language_comparison_is_read_as_restricted_semantic() {
+        let (result, lines) =
+            from_cross_language_comparison_json(CROSS_LANGUAGE_REPORT).expect("comparison reads");
+        assert_eq!(lines, 8);
+        assert_eq!(result.language, "mixed");
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(result.findings[0].clone_type, CloneType::RestrictedSemantic);
+        assert_eq!(
+            result.findings[0].rule_ids,
+            ["cross-language-sequence-pipeline-v1"]
+        );
+        assert!((result.findings[0].score - 0.55).abs() < f64::EPSILON);
+        assert_eq!(result.findings[0].fragments[1].file, "cpp/copied.cpp");
+    }
 
     /// A report with one reported group and one the tool suppressed.
     const REPORT: &str = r#"{

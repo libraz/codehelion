@@ -21,9 +21,11 @@
 //!   confidence is penalised accordingly rather than guessing. Supplying
 //!   evidence for both sides is what lifts that penalty, and only a compiler
 //!   can supply it;
-//! - **api** — how much the two call-name multisets overlap; unavailable when
-//!   neither unit calls anything, since two empty call surfaces are an absence
-//!   of evidence rather than agreement.
+//! - **api** — how much the two call surfaces overlap. Semantic mode uses
+//!   compiler-resolved targets when both units have them; otherwise it retains
+//!   Structural mode's call-name comparison. It is unavailable when neither
+//!   unit calls anything, since two empty call surfaces are an absence of
+//!   evidence rather than agreement.
 //!
 //! Alignment is a by-product: the LCS backtrace records which statements
 //! matched and which are unique to each side, which is the diff `explain`
@@ -61,12 +63,12 @@ use crate::clone_class::CloneClass;
 use crate::features::{ApiCallFeature, CfgFeature, SubtreeFeature, UnitFeatures};
 use crate::frontend::Token;
 use crate::ir::{IrNode, Shape, StatementSummary};
-use crate::types::TypeEvidence;
+use crate::types::{ApiEvidence, TypeEvidence};
 
 /// Version of the composite-weight recipe and judgment rules. Bump it when any
 /// weight default or classification rule changes, since findings change with
 /// it. Recorded as a detector version.
-pub const WEIGHT_VERSION: &str = "structural-verify-v4";
+pub const WEIGHT_VERSION: &str = "structural-verify-v5";
 
 /// Relative weights of the similarity dimensions in the composite score.
 ///
@@ -275,6 +277,10 @@ pub struct UnitView<'a> {
     /// from empty evidence: absent means nobody looked, and empty means
     /// somebody looked and found nothing to compare.
     pub types: Option<&'a TypeEvidence>,
+    /// The call targets a compiler resolved inside the unit, when both sides
+    /// of a comparison can use them. Missing targets deliberately retain the
+    /// Structural call-name comparison rather than claiming disagreement.
+    pub apis: Option<&'a ApiEvidence>,
 }
 
 /// The outcome of verifying a candidate pair.
@@ -352,7 +358,11 @@ fn measure(a: &UnitView<'_>, b: &UnitView<'_>, config: &VerifyConfig) -> Verdict
         subtree_jaccard(&a.features.subtrees, &b.features.subtrees),
     );
     let control_flow = cfg_similarity(&a.features.cfg, &b.features.cfg);
-    let api = api_similarity(&a.features.api, &b.features.api);
+    let api = a
+        .apis
+        .zip(b.apis)
+        .and_then(|(a, b)| ApiEvidence::agreement(a, b))
+        .or_else(|| api_similarity(&a.features.api, &b.features.api));
     // Absent unless a compiler resolved types for both sides. Structural mode
     // resolves none, and the dimension is then missing rather than zero: a
     // zero would say the two units' types disagree, which nothing measured.
@@ -746,7 +756,7 @@ mod tests {
     };
     use crate::frontend::Lexeme;
     use crate::ir::ByteRange;
-    use crate::types::TypeTag;
+    use crate::types::{ApiEvidence, TypeTag};
 
     /// A statement with no text of its own. Enough for the tests that only
     /// exercise alignment, which reads shapes and never the tokens.
@@ -774,6 +784,7 @@ mod tests {
                 tokens: &self.tokens,
                 features,
                 types: None,
+                apis: None,
             }
         }
 
@@ -784,6 +795,17 @@ mod tests {
         ) -> UnitView<'a> {
             UnitView {
                 types: Some(types),
+                ..self.view(features)
+            }
+        }
+
+        fn view_with_apis<'a>(
+            &'a self,
+            features: &'a UnitFeatures,
+            apis: &'a ApiEvidence,
+        ) -> UnitView<'a> {
+            UnitView {
+                apis: Some(apis),
                 ..self.view(features)
             }
         }
@@ -1116,6 +1138,38 @@ mod tests {
             disagreeing.breakdown.composite,
             untyped.breakdown.composite
         );
+    }
+
+    /// Compiler identities distinguish calls that the Structural lexer sees
+    /// under the same source spelling. The fallback remains useful when only
+    /// one side was resolved, so an unavailable helper does not turn evidence
+    /// into a synthetic mismatch.
+    #[test]
+    fn resolved_api_targets_refine_call_names_without_penalising_missing_data() {
+        let a = statements(&[(3, &["run"])]);
+        let b = statements(&[(3, &["run"])]);
+        let features = features(counts(1), &[1], 1, &["run"]);
+        let left = ApiEvidence::from_targets(["static:crate::left::run".to_string()]);
+        let right = ApiEvidence::from_targets(["static:crate::right::run".to_string()]);
+
+        let structural = verify(
+            &a.view(&features),
+            &b.view(&features),
+            &VerifyConfig::default(),
+        );
+        let semantic = verify(
+            &a.view_with_apis(&features, &left),
+            &b.view_with_apis(&features, &right),
+            &VerifyConfig::default(),
+        );
+        let partial = verify(
+            &a.view_with_apis(&features, &left),
+            &b.view(&features),
+            &VerifyConfig::default(),
+        );
+        assert_eq!(structural.breakdown.api, Some(1.0));
+        assert_eq!(semantic.breakdown.api, Some(0.0));
+        assert_eq!(partial.breakdown.api, Some(1.0));
     }
 
     /// A sequence of `len` statements whose shapes cycle, so that alignment is

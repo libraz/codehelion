@@ -43,7 +43,7 @@ use ra_ap_syntax::AstNode;
 use ra_ap_vfs::Vfs;
 
 use crate::types::category;
-use crate::{calls, expansions, instantiations, occurrences};
+use crate::{calls, constructs, expansions, instantiations, occurrences};
 
 /// A workspace that has been read, kept so a second request about the same
 /// project does not pay to read it again.
@@ -101,11 +101,9 @@ impl Workspaces {
     /// manifest has no build to be described, and every answer about it will
     /// be the same one.
     ///
-    /// Read from `cargo metadata` and the compiler's own `--print cfg` rather
-    /// than from the loaded database, because a run asks this before it knows
-    /// whether it needs the database at all — a scan of an unchanged tree is
-    /// reported from what was recorded, and paying to read a whole workspace to
-    /// find out which record to read would cost more than the work it saves.
+    /// Read from `cargo metadata` and the compiler's own `--print cfg` before
+    /// loading the workspace, so a request with no project can be declined
+    /// without constructing compiler state.
     pub(crate) fn describe(&mut self, root: &Path) -> Result<Option<BuildDescription>, String> {
         let Some(manifest) = nearest_manifest(root) else {
             return Ok(None);
@@ -211,12 +209,13 @@ fn cargo_config() -> ra_ap_project_model::CargoConfig {
 
 /// What the workspace at `manifest` is read under.
 ///
-/// Members only. A dependency's features follow from what the members asked
-/// for and from the lockfile, both of which the variant already carries, and
-/// the resolver's answer for three hundred transitive packages would move
-/// whenever cargo changed its mind about one of them — splitting a variant
-/// without the program having changed hides a project's history just as surely
-/// as merging two that differ.
+/// A member's own features and those of its direct dependencies. A direct
+/// dependency's feature selection lives in the member's manifest, yet it does
+/// not necessarily change `Cargo.lock`; omitting it could therefore merge two
+/// different resolved programs. Transitive packages remain out: their feature
+/// sets are derived from the direct selections and the lockfile, and recording
+/// every resolver-internal choice would split a variant when Cargo changes an
+/// irrelevant implementation detail.
 fn describe_workspace(manifest: &Path) -> Result<BuildDescription, String> {
     let path = manifest
         .to_str()
@@ -245,6 +244,12 @@ fn describe_workspace(manifest: &Path) -> Result<BuildDescription, String> {
             }
             for feature in &data.active_features {
                 features.push(format!("{}/{feature}", data.name));
+            }
+            for dependency in &data.dependencies {
+                let dependency = &cargo[dependency.pkg];
+                for feature in &dependency.active_features {
+                    features.push(format!("{}/{feature}", dependency.name));
+                }
             }
         }
     }
@@ -304,7 +309,8 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
     // What the macros invoked in this file declared. The walk above passes
     // those over, because a declaration inside an expansion has no place in a
     // file until somebody says which invocation it came out of.
-    for expanded in expansions::collect(loaded, Path::new(&unit.file)) {
+    let macros = expansions::collect(loaded, Path::new(&unit.file), &mut types);
+    for expanded in macros.expanded {
         collect(
             loaded,
             expanded.definition,
@@ -313,6 +319,7 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
             &mut types,
         );
     }
+    ir.unexpanded_macros = macros.unexpanded;
     // Names, after declarations, so that a name occurring exactly where a
     // declaration begins is dropped rather than recorded twice. That can only
     // happen where the declaration opens with its own name — a field, and
@@ -325,6 +332,9 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
     }
     ir.instantiations = instantiations::collect(loaded, Path::new(&unit.file), krate, &mut types);
     ir.calls = calls::collect(loaded, Path::new(&unit.file));
+    ir.semantic_constructs = constructs::collect(loaded, Path::new(&unit.file));
+    ir.calls.extend(macros.calls);
+    ir.expressions = macros.expressions;
     ir.calls.sort_by_key(|call| {
         (
             call.anchor.expansion.start_byte,
@@ -358,6 +368,14 @@ fn place(symbol: &ResolvedSymbol) -> (String, u64) {
     )
 }
 
+/// Keep one declaration for each compiler symbol when the module walk and an
+/// explicit macro-expansion walk both reached it.
+///
+/// Rust-analyzer can expose an item from a declarative macro through a module
+/// declaration as well as through the expansion tree. The latter carries the
+/// invocation-to-definition anchor the protocol promises, so it wins over an
+/// otherwise identical ordinary anchor. Different declarations cannot share
+/// this key inside a well-formed crate; their module path is part of `id`.
 /// Add what the compiler knows about one declaration to `ir`.
 ///
 /// `origin` is set for a declaration a macro produced. Everything it declares

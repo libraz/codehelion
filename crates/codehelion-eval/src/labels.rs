@@ -21,6 +21,13 @@ pub struct LabelPair {
     /// Expected clone category for this pair.
     #[serde(rename = "type")]
     pub clone_type: CloneType,
+    /// Registered semantic rule expected to produce this pair, when the
+    /// label measures a restricted-semantic rule in isolation.
+    ///
+    /// Ordinary Type-1 through Type-3 labels leave this absent. It remains a
+    /// label-side assertion rather than a detector identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
     /// The fragments that form the labelled clone (exactly two).
     pub fragments: Vec<Fragment>,
 }
@@ -33,6 +40,10 @@ pub struct NonClone {
     pub id: String,
     /// Why these fragments look similar yet must not count as a clone.
     pub reason: String,
+    /// Registered semantic rule this deliberate lookalike is intended to
+    /// challenge, when it is part of a per-rule measurement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
     /// The fragments that must not be reported together (exactly two).
     pub fragments: Vec<Fragment>,
 }
@@ -104,5 +115,28 @@ mod tests {
         }"#;
         let labels = LabelSet::from_json(json).expect("parses without non_clones");
         assert!(labels.non_clones.is_empty());
+    }
+
+    #[test]
+    fn a_restricted_semantic_label_can_name_its_registered_rule() {
+        let json = r#"{
+          "schema_version": 0,
+          "language": "mixed",
+          "files": ["a.rs", "b.cpp"],
+          "clone_pairs": [{
+            "id": "cp-001",
+            "type": "restricted-semantic",
+            "rule_id": "cross-language-sequence-pipeline-v1",
+            "fragments": [
+              {"file":"a.rs","start_line":1,"end_line":2},
+              {"file":"b.cpp","start_line":1,"end_line":2}
+            ]
+          }]
+        }"#;
+        let labels = LabelSet::from_json(json).expect("rule-labelled semantic case parses");
+        assert_eq!(
+            labels.clone_pairs[0].rule_id.as_deref(),
+            Some("cross-language-sequence-pipeline-v1")
+        );
     }
 }

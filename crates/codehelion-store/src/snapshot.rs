@@ -21,9 +21,10 @@ use codehelion_core::features::{
     FEATURE_SCHEMA_VERSION, FeatureKind, SHAPE_TAG_SLOTS, UnitFeatures,
 };
 use codehelion_core::frontend::UnitKind;
-use codehelion_core::lineage::{Anchor, AuditState, GroupSnapshot, MemberSnapshot};
+use codehelion_core::semantic::{SOG_SCHEMA_VERSION, SemanticOperationGraph};
 use codehelion_core::stable_id::{
-    CloneGroupFingerprint, FindingId, FragmentFingerprint, GroupLineageId, HASH_ALGORITHM,
+    CloneGroupFingerprint, CrossLanguageComparisonId, CrossLanguageGroupId,
+    CrossVariantComparisonId, CrossVariantGroupId, FindingId, FragmentFingerprint, HASH_ALGORITHM,
     UnitFingerprint,
 };
 use codehelion_core::verify::Confidence;
@@ -132,58 +133,6 @@ pub struct SimilarityBreakdownRow {
     pub confidence_band: Confidence,
 }
 
-/// What became of one clone group since the previous audit of the tree.
-///
-/// Every recorded group carries one. A first scan has nothing to compare
-/// against, and says so by recording each group as
-/// [`new`](AuditState::New) with a history that starts at itself — which is a
-/// statement about the record, not a claim that the duplication is recent.
-#[derive(Debug, Clone, PartialEq)]
-pub struct GroupOrigin {
-    /// The state the comparison settled on.
-    pub state: AuditState,
-    /// The history this group belongs to.
-    pub lineage: GroupLineageId,
-    /// The previous groups this one descends from, primary first. Empty for a
-    /// group nothing connects to.
-    pub parents: Vec<LineageParent>,
-}
-
-impl GroupOrigin {
-    /// The history of a group nothing before it connects to: it starts here.
-    ///
-    /// This is what a first audit records for everything it finds, and the
-    /// value a later audit's comparison overwrites for the groups it can
-    /// connect. It is deliberately the starting point rather than an absent
-    /// one: a recorded group without a recorded history would have to be read
-    /// as either "never compared" or "compared and found new", and those are
-    /// not the same claim.
-    #[must_use]
-    pub fn unconnected(fingerprint: &CloneGroupFingerprint) -> Self {
-        Self {
-            state: AuditState::New,
-            lineage: codehelion_core::stable_id::group_lineage_id(fingerprint),
-            parents: Vec::new(),
-        }
-    }
-}
-
-/// One connection back to a previous group.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LineageParent {
-    /// The parent group's fingerprint.
-    pub fingerprint: CloneGroupFingerprint,
-    /// The history the parent belonged to. Equal to the child's for the
-    /// primary parent; a merge's other parents bring their own.
-    pub lineage: GroupLineageId,
-    /// Whether the child's state was judged against this parent.
-    pub primary: bool,
-    /// Member contents both groups hold.
-    pub shared_content: usize,
-    /// Shared content as a fraction of the smaller group.
-    pub overlap: f64,
-}
-
 /// One clone group with its members.
 #[derive(Debug, Clone)]
 pub struct GroupRow {
@@ -226,50 +175,55 @@ pub struct GroupRow {
     /// The similarity breakdown, when the mode measured one (Structural). Fast
     /// groups leave this `None`.
     pub similarity: Option<SimilarityBreakdownRow>,
-    /// What became of this group since the previous audit.
-    pub history: GroupOrigin,
+    /// Registered SOG evidence for a restricted semantic finding. `None` for
+    /// textual and structural clone classes.
+    pub semantic: Option<SemanticEvidenceRow>,
     /// The occurrences, in deterministic order; the first is canonical.
     pub members: Vec<MemberRow>,
 }
 
-impl GroupRow {
-    /// This group as an audit comparison sees it: content, placement and the
-    /// classification, with the evidence a comparison never reads left out.
-    ///
-    /// `units` is [`Snapshot::units`], which members reference by index for
-    /// their enclosing unit's name.
-    #[must_use]
-    pub fn snapshot(&self, units: &[UnitRow]) -> GroupSnapshot {
-        GroupSnapshot {
-            fingerprint: self.fingerprint,
-            clone_type: self.clone_type,
-            scope: self.member_scope,
-            score: self.score,
-            canonical: self.members.first().map(|member| member.content),
-            lineage: None,
-            members: self
-                .members
-                .iter()
-                .map(|member| MemberSnapshot {
-                    content: member.content,
-                    anchor: Anchor {
-                        file: member.file_path.clone(),
-                        unit: member
-                            .host_unit
-                            .and_then(|index| units.get(index))
-                            .and_then(|unit| unit.name.clone()),
-                    },
-                })
-                .collect(),
-        }
-    }
+/// Persisted registered-rule evidence for one restricted semantic group.
+#[derive(Debug, Clone)]
+pub struct SemanticEvidenceRow {
+    /// SOG schema version interpreted by the registered rule.
+    pub schema_version: String,
+    /// Stable registered-rule identifier.
+    pub rule_id: String,
+    /// Rule semantics revision.
+    pub rule_version: u32,
+    /// Conservative rule confidence before auxiliary features are applied.
+    pub rule_confidence: f64,
+    /// One serialized normalized graph for every group member, in member order.
+    pub graphs: Vec<SemanticOperationGraphRow>,
+    /// Explainable graph-local node correspondences.
+    pub node_mappings: Vec<SemanticNodeMappingRow>,
+}
+
+/// One serialized normalized operation graph attached to a group member.
+#[derive(Debug, Clone)]
+pub struct SemanticOperationGraphRow {
+    /// Schema version stored inside the graph itself.
+    pub schema_version: String,
+    /// Canonical JSON serialization of the graph.
+    pub graph_json: String,
+}
+
+/// One graph-local node mapping recorded for semantic explain output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemanticNodeMappingRow {
+    /// Zero-based position of the corresponding member graph. The canonical
+    /// graph is at position zero, so this is always at least one.
+    pub corresponding_member: u32,
+    /// Node index in the canonical graph.
+    pub canonical: u32,
+    /// Node index in the corresponding graph.
+    pub corresponding: u32,
 }
 
 /// One suppression rule active for the scan.
 ///
-/// Rules are content-addressed by `(scope, pattern)`: recording the same rule
-/// again reuses the existing row, so findings from different runs suppressed
-/// by the same rule reference one row.
+/// Rules are content-addressed by `(scope, pattern)`: identical rules share
+/// one vocabulary row within the local database.
 #[derive(Debug, Clone)]
 pub struct SuppressionRuleRow {
     /// Rule scope; must be one of the schema's suppression scopes (for
@@ -442,6 +396,118 @@ pub struct Snapshot<'a> {
     pub summary: SummaryRow,
 }
 
+/// A separately persisted opt-in comparison across normal build variants.
+///
+/// It is intentionally not a [`Snapshot`]: no normal-snapshot or baseline
+/// relation may be inferred from it.
+#[derive(Debug, Clone)]
+pub struct CrossVariantComparisonSnapshot<'a> {
+    /// Scan root shared by the partition scans.
+    pub root_path: &'a str,
+    /// Comparison-domain identity.
+    pub comparison_id: CrossVariantComparisonId,
+    /// Version of the comparison policy.
+    pub policy_version: &'a str,
+    /// Clock values for this explicit comparison invocation.
+    pub started_at: &'a str,
+    /// Clock values for this explicit comparison invocation.
+    pub finished_at: &'a str,
+    /// Sorted origin build-variant fingerprints.
+    pub origins: &'a [String],
+    /// Exact groups found directly across the origins.
+    pub groups: &'a [CrossVariantGroupRow],
+}
+
+/// One cross-build-variant exact clone group.
+#[derive(Debug, Clone)]
+pub struct CrossVariantGroupRow {
+    /// Comparison-domain group identity.
+    pub group_id: CrossVariantGroupId,
+    /// Exact Type-1 clones only under the current policy.
+    pub clone_type: CloneClass,
+    /// Members retaining their own origin variant.
+    pub members: Vec<CrossVariantMemberRow>,
+}
+
+/// An origin-aware cross-build-variant member.
+#[derive(Debug, Clone)]
+pub struct CrossVariantMemberRow {
+    /// Fingerprint of the normal partition that produced this member.
+    pub origin_variant: String,
+    /// Source language.
+    pub language: Language,
+    /// Anchor relative to the comparison root.
+    pub file_path: String,
+    /// Anchor, 1-based.
+    pub start_line: u32,
+    /// Anchor, 1-based.
+    pub end_line: u32,
+    /// Best-effort unit name.
+    pub unit_name: Option<String>,
+    /// Token count of the exact unit.
+    pub token_count: usize,
+}
+
+/// A separately persisted opt-in Rust-to-C++ semantic comparison.
+///
+/// Like [`CrossVariantComparisonSnapshot`], this cannot affect normal scan
+/// snapshots or baselines.
+#[derive(Debug, Clone)]
+pub struct CrossLanguageComparisonSnapshot<'a> {
+    /// Scan root shared by the partition scans.
+    pub root_path: &'a str,
+    /// Comparison-domain identity.
+    pub comparison_id: CrossLanguageComparisonId,
+    /// Version of the comparison policy.
+    pub policy_version: &'a str,
+    /// Clock value for this explicit comparison invocation.
+    pub started_at: &'a str,
+    /// Clock value for this explicit comparison invocation.
+    pub finished_at: &'a str,
+    /// Sorted origin build-variant fingerprints.
+    pub origins: &'a [String],
+    /// Verified semantic groups found directly across the origins.
+    pub groups: &'a [CrossLanguageSemanticGroupRow],
+}
+
+/// One verified Rust-to-C++ restricted-semantic group.
+#[derive(Debug, Clone)]
+pub struct CrossLanguageSemanticGroupRow {
+    /// Comparison-domain group identity.
+    pub group_id: CrossLanguageGroupId,
+    /// Registered correspondence rule identifier.
+    pub rule_id: String,
+    /// Registered correspondence rule revision.
+    pub rule_version: u32,
+    /// Conservative confidence after normalization coverage.
+    pub semantic_confidence: f64,
+    /// Applied closed API-correspondence identifiers in SOG order.
+    pub correspondence_ids: Vec<String>,
+    /// Members retaining their own origin variant and normalized graph.
+    pub members: Vec<CrossLanguageSemanticMemberRow>,
+}
+
+/// One origin-aware member of a cross-language semantic group.
+#[derive(Debug, Clone)]
+pub struct CrossLanguageSemanticMemberRow {
+    /// Fingerprint of the normal partition that produced this graph.
+    pub origin_variant: String,
+    /// Source language (Rust or C++ only).
+    pub language: Language,
+    /// Anchor relative to the comparison root.
+    pub file_path: String,
+    /// Anchor, 1-based.
+    pub start_line: u32,
+    /// Anchor, 1-based.
+    pub end_line: u32,
+    /// Best-effort unit name.
+    pub unit_name: Option<String>,
+    /// Schema version retained inside the graph itself.
+    pub graph_schema_version: String,
+    /// Canonical JSON serialization of the normalized graph.
+    pub graph_json: String,
+}
+
 /// What a run's report says that its findings do not.
 ///
 /// Everything here is a measurement of the run rather than of a group: how
@@ -550,20 +616,254 @@ pub struct FileRow {
 }
 
 impl Store {
-    /// Persist `snapshot` as one atomic transaction and return the new scan
-    /// run's row id.
+    /// Replace the stored snapshot atomically and return its row id.
     ///
     /// # Errors
     ///
     /// Any failure — malformed input (such as a member referencing a
     /// non-existent unit) or an underlying database error — rolls the whole
-    /// snapshot back; no partial scan run is ever left behind.
+    /// replacement back; the prior completed snapshot remains intact.
     pub fn record_snapshot(&mut self, snapshot: &Snapshot<'_>) -> Result<i64, StoreError> {
+        self.record_snapshot_part(snapshot, true)
+    }
+
+    /// Record one partition of the current scan.
+    ///
+    /// The first partition replaces the prior scan; later partitions belong to
+    /// that same invocation and are appended before its report is emitted.
+    /// Callers must never use `false` to retain a completed earlier scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns any validation or database error while preserving transaction
+    /// atomicity for the partition being written.
+    pub fn record_snapshot_part(
+        &mut self,
+        snapshot: &Snapshot<'_>,
+        replace_existing: bool,
+    ) -> Result<i64, StoreError> {
         let tx = self.conn.transaction()?;
+        if replace_existing {
+            clear_previous_snapshot(&tx)?;
+        }
         let run_id = write_snapshot(&tx, snapshot)?;
         tx.commit()?;
         Ok(run_id)
     }
+
+    /// Persist one opt-in cross-build-variant comparison.
+    ///
+    /// Every invocation gets a row even when its comparison identity repeats,
+    /// so an explicit comparison always describes the inputs it received.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the comparison cannot be written atomically.
+    pub fn record_cross_variant_comparison(
+        &mut self,
+        comparison: &CrossVariantComparisonSnapshot<'_>,
+    ) -> Result<i64, StoreError> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO cross_variant_comparison
+                 (comparison_id, policy_version, root_path, started_at, finished_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                comparison.comparison_id.as_bytes().as_slice(),
+                comparison.policy_version,
+                comparison.root_path,
+                comparison.started_at,
+                comparison.finished_at,
+            ],
+        )?;
+        let comparison_row = tx.last_insert_rowid();
+        for origin in comparison.origins {
+            tx.execute(
+                "INSERT INTO cross_variant_comparison_origin
+                     (comparison_id, build_variant_fingerprint) VALUES (?1, ?2)",
+                params![comparison_row, origin],
+            )?;
+        }
+        for group in comparison.groups {
+            tx.execute(
+                "INSERT INTO cross_variant_clone_group
+                     (comparison_id, group_id, clone_type, member_count)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    comparison_row,
+                    group.group_id.as_bytes().as_slice(),
+                    group.clone_type.name(),
+                    i64::try_from(group.members.len()).unwrap_or(i64::MAX),
+                ],
+            )?;
+            let group_row = tx.last_insert_rowid();
+            for member in &group.members {
+                tx.execute(
+                    "INSERT INTO cross_variant_clone_member
+                         (group_id, origin_variant_fingerprint, language, file_path,
+                          start_line, end_line, unit_name, token_count)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        group_row,
+                        member.origin_variant,
+                        member.language.name(),
+                        member.file_path,
+                        i64::from(member.start_line),
+                        i64::from(member.end_line),
+                        member.unit_name,
+                        i64::try_from(member.token_count).unwrap_or(i64::MAX),
+                    ],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(comparison_row)
+    }
+
+    /// Persist one opt-in Rust-to-C++ semantic comparison.
+    ///
+    /// This uses tables distinct from both normal snapshots and exact
+    /// cross-build comparisons, so the result domains stay separate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a group lacks its closed evidence or when the
+    /// comparison cannot be written atomically.
+    pub fn record_cross_language_comparison(
+        &mut self,
+        comparison: &CrossLanguageComparisonSnapshot<'_>,
+    ) -> Result<i64, StoreError> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO cross_language_comparison
+                 (comparison_id, policy_version, root_path, started_at, finished_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                comparison.comparison_id.as_bytes().as_slice(),
+                comparison.policy_version,
+                comparison.root_path,
+                comparison.started_at,
+                comparison.finished_at,
+            ],
+        )?;
+        let comparison_row = tx.last_insert_rowid();
+        for origin in comparison.origins {
+            tx.execute(
+                "INSERT INTO cross_language_comparison_origin
+                     (comparison_id, build_variant_fingerprint) VALUES (?1, ?2)",
+                params![comparison_row, origin],
+            )?;
+        }
+        for group in comparison.groups {
+            validate_cross_language_group(group)?;
+            let correspondence_ids =
+                serde_json::to_string(&group.correspondence_ids).map_err(|error| {
+                    StoreError::InvalidSemanticEvidence {
+                        reason: format!(
+                            "serializing cross-language API correspondence IDs: {error}"
+                        ),
+                    }
+                })?;
+            tx.execute(
+                "INSERT INTO cross_language_semantic_group
+                     (comparison_id, group_id, rule_id, rule_version, semantic_confidence,
+                      correspondence_ids_json, member_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    comparison_row,
+                    group.group_id.as_bytes().as_slice(),
+                    group.rule_id,
+                    i64::from(group.rule_version),
+                    group.semantic_confidence,
+                    correspondence_ids,
+                    i64::try_from(group.members.len()).unwrap_or(i64::MAX),
+                ],
+            )?;
+            let group_row = tx.last_insert_rowid();
+            for member in &group.members {
+                tx.execute(
+                    "INSERT INTO cross_language_semantic_member
+                         (group_id, origin_variant_fingerprint, language, file_path,
+                          start_line, end_line, unit_name, graph_schema_version, graph_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        group_row,
+                        member.origin_variant,
+                        member.language.name(),
+                        member.file_path,
+                        i64::from(member.start_line),
+                        i64::from(member.end_line),
+                        member.unit_name,
+                        member.graph_schema_version,
+                        member.graph_json,
+                    ],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(comparison_row)
+    }
+}
+
+/// Drop the earlier scan before writing its replacement.
+///
+/// A local database is the current scan's canonical storage, not a ledger.
+fn clear_previous_snapshot(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    tx.execute("DELETE FROM scan_run", [])?;
+    Ok(())
+}
+
+fn validate_cross_language_group(group: &CrossLanguageSemanticGroupRow) -> Result<(), StoreError> {
+    if !group.semantic_confidence.is_finite()
+        || !(0.0..=1.0).contains(&group.semantic_confidence)
+        || group.rule_id.is_empty()
+        || group.correspondence_ids.is_empty()
+        || group.members.len() != 2
+    {
+        return Err(StoreError::InvalidSemanticEvidence {
+            reason: "cross-language group lacks bounded rule evidence".to_string(),
+        });
+    }
+    let mut has_rust = false;
+    let mut has_cpp = false;
+    let mut origins = BTreeSet::new();
+    for member in &group.members {
+        if !matches!(member.language, Language::Rust | Language::Cpp)
+            || member.graph_schema_version != SOG_SCHEMA_VERSION
+        {
+            return Err(StoreError::InvalidSemanticEvidence {
+                reason: "cross-language member has an unsupported language or graph schema"
+                    .to_string(),
+            });
+        }
+        let graph: SemanticOperationGraph =
+            serde_json::from_str(&member.graph_json).map_err(|error| {
+                StoreError::InvalidSemanticEvidence {
+                    reason: format!("decoding cross-language member graph: {error}"),
+                }
+            })?;
+        if graph.schema_version != member.graph_schema_version {
+            return Err(StoreError::InvalidSemanticEvidence {
+                reason: "cross-language member graph schema disagrees with its stored metadata"
+                    .to_string(),
+            });
+        }
+        if graph.language != member.language {
+            return Err(StoreError::InvalidSemanticEvidence {
+                reason: "cross-language member graph language disagrees with its stored metadata"
+                    .to_string(),
+            });
+        }
+        has_rust |= member.language == Language::Rust;
+        has_cpp |= member.language == Language::Cpp;
+        origins.insert(member.origin_variant.as_str());
+    }
+    if !has_rust || !has_cpp || origins.len() != 2 {
+        return Err(StoreError::InvalidSemanticEvidence {
+            reason: "cross-language group must contain one Rust and one C++ origin".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn write_snapshot(tx: &Transaction<'_>, snapshot: &Snapshot<'_>) -> Result<i64, StoreError> {
@@ -873,8 +1173,7 @@ fn write_units(
 }
 
 #[allow(clippy::too_many_arguments)] // transaction hand-off, one call site
-/// The audited row for one group in one run: what was found, where the run
-/// ranked it, and what became of it since the tree was last looked at.
+/// The persisted ranking for one group in one scan.
 fn write_finding(
     tx: &Transaction<'_>,
     run_id: i64,
@@ -893,15 +1192,14 @@ fn write_finding(
     };
     tx.execute(
         "INSERT INTO finding
-             (scan_run_id, clone_group_id, audit_state, suppression_id,
+             (scan_run_id, clone_group_id, suppression_id,
               clone_confidence, maintenance_risk, refactoring_difficulty,
               final_priority, semantic_confidence,
               source_artifact_mapping_confidence, savings_confidence)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             run_id,
             group_row_id,
-            group.history.state.name(),
             suppression_row_id,
             group.priority.clone_confidence,
             group.priority.maintenance_risk,
@@ -951,10 +1249,9 @@ fn write_group(
     let group_row_id = tx.last_insert_rowid();
 
     write_finding(tx, run_id, group_row_id, group, suppression_row_ids)?;
-    write_lineage(tx, snapshot, run_id, variant_id, group, group_fp_id)?;
-
     write_group_similarity(tx, group_row_id, group.similarity.as_ref())?;
 
+    let mut fragment_row_ids = Vec::with_capacity(group.members.len());
     for (index, member) in group.members.iter().enumerate() {
         let host_row_id = match member.host_unit {
             Some(unit_index) => Some(*unit_row_ids.get(unit_index).ok_or(
@@ -989,6 +1286,7 @@ fn write_group(
             ],
         )?;
         let fragment_row_id = tx.last_insert_rowid();
+        fragment_row_ids.push(fragment_row_id);
         tx.execute(
             "INSERT INTO clone_group_member
                  (clone_group_id, fragment_id, finding_id, is_canonical)
@@ -1001,54 +1299,91 @@ fn write_group(
             ],
         )?;
     }
+    if let Some(evidence) = &group.semantic {
+        write_semantic_evidence(tx, group_row_id, &fragment_row_ids, evidence)?;
+    }
     Ok(())
 }
 
-/// Record which history a group belongs to and what connected it there.
-///
-/// The edge rows carry the run that observed them, because a connection is a
-/// conclusion one audit drew from two results; a later audit comparing a
-/// different pair of runs may draw a different one, and both stay on the
-/// record. A parent's fingerprint row already exists — the run that found it
-/// wrote it — so the upsert here finds rather than creates, except where a
-/// caller supplies a parent no recorded run held, which the write treats the
-/// same way rather than rejecting: this layer stores what it is given.
-fn write_lineage(
+/// Persist the graph and rule evidence that makes a restricted semantic group
+/// explainable. Member graph order is the group's canonical member order.
+fn write_semantic_evidence(
     tx: &Transaction<'_>,
-    snapshot: &Snapshot<'_>,
-    run_id: i64,
-    variant_id: i64,
-    group: &GroupRow,
-    group_fp_id: i64,
+    group_row_id: i64,
+    fragment_row_ids: &[i64],
+    evidence: &SemanticEvidenceRow,
 ) -> Result<(), StoreError> {
+    if evidence.schema_version != SOG_SCHEMA_VERSION {
+        return Err(StoreError::InvalidSemanticEvidence {
+            reason: format!(
+                "group evidence schema {} is not supported ({SOG_SCHEMA_VERSION})",
+                evidence.schema_version
+            ),
+        });
+    }
+    if evidence.graphs.len() != fragment_row_ids.len() {
+        return Err(StoreError::InvalidSemanticEvidence {
+            reason: format!(
+                "{} graphs for {} group members",
+                evidence.graphs.len(),
+                fragment_row_ids.len()
+            ),
+        });
+    }
     tx.execute(
-        "INSERT INTO group_lineage (scan_run_id, lineage_id, group_fingerprint_id)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT (scan_run_id, group_fingerprint_id) DO NOTHING",
+        "INSERT INTO semantic_group_evidence
+             (clone_group_id, schema_version, rule_id, rule_version, rule_confidence)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
-            run_id,
-            group.history.lineage.as_bytes().as_slice(),
-            group_fp_id,
+            group_row_id,
+            evidence.schema_version,
+            evidence.rule_id,
+            evidence.rule_version,
+            evidence.rule_confidence,
         ],
     )?;
-    for parent in &group.history.parents {
-        let parent_fp_id =
-            upsert_group_fingerprint(tx, parent.fingerprint.as_bytes(), snapshot, variant_id)?;
+    for (fragment_row_id, graph) in fragment_row_ids.iter().zip(&evidence.graphs) {
+        if graph.schema_version != evidence.schema_version {
+            return Err(StoreError::InvalidSemanticEvidence {
+                reason: "member graph schema does not match group evidence".to_string(),
+            });
+        }
+        let parsed: SemanticOperationGraph =
+            serde_json::from_str(&graph.graph_json).map_err(|error| {
+                StoreError::InvalidSemanticEvidence {
+                    reason: format!("decoding member graph JSON: {error}"),
+                }
+            })?;
+        if parsed.schema_version != graph.schema_version {
+            return Err(StoreError::InvalidSemanticEvidence {
+                reason: "member graph JSON schema does not match its row".to_string(),
+            });
+        }
+        SemanticOperationGraph::new(
+            parsed.language,
+            parsed.build_variant_fingerprint,
+            parsed.nodes,
+            parsed.edges,
+        )
+        .map_err(|error| StoreError::InvalidSemanticEvidence {
+            reason: format!("member graph violates the SOG contract: {error}"),
+        })?;
         tx.execute(
-            "INSERT INTO group_lineage_edge
-                 (scan_run_id, child_group_fingerprint_id, parent_group_fingerprint_id,
-                  parent_lineage_id, is_primary, shared_content, overlap)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT (scan_run_id, child_group_fingerprint_id,
-                          parent_group_fingerprint_id) DO NOTHING",
+            "INSERT INTO semantic_operation_graph (fragment_id, schema_version, graph_json)
+             VALUES (?1, ?2, ?3)",
+            params![fragment_row_id, graph.schema_version, graph.graph_json],
+        )?;
+    }
+    for mapping in &evidence.node_mappings {
+        tx.execute(
+            "INSERT INTO semantic_node_mapping
+                 (clone_group_id, corresponding_member, canonical_node, corresponding_node)
+             VALUES (?1, ?2, ?3, ?4)",
             params![
-                run_id,
-                group_fp_id,
-                parent_fp_id,
-                parent.lineage.as_bytes().as_slice(),
-                parent.primary,
-                i64::try_from(parent.shared_content).unwrap_or(i64::MAX),
-                parent.overlap,
+                group_row_id,
+                mapping.corresponding_member,
+                mapping.canonical,
+                mapping.corresponding
             ],
         )?;
     }

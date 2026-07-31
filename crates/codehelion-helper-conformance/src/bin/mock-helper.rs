@@ -16,6 +16,8 @@
 //! mock-helper untyped           # cannot resolve types
 //! mock-helper slow              # answers, eventually
 //! mock-helper deaf              # never answers
+//! mock-helper deaf-after-setup  # establishes the run, then hangs on analysis
+//! mock-helper deaf-on-poison    # hangs only for a unit named `poison`
 //! mock-helper dies              # exits mid-handshake
 //! mock-helper noisy-death       # complains on stderr, then exits
 //! mock-helper confused          # answers a request nobody made
@@ -23,6 +25,8 @@
 //! mock-helper chatty            # floods its standard error, then exits
 //! mock-helper needs-execution   # analyzes nothing: it would have to run code
 //! mock-helper wrong-schema      # answers in a schema nobody reads
+//! mock-helper wrong-revision-after-setup # changes response protocol on analysis
+//! mock-helper wrong-revision-on-poison # changes protocol only for `poison`
 //! mock-helper allergic          # dies on any unit whose file is named `poison`
 //! ```
 
@@ -40,7 +44,10 @@ use codehelion_helper::protocol::{
 };
 
 fn main() {
-    let behaviour = std::env::args().nth(1).unwrap_or_default();
+    let behaviour = std::env::args()
+        .nth(1)
+        .or_else(|| std::env::var("CODEHELION_MOCK_HELPER_BEHAVIOUR").ok())
+        .unwrap_or_default();
     let mut input = std::io::stdin();
     let mut output = std::io::stdout();
 
@@ -63,6 +70,11 @@ fn main() {
         match behaviour.as_str() {
             "dies" => std::process::exit(4),
             "deaf" => park(),
+            "deaf-after-setup" if matches!(&request.body, RequestBody::Analyze(_)) => park(),
+            "deaf-on-poison" if matches!(&request.body, RequestBody::Analyze(analyze) if analyze.unit.file.contains("poison")) =>
+            {
+                park();
+            }
             "slow" => std::thread::sleep(Duration::from_secs(30)),
             _ => {}
         }
@@ -71,6 +83,7 @@ fn main() {
         } else {
             request.id
         };
+        let request_protocol = request.protocol_version;
         let body = match request.body {
             RequestBody::Handshake(_) if behaviour == "refuses" => ResponseBody::Failed(Failure {
                 code: "no_toolchain".into(),
@@ -108,10 +121,18 @@ fn main() {
             RequestBody::Shutdown => ResponseBody::Shutdown,
         };
         let shutting_down = matches!(body, ResponseBody::Shutdown);
+        let wrong_revision = behaviour == "wrong-revision-after-setup"
+            || (behaviour == "wrong-revision-on-poison"
+                && matches!(&body, ResponseBody::Analyzed(ir) if ir.unit.file.contains("poison")));
+        let protocol_version = if wrong_revision && matches!(&body, ResponseBody::Analyzed(_)) {
+            request_protocol.saturating_add(1)
+        } else {
+            request_protocol
+        };
         let sent = write_frame(
             &mut output,
             &Response {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version,
                 id,
                 body,
             },

@@ -62,12 +62,14 @@ fn breakdown(name: &str) -> SimilarityBreakdown {
             tokens: &seed.tokens,
             features: &seed_features.units[0],
             types: None,
+            apis: None,
         },
         &UnitView {
             statements: &variant_statements,
             tokens: &variant.tokens,
             features: &variant_features.units[0],
             types: None,
+            apis: None,
         },
         &VerifyConfig::default(),
     );

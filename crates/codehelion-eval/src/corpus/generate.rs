@@ -774,6 +774,7 @@ fn resolve_pairs(
             Ok(LabelPair {
                 id: format!("cp-{:03}", index + 1),
                 clone_type: pair.clone_type,
+                rule_id: None,
                 fragments: vec![
                     Fragment {
                         file: seed_file.to_string(),
@@ -830,6 +831,7 @@ fn resolve_non_clones(
             Ok(NonClone {
                 id: format!("nc-{:03}", index + 1),
                 reason: spec.reason.clone(),
+                rule_id: None,
                 fragments: vec![
                     Fragment {
                         file: seed_file.to_string(),
@@ -877,6 +879,7 @@ fn resolve_transplant_non_clones(
             Ok(NonClone {
                 id: format!("nc-{:03}", id_offset + index + 1),
                 reason: entry.reason.clone(),
+                rule_id: None,
                 fragments: vec![
                     Fragment {
                         file: seed_file.to_string(),

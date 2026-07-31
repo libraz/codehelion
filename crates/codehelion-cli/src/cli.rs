@@ -45,12 +45,12 @@ pub enum Command {
         #[command(subcommand)]
         action: CacheAction,
     },
-    /// Report what became of the duplication since the previous audit.
-    Audit(AuditArgs),
-    /// Analyse compiled artifacts.
-    Artifact,
-    /// Report source/artifact divergence.
-    Divergence,
+    /// Analyse or compare compiled artifacts without executing them.
+    Artifact {
+        /// Artifact action.
+        #[command(subcommand)]
+        action: ArtifactAction,
+    },
 }
 
 /// Analysis mode selecting how much work the scan performs.
@@ -104,6 +104,148 @@ pub enum DetailFormat {
     Json,
 }
 
+/// Output format for compiled-artifact analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ArtifactFormat {
+    /// Human-readable summary.
+    Text,
+    /// Machine-readable JSON with a versioned schema.
+    Json,
+    /// Comma-separated summary or symbol-delta rows.
+    Csv,
+}
+
+/// Input artifact format accepted by the parsers in this build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ArtifactInputFormat {
+    /// WebAssembly core module.
+    Wasm,
+    /// ELF executable, shared object, or relocatable object.
+    Elf,
+}
+
+/// Default maximum number of artifact bytes read by one command invocation.
+///
+/// This ceiling bounds the input retained by in-process parsers. It can be
+/// lowered for an untrusted artifact or raised deliberately for a known one.
+pub const DEFAULT_ARTIFACT_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Arguments for the `artifact` subcommand.
+#[derive(Debug, clap::Args)]
+pub struct ArtifactArgs {
+    /// Compiled artifact to inspect.
+    pub path: PathBuf,
+    /// Report format.
+    #[arg(long, value_enum, default_value_t = ArtifactFormat::Text)]
+    pub format: ArtifactFormat,
+    /// Require this input format instead of accepting automatic detection.
+    #[arg(long, value_enum)]
+    pub input_format: Option<ArtifactInputFormat>,
+    /// Write the report to this file instead of standard output.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    /// Include every extracted symbol in a text report.
+    #[arg(long)]
+    pub verbose: bool,
+    /// Reject an artifact larger than this many bytes before parsing it.
+    #[arg(long, default_value_t = DEFAULT_ARTIFACT_MAX_BYTES)]
+    pub max_bytes: u64,
+    /// JSON manifest describing this artifact's build variant.
+    #[arg(long)]
+    pub build_variant: Option<PathBuf>,
+    /// Completed source scan whose units may be correlated using debug evidence.
+    /// Requires `--build-variant` so artifact and source conditions remain explicit.
+    #[arg(long, requires = "build_variant")]
+    pub source_run: Option<i64>,
+    /// Existing local linker map used as additional source-artifact evidence.
+    ///
+    /// The map is read only when a source run was explicitly selected; this
+    /// command never invokes a linker or builds the inspected project.
+    #[arg(long, requires = "source_run")]
+    pub linker_map: Option<PathBuf>,
+    /// Existing external ELF debug companion for this exact artifact build.
+    ///
+    /// It is read locally without invoking a compiler. The artifact backend
+    /// accepts it only when both files carry the same GNU build ID.
+    #[arg(long, requires = "source_run")]
+    pub debug_file: Option<PathBuf>,
+    /// Local database path, overriding the configured location.
+    #[arg(long)]
+    pub db: Option<PathBuf>,
+}
+
+/// Actions available below `artifact`.
+#[derive(Debug, Subcommand)]
+pub enum ArtifactAction {
+    /// Analyse one compiled artifact.
+    Analyze(ArtifactArgs),
+    /// Compare two compiled artifacts.
+    Compare(ArtifactCompareArgs),
+    /// Summarize controlled savings-calibration measurements.
+    Calibration(ArtifactCalibrationArgs),
+}
+
+/// Arguments for `artifact calibration`.
+#[derive(Debug, clap::Args)]
+pub struct ArtifactCalibrationArgs {
+    /// Source scan whose controlled measurements are summarized.
+    #[arg(long)]
+    pub source_run: i64,
+    /// Earlier local calibration JSON report to compare without enforcing a threshold.
+    #[arg(long)]
+    pub baseline: Option<PathBuf>,
+    /// Local database path holding the controlled measurements.
+    #[arg(long)]
+    pub db: Option<PathBuf>,
+    /// Report format.
+    #[arg(long, value_enum, default_value_t = ArtifactFormat::Text)]
+    pub format: ArtifactFormat,
+    /// Write the report to this file instead of standard output.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+/// Arguments for `artifact compare`.
+#[derive(Debug, clap::Args)]
+pub struct ArtifactCompareArgs {
+    /// Earlier artifact.
+    pub before: PathBuf,
+    /// Later artifact.
+    pub after: PathBuf,
+    /// JSON manifest describing the earlier artifact's build variant.
+    ///
+    /// Supplying both manifests lets the comparison report warn when build
+    /// conditions differ without pretending that a byte difference comes
+    /// from a source-level change alone.
+    #[arg(long)]
+    pub before_build_variant: Option<PathBuf>,
+    /// JSON manifest describing the later artifact's build variant.
+    #[arg(long)]
+    pub after_build_variant: Option<PathBuf>,
+    /// Report format.
+    #[arg(long, value_enum, default_value_t = ArtifactFormat::Text)]
+    pub format: ArtifactFormat,
+    /// Write the report to this file instead of standard output.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    /// Reject either artifact larger than this many bytes before parsing it.
+    #[arg(long, default_value_t = DEFAULT_ARTIFACT_MAX_BYTES)]
+    pub max_bytes: u64,
+    /// Source scan that produced the clone group being calibrated.
+    ///
+    /// Must be used with `--clone-group`, both build-variant manifests, and
+    /// `--db`; a whole-artifact difference is never assigned to a group by
+    /// inference.
+    #[arg(long)]
+    pub source_run: Option<i64>,
+    /// Stable clone-group fingerprint to evaluate against this comparison.
+    #[arg(long)]
+    pub clone_group: Option<String>,
+    /// Local database path used to read the estimate and persist calibration.
+    #[arg(long)]
+    pub db: Option<PathBuf>,
+}
+
 /// Arguments for the `scan` subcommand.
 #[derive(Debug, clap::Args)]
 #[allow(clippy::struct_excessive_bools)] // independent CLI switches, not a state machine
@@ -129,15 +271,26 @@ pub struct ScanArgs {
     /// Number of worker threads (default: automatic).
     #[arg(long)]
     pub jobs: Option<usize>,
-    /// Audit-database path, overriding the configured location.
+    /// Local database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,
     /// Hide the findings this baseline file froze, reporting what came after.
     #[arg(long)]
     pub baseline: Option<PathBuf>,
-    /// Analyse the tree even when a recorded run already read exactly it.
+    /// Also compare exact duplicate units between distinct C/C++ build variants.
+    ///
+    /// Normal scan snapshots remain partition-local. This opt-in emits and
+    /// stores a separate comparison; it never changes a partition's variant.
     #[arg(long)]
-    pub no_reuse: bool,
+    pub compare_build_variants: bool,
+    /// Compare registered Rust and C++ semantic pipelines across explicitly
+    /// selected compilation partitions.
+    ///
+    /// This requires Semantic mode. Normal scan snapshots remain
+    /// partition-local; the result is a separate comparison with both origin
+    /// variants retained.
+    #[arg(long)]
+    pub compare_languages: bool,
     /// Also list suppressed groups, with the reason each was hidden.
     #[arg(long)]
     pub show_suppressed: bool,
@@ -173,32 +326,7 @@ pub struct ExplainArgs {
     /// Output format for the detail view.
     #[arg(long, value_enum, default_value_t = DetailFormat::Text)]
     pub format: DetailFormat,
-    /// Audit-database path, overriding the configured location.
-    #[arg(long)]
-    pub db: Option<PathBuf>,
-}
-
-/// Arguments for the `audit` subcommand.
-#[derive(Debug, clap::Args)]
-pub struct AuditArgs {
-    /// Scanned path whose recorded runs are compared.
-    #[arg(default_value = ".")]
-    pub path: PathBuf,
-    /// Compare against this exported JSON scan report instead of against the
-    /// run recorded before the latest one.
-    #[arg(long)]
-    pub previous: Option<PathBuf>,
-    /// Output format.
-    #[arg(long, value_enum, default_value_t = DetailFormat::Text)]
-    pub format: DetailFormat,
-    /// Also list the groups that did not change.
-    #[arg(long)]
-    pub show_unchanged: bool,
-    /// Exit with a non-zero status if any duplication is new, spreading or
-    /// drifting apart.
-    #[arg(long)]
-    pub fail_on_new: bool,
-    /// Audit-database path, overriding the configured location.
+    /// Local database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,
 }
@@ -226,7 +354,7 @@ pub enum ConfigAction {
 
 /// Default baseline file, relative to the working directory.
 ///
-/// Unlike the audit database this is meant to be committed: it is a decision
+/// Unlike the local database this is meant to be committed: it is a decision
 /// the project made, and it has to travel with the code the decision is about.
 pub const BASELINE_FILE_NAME: &str = "codehelion-baseline.json";
 
@@ -237,8 +365,6 @@ pub enum BaselineAction {
     Create(BaselineArgs),
     /// Drop the baseline entries the last scan no longer reports.
     Update(BaselineArgs),
-    /// Rewrite a baseline's identifiers onto a run made under changed rules.
-    Migrate(MigrateArgs),
 }
 
 /// Arguments shared by the `baseline` actions.
@@ -253,28 +379,7 @@ pub struct BaselineArgs {
     /// Overwrite an existing baseline file.
     #[arg(long)]
     pub force: bool,
-    /// Audit-database path, overriding the configured location.
-    #[arg(long)]
-    pub db: Option<PathBuf>,
-}
-
-/// Arguments for `baseline migrate`.
-#[derive(Debug, clap::Args)]
-pub struct MigrateArgs {
-    /// Scanned path whose recorded runs the rewrite reads.
-    #[arg(default_value = ".")]
-    pub path: PathBuf,
-    /// Baseline file to rewrite.
-    #[arg(long, default_value = BASELINE_FILE_NAME)]
-    pub file: PathBuf,
-    /// Recorded run to rewrite the baseline onto. Defaults to the newest
-    /// completed scan of the path.
-    #[arg(long)]
-    pub to_run: Option<i64>,
-    /// Report what the rewrite would do without writing anything.
-    #[arg(long)]
-    pub dry_run: bool,
-    /// Audit-database path, overriding the configured location.
+    /// Local database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,
 }
@@ -282,15 +387,15 @@ pub struct MigrateArgs {
 /// Actions for the `cache` subcommand.
 #[derive(Debug, Subcommand)]
 pub enum CacheAction {
-    /// Show the audit database's location and size.
+    /// Show the local database's location and size.
     Status {
-        /// Audit-database path, overriding the configured location.
+        /// Local database path, overriding the configured location.
         #[arg(long)]
         db: Option<PathBuf>,
     },
-    /// Delete the audit database.
+    /// Delete the local database.
     Clear {
-        /// Audit-database path, overriding the configured location.
+        /// Local database path, overriding the configured location.
         #[arg(long)]
         db: Option<PathBuf>,
     },
@@ -299,11 +404,69 @@ pub enum CacheAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn cli_definition_is_valid() {
         // `debug_assert` catches structural mistakes in the clap definition.
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Expected parse outcomes are the test subject.
+    fn linker_map_requires_an_explicit_correlated_source_run() {
+        let error = Cli::try_parse_from([
+            "codehelion",
+            "artifact",
+            "analyze",
+            "fixture.so",
+            "--linker-map",
+            "fixture.map",
+        ])
+        .expect_err("linker map without a source run must be rejected");
+        assert!(error.to_string().contains("--source-run"));
+
+        let parsed = Cli::try_parse_from([
+            "codehelion",
+            "artifact",
+            "analyze",
+            "fixture.so",
+            "--source-run",
+            "7",
+            "--build-variant",
+            "variant.json",
+            "--linker-map",
+            "fixture.map",
+        ])
+        .expect("a linker map with its required correlation inputs parses");
+        assert!(matches!(
+            &parsed.command,
+            Command::Artifact {
+                action: ArtifactAction::Analyze(_),
+            }
+        ));
+        let Command::Artifact {
+            action: ArtifactAction::Analyze(args),
+        } = parsed.command
+        else {
+            return;
+        };
+        assert_eq!(args.source_run, Some(7));
+        assert_eq!(args.linker_map, Some(PathBuf::from("fixture.map")));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Expected parse outcomes are the test subject.
+    fn debug_file_requires_an_explicit_correlated_source_run() {
+        let error = Cli::try_parse_from([
+            "codehelion",
+            "artifact",
+            "analyze",
+            "fixture.so",
+            "--debug-file",
+            "fixture.debug",
+        ])
+        .expect_err("debug file without a source run must be rejected");
+        assert!(error.to_string().contains("--source-run"));
     }
 }

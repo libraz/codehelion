@@ -146,7 +146,12 @@ impl Backend for ClangBackend<'_> {
             // for is what a coverage report is for.
             return Answer::Unavailable(Unavailability::NoBuildInformation);
         };
-        match analysis::analyze(self.clang, &request.unit, &database) {
+        match analysis::analyze(
+            self.clang,
+            &request.unit,
+            &database,
+            request.compile_command.as_ref(),
+        ) {
             Outcome::Analyzed(mut ir) => {
                 ir.schema_version = COMPILER_IR_SCHEMA_VERSION.to_string();
                 Answer::Analyzed(ir)

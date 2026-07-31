@@ -238,6 +238,7 @@ mod tests {
             handshake(),
             RequestBody::Analyze(Analyze {
                 unit: unit(),
+                compile_command: None,
                 want: vec![Capability::Types],
                 permitted: Vec::new(),
             }),
@@ -255,6 +256,7 @@ mod tests {
     fn an_unavailable_answer_is_about_the_unit_that_was_asked_for() {
         let (responses, backend) = conversation(&[RequestBody::Analyze(Analyze {
             unit: unit(),
+            compile_command: None,
             want: vec![Capability::Types],
             permitted: Vec::new(),
         })]);
@@ -304,6 +306,7 @@ mod tests {
             PROTOCOL_VERSION + 7,
             RequestBody::Analyze(Analyze {
                 unit: unit(),
+                compile_command: None,
                 want: vec![Capability::Types],
                 permitted: Vec::new(),
             }),

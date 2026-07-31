@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use super::{BuildConfiguration, CppBuild};
+
 /// A failure while reading the compilation database.
 #[derive(Debug, thiserror::Error)]
 pub enum CompileCommandsError {
@@ -56,6 +58,40 @@ pub struct CompileEntry {
     /// which is legal and means only that this unit's build configuration is
     /// unknown — not that it was compiled with nothing.
     pub arguments: Vec<String>,
+}
+
+impl CompileEntry {
+    /// The semantic build configuration this exact command describes.
+    ///
+    /// The database digest belongs to every entry because editing a database
+    /// changes what project build was observed even when a selected command's
+    /// flags happen to stay the same.
+    #[must_use]
+    pub fn build(&self, database_hash: Option<String>) -> CppBuild {
+        let mut build = CppBuild::from_command(&self.arguments, &self.file);
+        build.database_hash = database_hash;
+        build
+    }
+
+    /// The stable fields a helper uses to select this exact command.
+    ///
+    /// Paths are normalized in the same way as the helper's database reader,
+    /// so a scan rooted through a symbolic link cannot accidentally turn one
+    /// command into an unselectable sibling.
+    #[must_use]
+    pub fn selector_fields(&self) -> (String, Option<String>, Vec<String>) {
+        let normalize = |path: &Path| {
+            path.canonicalize()
+                .unwrap_or_else(|_| path.to_path_buf())
+                .display()
+                .to_string()
+        };
+        (
+            normalize(&self.file),
+            self.directory.as_deref().map(normalize),
+            self.arguments.clone(),
+        )
+    }
 }
 
 /// A parsed compilation database with duplicate translation units removed.
@@ -131,6 +167,25 @@ impl CompileCommands {
             .map(|entry| &entry.file)
             .collect::<BTreeSet<_>>()
             .len()
+    }
+
+    /// Group entries by the C/C++ build configuration they describe.
+    ///
+    /// A partition contains every command with identical semantic settings;
+    /// source paths deliberately do not participate in its identity. That
+    /// lets two ordinary translation units share one scan while keeping a
+    /// duplicated source with different `-D` settings in separate partitions.
+    #[must_use]
+    pub fn build_partitions(&self) -> std::collections::BTreeMap<String, Vec<&CompileEntry>> {
+        let mut partitions = std::collections::BTreeMap::new();
+        for entry in &self.entries {
+            let build = BuildConfiguration::Cpp(Box::new(entry.build(self.content_hash.clone())));
+            partitions
+                .entry(build.fingerprint())
+                .or_insert_with(Vec::new)
+                .push(entry);
+        }
+        partitions
     }
 }
 
@@ -233,6 +288,37 @@ mod tests {
         assert_eq!(db.translation_unit_count(), 2);
         // And one physical file, which is what the fragment side registers.
         assert_eq!(db.source_file_count(), 1);
+    }
+
+    #[test]
+    fn commands_partition_by_build_settings_not_source_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("compile_commands.json");
+        std::fs::write(
+            &path,
+            r#"[
+                {"directory": "/w", "file": "/w/a.cpp", "arguments": ["clang++", "-DNARROW", "-c", "/w/a.cpp"]},
+                {"directory": "/w", "file": "/w/b.cpp", "arguments": ["clang++", "-DNARROW", "-c", "/w/b.cpp"]},
+                {"directory": "/w", "file": "/w/a.cpp", "arguments": ["clang++", "-DWIDE", "-c", "/w/a.cpp"]}
+            ]"#,
+        )
+        .unwrap();
+        let db = CompileCommands::read(&path).unwrap();
+        let partitions = db.build_partitions();
+        assert_eq!(partitions.len(), 2);
+        let mut sizes: Vec<usize> = partitions.values().map(Vec::len).collect();
+        sizes.sort_unstable();
+        assert_eq!(sizes, [1, 2]);
+        assert!(partitions.values().any(|entries| {
+            entries
+                .iter()
+                .all(|entry| entry.build(db.content_hash.clone()).defines() == ["NARROW"])
+        }));
+        assert!(partitions.values().any(|entries| {
+            entries
+                .iter()
+                .all(|entry| entry.build(db.content_hash.clone()).defines() == ["WIDE"])
+        }));
     }
 
     #[test]

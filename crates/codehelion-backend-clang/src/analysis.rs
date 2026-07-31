@@ -40,9 +40,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use clang::{Clang, Entity, EntityKind, EntityVisitResult, Index, Type};
+use codehelion_helper::CompileCommandSelector;
 use codehelion_helper::ir::{
-    Anchor, CallSite, CallTarget, CompilerIr, Instantiation, ResolvedSymbol, ResolvedType,
-    SourceRange, SymbolKind, Unavailability, UnitRef, spell,
+    Anchor, CallSite, CallTarget, CompilerIr, DirectPropagation, FallibleKind, Instantiation,
+    ResolvedSymbol, ResolvedType, SemanticConstruct, SemanticConstructKind, SourceRange,
+    SymbolKind, Unavailability, UnitRef, spell,
 };
 
 use crate::database::{Database, canonical};
@@ -57,8 +59,13 @@ pub(crate) enum Outcome {
 }
 
 /// Read `unit` and report what Clang knows about the file it names.
-pub(crate) fn analyze(clang: &Clang, unit: &UnitRef, database: &Database) -> Outcome {
-    let Some(entry) = database.unit(&unit.unit) else {
+pub(crate) fn analyze(
+    clang: &Clang,
+    unit: &UnitRef,
+    database: &Database,
+    selector: Option<&CompileCommandSelector>,
+) -> Outcome {
+    let Some(entry) = database.unit(&unit.unit, selector) else {
         // Nothing in the database is this unit. Analysing the file under some
         // other unit's command would answer about a program this one is not.
         return Outcome::Unavailable(Unavailability::NoBuildInformation);
@@ -90,6 +97,7 @@ pub(crate) fn analyze(clang: &Clang, unit: &UnitRef, database: &Database) -> Out
     ir.anchored_at = Some(database.root.display().to_string());
     ir.symbols = reading.symbols;
     ir.calls = reading.calls;
+    ir.semantic_constructs = reading.semantic_constructs;
     ir.instantiations = reading.instantiations;
     ir.types = reading.types.into_vec();
     Outcome::Analyzed(Box::new(ir))
@@ -113,6 +121,7 @@ struct Reading<'a> {
     types: TypeTable,
     symbols: Vec<ResolvedSymbol>,
     calls: Vec<CallSite>,
+    semantic_constructs: Vec<SemanticConstruct>,
     instantiations: Vec<Instantiation>,
 }
 
@@ -152,6 +161,7 @@ impl<'a> Reading<'a> {
             types: TypeTable::default(),
             symbols: Vec::new(),
             calls: Vec::new(),
+            semantic_constructs: Vec::new(),
             instantiations: Vec::new(),
         }
     }
@@ -190,6 +200,9 @@ impl<'a> Reading<'a> {
         root.visit_children(|entity, parent| {
             self.remember_instantiation(entity, parent);
             self.remember_call(entity);
+            self.remember_fallible_validation(entity);
+            self.remember_expected_identity_propagation(entity);
+            self.remember_direct_lock_lifetime(entity);
             self.visit(entity);
             EntityVisitResult::Recurse
         });
@@ -198,6 +211,21 @@ impl<'a> Reading<'a> {
                 .then_with(|| call_target_order(&left.target, &right.target))
         });
         self.calls.dedup();
+        self.semantic_constructs.sort_by(|left, right| {
+            (
+                &left.anchor.expansion.file,
+                left.anchor.expansion.start_byte,
+                left.anchor.expansion.end_byte,
+                left.kind.name(),
+            )
+                .cmp(&(
+                    &right.anchor.expansion.file,
+                    right.anchor.expansion.start_byte,
+                    right.anchor.expansion.end_byte,
+                    right.kind.name(),
+                ))
+        });
+        self.semantic_constructs.dedup();
         self.instantiations.sort_by(|left, right| {
             (
                 &left.anchor.expansion.file,
@@ -234,19 +262,177 @@ impl<'a> Reading<'a> {
         let Some(anchor) = self.anchor(entity) else {
             return;
         };
-        let target = if entity.is_dynamic_call() {
-            CallTarget::Unresolved
-        } else {
-            entity
-                .get_reference()
-                .map(|target| target.get_canonical_entity())
-                .filter(|target| callable(target.get_kind()))
-                .and_then(|target| target.get_usr())
-                .map_or(CallTarget::Unresolved, |symbol| CallTarget::Static {
-                    symbol: symbol.0,
-                })
+        let reference = (!entity.is_dynamic_call())
+            .then(|| entity.get_reference())
+            .flatten()
+            .map(|target| target.get_canonical_entity())
+            .filter(|target| callable(target.get_kind()));
+        let api_name = reference
+            .as_ref()
+            .and_then(|target| standard_api_name(*target));
+        let target = reference
+            .and_then(|target| target.get_usr())
+            .map_or(CallTarget::Unresolved, |symbol| CallTarget::Static {
+                symbol: symbol.0,
+            });
+        self.calls.push(CallSite {
+            anchor,
+            target,
+            api_name,
+        });
+    }
+
+    /// Keep an `if` that directly asks a standard fallible value whether it
+    /// holds a value as one closed validation operation.
+    ///
+    /// The callee's declaration, rather than a method spelling, decides this.
+    /// A project type with a similar method or conversion is not an `optional`,
+    /// and a compound condition adds semantics this compact vocabulary does not
+    /// claim to understand.
+    fn remember_fallible_validation(&mut self, entity: Entity<'_>) {
+        if entity.get_kind() != EntityKind::IfStmt {
+            return;
+        }
+        let Some(condition) = entity.get_child(0) else {
+            return;
         };
-        self.calls.push(CallSite { anchor, target });
+        let Some(fallible_kind) = is_direct_standard_fallible_presence_check(condition) else {
+            return;
+        };
+        // The condition is the semantic operation. Anchoring the enclosing
+        // `if` would miss a macro invocation inside it and report a spelling
+        // range that does not identify the operation Clang resolved.
+        let Some(anchor) = self.anchor(condition) else {
+            return;
+        };
+        self.semantic_constructs.push(SemanticConstruct {
+            anchor,
+            kind: SemanticConstructKind::Validate,
+            fallible_kind: Some(fallible_kind),
+            direct_propagation: None,
+            resource_kind: None,
+        });
+    }
+
+    /// Keep the exact C++ `expected` identity adapter as closed error
+    /// propagation evidence.
+    ///
+    /// The accepted form is intentionally narrower than an error-handling
+    /// idiom: a project-written function must accept and return exactly the
+    /// same standard `expected` type, have one parameter, and consist only of
+    /// `return parameter;`. It forwards both the value and error alternative
+    /// unchanged, which is the C++ counterpart of the registered Rust
+    /// `Ok(value?)` adapter. Any inspection, conversion, construction, or
+    /// additional statement is left outside this rule.
+    fn remember_expected_identity_propagation(&mut self, entity: Entity<'_>) {
+        if entity.get_kind() != EntityKind::FunctionDecl {
+            return;
+        }
+        let Some(result_type) = entity.get_result_type() else {
+            return;
+        };
+        if !is_standard_expected_type(result_type) {
+            return;
+        }
+        let Some(arguments) = entity.get_arguments() else {
+            return;
+        };
+        let [argument] = arguments.as_slice() else {
+            return;
+        };
+        let Some(argument_type) = argument.get_type() else {
+            return;
+        };
+        if !is_standard_expected_type(argument_type)
+            || result_type.get_canonical_type().get_display_name()
+                != argument_type.get_canonical_type().get_display_name()
+        {
+            return;
+        }
+        let Some(argument_name) = argument.get_name() else {
+            return;
+        };
+        let Some(body) = entity
+            .get_children()
+            .into_iter()
+            .find(|child| child.get_kind() == EntityKind::CompoundStmt)
+        else {
+            return;
+        };
+        let statements = body.get_children();
+        let [returned] = statements.as_slice() else {
+            return;
+        };
+        if returned.get_kind() != EntityKind::ReturnStmt
+            || direct_returned_name(*returned).as_deref() != Some(argument_name.as_str())
+        {
+            return;
+        }
+        let Some(anchor) = self.anchor(*returned) else {
+            return;
+        };
+        self.semantic_constructs.push(SemanticConstruct {
+            anchor,
+            kind: SemanticConstructKind::PropagateError,
+            // The SOG category is intentionally language-neutral: standard
+            // `expected<T, E>` and Rust `Result<T, E>` both carry one success
+            // and one error alternative. The rule still requires the direct
+            // adapter form, so this coarse correspondence cannot generalize
+            // arbitrary expected-using functions into Result matches.
+            fallible_kind: Some(FallibleKind::Result),
+            direct_propagation: Some(DirectPropagation::ResultAdapter),
+            resource_kind: None,
+        });
+    }
+
+    /// Record the smallest C++ RAII lifetime Clang can establish without
+    /// control-flow reconstruction: one direct standard `lock_guard` or
+    /// `unique_lock` binding
+    /// in a function body and that body's closing scope. Nested scopes,
+    /// multiple guards and project-defined lookalikes remain outside the
+    /// restricted vocabulary.
+    fn remember_direct_lock_lifetime(&mut self, entity: Entity<'_>) {
+        if entity.get_kind() != EntityKind::FunctionDecl {
+            return;
+        }
+        let Some(body) = entity
+            .get_children()
+            .into_iter()
+            .find(|child| child.get_kind() == EntityKind::CompoundStmt)
+        else {
+            return;
+        };
+        let acquisitions: Vec<_> = body
+            .get_children()
+            .into_iter()
+            .filter(|statement| statement.get_kind() == EntityKind::DeclStmt)
+            .flat_map(|statement| statement.get_children())
+            .filter(|declaration| declaration.get_kind() == EntityKind::VarDecl)
+            .filter(|declaration| declaration.get_type().is_some_and(is_standard_lock_type))
+            .filter_map(|declaration| self.anchor(declaration))
+            .collect();
+        let [acquire] = acquisitions.as_slice() else {
+            return;
+        };
+        let Some(release) = self.scope_end_anchor(body) else {
+            return;
+        };
+        self.semantic_constructs.extend([
+            SemanticConstruct {
+                anchor: acquire.clone(),
+                kind: SemanticConstructKind::AcquireResource,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: Some("lock".to_owned()),
+            },
+            SemanticConstruct {
+                anchor: release,
+                kind: SemanticConstructKind::ReleaseResource,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: Some("lock".to_owned()),
+            },
+        ]);
     }
 
     /// Remember a concrete template specialization named at this cursor.
@@ -449,6 +635,23 @@ impl<'a> Reading<'a> {
         Some(Anchor::written_here(expansion))
     }
 
+    /// Anchor the endpoint of a direct lexical scope as its `Drop` boundary.
+    fn scope_end_anchor(&mut self, scope: Entity<'_>) -> Option<Anchor> {
+        let range = scope.get_range()?;
+        let end = range.get_end().get_expansion_location();
+        let file = end.file?;
+        let known = self.known(&file);
+        if !known.inside {
+            return None;
+        }
+        Some(Anchor::written_here(SourceRange {
+            file: known.name.clone(),
+            start_byte: u64::from(end.offset),
+            end_byte: u64::from(end.offset),
+            start_line: end.line,
+        }))
+    }
+
     /// Whether the definition of `entity` is outside the code being scanned.
     ///
     /// Where the definition sits answers it, which is the same question
@@ -560,6 +763,129 @@ const fn callable(kind: EntityKind) -> bool {
 /// they are not externally nameable — so they fall back to where they were
 /// declared, because two neighbouring functions each declaring `total` are two
 /// bindings and an identity they shared would say otherwise.
+/// A deliberately small semantic API vocabulary named only after Clang has
+/// resolved the target into the standard library.
+fn standard_api_name(entity: Entity<'_>) -> Option<String> {
+    if !crate::types::in_standard_namespace(entity) {
+        return None;
+    }
+    let name = entity.get_name()?;
+    matches!(
+        name.as_str(),
+        "begin"
+            | "filter"
+            | "copy_if"
+            | "map"
+            | "transform"
+            | "fold"
+            | "accumulate"
+            | "collect"
+            | "push_back"
+    )
+    .then(|| format!("std::{name}"))
+}
+
+/// Return the family of a resolved standard fallible presence check.
+///
+/// Both `has_value()` and the explicit `operator bool` conversion carry the
+/// same presence fact. The declaration must still belong to the standard
+/// optional or expected family, so a project conversion operator cannot enter the closed
+/// semantic vocabulary by sharing either spelling.
+fn standard_fallible_presence_method(method: Entity<'_>) -> Option<FallibleKind> {
+    method
+        .get_name()
+        .filter(|name| matches!(name.as_str(), "has_value" | "operator bool"))?;
+    method.get_semantic_parent().and_then(|parent| {
+        // libc++ exposes this inherited method on `__optional_storage_base`,
+        // whereas other standard libraries can expose it on `optional`
+        // itself. In both cases the declaration is inside `std` and its
+        // compiler-owned type name identifies it as the optional family.
+        crate::types::in_standard_namespace(parent).then_some(())?;
+        let name = parent.get_name()?.to_ascii_lowercase();
+        if name.contains("optional") {
+            Some(FallibleKind::Option)
+        } else if name.contains("expected") {
+            Some(FallibleKind::Result)
+        } else {
+            None
+        }
+    })
+}
+
+/// Return the family when the condition is exactly one resolved standard
+/// optional/expected presence call.
+fn is_direct_standard_fallible_presence_check(condition: Entity<'_>) -> Option<FallibleKind> {
+    let mut current = condition;
+    let call = loop {
+        match current.get_kind() {
+            EntityKind::CallExpr => break Some(current),
+            // A macro that contributes only parentheses around a direct
+            // standard call appears as one or more of these wrappers. They
+            // carry no operation of their own, unlike a unary or binary
+            // expression, so following exactly one child preserves the same
+            // closed condition accepted for source-written code.
+            EntityKind::UnexposedExpr | EntityKind::ParenExpr => {
+                let mut children = current.get_children().into_iter();
+                let Some(child) = children.next() else {
+                    break None;
+                };
+                if children.next().is_some() {
+                    break None;
+                }
+                current = child;
+            }
+            _ => break None,
+        }
+    };
+    call.and_then(|call| call.get_reference())
+        .map(|reference| reference.get_canonical_entity())
+        .and_then(standard_fallible_presence_method)
+}
+
+/// Whether `ty` resolves to the standard `expected` family.
+fn is_standard_expected_type(ty: Type<'_>) -> bool {
+    ty.get_canonical_type()
+        .get_declaration()
+        .is_some_and(|declaration| {
+            crate::types::in_standard_namespace(declaration)
+                && declaration.get_name().as_deref() == Some("expected")
+        })
+}
+
+/// Whether `ty` is one of the standard lexical RAII lock types this helper
+/// supports.
+fn is_standard_lock_type(ty: Type<'_>) -> bool {
+    ty.get_canonical_type()
+        .get_declaration()
+        .is_some_and(|declaration| {
+            crate::types::in_standard_namespace(declaration)
+                && matches!(
+                    declaration.get_name().as_deref(),
+                    Some("lock_guard" | "unique_lock")
+                )
+        })
+}
+
+/// Return the sole declaration-reference name under an identity return.
+///
+/// A copied `expected` value normally has compiler-inserted construct and cast
+/// cursors between the return statement and the written reference. Following
+/// only single-child wrappers admits that representation while rejecting calls,
+/// operators, and any expression with additional semantic operands.
+fn direct_returned_name(returned: Entity<'_>) -> Option<String> {
+    let mut current = returned.get_children().into_iter().next()?;
+    loop {
+        if current.get_kind() == EntityKind::DeclRefExpr {
+            return current.get_name();
+        }
+        let mut children = current.get_children().into_iter();
+        current = children.next()?;
+        if children.next().is_some() {
+            return None;
+        }
+    }
+}
+
 fn identity(entity: Entity<'_>) -> String {
     if let Some(usr) = entity.get_usr() {
         return usr.0;

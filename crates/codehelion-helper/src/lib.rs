@@ -23,12 +23,16 @@
 pub mod client;
 pub mod ir;
 pub mod protocol;
+pub mod sandbox;
 pub mod server;
 
 pub use client::{Analysis, DEFAULT_TIMEOUT, Helper, HelperError, Supervisor, locate};
 pub use ir::{COMPILER_IR_SCHEMA_VERSION, CompilerIr, Unavailability, UnitRef};
 pub use protocol::{
-    Absence, BuildDescription, Capability, Execution, HelperIdentity, OLDEST_PROTOCOL_VERSION,
-    PROTOCOL_VERSION, VersionRange,
+    Absence, BuildDescription, Capability, CompileCommandSelector, Execution, HelperIdentity,
+    OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, VersionRange,
+};
+pub use sandbox::{
+    SandboxAvailability, SandboxError, SandboxRequest, availability, doctor_summary,
 };
 pub use server::{Answer, Backend, Description, serve};

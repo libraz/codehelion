@@ -1,4 +1,4 @@
-//! Local `SQLite` audit storage for codehelion.
+//! Local `SQLite` storage for the current codehelion scan.
 //!
 //! This crate isolates the `SQLite` dependency from the analysis core: the
 //! engine ([`codehelion-core`](https://docs.rs/codehelion-core)) stays free of
@@ -7,20 +7,18 @@
 //!
 //! Layout:
 //!
-//! - [`schema`] — the DDL and the forward-only migration mechanism,
+//! - [`schema`] — the current pre-release database baseline,
 //! - [`snapshot`] — the write path: one scan, one atomic transaction,
 //! - [`query`] — the read path: every SQL query as a typed function,
 //! - [`compiler`] — both directions for the compiler IR, whose shape is
 //!   defined by the helper protocol rather than here,
-//! - [`migrate`] — rewriting recorded history when the rules that make
-//!   identifiers change under it.
 //!
-//! Opening a database migrates it forward when it is older and refuses it
-//! when it is newer than this build supports; downgrade is unsupported by
-//! design.
+//! Before release, opening a new database creates the current baseline.
+//! Earlier development layouts are deliberately rejected rather than
+//! migrated; their findings should be recreated by a fresh scan.
 
+pub mod artifact;
 pub mod compiler;
-pub mod migrate;
 pub mod query;
 pub mod schema;
 pub mod snapshot;
@@ -110,9 +108,37 @@ pub enum StoreError {
         /// The value read.
         value: String,
     },
+    /// A stored content fingerprint did not have the required 16 bytes.
+    #[error("stored {field} fingerprint has {length} bytes; expected 16")]
+    MalformedFingerprint {
+        /// Column whose value could not represent a fingerprint.
+        field: &'static str,
+        /// Number of bytes the database contained.
+        length: usize,
+    },
+    /// Mapping evidence could not establish a correspondence safely.
+    #[error("invalid source-artifact mapping evidence: {reason}")]
+    InvalidMappingEvidence {
+        /// Why the evidence must not become a stored correspondence.
+        reason: String,
+    },
+    /// Semantic graph evidence did not line up with the group it purports to
+    /// explain, so recording it would sever the finding from its justification.
+    #[error("invalid semantic evidence: {reason}")]
+    InvalidSemanticEvidence {
+        /// Why the evidence cannot be recorded safely.
+        reason: String,
+    },
+    /// Stored mapping evidence was not valid for the version this build knows.
+    #[error("invalid stored source-artifact mapping evidence: {source}")]
+    MappingEvidenceJson {
+        /// JSON parser error describing the malformed stored evidence.
+        #[from]
+        source: serde_json::Error,
+    },
 }
 
-/// An open audit database, migrated to the current schema.
+/// An open local database at the current schema.
 #[derive(Debug)]
 pub struct Store {
     pub(crate) conn: Connection,
@@ -167,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn every_audit_entity_table_exists() {
+    fn every_current_scan_entity_table_exists() {
         let store = Store::open_in_memory().unwrap();
         for table in [
             "scan_run",
@@ -177,11 +203,16 @@ mod tests {
             "fragment",
             "fingerprint",
             "clone_group",
-            "group_lineage",
             "finding",
             "suppression",
             "artifact",
             "artifact_symbol",
+            "artifact_analysis",
+            "artifact_analysis_symbol",
+            "artifact_analysis_source_mapping",
+            "artifact_analysis_unmapped_symbol",
+            "artifact_analysis_unmapped_source",
+            "artifact_analysis_correlation",
             "source_artifact_mapping",
             "detector_version",
             "feature_fingerprint",
@@ -198,6 +229,13 @@ mod tests {
             "compiler_instantiation",
             "compiler_effect",
             "compiler_data_flow",
+            "cross_variant_comparison",
+            "cross_variant_comparison_origin",
+            "cross_variant_clone_group",
+            "cross_variant_clone_member",
+            "semantic_operation_graph",
+            "semantic_group_evidence",
+            "semantic_node_mapping",
         ] {
             let count: i64 = store
                 .conn

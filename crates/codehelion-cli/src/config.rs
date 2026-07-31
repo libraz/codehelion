@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::discovery::{DEFAULT_MARKERS, HeaderPolicy};
 use serde::{Deserialize, Serialize};
@@ -274,6 +274,10 @@ pub struct Limits {
     /// single-pass and linear, so with the size ceiling in place this is a
     /// safety valve rather than the primary bound.
     pub parse_timeout_ms: u64,
+    /// Per-unit compiler-helper response ceiling in milliseconds. This only
+    /// applies to Semantic mode after a helper has described the build; a
+    /// timed-out unit is recorded as unavailable and the scan continues.
+    pub helper_timeout_ms: u64,
     /// Longest posting list or fragment class that still enters pairing;
     /// longer ones are dropped and counted. Unset leaves each mode at its own
     /// default.
@@ -292,11 +296,53 @@ pub struct Limits {
     pub max_component: usize,
 }
 
+/// Selection of the deliberately small restricted-semantic rule registry.
+///
+/// The registry is enabled only in Semantic mode. A disabled rule stays
+/// visible in `doctor` and in the recorded registry version, but cannot emit
+/// a finding for this project.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct SemanticRules {
+    /// Registered rule identifiers disabled for this project.
+    pub disabled: Vec<String>,
+}
+
+impl SemanticRules {
+    /// Whether a registered rule may emit findings.
+    #[must_use]
+    pub fn enabled(&self, rule_id: &str) -> bool {
+        !self.disabled.iter().any(|disabled| disabled == rule_id)
+    }
+
+    /// Reject a misspelled rule ID instead of treating it as a rule that did
+    /// nothing. A registry setting is a request to change detector behaviour,
+    /// so silently accepting an unknown name would make that request
+    /// impossible to audit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a disabled identifier is absent from the built-in
+    /// registry this build ships.
+    pub fn validate(&self) -> Result<()> {
+        for disabled in &self.disabled {
+            if !codehelion_core::semantic::registered_rules()
+                .iter()
+                .any(|rule| rule.id == disabled)
+            {
+                bail!("unknown restricted-semantic rule {disabled:?}");
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
             max_file_bytes: codehelion_core::discovery::DEFAULT_MAX_FILE_BYTES,
             parse_timeout_ms: 10_000,
+            helper_timeout_ms: 300_000,
             posting_cap: None,
             pair_budget: None,
             max_component: codehelion_core::grouping::GroupingConfig::default().max_component,
@@ -364,6 +410,8 @@ pub struct Config {
     pub priority: Priority,
     /// Resource ceilings.
     pub limits: Limits,
+    /// Restricted-semantic rule selection.
+    pub semantic: SemanticRules,
     /// Audit-database location, relative to the scan root unless absolute.
     pub database: PathBuf,
     /// Worker-thread count; `None` selects a count automatically.
@@ -384,6 +432,7 @@ impl Default for Config {
             suppression: Suppression::default(),
             priority: Priority::default(),
             limits: Limits::default(),
+            semantic: SemanticRules::default(),
             database: PathBuf::from(".codehelion/audit.db"),
             jobs: None,
         }
@@ -398,7 +447,9 @@ impl Config {
     /// Returns an error if the text is not valid TOML or contains an unknown
     /// key.
     pub fn from_toml(text: &str) -> Result<Self> {
-        toml::from_str(text).context("parsing configuration")
+        let config: Self = toml::from_str(text).context("parsing configuration")?;
+        config.semantic.validate()?;
+        Ok(config)
     }
 
     /// Serialize this configuration to TOML.
@@ -561,6 +612,11 @@ pub const TEMPLATE: &str = "\
 # maintenance-risk = 2
 # refactoring-ease = 1
 
+# Restricted Semantic rules are all enabled by default. List a stable rule ID
+# here to disable it for this project without broadening the detector.
+# [semantic]
+# disabled = [\"sequence-pipeline-v1\"]
+
 # Resource ceilings; every ceiling that fires is accounted for in the report.
 # There is deliberately no trust setting here. `codehelion scan --untrusted`
 # lowers every ceiling below at once, and it is a command-line flag because this
@@ -571,6 +627,9 @@ pub const TEMPLATE: &str = "\
 # max-file-bytes = 2097152
 # Per-file lexing time ceiling in milliseconds.
 # parse-timeout-ms = 10000
+# Per-unit compiler-helper response ceiling in milliseconds. A timed-out
+# Semantic unit is recorded as unavailable while the rest of the scan continues.
+# helper-timeout-ms = 300000
 # The two pairing ceilings below override both modes at once. Left out, each
 # mode keeps the default its own measurements picked — the modes pair different
 # things, and their candidate counts differ by an order of magnitude on the same
@@ -597,6 +656,35 @@ mod tests {
         assert_eq!(config.literal_normalization, LiteralNormalization::Full);
         assert!(config.languages.rust && config.languages.c && config.languages.cpp);
         assert_eq!(config.database, PathBuf::from(".codehelion/audit.db"));
+        assert!(config.semantic.enabled("sequence-pipeline-v1"));
+        assert!(
+            config
+                .semantic
+                .enabled("cross-language-sequence-pipeline-v1")
+        );
+    }
+
+    #[test]
+    fn semantic_rules_can_be_disabled_by_their_stable_identifier() {
+        let config = Config::from_toml(
+            "[semantic]\ndisabled = [\"sequence-pipeline-v1\", \
+             \"cross-language-sequence-pipeline-v1\"]\n",
+        )
+        .expect("semantic rule selection parses");
+        assert!(!config.semantic.enabled("sequence-pipeline-v1"));
+        assert!(
+            !config
+                .semantic
+                .enabled("cross-language-sequence-pipeline-v1")
+        );
+        assert!(config.semantic.enabled("sequence-pipeline-v2"));
+    }
+
+    #[test]
+    fn an_unknown_semantic_rule_is_rejected() {
+        let error = Config::from_toml("[semantic]\ndisabled = [\"misspelled-rule\"]\n")
+            .expect_err("unknown semantic rule must not silently do nothing");
+        assert!(format!("{error:#}").contains("unknown restricted-semantic rule"));
     }
 
     #[test]
@@ -627,6 +715,7 @@ mod tests {
             "a set between the two ceilings is still compared whole, with a sampled medoid"
         );
         assert!(limits.parse_timeout_ms > 0);
+        assert!(limits.helper_timeout_ms > 0);
     }
 
     #[test]
@@ -636,6 +725,10 @@ mod tests {
         assert_eq!(config.limits.posting_cap, Limits::default().posting_cap);
         assert_eq!(config.limits.pair_budget, Limits::default().pair_budget);
         assert_eq!(config.limits.max_component, Limits::default().max_component);
+        assert_eq!(
+            config.limits.helper_timeout_ms,
+            Limits::default().helper_timeout_ms
+        );
     }
 
     #[test]
