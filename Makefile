@@ -34,6 +34,18 @@ format-check: ## Check formatting without modifying files
 lint: ## Static analysis only: clippy with warnings as errors
 	$(ONESHOT) $(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 
+.PHONY: verify-helper-boundaries
+verify-helper-boundaries: ## Verify core and CLI do not link compiler adapter dependencies
+	sh scripts/verify-helper-boundaries.sh
+
+.PHONY: verify-artifact-boundaries
+verify-artifact-boundaries: ## Verify the source engine does not link artifact crates
+	sh scripts/verify-artifact-boundaries.sh
+
+.PHONY: verify-artifact-fixtures
+verify-artifact-fixtures: ## Build and verify real WASM and ELF artifact fixtures (Linux)
+	sh scripts/verify-artifact-fixtures.sh
+
 .PHONY: test
 test: ## Run the full test suite
 	$(ONESHOT) $(CARGO) test --workspace --all-targets --all-features
@@ -50,7 +62,7 @@ eval: ## Show detection accuracy over the committed corpora
 	$(CARGO) test -p codehelion-cli --test candidate_stages -- --nocapture
 
 .PHONY: check
-check: format-check lint test doc ## Run every CI check locally
+check: format-check lint verify-helper-boundaries verify-artifact-boundaries test doc ## Run every CI check locally
 
 ## --- convenience ----------------------------------------------------------
 

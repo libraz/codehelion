@@ -1,0 +1,118 @@
+name: Release helpers
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-tag:
+    name: Verify release tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check tag matches the CLI version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          crate_version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "codehelion-cli"))')"
+          if [ "$tag_version" != "$crate_version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match codehelion-cli version $crate_version" >&2
+            exit 1
+          fi
+          echo "version=$tag_version" >> "$GITHUB_OUTPUT"
+
+  build-helpers:
+    name: Build helpers (${{ matrix.name }})
+    needs: verify-tag
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            extension: ''
+            archive: tar.gz
+          - name: macos-aarch64
+            runner: macos-latest
+            extension: ''
+            archive: tar.gz
+          - name: windows-x86_64
+            runner: windows-latest
+            extension: .exe
+            archive: zip
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build helper executables
+        run: cargo build --release -p codehelion-backend-rust -p codehelion-backend-clang
+      - name: Stage Unix helper archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="codehelion-helpers-${{ needs.verify-tag.outputs.version }}-${{ matrix.name }}"
+          mkdir "$directory"
+          cp "target/release/codehelion-backend-rust${{ matrix.extension }}" "$directory/"
+          cp "target/release/codehelion-backend-clang${{ matrix.extension }}" "$directory/"
+          cp LICENSE "$directory/"
+          cp README.md "$directory/"
+          tar -czf "$directory.tar.gz" "$directory"
+      - name: Stage Windows helper archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $directory = "codehelion-helpers-${{ needs.verify-tag.outputs.version }}-${{ matrix.name }}"
+          New-Item -ItemType Directory -Path $directory | Out-Null
+          Copy-Item "target/release/codehelion-backend-rust${{ matrix.extension }}" $directory
+          Copy-Item "target/release/codehelion-backend-clang${{ matrix.extension }}" $directory
+          Copy-Item LICENSE $directory
+          Copy-Item README.md $directory
+          Compress-Archive -Path $directory -DestinationPath "$directory.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helpers-${{ matrix.name }}
+          path: codehelion-helpers-${{ needs.verify-tag.outputs.version }}-${{ matrix.name }}.${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    name: Publish GitHub Release assets
+    needs: [verify-tag, build-helpers]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: helpers-*
+          path: dist
+          merge-multiple: true
+      - name: Generate archive checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum codehelion-helpers-* > SHA256SUMS
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: Release ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/codehelion-helpers-*
+            dist/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

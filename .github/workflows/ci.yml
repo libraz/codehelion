@@ -14,6 +14,67 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  semantic-fixtures:
+    name: Semantic helpers and SQLite (${{ matrix.rust }} / Clang ${{ matrix.clang }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Pin the image/package pairing instead of asking whichever libclang
+          # happens to be newest on `ubuntu-latest`. These are independently
+          # built helpers and full Semantic scans, so every row verifies both
+          # protocol handshake and SQLite persistence against a real runtime.
+          - runner: ubuntu-22.04
+            rust: '1.95.0'
+            clang: '14'
+            libclang_package: libclang-14-dev
+            golden: true
+          - runner: ubuntu-24.04
+            rust: stable
+            clang: '18'
+            libclang_package: libclang-18-dev
+            golden: false
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install matrix Rust toolchain
+        run: rustup toolchain install ${{ matrix.rust }} --profile minimal
+      - name: Install libclang
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ matrix.libclang_package }}
+      - name: Build optional compiler helpers
+        run: cargo +${{ matrix.rust }} build -p codehelion-backend-rust -p codehelion-backend-clang
+      - name: Exercise Semantic scans
+        run: cargo +${{ matrix.rust }} test -p codehelion-cli --test semantic_helpers -- --ignored --skip compiler_ir_matches_its_golden_snapshot
+      - name: Check versioned compiler IR goldens
+        if: matrix.golden
+        run: cargo +${{ matrix.rust }} test -p codehelion-cli --test semantic_helpers compiler_ir_matches_its_golden_snapshot -- --ignored
+
+  helperless-modes:
+    name: Fast and Structural without compiler helpers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      # Do not restore a target directory from another job. This package-only
+      # build compiles the CLI and its library dependencies, never either
+      # compiler-helper binary.
+      - name: Exercise helper-free modes
+        run: cargo test -p codehelion-cli --test scan fast_and_structural_modes_run_without_compiler_helpers
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/codehelion-helperless-target
+
+  artifact-fixtures:
+    name: Artifact fixture end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Install the fixture target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Build and analyse real WASM and ELF fixtures
+        run: make verify-artifact-fixtures
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -57,6 +118,10 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Verify compiler helper boundaries
+        run: make verify-helper-boundaries
+      - name: Verify artifact dependency boundary
+        run: make verify-artifact-boundaries
       - name: Docs
         run: cargo doc --no-deps --all-features
         env:
