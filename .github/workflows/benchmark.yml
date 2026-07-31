@@ -34,5 +34,7 @@ jobs:
           cargo build --release -p codehelion-cli
           cargo run --release -p codehelion-eval --bin codehelion-bench -- \
             corpus --out "$bench_root/corpus" --lines "${{ inputs.lines }}" --seed 42 --clone-percent 5
-          cargo run --release -p codehelion-eval --bin codehelion-bench -- \
-            scan --corpus "$bench_root/corpus" --binary target/release/codehelion --mode fast --runs "${{ inputs.runs }}"
+          for mode in fast structural; do
+            cargo run --release -p codehelion-eval --bin codehelion-bench -- \
+              scan --corpus "$bench_root/corpus" --binary target/release/codehelion --mode "$mode" --runs "${{ inputs.runs }}"
+          done
