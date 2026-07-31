@@ -1,4 +1,4 @@
-name: Release helpers
+name: Release
 
 on:
   push:
@@ -89,9 +89,89 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build-cli:
+    name: Build CLI (${{ matrix.name }})
+    needs: verify-tag
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            extension: ''
+            archive: tar.gz
+            cross_linker: ''
+          - name: linux-aarch64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            extension: ''
+            archive: tar.gz
+            cross_linker: aarch64-linux-gnu-gcc
+          - name: macos-x86_64
+            runner: macos-13
+            target: x86_64-apple-darwin
+            extension: ''
+            archive: tar.gz
+            cross_linker: ''
+          - name: macos-aarch64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            extension: ''
+            archive: tar.gz
+            cross_linker: ''
+          - name: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            extension: .exe
+            archive: zip
+            cross_linker: ''
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux cross linker
+        if: matrix.cross_linker != ''
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+      - name: Build CLI
+        shell: bash
+        run: cargo build --locked --release -p codehelion-cli --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross_linker }}
+      - name: Stage Unix CLI archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="codehelion-${{ needs.verify-tag.outputs.version }}-${{ matrix.name }}"
+          mkdir "$directory"
+          cp "target/${{ matrix.target }}/release/codehelion${{ matrix.extension }}" "$directory/"
+          cp LICENSE "$directory/"
+          cp README.md "$directory/"
+          tar -czf "$directory.tar.gz" "$directory"
+      - name: Stage Windows CLI archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $directory = "codehelion-${{ needs.verify-tag.outputs.version }}-${{ matrix.name }}"
+          New-Item -ItemType Directory -Path $directory | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/codehelion${{ matrix.extension }}" $directory
+          Copy-Item LICENSE $directory
+          Copy-Item README.md $directory
+          Compress-Archive -Path $directory -DestinationPath "$directory.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.name }}
+          path: codehelion-${{ needs.verify-tag.outputs.version }}-${{ matrix.name }}.${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 14
+
   publish-release:
     name: Publish GitHub Release assets
-    needs: [verify-tag, build-helpers]
+    needs: [verify-tag, build-helpers, build-cli]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -104,7 +184,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          sha256sum codehelion-helpers-* > SHA256SUMS
+          sha256sum codehelion-* > SHA256SUMS
       - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -112,7 +192,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           files: |
-            dist/codehelion-helpers-*
+            dist/codehelion-*
             dist/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

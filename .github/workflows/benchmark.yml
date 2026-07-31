@@ -1,0 +1,38 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      lines:
+        description: Source lines in the deterministic synthetic corpus
+        required: false
+        default: '2000'
+        type: string
+      runs:
+        description: Number of cold/warm measurement pairs
+        required: false
+        default: '1'
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  scan:
+    name: small scan benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      # This produces evidence only. Performance targets are deliberately not
+      # CI gates, so a changed runner does not block unrelated correctness work.
+      - name: Measure a deterministic synthetic corpus
+        shell: bash
+        run: |
+          bench_root="$(mktemp -d)"
+          cargo build --release -p codehelion-cli
+          cargo run --release -p codehelion-eval --bin codehelion-bench -- \
+            corpus --out "$bench_root/corpus" --lines "${{ inputs.lines }}" --seed 42 --clone-percent 5
+          cargo run --release -p codehelion-eval --bin codehelion-bench -- \
+            scan --corpus "$bench_root/corpus" --binary target/release/codehelion --mode fast --runs "${{ inputs.runs }}"

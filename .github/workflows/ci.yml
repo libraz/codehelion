@@ -69,11 +69,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # The fixture programs are compiled in a scratch directory outside the
+      # checkout, where rust-toolchain.toml does not apply. The target has to
+      # be added to the toolchain this job pins, which is what the fixtures are
+      # built with there — adding it from inside the repository would install
+      # it against the toolchain the file selects instead, and leave the one
+      # doing the compiling without it.
       - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Install the fixture target
-        run: rustup target add wasm32-unknown-unknown
+        with:
+          targets: wasm32-unknown-unknown
       - name: Build and analyse real WASM and ELF fixtures
         run: make verify-artifact-fixtures
+
+  macho-artifact-fixtures:
+    name: Mach-O artifact fixture end-to-end
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and analyse real Mach-O and dSYM fixtures
+        run: make verify-macho-artifact-fixtures
+
+  pe-artifact-fixtures:
+    name: PE/PDB artifact fixture end-to-end
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and analyse real PE/PDB fixtures
+        shell: pwsh
+        run: .\scripts\verify-pe-artifact-fixtures.ps1
 
   test:
     name: test (${{ matrix.os }})
@@ -86,8 +111,18 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Test
-        run: cargo test --all-targets --all-features
+      # Keep this portable across the native shells of all three runners.
+      # Linux additionally verifies shell-based dependency boundaries in the
+      # lint job; the four commands below are the platform-independent body of
+      # `make check`.
+      - name: Check
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-targets --all-features
+          cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "-D warnings"
 
   accuracy:
     name: detection accuracy

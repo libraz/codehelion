@@ -1,0 +1,6 @@
+# Line endings are content here, not presentation. Golden snapshots and schema
+# documents are compared byte for byte against what the code renders, and the
+# code renders `\n`; a checkout that rewrote them would fail those comparisons
+# on one platform and pass on another, which says nothing about the code. Every
+# text file therefore reaches the working tree exactly as it is committed.
+* text=auto eol=lf
