@@ -11,7 +11,11 @@
 #
 # A case that records an `origin` URL is fetched into `corpus/external/<case>`
 # on first use, so the case is reproducible on any machine. A case with only a
-# local `repo` path is reproducible only where that path exists.
+# local `repo` path is reproducible only where that path exists, and is skipped
+# rather than failed elsewhere: the accuracy run reports an unmaterialized case
+# as unscored, which is the honest answer on a machine that cannot reach it.
+# A case that names an `origin` it cannot fetch is an error, because that one
+# was meant to work anywhere.
 #
 # Usage: corpus/scripts/materialize-labeled.sh [case ...]
 set -euo pipefail
@@ -81,6 +85,14 @@ for name in "${cases[@]}"; do
       status=1
       continue
     }
+  fi
+
+  # A case that names no origin can only come from a path on this machine, and
+  # that path is not one every machine has. Leaving it unmaterialized is the
+  # answer, not an error: it costs the run that case's scores and nothing else.
+  if [ -z "$origin" ] && [ ! -d "$repo/.git" ]; then
+    echo "$name: skipped — $repo is not a git repository on this machine" >&2
+    continue
   fi
 
   if [ ! -d "$repo/.git" ]; then
