@@ -38,3 +38,19 @@ pub fn credits(entries: &[Entry]) -> i64 {
 pub fn labels(entries: &[Entry]) -> Vec<String> {
     entries.iter().map(|entry| entry.label.clone()).collect()
 }
+
+/// Opens one standard file for the duration of this function.
+pub fn inspect_file(path: &std::path::Path) -> std::io::Result<()> {
+    let _file = std::fs::File::open(path)?;
+    Ok(())
+}
+
+/// Opens two files, which is deliberately outside the one-resource form.
+pub fn inspect_two_files(
+    first: &std::path::Path,
+    second: &std::path::Path,
+) -> std::io::Result<()> {
+    let _first = std::fs::File::open(first)?;
+    let _second = std::fs::File::open(second)?;
+    Ok(())
+}

@@ -192,7 +192,11 @@ Fields: `type` is one of `type-1 | type-2 | type-3 | restricted-semantic`;
 `clone_pairs` are positive examples that should be reported (drives recall);
 `non_clones` are boilerplate such as getters/setters, trait impls and test
 fixtures that must not be reported (drives precision). `language` is one of
-`rust | c | cpp`. Paths are relative to the label file's directory.
+`rust | c | cpp | mixed`; `mixed` is for an explicitly selected cross-language
+comparison. A restricted-semantic label may add `rule_id`, naming the
+registered rule it measures; the evaluation harness reports those labels
+separately from every other rule. Paths are relative to the label file's
+directory.
 
 ```json
 {

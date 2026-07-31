@@ -51,3 +51,107 @@ pub fn total(values: &[i64]) -> i64 {
     }
     sum
 }
+
+/// A standard optional branch that restricted semantic normalization may name.
+pub fn retain_positive(value: Option<i64>) -> Option<i64> {
+    match value {
+        Some(value) if value > 0 => Some(value),
+        _ => None,
+    }
+}
+
+/// A direct standard optional-presence branch for semantic normalization.
+pub fn retain_present(value: Option<i64>) -> bool {
+    if value.is_some() {
+        true
+    } else {
+        false
+    }
+}
+
+/// A compound optional condition remains outside the closed normalizer.
+pub fn retain_present_with_flag(value: Option<i64>, keep: bool) -> bool {
+    if value.is_some() && keep {
+        true
+    } else {
+        false
+    }
+}
+
+/// A direct standard result-presence branch for semantic normalization.
+pub fn retain_success(value: Result<i64, ()>) -> bool {
+    if value.is_ok() {
+        true
+    } else {
+        false
+    }
+}
+
+/// A compound result condition remains outside the closed normalizer.
+pub fn retain_success_with_flag(value: Result<i64, ()>, keep: bool) -> bool {
+    if value.is_ok() && keep {
+        true
+    } else {
+        false
+    }
+}
+
+/// A standard error branch that restricted semantic normalization may name.
+pub fn preserve_result(value: Result<i64, ()>) -> Result<i64, ()> {
+    match value {
+        Ok(value) => Ok(value),
+        Err(error) => Err(error),
+    }
+}
+
+/// A direct `Result` adapter using the propagation operator.
+pub fn propagate_result(value: Result<i64, ()>) -> Result<i64, ()> {
+    Ok(value?)
+}
+
+/// An error propagation whose success value is deliberately transformed.
+pub fn transform_result(value: Result<i64, ()>) -> Result<i64, ()> {
+    let value = value?;
+    Ok(value.saturating_add(1))
+}
+
+/// A project-defined enum must not be mistaken for fallible control flow.
+pub enum Direction {
+    /// Move forward.
+    Forward,
+    /// Move backward.
+    Backward,
+}
+
+/// Use an ordinary enum in a branch as the negative control.
+pub fn reverse(direction: Direction) -> Direction {
+    match direction {
+        Direction::Forward => Direction::Backward,
+        Direction::Backward => Direction::Forward,
+    }
+}
+
+/// Materialize a sequence with the narrow explicit-loop shape recognized by
+/// restricted semantic normalization.
+pub fn collect_loop(values: Vec<i64>) -> Vec<i64> {
+    let mut collected = Vec::new();
+    for value in values {
+        collected.push(value);
+    }
+    collected
+}
+
+/// The iterator spelling corresponding to [`collect_loop`].
+pub fn collect_pipeline(values: Vec<i64>) -> Vec<i64> {
+    values.into_iter().collect()
+}
+
+/// A loop that looks similar but transforms the value, so it is outside the
+/// plain-collection normalizer.
+pub fn collect_transformed(values: Vec<i64>) -> Vec<i64> {
+    let mut collected = Vec::new();
+    for value in values {
+        collected.push(value.saturating_add(1));
+    }
+    collected
+}

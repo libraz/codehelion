@@ -1,0 +1,36 @@
+{
+  "schema_version": 0,
+  "language": "mixed",
+  "files": ["src/lib.rs", "cpp/copied.cpp"],
+  "clone_pairs": [
+    {
+      "id": "rust-cpp-source-collect",
+      "type": "restricted-semantic",
+      "rule_id": "cross-language-sequence-pipeline-v1",
+      "fragments": [
+        {"file": "src/lib.rs", "start_line": 3, "end_line": 3},
+        {"file": "cpp/copied.cpp", "start_line": 9, "end_line": 10}
+      ]
+    },
+    {
+      "id": "rust-cpp-optional-validation",
+      "type": "restricted-semantic",
+      "rule_id": "cross-language-optional-validation-v1",
+      "fragments": [
+        {"file": "src/lib.rs", "start_line": 7, "end_line": 10},
+        {"file": "cpp/copied.cpp", "start_line": 15, "end_line": 15}
+      ]
+    }
+  ],
+  "non_clones": [
+    {
+      "id": "rust-cpp-unregistered-sequence",
+      "reason": "different closed operation sequence",
+      "rule_id": "cross-language-sequence-pipeline-v1",
+      "fragments": [
+        {"file": "src/lib.rs", "start_line": 1, "end_line": 4},
+        {"file": "cpp/copied.cpp", "start_line": 20, "end_line": 27}
+      ]
+    }
+  ]
+}

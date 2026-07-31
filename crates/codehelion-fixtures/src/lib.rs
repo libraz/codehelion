@@ -102,6 +102,22 @@ pub fn rust(name: &str) -> Result<PathBuf, FixtureError> {
     existing(root().join("rust").join(name))
 }
 
+/// Copies a Rust fixture into `destination` and returns the copied root.
+///
+/// The execution fixtures are copied before an opt-in test runs them: the
+/// committed fixture is evidence that normal development never executed its
+/// code, so a test must not spend that evidence in place.
+///
+/// # Errors
+///
+/// Fails if the fixture is absent or copying its files fails.
+pub fn copy_rust(fixture: &str, destination: &Path) -> Result<PathBuf, FixtureError> {
+    let source = rust(fixture)?;
+    let root = destination.join(fixture);
+    copy_tree(&source, &root)?;
+    Ok(root)
+}
+
 /// The directory of a C or C++ fixture.
 ///
 /// # Errors

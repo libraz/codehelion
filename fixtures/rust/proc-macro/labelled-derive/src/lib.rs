@@ -11,6 +11,9 @@ use proc_macro::TokenStream;
 /// Derives a `label` method returning the type's own name.
 #[proc_macro_derive(Labelled)]
 pub fn labelled(input: TokenStream) -> TokenStream {
+    if let Some(marker) = std::env::var_os("CODEHELION_PROC_MACRO_MARKER") {
+        let _ = std::fs::write(marker, "the procedural macro ran\n");
+    }
     let name = type_name(&input.to_string()).unwrap_or_else(|| "Unknown".to_string());
     format!(
         "impl {name} {{ \

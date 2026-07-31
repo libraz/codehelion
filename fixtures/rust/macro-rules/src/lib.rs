@@ -28,6 +28,19 @@ counter!(Reads);
 
 counter!(Writes);
 
+/// Calls the counter method from expansion syntax rather than from a call
+/// expression written in the source file.
+macro_rules! count_from_expansion {
+    ($counter:expr) => {
+        $counter.count()
+    };
+}
+
+/// A call whose target exists only after expanding `count_from_expansion!`.
+pub fn expanded_call(reads: &Reads) -> i64 {
+    count_from_expansion!(reads)
+}
+
 /// The same shape, written out. This one somebody did type.
 pub struct Manual {
     /// How many.

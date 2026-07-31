@@ -1,0 +1,3 @@
+# The reduced source is the controlled after state. Source scans rooted at this
+# fixture describe the before tree; artifact compare supplies the after input.
+exclude = ["wasm/lib-deduplicated.rs"]

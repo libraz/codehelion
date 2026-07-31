@@ -43,6 +43,12 @@ mutation spec, the generated variant sources and the generated `labels.json`:
   `non_clone`. Precision measurement: what must come out is one group per
   function and nothing that mixes two of them.
 - `c/` and `cpp/` — the Rust reference case ported to C and C++.
+- `rust-cpp-semantic/` — a hand-labelled, compiler-backed Rust/C++ porting
+  corpus for restricted-semantic rules. It covers a SOURCE/COLLECT
+  correspondence, an Option/optional validation correspondence, and a
+  deliberately unregistered sequence transformation. Unlike the structural
+  mutation cases, this case is maintained directly because its evidence is
+  compiler resolution and an explicitly selected cross-language comparison.
 
 Within a case:
 
