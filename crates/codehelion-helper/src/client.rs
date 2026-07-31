@@ -28,26 +28,13 @@ use std::process::{Child, ChildStdin};
 use crate::ir::{CompilerIr, Unavailability, UnitRef};
 use crate::protocol::{
     Analyze, BuildDescription, Capability, ClientIdentity, CompileCommandSelector, DescribeBuild,
-    Execution, FrameError, HelperIdentity, OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, Request,
-    RequestBody, Response, ResponseBody, VersionRange, read_frame, write_frame,
+    Execution, FrameError, HelperIdentity, PROTOCOL_VERSION, Request, RequestBody, Response,
+    ResponseBody, read_frame, write_frame,
 };
 use crate::sandbox::{SandboxError, SandboxRequest, spawn};
 
 /// How long a request waits before the helper is treated as unresponsive.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// The oldest revision that can be asked what a tree is built under.
-const DESCRIBES_BUILDS: u32 = 2;
-
-/// What a semantic run has to ask, with the oldest revision that can carry it.
-///
-/// Written down as a table rather than only as a check where the request is
-/// made, so that "is this helper new enough" can be answered at the handshake
-/// instead of at the moment a run is stopped by the answer. Everything listed
-/// is something a run cannot go on without: a request that a run could do
-/// without would have to say so here, because whoever reads this list is being
-/// told that a helper too old for one of these is a helper no run gets past.
-const NEEDED_SINCE: [(&str, u32); 1] = [("describe the build", DESCRIBES_BUILDS)];
 
 /// Lines of helper standard error kept for diagnostics.
 ///
@@ -65,36 +52,18 @@ pub enum HelperError {
         name: String,
     },
     /// Core and helper have no protocol revision in common.
-    #[error(
-        "the helper speaks protocol {helper_min}..={helper_max} and this build speaks \
-         {ours_min}..={ours_max}; update whichever is older"
-    )]
+    #[error("the helper speaks protocol {helper}, but this build requires protocol {required}")]
     NoCommonProtocol {
-        /// Oldest revision the helper accepts.
-        helper_min: u32,
-        /// Newest revision the helper accepts.
-        helper_max: u32,
-        /// Oldest revision this build accepts.
-        ours_min: u32,
-        /// Newest revision this build accepts.
-        ours_max: u32,
+        /// Revision the helper announced.
+        helper: u32,
+        /// Revision this build requires.
+        required: u32,
     },
     /// The helper cannot supply something semantic analysis cannot do without.
     #[error("the helper does not supply {missing:?}, which semantic analysis cannot go without")]
     MissingRequiredCapability {
         /// What it could not supply.
         missing: Capability,
-    },
-    /// The revision the two sides settled on has no way to ask this.
-    #[error(
-        "the helper speaks protocol {agreed}, which has no way to ask it to {request}; \
-         update the helper"
-    )]
-    TooOld {
-        /// What the handshake settled on.
-        agreed: u32,
-        /// What could not be asked, as a person would say it.
-        request: &'static str,
     },
     /// The helper did not answer in time.
     #[error("the helper did not answer within {}s", timeout.as_secs())]
@@ -250,10 +219,8 @@ impl Helper {
             responses,
             stderr,
             identity: unknown_identity(),
-            // Until the handshake settles one, requests travel at the oldest
-            // revision this build can speak, because that is the only one a
-            // peer that has not spoken yet is known to have.
-            protocol_version: OLDEST_PROTOCOL_VERSION,
+            // The handshake uses the one protocol revision this build speaks.
+            protocol_version: PROTOCOL_VERSION,
             timeout,
             next_id: 0,
             permitted: Vec::new(),
@@ -284,23 +251,6 @@ impl Helper {
     #[must_use]
     pub fn executes(&self, execution: Execution) -> bool {
         self.identity.executes.contains(&execution)
-    }
-
-    /// What a run would have to ask that the settled revision cannot carry.
-    ///
-    /// Empty for a helper a run can get through, and that is the distinction
-    /// worth having: a helper can answer the handshake perfectly and still be
-    /// one every run stops at, because these are asked before anything is
-    /// analysed. Knowing which at the handshake is what lets a diagnostic say
-    /// "update this" instead of leaving somebody to find out from a scan that
-    /// refuses on its opening question.
-    #[must_use]
-    pub fn predates(&self) -> Vec<&'static str> {
-        NEEDED_SINCE
-            .iter()
-            .filter(|(_, since)| self.protocol_version < *since)
-            .map(|(request, _)| *request)
-            .collect()
     }
 
     /// Permit `permitted` for every unit this helper is asked about.
@@ -364,26 +314,19 @@ impl Helper {
     /// Ask for one unit's compiler IR under one exact C/C++ command.
     ///
     /// The selector is optional because Rust crates have no compilation
-    /// database. When present it needs protocol revision 3: older helpers
-    /// would silently select their first matching entry, which is precisely
-    /// the ambiguity this field removes.
+    /// database. Protocol v1 carries it directly, so a C/C++ helper always
+    /// receives the exact selected command rather than choosing one itself.
     ///
     /// # Errors
     ///
-    /// Returns an error when the helper cannot be contacted, does not support
-    /// the selector protocol revision, or cannot return a readable answer.
+    /// Returns an error when the helper cannot be contacted or cannot return a
+    /// readable answer.
     pub fn analyze_with_command(
         &mut self,
         unit: &UnitRef,
         compile_command: Option<&CompileCommandSelector>,
         want: &[Capability],
     ) -> Result<Analysis, HelperError> {
-        if compile_command.is_some() && self.protocol_version < 3 {
-            return Err(HelperError::TooOld {
-                agreed: self.protocol_version,
-                request: "select an exact compilation command",
-            });
-        }
         let want = want
             .iter()
             .copied()
@@ -422,17 +365,11 @@ impl Helper {
     ///
     /// # Errors
     ///
-    /// Fails if the helper predates the request, cannot be written to, does not
-    /// answer in time, dies, or answers something else. A helper that answers
-    /// with a failure is reported as having refused: conditions nobody could
-    /// name are not conditions a run may record its answers under.
+    /// Fails if the helper cannot be written to, does not answer in time, dies,
+    /// or answers something else. A helper that answers with a failure is
+    /// reported as having refused: conditions nobody could name are not
+    /// conditions a run may record its answers under.
     pub fn describe(&mut self, root: &Path) -> Result<BuildDescription, HelperError> {
-        if self.protocol_version < DESCRIBES_BUILDS {
-            return Err(HelperError::TooOld {
-                agreed: self.protocol_version,
-                request: "describe the build",
-            });
-        }
         let id = self.send(RequestBody::DescribeBuild(DescribeBuild {
             root: root.display().to_string(),
         }))?;
@@ -446,35 +383,29 @@ impl Helper {
 
     /// Send the handshake and take what comes back.
     fn shake_hands(&mut self) -> Result<(), HelperError> {
-        let ours = VersionRange {
-            min: OLDEST_PROTOCOL_VERSION,
-            max: PROTOCOL_VERSION,
-        };
         let id = self.send(RequestBody::Handshake(ClientIdentity {
             client: env!("CARGO_PKG_NAME").into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
-            accepts: ours,
+            protocol: PROTOCOL_VERSION,
         }))?;
         let ResponseBody::Handshake(identity) = self.receive(id)? else {
             return Err(HelperError::Died {
                 stderr: vec!["the helper answered the handshake with something else".into()],
             });
         };
-        let Some(agreed) = ours.best_common(identity.protocol) else {
+        if identity.protocol != PROTOCOL_VERSION {
             return Err(HelperError::NoCommonProtocol {
-                helper_min: identity.protocol.min,
-                helper_max: identity.protocol.max,
-                ours_min: ours.min,
-                ours_max: ours.max,
+                helper: identity.protocol,
+                required: PROTOCOL_VERSION,
             });
-        };
+        }
         for required in [Capability::Types] {
             if !identity.capabilities.contains(&required) {
                 return Err(HelperError::MissingRequiredCapability { missing: required });
             }
         }
         self.identity = *identity;
-        self.protocol_version = agreed;
+        self.protocol_version = PROTOCOL_VERSION;
         Ok(())
     }
 
@@ -498,13 +429,10 @@ impl Helper {
     fn receive(&mut self, expected: u64) -> Result<ResponseBody, HelperError> {
         match self.responses.recv_timeout(self.timeout) {
             Ok(Ok(response)) => {
-                // A handshake may be framed at any revision this client still
-                // accepts: negotiation has not chosen one yet. Every later
-                // response must use the negotiated revision, otherwise a peer
-                // from another protocol could be mistaken for an answer.
+                // Both the handshake and every later response use the one
+                // revision this build accepts.
                 let valid_revision = if self.identity.name.is_empty() {
-                    (OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION)
-                        .contains(&response.protocol_version)
+                    response.protocol_version == PROTOCOL_VERSION
                 } else {
                     response.protocol_version == self.protocol_version
                 };
@@ -596,7 +524,7 @@ pub struct Supervisor {
     /// been shut down and every restart along the way has been and gone. Read
     /// off the live process instead, the answer would be "nobody" for every
     /// run that finished — which is every run that gets recorded.
-    spoke_with: Option<(HelperIdentity, u32)>,
+    spoke_with: Option<HelperIdentity>,
     /// What every helper started here may run out of the project.
     permitted: Vec<Execution>,
     /// Units that have already broken a helper once.
@@ -660,16 +588,14 @@ impl Supervisor {
         self.restarts
     }
 
-    /// What the helper said it is, and the revision the two sides settled on.
+    /// What the helper said it is.
     ///
     /// `None` until one has answered a handshake: a program that never started
     /// described itself to nobody, and a run that names it anyway would be
     /// crediting answers to a helper that never spoke.
     #[must_use]
-    pub fn spoke_with(&self) -> Option<(&HelperIdentity, u32)> {
-        self.spoke_with
-            .as_ref()
-            .map(|(identity, agreed)| (identity, *agreed))
+    pub const fn spoke_with(&self) -> Option<&HelperIdentity> {
+        self.spoke_with.as_ref()
     }
 
     /// Whether `unit` has been set aside as one the helper cannot survive.
@@ -751,7 +677,7 @@ impl Supervisor {
                         self.given_up = true;
                     })?
                     .permitting(self.permitted.clone());
-            self.spoke_with = Some((helper.identity().clone(), helper.protocol_version()));
+            self.spoke_with = Some(helper.identity().clone());
             self.helper = Some(helper);
         }
         let Some(helper) = self.helper.as_mut() else {
@@ -774,7 +700,6 @@ const fn unavailability(error: &HelperError) -> Unavailability {
         HelperError::TimedOut { .. } => Unavailability::HelperTimedOut,
         HelperError::NoCommonProtocol { .. }
         | HelperError::MissingRequiredCapability { .. }
-        | HelperError::TooOld { .. }
         | HelperError::ProtocolMismatch { .. } => Unavailability::ToolchainMismatch,
         _ => Unavailability::HelperDied,
     }
@@ -795,7 +720,7 @@ const fn unknown_identity() -> HelperIdentity {
     HelperIdentity {
         name: String::new(),
         version: String::new(),
-        protocol: VersionRange::exactly(PROTOCOL_VERSION),
+        protocol: PROTOCOL_VERSION,
         toolchains: Vec::new(),
         capabilities: Vec::new(),
         executes: Vec::new(),

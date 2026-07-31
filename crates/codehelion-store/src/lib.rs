@@ -7,15 +7,15 @@
 //!
 //! Layout:
 //!
-//! - [`schema`] — the current pre-release database baseline,
+//! - [`schema`] — the single pre-release database baseline,
 //! - [`snapshot`] — the write path: one scan, one atomic transaction,
 //! - [`query`] — the read path: every SQL query as a typed function,
 //! - [`compiler`] — both directions for the compiler IR, whose shape is
 //!   defined by the helper protocol rather than here,
 //!
 //! Before release, opening a new database creates the current baseline.
-//! Earlier development layouts are deliberately rejected rather than
-//! migrated; their findings should be recreated by a fresh scan.
+//! Any earlier development layout is deliberately rejected; its findings
+//! should be recreated by a fresh scan.
 
 pub mod artifact;
 pub mod compiler;
@@ -33,27 +33,14 @@ pub enum StoreError {
     /// An underlying database error.
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    /// The database was written by a newer tool version.
+    /// The database is not the one pre-release baseline this build supports.
     #[error(
-        "database schema version {found} is newer than this build supports \
-         ({supported}); upgrade codehelion (downgrading a database is not supported)"
+        "database schema version {found} is not the current pre-release baseline; \
+         delete the development database and run a fresh scan"
     )]
-    SchemaTooNew {
-        /// Version recorded in the database.
+    UnsupportedSchema {
+        /// Version recorded in the database, or zero when its layout has no marker.
         found: i64,
-        /// Newest version this build understands.
-        supported: i64,
-    },
-    /// Migrating left a reference pointing at a row that is not there.
-    ///
-    /// Foreign keys are not enforced while migrations run, because rebuilding
-    /// a table under enforcement destroys everything that cascades off it.
-    /// This is the check that replaces the enforcement, and it fires before
-    /// the database is handed back rather than at the next write.
-    #[error("migrating left {rows} reference(s) pointing at rows that are not there")]
-    MigrationOrphanedRows {
-        /// How many references `foreign_key_check` reported.
-        rows: i64,
     },
     /// A snapshot member referenced a unit index that does not exist.
     #[error("snapshot member references unit index {index}, but only {units} units were given")]
@@ -145,13 +132,12 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open (creating if missing) the database at `path` and migrate it to
-    /// the current schema.
+    /// Open (creating if missing) the database at the current baseline.
     ///
     /// # Errors
     ///
-    /// [`StoreError::SchemaTooNew`] when the database was written by a newer
-    /// tool; otherwise any underlying database error.
+    /// [`StoreError::UnsupportedSchema`] when an earlier development layout
+    /// exists at the path; otherwise any underlying database error.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         Self::from_connection(Connection::open(path)?)
     }
@@ -167,7 +153,7 @@ impl Store {
 
     fn from_connection(mut conn: Connection) -> Result<Self, StoreError> {
         conn.pragma_update(None, "foreign_keys", true)?;
-        schema::migrate(&mut conn)?;
+        schema::initialize(&mut conn)?;
         Ok(Self { conn })
     }
 
@@ -187,7 +173,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_in_memory_store_migrates_to_the_current_version() {
+    fn an_in_memory_store_uses_the_current_baseline() {
         let store = Store::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), schema::SCHEMA_VERSION);
     }

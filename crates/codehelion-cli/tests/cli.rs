@@ -32,7 +32,7 @@ fn doctor_reports_the_restricted_semantic_rule_registry() {
         .stdout(predicate::str::contains(
             "restricted semantic rules: 10 enabled",
         ))
-        .stdout(predicate::str::contains("semantic-rule-registry-v8"));
+        .stdout(predicate::str::contains("semantic-rule-registry-v1"));
 }
 
 #[test]
@@ -171,7 +171,7 @@ fn artifact_reports_a_minimal_wasm_without_executing_it() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("artifact-report-v8"))
+        .stdout(predicate::str::contains("artifact-report-v1"))
         .stdout(predicate::str::contains("\"format\": \"wasm\""))
         .stdout(predicate::str::contains("\"analysis_id\": 1"));
     assert!(db.is_file());

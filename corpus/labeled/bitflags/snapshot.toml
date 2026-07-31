@@ -3,7 +3,7 @@
 # `corpus/external/` and cuts `snapshot/` from the pinned commit, both of which
 # are git-ignored. The commit is what makes the line ranges in labels.json
 # meaningful, so it is never bumped in place.
-schema_version = 0
+schema_version = 1
 origin = "https://github.com/bitflags/bitflags.git"
 commit = "f92a2921b41644b02ca5d50a6ace542e309e6a6f"
 # The crate, its test modules included. Every other case here leaves the suite

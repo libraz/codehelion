@@ -10,7 +10,6 @@
 //! ```sh
 //! mock-helper well-behaved      # answers correctly
 //! mock-helper ancient           # speaks a protocol revision nobody else does
-//! mock-helper predates-describe # speaks the oldest revision, which cannot
 //! mock-helper undescribed       # cannot say what the tree is built with
 //! mock-helper inert             # runs nothing, whatever it is permitted
 //! mock-helper untyped           # cannot resolve types
@@ -38,9 +37,8 @@ use codehelion_helper::ir::{
     Unavailability, UnitRef,
 };
 use codehelion_helper::protocol::{
-    BuildDescription, Capability, Execution, Failure, HelperIdentity, OLDEST_PROTOCOL_VERSION,
-    PROTOCOL_VERSION, Request, RequestBody, Response, ResponseBody, VersionRange, read_frame,
-    write_frame,
+    BuildDescription, Capability, Execution, Failure, HelperIdentity, PROTOCOL_VERSION, Request,
+    RequestBody, Response, ResponseBody, read_frame, write_frame,
 };
 
 fn main() {
@@ -173,19 +171,9 @@ fn analyzed(unit: UnitRef) -> CompilerIr {
 /// What this mock claims to be, under the named behaviour.
 fn identity(behaviour: &str) -> HelperIdentity {
     let protocol = if behaviour == "ancient" {
-        // A revision far enough back that no negotiation can reach it: below
-        // the oldest a client still accepts, rather than merely below the
-        // newest, which would be a helper a release behind and usable.
-        VersionRange {
-            min: 0,
-            max: OLDEST_PROTOCOL_VERSION.saturating_sub(1),
-        }
-    } else if behaviour == "predates-describe" {
-        // A helper a release behind: everything the older revision has works,
-        // and what was added after it cannot be asked for.
-        VersionRange::exactly(OLDEST_PROTOCOL_VERSION)
+        PROTOCOL_VERSION.saturating_sub(1)
     } else {
-        VersionRange::exactly(PROTOCOL_VERSION)
+        PROTOCOL_VERSION
     };
     let capabilities = if behaviour == "untyped" {
         vec![Capability::CallTargets]

@@ -53,7 +53,7 @@ use crate::frontend::{Token, TokenKind};
 /// Recorded alongside the other detector versions: a change in what counts as
 /// test code changes how a report is ordered, so results from two versions are
 /// not comparable without saying so.
-pub const TEST_CODE_VERSION: &str = "test-code-v2";
+pub const TEST_CODE_VERSION: &str = "test-code-v1";
 
 /// The identifier a test attribute is built around.
 ///

@@ -68,7 +68,7 @@ use crate::types::{ApiEvidence, TypeEvidence};
 /// Version of the composite-weight recipe and judgment rules. Bump it when any
 /// weight default or classification rule changes, since findings change with
 /// it. Recorded as a detector version.
-pub const WEIGHT_VERSION: &str = "structural-verify-v5";
+pub const WEIGHT_VERSION: &str = "structural-verify-v1";
 
 /// Relative weights of the similarity dimensions in the composite score.
 ///

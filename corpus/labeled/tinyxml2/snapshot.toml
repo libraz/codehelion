@@ -1,4 +1,4 @@
-schema_version = 0
+schema_version = 1
 origin = "https://github.com/leethomason/tinyxml2.git"
 commit = "8224e427b655b83dae5e2298f1e6919523a78737"
 # The library is two files and nothing else — no headers to select between, no

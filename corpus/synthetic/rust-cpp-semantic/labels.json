@@ -1,5 +1,5 @@
 {
-  "schema_version": 0,
+  "schema_version": 1,
   "language": "mixed",
   "files": ["src/lib.rs", "cpp/copied.cpp"],
   "clone_pairs": [

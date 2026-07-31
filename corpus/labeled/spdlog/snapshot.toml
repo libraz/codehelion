@@ -1,4 +1,4 @@
-schema_version = 0
+schema_version = 1
 origin = "https://github.com/gabime/spdlog.git"
 commit = "79524ddd08a4ec981b7fea76afd08ee05f83755d"
 # The library's own headers. `include/spdlog/fmt/bundled` is a second project

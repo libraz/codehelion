@@ -50,7 +50,7 @@ use tree_sitter::{Node, Parser};
 /// Version tag of this structural frontend, used as a fingerprint input. Bump
 /// it whenever a change alters the token stream or the IR tree for unchanged
 /// input.
-pub const STRUCTURAL_FRONTEND_VERSION: &str = "c-ir-v0";
+pub const STRUCTURAL_FRONTEND_VERSION: &str = "c-ir-v1";
 
 /// Grammar kinds lexed as one atomic token: the walker emits a single token
 /// for the whole node and never descends into its children (escape sequences,
@@ -947,7 +947,7 @@ function compute
     fn file_carries_language_and_versions() {
         let frontend = CStructuralFrontend;
         assert_eq!(frontend.language(), Language::C);
-        assert_eq!(frontend.frontend_version(), "c-ir-v0");
+        assert_eq!(frontend.frontend_version(), "c-ir-v1");
 
         let file = parse("int a;");
         assert_eq!(file.language, Language::C);

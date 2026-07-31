@@ -1059,7 +1059,7 @@ mod tests {
     /// covered, exactly 2 findings are true positives, 1 is a false positive.
     fn self_test_inputs() -> (DetectionResult, LabelSet) {
         let results = DetectionResult {
-            schema_version: 0,
+            schema_version: 1,
             language: "rust".to_string(),
             findings: vec![
                 // Covers pair A exactly -> true positive.
@@ -1085,7 +1085,7 @@ mod tests {
             withheld: Vec::new(),
         };
         let labels = LabelSet {
-            schema_version: 0,
+            schema_version: 1,
             language: "rust".to_string(),
             files: vec!["x.rs".to_string(), "y.rs".to_string()],
             clone_pairs: vec![
@@ -1228,7 +1228,7 @@ mod tests {
     fn nothing_judged_is_not_perfect_precision() {
         let (results, _) = self_test_inputs();
         let empty = LabelSet {
-            schema_version: 0,
+            schema_version: 1,
             language: "rust".to_string(),
             files: vec![],
             clone_pairs: vec![],
@@ -1304,13 +1304,13 @@ mod tests {
     #[test]
     fn stability_disjoint_runs() {
         let a = DetectionResult {
-            schema_version: 0,
+            schema_version: 1,
             language: "rust".to_string(),
             findings: vec![finding("f-a", 1.0, vec![fragment("x.rs", 1, 10)])],
             withheld: Vec::new(),
         };
         let b = DetectionResult {
-            schema_version: 0,
+            schema_version: 1,
             language: "rust".to_string(),
             findings: vec![finding("f-b", 1.0, vec![fragment("x.rs", 50, 60)])],
             withheld: Vec::new(),
@@ -1328,13 +1328,13 @@ mod tests {
         let k2 = vec![fragment("y.rs", 1, 10)];
         let k3 = vec![fragment("z.rs", 1, 10)];
         let a = DetectionResult {
-            schema_version: 0,
+            schema_version: 1,
             language: "rust".to_string(),
             findings: vec![finding("a1", 1.0, k1), finding("a2", 1.0, k2.clone())],
             withheld: Vec::new(),
         };
         let b = DetectionResult {
-            schema_version: 0,
+            schema_version: 1,
             language: "rust".to_string(),
             // Different id and clone_type for the shared key: identity is by
             // fragments only.
@@ -1363,7 +1363,7 @@ mod tests {
     #[test]
     fn stability_empty_runs_are_identical() {
         let empty = DetectionResult {
-            schema_version: 0,
+            schema_version: 1,
             language: "rust".to_string(),
             findings: vec![],
             withheld: Vec::new(),

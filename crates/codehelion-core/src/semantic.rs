@@ -19,7 +19,7 @@ use crate::types::TypeTag;
 use crate::verify::Confidence;
 
 /// Version of the closed SOG vocabulary and normalization contract.
-pub const SOG_SCHEMA_VERSION: &str = "sog-v9";
+pub const SOG_SCHEMA_VERSION: &str = "sog-v1";
 
 /// Version of the coarse index used to bound registered SOG comparisons.
 ///
@@ -47,7 +47,7 @@ pub const CROSS_LANGUAGE_CANDIDATE_INDEX_VERSION: &str = "cross-language-sog-can
 /// This changes when the set of rule identifiers or their default enabled
 /// state changes. A scan records it beside the SOG schema so its evidence is
 /// never interpreted under a different rule selection unnoticed.
-pub const SEMANTIC_RULE_REGISTRY_VERSION: &str = "semantic-rule-registry-v8";
+pub const SEMANTIC_RULE_REGISTRY_VERSION: &str = "semantic-rule-registry-v1";
 
 /// One permitted semantic operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -360,8 +360,8 @@ pub struct ConstructObservation {
     pub kind: OperationKind,
     /// Standard fallible container the compiler resolved for this operation.
     ///
-    /// `None` is retained for pre-v6 helper documents; it is never treated as
-    /// interchangeable with either known variant by a registered rule.
+    /// `None` is never treated as interchangeable with either known variant
+    /// by a registered rule.
     pub fallible_kind: Option<FallibleKind>,
     /// Closed direct-propagation spelling the helper confirmed, when any.
     pub direct_propagation: Option<DirectPropagation>,

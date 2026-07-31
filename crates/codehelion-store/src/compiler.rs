@@ -46,9 +46,6 @@ pub const IR_SCHEMA_COMPONENT: &str = "compiler_ir";
 pub struct CompilerHelperRow {
     /// What the helper said about itself at handshake.
     pub identity: HelperIdentity,
-    /// The protocol revision the two sides settled on, which is the highest
-    /// both could speak and so is not derivable from either range alone.
-    pub protocol_agreed: u32,
     /// How many times the run had to restart it, when the run counted.
     ///
     /// `None` from a run recorded before this was kept. Zero is the different
@@ -249,16 +246,13 @@ fn write_helpers(
     for helper in helpers {
         tx.execute(
             "INSERT INTO compiler_helper
-                 (scan_run_id, name, version, protocol_min, protocol_max, protocol_agreed,
-                  restarts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (scan_run_id, name, version, protocol_version, restarts)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 run_id,
                 helper.identity.name,
                 helper.identity.version,
-                i64::from(helper.identity.protocol.min),
-                i64::from(helper.identity.protocol.max),
-                i64::from(helper.protocol_agreed),
+                i64::from(helper.identity.protocol),
                 helper.restarts.map(i64::from),
             ],
         )?;
@@ -738,14 +732,12 @@ mod read {
         StoredHelperRef, SymbolKind, TypeCategory, Unavailability, UnexpandedMacro,
         UnexpandedMacroReason, UnitRef, anchor_at, params,
     };
-    use codehelion_helper::protocol::VersionRange;
-
     pub(super) fn helpers(
         conn: &Connection,
         run_id: i64,
     ) -> Result<Vec<CompilerHelperRow>, StoreError> {
         let mut statement = conn.prepare(
-            "SELECT id, name, version, protocol_min, protocol_max, protocol_agreed, restarts
+            "SELECT id, name, version, protocol_version, restarts
              FROM compiler_helper WHERE scan_run_id = ?1 ORDER BY name, version",
         )?;
         let rows = statement
@@ -755,22 +747,17 @@ mod read {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<i64>>(4)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         let mut helpers = Vec::with_capacity(rows.len());
-        for (id, name, version, min, max, agreed, restarts) in rows {
+        for (id, name, version, protocol, restarts) in rows {
             helpers.push(CompilerHelperRow {
                 identity: HelperIdentity {
                     name,
                     version,
-                    protocol: VersionRange {
-                        min: revision(min),
-                        max: revision(max),
-                    },
+                    protocol: revision(protocol),
                     toolchains: strings(
                         conn,
                         "SELECT toolchain FROM compiler_helper_toolchain
@@ -780,7 +767,6 @@ mod read {
                     capabilities: capabilities(conn, id)?,
                     executes: executions(conn, id)?,
                 },
-                protocol_agreed: revision(agreed),
                 restarts: restarts.map(revision),
             });
         }
@@ -1339,7 +1325,7 @@ mod read {
              WHERE compiler_helper_id = ?1 ORDER BY capability",
             id,
         )?;
-        Ok(names.iter().map(|name| capability(name)).collect())
+        names.iter().map(|name| capability(name)).collect()
     }
 
     fn executions(conn: &Connection, id: i64) -> Result<Vec<Execution>, StoreError> {
@@ -1349,13 +1335,15 @@ mod read {
              WHERE compiler_helper_id = ?1 ORDER BY execution",
             id,
         )?;
-        // A class this build cannot name is kept as the nameless one rather
-        // than dropped: the row says the helper offered something, and losing
-        // it would report a helper that offered less than it did.
-        Ok(names
+        names
             .iter()
-            .map(|name| Execution::from_name(name).unwrap_or(Execution::Unknown))
-            .collect())
+            .map(|name| {
+                Execution::from_name(name).ok_or_else(|| StoreError::UnknownVocabulary {
+                    field: "compiler_helper_execution",
+                    value: name.clone(),
+                })
+            })
+            .collect()
     }
 
     fn strings(conn: &Connection, sql: &str, id: i64) -> Result<Vec<String>, StoreError> {
@@ -1374,19 +1362,20 @@ mod read {
             .map(|(name, version)| StoredHelperRef { name, version }))
     }
 
-    /// A capability name as this build reads it. An unrecognised one folds
-    /// into `Unknown` rather than failing, the same way the handshake does:
-    /// a newer helper may offer more than this build knows to ask for, and a
-    /// stored run of it must still be readable.
-    fn capability(name: &str) -> Capability {
+    /// A capability name as this v1 build reads it.
+    fn capability(name: &str) -> Result<Capability, StoreError> {
         match name {
-            "types" => Capability::Types,
-            "call_targets" => Capability::CallTargets,
-            "mir_cfg" => Capability::MirCfg,
-            "macro_expansion" => Capability::MacroExpansion,
-            "template_instantiation" => Capability::TemplateInstantiation,
-            "overload_resolution" => Capability::OverloadResolution,
-            _ => Capability::Unknown,
+            "types" => Ok(Capability::Types),
+            "name_resolution" => Ok(Capability::NameResolution),
+            "call_targets" => Ok(Capability::CallTargets),
+            "mir_cfg" => Ok(Capability::MirCfg),
+            "macro_expansion" => Ok(Capability::MacroExpansion),
+            "template_instantiation" => Ok(Capability::TemplateInstantiation),
+            "overload_resolution" => Ok(Capability::OverloadResolution),
+            _ => Err(StoreError::UnknownVocabulary {
+                field: "compiler_helper_capability",
+                value: name.to_owned(),
+            }),
         }
     }
 

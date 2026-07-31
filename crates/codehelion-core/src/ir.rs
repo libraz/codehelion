@@ -587,7 +587,7 @@ mod tests {
 
         let file = SyntaxIrFile {
             language: Language::Rust,
-            frontend_version: "test-v0",
+            frontend_version: "test-v1",
             ir_schema_version: IR_SCHEMA_VERSION,
             tokens: Vec::new(),
             roots: vec![root],
@@ -613,7 +613,7 @@ mod tests {
     fn file_of(roots: Vec<IrNode>) -> SyntaxIrFile {
         SyntaxIrFile {
             language: Language::Rust,
-            frontend_version: "test-v0",
+            frontend_version: "test-v1",
             ir_schema_version: IR_SCHEMA_VERSION,
             tokens: Vec::new(),
             roots,

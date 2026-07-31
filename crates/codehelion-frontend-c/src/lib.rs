@@ -22,7 +22,7 @@ use codehelion_core::frontend::{Frontend, LexedFile};
 
 /// Version tag of this frontend, used as a fingerprint input. Bump it whenever
 /// a change alters the token stream or unit boundaries for unchanged input.
-pub const FRONTEND_VERSION: &str = "c-lexer-v0";
+pub const FRONTEND_VERSION: &str = "c-lexer-v1";
 
 /// The C Fast-mode frontend.
 #[derive(Debug, Clone, Copy, Default)]

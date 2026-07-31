@@ -1,13 +1,11 @@
-//! The wire shape of the compiler IR, frozen.
+//! The wire shape of the compiler IR.
 //!
 //! A helper and the tool that reads it are built and shipped separately, so
 //! the only thing keeping them able to talk is the schema version — and a
 //! version is only worth anything if changing the shape is hard to do without
 //! noticing. This is what makes it hard: a canonical analysis is serialized
-//! and compared against a stored document named after the version it belongs
-//! to. Adding, removing or renaming a field fails here, and the way to make it
-//! pass is to write a new document under a new version, which is the change
-//! that was needed anyway.
+//! and compared against the one stored document that defines the current
+//! contract. Adding, removing or renaming a field fails here.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use codehelion_helper::ir::{
@@ -171,50 +169,14 @@ fn sample_expressions() -> Vec<ResolvedExpression> {
     }]
 }
 
-/// The stored document for the version this build writes. A new version means
-/// a new file beside the last, not an edit to it — the shapes that have been
-/// shipped stay on disk to say what a stored analysis written against them
-/// meant.
-const GOLDEN_V11: &str = include_str!("golden/compiler-ir-v11.json");
-
-/// The shape before explicit loop reductions were retained.
-const GOLDEN_V10: &str = include_str!("golden/compiler-ir-v10.json");
-
-/// The shape before resource categories were retained on semantic constructs.
-const GOLDEN_V9: &str = include_str!("golden/compiler-ir-v9.json");
-
-/// The shape before compiler-confirmed API names accompanied call identities.
-const GOLDEN_V8: &str = include_str!("golden/compiler-ir-v8.json");
-
-/// The shape before direct propagation forms were retained.
-const GOLDEN_V7: &str = include_str!("golden/compiler-ir-v7.json");
-
-/// The shape before explicit loop operations were retained.
-const GOLDEN_V6: &str = include_str!("golden/compiler-ir-v6.json");
-
-/// The shape before standard fallible container kinds were retained.
-const GOLDEN_V5: &str = include_str!("golden/compiler-ir-v5.json");
-
-/// The shape before compiler-confirmed validation constructs were reported.
-const GOLDEN_V4: &str = include_str!("golden/compiler-ir-v4.json");
-
-/// The shape before compiler-confirmed semantic constructs were reported.
-const GOLDEN_V3: &str = include_str!("golden/compiler-ir-v3.json");
-
-/// The shape before expanded expression types were reported.
-const GOLDEN_V2: &str = include_str!("golden/compiler-ir-v2.json");
-
-/// The shape before skipped macro invocations were made visible.
-const GOLDEN_V1: &str = include_str!("golden/compiler-ir-v1.json");
-
-/// The shape before the analysis said what its paths were spelled against.
-const GOLDEN_V0: &str = include_str!("golden/compiler-ir-v0.json");
+/// The stored document for the only compiler-IR contract this build writes.
+const GOLDEN: &str = include_str!("golden/compiler-ir-v1.json");
 
 #[test]
 fn the_wire_shape_matches_the_document_for_this_version() {
-    assert_eq!(COMPILER_IR_SCHEMA_VERSION, "compiler-ir-v11");
+    assert_eq!(COMPILER_IR_SCHEMA_VERSION, "compiler-ir-v1");
     let written = serde_json::to_string_pretty(&canonical()).unwrap();
-    assert_eq!(written, GOLDEN_V11.trim_end());
+    assert_eq!(written, GOLDEN.trim_end());
 }
 
 /// The document is also what a reader of that version has to accept, so it is
@@ -222,7 +184,7 @@ fn the_wire_shape_matches_the_document_for_this_version() {
 /// wrong would pass the check above.
 #[test]
 fn the_document_reads_back_as_what_produced_it() {
-    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V11).unwrap();
+    let parsed: CompilerIr = serde_json::from_str(GOLDEN).unwrap();
     assert_eq!(parsed, canonical());
     assert!(parsed.is_readable());
 }
@@ -244,73 +206,4 @@ fn a_resource_category_round_trips_when_present() {
         serde_json::from_str::<SemanticConstruct>(&written).unwrap(),
         construct
     );
-}
-
-#[test]
-fn the_previous_document_remains_parseable_as_thin_coverage() {
-    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V10).unwrap();
-    assert!(
-        parsed
-            .semantic_constructs
-            .iter()
-            .all(|construct| construct.kind != SemanticConstructKind::Reduce)
-    );
-    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V9).unwrap();
-    assert!(
-        parsed
-            .semantic_constructs
-            .iter()
-            .all(|construct| construct.resource_kind.is_none())
-    );
-    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V8).unwrap();
-    assert!(parsed.calls.iter().all(|call| call.api_name.is_none()));
-    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V7).unwrap();
-    assert!(
-        parsed
-            .semantic_constructs
-            .iter()
-            .all(|construct| construct.direct_propagation.is_none())
-    );
-    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V6).unwrap();
-    assert!(parsed.semantic_constructs.iter().all(|construct| {
-        matches!(
-            construct.kind,
-            SemanticConstructKind::PropagateError | SemanticConstructKind::Validate
-        )
-    }));
-    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V5).unwrap();
-    assert!(
-        parsed
-            .semantic_constructs
-            .iter()
-            .all(|construct| construct.fallible_kind.is_none())
-    );
-    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V4).unwrap();
-    assert!(
-        parsed
-            .semantic_constructs
-            .iter()
-            .all(|construct| { construct.kind == SemanticConstructKind::PropagateError })
-    );
-    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V3).unwrap();
-    assert!(parsed.semantic_constructs.is_empty());
-    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V2).unwrap();
-    assert!(parsed.expressions.is_empty());
-    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V1).unwrap();
-    assert!(parsed.expressions.is_empty());
-    assert!(parsed.unexpanded_macros.is_empty());
-}
-
-/// An analysis from an earlier schema has to arrive before it can be turned
-/// away. Refusing it at the parser instead would report a helper from another
-/// release as a helper that broke, and send someone to debug their project
-/// rather than to update a program.
-#[test]
-fn an_answer_from_an_earlier_schema_arrives_and_is_turned_away() {
-    let parsed: CompilerIr = serde_json::from_str(GOLDEN_V0)
-        .expect("a shape this build no longer writes still has to parse");
-    assert!(!parsed.is_readable());
-    // The field it predates reads as absent rather than as a claim: what a v0
-    // analysis spelled its paths against is exactly what nobody recorded.
-    assert_eq!(parsed.anchored_at, None);
 }

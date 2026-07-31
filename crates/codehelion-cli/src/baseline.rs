@@ -35,14 +35,8 @@
 //! set. A baseline made under different conditions would silently match
 //! nothing — the worst possible failure for a suppression, since it looks
 //! exactly like a suppression that worked. The file therefore records what it
-//! was made under, and [`Baseline::compatibility`] states plainly when a run
-//! does not match.
-//!
-//! Not every difference is fatal, and treating them alike would be its own
-//! failure: a release that changed the order findings are read in would throw
-//! away every frozen judgement in the project. Which differences matter is
-//! decided by [`codehelion_core::compat`]. A baseline is deliberately a
-//! standalone snapshot: it neither rewrites nor depends on an earlier scan.
+//! was made under and requires an exact match. This unreleased v1 product does
+//! not read, convert, or reinterpret older baseline formats.
 //!
 //! [`CloneGroupFingerprint`]: codehelion_core::stable_id::CloneGroupFingerprint
 
@@ -50,7 +44,6 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use codehelion_core::compat::{self, Impact};
 use codehelion_store::query::{RunOrigin, StoredGroup};
 use serde::{Deserialize, Serialize};
 
@@ -174,9 +167,9 @@ impl Baseline {
             .with_context(|| format!("reading baseline {}", path.display()))?;
         let baseline: Self = serde_json::from_str(&text)
             .with_context(|| format!("parsing baseline {}", path.display()))?;
-        if baseline.schema_version > SCHEMA_VERSION {
+        if baseline.schema_version != SCHEMA_VERSION {
             bail!(
-                "baseline {} is schema version {}, and this build reads up to version {}",
+                "baseline {} is schema version {}, but this build requires version {}",
                 path.display(),
                 baseline.schema_version,
                 SCHEMA_VERSION
@@ -241,12 +234,8 @@ impl Baseline {
     /// that no longer exist, and matching nothing is the expected outcome
     /// rather than a sign the duplication is gone.
     ///
-    /// A detector version difference is weighed rather than counted. Only the
-    /// components that decide what an id *is* stop the entries matching; a
-    /// component that decides how findings are grouped leaves most of them
-    /// intact, and one that decides only how they are displayed leaves all of
-    /// them. Treating the three alike would discard a project's frozen
-    /// judgements over a change that moved nothing.
+    /// Detector versions must also match exactly. There is no compatibility
+    /// table for superseded detector rules in the unreleased v1 product.
     #[must_use]
     pub fn compatibility(
         &self,
@@ -264,33 +253,20 @@ impl Baseline {
                 caveat: None,
             };
         }
-        let recorded: Vec<(String, String)> = self
+        let mut recorded: Vec<(String, String)> = self
             .detector_versions
             .iter()
             .map(|entry| (entry.component.clone(), entry.version.clone()))
             .collect();
-        let drift = compat::drift(&recorded, detectors);
-        let named = |impact: Impact| -> Option<String> {
-            let listed: Vec<String> = drift
-                .iter()
-                .filter(|entry| entry.impact == impact)
-                .map(compat::Drift::describe)
-                .collect();
-            (!listed.is_empty()).then(|| listed.join(", "))
-        };
+        let mut current = detectors.to_vec();
+        recorded.sort_unstable();
+        current.sort_unstable();
         Compatibility {
-            mismatch: named(Impact::Identifiers).map(|listed| {
-                format!(
-                    "recorded under detector versions that name findings differently ({listed}); \
-                     recreate the baseline from this scan before using it"
-                )
-            }),
-            caveat: named(Impact::Grouping).map(|listed| {
-                format!(
-                    "grouped under different rules ({listed}), \
-                     so an entry whose group gained or lost an occurrence reads as stale"
-                )
-            }),
+            mismatch: (recorded != current).then_some(
+                "recorded under different detector versions; recreate the baseline from this scan before using it"
+                    .to_string(),
+            ),
+            caveat: None,
         }
     }
 }
@@ -366,6 +342,7 @@ mod tests {
             end_line: Some(20),
             token_count: 42,
             unit_name: Some("parse".to_string()),
+            boilerplate: None,
             is_canonical: canonical,
         }
     }
@@ -383,6 +360,10 @@ mod tests {
             test_code: false,
             width_family: false,
             statements: None,
+            identifier_jaccard: None,
+            has_loop: None,
+            has_dynamic_allocation: None,
+            call_count: None,
             similarity: None,
             semantic: None,
             suppressed_by: None,
@@ -488,12 +469,15 @@ mod tests {
             .expect("a different variant is a mismatch");
         assert!(other_variant.contains("build variant"));
 
-        let bumped = vec![("fp-schema".to_string(), "fp-schema-v2".to_string())];
+        let bumped = vec![(
+            "fp-schema".to_string(),
+            "different-fingerprint-v1".to_string(),
+        )];
         let other_detector = baseline
             .compatibility("abcdef0123456789", &bumped)
             .mismatch
             .expect("a moved fingerprint schema is a mismatch");
-        assert!(other_detector.contains("fp-schema fp-schema-v1 -> fp-schema-v2"));
+        assert!(other_detector.contains("different detector versions"));
         assert!(other_detector.contains("recreate the baseline"));
     }
 }

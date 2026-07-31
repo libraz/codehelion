@@ -20,7 +20,7 @@ use crate::schema::CloneType;
 ///
 /// ```json
 /// {
-///   "schema_version": 0,
+///   "schema_version": 1,
 ///   "language": "rust",
 ///   "seed": "seed.rs",
 ///   "variants": [
@@ -334,7 +334,7 @@ mod tests {
     use super::*;
 
     const EXAMPLE: &str = r#"{
-      "schema_version": 0,
+      "schema_version": 1,
       "language": "rust",
       "seed": "seed.rs",
       "variants": [
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn parses_full_example() {
         let spec = MutationSpec::from_json(EXAMPLE).expect("example parses");
-        assert_eq!(spec.schema_version, 0);
+        assert_eq!(spec.schema_version, 1);
         assert_eq!(spec.seed, "seed.rs");
         assert_eq!(spec.variants.len(), 1);
         let variant = &spec.variants[0];
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn parses_transplants() {
         let json = r#"{
-          "schema_version": 0,
+          "schema_version": 1,
           "language": "rust",
           "seed": "seed.rs",
           "variants": [
@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn unknown_fields_are_rejected() {
         let json = r#"{
-          "schema_version": 0,
+          "schema_version": 1,
           "language": "rust",
           "seed": "seed.rs",
           "variants": [],

@@ -30,7 +30,7 @@ pub use client::{Analysis, DEFAULT_TIMEOUT, Helper, HelperError, Supervisor, loc
 pub use ir::{COMPILER_IR_SCHEMA_VERSION, CompilerIr, Unavailability, UnitRef};
 pub use protocol::{
     Absence, BuildDescription, Capability, CompileCommandSelector, Execution, HelperIdentity,
-    OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, VersionRange,
+    PROTOCOL_VERSION,
 };
 pub use sandbox::{
     SandboxAvailability, SandboxError, SandboxRequest, availability, doctor_summary,

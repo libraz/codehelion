@@ -33,12 +33,11 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// The revision of the compiler-IR shape.
+/// The compiler-IR schema identifier.
 ///
-/// Recorded beside every stored result: a stored IR whose schema this build
-/// cannot read must be recognised as such rather than read as if it were
-/// current.
-pub const COMPILER_IR_SCHEMA_VERSION: &str = "compiler-ir-v11";
+/// The product has not been released, so the complete current shape is the
+/// only supported wire contract.
+pub const COMPILER_IR_SCHEMA_VERSION: &str = "compiler-ir-v1";
 
 /// A half-open byte range in one file, with the line its start falls on.
 ///
@@ -195,8 +194,7 @@ pub enum SymbolKind {
     Constant,
     /// A module, namespace, or crate.
     Namespace,
-    /// Something this build has no name for.
-    #[serde(other)]
+    /// A compiler fact that has no more specific symbol category.
     Other,
 }
 
@@ -240,9 +238,8 @@ pub struct CallSite {
     /// A compiler-confirmed standard-library API name, when the helper can
     /// establish it without deriving it from the stable target identifier.
     ///
-    /// `None` retains compatibility with older IR and with calls outside the
-    /// deliberately small API vocabulary used by restricted semantic rules.
-    #[serde(default)]
+    /// `None` for calls outside the deliberately small API vocabulary used by
+    /// restricted semantic rules.
     pub api_name: Option<String>,
 }
 
@@ -257,17 +254,14 @@ pub struct SemanticConstruct {
     /// The standard fallible container the compiler resolved, when this
     /// construct operates on one.
     ///
-    /// Older helper documents did not retain this distinction. `None` means
-    /// the document predates it, not that the helper inferred an unknown type.
-    #[serde(default)]
+    /// `None` when the construct does not operate on a fallible container.
     pub fallible_kind: Option<FallibleKind>,
     /// A closed form that makes this propagation directly comparable to a
     /// different spelling without general equivalence reasoning.
-    #[serde(default)]
     pub direct_propagation: Option<DirectPropagation>,
     /// Closed resource category for a compiler-confirmed acquire or release.
     /// It is absent for every other construct.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_kind: Option<String>,
 }
 
@@ -559,10 +553,8 @@ pub struct EffectSummary {
     /// which are the same empty summary and very different claims.
     pub computed: bool,
     /// Symbols whose state the unit writes.
-    #[serde(default)]
     pub writes: Vec<String>,
     /// Kinds of external interaction the unit performs.
-    #[serde(default)]
     pub interactions: Vec<String>,
 }
 
@@ -574,7 +566,6 @@ pub struct DataFlowSummary {
     /// Whether the helper attempted this analysis at all.
     pub computed: bool,
     /// Pairs of symbol ids where the first flows into the second.
-    #[serde(default)]
     pub flows: Vec<(String, String)>,
 }
 
@@ -613,13 +604,6 @@ pub struct CompilerIr {
     /// `None` when the paths stand on their own, which is what an analysis
     /// with no project root to speak of reports.
     ///
-    /// Defaulted when absent so that an analysis written against a schema
-    /// without it still parses. What tells a reader to update its helper is
-    /// [`CompilerIr::is_readable`], and that only gets to speak if the message
-    /// arrives — a field this side requires would turn "a helper from another
-    /// release" into "a helper that broke", which sends someone to debug the
-    /// wrong thing.
-    #[serde(default)]
     pub anchored_at: Option<String>,
     /// Names resolved to definitions.
     pub symbols: Vec<ResolvedSymbol>,
@@ -628,14 +612,11 @@ pub struct CompilerIr {
     /// Calls and what they call.
     pub calls: Vec<CallSite>,
     /// Compiler-confirmed constructs available to restricted semantic rules.
-    #[serde(default)]
     pub semantic_constructs: Vec<SemanticConstruct>,
     /// Expression types whose anchor may cover an invocation rather than one
     /// source token.
-    #[serde(default)]
     pub expressions: Vec<ResolvedExpression>,
     /// Macro invocations that were not expanded, and why.
-    #[serde(default)]
     pub unexpanded_macros: Vec<UnexpandedMacro>,
     /// Control flow, when the helper offers it.
     pub cfg: Option<ControlFlowGraph>,
@@ -799,7 +780,7 @@ mod tests {
             file: "src/lib.rs".into(),
             variant: "v1".into(),
         });
-        ir.schema_version = "compiler-ir-v99".into();
+        ir.schema_version = "compiler-ir-unsupported".into();
         assert!(!ir.is_readable());
     }
 
@@ -844,8 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn a_symbol_kind_from_a_newer_helper_still_parses() {
-        let kind: SymbolKind = serde_json::from_str("\"something_new\"").unwrap();
-        assert_eq!(kind, SymbolKind::Other);
+    fn an_unknown_symbol_kind_is_rejected() {
+        assert!(serde_json::from_str::<SymbolKind>("\"something_new\"").is_err());
     }
 }

@@ -679,7 +679,7 @@ mod tests {
 
     fn ctx() -> FileContext<'static> {
         FileContext {
-            frontend_version: "test-lexer-v0",
+            frontend_version: "test-lexer-v1",
             language: Language::Rust,
         }
     }

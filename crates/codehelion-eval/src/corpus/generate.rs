@@ -949,7 +949,7 @@ fn twice(x: i32) -> i32 {
 
     fn base_spec() -> MutationSpec {
         MutationSpec {
-            schema_version: 0,
+            schema_version: 1,
             language: "rust".to_string(),
             seed: "seed.rs".to_string(),
             variants: Vec::new(),

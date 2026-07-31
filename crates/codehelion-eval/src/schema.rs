@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Schema version of the [`DetectionResult`] documents this crate produces.
-pub const SCHEMA_VERSION: u32 = 0;
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// Whether a count is zero, for leaving unstated counts out of the JSON.
 #[allow(clippy::trivially_copy_pass_by_ref)] // serde requires this signature.
@@ -219,8 +219,8 @@ const fn put_forward() -> bool {
 /// The full output of one detection run over a set of source files.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DetectionResult {
-    /// Schema version of this document, so the harness can reject or migrate
-    /// incompatible inputs.
+    /// Schema version of this document, so the harness can reject incompatible
+    /// inputs.
     pub schema_version: u32,
     /// Source language of the analysed files (`rust` | `c` | `cpp`).
     pub language: String,
@@ -265,7 +265,7 @@ mod tests {
     use super::*;
 
     const EXAMPLE: &str = r#"{
-      "schema_version": 0,
+      "schema_version": 1,
       "language": "rust",
       "findings": [
         { "id": "f-001", "clone_type": "type-2", "score": 0.95,
@@ -282,7 +282,7 @@ mod tests {
         let reparsed = DetectionResult::from_json(&reserialized).expect("re-parses");
         assert_eq!(parsed, reparsed);
 
-        assert_eq!(parsed.schema_version, 0);
+        assert_eq!(parsed.schema_version, 1);
         assert_eq!(parsed.language, "rust");
         assert_eq!(parsed.findings.len(), 1);
         let finding = &parsed.findings[0];

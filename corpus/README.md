@@ -200,7 +200,7 @@ directory.
 
 ```json
 {
-  "schema_version": 0,
+  "schema_version": 1,
   "language": "rust",
   "files": ["a.rs", "b.rs"],
   "clone_pairs": [

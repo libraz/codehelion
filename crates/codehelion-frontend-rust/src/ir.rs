@@ -28,7 +28,7 @@ use ra_ap_syntax::{Edition, SourceFile, SyntaxKind, SyntaxNode};
 /// Version tag of this structural frontend, used as a fingerprint input. Bump
 /// it whenever a change alters the token stream or the IR tree for unchanged
 /// input.
-pub const STRUCTURAL_FRONTEND_VERSION: &str = "rust-ir-v0";
+pub const STRUCTURAL_FRONTEND_VERSION: &str = "rust-ir-v1";
 
 /// Edition the parser assumes. Parsing is edition-tolerant enough for audit
 /// purposes; a wrong guess degrades to error ranges, never to a lost file.
@@ -759,7 +759,7 @@ trait T {
     fn file_carries_language_and_versions() {
         let frontend = RustStructuralFrontend;
         assert_eq!(frontend.language(), Language::Rust);
-        assert_eq!(frontend.frontend_version(), "rust-ir-v0");
+        assert_eq!(frontend.frontend_version(), "rust-ir-v1");
 
         let file = parse("fn a() {}");
         assert_eq!(file.language, Language::Rust);

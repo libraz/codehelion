@@ -3,7 +3,7 @@
 # `corpus/external/` and cuts `snapshot/` from the pinned commit, both of which
 # are git-ignored. The commit is what makes the line ranges in labels.json
 # meaningful, so it is never bumped in place.
-schema_version = 0
+schema_version = 1
 # Fetched on first use. A commit given as a full hash can be fetched on its
 # own; an abbreviated one cannot.
 origin = "https://github.com/serde-rs/json.git"

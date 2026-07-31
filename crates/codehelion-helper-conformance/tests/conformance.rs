@@ -13,9 +13,7 @@ use std::time::{Duration, Instant};
 
 use codehelion_helper::client::{Analysis, Helper, HelperError, MAX_DIAGNOSTIC_LINES, Supervisor};
 use codehelion_helper::ir::{TypeCategory, Unavailability, UnitRef};
-use codehelion_helper::protocol::{
-    Capability, Execution, OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION,
-};
+use codehelion_helper::protocol::{Capability, Execution, PROTOCOL_VERSION};
 
 /// The deadline for tests that are not about a deadline.
 ///
@@ -59,43 +57,6 @@ fn a_helper_from_another_era_is_named_as_such_rather_than_used() {
     // The message has to tell someone which side to update.
     let said = error.to_string();
     assert!(said.contains("update"), "{said}");
-}
-
-/// A helper one revision behind is usable for everything that revision has,
-/// and says so about what it does not. Turning it away outright would make
-/// every addition to the protocol a reason to reinstall, and answering around
-/// it would file a run's results under conditions nobody established.
-#[test]
-fn a_helper_a_release_behind_answers_what_its_revision_has_and_declines_the_rest() {
-    let mut helper = start("predates-describe", DEADLINE).expect("the revisions overlap");
-    assert_eq!(helper.protocol_version(), OLDEST_PROTOCOL_VERSION);
-    let error = helper
-        .describe(Path::new("/repo"))
-        .expect_err("the older revision cannot be asked this");
-    assert!(matches!(error, HelperError::TooOld { .. }), "{error:?}");
-    assert!(error.to_string().contains("update the helper"), "{error}");
-    // And what its revision does have still works: the point is a helper that
-    // is behind, not one that is broken.
-    assert!(matches!(
-        helper.analyze(&unit("src/lib.rs"), &[Capability::Types]),
-        Ok(Analysis::Done(_))
-    ));
-    helper.shutdown().expect("it goes when asked");
-}
-
-/// The same helper, before anything has been asked of it. A run finds out it
-/// is too old by being refused halfway in; a diagnostic has to be able to find
-/// out at the handshake, or the only way to learn that a helper wants updating
-/// is to start a scan that cannot finish.
-#[test]
-fn whether_a_helper_is_too_old_to_be_used_is_answerable_before_it_is_used() {
-    let behind = start("predates-describe", DEADLINE).expect("the revisions overlap");
-    assert_eq!(behind.predates(), vec!["describe the build"]);
-    behind.shutdown().expect("it goes when asked");
-
-    let current = start("well-behaved", DEADLINE).expect("the mock answers");
-    assert!(current.predates().is_empty(), "{:?}", current.predates());
-    current.shutdown().expect("it goes when asked");
 }
 
 #[test]
@@ -364,9 +325,9 @@ fn who_answered_is_still_known_once_the_helper_has_gone() {
         Analysis::Done(_)
     ));
     supervisor.shutdown();
-    let (identity, agreed) = supervisor.spoke_with().expect("one helper answered");
+    let identity = supervisor.spoke_with().expect("one helper answered");
     assert_eq!(identity.name, "codehelion-mock-helper");
-    assert_eq!(agreed, PROTOCOL_VERSION);
+    assert_eq!(identity.protocol, PROTOCOL_VERSION);
     assert!(identity.capabilities.contains(&Capability::Types));
 }
 

@@ -49,7 +49,7 @@ use crate::ir::{ByteRange, IrNode, SUMMARY_HEAD_TOKENS, Shape, SyntaxIrFile};
 /// Written into every feature hash after the domain string. Bump it when any
 /// feature's input derivation changes, so features from incompatible recipes
 /// never collide silently.
-pub const FEATURE_SCHEMA_VERSION: &str = "ir-features-v0";
+pub const FEATURE_SCHEMA_VERSION: &str = "ir-features-v1";
 
 /// Statement-window lengths, in statements. Windows slide with stride 1 over
 /// each block's statement sequence; a block shorter than a length yields no
@@ -802,7 +802,7 @@ mod tests {
     fn file_of(roots: Vec<IrNode>, tokens: Vec<Token>) -> SyntaxIrFile {
         SyntaxIrFile {
             language: Language::Rust,
-            frontend_version: "test-ir-v0",
+            frontend_version: "test-ir-v1",
             ir_schema_version: IR_SCHEMA_VERSION,
             tokens,
             roots,

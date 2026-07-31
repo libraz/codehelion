@@ -82,7 +82,7 @@ mod tests {
     use super::*;
 
     const EXAMPLE: &str = r#"{
-      "schema_version": 0,
+      "schema_version": 1,
       "language": "rust",
       "files": ["seed.rs", "type2.rs"],
       "clone_pairs": [
@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn parses_full_example() {
         let labels = LabelSet::from_json(EXAMPLE).expect("example parses");
-        assert_eq!(labels.schema_version, 0);
+        assert_eq!(labels.schema_version, 1);
         assert_eq!(labels.language, "rust");
         assert_eq!(labels.files, vec!["seed.rs", "type2.rs"]);
         assert_eq!(labels.clone_pairs.len(), 1);
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn non_clones_default_to_empty_when_absent() {
         let json = r#"{
-          "schema_version": 0,
+          "schema_version": 1,
           "language": "rust",
           "files": ["seed.rs"],
           "clone_pairs": []
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn a_restricted_semantic_label_can_name_its_registered_rule() {
         let json = r#"{
-          "schema_version": 0,
+          "schema_version": 1,
           "language": "mixed",
           "files": ["a.rs", "b.cpp"],
           "clone_pairs": [{

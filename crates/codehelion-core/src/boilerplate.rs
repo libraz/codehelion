@@ -58,7 +58,7 @@ use crate::ir::{IrNode, Shape};
 /// Recorded alongside the other detector versions: a change in what counts as
 /// boilerplate changes which findings a report shows, so results from two
 /// versions are not comparable without saying so.
-pub const BOILERPLATE_VERSION: &str = "boilerplate-v5";
+pub const BOILERPLATE_VERSION: &str = "boilerplate-v1";
 
 /// A recognised boilerplate shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

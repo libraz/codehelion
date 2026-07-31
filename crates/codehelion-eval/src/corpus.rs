@@ -33,11 +33,11 @@ pub mod spec;
 use std::fmt;
 
 /// Schema version of the mutation-spec documents this generator accepts.
-pub const SPEC_SCHEMA_VERSION: u32 = 0;
+pub const SPEC_SCHEMA_VERSION: u32 = 1;
 
 /// Schema version written into generated label documents. Tracks the current
 /// [`LabelSet`](crate::labels::LabelSet) format.
-pub const LABEL_SCHEMA_VERSION: u32 = 0;
+pub const LABEL_SCHEMA_VERSION: u32 = 1;
 
 /// File name of the generated label document.
 pub const LABELS_FILE: &str = "labels.json";

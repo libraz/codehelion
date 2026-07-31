@@ -45,7 +45,7 @@
     "writes": []
   },
   "instantiations": [],
-  "schema_version": "compiler-ir-v3",
+  "schema_version": "compiler-ir-v1",
   "symbols": [
     {
       "anchor": {

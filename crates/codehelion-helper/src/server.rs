@@ -143,7 +143,7 @@ fn answer<B: Backend>(backend: &mut B, request: &Request) -> ResponseBody {
 mod tests {
     use super::*;
     use crate::ir::UnitRef;
-    use crate::protocol::{Capability, ClientIdentity, VersionRange, read_frame};
+    use crate::protocol::{Capability, ClientIdentity, read_frame};
 
     struct Fixed {
         answer: Answer,
@@ -155,7 +155,7 @@ mod tests {
             HelperIdentity {
                 name: "fixed".to_string(),
                 version: "0.1.0".to_string(),
-                protocol: VersionRange::exactly(PROTOCOL_VERSION),
+                protocol: PROTOCOL_VERSION,
                 toolchains: vec!["fixed 1.0".to_string()],
                 capabilities: vec![Capability::Types],
                 executes: Vec::new(),
@@ -214,7 +214,7 @@ mod tests {
         RequestBody::Handshake(ClientIdentity {
             client: "test".to_string(),
             client_version: "0.1.0".to_string(),
-            accepts: VersionRange::exactly(PROTOCOL_VERSION),
+            protocol: PROTOCOL_VERSION,
         })
     }
 

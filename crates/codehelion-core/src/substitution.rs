@@ -36,7 +36,7 @@ use crate::frontend::{LiteralKind, Token, TokenKind};
 
 /// Version of the witness rules, for recording alongside the other detector
 /// versions when something acts on one.
-pub const SUBSTITUTION_VERSION: &str = "substitution-v2";
+pub const SUBSTITUTION_VERSION: &str = "substitution-v1";
 
 /// Largest product of the two token counts an alignment is computed for.
 ///

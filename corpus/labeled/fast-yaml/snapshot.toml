@@ -2,7 +2,7 @@
 # committed: `corpus/scripts/materialize-labeled.sh` reconstructs them into
 # `snapshot/`, which is git-ignored. The commit is what makes the line ranges
 # in labels.json meaningful, so it is never bumped in place.
-schema_version = 0
+schema_version = 1
 repo = "/Users/libraz/Projects/fast-yaml"
 commit = "5317da2"
 # Paths taken from the source tree. Vendored third-party code is excluded: it

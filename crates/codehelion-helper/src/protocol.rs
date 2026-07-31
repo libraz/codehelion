@@ -25,24 +25,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::ir::{CompilerIr, Unavailability, UnitRef};
 
-/// The protocol revision this build speaks.
+/// The only protocol revision this build speaks.
 ///
-/// Bumped when a change would make an older peer misread a message. Additive
-/// fields with defaults do not need it; removing or repurposing one does.
-///
-/// Revision 2 added [`RequestBody::DescribeBuild`]. Revision 3 added an exact
-/// [`CompileCommandSelector`] to [`Analyze`]. A helper from an older revision
-/// cannot select between two commands for one source file, so the caller must
-/// not send such a request until the handshake settled on revision 3.
-pub const PROTOCOL_VERSION: u32 = 3;
-
-/// The oldest revision this build can still talk to.
-///
-/// Two things depend on it. A client accepts everything from here up, so a
-/// helper one release behind is still usable for what both sides have; and the
-/// handshake itself travels at this revision, because a peer that has not said
-/// what it speaks cannot be sent a message in a revision it may not have.
-pub const OLDEST_PROTOCOL_VERSION: u32 = 1;
+/// The product has not been released, so clients and helpers use the complete
+/// current protocol directly.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Largest payload a single frame may declare.
 ///
@@ -78,53 +65,6 @@ impl Encoding {
     }
 }
 
-/// An inclusive range of protocol revisions a peer can speak.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VersionRange {
-    /// Oldest revision understood.
-    pub min: u32,
-    /// Newest revision understood.
-    pub max: u32,
-}
-
-impl VersionRange {
-    /// The range that accepts exactly `version`.
-    #[must_use]
-    pub const fn exactly(version: u32) -> Self {
-        Self {
-            min: version,
-            max: version,
-        }
-    }
-
-    /// Whether `version` falls inside this range.
-    #[must_use]
-    pub const fn accepts(self, version: u32) -> bool {
-        self.min <= version && version <= self.max
-    }
-
-    /// The newest revision both ranges accept.
-    ///
-    /// Negotiation picks the highest rather than the lowest common revision:
-    /// an older revision is kept only for peers that cannot do better, so
-    /// choosing it when both sides can do better would freeze every pair at
-    /// the oldest thing anyone still supports.
-    #[must_use]
-    pub const fn best_common(self, other: Self) -> Option<u32> {
-        let low = if self.min > other.min {
-            self.min
-        } else {
-            other.min
-        };
-        let high = if self.max < other.max {
-            self.max
-        } else {
-            other.max
-        };
-        if low <= high { Some(high) } else { None }
-    }
-}
-
 /// Something a helper can be asked for.
 ///
 /// A helper reports the subset it can supply during the handshake, and a run
@@ -149,13 +89,6 @@ pub enum Capability {
     TemplateInstantiation,
     /// Which overload a call resolved to.
     OverloadResolution,
-    /// A capability this build has no name for.
-    ///
-    /// A newer helper may offer more than this build knows to ask for. Folding
-    /// those into one variant keeps the handshake parseable; nothing requests
-    /// them, so nothing depends on telling them apart.
-    #[serde(other)]
-    Unknown,
 }
 
 /// What a run does when a helper cannot supply a capability.
@@ -180,7 +113,6 @@ impl Capability {
             Self::MacroExpansion => "macro_expansion",
             Self::TemplateInstantiation => "template_instantiation",
             Self::OverloadResolution => "overload_resolution",
-            Self::Unknown => "unknown",
         }
     }
 
@@ -204,8 +136,7 @@ impl Capability {
             | Self::MirCfg
             | Self::MacroExpansion
             | Self::TemplateInstantiation
-            | Self::OverloadResolution
-            | Self::Unknown => Absence::Degrade,
+            | Self::OverloadResolution => Absence::Degrade,
         }
     }
 }
@@ -284,7 +215,6 @@ pub struct Analyze {
     /// than once under different `-D` settings. This carries the complete
     /// recorded command identity rather than a database index, because an
     /// index changes when an unrelated command is inserted or reordered.
-    #[serde(default)]
     pub compile_command: Option<CompileCommandSelector>,
     /// What to spend time on.
     ///
@@ -294,10 +224,7 @@ pub struct Analyze {
     pub want: Vec<Capability>,
     /// What the helper may run out of the project while answering.
     ///
-    /// Empty unless somebody said otherwise, and empty is what a request that
-    /// predates the field parses as: a helper reading an older client's message
-    /// runs nothing, which is the outcome that needs no permission.
-    #[serde(default)]
+    /// Empty unless somebody said otherwise.
     pub permitted: Vec<Execution>,
 }
 
@@ -338,13 +265,6 @@ pub enum Execution {
     CompilerWrapper,
     /// A command that generates source files.
     GeneratedSource,
-    /// A class this build has no name for.
-    ///
-    /// A newer peer may name one this build does not know. Folding those into
-    /// one variant keeps the message parseable, and a helper cannot be
-    /// permitted something it cannot name — which is the safe direction.
-    #[serde(other)]
-    Unknown,
 }
 
 impl Execution {
@@ -358,16 +278,10 @@ impl Execution {
             Self::Configure => "configure",
             Self::CompilerWrapper => "compiler-wrapper",
             Self::GeneratedSource => "generated-source",
-            Self::Unknown => "unknown",
         }
     }
 
     /// The class a name refers to, or `None` for one this build cannot name.
-    ///
-    /// Never [`Execution::Unknown`]: that variant exists so an unknown name
-    /// arriving over the wire stays parseable, and turning a name nobody
-    /// recognises into it here would let a misspelled permission travel as a
-    /// permission.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         [
@@ -389,8 +303,8 @@ pub struct ClientIdentity {
     pub client: String,
     /// Its version, for diagnostics rather than for negotiation.
     pub client_version: String,
-    /// The revisions it can speak.
-    pub accepts: VersionRange,
+    /// The exact protocol revision it speaks.
+    pub protocol: u32,
 }
 
 /// A message from a helper to core.
@@ -437,8 +351,8 @@ pub struct HelperIdentity {
     pub name: String,
     /// Helper version.
     pub version: String,
-    /// The protocol revisions it can speak.
-    pub protocol: VersionRange,
+    /// The exact protocol revision it speaks.
+    pub protocol: u32,
     /// The toolchains it was built against, as the compiler spells them.
     ///
     /// A helper built for one compiler release cannot be trusted against
@@ -453,7 +367,6 @@ pub struct HelperIdentity {
     /// refused rather than accepted and forgotten. A permission that changes
     /// nothing is worse than one that is turned down: somebody granted it, and
     /// the thin answer that follows looks like the project's own.
-    #[serde(default)]
     pub executes: Vec<Execution>,
 }
 
@@ -584,7 +497,7 @@ mod tests {
         HelperIdentity {
             name: "mock".into(),
             version: "0.1.0".into(),
-            protocol: VersionRange::exactly(PROTOCOL_VERSION),
+            protocol: PROTOCOL_VERSION,
             toolchains: vec!["rustc 1.85.0".into()],
             capabilities: vec![Capability::Types, Capability::CallTargets],
             executes: vec![Execution::BuildScript],
@@ -677,21 +590,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn negotiation_takes_the_newest_revision_both_sides_can_speak() {
-        let core = VersionRange { min: 1, max: 3 };
-        let helper = VersionRange { min: 2, max: 5 };
-        assert_eq!(core.best_common(helper), Some(3));
-        assert_eq!(helper.best_common(core), Some(3));
-    }
-
-    #[test]
-    fn ranges_that_do_not_meet_have_no_common_revision() {
-        let core = VersionRange { min: 4, max: 5 };
-        let helper = VersionRange { min: 1, max: 3 };
-        assert_eq!(core.best_common(helper), None);
-    }
-
     /// One spelling, kept in one place. A stored capability and a transmitted
     /// one that disagree would make a database written by this build unreadable
     /// by it.
@@ -705,7 +603,6 @@ mod tests {
             Capability::MacroExpansion,
             Capability::TemplateInstantiation,
             Capability::OverloadResolution,
-            Capability::Unknown,
         ] {
             let sent = serde_json::to_string(&capability).unwrap();
             assert_eq!(sent, format!("\"{}\"", capability.name()));
@@ -722,7 +619,6 @@ mod tests {
             Execution::Configure,
             Execution::CompilerWrapper,
             Execution::GeneratedSource,
-            Execution::Unknown,
         ] {
             let sent = serde_json::to_string(&class).unwrap();
             assert_eq!(sent, format!("\"{}\"", class.name()));
@@ -740,17 +636,18 @@ mod tests {
         );
         assert_eq!(Execution::from_name("build-scripts"), None);
         assert_eq!(Execution::from_name("unknown"), None);
-        // Over the wire it still parses, so a newer peer's message is readable.
-        let listed: Vec<Execution> =
-            serde_json::from_str(r#"["build-script","something-newer"]"#).unwrap();
-        assert_eq!(listed, vec![Execution::BuildScript, Execution::Unknown]);
+        assert!(
+            serde_json::from_str::<Vec<Execution>>(r#"["build-script","something-newer"]"#)
+                .is_err()
+        );
     }
 
     #[test]
-    fn a_capability_this_build_cannot_name_still_parses() {
-        let listed: Vec<Capability> =
-            serde_json::from_str(r#"["types","something_from_a_newer_helper"]"#).unwrap();
-        assert_eq!(listed, vec![Capability::Types, Capability::Unknown]);
+    fn a_capability_this_build_cannot_name_is_rejected() {
+        assert!(
+            serde_json::from_str::<Vec<Capability>>(r#"["types","something_from_a_newer_helper"]"#)
+                .is_err()
+        );
     }
 
     /// The two that decide what a comparison is made of. Everything else
@@ -765,7 +662,6 @@ mod tests {
             Capability::MacroExpansion,
             Capability::TemplateInstantiation,
             Capability::OverloadResolution,
-            Capability::Unknown,
         ] {
             assert_eq!(capability.absence(), Absence::Degrade, "{capability:?}");
         }
