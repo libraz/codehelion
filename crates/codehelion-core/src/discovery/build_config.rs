@@ -164,6 +164,11 @@ pub struct CppBuild {
     pub flags: Vec<String>,
     /// A hash of the compilation database this came from.
     pub database_hash: Option<String>,
+    /// Post-processing tools declared for this build, in invocation order.
+    ///
+    /// This is deliberately declarative. Source analysis never runs a tool in
+    /// this list; artifact analysis may consume the recorded fact later.
+    pub post_processing_tools: Vec<String>,
 }
 
 impl CppBuild {
@@ -228,6 +233,7 @@ impl CppBuild {
             ordered("includes", &self.include_paths),
             ordered("flags", &self.flags),
             resolved("database", self.database_hash.as_deref()),
+            ordered("post_processing_tools", &self.post_processing_tools),
         ]
     }
 }
@@ -265,6 +271,11 @@ pub struct RustBuild {
     pub lockfile_hash: Option<String>,
     /// A hash of the command the build was requested with.
     pub build_command_hash: Option<String>,
+    /// Post-processing tools declared for this build, in invocation order.
+    ///
+    /// This records build context only. The source scanner never executes a
+    /// declared tool.
+    pub post_processing_tools: Vec<String>,
     /// The classes of execution the run was permitted, sorted and named as a
     /// person types them.
     ///
@@ -314,6 +325,7 @@ impl RustBuild {
             given("panic", &self.panic),
             resolved("lockfile", self.lockfile_hash.as_deref()),
             resolved("build_command", self.build_command_hash.as_deref()),
+            ordered("post_processing_tools", &self.post_processing_tools),
             ordered("permitted_execution", &self.permitted_execution),
         ]
     }
@@ -685,7 +697,8 @@ mod tests {
         assert_eq!(
             build.canonical(),
             "language=3:cpp;compiler=2:cc;compiler_version=none;linker=none;\
-             macros=1[5:-DA=1];includes=1[4:/inc];flags=0[];database=none;"
+             macros=1[5:-DA=1];includes=1[4:/inc];flags=0[];database=none;\
+             post_processing_tools=0[];"
         );
         let build = BuildConfiguration::Rust(Box::new(RustBuild {
             features: vec!["ledger/std".into()],
@@ -699,7 +712,7 @@ mod tests {
             "language=4:rust;target=0:;features=1[10:ledger/std];cfgs=1[4:unix];\
              compiler_version=21:rust-analyzer 0.0.344;opt_level=0:;lto=0:;\
              codegen_units=none;panic=0:;lockfile=none;build_command=none;\
-             permitted_execution=1[12:build-script];"
+             post_processing_tools=0[];permitted_execution=1[12:build-script];"
         );
     }
 
@@ -718,11 +731,12 @@ mod tests {
                 include_paths: vec!["/inc".into()],
                 flags: vec!["-O2".into()],
                 database_hash: Some("db".into()),
+                post_processing_tools: vec!["strip".into()],
             };
             change(&mut build);
             BuildConfiguration::Cpp(Box::new(build))
         };
-        let changes: [fn(&mut CppBuild); 7] = [
+        let changes: [fn(&mut CppBuild); 8] = [
             |b| b.compiler = "c++".into(),
             |b| b.compiler_version = None,
             |b| b.linker = Some("lld".into()),
@@ -730,6 +744,7 @@ mod tests {
             |b| b.include_paths.clear(),
             |b| b.flags = vec!["-O0".into()],
             |b| b.database_hash = None,
+            |b| b.post_processing_tools.push("objcopy".into()),
         ];
         let base = cpp(|_| {});
         for change in changes {
@@ -750,12 +765,13 @@ mod tests {
                 panic: "unwind".into(),
                 lockfile_hash: Some("lock".into()),
                 build_command_hash: Some("cmd".into()),
+                post_processing_tools: vec!["strip".into()],
                 permitted_execution: Vec::new(),
             };
             change(&mut build);
             BuildConfiguration::Rust(Box::new(build))
         };
-        let changes: [fn(&mut RustBuild); 11] = [
+        let changes: [fn(&mut RustBuild); 12] = [
             |b| b.target = "x86_64-unknown-linux-gnu".into(),
             |b| b.features.clear(),
             |b| b.cfgs.push("windows".into()),
@@ -766,6 +782,7 @@ mod tests {
             |b| b.panic = "abort".into(),
             |b| b.lockfile_hash = None,
             |b| b.build_command_hash = Some("other".into()),
+            |b| b.post_processing_tools.push("objcopy".into()),
             |b| b.permitted_execution = vec!["build-script".into()],
         ];
         let base = rust(|_| {});
