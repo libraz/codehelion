@@ -322,13 +322,10 @@ pub struct ArtifactAnalysisMapping {
 }
 
 /// Current record shape for source-to-artifact correspondences.
-pub const SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION: &str = "source-artifact-mapping-v3";
+pub const SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION: &str = "source-artifact-mapping-v1";
 
 fn supported_mapping_schema(schema_version: &str) -> bool {
-    matches!(
-        schema_version,
-        "source-artifact-mapping-v2" | SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION
-    )
+    schema_version == SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION
 }
 
 /// Current JSON shape for source-to-artifact correspondence evidence.
@@ -463,6 +460,11 @@ pub enum MappingEvidenceFact {
         #[serde(default)]
         translation_units: Vec<String>,
     },
+    /// A compiler anchor says generated code was written in this macro body.
+    MacroOrigin {
+        /// Path of the declarative macro definition.
+        definition_path: String,
+    },
 }
 
 impl MappingEvidenceFact {
@@ -479,7 +481,9 @@ impl MappingEvidenceFact {
             Self::SymbolName { .. } => 1,
             Self::LinkerMap { .. } => 2,
             Self::FunctionFingerprint { .. } => 3,
-            Self::CallGraphNeighborhood | Self::GenericOrigin { .. } => 4,
+            Self::CallGraphNeighborhood | Self::GenericOrigin { .. } | Self::MacroOrigin { .. } => {
+                4
+            }
         }
     }
 }
@@ -1054,12 +1058,12 @@ mod tests {
 
         let error = store
             .record_artifact_analysis(&ArtifactAnalysisSnapshot {
-                schema_version: "artifact-ir-v2",
+                schema_version: "artifact-ir-v1",
                 path: "fixture.so",
                 format: "elf",
                 content_fingerprint: [1; 16],
                 observed_bytes: 0,
-                ir_json: r#"{"schema_version":"artifact-ir-v2"}"#,
+                ir_json: r#"{"schema_version":"artifact-ir-v1"}"#,
                 build_variant_manifest_path: None,
                 build_variant_fingerprint: None,
                 started_at: "2026-07-30T00:00:00Z",
@@ -1090,12 +1094,12 @@ mod tests {
         {
             store
                 .record_artifact_analysis(&ArtifactAnalysisSnapshot {
-                    schema_version: "artifact-ir-v2",
+                    schema_version: "artifact-ir-v1",
                     path: "fixture.wasm",
                     format: "wasm",
                     content_fingerprint,
                     observed_bytes: 8,
-                    ir_json: r#"{"schema_version":"artifact-ir-v2"}"#,
+                    ir_json: r#"{"schema_version":"artifact-ir-v1"}"#,
                     build_variant_manifest_path: Some("build-variant.json"),
                     build_variant_fingerprint: Some(build_variant_fingerprint),
                     started_at: "2026-07-30T00:00:00Z",
@@ -1218,7 +1222,7 @@ mod tests {
                 format: "wasm",
                 content_fingerprint: [1; 16],
                 observed_bytes: 12,
-                ir_json: r#"{"schema_version":"artifact-ir-v2"}"#,
+                ir_json: r#"{"schema_version":"artifact-ir-v1"}"#,
                 build_variant_manifest_path: Some("build-variant.json"),
                 build_variant_fingerprint: Some([5; 16]),
                 started_at: "2026-07-30T00:00:00Z",
@@ -1256,7 +1260,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(ir_json, r#"{"schema_version":"artifact-ir-v2"}"#);
+        assert_eq!(ir_json, r#"{"schema_version":"artifact-ir-v1"}"#);
         let variant: (Option<String>, Option<Vec<u8>>) = store
             .conn
             .query_row(

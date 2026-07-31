@@ -12,10 +12,11 @@ use core::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod dwarf;
 pub mod metrics;
 
 /// Version of the artifact IR document.
-pub const ARTIFACT_IR_SCHEMA_VERSION: &str = "artifact-ir-v2";
+pub const ARTIFACT_IR_SCHEMA_VERSION: &str = "artifact-ir-v1";
 
 /// Version of the fingerprint recipe for parsed artifact entities.
 pub const ARTIFACT_FINGERPRINT_VERSION: &str = "artifact-fingerprint-v1";
@@ -28,9 +29,9 @@ pub enum ArtifactFormat {
     Wasm,
     /// An ELF executable, shared library, or relocatable object.
     Elf,
-    /// A Mach-O binary, recognised for a future backend.
+    /// A Mach-O executable, dynamic library, or relocatable object.
     MachO,
-    /// A PE or COFF binary, recognised for a future backend.
+    /// A PE image or COFF relocatable object.
     PeCoff,
     /// A static archive.
     Archive,
@@ -129,6 +130,12 @@ pub struct ArtifactIr {
     pub observed_bytes: u64,
     /// Parsed sections, when the format exposes them.
     pub sections: Vec<ArtifactSection>,
+    /// Object members when this artifact is an archive.
+    ///
+    /// Ordinary containers leave this empty. Archive members retain their own
+    /// content identity and parser outcome even though their parsed facts are
+    /// also flattened into this IR for the format-neutral metrics layer.
+    pub archive_members: Vec<ArtifactArchiveMember>,
     /// Declared imports, when the format exposes them.
     pub imports: Vec<ArtifactImport>,
     /// Parsed functions or symbols.
@@ -159,6 +166,7 @@ impl ArtifactIr {
             fingerprint: ArtifactFingerprint::from_content("artifact", bytes),
             observed_bytes: bytes.len() as u64,
             sections: Vec::new(),
+            archive_members: Vec::new(),
             imports: Vec::new(),
             symbols: Vec::new(),
             entry_points: Vec::new(),
@@ -169,6 +177,28 @@ impl ArtifactIr {
             data_segments: Vec::new(),
         }
     }
+}
+
+/// One object member observed inside a static archive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactArchiveMember {
+    /// Archive-provided member name, preserved only as display evidence.
+    pub name: String,
+    /// Content-derived identity of this member's bytes.
+    pub fingerprint: ArtifactFingerprint,
+    /// Byte offset of the member data in the archive, never an identity input.
+    pub offset: u64,
+    /// Member byte length observed in the archive.
+    pub size: u64,
+    /// Container format recognised inside this member, when any.
+    pub format: Option<ArtifactFormat>,
+    /// Whether this member is thin and therefore has no local bytes to parse.
+    pub thin: bool,
+    /// Parser failure or deliberate non-support for this individual member.
+    ///
+    /// This retains a partial archive result rather than hiding unsupported or
+    /// malformed member bytes behind a successful outer container parse.
+    pub parse_error: Option<String>,
 }
 
 /// One named or numbered region of an artifact.
@@ -375,7 +405,7 @@ pub fn detect_format(bytes: &[u8]) -> Option<ArtifactFormat> {
         || bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
     {
         Some(ArtifactFormat::MachO)
-    } else if bytes.starts_with(b"!<arch>\n") {
+    } else if bytes.starts_with(b"!<arch>\n") || bytes.starts_with(b"!<thin>\n") {
         Some(ArtifactFormat::Archive)
     } else if is_pe_coff(bytes) {
         Some(ArtifactFormat::PeCoff)
@@ -384,11 +414,18 @@ pub fn detect_format(bytes: &[u8]) -> Option<ArtifactFormat> {
     }
 }
 
-/// Whether a DOS header actually points at the PE signature.
+/// Whether the input starts as a supported PE image or COFF object.
 ///
 /// `MZ` alone also names historical DOS executables, so treating it as PE/COFF
-/// would promise a backend for bytes the PE parser cannot read.
+/// would promise a backend for bytes the parser cannot read. COFF has no DOS
+/// header; its file-header machine value is the only inexpensive dispatch fact.
 fn is_pe_coff(bytes: &[u8]) -> bool {
+    if matches!(
+        bytes.get(..2),
+        Some([0x4c, 0x01] | [0x64, 0x86 | 0xaa] | [0xaa, 0x64])
+    ) {
+        return true;
+    }
     let Some(offset_bytes) = bytes.get(0x3c..0x40) else {
         return false;
     };
@@ -420,8 +457,10 @@ mod tests {
             Some(ArtifactFormat::MachO)
         );
         assert_eq!(detect_format(&pe), Some(ArtifactFormat::PeCoff));
+        assert_eq!(detect_format(&[0x64, 0x86]), Some(ArtifactFormat::PeCoff));
         assert_eq!(detect_format(b"MZ\x90\0"), None);
         assert_eq!(detect_format(b"!<arch>\n"), Some(ArtifactFormat::Archive));
+        assert_eq!(detect_format(b"!<thin>\n"), Some(ArtifactFormat::Archive));
         assert_eq!(detect_format(b"not an artifact"), None);
     }
 

@@ -24,7 +24,10 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 codehelion-core = { version = "0.1.0", path = "../codehelion-core" }
 codehelion-artifact = { version = "0.1.0", path = "../codehelion-artifact" }
+codehelion-artifact-archive = { version = "0.1.0", path = "../codehelion-artifact-archive" }
 codehelion-artifact-elf = { version = "0.1.0", path = "../codehelion-artifact-elf" }
+codehelion-artifact-macho = { version = "0.1.0", path = "../codehelion-artifact-macho" }
+codehelion-artifact-pe = { version = "0.1.0", path = "../codehelion-artifact-pe" }
 codehelion-artifact-wasm = { version = "0.1.0", path = "../codehelion-artifact-wasm" }
 # Only to look for helper programs and, later, to run them. The engine crates
 # do not depend on this; the layer that starts processes does.

@@ -41,7 +41,7 @@ cargo run --quiet -p codehelion-cli -- scan \
     --format json \
     --db "$temporary_root/artifact.sqlite" \
     --output "$temporary_root/source-scan.json"
-source_run=$(sed -n 's/^[[:space:]]*"run_id": \([0-9][0-9]*\),$/\1/p' "$temporary_root/source-scan.json")
+source_run=$(sed -n 's/^[[:space:]]*"run_id": \([0-9][0-9]*\),\{0,1\}$/\1/p' "$temporary_root/source-scan.json")
 test -n "$source_run"
 calibration_group=$(awk '
     /"groups": \[/ { groups = 1; next }
@@ -194,7 +194,7 @@ rg -q '"calibration": {' "$temporary_root/compare-calibration-release-lto.json"
 rg -q '"verified_savings_bytes": [1-9][0-9]*' "$temporary_root/compare-calibration-release-lto.json"
 rg -q '"samples": 2' "$temporary_root/calibration.json"
 rg -q '"comparison": {' "$temporary_root/calibration.json"
-rg -q '"baseline_schema_version": "artifact-calibration-report-v3"' "$temporary_root/calibration.json"
+rg -q '"baseline_schema_version": "artifact-calibration-report-v1"' "$temporary_root/calibration.json"
 rg -q '"dimension": "artifact_format"' "$temporary_root/calibration.json"
 rg -q '"dimension": "artifact_build_variant"' "$temporary_root/calibration.json"
 rg -q '"dimension": "clone_type"' "$temporary_root/calibration.json"

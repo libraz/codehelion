@@ -22,6 +22,17 @@ sections, and analyzes that copy with `--debug-file`. The companion is a local
 input only; analysis rejects a mismatched build ID rather than attaching its
 source locations to a different artifact.
 
+On macOS, `make verify-macho-artifact-fixtures` builds a dynamic library and
+its matching dSYM, checks their UUID relationship, and verifies symbol, data,
+and source-location extraction. Analysis accepts the dSYM's inner DWARF image
+only when its `LC_UUID` matches the inspected dynamic library; a conventional
+adjacent `.dSYM` bundle is discovered automatically.
+
+On Windows, `make verify-pe-artifact-fixtures` builds matching PE/PDB pairs
+with MSVC debug information. It verifies that a matching CodeView identity
+produces source mappings, preserves an explicit source-scan correlation for
+both exported functions, and rejects a PDB from a distinct build.
+
 The programs expose two intentionally similar functions and repeated static
 data. They are inputs to parser tests only and are never executed by
 codehelion.

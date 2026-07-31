@@ -13,7 +13,7 @@ use codehelion_helper::ir::{
     SourceRange, SymbolKind, TypeCategory, Unavailability, UnexpandedMacro, UnexpandedMacroReason,
     UnitRef,
 };
-use codehelion_helper::protocol::{Capability, Execution, HelperIdentity, VersionRange};
+use codehelion_helper::protocol::{Capability, Execution, HelperIdentity};
 use codehelion_store::compiler::{CompilerHelperRow, CompilerOutcome, CompilerUnitRow};
 use codehelion_store::snapshot::{Snapshot, SummaryRow};
 use codehelion_store::{Store, StoreError};
@@ -95,7 +95,7 @@ fn helper_row() -> CompilerHelperRow {
         identity: HelperIdentity {
             name: "codehelion-backend-rust".to_string(),
             version: "0.1.0".to_string(),
-            protocol: VersionRange { min: 1, max: 3 },
+            protocol: 1,
             toolchains: vec!["1.85.0".to_string(), "1.86.0".to_string()],
             capabilities: vec![
                 Capability::CallTargets,
@@ -105,7 +105,6 @@ fn helper_row() -> CompilerHelperRow {
             ],
             executes: vec![Execution::BuildScript, Execution::ProcMacro],
         },
-        protocol_agreed: 3,
         restarts: Some(2),
     }
 }
@@ -411,6 +410,46 @@ fn local_resolved_function_anchors_remain_available_for_correlation() {
             name: "render".to_owned(),
             file_path: "src/render.rs".to_owned(),
             line: 1,
+            macro_definition: None,
+        }]
+    );
+}
+
+#[test]
+fn local_macro_defined_function_anchors_preserve_the_definition_origin() {
+    let (_dir, mut store, _path) = on_disk();
+    let variant = variant();
+    let mut analysis = full_analysis(unit_ref("render", "src/render.rs"));
+    analysis.symbols = vec![ResolvedSymbol {
+        id: "crate::generated::render".to_owned(),
+        name: "render".to_owned(),
+        kind: SymbolKind::Function,
+        anchor: Anchor {
+            expansion: range("src/render.rs", 128),
+            definition: Some(range("src/macros.rs", 32)),
+        },
+        type_index: None,
+        external: false,
+    }];
+    let run = store
+        .record_snapshot(&snapshot(
+            "/tree",
+            &variant,
+            vec![helper_row()],
+            vec![answered(analysis)],
+        ))
+        .unwrap();
+
+    assert_eq!(
+        store.source_resolved_symbols(run).unwrap(),
+        vec![codehelion_store::query::SourceResolvedSymbol {
+            name: "render".to_owned(),
+            file_path: "src/macros.rs".to_owned(),
+            line: 2,
+            macro_definition: Some(codehelion_store::query::SourceMacroDefinition {
+                file_path: "src/macros.rs".to_owned(),
+                line: 2,
+            }),
         }]
     );
 }
@@ -832,10 +871,10 @@ fn a_run_holding_compiler_ir_declares_the_schema_it_used() {
 #[test]
 fn an_answer_from_another_schema_is_not_read_as_current() {
     let mut ir = full_analysis(unit_ref("crate", "src/lib.rs"));
-    ir.schema_version = "compiler-ir-v99".to_string();
+    ir.schema_version = "compiler-ir-unsupported".to_string();
     let stored = round_trip(ir);
     assert!(!stored.is_readable());
-    assert_eq!(stored.schema_version, "compiler-ir-v99");
+    assert_eq!(stored.schema_version, "compiler-ir-unsupported");
 }
 
 /// The handshake result is the only place that says why a whole run has no
@@ -854,9 +893,6 @@ fn the_helper_that_answered_is_recorded_with_what_it_granted() {
         .unwrap();
     let helpers = store.run_compiler_helpers(run).unwrap();
     assert_eq!(helpers, vec![helper_row()]);
-    // The agreed revision is the highest both sides could speak, which
-    // neither range says on its own.
-    assert_eq!(helpers[0].protocol_agreed, 3);
     // How often it fell over is the other thing the run cannot reconstruct:
     // the unit rows say which files came back empty, not that the emptiness
     // was the helper's doing.

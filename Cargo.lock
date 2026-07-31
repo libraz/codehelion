@@ -382,9 +382,24 @@ name = "codehelion-artifact"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "gimli",
+ "object",
  "proptest",
  "serde",
  "thiserror",
+]
+
+[[package]]
+name = "codehelion-artifact-archive"
+version = "0.1.0"
+dependencies = [
+ "codehelion-artifact",
+ "codehelion-artifact-elf",
+ "codehelion-artifact-macho",
+ "codehelion-artifact-pe",
+ "codehelion-artifact-wasm",
+ "object",
+ "proptest",
 ]
 
 [[package]]
@@ -399,6 +414,31 @@ dependencies = [
  "proptest",
  "rustc-demangle",
  "serde_json",
+]
+
+[[package]]
+name = "codehelion-artifact-macho"
+version = "0.1.0"
+dependencies = [
+ "codehelion-artifact",
+ "cpp_demangle",
+ "iced-x86",
+ "object",
+ "proptest",
+ "rustc-demangle",
+]
+
+[[package]]
+name = "codehelion-artifact-pe"
+version = "0.1.0"
+dependencies = [
+ "codehelion-artifact",
+ "cpp_demangle",
+ "iced-x86",
+ "object",
+ "pdb",
+ "proptest",
+ "rustc-demangle",
 ]
 
 [[package]]
@@ -449,7 +489,10 @@ dependencies = [
  "boon",
  "clap",
  "codehelion-artifact",
+ "codehelion-artifact-archive",
  "codehelion-artifact-elf",
+ "codehelion-artifact-macho",
+ "codehelion-artifact-pe",
  "codehelion-artifact-wasm",
  "codehelion-core",
  "codehelion-eval",
@@ -787,6 +830,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "fallible-iterator"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4443176a9f2c162692bd3d352d745ef9413eec5782a80d8fd6f8a1ac692a07f7"
 
 [[package]]
 name = "fallible-iterator"
@@ -1491,6 +1540,17 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "pdb"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82040a392923abe6279c00ab4aff62d5250d1c8555dc780e4b02783a7aa74863"
+dependencies = [
+ "fallible-iterator 0.2.0",
+ "scroll",
+ "uuid",
 ]
 
 [[package]]
@@ -2466,7 +2526,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323"
 dependencies = [
  "bitflags",
- "fallible-iterator",
+ "fallible-iterator 0.3.0",
  "fallible-streaming-iterator",
  "hashlink",
  "libsqlite3-sys",
@@ -2604,6 +2664,12 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "scroll"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04c565b551bafbef4157586fa379538366e4385d42082f255bfd96e4fe8519da"
 
 [[package]]
 name = "semver"

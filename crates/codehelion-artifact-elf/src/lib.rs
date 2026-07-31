@@ -3,9 +3,6 @@
 //! The backend reads bytes through the safe `object` API and never maps or
 //! executes the artifact.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
-
 use codehelion_artifact::{
     ArtifactBackend, ArtifactCall, ArtifactCapabilities, ArtifactDataSegment, ArtifactError,
     ArtifactFingerprint, ArtifactFormat, ArtifactImport, ArtifactImportKind, ArtifactInlineFrame,
@@ -18,6 +15,7 @@ use object::{
     Architecture, Endianness, Object, ObjectSection, ObjectSymbol, RelocationKind,
     RelocationTarget, SectionKind, SymbolKind,
 };
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Parser backend for ELF artifacts.
 #[derive(Debug, Default, Clone, Copy)]
@@ -578,30 +576,33 @@ fn dwarf_source_frame<R: Reader>(
 /// DWARF line programs can spell a file relative to an include directory or
 /// compilation directory. The path is only normalized as metadata for later
 /// matching; this backend never opens it.
+///
+/// Joined by the conventions of the object being read rather than those of the
+/// machine reading it. The path is a string an ELF carries, so the same
+/// artifact has to resolve to the same source path on every host: reading it
+/// through the local path type would spell one artifact two ways and file the
+/// same symbol under two sources.
 fn resolve_dwarf_source_path(
     file: &str,
     directory: Option<&str>,
     compilation_directory: Option<&str>,
 ) -> String {
-    let file = Path::new(file);
-    if file.is_absolute() {
-        return file.display().to_string();
+    fn rooted(path: &str) -> bool {
+        path.starts_with('/')
     }
-    let base = directory.map_or_else(
-        || compilation_directory.map(PathBuf::from),
-        |directory| {
-            let directory = Path::new(directory);
-            if directory.is_absolute() {
-                Some(directory.to_path_buf())
-            } else {
-                compilation_directory.map(|root| Path::new(root).join(directory))
-            }
-        },
-    );
-    base.map_or_else(
-        || file.display().to_string(),
-        |base| base.join(file).display().to_string(),
-    )
+    fn under(base: &str, path: &str) -> String {
+        format!("{}/{path}", base.trim_end_matches('/'))
+    }
+
+    if rooted(file) {
+        return file.to_string();
+    }
+    let base = match directory {
+        Some(directory) if rooted(directory) => Some(directory.to_string()),
+        Some(directory) => compilation_directory.map(|root| under(root, directory)),
+        None => compilation_directory.map(ToString::to_string),
+    };
+    base.map_or_else(|| file.to_string(), |base| under(&base, file))
 }
 
 /// Copy section, read-only-data, and relocation facts into format-neutral IR.
@@ -1153,7 +1154,7 @@ mod tests {
         let rendered = serde_json::to_string_pretty(&artifact).expect("IR serializes");
         assert_eq!(
             rendered,
-            include_str!("../tests/golden/minimal-ir-v2.json").trim_end()
+            include_str!("../tests/golden/minimal-ir-v1.json").trim_end()
         );
     }
 
@@ -1329,6 +1330,17 @@ mod tests {
         assert_eq!(
             resolve_dwarf_source_path("/outside/entry.cpp", Some("include"), Some("/work/tree")),
             "/outside/entry.cpp"
+        );
+        // A directory already ending in a separator does not gain a second one.
+        // Producers write it both ways, and the same source spelled two ways
+        // would be two sources to everything downstream that matches on it.
+        assert_eq!(
+            resolve_dwarf_source_path("src/main.cpp", None, Some("/work/tree/")),
+            "/work/tree/src/main.cpp"
+        );
+        assert_eq!(
+            resolve_dwarf_source_path("header.hpp", Some("include/"), Some("/work/tree/")),
+            "/work/tree/include/header.hpp"
         );
     }
 }

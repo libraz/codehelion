@@ -1,0 +1,24 @@
+[package]
+name = "codehelion-artifact-archive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Static archive parser backend for codehelion."
+
+[dependencies]
+codehelion-artifact = { version = "0.1.0", path = "../codehelion-artifact" }
+codehelion-artifact-elf = { version = "0.1.0", path = "../codehelion-artifact-elf" }
+codehelion-artifact-macho = { version = "0.1.0", path = "../codehelion-artifact-macho" }
+codehelion-artifact-pe = { version = "0.1.0", path = "../codehelion-artifact-pe" }
+codehelion-artifact-wasm = { version = "0.1.0", path = "../codehelion-artifact-wasm" }
+object = { version = "0.39", default-features = false, features = ["read", "archive"] }
+
+[dev-dependencies]
+object = { version = "0.39", default-features = false, features = ["write", "coff"] }
+proptest = "1.6"
+
+[lints]
+workspace = true

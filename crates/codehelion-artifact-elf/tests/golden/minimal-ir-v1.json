@@ -1,5 +1,5 @@
 {
-  "schema_version": "artifact-ir-v2",
+  "schema_version": "artifact-ir-v1",
   "format": "elf",
   "capabilities": {
     "symbols": true,
@@ -59,6 +59,7 @@
       "executable": false
     }
   ],
+  "archive_members": [],
   "imports": [],
   "symbols": [
     {

@@ -46,6 +46,14 @@ verify-artifact-boundaries: ## Verify the source engine does not link artifact c
 verify-artifact-fixtures: ## Build and verify real WASM and ELF artifact fixtures (Linux)
 	sh scripts/verify-artifact-fixtures.sh
 
+.PHONY: verify-macho-artifact-fixtures
+verify-macho-artifact-fixtures: ## Build and verify a real Mach-O and dSYM fixture (macOS)
+	sh scripts/verify-macho-artifact-fixtures.sh
+
+.PHONY: verify-pe-artifact-fixtures
+verify-pe-artifact-fixtures: ## Build and verify real PE/PDB fixtures (Windows)
+	pwsh -NoProfile -File scripts/verify-pe-artifact-fixtures.ps1
+
 .PHONY: test
 test: ## Run the full test suite
 	$(ONESHOT) $(CARGO) test --workspace --all-targets --all-features
@@ -58,7 +66,6 @@ doc: ## Build docs, failing on warnings
 eval: ## Show detection accuracy over the committed corpora
 	$(CARGO) test -p codehelion-cli --test corpus_accuracy -- --nocapture
 	$(CARGO) test -p codehelion-cli --test labeled_precision -- --nocapture
-	$(CARGO) test -p codehelion-cli --test refactoring -- --nocapture
 	$(CARGO) test -p codehelion-cli --test candidate_stages -- --nocapture
 
 .PHONY: check

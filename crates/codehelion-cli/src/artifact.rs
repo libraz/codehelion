@@ -14,7 +14,10 @@ use codehelion_artifact::{
     ArtifactBackend, ArtifactFormat as BinaryFormat, ArtifactIr, detect_format, metrics,
     metrics::EvidenceConfidence,
 };
+use codehelion_artifact_archive::ArchiveBackend;
 use codehelion_artifact_elf::ElfBackend;
+use codehelion_artifact_macho::MachOBackend;
+use codehelion_artifact_pe::PeCoffBackend;
 use codehelion_artifact_wasm::WasmBackend;
 use codehelion_store::Store;
 use codehelion_store::artifact::{
@@ -40,15 +43,18 @@ use crate::cli::{
 };
 
 /// JSON schema emitted by the artifact command.
-pub const ARTIFACT_REPORT_SCHEMA_VERSION: &str = "artifact-report-v8";
+pub const ARTIFACT_REPORT_SCHEMA_VERSION: &str = "artifact-report-v1";
 
 /// JSON Schema for the versioned artifact-analysis report.
 pub const ARTIFACT_REPORT_JSON_SCHEMA: &str =
-    include_str!("../schema/artifact-report-v8.schema.json");
+    include_str!("../schema/artifact-report-v1.schema.json");
 
 /// JSON Schema for the versioned calibration summary report.
 pub const ARTIFACT_CALIBRATION_REPORT_JSON_SCHEMA: &str =
-    include_str!("../schema/artifact-calibration-report-v3.schema.json");
+    include_str!("../schema/artifact-calibration-report-v1.schema.json");
+
+/// JSON report schema emitted by artifact calibration.
+const ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION: &str = "artifact-calibration-report-v1";
 
 /// Number of fields in every artifact CSV record.
 const ARTIFACT_CSV_COLUMNS: usize = 22;
@@ -116,7 +122,7 @@ pub fn calibration(args: &ArtifactCalibrationArgs, out: &mut impl Write) -> Resu
         .with_context(|| format!("opening calibration database {}", db.display()))?;
     let measurements = store.artifact_savings_calibrations_for_run(args.source_run)?;
     let mut report = CalibrationSummaryReport {
-        schema_version: "artifact-calibration-report-v3",
+        schema_version: ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION,
         source_run: args.source_run,
         statistics: artifact_savings_calibration_statistics(&measurements),
         strata: calibration_strata(&store, &measurements)?,
@@ -214,10 +220,7 @@ fn calibration_comparison(
         .with_context(|| format!("reading calibration baseline {}", baseline_path.display()))?;
     let baseline: CalibrationBaselineReport = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing calibration baseline {}", baseline_path.display()))?;
-    if !matches!(
-        baseline.schema_version.as_str(),
-        "artifact-calibration-report-v2" | "artifact-calibration-report-v3"
-    ) {
+    if baseline.schema_version != ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION {
         bail!(
             "calibration baseline {} has unsupported schema version {}",
             baseline_path.display(),
@@ -479,6 +482,7 @@ struct ArtifactCorrelationReport {
     clone_group_attributions: Vec<CloneGroupAttributionReport>,
     estimated_refactor_savings: Vec<CloneGroupSavingsReport>,
     generic_origins: Vec<GenericOriginReport>,
+    macro_origins: Vec<MacroOriginReport>,
 }
 
 /// Conservative observed bytes attributed to one source clone group.
@@ -640,6 +644,21 @@ struct GenericOriginReport {
     retained_size_sum: Option<u64>,
     /// Observed artifact size split by exact compiler-reported specialization.
     specializations: Vec<GenericSpecializationReport>,
+}
+
+/// Observed artifact symbols attributed to one declarative macro definition.
+#[derive(Debug, Clone, Serialize)]
+struct MacroOriginReport {
+    /// Content-derived identity of the source unit containing the macro body.
+    origin_fingerprint: String,
+    /// Build variant that minted the origin identity.
+    origin_build_variant_fingerprint: String,
+    /// Macro definition paths retained as auditable evidence.
+    definition_paths: Vec<String>,
+    /// Number of distinct artifact symbols attributed to this macro body.
+    artifact_symbols: usize,
+    /// Sum of observed sizes of the distinct mapped artifact symbols.
+    observed_symbol_bytes: u64,
 }
 
 /// One exact generic specialization contributing to an origin's artifact size.
@@ -822,6 +841,44 @@ impl ArtifactCorrelationReport {
                         .cmp(&right.origin_build_variant_fingerprint)
                 })
         });
+        let mut macro_origins: BTreeMap<_, (BTreeSet<String>, BTreeSet<[u8; 16]>)> =
+            BTreeMap::new();
+        for mapping in &rows.mappings {
+            if mapping.source_kind != ArtifactAnalysisSourceKind::Unit {
+                continue;
+            }
+            for definition_path in mapping.evidence.facts.iter().filter_map(|fact| match fact {
+                MappingEvidenceFact::MacroOrigin { definition_path } => Some(definition_path),
+                _ => None,
+            }) {
+                let entry = macro_origins
+                    .entry((
+                        mapping.source_fingerprint,
+                        mapping.source_build_variant_fingerprint,
+                    ))
+                    .or_default();
+                entry.0.insert(definition_path.clone());
+                entry.1.insert(mapping.artifact_symbol_fingerprint);
+            }
+        }
+        let mut macro_origins: Vec<_> = macro_origins
+            .into_iter()
+            .map(
+                |((origin, variant), (definition_paths, symbols))| MacroOriginReport {
+                    origin_fingerprint: fingerprint_hex(origin),
+                    origin_build_variant_fingerprint: fingerprint_hex(variant),
+                    definition_paths: definition_paths.into_iter().collect(),
+                    artifact_symbols: symbols.len(),
+                    observed_symbol_bytes: observed_symbol_bytes_for(artifact, &symbols),
+                },
+            )
+            .collect();
+        macro_origins.sort_by(|left, right| {
+            right
+                .observed_symbol_bytes
+                .cmp(&left.observed_symbol_bytes)
+                .then_with(|| left.origin_fingerprint.cmp(&right.origin_fingerprint))
+        });
         Self {
             source_run,
             mappings: rows.mappings.len(),
@@ -839,6 +896,7 @@ impl ArtifactCorrelationReport {
             clone_group_attributions: clone_group_attributions(rows),
             estimated_refactor_savings: clone_group_savings(rows),
             generic_origins,
+            macro_origins,
         }
     }
 
@@ -1333,6 +1391,10 @@ fn is_linker_address(value: &str) -> bool {
 /// linker symbol. This covers conventional `CMake` and compiler output paths
 /// without guessing from a basename. Equal candidates remain separate mappings
 /// and therefore stay ambiguous.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linker-map candidates and existing mapping reconciliation share one evidence boundary"
+)]
 fn enrich_linker_map_evidence(
     artifact: &ArtifactIr,
     units: &[SourceUnitIdentity],
@@ -1358,7 +1420,11 @@ fn enrich_linker_map_evidence(
                         == Some(symbol_name.as_str())
             }) {
                 candidates
-                    .entry((unit.fingerprint, unit.build_variant_fingerprint))
+                    .entry((
+                        unit.fingerprint,
+                        source_unit_instance_fingerprint(unit),
+                        unit.build_variant_fingerprint,
+                    ))
                     .or_insert_with(|| (unit, entry.object_path.clone()));
             }
         }
@@ -1383,6 +1449,7 @@ fn enrich_linker_map_evidence(
                 let mapping = &rows.mappings[*index];
                 (
                     mapping.source_fingerprint,
+                    mapping.source_instance_fingerprint,
                     mapping.source_build_variant_fingerprint,
                 )
             })
@@ -1393,10 +1460,13 @@ fn enrich_linker_map_evidence(
                 rows.mappings[*index].evidence.has_conflict = true;
             }
         }
-        for ((fingerprint, build_variant_fingerprint), (unit, object_path)) in candidates {
+        for ((fingerprint, instance_fingerprint, build_variant_fingerprint), (unit, object_path)) in
+            candidates
+        {
             let existing = existing_indices.iter().copied().find(|index| {
                 let mapping = &rows.mappings[*index];
                 mapping.source_fingerprint == fingerprint
+                    && mapping.source_instance_fingerprint == instance_fingerprint
                     && mapping.source_build_variant_fingerprint == build_variant_fingerprint
             });
             if let Some(index) = existing {
@@ -1418,7 +1488,7 @@ fn enrich_linker_map_evidence(
                     artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
                     source_kind: ArtifactAnalysisSourceKind::Unit,
                     source_fingerprint: unit.fingerprint,
-                    source_instance_fingerprint: unit.fingerprint,
+                    source_instance_fingerprint: source_unit_instance_fingerprint(unit),
                     source_build_variant_fingerprint: unit.build_variant_fingerprint,
                     evidence: MappingEvidence::new(
                         linker_map_facts(unit, &symbol_name, object_path),
@@ -1493,7 +1563,10 @@ fn correlate_debug_locations(
                 .collect();
             let candidate_count = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
             for unit in candidates {
-                if !seen_units.insert((unit.fingerprint, unit.build_variant_fingerprint)) {
+                if !seen_units.insert((
+                    source_unit_instance_fingerprint(unit),
+                    unit.build_variant_fingerprint,
+                )) {
                     continue;
                 }
                 rows.mappings.push(ArtifactAnalysisMapping {
@@ -1501,7 +1574,7 @@ fn correlate_debug_locations(
                     artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
                     source_kind: ArtifactAnalysisSourceKind::Unit,
                     source_fingerprint: unit.fingerprint,
-                    source_instance_fingerprint: unit.fingerprint,
+                    source_instance_fingerprint: source_unit_instance_fingerprint(unit),
                     source_build_variant_fingerprint: unit.build_variant_fingerprint,
                     evidence: MappingEvidence::new(
                         vec![MappingEvidenceFact::Dwarf {
@@ -1606,14 +1679,14 @@ fn correlate_debug_locations(
         .filter(|unit| {
             !mapped_units.contains(&(
                 unit.fingerprint,
-                unit.fingerprint,
+                source_unit_instance_fingerprint(unit),
                 unit.build_variant_fingerprint,
             ))
         })
         .map(|unit| ArtifactAnalysisUnmappedSource {
             source_kind: ArtifactAnalysisSourceKind::Unit,
             source_fingerprint: unit.fingerprint,
-            source_instance_fingerprint: unit.fingerprint,
+            source_instance_fingerprint: source_unit_instance_fingerprint(unit),
             source_build_variant_fingerprint: unit.build_variant_fingerprint,
             reason: ArtifactAnalysisUnmappedSourceReason::NoArtifactEvidence,
         })
@@ -1649,6 +1722,26 @@ fn correlate_debug_locations(
             }),
     );
     rows
+}
+
+/// Derive an occurrence identity for one source unit without changing its
+/// content-derived stable fingerprint. Equal source bodies can occur in more
+/// than one file or declaration, and the `SQLite` correlation table retains each
+/// occurrence independently.
+fn source_unit_instance_fingerprint(unit: &SourceUnitIdentity) -> [u8; 16] {
+    let mut bytes = Vec::new();
+    for field in [
+        unit.file_path.as_bytes(),
+        unit.name.as_deref().unwrap_or_default().as_bytes(),
+    ] {
+        bytes.extend(u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
+        bytes.extend(field);
+    }
+    bytes.extend(unit.start_line.unwrap_or_default().to_le_bytes());
+    bytes.extend(unit.end_line.unwrap_or_default().to_le_bytes());
+    bytes.extend(unit.build_variant_fingerprint);
+    codehelion_artifact::ArtifactFingerprint::from_content("source-unit-instance", &bytes)
+        .as_bytes()
 }
 
 /// Attribute a symbol's observed bytes only when one exact fragment mapping
@@ -1858,7 +1951,7 @@ fn correlate_generic_origin(
             artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
             source_kind: ArtifactAnalysisSourceKind::Unit,
             source_fingerprint: unit.fingerprint,
-            source_instance_fingerprint: unit.fingerprint,
+            source_instance_fingerprint: source_unit_instance_fingerprint(unit),
             source_build_variant_fingerprint: unit.build_variant_fingerprint,
             evidence: MappingEvidence::new(
                 vec![MappingEvidenceFact::GenericOrigin {
@@ -1895,6 +1988,10 @@ fn correlate_generic_origin(
     mappings
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "name candidates retain macro provenance without collapsing competing source identities"
+)]
 fn correlate_symbol_name(
     symbol: &codehelion_artifact::ArtifactSymbol,
     scan_root: &FilePath,
@@ -1926,7 +2023,14 @@ fn correlate_symbol_name(
             )
         }) {
             if seen_units.insert((unit.fingerprint, unit.build_variant_fingerprint)) {
-                unit_candidates.push((unit, source_name.clone()));
+                unit_candidates.push((
+                    unit,
+                    source_name.clone(),
+                    source_symbol
+                        .macro_definition
+                        .as_ref()
+                        .map(|anchor| anchor.file_path.clone()),
+                ));
             }
         }
         for fragment in fragments.iter().filter(|fragment| {
@@ -1938,7 +2042,14 @@ fn correlate_symbol_name(
             )
         }) {
             if seen_fragments.insert((fragment.finding_id, fragment.build_variant_fingerprint)) {
-                fragment_candidates.push((fragment, source_name.clone()));
+                fragment_candidates.push((
+                    fragment,
+                    source_name.clone(),
+                    source_symbol
+                        .macro_definition
+                        .as_ref()
+                        .map(|anchor| anchor.file_path.clone()),
+                ));
             }
         }
     }
@@ -1948,33 +2059,40 @@ fn correlate_symbol_name(
                 .as_deref()
                 .and_then(canonical_symbol_name)
                 .filter(|source_name| source_name == &artifact_name)
-                .map(|source_name| (unit, source_name))
+                .map(|source_name| (unit, source_name, None))
         }));
     }
     let unit_candidate_count = u32::try_from(unit_candidates.len()).unwrap_or(u32::MAX);
     let fragment_candidate_count = u32::try_from(fragment_candidates.len()).unwrap_or(u32::MAX);
     let mut mappings = Vec::new();
-    for (unit, source_name) in unit_candidates {
+    for (unit, source_name, macro_definition) in unit_candidates {
+        let mut facts = vec![MappingEvidenceFact::SymbolName {
+            source_symbol: source_name,
+            artifact_symbol: artifact_name.clone(),
+        }];
+        if let Some(definition_path) = macro_definition {
+            facts.push(MappingEvidenceFact::MacroOrigin { definition_path });
+        }
         mappings.push(ArtifactAnalysisMapping {
             schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
             artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
             source_kind: ArtifactAnalysisSourceKind::Unit,
             source_fingerprint: unit.fingerprint,
-            source_instance_fingerprint: unit.fingerprint,
+            source_instance_fingerprint: source_unit_instance_fingerprint(unit),
             source_build_variant_fingerprint: unit.build_variant_fingerprint,
-            evidence: MappingEvidence::new(
-                vec![MappingEvidenceFact::SymbolName {
-                    source_symbol: source_name,
-                    artifact_symbol: artifact_name.clone(),
-                }],
-                unit_candidate_count,
-                false,
-            ),
+            evidence: MappingEvidence::new(facts, unit_candidate_count, false),
             attributed_bytes: None,
             build_variant_fingerprint: artifact_variant,
         });
     }
-    for (fragment, source_name) in fragment_candidates {
+    for (fragment, source_name, macro_definition) in fragment_candidates {
+        let mut facts = vec![MappingEvidenceFact::SymbolName {
+            source_symbol: source_name,
+            artifact_symbol: artifact_name.clone(),
+        }];
+        if let Some(definition_path) = macro_definition {
+            facts.push(MappingEvidenceFact::MacroOrigin { definition_path });
+        }
         mappings.push(ArtifactAnalysisMapping {
             schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
             artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
@@ -1982,14 +2100,7 @@ fn correlate_symbol_name(
             source_fingerprint: fragment.fingerprint,
             source_instance_fingerprint: fragment.finding_id,
             source_build_variant_fingerprint: fragment.build_variant_fingerprint,
-            evidence: MappingEvidence::new(
-                vec![MappingEvidenceFact::SymbolName {
-                    source_symbol: source_name,
-                    artifact_symbol: artifact_name.clone(),
-                }],
-                fragment_candidate_count,
-                false,
-            ),
+            evidence: MappingEvidence::new(facts, fragment_candidate_count, false),
             attributed_bytes: None,
             build_variant_fingerprint: artifact_variant,
         });
@@ -2277,10 +2388,46 @@ fn inspect(
         );
     }
     let bytes = fs::read(path).with_context(|| format!("reading artifact {}", path.display()))?;
-    let debug_companion = debug_file
-        .map(|path| read_artifact_input(path, max_bytes, "external debug companion"))
-        .transpose()?;
-    parse_input_format(&bytes, required_format, debug_companion.as_deref())
+    let (debug_companion, automatically_discovered) = match debug_file {
+        Some(path) => (
+            Some(read_artifact_input(
+                path,
+                max_bytes,
+                "external debug companion",
+            )?),
+            false,
+        ),
+        None => (discover_macho_dsym(path, &bytes, max_bytes), true),
+    };
+    match parse_input_format(&bytes, required_format, debug_companion.as_deref()) {
+        Ok(artifact) => Ok(artifact),
+        Err(_) if automatically_discovered && debug_companion.is_some() => {
+            // An automatically discovered bundle is optional evidence. Its
+            // malformed bytes or a stale UUID must not make a valid artifact
+            // unanalyzable; an explicitly supplied companion remains strict.
+            parse_input_format(&bytes, required_format, None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Read the conventional sibling dSYM image only when it stays within the
+/// configured input limit. This performs no directory traversal: a Mach-O
+/// artifact named `app` maps to exactly `app.dSYM/Contents/Resources/DWARF/app`.
+fn discover_macho_dsym(path: &FilePath, artifact: &[u8], max_bytes: u64) -> Option<Vec<u8>> {
+    if detect_format(artifact) != Some(BinaryFormat::MachO) {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?;
+    let candidate = path
+        .with_file_name(format!("{name}.dSYM"))
+        .join("Contents/Resources/DWARF")
+        .join(name);
+    let metadata = fs::metadata(&candidate).ok()?;
+    if !metadata.is_file() || metadata.len() > max_bytes {
+        return None;
+    }
+    fs::read(candidate).ok()
 }
 
 /// Read an optional artifact-side input under the same explicit size ceiling.
@@ -2394,6 +2541,9 @@ const fn input_format(format: ArtifactInputFormat) -> BinaryFormat {
     match format {
         ArtifactInputFormat::Wasm => BinaryFormat::Wasm,
         ArtifactInputFormat::Elf => BinaryFormat::Elf,
+        ArtifactInputFormat::MachO => BinaryFormat::MachO,
+        ArtifactInputFormat::Archive => BinaryFormat::Archive,
+        ArtifactInputFormat::PeCoff => BinaryFormat::PeCoff,
     }
 }
 
@@ -2401,15 +2551,24 @@ fn parse(format: BinaryFormat, bytes: &[u8], debug_companion: Option<&[u8]>) -> 
     match format {
         BinaryFormat::Wasm => {
             if debug_companion.is_some() {
-                bail!("--debug-file is only supported for ELF artifacts");
+                bail!("--debug-file is only supported for ELF, Mach-O, and PE artifacts");
             }
             WasmBackend.parse(bytes).map_err(Into::into)
         }
         BinaryFormat::Elf => ElfBackend
             .parse_with_debug_companion(bytes, debug_companion)
             .map_err(Into::into),
-        BinaryFormat::MachO | BinaryFormat::PeCoff | BinaryFormat::Archive => {
-            bail!("{format} input is recognised but has no parser backend in this build")
+        BinaryFormat::MachO => MachOBackend
+            .parse_with_debug_companion(bytes, debug_companion)
+            .map_err(Into::into),
+        BinaryFormat::PeCoff => PeCoffBackend
+            .parse_with_pdb(bytes, debug_companion)
+            .map_err(Into::into),
+        BinaryFormat::Archive => {
+            if debug_companion.is_some() {
+                bail!("--debug-file is not supported for archive artifacts");
+            }
+            ArchiveBackend.parse(bytes).map_err(Into::into)
         }
     }
 }
@@ -2435,6 +2594,7 @@ struct ArtifactReport {
     relocations: usize,
     source_mappings: usize,
     source_maps: Vec<SourceMapResolution>,
+    archive_members: Vec<ArchiveMemberReport>,
     data_segments: usize,
     capabilities: codehelion_artifact::ArtifactCapabilities,
     sizes: metrics::SizeClassification,
@@ -2442,6 +2602,18 @@ struct ArtifactReport {
     retained_sizes: Option<Vec<metrics::RetainedSize>>,
     duplicates: DuplicateSummary,
     duplicate_groups: DuplicateGroups,
+}
+
+/// Display-safe provenance for one archive member.
+#[derive(Debug, Serialize)]
+struct ArchiveMemberReport {
+    name: String,
+    fingerprint: String,
+    offset: u64,
+    size: u64,
+    format: Option<BinaryFormat>,
+    thin: bool,
+    parse_error: Option<String>,
 }
 
 /// Result of one locally declared WASM source-map reference.
@@ -2514,6 +2686,19 @@ impl ArtifactReport {
             relocations: artifact.relocations.len(),
             source_mappings: artifact.source_mappings.len(),
             source_maps: Vec::new(),
+            archive_members: artifact
+                .archive_members
+                .iter()
+                .map(|member| ArchiveMemberReport {
+                    name: member.name.clone(),
+                    fingerprint: member.fingerprint.to_hex(),
+                    offset: member.offset,
+                    size: member.size,
+                    format: member.format,
+                    thin: member.thin,
+                    parse_error: member.parse_error.clone(),
+                })
+                .collect(),
             data_segments: artifact.data_segments.len(),
             capabilities: artifact.capabilities,
             sizes: metrics::classify_sizes(artifact),
@@ -2940,6 +3125,30 @@ fn render_text(report: &ArtifactReport, verbose: bool, out: &mut impl Write) -> 
     writeln!(out, "calls: {}", report.calls)?;
     writeln!(out, "relocations: {}", report.relocations)?;
     writeln!(out, "source mappings: {}", report.source_mappings)?;
+    if !report.archive_members.is_empty() {
+        let failed = report
+            .archive_members
+            .iter()
+            .filter(|member| member.parse_error.is_some())
+            .count();
+        writeln!(
+            out,
+            "archive members: {} parsed, {failed} unavailable",
+            report.archive_members.len().saturating_sub(failed)
+        )?;
+        for member in report
+            .archive_members
+            .iter()
+            .filter(|member| member.parse_error.is_some())
+        {
+            writeln!(
+                out,
+                "  {}: {}",
+                member.name,
+                member.parse_error.as_deref().unwrap_or_default()
+            )?;
+        }
+    }
     if !report.source_maps.is_empty() {
         let resolved = report
             .source_maps
@@ -3049,6 +3258,20 @@ fn render_text(report: &ArtifactReport, verbose: bool, out: &mut impl Write) -> 
                         specialization.translation_units,
                     )?;
                 }
+            }
+        }
+        if !correlation.macro_origins.is_empty() {
+            writeln!(out, "macro origins (observed symbol bytes):")?;
+            for origin in &correlation.macro_origins {
+                writeln!(
+                    out,
+                    "  {} ({}): {} observed bytes across {} symbols ({})",
+                    origin.origin_fingerprint,
+                    origin.origin_build_variant_fingerprint,
+                    origin.observed_symbol_bytes,
+                    origin.artifact_symbols,
+                    origin.definition_paths.join(", "),
+                )?;
             }
         }
     }
@@ -3228,6 +3451,21 @@ fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Result<()> {
         row[5] = csv(&variant.manifest_path);
         write_artifact_csv_row(out, &row)?;
     }
+    for member in &report.archive_members {
+        let mut row = artifact_csv_row();
+        "archive-member".clone_into(&mut row[0]);
+        row[1] = csv(&report.path);
+        row[2] = report.format.to_string();
+        row[3] = member
+            .format
+            .map_or_else(|| "unknown".to_owned(), |format| format.to_string());
+        row[4].clone_from(&member.fingerprint);
+        row[5] = csv(&member.name);
+        row[6] = member.offset.to_string();
+        row[7] = member.size.to_string();
+        row[10] = csv(member.parse_error.as_deref().unwrap_or("parsed"));
+        write_artifact_csv_row(out, &row)?;
+    }
     for (kind, groups) in [
         ("exact", &report.duplicate_groups.exact),
         ("normalized", &report.duplicate_groups.normalized),
@@ -3310,6 +3548,20 @@ fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Result<()> {
                 row[21] = specialization.translation_units.to_string();
                 write_artifact_csv_row(out, &row)?;
             }
+        }
+        for origin in &correlation.macro_origins {
+            let mut row = artifact_csv_row();
+            "macro-origin".clone_into(&mut row[0]);
+            row[1] = csv(&report.path);
+            row[2] = report.format.to_string();
+            "macro-origin".clone_into(&mut row[3]);
+            row[4].clone_from(&origin.origin_fingerprint);
+            row[5] = csv(&origin.definition_paths.join(";"));
+            row[7] = origin.observed_symbol_bytes.to_string();
+            row[19].clone_from(&origin.origin_build_variant_fingerprint);
+            row[20] = origin.artifact_symbols.to_string();
+            row[21] = origin.definition_paths.len().to_string();
+            write_artifact_csv_row(out, &row)?;
         }
     }
     Ok(())
@@ -3670,6 +3922,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture keeps the source-run boundary and all rejected candidates explicit"
+    )]
     fn dwarf_locations_map_only_units_in_the_explicit_source_run() {
         let symbol = codehelion_artifact::ArtifactSymbol {
             fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("symbol", b"one"),
@@ -3708,7 +3964,6 @@ mod tests {
             start_line: Some(11),
             end_line: Some(13),
         }];
-
         let rows = correlate_debug_locations(
             &artifact,
             FilePath::new("/work"),
@@ -3745,7 +4000,7 @@ mod tests {
                     7, &artifact, &rows,
                 )));
         let json = serde_json::to_string(&report).unwrap();
-        assert!(json.contains("\"schema_version\":\"artifact-report-v8\""));
+        assert!(json.contains("\"schema_version\":\"artifact-report-v1\""));
         assert!(json.contains("\"source_run\":7"));
         let mut text = Vec::new();
         render_text(&report, false, &mut text).unwrap();
@@ -3906,6 +4161,7 @@ mod tests {
             start_line: Some(1),
             end_line: Some(2),
         }];
+        let unit_instance = source_unit_instance_fingerprint(&units[0]);
 
         let rows = correlate_debug_locations(
             &artifact,
@@ -3925,7 +4181,7 @@ mod tests {
                 ArtifactAnalysisUnmappedSource {
                     source_kind: ArtifactAnalysisSourceKind::Unit,
                     source_fingerprint: [3; 16],
-                    source_instance_fingerprint: [3; 16],
+                    source_instance_fingerprint: unit_instance,
                     source_build_variant_fingerprint: [4; 16],
                     reason: ArtifactAnalysisUnmappedSourceReason::NoArtifactEvidence,
                 },
@@ -3944,6 +4200,46 @@ mod tests {
         assert_eq!(
             correlation.unmapped_source_reasons,
             BTreeMap::from([("no_artifact_evidence".to_owned(), 2)])
+        );
+    }
+
+    #[test]
+    fn equal_content_source_units_keep_distinct_unmapped_occurrences() {
+        let artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
+        let units = [
+            SourceUnitIdentity {
+                fingerprint: [3; 16],
+                build_variant_fingerprint: [4; 16],
+                file_path: "src/left.cpp".to_owned(),
+                name: Some("duplicate".to_owned()),
+                start_line: Some(1),
+                end_line: Some(3),
+            },
+            SourceUnitIdentity {
+                fingerprint: [3; 16],
+                build_variant_fingerprint: [4; 16],
+                file_path: "src/right.cpp".to_owned(),
+                name: Some("duplicate".to_owned()),
+                start_line: Some(1),
+                end_line: Some(3),
+            },
+        ];
+
+        let rows = correlate_debug_locations(
+            &artifact,
+            FilePath::new("/work"),
+            &units,
+            &[],
+            &[],
+            &[],
+            &[],
+            [5; 16],
+        );
+
+        assert_eq!(rows.unmapped_sources.len(), 2);
+        assert_ne!(
+            rows.unmapped_sources[0].source_instance_fingerprint,
+            rows.unmapped_sources[1].source_instance_fingerprint
         );
     }
 
@@ -4000,7 +4296,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_symbol_anchor_beats_an_unrelated_unit_label() {
+    fn macro_definition_anchor_beats_an_unrelated_unit_label() {
         let symbol = codehelion_artifact::ArtifactSymbol {
             fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("symbol", b"one"),
             name: Some("project::render()".to_owned()),
@@ -4027,6 +4323,10 @@ mod tests {
             name: "project::render".to_owned(),
             file_path: "/work/src/widget.cpp".to_owned(),
             line: 12,
+            macro_definition: Some(codehelion_store::query::SourceMacroDefinition {
+                file_path: "/work/src/widget.cpp".to_owned(),
+                line: 12,
+            }),
         }];
         let fragments = [SourceFragmentIdentity {
             fingerprint: [6; 16],
@@ -4056,16 +4356,45 @@ mod tests {
         assert_eq!(rows.mappings[0].source_fingerprint, [3; 16]);
         assert_eq!(
             rows.mappings[0].evidence.facts,
-            vec![MappingEvidenceFact::SymbolName {
-                source_symbol: "render".to_owned(),
-                artifact_symbol: "render".to_owned(),
-            }]
+            vec![
+                MappingEvidenceFact::SymbolName {
+                    source_symbol: "render".to_owned(),
+                    artifact_symbol: "render".to_owned(),
+                },
+                MappingEvidenceFact::MacroOrigin {
+                    definition_path: "/work/src/widget.cpp".to_owned(),
+                },
+            ]
         );
         assert_eq!(
             rows.mappings[1].source_kind,
             ArtifactAnalysisSourceKind::Fragment
         );
         assert_eq!(rows.mappings[1].source_fingerprint, [6; 16]);
+        let correlation = ArtifactCorrelationReport::from_rows(7, &artifact, &rows);
+        assert_eq!(correlation.macro_origins.len(), 1);
+        assert_eq!(correlation.macro_origins[0].artifact_symbols, 1);
+        assert_eq!(correlation.macro_origins[0].observed_symbol_bytes, 8);
+        assert_eq!(
+            correlation.macro_origins[0].definition_paths,
+            vec!["/work/src/widget.cpp"]
+        );
+        let report = ArtifactReport::from_ir(FilePath::new("fixture.so"), &artifact, None, None)
+            .with_correlation(Some(correlation));
+        let mut text = Vec::new();
+        render_text(&report, false, &mut text).unwrap();
+        assert!(
+            String::from_utf8(text)
+                .unwrap()
+                .contains("macro origins (observed symbol bytes):")
+        );
+        let mut csv_output = Vec::new();
+        render_csv(&report, &mut csv_output).unwrap();
+        assert!(
+            String::from_utf8(csv_output)
+                .unwrap()
+                .contains("macro-origin,fixture.so,elf,macro-origin")
+        );
     }
 
     #[test]
@@ -4118,6 +4447,7 @@ mod tests {
             name: "crate::render".to_owned(),
             file_path: "/work/src/render.rs".to_owned(),
             line: 1,
+            macro_definition: None,
         }];
         let resolved_calls = [SourceResolvedCall {
             target_name: "crate::escape".to_owned(),
@@ -4458,6 +4788,7 @@ mod tests {
             name: "crate::render".to_owned(),
             file_path: "/work/src/named.rs".to_owned(),
             line: 2,
+            macro_definition: None,
         }];
 
         let rows = correlate_debug_locations(
@@ -4848,19 +5179,19 @@ mod tests {
         let artifact_report =
             ArtifactReport::from_ir(std::path::Path::new("fixture.wasm"), &artifact, None, None);
         assert_valid_schema(
-            "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v8.schema.json",
+            "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v1.schema.json",
             ARTIFACT_REPORT_JSON_SCHEMA,
             &serde_json::to_value(artifact_report).unwrap(),
         );
         let calibration_report = CalibrationSummaryReport {
-            schema_version: "artifact-calibration-report-v3",
+            schema_version: ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION,
             source_run: 1,
             statistics: artifact_savings_calibration_statistics(&[]),
             strata: Vec::new(),
             comparison: None,
         };
         assert_valid_schema(
-            "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-calibration-report-v3.schema.json",
+            "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-calibration-report-v1.schema.json",
             ARTIFACT_CALIBRATION_REPORT_JSON_SCHEMA,
             &serde_json::to_value(calibration_report).unwrap(),
         );
@@ -5273,7 +5604,7 @@ mod tests {
     #[test]
     fn calibration_summary_keeps_absolute_and_relative_statistics_separate() {
         let report = CalibrationSummaryReport {
-            schema_version: "artifact-calibration-report-v3",
+            schema_version: ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION,
             source_run: 7,
             statistics: ArtifactSavingsCalibrationStatistics {
                 samples: 4,
@@ -5322,7 +5653,7 @@ mod tests {
     )]
     fn calibration_comparison_reports_deltas_without_a_threshold_gate() {
         let mut report = CalibrationSummaryReport {
-            schema_version: "artifact-calibration-report-v3",
+            schema_version: ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION,
             source_run: 7,
             statistics: ArtifactSavingsCalibrationStatistics {
                 samples: 4,
@@ -5350,7 +5681,7 @@ mod tests {
         fs::write(
             baseline.path(),
             serde_json::to_vec(&serde_json::json!({
-                "schema_version": "artifact-calibration-report-v2",
+                "schema_version": ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION,
                 "source_run": 6,
                 "statistics": {
                     "samples": 2,
@@ -5394,7 +5725,7 @@ mod tests {
         let comparison = calibration_comparison(&report, baseline.path()).unwrap();
         assert_eq!(
             comparison.baseline_schema_version,
-            "artifact-calibration-report-v2"
+            ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION
         );
         assert_eq!(comparison.baseline_source_run, 6);
         assert_eq!(comparison.overall.samples, 2);
@@ -5410,7 +5741,7 @@ mod tests {
 
         let value = serde_json::to_value(&report).unwrap();
         assert_valid_schema(
-            "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-calibration-report-v3.schema.json",
+            "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-calibration-report-v1.schema.json",
             ARTIFACT_CALIBRATION_REPORT_JSON_SCHEMA,
             &value,
         );
@@ -5444,14 +5775,52 @@ mod tests {
     }
 
     #[test]
-    fn recognised_future_formats_are_not_reported_as_unknown_inputs() {
-        for bytes in [b"\xcf\xfa\xed\xfe".as_slice(), b"!<arch>\n".as_slice()] {
-            let error = parse_input_format(bytes, None, None).unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("recognised but has no parser backend")
-            );
-        }
+    fn empty_archive_input_is_parsed_without_treating_it_as_unknown() {
+        let archive = parse_input_format(b"!<arch>\n", None, None).expect("parse archive");
+        assert_eq!(archive.format, BinaryFormat::Archive);
+        assert!(archive.archive_members.is_empty());
+    }
+
+    #[test]
+    fn archive_report_retains_member_failures_without_raw_member_bytes() {
+        let mut archive = ArtifactIr::empty(BinaryFormat::Archive, b"archive");
+        archive
+            .archive_members
+            .push(codehelion_artifact::ArtifactArchiveMember {
+                name: "thin-member.o".to_owned(),
+                fingerprint: codehelion_artifact::ArtifactFingerprint::from_content(
+                    "archive-member",
+                    b"member",
+                ),
+                offset: 32,
+                size: 0,
+                format: Some(BinaryFormat::Elf),
+                thin: true,
+                parse_error: Some("external member paths are not followed".to_owned()),
+            });
+
+        let report = ArtifactReport::from_ir(FilePath::new("fixture.a"), &archive, None, None);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["archive_members"][0]["name"], "thin-member.o");
+        assert_eq!(json["archive_members"][0]["thin"], true);
+        assert!(
+            json["archive_members"][0]["parse_error"]
+                .as_str()
+                .unwrap()
+                .contains("not followed")
+        );
+        let mut text = Vec::new();
+        render_text(&report, false, &mut text).unwrap();
+        assert!(
+            String::from_utf8(text)
+                .unwrap()
+                .contains("archive members: 0 parsed, 1 unavailable")
+        );
+        let mut csv = Vec::new();
+        render_csv(&report, &mut csv).unwrap();
+        let csv = String::from_utf8(csv).unwrap();
+        assert!(csv.contains("archive-member,fixture.a,archive,elf"));
+        assert!(csv.contains("thin-member.o"));
+        assert!(csv.contains("external member paths are not followed"));
     }
 }
