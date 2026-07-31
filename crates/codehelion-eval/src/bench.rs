@@ -1042,6 +1042,10 @@ pub fn measure_store_insert(
             entropy_bits: 24.0,
             suppress_reason: None,
             boilerplate: None,
+            identifier_jaccard: None,
+            has_loop: None,
+            has_dynamic_allocation: None,
+            call_count: None,
             width_family: false,
             suppressed_by: None,
             priority: PriorityRow {
@@ -1063,6 +1067,7 @@ pub fn measure_store_insert(
                         finding: FindingId::from_bytes(fp(4, index)),
                         language: Language::Rust,
                         host_unit: Some(index % units),
+                        boilerplate: None,
                         file_path: format!("mod_{}/file_{}.rs", index / 256, index),
                         start_line: 1,
                         end_line: 40,

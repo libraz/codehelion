@@ -200,6 +200,23 @@ pub struct GroupFacts {
     pub languages: u64,
     /// The run's minimum clone length, which the sizes above are read against.
     pub min_clone_tokens: u64,
+    /// Weakest raw identifier-set agreement against the canonical member.
+    ///
+    /// Structural whole-unit analysis supplies this before normalization loses
+    /// the spelling. Other modes leave it absent rather than treating an
+    /// unavailable measurement as disagreement.
+    pub identifier_jaccard: Option<f64>,
+    /// Weakest call-surface agreement the analysis measured.
+    ///
+    /// `None` means neither side offered a call surface to compare, not that
+    /// their call surfaces agree.
+    pub api_similarity: Option<f64>,
+    /// Whether every member has a loop, when Structural mode measured bodies.
+    pub has_loop: Option<bool>,
+    /// Whether every member calls a recognised allocation API.
+    pub has_dynamic_allocation: Option<bool>,
+    /// Fewest call sites in any member, when Structural mode measured bodies.
+    pub call_count: Option<u64>,
     /// How often the duplicated code changed. Reserved: this needs repository
     /// history, which no analysis mode reads yet.
     pub churn: Option<f64>,
@@ -285,6 +302,8 @@ pub fn clone_confidence(facts: &GroupFacts) -> f64 {
 /// [`GroupFacts::churn`] and [`GroupFacts::ownership_spread`] belong here too
 /// and are not read: nothing supplies them yet, and inventing a value for a
 /// missing input would put findings in an order the evidence does not support.
+/// Structural mode also reports loop, allocation, and call-site evidence.
+/// Those facts measure maintenance surface, not generated code size.
 #[must_use]
 pub fn maintenance_risk(facts: &GroupFacts) -> f64 {
     let copies = saturating(
@@ -296,7 +315,19 @@ pub fn maintenance_risk(facts: &GroupFacts) -> f64 {
         as_f64(facts.directories.saturating_sub(1)),
         RISK_HALF_DIRECTORIES,
     );
-    0.50f64.mul_add(copies, 0.35f64.mul_add(extent, 0.15 * spread))
+    let baseline = 0.50f64.mul_add(copies, 0.35f64.mul_add(extent, 0.15 * spread));
+    let (materiality, measurements) = [
+        facts.has_loop.map(f64::from),
+        facts.has_dynamic_allocation.map(f64::from),
+        facts.call_count.map(|count| saturating(as_f64(count), 4.0)),
+    ]
+    .into_iter()
+    .flatten()
+    .fold((0.0, 0_u64), |(sum, count), value| (sum + value, count + 1));
+    if measurements == 0 {
+        return baseline;
+    }
+    0.80f64.mul_add(baseline, 0.20 * (materiality / as_f64(measurements)))
 }
 
 /// What removing the duplication would cost.
@@ -305,7 +336,10 @@ pub fn maintenance_risk(facts: &GroupFacts) -> f64 {
 /// run inside a unit has no boundary to lift it out at and has to be given
 /// one, everything the copies do differently becomes a parameter of whatever
 /// replaces them, and copies in different languages cannot share code at all
-/// without an interface between them.
+/// without an interface between them. When the structural analysis measured
+/// raw identifiers or call surfaces, disagreement there is a separate fact:
+/// it says that a shared body may need a dispatcher rather than one ordinary
+/// abstraction. Missing measurements do not change the answer.
 ///
 /// Higher is harder. It lowers a finding's place in the report rather than
 /// raising it — a duplication nobody can act on is worth less attention than
@@ -316,13 +350,30 @@ pub fn refactoring_difficulty(facts: &GroupFacts) -> f64 {
     let unbounded = f64::from(facts.scope == CloneScope::Fragment);
     let divergence = 1.0 - facts.min_pairwise.clamp(0.0, 1.0);
     let cross_language = f64::from(facts.languages > 1);
-    0.40f64.mul_add(
+    let baseline = 0.40f64.mul_add(
         extent,
         0.25f64.mul_add(
             unbounded,
             0.20f64.mul_add(divergence, 0.15 * cross_language),
         ),
-    )
+    );
+    let (surface_divergence, measurements) = [
+        facts
+            .identifier_jaccard
+            .map(|value| 1.0 - value.clamp(0.0, 1.0)),
+        facts
+            .api_similarity
+            .map(|value| 1.0 - value.clamp(0.0, 1.0)),
+    ]
+    .into_iter()
+    .flatten()
+    .fold((0.0, 0_u64), |(sum, count), value| (sum + value, count + 1));
+    if measurements == 0 {
+        return baseline;
+    }
+    // The base measure remains dominant: surface disagreement is evidence
+    // against a simple extraction, not proof that no good abstraction exists.
+    0.85f64.mul_add(baseline, 0.15 * (surface_divergence / as_f64(measurements)))
 }
 
 /// Rank one clone group: every measure, and the facts they came from.
@@ -364,6 +415,11 @@ mod tests {
             directories: 1,
             languages: 1,
             min_clone_tokens: 20,
+            identifier_jaccard: None,
+            api_similarity: None,
+            has_loop: None,
+            has_dynamic_allocation: None,
+            call_count: None,
             churn: None,
             ownership_spread: None,
         }
@@ -462,6 +518,17 @@ mod tests {
     }
 
     #[test]
+    fn material_bodies_raise_maintenance_risk_without_predicting_binary_size() {
+        let plain = facts();
+        let mut material = plain;
+        material.has_loop = Some(true);
+        material.has_dynamic_allocation = Some(true);
+        material.call_count = Some(8);
+
+        assert!(maintenance_risk(&material) > maintenance_risk(&plain));
+    }
+
+    #[test]
     fn a_run_inside_a_unit_is_harder_to_lift_out_than_a_whole_unit() {
         let mut whole = facts();
         whole.scope = CloneScope::Unit;
@@ -479,6 +546,33 @@ mod tests {
         two.languages = 2;
 
         assert!(refactoring_difficulty(&two) > refactoring_difficulty(&one));
+    }
+
+    #[test]
+    fn distinct_names_and_call_surfaces_raise_refactoring_difficulty() {
+        let ordinary = facts();
+        let mut divergent = ordinary;
+        divergent.clone_type = CloneClass::Type3;
+        divergent.identifier_jaccard = Some(0.0);
+        divergent.api_similarity = Some(0.0);
+
+        assert!(
+            refactoring_difficulty(&divergent) > refactoring_difficulty(&ordinary),
+            "unshared names and APIs make a single extraction less plausible"
+        );
+    }
+
+    #[test]
+    fn unavailable_surface_evidence_does_not_change_refactoring_difficulty() {
+        let ordinary = facts();
+        let mut unavailable = ordinary;
+        unavailable.identifier_jaccard = None;
+        unavailable.api_similarity = None;
+
+        assert!(
+            (refactoring_difficulty(&unavailable) - refactoring_difficulty(&ordinary)).abs()
+                < f64::EPSILON
+        );
     }
 
     #[test]

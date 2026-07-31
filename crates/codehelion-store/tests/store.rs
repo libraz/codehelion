@@ -1,5 +1,5 @@
 //! Store integration: snapshot round-trips, crash atomicity, fingerprint
-//! dedup across scans, and migration behaviour — all against real `SQLite`
+//! dedup across scans and unsupported-layout rejection — all against real `SQLite`
 //! databases (in-memory and on-disk), never mocks.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -48,7 +48,7 @@ const fn finding(seed: u8) -> FindingId {
 
 fn semantic_graph_json(kind: &str) -> String {
     serde_json::json!({
-        "schema_version": "sog-v9",
+        "schema_version": "sog-v1",
         "language": "c",
         "build_variant_fingerprint": vec![0_u8; 32],
         "nodes": [{
@@ -69,7 +69,7 @@ fn semantic_graph_json(kind: &str) -> String {
 
 fn cross_language_graph_json(language: &str, kind: &str, api_name: &str, variant: u8) -> String {
     serde_json::json!({
-        "schema_version": "sog-v9",
+        "schema_version": "sog-v1",
         "language": language,
         "build_variant_fingerprint": vec![variant; 32],
         "nodes": [{
@@ -91,7 +91,7 @@ fn cross_language_graph_json(language: &str, kind: &str, api_name: &str, variant
 fn detector_versions() -> Vec<(String, String)> {
     vec![
         ("normalization".to_string(), "2".to_string()),
-        ("frontend.rust".to_string(), "rust-lexer-v0".to_string()),
+        ("frontend.rust".to_string(), "rust-lexer-v1".to_string()),
         ("fp-schema".to_string(), "fp-schema-v1".to_string()),
     ]
 }
@@ -107,6 +107,7 @@ fn member_with_finding(
         finding: finding(finding_seed.wrapping_add(100)),
         language: Language::Rust,
         host_unit: host,
+        boilerplate: None,
         file_path: path.to_string(),
         start_line: 10,
         end_line: 20,
@@ -156,6 +157,10 @@ fn sample_snapshot<'a>(
             split_pair: false,
             member_scope: CloneScope::Unit,
             statements: None,
+            identifier_jaccard: None,
+            has_loop: None,
+            has_dynamic_allocation: None,
+            call_count: None,
             test_code: false,
             score: 1.0,
             entropy_bits: 4.2,
@@ -245,85 +250,6 @@ fn sample_summary() -> SummaryRow {
             pattern: "vendor/**".to_string(),
         }],
     }
-}
-
-/// Strip everything the migrations after version 15 added, so a database wound
-/// back to 15 migrates forward *through* those steps instead of meeting a table
-/// or column it already has.
-///
-/// A test that winds a database back has to undo every step in between, so
-/// every migration appended after 15 belongs here.
-fn undo_since_fifteen(conn: &rusqlite::Connection) {
-    for table in [
-        // Version 39.
-        "semantic_node_mapping",
-        "semantic_group_evidence",
-        "semantic_operation_graph",
-        // Version 38.
-        "artifact_analysis_savings_calibration",
-        // Version 37.
-        "artifact_analysis_clone_group_savings",
-        // Version 33.
-        "artifact_analysis_correlation",
-        // Version 31.
-        "artifact_analysis_unmapped_source",
-        // Version 30.
-        "artifact_analysis_unmapped_symbol",
-        "artifact_analysis_source_mapping",
-        // Versions 27 through 29 only added columns to the Version 26 tables.
-        "artifact_analysis_symbol",
-        "artifact_analysis",
-        // Version 25.
-        "compiler_expression",
-        // Version 24.
-        "compiler_unexpanded_macro",
-        // Version 23.
-        "cross_variant_clone_member",
-        "cross_variant_clone_group",
-        "cross_variant_comparison_origin",
-        "cross_variant_comparison",
-        // Version 21.
-        "compiler_helper_execution",
-        // Version 18.
-        "build_variant_setting",
-        // Version 17.
-        "compiler_data_flow",
-        "compiler_effect",
-        "compiler_instantiation_argument",
-        "compiler_instantiation",
-        "compiler_edge",
-        "compiler_block",
-        "compiler_call_candidate",
-        "compiler_call",
-        "compiler_symbol",
-        "compiler_type_argument",
-        "compiler_type",
-        "compiler_unit",
-        "compiler_helper_toolchain",
-        "compiler_helper_capability",
-        "compiler_helper",
-        // Version 16.
-        "run_summary",
-        "run_funnel_stage",
-        "run_funnel_drop",
-        "run_unused_suppression",
-    ] {
-        conn.execute(&format!("DROP TABLE {table}"), []).unwrap();
-    }
-    for column in ["languages", "header_language", "build_language"] {
-        conn.execute(
-            &format!("ALTER TABLE build_variant DROP COLUMN {column}"),
-            [],
-        )
-        .unwrap();
-    }
-    // Version 19 sits on a table version 17 created, which the loop above has
-    // already dropped, so nothing is left to undo for it.
-    // Version 35.
-    conn.execute("DROP INDEX idx_clone_group_member_fragment", [])
-        .unwrap();
-    conn.execute("ALTER TABLE clone_group DROP COLUMN statements", [])
-        .unwrap();
 }
 
 #[test]
@@ -436,7 +362,7 @@ fn clone_fragments_keep_the_variant_that_minted_their_fingerprints() {
     assert_eq!(fragments[1].file_path, "src/b.rs");
 }
 
-/// An unreleased development database is rejected instead of being migrated.
+/// Any layout marker other than the v1 baseline is rejected.
 #[test]
 fn a_development_database_before_summaries_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
@@ -451,17 +377,13 @@ fn a_development_database_before_summaries_is_rejected() {
     }
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
-        undo_since_fifteen(&conn);
-        conn.execute("UPDATE schema_meta SET version = 15", [])
+        conn.execute("UPDATE schema_meta SET version = 2", [])
             .unwrap();
     }
 
     assert!(matches!(
         Store::open(&path),
-        Err(StoreError::SchemaTooNew {
-            found: 15,
-            supported: 1
-        })
+        Err(StoreError::UnsupportedSchema { found: 2 })
     ));
 }
 
@@ -474,7 +396,7 @@ fn a_structural_group_persists_its_similarity_breakdown() {
     let mut snapshot = sample_snapshot(&variant, &detectors);
     snapshot.groups[0].clone_type = CloneClass::Type2;
     snapshot.groups[0].similarity = Some(SimilarityBreakdownRow {
-        weight_version: "structural-verify-v4".to_string(),
+        weight_version: "structural-verify-v1".to_string(),
         lexical: 0.8,
         structural: 0.95,
         control_flow: 0.9,
@@ -492,7 +414,7 @@ fn a_structural_group_persists_its_similarity_breakdown() {
         .similarity
         .as_ref()
         .expect("the structural group carries a breakdown");
-    assert_eq!(breakdown.weight_version, "structural-verify-v4");
+    assert_eq!(breakdown.weight_version, "structural-verify-v1");
     assert!((breakdown.structural - 0.95).abs() < 1e-9);
     assert!((breakdown.composite - 0.87).abs() < 1e-9);
     assert!((breakdown.min_pairwise - 0.72).abs() < 1e-9);
@@ -533,7 +455,7 @@ fn an_unmeasured_api_dimension_round_trips_as_absent() {
 
     let mut snapshot = sample_snapshot(&variant, &detectors);
     snapshot.groups[0].similarity = Some(SimilarityBreakdownRow {
-        weight_version: "structural-verify-v4".to_string(),
+        weight_version: "structural-verify-v1".to_string(),
         lexical: 1.0,
         structural: 1.0,
         control_flow: 1.0,
@@ -646,17 +568,17 @@ fn semantic_evidence_persists_one_graph_per_member_and_rolls_back_on_mismatch() 
     let mut snapshot = sample_snapshot(&variant, &detectors);
     snapshot.groups[0].clone_type = CloneClass::RestrictedSemantic;
     snapshot.groups[0].semantic = Some(SemanticEvidenceRow {
-        schema_version: "sog-v9".to_string(),
+        schema_version: "sog-v1".to_string(),
         rule_id: "sequence-pipeline-v1".to_string(),
         rule_version: 1,
         rule_confidence: 0.7,
         graphs: vec![
             SemanticOperationGraphRow {
-                schema_version: "sog-v9".to_string(),
+                schema_version: "sog-v1".to_string(),
                 graph_json: semantic_graph_json("filter"),
             },
             SemanticOperationGraphRow {
-                schema_version: "sog-v9".to_string(),
+                schema_version: "sog-v1".to_string(),
                 graph_json: semantic_graph_json("collect"),
             },
         ],
@@ -702,7 +624,7 @@ fn semantic_evidence_persists_one_graph_per_member_and_rolls_back_on_mismatch() 
     let mut malformed = sample_snapshot(&variant, &detectors);
     malformed.groups[0].clone_type = CloneClass::RestrictedSemantic;
     malformed.groups[0].semantic = Some(SemanticEvidenceRow {
-        schema_version: "sog-v9".to_string(),
+        schema_version: "sog-v1".to_string(),
         rule_id: "sequence-pipeline-v1".to_string(),
         rule_version: 1,
         rule_confidence: 0.7,
@@ -732,7 +654,7 @@ fn cross_language_semantic_comparison_is_separate_and_keeps_its_evidence() {
                 start_line: 3,
                 end_line: 6,
                 unit_name: Some("map_values".to_string()),
-                graph_schema_version: "sog-v9".to_string(),
+                graph_schema_version: "sog-v1".to_string(),
                 graph_json: cross_language_graph_json("rust", "map", "rust::Iterator::map", 1),
             },
             CrossLanguageSemanticMemberRow {
@@ -742,7 +664,7 @@ fn cross_language_semantic_comparison_is_separate_and_keeps_its_evidence() {
                 start_line: 3,
                 end_line: 6,
                 unit_name: Some("map_values".to_string()),
-                graph_schema_version: "sog-v9".to_string(),
+                graph_schema_version: "sog-v1".to_string(),
                 graph_json: cross_language_graph_json("cpp", "map", "std::transform", 2),
             },
         ],
@@ -1055,7 +977,7 @@ fn on_disk_databases_reopen_and_a_newer_schema_is_refused() {
             .unwrap();
     }
     {
-        // Reopen: migration is idempotent and the data is still there.
+        // Reopen: the v1 baseline remains readable and the data is still there.
         let store = Store::open(&path).unwrap();
         assert_eq!(
             store.schema_version().unwrap(),
@@ -1071,13 +993,7 @@ fn on_disk_databases_reopen_and_a_newer_schema_is_refused() {
             .unwrap();
     }
     let err = Store::open(&path).unwrap_err();
-    assert!(matches!(
-        err,
-        StoreError::SchemaTooNew {
-            found: 999,
-            supported: _
-        }
-    ));
+    assert!(matches!(err, StoreError::UnsupportedSchema { found: 999 }));
 }
 
 #[test]
@@ -1124,48 +1040,6 @@ fn a_whole_unit_group_records_the_scope_it_was_written_with() {
 }
 
 #[test]
-fn a_development_database_before_the_scope_column_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("audit.db");
-    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
-    let detectors = detector_versions();
-    {
-        let mut store = Store::open(&path).unwrap();
-        store
-            .record_snapshot(&sample_snapshot(&variant, &detectors))
-            .unwrap();
-    }
-    // Put the database back the way an older tool left it: the column gone
-    // and the version behind. Every group it holds described a whole unit,
-    // which is what migrating forward has to conclude.
-    {
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        // Every column and table added at or after that version has to go, or
-        // migrating forward would try to add one twice.
-        undo_since_fifteen(&conn);
-        conn.execute("DROP TABLE scanned_file", []).unwrap();
-        conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])
-            .unwrap();
-        conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
-            .unwrap();
-        conn.execute("ALTER TABLE clone_group DROP COLUMN test_code", [])
-            .unwrap();
-        conn.execute("ALTER TABLE clone_group DROP COLUMN member_scope", [])
-            .unwrap();
-        conn.execute("UPDATE schema_meta SET version = 6", [])
-            .unwrap();
-    }
-
-    assert!(matches!(
-        Store::open(&path),
-        Err(StoreError::SchemaTooNew {
-            found: 6,
-            supported: 1
-        })
-    ));
-}
-
-#[test]
 fn a_pair_no_group_could_hold_records_that_it_is_one() {
     let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
@@ -1176,42 +1050,6 @@ fn a_pair_no_group_could_hold_records_that_it_is_one() {
     let run_id = store.record_snapshot(&snapshot).unwrap();
 
     assert!(store.run_groups(run_id).unwrap()[0].split_pair);
-}
-
-#[test]
-fn a_development_database_before_the_split_pair_column_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("audit.db");
-    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
-    let detectors = detector_versions();
-    {
-        let mut store = Store::open(&path).unwrap();
-        let mut snapshot = sample_snapshot(&variant, &detectors);
-        snapshot.groups[0].split_pair = true;
-        store.record_snapshot(&snapshot).unwrap();
-    }
-    // An older tool reported only the groups a partition could hold, so every
-    // row it wrote was one of them. Migrating forward must say so rather than
-    // leave the question open.
-    {
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        undo_since_fifteen(&conn);
-        conn.execute("DROP TABLE scanned_file", []).unwrap();
-        conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])
-            .unwrap();
-        conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
-            .unwrap();
-        conn.execute("UPDATE schema_meta SET version = 8", [])
-            .unwrap();
-    }
-
-    assert!(matches!(
-        Store::open(&path),
-        Err(StoreError::SchemaTooNew {
-            found: 8,
-            supported: 1
-        })
-    ));
 }
 
 #[test]
@@ -1241,43 +1079,6 @@ fn a_group_reaching_outside_the_suite_records_that_it_does() {
         .record_snapshot(&sample_snapshot(&variant, &detectors))
         .unwrap();
     assert!(!store.run_groups(run_id).unwrap()[0].test_code);
-}
-
-#[test]
-fn a_development_database_before_the_test_code_column_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("audit.db");
-    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
-    let detectors = detector_versions();
-    {
-        let mut store = Store::open(&path).unwrap();
-        let mut snapshot = sample_snapshot(&variant, &detectors);
-        snapshot.groups[0].test_code = true;
-        store.record_snapshot(&snapshot).unwrap();
-    }
-    // An older tool had no rules for recognising a test, so its rows carry no
-    // claim either way. Migrating forward must not invent one.
-    {
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        undo_since_fifteen(&conn);
-        conn.execute("DROP TABLE scanned_file", []).unwrap();
-        conn.execute("ALTER TABLE scan_run DROP COLUMN min_clone_tokens", [])
-            .unwrap();
-        conn.execute("ALTER TABLE clone_group DROP COLUMN split_pair", [])
-            .unwrap();
-        conn.execute("ALTER TABLE clone_group DROP COLUMN test_code", [])
-            .unwrap();
-        conn.execute("UPDATE schema_meta SET version = 7", [])
-            .unwrap();
-    }
-
-    assert!(matches!(
-        Store::open(&path),
-        Err(StoreError::SchemaTooNew {
-            found: 7,
-            supported: 1
-        })
-    ));
 }
 
 /// A variant resolved from a compilation database entry.
@@ -1442,7 +1243,7 @@ fn recording_one_variant_twice_records_its_settings_once() {
 
 /// A row written before variants were described has nothing to say about what
 /// it was built with. Before release, that development layout is rejected
-/// rather than migrated into a current baseline.
+/// rather than converted into a current baseline.
 #[test]
 fn a_development_database_before_variant_descriptions_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
@@ -1506,10 +1307,7 @@ fn a_development_database_before_variant_descriptions_is_rejected() {
 
     assert!(matches!(
         Store::open(&path),
-        Err(StoreError::SchemaTooNew {
-            found: 17,
-            supported: 1
-        })
+        Err(StoreError::UnsupportedSchema { found: 17 })
     ));
 }
 
@@ -1602,7 +1400,7 @@ fn a_group_the_comparison_already_connected_is_left_as_it_was() {
     };
     let after = store.record_snapshot(&snapshot).unwrap();
 
-    // Matched on content, so the rule change did not touch it. A migration
+    // Matched on content, so the rule change did not touch it. A conversion
     // must not replace an answer the evidence supported with one from
     // placement.
     let invented = group_lineage_id(&group_fp(123));

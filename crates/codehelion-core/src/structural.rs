@@ -39,7 +39,7 @@ use crate::control_flow::{self, ControlFlowConfig, ControlFlowStats};
 use crate::discovery::{BuildVariant, Language};
 use crate::engine::LiteralNorm;
 use crate::features::{self, FileFeatures};
-use crate::frontend::{Lexeme, Token, UnitKind};
+use crate::frontend::{Lexeme, Token, TokenKind, UnitKind};
 use crate::grouping::{
     self, GroupingConfig, GroupingSet, GroupingStats, GroupingUnit, SimilarityEdge,
 };
@@ -201,9 +201,17 @@ pub struct GroupDetail {
     /// The similarity breakdown of the medoid against each member, parallel to
     /// the group's `members` (the medoid's own entry is a perfect self-match).
     pub member_breakdowns: Vec<SimilarityBreakdown>,
-    /// The boilerplate shape the whole group matches, when every member
-    /// matches the same one. A group whose members disagree is not boilerplate:
-    /// at least one occurrence carries behaviour the others share.
+    /// Smallest raw-identifier Jaccard agreement against the canonical unit.
+    /// It is evidence only: detection, clone class, and priority ignore it.
+    pub identifier_jaccard: f64,
+    /// Conservative evidence that every member carries a material body.
+    ///
+    /// This is not a code-size estimate. It records only syntactic work that
+    /// a maintainer must understand while changing each copy.
+    pub body_materiality: BodyMateriality,
+    /// The dominant boilerplate shape of the whole group, when at least four
+    /// fifths of its members match it. The per-member classifications remain
+    /// available in reports so the exceptional bodies are never hidden.
     pub boilerplate: Option<Boilerplate>,
     /// Whether every member is test code. A group with even one member outside
     /// the suite is duplication between test and tested code, which is the
@@ -216,6 +224,17 @@ pub struct GroupDetail {
     /// about how two bodies differ, which no member can carry on its own, so it
     /// sits beside the category rather than inside it.
     pub width_family: bool,
+}
+
+/// Material operations shared by every member of a structural clone group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyMateriality {
+    /// Every member contains at least one loop.
+    pub has_loop: bool,
+    /// Every member calls a recognised allocation API.
+    pub has_dynamic_allocation: bool,
+    /// Fewest recovered call sites in any member.
+    pub call_count: u64,
 }
 
 /// One occurrence of a duplicated statement run, resolved against the source
@@ -1290,10 +1309,105 @@ fn group_detail(
     GroupDetail {
         fingerprint,
         member_breakdowns,
-        boilerplate: unanimous_boilerplate(group, units),
+        identifier_jaccard: group_identifier_jaccard(group, units, files),
+        body_materiality: group_body_materiality(group, units, feature_files),
+        boilerplate: dominant_boilerplate(group, units),
         test_code: group.members.iter().all(|&member| units[member].test_code),
         width_family: written_once_per_width(group, units, files),
     }
+}
+
+/// Material work that exists in every member rather than just the medoid.
+fn group_body_materiality(
+    group: &grouping::StructuralGroup,
+    units: &[Unit],
+    feature_files: &[FileFeatures],
+) -> BodyMateriality {
+    let members: Vec<&features::UnitFeatures> = group
+        .members
+        .iter()
+        .map(|&member| {
+            let unit = &units[member];
+            &feature_files[unit.file].units[unit.local]
+        })
+        .collect();
+    BodyMateriality {
+        has_loop: members
+            .iter()
+            .all(|features| features.cfg.max_loop_depth > 0),
+        has_dynamic_allocation: members
+            .iter()
+            .all(|features| features.api.names.iter().any(is_allocation_api)),
+        call_count: members
+            .iter()
+            .map(|features| u64::try_from(features.api.names.len()).unwrap_or(u64::MAX))
+            .min()
+            .unwrap_or(0),
+    }
+}
+
+/// Allocation APIs recognised without a compiler backend.
+///
+/// The lexical frontend intentionally recognises only explicit, portable
+/// allocator names. An unfamiliar wrapper is absence of evidence, not a
+/// guess that the call allocates.
+fn is_allocation_api(name: &Lexeme) -> bool {
+    matches!(
+        name.as_str(),
+        "aligned_alloc"
+            | "calloc"
+            | "make_shared"
+            | "make_unique"
+            | "malloc"
+            | "realloc"
+            | "reserve"
+            | "reserve_exact"
+            | "try_reserve"
+            | "try_reserve_exact"
+            | "with_capacity"
+            | "with_capacity_and_hasher"
+    )
+}
+
+/// The weakest identifier-set agreement between canonical and a member.
+fn group_identifier_jaccard(
+    group: &grouping::StructuralGroup,
+    units: &[Unit],
+    files: &[SyntaxIrFile],
+) -> f64 {
+    let canonical = identifier_set(unit_tokens(&units[group.canonical], files));
+    group
+        .members
+        .iter()
+        .filter(|&&member| member != group.canonical)
+        .map(|&member| {
+            set_jaccard(
+                &canonical,
+                &identifier_set(unit_tokens(&units[member], files)),
+            )
+        })
+        .min_by(f64::total_cmp)
+        .unwrap_or(1.0)
+}
+
+fn identifier_set(tokens: &[Token]) -> BTreeSet<&str> {
+    tokens
+        .iter()
+        .filter(|token| matches!(token.kind, TokenKind::Identifier))
+        .map(|token| token.text.as_str())
+        .collect()
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn set_jaccard(left: &BTreeSet<&str>, right: &BTreeSet<&str>) -> f64 {
+    let union = left.union(right).count();
+    if union == 0 {
+        return 1.0;
+    }
+    // One set entry requires one input token; discovery's file-size ceiling
+    // bounds this far below the integer range where a report ratio loses a
+    // meaningful displayed digit.
+    left.intersection(right).count() as f64 / union as f64
 }
 
 /// Whether every member differs from the medoid by one integer width and
@@ -1333,17 +1447,25 @@ fn unit_tokens<'a>(unit: &Unit, files: &'a [SyntaxIrFile]) -> &'a [Token] {
     &files[unit.file].tokens[unit.tokens.0..unit.tokens.1]
 }
 
-/// The boilerplate category every member of a group shares, or `None` when
-/// they do not all share one.
-fn unanimous_boilerplate(group: &grouping::StructuralGroup, units: &[Unit]) -> Option<Boilerplate> {
-    let mut members = group
-        .members
-        .iter()
-        .map(|&member| units[member].boilerplate);
-    let first = members.next().flatten()?;
-    members
-        .all(|category| category == Some(first))
-        .then_some(first)
+/// The category that covers at least four fifths of one cohesive group.
+///
+/// Clone grouping permits structurally similar bodies to differ in a small
+/// number of details. Requiring unanimity therefore let a single exceptional
+/// body erase the useful classification of a large predicate family. The
+/// threshold is intentionally strict: a two-member pair still needs both
+/// members to agree, while a high-instance group can retain a few explicitly
+/// visible exceptions.
+fn dominant_boilerplate(group: &grouping::StructuralGroup, units: &[Unit]) -> Option<Boilerplate> {
+    let mut counts = BTreeMap::new();
+    for &member in &group.members {
+        if let Some(category) = units[member].boilerplate {
+            *counts.entry(category).or_insert(0usize) += 1;
+        }
+    }
+    let (category, count) = counts
+        .into_iter()
+        .max_by_key(|(category, count)| (*count, *category))?;
+    (count.saturating_mul(5) >= group.members.len().saturating_mul(4)).then_some(category)
 }
 
 /// Flatten every file's units into one global list, in IR-walk order, and
@@ -1805,16 +1927,20 @@ const fn encloses(a: &Unit, b: &Unit) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        CloneClass, Confirmed, CrossVariantUnit, RegionOccurrence, RegionSide, ResolvedTypes,
-        StructuralRegion, Unit, compare_build_variants, drop_subsumed, merge_adjacent,
+        Boilerplate, CloneClass, Confirmed, CrossVariantUnit, RegionOccurrence, RegionSide,
+        ResolvedTypes, StructuralRegion, Unit, compare_build_variants, dominant_boilerplate,
+        drop_subsumed, is_allocation_api, merge_adjacent, set_jaccard,
     };
     use crate::candidate::StatementRun;
     use crate::conditional::ArmPath;
     use crate::discovery::Language;
     use crate::frontend::{SourceSpan, Token, TokenKind, UnitKind};
+    use crate::grouping;
     use crate::ir::ByteRange;
     use crate::stable_id::{CloneGroupFingerprint, FragmentFingerprint, UnitFingerprint};
     use crate::types::TypeTag;
+    use crate::verify::Confidence;
+    use std::collections::BTreeSet;
 
     fn occurrence(file: usize, start: usize, end: usize) -> RegionOccurrence {
         RegionOccurrence {
@@ -1827,6 +1953,24 @@ mod tests {
             token_end: end,
             content: FragmentFingerprint::from_bytes([u8::try_from(start % 251).unwrap(); 16]),
         }
+    }
+
+    #[test]
+    fn identifier_jaccard_compares_raw_identifier_sets() {
+        let first = BTreeSet::from(["candidate", "token", "value"]);
+        let second = BTreeSet::from(["candidate", "other", "value"]);
+        let empty = BTreeSet::new();
+
+        assert!((set_jaccard(&first, &first) - 1.0).abs() < f64::EPSILON);
+        assert!((set_jaccard(&first, &second) - 0.5).abs() < f64::EPSILON);
+        assert!((set_jaccard(&empty, &empty) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn allocation_evidence_accepts_explicit_apis_without_guessing_wrappers() {
+        assert!(is_allocation_api(&"with_capacity".into()));
+        assert!(is_allocation_api(&"malloc".into()));
+        assert!(!is_allocation_api(&"build_buffer".into()));
     }
 
     fn region(
@@ -1869,6 +2013,41 @@ mod tests {
             test_code: false,
             arms: ArmPath::default(),
         }
+    }
+
+    fn grouped(members: Vec<usize>) -> grouping::StructuralGroup {
+        grouping::StructuralGroup {
+            clone_type: CloneClass::Type2,
+            confidence: Confidence::High,
+            canonical: 0,
+            medoid_similarities: vec![1.0; members.len()],
+            min_pairwise: 0.9,
+            members,
+        }
+    }
+
+    #[test]
+    fn a_dominant_boilerplate_shape_survives_a_small_number_of_exceptions() {
+        let mut units = (0..5).map(|index| unit_at(index, 0, 0)).collect::<Vec<_>>();
+        for unit in &mut units[..4] {
+            unit.boilerplate = Some(Boilerplate::TrivialBody);
+        }
+        assert_eq!(
+            dominant_boilerplate(&grouped(vec![0, 1, 2, 3, 4]), &units),
+            Some(Boilerplate::TrivialBody)
+        );
+    }
+
+    #[test]
+    fn a_non_dominant_shape_does_not_label_a_group() {
+        let mut units = (0..5).map(|index| unit_at(index, 0, 0)).collect::<Vec<_>>();
+        for unit in &mut units[..3] {
+            unit.boilerplate = Some(Boilerplate::TrivialBody);
+        }
+        assert_eq!(
+            dominant_boilerplate(&grouped(vec![0, 1, 2, 3, 4]), &units),
+            None
+        );
     }
 
     fn at(start: usize, end: usize, tag: TypeTag) -> (ByteRange, TypeTag) {

@@ -65,6 +65,9 @@ pub struct MemberRow {
     pub language: Language,
     /// Index into [`Snapshot::units`] of the enclosing unit, if any.
     pub host_unit: Option<usize>,
+    /// Boilerplate shape of the enclosing whole unit, when Structural mode
+    /// classified it. A matched fragment has no standalone body to classify.
+    pub boilerplate: Option<Boilerplate>,
     /// Anchor: path of the file, relative to the scan root.
     pub file_path: String,
     /// Anchor: 1-based first line.
@@ -158,6 +161,15 @@ pub struct GroupRow {
     /// A recorded fact about the code, independent of what policy does with
     /// it.
     pub boilerplate: Option<Boilerplate>,
+    /// Smallest raw-identifier Jaccard agreement to the canonical unit.
+    /// Absent outside Structural whole-unit groups.
+    pub identifier_jaccard: Option<f64>,
+    /// Whether every member contains a loop, when Structural mode measured it.
+    pub has_loop: Option<bool>,
+    /// Whether every member calls a recognised allocation API.
+    pub has_dynamic_allocation: Option<bool>,
+    /// Fewest recovered call sites in any member.
+    pub call_count: Option<u64>,
     /// Whether the members differ from each other by one integer width and
     /// nothing else. Recorded on the same footing as `boilerplate`, and kept
     /// apart from it because it describes how the members differ rather than
@@ -367,7 +379,7 @@ pub struct Snapshot<'a> {
     /// ranking cannot be re-derived without knowing which was in force.
     pub min_clone_tokens: u32,
     /// Active `(component, version)` pairs, e.g. `("frontend.rust",
-    /// "rust-lexer-v0")`.
+    /// "rust-lexer-v1")`.
     pub detector_versions: &'a [(String, String)],
     /// Suppression rules active for this scan, referenced by
     /// [`GroupRow::suppressed_by`].
@@ -1228,8 +1240,9 @@ fn write_group(
         "INSERT INTO clone_group
              (scan_run_id, group_fingerprint_id, clone_type, member_scope,
               member_count, score, entropy_bits, suppress_reason, boilerplate,
-              test_code, split_pair, width_family, statements)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              test_code, split_pair, width_family, statements, identifier_jaccard,
+              has_loop, has_dynamic_allocation, call_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             run_id,
             group_fp_id,
@@ -1244,6 +1257,12 @@ fn write_group(
             group.split_pair,
             group.width_family,
             group.statements,
+            group.identifier_jaccard,
+            group.has_loop,
+            group.has_dynamic_allocation,
+            group
+                .call_count
+                .map(|count| i64::try_from(count).unwrap_or(i64::MAX)),
         ],
     )?;
     let group_row_id = tx.last_insert_rowid();
@@ -1289,13 +1308,14 @@ fn write_group(
         fragment_row_ids.push(fragment_row_id);
         tx.execute(
             "INSERT INTO clone_group_member
-                 (clone_group_id, fragment_id, finding_id, is_canonical)
-             VALUES (?1, ?2, ?3, ?4)",
+                 (clone_group_id, fragment_id, finding_id, is_canonical, boilerplate)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 group_row_id,
                 fragment_row_id,
                 member.finding.as_bytes().as_slice(),
                 i64::from(index == 0),
+                member.boilerplate.map(Boilerplate::name),
             ],
         )?;
     }

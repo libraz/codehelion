@@ -149,6 +149,9 @@ pub struct StoredMember {
     pub token_count: i64,
     /// Name of the enclosing unit, when anchored to one.
     pub unit_name: Option<String>,
+    /// Boilerplate shape of the enclosing whole unit, when Structural mode
+    /// classified it. `None` also covers fragments, which have no whole body.
+    pub boilerplate: Option<String>,
     /// Whether this is the group's canonical instance.
     pub is_canonical: bool,
 }
@@ -182,6 +185,14 @@ pub struct StoredGroup {
     /// Statements each member covers, for a fragment-scope group; `None` for a
     /// whole-unit group, and for a row written before runs recorded it.
     pub statements: Option<i64>,
+    /// Smallest raw-identifier Jaccard agreement to the canonical unit.
+    pub identifier_jaccard: Option<f64>,
+    /// Whether every member contains a loop, when Structural mode measured it.
+    pub has_loop: Option<bool>,
+    /// Whether every member calls a recognised allocation API.
+    pub has_dynamic_allocation: Option<bool>,
+    /// Fewest recovered call sites in any member.
+    pub call_count: Option<i64>,
     /// The similarity breakdown, when the mode measured one (Structural).
     pub similarity: Option<StoredSimilarity>,
     /// The rule that hid the group in its run, when one matched. Absent for a
@@ -504,6 +515,23 @@ pub struct SourceResolvedSymbol {
     pub file_path: String,
     /// One-based line in [`Self::file_path`].
     pub line: u32,
+    /// Macro definition anchor when this symbol was expanded elsewhere.
+    ///
+    /// The ordinary source mapping uses [`Self::file_path`] and [`Self::line`]
+    /// (the definition side when available). This extra fact preserves that
+    /// the correspondence originated in a declarative macro rather than an
+    /// independently written function.
+    pub macro_definition: Option<SourceMacroDefinition>,
+}
+
+/// Definition location that distinguishes generated macro code from source
+/// written at the expansion site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceMacroDefinition {
+    /// Path the macro body was written in.
+    pub file_path: String,
+    /// One-based line in [`Self::file_path`].
+    pub line: u32,
 }
 
 /// A statically resolved source call available to artifact-call correlation.
@@ -679,7 +707,9 @@ impl Store {
     ) -> Result<Vec<SourceResolvedSymbol>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT s.name, COALESCE(s.definition_file, s.expansion_file),
-                    COALESCE(s.definition_start_line, s.expansion_start_line)
+                    COALESCE(s.definition_start_line, s.expansion_start_line),
+                    s.definition_file, s.definition_start_line,
+                    s.expansion_file, s.expansion_start_line
              FROM compiler_symbol s
              JOIN compiler_unit u ON u.id = s.compiler_unit_id
              WHERE u.scan_run_id = ?1
@@ -694,22 +724,67 @@ impl Store {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(name, file_path, line)| {
-                let line = positive_line("compiler_symbol.definition_start_line", Some(line))?
-                    .ok_or_else(|| StoreError::UnknownVocabulary {
-                        field: "compiler_symbol.definition_start_line",
-                        value: "NULL".to_owned(),
-                    })?;
-                Ok(SourceResolvedSymbol {
+            .map(
+                |(
                     name,
                     file_path,
                     line,
-                })
-            })
+                    definition_file,
+                    definition_line,
+                    expansion_file,
+                    expansion_line,
+                )| {
+                    let line = positive_line("compiler_symbol.definition_start_line", Some(line))?
+                        .ok_or_else(|| StoreError::UnknownVocabulary {
+                            field: "compiler_symbol.definition_start_line",
+                            value: "NULL".to_owned(),
+                        })?;
+                    let macro_definition = match (
+                        definition_file,
+                        definition_line,
+                        expansion_file,
+                        expansion_line,
+                    ) {
+                        (
+                            Some(definition_file),
+                            Some(definition_line),
+                            Some(expansion_file),
+                            Some(expansion_line),
+                        ) if definition_file != expansion_file
+                            || definition_line != expansion_line =>
+                        {
+                            Some(SourceMacroDefinition {
+                                line: positive_line(
+                                    "compiler_symbol.definition_start_line",
+                                    Some(definition_line),
+                                )?
+                                .ok_or_else(|| {
+                                    StoreError::UnknownVocabulary {
+                                        field: "compiler_symbol.definition_start_line",
+                                        value: "NULL".to_owned(),
+                                    }
+                                })?,
+                                file_path: definition_file,
+                            })
+                        }
+                        _ => None,
+                    };
+                    Ok(SourceResolvedSymbol {
+                        name,
+                        file_path,
+                        line,
+                        macro_definition,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -868,10 +943,7 @@ impl Store {
                     build_variant_fingerprint,
                     source_build_variant_fingerprint,
                 )| {
-                    if !matches!(
-                        schema_version.as_str(),
-                        "source-artifact-mapping-v2" | SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION
-                    ) {
+                    if schema_version != SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION {
                         return Err(StoreError::InvalidMappingEvidence {
                             reason: "unknown source-artifact mapping schema".to_owned(),
                         });
@@ -1549,6 +1621,36 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// One scan run by row id, if the database holds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn run_summary(&self, run_id: i64) -> Result<Option<RunSummary>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT r.id, r.root_path, r.tool_version, r.analysis_mode,
+                        r.started_at, r.finished_at,
+                        (SELECT COUNT(*) FROM clone_group g WHERE g.scan_run_id = r.id)
+                 FROM scan_run r
+                 WHERE r.id = ?1",
+                params![run_id],
+                |row| {
+                    Ok(RunSummary {
+                        id: row.get(0)?,
+                        root_path: row.get(1)?,
+                        tool_version: row.get(2)?,
+                        analysis_mode: row.get(3)?,
+                        started_at: row.get(4)?,
+                        finished_at: row.get(5)?,
+                        group_count: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
     /// The files one run read, by path relative to the scan root, each with
     /// the hash of what it held.
     ///
@@ -1743,7 +1845,8 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT g.id, lower(hex(f.hash)), g.clone_type, g.score, g.entropy_bits,
                     g.suppress_reason, g.boilerplate, g.member_scope, g.test_code,
-                    g.split_pair, s.scope, s.pattern, g.width_family, g.statements
+                    g.split_pair, s.scope, s.pattern, g.width_family, g.statements,
+                    g.identifier_jaccard, g.has_loop, g.has_dynamic_allocation, g.call_count
              FROM clone_group g
              JOIN fingerprint f ON f.id = g.group_fingerprint_id
              LEFT JOIN finding fi ON fi.clone_group_id = g.id
@@ -1769,6 +1872,10 @@ impl Store {
                         split_pair: row.get(9)?,
                         width_family: row.get(12)?,
                         statements: row.get(13)?,
+                        identifier_jaccard: row.get(14)?,
+                        has_loop: row.get(15)?,
+                        has_dynamic_allocation: row.get(16)?,
+                        call_count: row.get(17)?,
                         similarity: None,
                         semantic: None,
                         suppressed_by: scope
@@ -1788,6 +1895,34 @@ impl Store {
             groups.push(group);
         }
         Ok(groups)
+    }
+
+    /// The priority a recorded run assigned one clone group.
+    ///
+    /// This intentionally reads the stored values instead of applying the
+    /// current ranking configuration. Reformatting a run must describe the
+    /// decision that run made.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn run_group_priority(
+        &self,
+        run_id: i64,
+        group_fingerprint_hex: &str,
+    ) -> Result<Option<StoredPriority>, StoreError> {
+        let group_id = self
+            .conn
+            .query_row(
+                "SELECT g.id
+                 FROM clone_group g
+                 JOIN fingerprint f ON f.id = g.group_fingerprint_id
+                 WHERE g.scan_run_id = ?1 AND lower(hex(f.hash)) = ?2",
+                params![run_id, group_fingerprint_hex],
+                |row| row.get(0),
+            )
+            .optional()?;
+        group_id.map_or_else(|| Ok(None), |id| self.group_priority(id, run_id))
     }
 
     /// Registered SOG evidence attached to one clone group, when the group
@@ -2042,7 +2177,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT lower(hex(m.finding_id)), fr.file_path, fr.start_line, fr.end_line,
                     fr.token_count, u.name, m.is_canonical, lower(hex(ff.hash)),
-                    ff.language
+                    ff.language, m.boilerplate
              FROM clone_group_member m
              JOIN fragment fr ON fr.id = m.fragment_id
              JOIN fingerprint ff ON ff.id = fr.fingerprint_id
@@ -2127,7 +2262,7 @@ impl Store {
                         lower(hex(gf.hash)), g.clone_type, g.score, g.scan_run_id,
                         g.member_count, g.boilerplate, s.scope, s.pattern, g.id,
                         g.member_scope, g.test_code, g.split_pair, lower(hex(ff.hash)),
-                        ff.language
+                        ff.language, m.boilerplate
                  FROM clone_group_member m
                  JOIN fragment fr ON fr.id = m.fragment_id
                  JOIN fingerprint ff ON ff.id = fr.fingerprint_id
@@ -2293,6 +2428,7 @@ fn map_member(row: &rusqlite::Row<'_>, content: usize) -> Result<StoredMember, r
         end_line: row.get(3)?,
         token_count: row.get(4)?,
         unit_name: row.get(5)?,
+        boilerplate: row.get(content + 2)?,
         is_canonical: row.get::<_, i64>(6)? != 0,
     })
 }
