@@ -16,6 +16,8 @@ compiler-assisted mode. **Fast** is
 token-level Type-1 (identical) and Type-2 (renamed identifiers / changed
 literals) detection that scans hundreds of thousands of lines in seconds and
 millions in a couple of minutes.
+Comments and whitespace are excluded before clone comparison, so comment-only
+edits do not make otherwise identical code different findings.
 **Structural** adds syntax-structural Type-3 detection — clones that differ by
 added, removed or changed statements — and reports the per-dimension similarity
 each finding was judged on. **Semantic** uses separately installed Rust and
