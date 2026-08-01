@@ -4,7 +4,7 @@
 //! authoring style, shared by every supported language:
 //!
 //! - one statement per line;
-//! - braces never appear inside string or character literals;
+//! - string and character literals are single-line (their braces are ignored);
 //! - only `//` line comments (`/* */` block comments are not supported);
 //! - an item's opening `{` sits on its header line and its closing `}` on its
 //!   own line (single-line bodies such as `struct X;` are also accepted for
@@ -65,6 +65,18 @@ pub struct Item {
     pub end_line: u32,
     /// Whether the item is a function nested inside an `impl`/`trait` block.
     pub nested: bool,
+}
+
+/// A controlled-style seed source could not be scanned into complete items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanError {
+    /// An item opened a brace-delimited body but did not close it before EOF.
+    UnclosedItem {
+        /// Scanner key of the unclosed item.
+        key: String,
+        /// Header line of the unclosed item, inclusive and 1-based.
+        start_line: u32,
+    },
 }
 
 /// Keywords that begin a Rust item header.
@@ -143,15 +155,18 @@ fn item_key(trimmed: &str, language: Language) -> Option<String> {
     }
 }
 
-/// Net brace balance of a line, ignoring any trailing line comment.
+/// Net brace balance of a line, ignoring comments and literal tokens.
 pub(crate) fn brace_balance(line: &str) -> i32 {
-    let code = line.split("//").next().unwrap_or(line);
     let mut balance = 0;
-    for c in code.chars() {
-        match c {
-            '{' => balance += 1,
-            '}' => balance -= 1,
-            _ => {}
+    for token in crate::corpus::lexer::tokenize(line) {
+        if let crate::corpus::lexer::Token::Other(text) = token {
+            for c in text.chars() {
+                match c {
+                    '{' => balance += 1,
+                    '}' => balance -= 1,
+                    _ => {}
+                }
+            }
         }
     }
     balance
@@ -162,8 +177,12 @@ pub(crate) fn brace_balance(line: &str) -> i32 {
 ///
 /// Duplicate keys are returned as-is; consumers that need unambiguous lookup
 /// must reject them.
-#[must_use]
-pub fn scan_items(text: &str, language: Language) -> Vec<Item> {
+///
+/// # Errors
+///
+/// Returns [`ScanError::UnclosedItem`] when a brace-delimited item remains
+/// open at the end of the seed source.
+pub fn scan_items(text: &str, language: Language) -> Result<Vec<Item>, ScanError> {
     let mut items: Vec<Item> = Vec::new();
     // Indices into `items` of the still-open items, with the depth at which
     // each was opened.
@@ -209,7 +228,14 @@ pub fn scan_items(text: &str, language: Language) -> Vec<Item> {
             }
         }
     }
-    items
+    if let Some(&(item_index, _)) = open.first() {
+        let item = &items[item_index];
+        return Err(ScanError::UnclosedItem {
+            key: item.key.clone(),
+            start_line: item.start_line,
+        });
+    }
+    Ok(items)
 }
 
 #[cfg(test)]
@@ -289,7 +315,7 @@ private:
 
     #[test]
     fn finds_top_level_items_with_exact_ranges() {
-        let items = scan_items(SAMPLE, Language::Rust);
+        let items = scan_items(SAMPLE, Language::Rust).expect("sample scans");
         let alpha = find(&items, "fn alpha");
         assert_eq!((alpha.start_line, alpha.end_line), (3, 9));
         assert!(!alpha.nested);
@@ -301,7 +327,7 @@ private:
 
     #[test]
     fn finds_nested_functions() {
-        let items = scan_items(SAMPLE, Language::Rust);
+        let items = scan_items(SAMPLE, Language::Rust).expect("sample scans");
         let value = find(&items, "fn value");
         assert_eq!((value.start_line, value.end_line), (16, 18));
         assert!(value.nested);
@@ -309,7 +335,7 @@ private:
 
     #[test]
     fn else_branches_do_not_end_an_item() {
-        let items = scan_items(SAMPLE, Language::Rust);
+        let items = scan_items(SAMPLE, Language::Rust).expect("sample scans");
         let alpha = find(&items, "fn alpha");
         // The `} else {` on line 6 must not close `fn alpha`.
         assert_eq!(alpha.end_line, 9);
@@ -318,7 +344,7 @@ private:
     #[test]
     fn pub_items_and_braceless_items_are_found() {
         let text = "pub fn one() {\n    1\n}\n\nstruct Unit;\n";
-        let items = scan_items(text, Language::Rust);
+        let items = scan_items(text, Language::Rust).expect("seed scans");
         let one = find(&items, "fn one");
         assert_eq!((one.start_line, one.end_line), (1, 3));
         let unit = find(&items, "struct Unit");
@@ -328,14 +354,34 @@ private:
     #[test]
     fn braces_in_comments_are_ignored() {
         let text = "fn f() {\n    // ignore this brace }\n    1\n}\n";
-        let items = scan_items(text, Language::Rust);
+        let items = scan_items(text, Language::Rust).expect("seed scans");
         let f = find(&items, "fn f");
         assert_eq!((f.start_line, f.end_line), (1, 4));
     }
 
     #[test]
+    fn braces_in_literals_do_not_change_an_items_range() {
+        let text = "fn f() {\n    let template = \"{ not a block }\";\n    let close = '}';\n}\n";
+        let items = scan_items(text, Language::Rust).expect("seed scans");
+        let f = find(&items, "fn f");
+        assert_eq!((f.start_line, f.end_line), (1, 4));
+    }
+
+    #[test]
+    fn an_unclosed_item_is_rejected() {
+        let text = "fn unfinished() {\n    let template = \"{ literal\";\n";
+        assert_eq!(
+            scan_items(text, Language::Rust),
+            Err(ScanError::UnclosedItem {
+                key: "fn unfinished".to_string(),
+                start_line: 1,
+            })
+        );
+    }
+
+    #[test]
     fn finds_c_items_with_exact_ranges() {
-        let items = scan_items(C_SAMPLE, Language::C);
+        let items = scan_items(C_SAMPLE, Language::C).expect("C sample scans");
         let sum = find(&items, "fn sum_even");
         assert_eq!((sum.start_line, sum.end_line), (3, 11));
         assert!(!sum.nested);
@@ -349,7 +395,7 @@ private:
 
     #[test]
     fn finds_cpp_class_and_nested_method_with_exact_ranges() {
-        let items = scan_items(CPP_SAMPLE, Language::Cpp);
+        let items = scan_items(CPP_SAMPLE, Language::Cpp).expect("C++ sample scans");
         let sum = find(&items, "fn sum_even");
         assert_eq!((sum.start_line, sum.end_line), (3, 6));
         let class = find(&items, "class Counter");
@@ -364,7 +410,7 @@ private:
     #[test]
     fn c_prototypes_and_class_outside_cpp_are_not_items() {
         let text = "int f(int x);\n\nclass Counter {\n};\n";
-        let items = scan_items(text, Language::C);
+        let items = scan_items(text, Language::C).expect("C seed scans");
         assert!(
             items.is_empty(),
             "prototype/class must not be C items: {items:?}"
@@ -375,10 +421,10 @@ private:
     fn rust_detection_is_unchanged_by_the_language_dispatch() {
         // The C sample under Rust rules finds only the `struct` header; the
         // Rust sample under Rust rules finds the same items as before.
-        let items = scan_items(C_SAMPLE, Language::Rust);
+        let items = scan_items(C_SAMPLE, Language::Rust).expect("C sample scans as Rust");
         let keys: Vec<&str> = items.iter().map(|item| item.key.as_str()).collect();
         assert_eq!(keys, vec!["struct counter"]);
-        let items = scan_items(SAMPLE, Language::Rust);
+        let items = scan_items(SAMPLE, Language::Rust).expect("Rust sample scans");
         let keys: Vec<&str> = items.iter().map(|item| item.key.as_str()).collect();
         assert_eq!(
             keys,

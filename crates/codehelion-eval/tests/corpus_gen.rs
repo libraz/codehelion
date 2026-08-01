@@ -1,5 +1,6 @@
 //! End-to-end tests that run the compiled corpus-gen binary.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
+#![cfg(feature = "corpus-gen")]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,19 @@ fn cmd() -> Command {
 fn corpus_dir() -> PathBuf {
     // Corpus lives at the workspace root, two levels up from this crate.
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/synthetic/rust")
+}
+
+/// Every generated corpus is a direct child with a mutation spec. Enumerating
+/// those specs makes a newly added corpus enter the drift check automatically.
+fn synthetic_corpus_dirs() -> Vec<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/synthetic");
+    let mut directories = fs::read_dir(&root)
+        .expect("read synthetic corpus root")
+        .map(|entry| entry.expect("read corpus entry").path())
+        .filter(|path| path.join("spec.json").is_file())
+        .collect::<Vec<_>>();
+    directories.sort();
+    directories
 }
 
 fn generate_into(out_dir: &Path) {
@@ -111,19 +125,12 @@ fn check_fails_on_drifted_output() {
 /// someone hand-edits a variant or `labels.json` instead of regenerating.
 #[test]
 fn committed_corpora_match_their_specs() {
-    for case in [
-        "rust",
-        "rust-divergent",
-        "rust-graded",
-        "rust-literals",
-        "rust-negative",
-        "rust-partial",
-        "c",
-        "cpp",
-    ] {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../corpus/synthetic")
-            .join(case);
+    let directories = synthetic_corpus_dirs();
+    assert!(
+        !directories.is_empty(),
+        "synthetic corpus root has no specs"
+    );
+    for dir in directories {
         cmd()
             .arg("check")
             .arg("--spec")

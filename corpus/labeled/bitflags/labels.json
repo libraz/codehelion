@@ -30,7 +30,7 @@
   ],
   "clone_pairs": [
     {
-      "id": "cp-001",
+      "id": "cp-001-1-2",
       "type": "type-2",
       "fragments": [
         {
@@ -42,12 +42,141 @@
           "file": "src/tests/union.rs",
           "start_line": 28,
           "end_line": 71
+        }
+      ]
+    },
+    {
+      "id": "cp-001-1-3",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/tests/difference.rs",
+          "start_line": 49,
+          "end_line": 92
         },
         {
           "file": "src/tests/insert.rs",
           "start_line": 31,
           "end_line": 91
+        }
+      ]
+    },
+    {
+      "id": "cp-001-1-4",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/tests/difference.rs",
+          "start_line": 49,
+          "end_line": 92
         },
+        {
+          "file": "src/tests/remove.rs",
+          "start_line": 40,
+          "end_line": 100
+        }
+      ]
+    },
+    {
+      "id": "cp-001-1-5",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/tests/difference.rs",
+          "start_line": 49,
+          "end_line": 92
+        },
+        {
+          "file": "src/tests/intersection.rs",
+          "start_line": 36,
+          "end_line": 79
+        }
+      ]
+    },
+    {
+      "id": "cp-001-2-3",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/tests/union.rs",
+          "start_line": 28,
+          "end_line": 71
+        },
+        {
+          "file": "src/tests/insert.rs",
+          "start_line": 31,
+          "end_line": 91
+        }
+      ]
+    },
+    {
+      "id": "cp-001-2-4",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/tests/union.rs",
+          "start_line": 28,
+          "end_line": 71
+        },
+        {
+          "file": "src/tests/remove.rs",
+          "start_line": 40,
+          "end_line": 100
+        }
+      ]
+    },
+    {
+      "id": "cp-001-2-5",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/tests/union.rs",
+          "start_line": 28,
+          "end_line": 71
+        },
+        {
+          "file": "src/tests/intersection.rs",
+          "start_line": 36,
+          "end_line": 79
+        }
+      ]
+    },
+    {
+      "id": "cp-001-3-4",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/tests/insert.rs",
+          "start_line": 31,
+          "end_line": 91
+        },
+        {
+          "file": "src/tests/remove.rs",
+          "start_line": 40,
+          "end_line": 100
+        }
+      ]
+    },
+    {
+      "id": "cp-001-3-5",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/tests/insert.rs",
+          "start_line": 31,
+          "end_line": 91
+        },
+        {
+          "file": "src/tests/intersection.rs",
+          "start_line": 36,
+          "end_line": 79
+        }
+      ]
+    },
+    {
+      "id": "cp-001-4-5",
+      "type": "type-2",
+      "fragments": [
         {
           "file": "src/tests/remove.rs",
           "start_line": 40,
@@ -109,7 +238,7 @@
       ]
     },
     {
-      "id": "cp-005",
+      "id": "cp-005-1-2",
       "type": "type-2",
       "fragments": [
         {
@@ -117,6 +246,33 @@
           "start_line": 293,
           "end_line": 298
         },
+        {
+          "file": "src/traits.rs",
+          "start_line": 304,
+          "end_line": 309
+        }
+      ]
+    },
+    {
+      "id": "cp-005-1-3",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/traits.rs",
+          "start_line": 293,
+          "end_line": 298
+        },
+        {
+          "file": "src/traits.rs",
+          "start_line": 312,
+          "end_line": 317
+        }
+      ]
+    },
+    {
+      "id": "cp-005-2-3",
+      "type": "type-2",
+      "fragments": [
         {
           "file": "src/traits.rs",
           "start_line": 304,
@@ -290,7 +446,7 @@
       ]
     },
     {
-      "id": "cp-016",
+      "id": "cp-016-1-2",
       "type": "type-3",
       "fragments": [
         {
@@ -298,6 +454,33 @@
           "start_line": 28,
           "end_line": 45
         },
+        {
+          "file": "src/tests/flags.rs",
+          "start_line": 5,
+          "end_line": 23
+        }
+      ]
+    },
+    {
+      "id": "cp-016-1-3",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/tests/flags.rs",
+          "start_line": 28,
+          "end_line": 45
+        },
+        {
+          "file": "src/tests/flag_name.rs",
+          "start_line": 5,
+          "end_line": 40
+        }
+      ]
+    },
+    {
+      "id": "cp-016-2-3",
+      "type": "type-3",
+      "fragments": [
         {
           "file": "src/tests/flags.rs",
           "start_line": 5,
@@ -313,7 +496,7 @@
   ],
   "non_clones": [
     {
-      "id": "nc-001",
+      "id": "nc-001-1-2",
       "reason": "forwarding-wrapper",
       "fragments": [
         {
@@ -321,6 +504,33 @@
           "start_line": 151,
           "end_line": 159
         },
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 229,
+          "end_line": 237
+        }
+      ]
+    },
+    {
+      "id": "nc-001-1-3",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 151,
+          "end_line": 159
+        },
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 323,
+          "end_line": 331
+        }
+      ]
+    },
+    {
+      "id": "nc-001-2-3",
+      "reason": "forwarding-wrapper",
+      "fragments": [
         {
           "file": "src/tests/parser.rs",
           "start_line": 229,
@@ -350,7 +560,7 @@
       ]
     },
     {
-      "id": "nc-003",
+      "id": "nc-003-1-2",
       "reason": "assertion-run",
       "fragments": [
         {
@@ -362,12 +572,141 @@
           "file": "src/tests/parser.rs",
           "start_line": 70,
           "end_line": 100
+        }
+      ]
+    },
+    {
+      "id": "nc-003-1-3",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 165,
+          "end_line": 199
         },
         {
           "file": "src/tests/parser.rs",
           "start_line": 205,
           "end_line": 227
+        }
+      ]
+    },
+    {
+      "id": "nc-003-1-4",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 165,
+          "end_line": 199
         },
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 299,
+          "end_line": 321
+        }
+      ]
+    },
+    {
+      "id": "nc-003-1-5",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 165,
+          "end_line": 199
+        },
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 127,
+          "end_line": 149
+        }
+      ]
+    },
+    {
+      "id": "nc-003-2-3",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 70,
+          "end_line": 100
+        },
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 205,
+          "end_line": 227
+        }
+      ]
+    },
+    {
+      "id": "nc-003-2-4",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 70,
+          "end_line": 100
+        },
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 299,
+          "end_line": 321
+        }
+      ]
+    },
+    {
+      "id": "nc-003-2-5",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 70,
+          "end_line": 100
+        },
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 127,
+          "end_line": 149
+        }
+      ]
+    },
+    {
+      "id": "nc-003-3-4",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 205,
+          "end_line": 227
+        },
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 299,
+          "end_line": 321
+        }
+      ]
+    },
+    {
+      "id": "nc-003-3-5",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 205,
+          "end_line": 227
+        },
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 127,
+          "end_line": 149
+        }
+      ]
+    },
+    {
+      "id": "nc-003-4-5",
+      "reason": "assertion-run",
+      "fragments": [
         {
           "file": "src/tests/parser.rs",
           "start_line": 299,
@@ -381,7 +720,7 @@
       ]
     },
     {
-      "id": "nc-004",
+      "id": "nc-004-1-2",
       "reason": "assertion-run",
       "fragments": [
         {
@@ -389,6 +728,33 @@
           "start_line": 270,
           "end_line": 293
         },
+        {
+          "file": "src/tests/iter.rs",
+          "start_line": 28,
+          "end_line": 65
+        }
+      ]
+    },
+    {
+      "id": "nc-004-1-3",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 270,
+          "end_line": 293
+        },
+        {
+          "file": "src/tests/fmt.rs",
+          "start_line": 81,
+          "end_line": 97
+        }
+      ]
+    },
+    {
+      "id": "nc-004-2-3",
+      "reason": "assertion-run",
+      "fragments": [
         {
           "file": "src/tests/iter.rs",
           "start_line": 28,
@@ -434,7 +800,7 @@
       ]
     },
     {
-      "id": "nc-007",
+      "id": "nc-007-1-2",
       "reason": "assertion-run",
       "fragments": [
         {
@@ -446,12 +812,141 @@
           "file": "src/tests/iter.rs",
           "start_line": 105,
           "end_line": 131
+        }
+      ]
+    },
+    {
+      "id": "nc-007-1-3",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/bitflags_match.rs",
+          "start_line": 66,
+          "end_line": 74
         },
         {
           "file": "src/tests/bitflags_match.rs",
           "start_line": 36,
           "end_line": 47
+        }
+      ]
+    },
+    {
+      "id": "nc-007-1-4",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/bitflags_match.rs",
+          "start_line": 66,
+          "end_line": 74
         },
+        {
+          "file": "src/tests/bitflags_match.rs",
+          "start_line": 76,
+          "end_line": 87
+        }
+      ]
+    },
+    {
+      "id": "nc-007-1-5",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/bitflags_match.rs",
+          "start_line": 66,
+          "end_line": 74
+        },
+        {
+          "file": "src/tests/complement.rs",
+          "start_line": 37,
+          "end_line": 53
+        }
+      ]
+    },
+    {
+      "id": "nc-007-2-3",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/iter.rs",
+          "start_line": 105,
+          "end_line": 131
+        },
+        {
+          "file": "src/tests/bitflags_match.rs",
+          "start_line": 36,
+          "end_line": 47
+        }
+      ]
+    },
+    {
+      "id": "nc-007-2-4",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/iter.rs",
+          "start_line": 105,
+          "end_line": 131
+        },
+        {
+          "file": "src/tests/bitflags_match.rs",
+          "start_line": 76,
+          "end_line": 87
+        }
+      ]
+    },
+    {
+      "id": "nc-007-2-5",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/iter.rs",
+          "start_line": 105,
+          "end_line": 131
+        },
+        {
+          "file": "src/tests/complement.rs",
+          "start_line": 37,
+          "end_line": 53
+        }
+      ]
+    },
+    {
+      "id": "nc-007-3-4",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/bitflags_match.rs",
+          "start_line": 36,
+          "end_line": 47
+        },
+        {
+          "file": "src/tests/bitflags_match.rs",
+          "start_line": 76,
+          "end_line": 87
+        }
+      ]
+    },
+    {
+      "id": "nc-007-3-5",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/bitflags_match.rs",
+          "start_line": 36,
+          "end_line": 47
+        },
+        {
+          "file": "src/tests/complement.rs",
+          "start_line": 37,
+          "end_line": 53
+        }
+      ]
+    },
+    {
+      "id": "nc-007-4-5",
+      "reason": "assertion-run",
+      "fragments": [
         {
           "file": "src/tests/bitflags_match.rs",
           "start_line": 76,
@@ -465,7 +960,7 @@
       ]
     },
     {
-      "id": "nc-008",
+      "id": "nc-008-1-2",
       "reason": "assertion-run",
       "fragments": [
         {
@@ -477,7 +972,77 @@
           "file": "src/tests/bitflags_match.rs",
           "start_line": 49,
           "end_line": 64
+        }
+      ]
+    },
+    {
+      "id": "nc-008-1-3",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 102,
+          "end_line": 121
         },
+        {
+          "file": "src/tests/eq.rs",
+          "start_line": 3,
+          "end_line": 10
+        }
+      ]
+    },
+    {
+      "id": "nc-008-1-4",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/parser.rs",
+          "start_line": 102,
+          "end_line": 121
+        },
+        {
+          "file": "src/tests/bitflags_match.rs",
+          "start_line": 28,
+          "end_line": 34
+        }
+      ]
+    },
+    {
+      "id": "nc-008-2-3",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/bitflags_match.rs",
+          "start_line": 49,
+          "end_line": 64
+        },
+        {
+          "file": "src/tests/eq.rs",
+          "start_line": 3,
+          "end_line": 10
+        }
+      ]
+    },
+    {
+      "id": "nc-008-2-4",
+      "reason": "assertion-run",
+      "fragments": [
+        {
+          "file": "src/tests/bitflags_match.rs",
+          "start_line": 49,
+          "end_line": 64
+        },
+        {
+          "file": "src/tests/bitflags_match.rs",
+          "start_line": 28,
+          "end_line": 34
+        }
+      ]
+    },
+    {
+      "id": "nc-008-3-4",
+      "reason": "assertion-run",
+      "fragments": [
         {
           "file": "src/tests/eq.rs",
           "start_line": 3,

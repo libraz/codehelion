@@ -3,8 +3,8 @@
 # `snapshot/`, which is git-ignored. The commit is what makes the line ranges
 # in labels.json meaningful, so it is never bumped in place.
 schema_version = 1
-repo = "/Users/libraz/Projects/fast-yaml"
-commit = "5317da2"
+origin = "https://github.com/libraz/fast-yaml.git"
+commit = "5317da25fc4fa7b9d90c74a8bbda2bd55fb75825"
 # Paths taken from the source tree. Vendored third-party code is excluded: it
 # is not this project's code, and the verdicts are about this project's.
 paths = ["src"]

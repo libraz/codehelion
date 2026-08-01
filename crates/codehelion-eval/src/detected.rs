@@ -38,7 +38,7 @@ pub enum Error {
         /// The version the document declared.
         found: u32,
     },
-    /// A field guaranteed by the current v1 report contract was omitted.
+    /// A field guaranteed by the current report contract was omitted.
     MissingField {
         /// Dot-separated field path.
         path: String,
@@ -255,7 +255,7 @@ struct CrossLanguageMember {
 /// [`Error::Version`] when it is one of a version this adapter does not read.
 pub fn from_report_json(json: &str) -> Result<(DetectionResult, u32), Error> {
     let value: Value = serde_json::from_str(json)?;
-    validate_report_v1_contract(&value)?;
+    validate_current_report_contract(&value)?;
     let report: ScanReport = serde_json::from_value(value)?;
     if report.schema_version != SUPPORTED_REPORT_SCHEMA {
         return Err(Error::Version {
@@ -321,20 +321,20 @@ pub fn from_report_json(json: &str) -> Result<(DetectionResult, u32), Error> {
     ))
 }
 
-/// Reject reports that silently omit a field produced by the current v1
-/// report writer.
+/// Reject reports that silently omit a field produced by the current report
+/// writer.
 ///
 /// `Option<T>` accepts an absent key as well as `null`. That is useful for a
 /// genuinely optional field such as non-semantic groups' `semantic` evidence,
 /// but it must not make this evaluator accept a stale pre-release report
 /// shape. The checked fields are the complete subset this adapter reads and
 /// the writer always emits them, including as `null` when no value exists.
-fn validate_report_v1_contract(value: &Value) -> Result<(), Error> {
+fn validate_current_report_contract(value: &Value) -> Result<(), Error> {
     require_fields(value, "report", &["schema_version", "summary", "groups"])?;
     let Some(summary) = value.get("summary") else {
         return Ok(());
     };
-    require_fields(summary, "summary", &["files", "lines"])?;
+    require_fields(summary, "summary", &["files", "lines", "search_truncated"])?;
     if let Some(files) = summary.get("files") {
         require_fields(files, "summary.files", &["rust", "c", "cpp"])?;
     }
@@ -354,6 +354,7 @@ fn validate_report_v1_contract(value: &Value) -> Result<(), Error> {
                 "similarity",
                 "boilerplate",
                 "test_code",
+                "test_code_evidence",
                 "width_family",
                 "split_pair",
                 "suppressed",
@@ -535,6 +536,7 @@ mod tests {
       "summary": {
         "files": {"total": 2, "rust": 2, "c": 0, "cpp": 0},
         "lines": 240,
+        "search_truncated": false,
         "groups": {"total": 2}
       },
       "groups": [
@@ -553,6 +555,7 @@ mod tests {
           },
           "boilerplate": null,
           "test_code": false,
+          "test_code_evidence": null,
           "width_family": false,
           "split_pair": false,
           "suppressed": null,
@@ -569,6 +572,7 @@ mod tests {
           "similarity": null,
           "boilerplate": null,
           "test_code": false,
+          "test_code_evidence": null,
           "width_family": false,
           "split_pair": false,
           "suppressed": {"kind": "rule", "detail": "path"},

@@ -655,6 +655,22 @@
           "end_line": 244
         }
       ]
+    },
+    {
+      "id": "nc-019",
+      "reason": "getter-boilerplate",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/registry-inl.h",
+          "start_line": 92,
+          "end_line": 95
+        },
+        {
+          "file": "include/spdlog/details/registry-inl.h",
+          "start_line": 118,
+          "end_line": 121
+        }
+      ]
     }
   ]
 }

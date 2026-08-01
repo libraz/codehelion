@@ -14,12 +14,14 @@
 //!   non-clones).
 //! - [`metrics`] — matching of findings against labels plus the accuracy and
 //!   stability metrics derived from that matching.
-//! - [`corpus`] — the deterministic synthetic-corpus mutation generator that
-//!   emits variant sources and their ground-truth labels.
+//! - `corpus` (with the `corpus-gen` feature) — the deterministic
+//!   synthetic-corpus mutation generator that emits variant sources and their
+//!   ground-truth labels.
 //! - [`bench`](mod@bench) — large-corpus generation and cold-scan
 //!   measurement for the performance targets.
 
 pub mod bench;
+#[cfg(feature = "corpus-gen")]
 pub mod corpus;
 pub mod detected;
 pub mod labels;

@@ -53,6 +53,13 @@ pub enum Error {
         /// The spec's `language` value.
         language: String,
     },
+    /// A brace-delimited item in the seed did not close before EOF.
+    UnclosedSeedItem {
+        /// Scanner key of the unclosed item.
+        key: String,
+        /// Header line of the unclosed item, inclusive and 1-based.
+        start_line: u32,
+    },
     /// The scanner found two seed items with the same key, so references to
     /// that key would be ambiguous.
     DuplicateItem {
@@ -135,6 +142,12 @@ impl fmt::Display for Error {
                 write!(
                     f,
                     "unsupported language `{language}` (expected rust, c or cpp)"
+                )
+            }
+            Self::UnclosedSeedItem { key, start_line } => {
+                write!(
+                    f,
+                    "seed item `{key}` opened on line {start_line} is not closed"
                 )
             }
             Self::DuplicateItem { key } => write!(f, "duplicate seed item key `{key}`"),

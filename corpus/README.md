@@ -83,8 +83,9 @@ anyone was shown — but it is the record of why that group should stay away, an
 it is what notices if the group comes back.
 
 A case whose `snapshot/` has not been materialized is reported as unscored, not
-scored as perfect — so a machine without the sources gets no precision figure
-rather than a flattering one.
+scored as perfect. A case with `origin` must materialize for the portable
+precision gate to pass; a local-only case is visible as an individual
+observation when present but is excluded from that aggregate population.
 
 ### Working rules
 
@@ -196,7 +197,12 @@ fixtures that must not be reported (drives precision). `language` is one of
 comparison. A restricted-semantic label may add `rule_id`, naming the
 registered rule it measures; the evaluation harness reports those labels
 separately from every other rule. Paths are relative to the label file's
-directory.
+directory. Every label contains exactly two fragments. When a reviewed group
+has three or more members, record every distinct pair as its own label, with a
+stable ID suffix indicating the original member positions (for example,
+`cp-001-1-3`). This preserves each asserted relation and prevents a finding
+that contains only part of a group from being judged by an implicit
+all-members rule.
 
 ```json
 {

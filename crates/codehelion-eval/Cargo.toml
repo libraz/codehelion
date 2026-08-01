@@ -15,6 +15,12 @@ publish = false
 name = "codehelion_eval"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Synthetic-corpus mutation and its development CLI. The evaluator and bench
+# harness do not need to compile this generator in ordinary builds.
+corpus-gen = []
+
 [[bin]]
 name = "codehelion-eval"
 path = "src/bin/eval.rs"
@@ -22,6 +28,7 @@ path = "src/bin/eval.rs"
 [[bin]]
 name = "codehelion-corpus-gen"
 path = "src/bin/corpus_gen.rs"
+required-features = ["corpus-gen"]
 
 [[bin]]
 name = "codehelion-bench"

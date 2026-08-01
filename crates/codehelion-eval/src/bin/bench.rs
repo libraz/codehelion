@@ -27,7 +27,7 @@ struct Args {
 enum Command {
     /// Generate a deterministic benchmark corpus.
     Corpus {
-        /// Directory to write the corpus into (must not already have one).
+        /// Directory to write the corpus into (must be empty if it exists).
         #[arg(long)]
         out: PathBuf,
         /// Target size in source lines.

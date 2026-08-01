@@ -9,6 +9,7 @@
 //! fingerprint-based, never line- or position-based, so ranges here never feed
 //! into any stable ID.
 
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{CloneType, Fragment};
@@ -28,7 +29,8 @@ pub struct LabelPair {
     /// label-side assertion rather than a detector identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
-    /// The fragments that form the labelled clone (exactly two).
+    /// The two fragments that form the labelled clone relation.
+    #[serde(deserialize_with = "pair_fragments")]
     pub fragments: Vec<Fragment>,
 }
 
@@ -44,7 +46,8 @@ pub struct NonClone {
     /// challenge, when it is part of a per-rule measurement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
-    /// The fragments that must not be reported together (exactly two).
+    /// The two fragments that must not be reported together.
+    #[serde(deserialize_with = "pair_fragments")]
     pub fragments: Vec<Fragment>,
 }
 
@@ -74,6 +77,24 @@ impl LabelSet {
     pub fn from_json(json: &str) -> serde_json::Result<Self> {
         serde_json::from_str(json)
     }
+}
+
+/// Deserialize the fragments of a binary label relation.
+///
+/// Labels score one relation at a time. Keeping that relation binary makes a
+/// partial group finding match precisely the pair it contains instead of
+/// relying on an ambiguous all-members convention.
+fn pair_fragments<'de, D>(deserializer: D) -> Result<Vec<Fragment>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let fragments = Vec::deserialize(deserializer)?;
+    if fragments.len() != 2 {
+        return Err(D::Error::custom(
+            "a label must contain exactly two fragments",
+        ));
+    }
+    Ok(fragments)
 }
 
 #[cfg(test)]
@@ -138,5 +159,35 @@ mod tests {
             labels.clone_pairs[0].rule_id.as_deref(),
             Some("cross-language-sequence-pipeline-v1")
         );
+    }
+
+    #[test]
+    fn labels_with_other_than_two_fragments_are_rejected_at_import() {
+        let json = r#"{
+          "schema_version": 1,
+          "language": "rust",
+          "files": ["seed.rs"],
+          "clone_pairs": [{"id":"cp-001","type":"type-1","fragments":[]}]
+        }"#;
+        let error = LabelSet::from_json(json).expect_err("empty clone label is invalid");
+        assert!(error.to_string().contains("exactly two fragments"));
+
+        let json = r#"{
+          "schema_version": 1,
+          "language": "rust",
+          "files": ["seed.rs", "type2.rs", "type3.rs"],
+          "non_clones": [{
+            "id":"nc-001",
+            "reason":"getter-boilerplate",
+            "fragments":[
+              {"file":"seed.rs","start_line":1,"end_line":2},
+              {"file":"type2.rs","start_line":1,"end_line":2},
+              {"file":"type3.rs","start_line":1,"end_line":2}
+            ]
+          }]
+        }"#;
+        let error =
+            LabelSet::from_json(json).expect_err("three-fragment negative label is invalid");
+        assert!(error.to_string().contains("exactly two fragments"));
     }
 }
