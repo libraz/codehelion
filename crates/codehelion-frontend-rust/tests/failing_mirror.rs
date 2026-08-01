@@ -241,7 +241,23 @@ fn single_pair_funnel(left: &str, right: &str) -> PairFunnel {
 #[test]
 fn exact_conversion_mirrors_are_grouped_but_the_shorter_band_type_is_not() {
     let files = [parse(C_ABI), parse(WASM), parse(NODE)];
-    let report = structural::analyze(&files, &variant(), &StructuralConfig::default());
+    // The Node table resembles `phase_mode_from_integer` strongly enough to
+    // be a different primary near-clone under the ordinary cohesion floor.
+    // Tightening only this fixture's primary floor leaves the exact mirrors
+    // intact while exercising the post-grouping rule: the incomplete table is
+    // ungrouped and can only surface as the full band's sibling.
+    let report = structural::analyze(
+        &files,
+        &variant(),
+        &StructuralConfig {
+            grouping: codehelion_core::grouping::GroupingConfig {
+                medoid_min_similarity: 0.96,
+                min_pairwise_similarity: 0.96,
+                ..codehelion_core::grouping::GroupingConfig::default()
+            },
+            ..StructuralConfig::default()
+        },
+    );
 
     for name in [
         "placement_from_string",
@@ -268,6 +284,14 @@ fn exact_conversion_mirrors_are_grouped_but_the_shorter_band_type_is_not() {
     assert!(
         !group.members.contains(&node),
         "the shorter Node band-type table must not join the full mirrors"
+    );
+    assert!(
+        report
+            .siblings
+            .iter()
+            .flat_map(|group| &group.siblings)
+            .any(|sibling| sibling.unit == node),
+        "the incomplete Node band-type copy is triage evidence, not primary membership"
     );
 }
 

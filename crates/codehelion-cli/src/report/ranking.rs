@@ -25,6 +25,15 @@ impl Guardrails {
             helper_timeout_ms: limits.helper_timeout_ms,
             posting_cap: limits.posting_cap.unwrap_or(profile.posting_cap),
             pair_budget: limits.pair_budget.unwrap_or(profile.max_candidates),
+            sibling_candidate_budget: limits.sibling_candidate_budget.unwrap_or_else(|| {
+                codehelion_core::structural::SiblingConfig::default().candidate_budget
+            }),
+            sibling_per_group_cap: limits.sibling_per_group_cap.unwrap_or_else(|| {
+                codehelion_core::structural::SiblingConfig::default().per_group_cap
+            }),
+            sibling_total_cap: limits
+                .sibling_total_cap
+                .unwrap_or_else(|| codehelion_core::structural::SiblingConfig::default().total_cap),
             max_component: limits.max_component,
         }
     }
@@ -39,6 +48,10 @@ impl From<&GuardrailsRow> for Guardrails {
             helper_timeout_ms: row.helper_timeout_ms,
             posting_cap: usize::try_from(row.posting_cap).unwrap_or(usize::MAX),
             pair_budget: usize::try_from(row.pair_budget).unwrap_or(usize::MAX),
+            sibling_candidate_budget: usize::try_from(row.sibling_candidate_budget)
+                .unwrap_or(usize::MAX),
+            sibling_per_group_cap: usize::try_from(row.sibling_per_group_cap).unwrap_or(usize::MAX),
+            sibling_total_cap: usize::try_from(row.sibling_total_cap).unwrap_or(usize::MAX),
             max_component: usize::try_from(row.max_component).unwrap_or(usize::MAX),
         }
     }

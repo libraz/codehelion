@@ -20,6 +20,7 @@ pub(crate) fn write_report(args: &ScanArgs, out: &mut impl Write, model: &Report
             force: args.force,
             verbose: args.verbose,
             show_suppressed: args.show_suppressed,
+            show_siblings: args.show_siblings,
             sort: args.sort.axis(),
             min_identifier_jaccard: args.min_identifier_jaccard,
         },
@@ -29,6 +30,10 @@ pub(crate) fn write_report(args: &ScanArgs, out: &mut impl Write, model: &Report
 }
 
 /// Output choices shared by a freshly scanned and a recorded report.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each boolean is an independent presentation option mirrored by a CLI flag"
+)]
 #[derive(Clone, Copy)]
 pub(crate) struct ReportOutput<'a> {
     /// Chosen serialization.
@@ -41,6 +46,8 @@ pub(crate) struct ReportOutput<'a> {
     pub(crate) verbose: bool,
     /// Whether text output includes suppressed groups.
     pub(crate) show_suppressed: bool,
+    /// Whether text output includes incomplete local mirrors.
+    pub(crate) show_siblings: bool,
     /// The axis the entries were put in order on, named in the listing's
     /// heading.
     pub(crate) sort: report::Sort,
@@ -59,6 +66,11 @@ pub(crate) fn write_report_options(
             "--show-suppressed applies only to text reports; JSON and SARIF always include suppressed groups"
         );
     }
+    if options.show_siblings && options.format != Format::Text {
+        bail!(
+            "--show-siblings applies only to text reports; JSON and SARIF always include sibling data"
+        );
+    }
     let text = match options.format {
         Format::Json => model.to_json().context("serializing the JSON report")?,
         Format::Sarif => model.to_sarif().context("serializing the SARIF report")?,
@@ -67,6 +79,7 @@ pub(crate) fn write_report_options(
                 verbose: options.verbose,
                 color: options.output.is_none() && std::io::stdout().is_terminal(),
                 show_suppressed: options.show_suppressed,
+                show_siblings: options.show_siblings,
                 sort: options.sort,
                 min_identifier_jaccard: options.min_identifier_jaccard,
             };
@@ -382,6 +395,7 @@ pub(super) fn partitioned_text(
         verbose: args.verbose,
         color: args.output.is_none() && std::io::stdout().is_terminal(),
         show_suppressed: args.show_suppressed,
+        show_siblings: args.show_siblings,
         sort: args.sort.axis(),
         min_identifier_jaccard: args.min_identifier_jaccard,
     };

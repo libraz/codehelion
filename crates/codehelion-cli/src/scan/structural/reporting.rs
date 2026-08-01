@@ -404,7 +404,7 @@ pub(super) fn build_report(
     stored: &SummaryRow,
     groups: Vec<report::Group>,
 ) -> Report {
-    shared::report(
+    let mut report = shared::report(
         common_run_info(RunInfoInputs {
             root: inputs.root,
             db_path: inputs.db_path,
@@ -422,7 +422,67 @@ pub(super) fn build_report(
         stored,
         groups,
         inputs.variant.mode.name(),
-    )
+    );
+    report.siblings = build_siblings(inputs);
+    report
+}
+
+/// Convert core-owned sibling findings into the additive public report shape.
+/// They stay keyed by their owning primary group rather than becoming ranked
+/// standalone findings.
+fn build_siblings(inputs: &ReportInputs<'_>) -> Vec<report::GroupSiblings> {
+    inputs
+        .analysis
+        .siblings
+        .iter()
+        .filter_map(|siblings| {
+            let detail = inputs.analysis.details.get(siblings.group)?;
+            Some(report::GroupSiblings {
+                group_fingerprint: detail.fingerprint.to_hex(),
+                siblings: siblings
+                    .siblings
+                    .iter()
+                    .map(|sibling| {
+                        let unit = &inputs.analysis.units[sibling.unit];
+                        let file = &inputs.files[unit.file];
+                        report::Sibling {
+                            clone_type: sibling.clone_type.name().to_string(),
+                            confidence_band: sibling.confidence.name().to_string(),
+                            similarity: report::SiblingSimilarity {
+                                weight_version: WEIGHT_VERSION.to_string(),
+                                lexical: sibling.breakdown.lexical,
+                                structural: sibling.breakdown.structural,
+                                control_flow: sibling.breakdown.control_flow,
+                                type_similarity: sibling.breakdown.type_similarity,
+                                api: sibling.breakdown.api,
+                                composite: sibling.breakdown.composite,
+                            },
+                            member: report::Member {
+                                finding_id: stable_id::finding_id(
+                                    &detail.fingerprint,
+                                    Some(&unit.fingerprint),
+                                    0,
+                                )
+                                .to_hex(),
+                                content: unit.content.to_hex(),
+                                file: file.relative_path.clone(),
+                                language: file.language.name().to_string(),
+                                start_line: unit.start_line,
+                                end_line: unit.end_line,
+                                unit: unit.name.as_deref().map(ToString::to_string),
+                                boilerplate: unit.boilerplate.map(|shape| shape.name().to_string()),
+                                tokens: u64::try_from(
+                                    unit.token_end.saturating_sub(unit.token_start),
+                                )
+                                .unwrap_or(u64::MAX),
+                                canonical: false,
+                            },
+                        }
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 /// What the run reported about itself beyond the groups it found, in the shape

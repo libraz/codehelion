@@ -81,6 +81,7 @@ pub(super) fn report(
         run,
         summary: report::restored(stored, &groups, analysis_mode),
         groups,
+        siblings: Vec::new(),
     }
 }
 

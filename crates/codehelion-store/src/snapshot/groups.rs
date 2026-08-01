@@ -2,8 +2,8 @@ use super::variant::{upsert_fingerprint, upsert_group_fingerprint};
 use super::{
     BTreeMap, BTreeSet, Boilerplate, CrossLanguageComparisonSnapshot,
     CrossLanguageSemanticGroupRow, CrossVariantComparisonSnapshot, GroupRow, Language, MemberRow,
-    SOG_SCHEMA_VERSION, SemanticEvidenceRow, SemanticOperationGraph, SimilarityBreakdownRow,
-    Snapshot, Store, StoreError, TestCodeEvidence, Transaction, params,
+    SOG_SCHEMA_VERSION, SemanticEvidenceRow, SemanticOperationGraph, SiblingGroupRow,
+    SimilarityBreakdownRow, Snapshot, Store, StoreError, TestCodeEvidence, Transaction, params,
 };
 
 impl Store {
@@ -222,7 +222,7 @@ fn write_finding(
     group_row_id: i64,
     group: &GroupRow,
     suppression_row_ids: &[i64],
-) -> Result<(), StoreError> {
+) -> Result<i64, StoreError> {
     let suppression_row_id = match group.suppressed_by {
         Some(index) => Some(*suppression_row_ids.get(index).ok_or(
             StoreError::UnknownSuppressionIndex {
@@ -252,6 +252,55 @@ fn write_finding(
             group.priority.savings_confidence,
         ],
     )?;
+    Ok(group_row_id)
+}
+
+/// Persist supplemental local mirrors without adding them to group membership.
+pub(super) fn write_sibling_groups(
+    tx: &Transaction<'_>,
+    sibling_groups: &[SiblingGroupRow],
+    unit_row_ids: &[i64],
+    group_row_ids: &BTreeMap<[u8; 16], i64>,
+) -> Result<(), StoreError> {
+    let mut insert = tx.prepare_cached(
+        "INSERT INTO clone_group_sibling
+             (clone_group_id, source_unit_id, fragment_fingerprint, finding_id,
+              clone_type, confidence_band, weight_version, lexical, structural,
+              control_flow, type_similarity, api, composite, boilerplate)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+    )?;
+    for siblings in sibling_groups {
+        let group_row_id = *group_row_ids
+            .get(siblings.group.as_bytes())
+            .ok_or_else(|| StoreError::UnknownGroupFingerprint {
+                fingerprint: siblings.group.to_hex(),
+            })?;
+        for sibling in &siblings.siblings {
+            let source_unit_id =
+                *unit_row_ids
+                    .get(sibling.unit)
+                    .ok_or(StoreError::UnknownUnitIndex {
+                        index: sibling.unit,
+                        units: unit_row_ids.len(),
+                    })?;
+            insert.execute(params![
+                group_row_id,
+                source_unit_id,
+                sibling.content.as_bytes().as_slice(),
+                sibling.finding.as_bytes().as_slice(),
+                sibling.clone_type.name(),
+                sibling.confidence.name(),
+                sibling.similarity.weight_version,
+                sibling.similarity.lexical,
+                sibling.similarity.structural,
+                sibling.similarity.control_flow,
+                sibling.similarity.type_similarity,
+                sibling.similarity.api,
+                sibling.similarity.composite,
+                sibling.boilerplate.map(Boilerplate::name),
+            ])?;
+        }
+    }
     Ok(())
 }
 
@@ -263,7 +312,7 @@ pub(super) fn write_group(
     group: &GroupRow,
     unit_row_ids: &[i64],
     suppression_row_ids: &[i64],
-) -> Result<(), StoreError> {
+) -> Result<i64, StoreError> {
     let group_fp_id =
         upsert_group_fingerprint(tx, group.fingerprint.as_bytes(), snapshot, variant_id)?;
     tx.execute(
@@ -313,7 +362,7 @@ pub(super) fn write_group(
     if let Some(evidence) = &group.semantic {
         write_semantic_evidence(tx, group_row_id, &fragment_row_ids, evidence)?;
     }
-    Ok(())
+    Ok(group_row_id)
 }
 
 #[allow(clippy::too_many_arguments)] // transaction hand-off, one call site

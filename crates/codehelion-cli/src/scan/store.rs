@@ -106,6 +106,7 @@ pub(super) fn rank_and_record(
         suppressions: inputs.rules.rows.clone(),
         units,
         groups,
+        sibling_groups: Vec::new(),
         features: Vec::new(),
         files,
         // No compiler was asked anything: this mode reads source and nothing

@@ -49,7 +49,8 @@ use codehelion_store::snapshot::{
     CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow, CrossLanguageSemanticMemberRow,
     CrossVariantComparisonSnapshot, CrossVariantGroupRow, CrossVariantMemberRow, FeatureRow,
     FileRow, GroupRow, MemberRow, PriorityRow, SemanticEvidenceRow, SemanticNodeMappingRow,
-    SemanticOperationGraphRow, SimilarityBreakdownRow, Snapshot, SummaryRow, UnitRow,
+    SemanticOperationGraphRow, SiblingGroupRow, SiblingRow, SimilarityBreakdownRow, Snapshot,
+    SummaryRow, UnitRow,
 };
 
 use super::{

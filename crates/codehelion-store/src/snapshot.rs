@@ -198,6 +198,38 @@ pub struct GroupRow {
     pub members: Vec<MemberRow>,
 }
 
+/// Siblings attached to one cohesive primary clone group.
+///
+/// They are intentionally outside [`GroupRow::members`]: a sibling is a
+/// bounded, relaxed-threshold local mirror and must never reconstruct as a
+/// primary group member.
+#[derive(Debug, Clone)]
+pub struct SiblingGroupRow {
+    /// Stable fingerprint of the owning primary clone group.
+    pub group: CloneGroupFingerprint,
+    /// Incomplete local mirrors in deterministic order.
+    pub siblings: Vec<SiblingRow>,
+}
+
+/// One persisted incomplete local mirror.
+#[derive(Debug, Clone)]
+pub struct SiblingRow {
+    /// Index into [`Snapshot::units`] of the ungrouped sibling unit.
+    pub unit: usize,
+    /// The sibling unit's whole-unit content identity.
+    pub content: FragmentFingerprint,
+    /// Stable occurrence identity in the owning group domain.
+    pub finding: FindingId,
+    /// The verifier classification.
+    pub clone_type: CloneClass,
+    /// The verifier confidence band.
+    pub confidence: Confidence,
+    /// Canonical-to-sibling per-dimension comparison evidence.
+    pub similarity: SimilarityBreakdownRow,
+    /// Body classification carried by the sibling's host unit, when any.
+    pub boilerplate: Option<Boilerplate>,
+}
+
 /// Persisted registered-rule evidence for one restricted semantic group.
 #[derive(Debug, Clone)]
 pub struct SemanticEvidenceRow {
@@ -396,6 +428,8 @@ pub struct Snapshot<'a> {
     pub units: Vec<UnitRow>,
     /// Detected clone groups.
     pub groups: Vec<GroupRow>,
+    /// Incomplete local mirrors keyed by their owning primary group.
+    pub sibling_groups: Vec<SiblingGroupRow>,
     /// Per-unit candidate-extraction features, referencing [`Self::units`] by
     /// index. Empty in Fast mode, which derives no structural features.
     pub features: Vec<FeatureRow>,
@@ -627,6 +661,12 @@ pub struct GuardrailsRow {
     pub posting_cap: u64,
     /// Largest candidate-pair budget per pass.
     pub pair_budget: u64,
+    /// Largest number of post-grouping sibling candidates compared in one run.
+    pub sibling_candidate_budget: u64,
+    /// Largest number of sibling findings retained for one clone group.
+    pub sibling_per_group_cap: u64,
+    /// Largest number of sibling findings retained across one run.
+    pub sibling_total_cap: u64,
     /// Largest related component refined together.
     pub max_component: u64,
 }

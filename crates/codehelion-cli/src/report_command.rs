@@ -36,6 +36,7 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
         .run_summary_row(run.id)?
         .context("the selected run has no stored summary")?;
     let mut groups = recorded_groups(&store, run.id)?;
+    let siblings = recorded_siblings(&store.run_groups(run.id)?);
     let sort = args.sort.axis();
     report::order(&mut groups, &resolved_config.config.suppression, sort);
     let compiler = store
@@ -87,6 +88,7 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
             ..report::restored(&summary_row, &groups, &analysis_mode)
         },
         groups,
+        siblings,
     };
     scan::hydrate_artifact_savings(&store, run.id, &mut model.groups)?;
     scan::write_report_options(
@@ -96,6 +98,7 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
             force: args.force,
             verbose: args.verbose,
             show_suppressed: args.show_suppressed,
+            show_siblings: args.show_siblings,
             sort,
             min_identifier_jaccard: args.min_identifier_jaccard,
         },
@@ -103,6 +106,51 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
         &model,
     )?;
     Ok(Outcome::Success)
+}
+
+/// Restore supplemental sibling evidence from the dedicated `SQLite` table.
+/// It remains outside the ranked group list, exactly as a fresh scan presents
+/// it, so re-rendering cannot promote a sibling into primary membership.
+fn recorded_siblings(
+    groups: &[codehelion_store::query::StoredGroup],
+) -> Vec<report::GroupSiblings> {
+    groups
+        .iter()
+        .filter(|group| !group.siblings.is_empty())
+        .map(|group| report::GroupSiblings {
+            group_fingerprint: group.fingerprint_hex.clone(),
+            siblings: group
+                .siblings
+                .iter()
+                .map(|sibling| report::Sibling {
+                    clone_type: sibling.clone_type.clone(),
+                    confidence_band: sibling.confidence_band.clone(),
+                    similarity: report::SiblingSimilarity {
+                        weight_version: sibling.weight_version.clone(),
+                        lexical: sibling.lexical,
+                        structural: sibling.structural,
+                        control_flow: sibling.control_flow,
+                        type_similarity: sibling.type_similarity,
+                        api: sibling.api,
+                        composite: sibling.composite,
+                    },
+                    member: report::Member {
+                        finding_id: sibling.member.finding_hex.clone(),
+                        content: sibling.member.content_hex.clone(),
+                        file: sibling.member.file_path.clone(),
+                        language: sibling.member.language.clone(),
+                        start_line: u32::try_from(sibling.member.start_line.unwrap_or(0))
+                            .unwrap_or(0),
+                        end_line: u32::try_from(sibling.member.end_line.unwrap_or(0)).unwrap_or(0),
+                        unit: sibling.member.unit_name.clone(),
+                        boilerplate: sibling.member.boilerplate.clone(),
+                        tokens: u64::try_from(sibling.member.token_count).unwrap_or(0),
+                        canonical: false,
+                    },
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Restore configuration provenance without letting the current configuration

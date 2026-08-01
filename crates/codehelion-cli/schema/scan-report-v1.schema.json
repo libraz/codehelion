@@ -26,6 +26,13 @@
       "items": {
         "$ref": "#/$defs/group"
       }
+    },
+    "siblings": {
+      "type": "array",
+      "description": "Incomplete local mirrors keyed to their owning cohesive group. These are additive evidence, not primary group members.",
+      "items": {
+        "$ref": "#/$defs/group_siblings"
+      }
     }
   },
   "$defs": {
@@ -886,6 +893,40 @@
             "$ref": "#/$defs/member"
           }
         }
+      }
+    },
+    "group_siblings": {
+      "type": "object",
+      "required": ["group_fingerprint", "siblings"],
+      "properties": {
+        "group_fingerprint": { "$ref": "#/$defs/hex" },
+        "siblings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/sibling" }
+        }
+      }
+    },
+    "sibling": {
+      "type": "object",
+      "required": ["clone_type", "confidence_band", "similarity", "member"],
+      "properties": {
+        "clone_type": { "enum": ["type-1", "type-2", "type-3"] },
+        "confidence_band": { "enum": ["high", "medium", "low"] },
+        "similarity": { "$ref": "#/$defs/sibling_similarity" },
+        "member": { "$ref": "#/$defs/member" }
+      }
+    },
+    "sibling_similarity": {
+      "type": "object",
+      "required": ["weight_version", "lexical", "structural", "control_flow", "type_similarity", "api", "composite"],
+      "properties": {
+        "weight_version": { "type": "string" },
+        "lexical": { "type": "number", "minimum": 0, "maximum": 1 },
+        "structural": { "type": "number", "minimum": 0, "maximum": 1 },
+        "control_flow": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "type_similarity": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "api": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "composite": { "type": "number", "minimum": 0, "maximum": 1 }
       }
     },
     "priority": {

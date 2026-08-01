@@ -60,6 +60,52 @@ pub struct Report {
     /// Every detected group, suppressed ones included, ordered by priority
     /// descending with the fingerprint bytes as a tie-break.
     pub groups: Vec<Group>,
+    /// Incomplete local mirrors attached to an established group. They are
+    /// not group members and are kept separate so primary clone membership
+    /// stays a cohesive relation.
+    pub siblings: Vec<GroupSiblings>,
+}
+
+/// Sibling findings owned by one primary clone group.
+#[derive(Debug, Serialize)]
+pub struct GroupSiblings {
+    /// Fingerprint of the primary group that owns these local mirrors.
+    pub group_fingerprint: String,
+    /// Incomplete copies, in deterministic source-content order.
+    pub siblings: Vec<Sibling>,
+}
+
+/// One incomplete local mirror of a primary group's canonical member.
+#[derive(Debug, Serialize)]
+pub struct Sibling {
+    /// Clone class measured by the verifier. A relaxed-only hit is Type-3.
+    pub clone_type: String,
+    /// The verifier confidence band; relaxed-only hits are low confidence.
+    pub confidence_band: String,
+    /// Canonical-to-sibling verifier evidence.
+    pub similarity: SiblingSimilarity,
+    /// The ungrouped unit. It is intentionally not repeated in the owning
+    /// group's `members` collection.
+    pub member: Member,
+}
+
+/// Per-dimension evidence for one sibling comparison.
+#[derive(Debug, Clone, Serialize)]
+pub struct SiblingSimilarity {
+    /// Composite-weight recipe used for the comparison.
+    pub weight_version: String,
+    /// Verbatim agreement of aligned statements' leading tokens.
+    pub lexical: f64,
+    /// Rename-invariant structural agreement.
+    pub structural: f64,
+    /// Control-flow-profile agreement, when both sides had such evidence.
+    pub control_flow: Option<f64>,
+    /// Type agreement, when compiler evidence was available.
+    pub type_similarity: Option<f64>,
+    /// Call-surface agreement, when either side called an API.
+    pub api: Option<f64>,
+    /// Weighted mean of the measured dimensions.
+    pub composite: f64,
 }
 
 /// An explicitly requested comparison across independent build variants.
@@ -402,6 +448,12 @@ pub struct Guardrails {
     pub posting_cap: usize,
     /// Largest number of candidate pairs any pairing pass examined.
     pub pair_budget: usize,
+    /// Largest number of sibling-sweep comparisons.
+    pub sibling_candidate_budget: usize,
+    /// Maximum siblings retained by one primary group.
+    pub sibling_per_group_cap: usize,
+    /// Maximum siblings retained by the whole run.
+    pub sibling_total_cap: usize,
     /// Largest related unit component refined as one group.
     pub max_component: usize,
 }
@@ -957,6 +1009,10 @@ pub struct PriorityInputs {
 }
 
 /// Rendering options for the text view of a [`Report`].
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each boolean is an independent presentation option mirrored by a CLI flag"
+)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TextOptions {
     /// List every group and every member instead of the summarised excerpt.
@@ -965,6 +1021,8 @@ pub struct TextOptions {
     pub color: bool,
     /// Also list suppressed groups, with the reason each was hidden.
     pub show_suppressed: bool,
+    /// Also list incomplete local mirrors attached to visible primary groups.
+    pub show_siblings: bool,
     /// The axis the report was put in order on, for the listing's heading.
     pub sort: Sort,
     /// Leave groups whose raw identifier agreement is below this out of the

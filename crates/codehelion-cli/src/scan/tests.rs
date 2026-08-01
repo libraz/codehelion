@@ -191,6 +191,7 @@ fn scan_args(untrusted: bool) -> ScanArgs {
         compare_build_variants: false,
         compare_languages: false,
         show_suppressed: false,
+        show_siblings: false,
         include_trivial: false,
         include_vendored: false,
         verbose: false,
@@ -220,6 +221,9 @@ fn distrusting_the_tree_lowers_every_ceiling_and_says_which() {
             helper_timeout_ms: u64::MAX,
             posting_cap: Some(usize::MAX),
             pair_budget: Some(usize::MAX),
+            sibling_candidate_budget: Some(usize::MAX),
+            sibling_per_group_cap: Some(usize::MAX),
+            sibling_total_cap: Some(usize::MAX),
             max_component: usize::MAX,
         },
         ..Config::default()

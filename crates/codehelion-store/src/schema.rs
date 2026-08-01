@@ -58,7 +58,7 @@ use crate::StoreError;
 /// A database recorded under another one is rejected rather than migrated.
 /// Nothing is lost by that: the audit database holds the latest scan, which
 /// re-running the scan reproduces.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// Full pre-release database layout. Existing development databases are not
 /// transformed; create a fresh database when this contract changes.
@@ -259,6 +259,23 @@ CREATE TABLE "clone_group_similarity" (
     composite       REAL NOT NULL,
     min_pairwise    REAL NOT NULL,
     confidence_band TEXT CHECK (confidence_band IN ('high', 'medium', 'low'))
+) STRICT;
+CREATE TABLE clone_group_sibling (
+    clone_group_id       INTEGER NOT NULL REFERENCES clone_group (id) ON DELETE CASCADE,
+    source_unit_id       INTEGER NOT NULL REFERENCES source_unit (id) ON DELETE CASCADE,
+    fragment_fingerprint BLOB NOT NULL CHECK (length(fragment_fingerprint) = 16),
+    finding_id           BLOB NOT NULL CHECK (length(finding_id) = 16),
+    clone_type           TEXT NOT NULL CHECK (clone_type IN ('type-1', 'type-2', 'type-3')),
+    confidence_band      TEXT NOT NULL CHECK (confidence_band IN ('high', 'medium', 'low')),
+    weight_version       TEXT NOT NULL,
+    lexical              REAL NOT NULL,
+    structural           REAL NOT NULL,
+    control_flow         REAL,
+    type_similarity      REAL,
+    api                  REAL,
+    composite            REAL NOT NULL,
+    boilerplate          TEXT CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition', 'guarded-dispatch', 'configured-answer')),
+    PRIMARY KEY (clone_group_id, source_unit_id)
 ) STRICT;
 CREATE TABLE compiler_block (
     compiler_unit_id      INTEGER NOT NULL REFERENCES compiler_unit (id) ON DELETE CASCADE,
@@ -663,6 +680,9 @@ CREATE TABLE run_summary (
     guardrail_helper_timeout_ms INTEGER,
     guardrail_posting_cap INTEGER,
     guardrail_pair_budget INTEGER,
+    guardrail_sibling_candidate_budget INTEGER,
+    guardrail_sibling_per_group_cap INTEGER,
+    guardrail_sibling_total_cap INTEGER,
     guardrail_max_component INTEGER,
     folded_runs           INTEGER NOT NULL,
     subsumed_runs         INTEGER NOT NULL,
@@ -819,6 +839,8 @@ CREATE INDEX idx_artifact_analysis_correlation_source_run
     ON artifact_analysis_correlation (source_scan_run_id);
 CREATE INDEX idx_clone_group_member_fragment
     ON clone_group_member (fragment_id, clone_group_id);
+CREATE INDEX idx_clone_group_sibling_group
+    ON clone_group_sibling (clone_group_id);
 CREATE INDEX idx_artifact_analysis_mapping_symbol
     ON artifact_analysis_source_mapping (artifact_analysis_id, artifact_symbol_fingerprint);
 CREATE INDEX idx_artifact_analysis_mapping_source

@@ -345,6 +345,15 @@ pub struct Limits {
     /// different spaces, and one number spent by whichever runs first would
     /// silence the other.
     pub pair_budget: Option<usize>,
+    /// Upper bound on the post-grouping sibling sweep's verifier comparisons.
+    /// Unset selects the structural default.
+    pub sibling_candidate_budget: Option<usize>,
+    /// Maximum incomplete local mirrors retained for each primary group.
+    /// Unset selects the structural default.
+    pub sibling_per_group_cap: Option<usize>,
+    /// Maximum incomplete local mirrors retained in one structural report.
+    /// Unset selects the structural default.
+    pub sibling_total_cap: Option<usize>,
     /// Largest set of related units compared as one piece when forming
     /// groups; a larger set is cut, and the cut is reported. Comparing a set
     /// costs time quadratic in its size, so without a ceiling a codebase of
@@ -401,6 +410,9 @@ impl Default for Limits {
             helper_timeout_ms: 300_000,
             posting_cap: None,
             pair_budget: None,
+            sibling_candidate_budget: None,
+            sibling_per_group_cap: None,
+            sibling_total_cap: None,
             max_component: codehelion_core::grouping::GroupingConfig::default().max_component,
         }
     }
@@ -428,6 +440,15 @@ impl Limits {
         if self.pair_budget == Some(0) {
             bail!("limits.pair-budget must be at least 1 when set");
         }
+        if self.sibling_candidate_budget == Some(0) {
+            bail!("limits.sibling-candidate-budget must be at least 1 when set");
+        }
+        if self.sibling_per_group_cap == Some(0) {
+            bail!("limits.sibling-per-group-cap must be at least 1 when set");
+        }
+        if self.sibling_total_cap == Some(0) {
+            bail!("limits.sibling-total-cap must be at least 1 when set");
+        }
         if self.max_component < 2 {
             bail!("limits.max-component must be at least 2");
         }
@@ -438,8 +459,8 @@ impl Limits {
     ///
     /// The optional pairing settings mean "use the mode-specific default" in
     /// normal runs. An untrusted run cannot leave that choice open: it turns
-    /// both into concrete profile ceilings so Fast, Structural, and Semantic
-    /// all receive the same bound.
+    /// them into concrete ceilings. Pairing uses the untrusted profile; the
+    /// structural-only sibling sweep uses its already-bounded defaults.
     pub(crate) fn clamp_to_untrusted(&mut self, profile: &codehelion_core::execution::Limits) {
         self.max_file_bytes = self.max_file_bytes.min(profile.max_file_bytes);
         self.parse_timeout_ms = self
@@ -455,6 +476,25 @@ impl Limits {
         self.pair_budget = Some(self.pair_budget.map_or(profile.max_candidates, |budget| {
             budget.min(profile.max_candidates)
         }));
+        let sibling_defaults = codehelion_core::structural::SiblingConfig::default();
+        self.sibling_candidate_budget = Some(
+            self.sibling_candidate_budget
+                .map_or(sibling_defaults.candidate_budget, |budget| {
+                    budget.min(sibling_defaults.candidate_budget)
+                }),
+        );
+        self.sibling_per_group_cap = Some(
+            self.sibling_per_group_cap
+                .map_or(sibling_defaults.per_group_cap, |cap| {
+                    cap.min(sibling_defaults.per_group_cap)
+                }),
+        );
+        self.sibling_total_cap = Some(
+            self.sibling_total_cap
+                .map_or(sibling_defaults.total_cap, |cap| {
+                    cap.min(sibling_defaults.total_cap)
+                }),
+        );
         self.max_component = self.max_component.min(profile.max_component);
     }
 }
@@ -618,6 +658,9 @@ impl Config {
         if self.jobs.is_none()
             || self.limits.posting_cap.is_none()
             || self.limits.pair_budget.is_none()
+            || self.limits.sibling_candidate_budget.is_none()
+            || self.limits.sibling_per_group_cap.is_none()
+            || self.limits.sibling_total_cap.is_none()
         {
             text.push_str("\n# Unset optional settings\n");
             if self.jobs.is_none() {
@@ -628,6 +671,15 @@ impl Config {
             }
             if self.limits.pair_budget.is_none() {
                 text.push_str("# limits.pair-budget: mode-specific default\n");
+            }
+            if self.limits.sibling_candidate_budget.is_none() {
+                text.push_str("# limits.sibling-candidate-budget: structural default\n");
+            }
+            if self.limits.sibling_per_group_cap.is_none() {
+                text.push_str("# limits.sibling-per-group-cap: structural default\n");
+            }
+            if self.limits.sibling_total_cap.is_none() {
+                text.push_str("# limits.sibling-total-cap: structural default\n");
             }
         }
         Ok(text)

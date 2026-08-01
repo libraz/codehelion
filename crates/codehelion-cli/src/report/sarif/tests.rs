@@ -1,5 +1,5 @@
 use super::*;
-use crate::report::tests::{sample_report, structural_group};
+use crate::report::tests::{sample_report, sample_siblings, structural_group};
 
 fn sarif(report: &Report) -> serde_json::Value {
     serde_json::from_str(&report.to_sarif().unwrap()).unwrap()
@@ -86,6 +86,25 @@ fn a_group_becomes_one_result_pointing_at_its_canonical_instance() {
         result["partialFingerprints"][FINGERPRINT_KEY],
         "0b".repeat(16)
     );
+}
+
+#[test]
+fn a_sibling_is_a_property_of_its_primary_result_not_a_result_of_its_own() {
+    let mut report = sample_report();
+    report.siblings = vec![sample_siblings()];
+    let value = sarif(&report);
+    let results = value["runs"][0]["results"].as_array().unwrap();
+
+    assert_eq!(results.len(), report.groups.len());
+    assert_eq!(
+        results[0]["properties"]["siblings"][0]["member"]["file"],
+        "src/incomplete.rs"
+    );
+    assert_eq!(
+        results[0]["properties"]["siblings"][0]["similarity"]["composite"],
+        0.76
+    );
+    assert_eq!(results[1]["properties"]["siblings"], serde_json::json!([]));
 }
 
 #[test]

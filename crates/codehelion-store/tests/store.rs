@@ -29,8 +29,9 @@ use codehelion_store::query::{IdKind, StoredVariant};
 use codehelion_store::snapshot::{
     CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow, CrossLanguageSemanticMemberRow,
     FeatureRow, FileRow, FunnelDropRow, FunnelStageRow, GroupRow, MemberRow, PriorityRow,
-    SemanticEvidenceRow, SemanticNodeMappingRow, SemanticOperationGraphRow, SimilarityBreakdownRow,
-    Snapshot, SummaryRow, SuppressionRuleRow, UnitRow, UnparsedRow, UnusedRuleRow,
+    SemanticEvidenceRow, SemanticNodeMappingRow, SemanticOperationGraphRow, SiblingGroupRow,
+    SiblingRow, SimilarityBreakdownRow, Snapshot, SummaryRow, SuppressionRuleRow, UnitRow,
+    UnparsedRow, UnusedRuleRow,
 };
 use codehelion_store::{Store, StoreError};
 
@@ -191,6 +192,7 @@ fn sample_snapshot<'a>(
                 member_with_finding(1, 2, "src/b.rs", Some(1)),
             ],
         }],
+        sibling_groups: Vec::new(),
         features: Vec::new(),
         files: vec![
             FileRow {
@@ -244,6 +246,9 @@ fn sample_summary() -> SummaryRow {
             helper_timeout_ms: 30,
             posting_cap: 40,
             pair_budget: 50,
+            sibling_candidate_budget: 51,
+            sibling_per_group_cap: 52,
+            sibling_total_cap: 53,
             max_component: 60,
         }),
         excluded_skipped: 5,

@@ -31,6 +31,7 @@ fn comparison_and_presentation_flags_reject_unsupported_modes() {
         compare_build_variants: true,
         compare_languages: false,
         show_suppressed: false,
+        show_siblings: false,
         include_trivial: false,
         include_vendored: false,
         verbose: false,

@@ -249,8 +249,16 @@ once. Structural and Semantic scans apply these classifications; Fast scans say
 explicitly when they are unavailable.
 
 Each scan creates its persistent local audit database at
-`.codehelion/audit.db` under the scan root by default. Add `.codehelion/` to
-the repository's `.gitignore`; this database is not an expendable build cache.
+`.codehelion/audit.db` by default, placed under the Git repository holding the
+scan root so that scanning a subdirectory reuses the repository's database
+rather than starting a new one; a scan root outside any repository holds its
+own. `--db <path>` overrides the location. Add `.codehelion/` to the
+repository's `.gitignore`; this database is not an expendable build cache.
+
+`codehelion.toml`, in contrast, is read only from the scan root itself and is
+never inherited from a parent directory: a scan says which settings governed it
+and where they came from, and a file nobody named that sits above the tree
+being read is not that.
 
 `.h` is the one extension C and C++ share, and the grammar it is read with
 decides what the analysis can see inside it: a C++ header read as C recovers

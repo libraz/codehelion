@@ -70,6 +70,12 @@ pub enum StoreError {
         /// Number of units in the snapshot.
         units: usize,
     },
+    /// A sibling collection named no group in the same snapshot.
+    #[error("snapshot sibling collection references unknown group fingerprint {fingerprint}")]
+    UnknownGroupFingerprint {
+        /// Hex form of the missing primary group fingerprint.
+        fingerprint: String,
+    },
     /// A snapshot's compiler result named a helper that is not in the
     /// snapshot.
     #[error(

@@ -3,8 +3,9 @@ use super::{
     FileCountsRow, FunnelDropRow, FunnelStageRow, GuardrailsRow, IdKind, IdMatch,
     OptionalExtension, SOG_SCHEMA_VERSION, SemanticOperationGraph, Store, StoreError,
     StoredFinding, StoredGroup, StoredGroupDetail, StoredMember, StoredPriority,
-    StoredSemanticEvidence, StoredSemanticNodeMapping, StoredSimilarity, StoredSuppressionRef,
-    SummaryRow, UnparsedRow, UnusedRuleRow, params, stored_test_code_evidence,
+    StoredSemanticEvidence, StoredSemanticNodeMapping, StoredSibling, StoredSimilarity,
+    StoredSuppressionRef, SummaryRow, UnparsedRow, UnusedRuleRow, params,
+    stored_test_code_evidence,
 };
 
 impl Store {
@@ -80,6 +81,7 @@ impl Store {
                             }
                         }),
                         members: Vec::new(),
+                        siblings: Vec::new(),
                     },
                 ))
             })?
@@ -90,9 +92,55 @@ impl Store {
             group.similarity = self.group_similarity(group_row_id)?;
             group.semantic = self.group_semantic_evidence(group_row_id)?;
             group.members = self.group_members(group_row_id)?;
+            group.siblings = self.group_siblings(group_row_id)?;
             groups.push(group);
         }
         Ok(groups)
+    }
+
+    /// Local incomplete mirrors attached to one primary group, in stored
+    /// deterministic order. They intentionally do not flow through
+    /// `group_members`.
+    fn group_siblings(&self, group_row_id: i64) -> Result<Vec<StoredSibling>, StoreError> {
+        self.conn
+            .prepare(
+                "SELECT lower(hex(s.finding_id)), lower(hex(s.fragment_fingerprint)),
+                        u.language, u.file_path, u.start_line, u.end_line, u.token_count,
+                        u.name, s.boilerplate, s.clone_type, s.confidence_band,
+                        s.weight_version, s.lexical, s.structural, s.control_flow,
+                        s.type_similarity, s.api, s.composite
+                 FROM clone_group_sibling s
+                 JOIN source_unit u ON u.id = s.source_unit_id
+                 WHERE s.clone_group_id = ?1
+                 ORDER BY s.fragment_fingerprint ASC, u.fingerprint_id ASC, u.id ASC",
+            )?
+            .query_map(params![group_row_id], |row| {
+                Ok(StoredSibling {
+                    member: StoredMember {
+                        finding_hex: row.get(0)?,
+                        content_hex: row.get(1)?,
+                        language: row.get(2)?,
+                        file_path: row.get(3)?,
+                        start_line: row.get(4)?,
+                        end_line: row.get(5)?,
+                        token_count: row.get(6)?,
+                        unit_name: row.get(7)?,
+                        boilerplate: row.get(8)?,
+                        is_canonical: false,
+                    },
+                    clone_type: row.get(9)?,
+                    confidence_band: row.get(10)?,
+                    weight_version: row.get(11)?,
+                    lexical: row.get(12)?,
+                    structural: row.get(13)?,
+                    control_flow: row.get(14)?,
+                    type_similarity: row.get(15)?,
+                    api: row.get(16)?,
+                    composite: row.get(17)?,
+                })
+            })?
+            .collect::<Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /// One clone group by the hex form of its fingerprint, from the most
@@ -318,6 +366,8 @@ impl Store {
                         guardrail_profile, guardrail_max_file_bytes,
                         guardrail_parse_timeout_ms, guardrail_helper_timeout_ms,
                         guardrail_posting_cap, guardrail_pair_budget,
+                        guardrail_sibling_candidate_budget,
+                        guardrail_sibling_per_group_cap, guardrail_sibling_total_cap,
                         guardrail_max_component, folded_runs, subsumed_runs,
                         split_components, pair_budget_exhausted, baseline_digest
                  FROM run_summary WHERE scan_run_id = ?1",
@@ -332,7 +382,10 @@ impl Store {
                     let guardrail_helper_timeout_ms: Option<i64> = row.get(21)?;
                     let guardrail_posting_cap: Option<i64> = row.get(22)?;
                     let guardrail_pair_budget: Option<i64> = row.get(23)?;
-                    let guardrail_max_component: Option<i64> = row.get(24)?;
+                    let guardrail_sibling_candidate_budget: Option<i64> = row.get(24)?;
+                    let guardrail_sibling_per_group_cap: Option<i64> = row.get(25)?;
+                    let guardrail_sibling_total_cap: Option<i64> = row.get(26)?;
+                    let guardrail_max_component: Option<i64> = row.get(27)?;
                     Ok(SummaryRow {
                         analyzed_files: FileCountsRow {
                             total: count(row.get(0)?),
@@ -363,13 +416,20 @@ impl Store {
                             helper_timeout_ms: count(guardrail_helper_timeout_ms.unwrap_or(0)),
                             posting_cap: count(guardrail_posting_cap.unwrap_or(0)),
                             pair_budget: count(guardrail_pair_budget.unwrap_or(0)),
+                            sibling_candidate_budget: count(
+                                guardrail_sibling_candidate_budget.unwrap_or(0),
+                            ),
+                            sibling_per_group_cap: count(
+                                guardrail_sibling_per_group_cap.unwrap_or(0),
+                            ),
+                            sibling_total_cap: count(guardrail_sibling_total_cap.unwrap_or(0)),
                             max_component: count(guardrail_max_component.unwrap_or(0)),
                         }),
-                        folded_runs: count(row.get(25)?),
-                        subsumed_runs: count(row.get(26)?),
-                        split_components: count(row.get(27)?),
-                        pair_budget_exhausted: row.get(28)?,
-                        baseline_digest: row.get(29)?,
+                        folded_runs: count(row.get(28)?),
+                        subsumed_runs: count(row.get(29)?),
+                        split_components: count(row.get(30)?),
+                        pair_budget_exhausted: row.get(31)?,
+                        baseline_digest: row.get(32)?,
                         funnel: Vec::new(),
                         unused_suppressions: Vec::new(),
                     })

@@ -66,6 +66,15 @@ pub(super) fn structural_config(cfg: &Config) -> StructuralConfig {
         config.control_flow.pair_budget = budget;
     }
     config.grouping.max_component = cfg.limits.max_component;
+    if let Some(budget) = cfg.limits.sibling_candidate_budget {
+        config.siblings.candidate_budget = budget;
+    }
+    if let Some(cap) = cfg.limits.sibling_per_group_cap {
+        config.siblings.per_group_cap = cap;
+    }
+    if let Some(cap) = cfg.limits.sibling_total_cap {
+        config.siblings.total_cap = cap;
+    }
     config.literals = literal_norm(cfg.literal_normalization);
     config
 }

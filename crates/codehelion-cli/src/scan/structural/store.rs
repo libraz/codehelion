@@ -8,11 +8,19 @@ use super::{
     BTreeMap, CloneScope, CompilerHelperRow, CompilerOutcome, Config, ContentHash, Context,
     FeatureRow, FileRow, GroupDetail, GroupRow, MemberRow, PriorityRow, REGION_SIMILARITY,
     ReportInputs, Result, SemanticEvidenceRow, SemanticNodeMappingRow, SemanticOperationGraphRow,
-    SemanticUnitGraph, SimilarityBreakdownRow, Snapshot, StructuralGroup, SummaryRow, UnitRow,
-    WEIGHT_VERSION, aggregate_test_code_evidence, bail, engine, features, literal_norm,
-    local_unit_indices, open_store, region_identifier_jaccard, region_test_code_evidence, report,
-    semantic, semantic_member_ranks, semantic_scope, shared, stable_id, store_compiler,
+    SemanticUnitGraph, SiblingGroupRow, SiblingRow, SimilarityBreakdownRow, Snapshot,
+    StructuralGroup, SummaryRow, UnitRow, WEIGHT_VERSION, aggregate_test_code_evidence, bail,
+    engine, features, literal_norm, local_unit_indices, open_store, region_identifier_jaccard,
+    region_test_code_evidence, report, semantic, semantic_member_ranks, semantic_scope, shared,
+    stable_id, store_compiler,
 };
+
+type SnapshotRows = (
+    Vec<UnitRow>,
+    Vec<GroupRow>,
+    Vec<FeatureRow>,
+    BTreeMap<usize, usize>,
+);
 
 pub(super) fn record(
     cfg: &Config,
@@ -23,7 +31,7 @@ pub(super) fn record(
     asked: Option<&semantic::Answers>,
     completed: bool,
 ) -> Result<i64> {
-    let (units, groups, features) = snapshot_rows(inputs, ranked)?;
+    let (units, groups, features, host_index) = snapshot_rows(inputs, ranked)?;
     let mut store = open_store(inputs.db_path)?;
     let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
     let mut detector_versions = detector_versions(literal_norm(cfg.literal_normalization));
@@ -52,6 +60,7 @@ pub(super) fn record(
         files,
         units,
         groups,
+        sibling_groups: sibling_rows(inputs, &host_index)?,
         features,
         compiler_helpers,
         compiler_units,
@@ -62,6 +71,66 @@ pub(super) fn record(
     } else {
         store.record_snapshot_part(&snapshot).map_err(Into::into)
     }
+}
+
+/// Convert core sibling evidence to the store's dedicated, non-membership
+/// table rows. Group fingerprints keep the attachment stable across replay.
+fn sibling_rows(
+    inputs: &ReportInputs<'_>,
+    host_index: &BTreeMap<usize, usize>,
+) -> Result<Vec<SiblingGroupRow>> {
+    inputs
+        .analysis
+        .siblings
+        .iter()
+        .map(|siblings| {
+            let detail = inputs
+                .analysis
+                .details
+                .get(siblings.group)
+                .with_context(|| format!("missing detail for sibling group {}", siblings.group))?;
+            let siblings = siblings
+                .siblings
+                .iter()
+                .map(|sibling| {
+                    let unit = &inputs.analysis.units[sibling.unit];
+                    let snapshot_unit = host_index.get(&sibling.unit).with_context(|| {
+                        format!(
+                            "sibling source unit {} is missing from the snapshot",
+                            sibling.unit
+                        )
+                    })?;
+                    Ok(SiblingRow {
+                        unit: *snapshot_unit,
+                        content: unit.content,
+                        finding: stable_id::finding_id(
+                            &detail.fingerprint,
+                            Some(&unit.fingerprint),
+                            0,
+                        ),
+                        clone_type: sibling.clone_type,
+                        confidence: sibling.confidence,
+                        similarity: SimilarityBreakdownRow {
+                            weight_version: WEIGHT_VERSION.to_string(),
+                            lexical: sibling.breakdown.lexical,
+                            structural: sibling.breakdown.structural,
+                            control_flow: sibling.breakdown.control_flow,
+                            type_similarity: sibling.breakdown.type_similarity,
+                            api: sibling.breakdown.api,
+                            composite: sibling.breakdown.composite,
+                            min_pairwise: sibling.breakdown.composite,
+                            confidence_band: sibling.confidence,
+                        },
+                        boilerplate: unit.boilerplate,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(SiblingGroupRow {
+                group: detail.fingerprint,
+                siblings,
+            })
+        })
+        .collect()
 }
 
 /// What a compiler said about the tree, as the snapshot records it.
@@ -120,10 +189,7 @@ fn compiler_rows(
 /// member's host is the unit it *is*; a duplicated run's host is the unit it
 /// sits inside, which is a different unit for each occurrence and usually not
 /// a clone of the others.
-fn snapshot_rows(
-    inputs: &ReportInputs<'_>,
-    ranked: &[report::Group],
-) -> Result<(Vec<UnitRow>, Vec<GroupRow>, Vec<FeatureRow>)> {
+fn snapshot_rows(inputs: &ReportInputs<'_>, ranked: &[report::Group]) -> Result<SnapshotRows> {
     // The ranking is looked up by fingerprint rather than by position: the
     // report interleaves duplicated units, duplicated runs and the pairs no
     // group could hold into one order, and the store keeps them apart.
@@ -135,6 +201,14 @@ fn snapshot_rows(
     for group in &inputs.analysis.groups.groups {
         for &member in &group.members {
             host_index.entry(member).or_insert(0);
+        }
+    }
+    // Siblings are intentionally not primary members, but their source
+    // units must still be persisted so the dedicated sibling table can refer
+    // to a valid local snapshot row on replay.
+    for siblings in &inputs.analysis.siblings {
+        for sibling in &siblings.siblings {
+            host_index.entry(sibling.unit).or_insert(0);
         }
     }
     for &index in &inputs.regions.reported {
@@ -213,7 +287,7 @@ fn snapshot_rows(
             Ok(FeatureRow::from_unit(host_unit, unit_features))
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok((units, groups, features))
+    Ok((units, groups, features, host_index))
 }
 
 /// Store one restricted semantic pair with its normalized graphs and rule

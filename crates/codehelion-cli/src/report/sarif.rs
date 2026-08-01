@@ -53,8 +53,8 @@ use serde::Serialize;
 
 use super::{
     ArtifactSavings, BodyMateriality, BuildVariantInfo, CompilerCoverage, DetectorVersion, Group,
-    Member, Priority, RankingInfo, Report, SCOPE_FRAGMENT, Similarity, Summary, Suppression,
-    SuppressionKind,
+    GroupSiblings, Member, Priority, RankingInfo, Report, SCOPE_FRAGMENT, Sibling, Similarity,
+    Summary, Suppression, SuppressionKind,
 };
 
 /// SARIF version this reporter emits.
@@ -315,7 +315,11 @@ impl<'a> From<&'a Report> for Run<'a> {
                 end_time_utc: millisecond_timestamp(&run.finished_at),
                 tool_execution_notifications: notifications(report),
             }],
-            results: report.groups.iter().map(ResultEntry::from).collect(),
+            results: report
+                .groups
+                .iter()
+                .map(|group| ResultEntry::new(group, sibling_properties(group, &report.siblings)))
+                .collect(),
             properties: RunProperties {
                 report_schema_version: report.schema_version,
                 mode: &run.mode,
@@ -721,8 +725,8 @@ struct ResultEntry<'a> {
     properties: ResultProperties<'a>,
 }
 
-impl<'a> From<&'a Group> for ResultEntry<'a> {
-    fn from(group: &'a Group) -> Self {
+impl<'a> ResultEntry<'a> {
+    fn new(group: &'a Group, siblings: &'a [Sibling]) -> Self {
         let rule = RULES.iter().find(|spec| spec.class == group.clone_type);
         let canonical = group
             .members
@@ -778,6 +782,7 @@ impl<'a> From<&'a Group> for ResultEntry<'a> {
                 suppressed: group.suppressed.as_ref(),
                 semantic: group.semantic.as_ref(),
                 artifact_savings: &group.artifact_savings,
+                siblings,
             },
         }
     }
@@ -959,6 +964,15 @@ struct ResultProperties<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     semantic: Option<&'a super::SemanticEvidence>,
     artifact_savings: &'a [ArtifactSavings],
+    siblings: &'a [Sibling],
+}
+
+fn sibling_properties<'a>(group: &'a Group, siblings: &'a [GroupSiblings]) -> &'a [Sibling] {
+    siblings
+        .iter()
+        .find(|entry| entry.group_fingerprint == group.fingerprint)
+        .map(|entry| entry.siblings.as_slice())
+        .unwrap_or_default()
 }
 
 pub(crate) mod uri;

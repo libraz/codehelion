@@ -481,6 +481,10 @@ pub struct ScanArgs {
     /// hidden. JSON and SARIF always retain suppressed findings.
     #[arg(long)]
     pub show_suppressed: bool,
+    /// Also list incomplete local mirrors beneath their owning primary group.
+    /// JSON and SARIF always retain sibling data.
+    #[arg(long)]
+    pub show_siblings: bool,
     /// Order the report on this axis instead of the composed priority.
     #[arg(long, value_enum, default_value_t = SortAxis::Priority)]
     pub sort: SortAxis,
@@ -533,6 +537,10 @@ pub struct ScanArgs {
 }
 
 /// Arguments for the `report` subcommand.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the command-line flags map directly to independently composable report views"
+)]
 #[derive(Debug, clap::Args)]
 pub struct ReportArgs {
     /// Repository path whose configuration and local database to use.
@@ -559,6 +567,10 @@ pub struct ReportArgs {
     /// hidden. JSON and SARIF always retain suppressed findings.
     #[arg(long)]
     pub show_suppressed: bool,
+    /// Also list incomplete local mirrors beneath their owning primary group.
+    /// JSON and SARIF always retain sibling data.
+    #[arg(long)]
+    pub show_siblings: bool,
     /// Order the report on this axis instead of the composed priority.
     #[arg(long, value_enum, default_value_t = SortAxis::Priority)]
     pub sort: SortAxis,

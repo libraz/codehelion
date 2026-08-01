@@ -3,8 +3,8 @@ use super::{
     StructuralConfig, StructuralRegion, StructuralReport, StructuralStats, StructuralUnit,
     SyntaxIrFile, Unit, UnitEvidence, VerifyConfig, candidate, confirm_regions, control_flow,
     drop_subsumed, features, flatten_units, group_detail, grouping, grow_runs, lift_to_unit_pairs,
-    maximal, near_match, token_count_meets_minimum, unit_evidence, unit_meets_minimum,
-    unrepresented_pairs, verify, view,
+    maximal, near_match, sweep_siblings, token_count_meets_minimum, unit_evidence,
+    unit_meets_minimum, unrepresented_pairs, verify, view,
 };
 
 /// Run the structural pipeline over parsed IR files.
@@ -136,6 +136,18 @@ pub fn analyze_resolved(
 
     let (unrepresented, described_pairs, severed_pairs) =
         unrepresented_pairs(&edges, &groups, &units, files, variant);
+    // This is intentionally after primary grouping and unrepresented-pair
+    // carry-out. It only inspects ungrouped units and cannot add an edge or a
+    // member to `groups`.
+    let (siblings, sibling_stats) = sweep_siblings(
+        &groups,
+        &units,
+        files,
+        &feature_files,
+        &evidence,
+        &config.verify,
+        &config.siblings,
+    );
 
     let stats = StructuralStats {
         files: files.len(),
@@ -162,6 +174,7 @@ pub fn analyze_resolved(
         described_pairs,
         severed_pairs,
         grouping: groups.stats.clone(),
+        siblings: sibling_stats,
     };
 
     StructuralReport {
@@ -170,6 +183,7 @@ pub fn analyze_resolved(
         regions,
         details,
         unrepresented,
+        siblings,
         stats,
     }
 }

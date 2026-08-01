@@ -1,10 +1,10 @@
-use super::groups::write_group;
+use super::groups::{write_group, write_sibling_groups};
 use super::variant::{
     frontend_version_for, upsert_feature_fingerprint, upsert_fingerprint, upsert_variant,
 };
 use super::{
-    BTreeSet, FileRow, OptionalExtension, SHAPE_TAG_SLOTS, Snapshot, Store, StoreError, SummaryRow,
-    SuppressionRuleRow, Transaction, params,
+    BTreeMap, BTreeSet, FileRow, OptionalExtension, SHAPE_TAG_SLOTS, Snapshot, Store, StoreError,
+    SummaryRow, SuppressionRuleRow, Transaction, params,
 };
 
 impl Store {
@@ -170,8 +170,9 @@ fn write_snapshot(
     let suppression_row_ids = write_suppressions(tx, &snapshot.suppressions)?;
     // Units first: members and features reference them by index.
     let unit_row_ids = write_units(tx, snapshot, run_id, variant_id)?;
+    let mut group_row_ids = BTreeMap::new();
     for group in &snapshot.groups {
-        write_group(
+        let group_row_id = write_group(
             tx,
             snapshot,
             run_id,
@@ -180,7 +181,9 @@ fn write_snapshot(
             &unit_row_ids,
             &suppression_row_ids,
         )?;
+        group_row_ids.insert(*group.fingerprint.as_bytes(), group_row_id);
     }
+    write_sibling_groups(tx, &snapshot.sibling_groups, &unit_row_ids, &group_row_ids)?;
     write_features(tx, snapshot, run_id, variant_id, &unit_row_ids)?;
     write_files(tx, &snapshot.files, run_id)?;
     // The compiler IR names its own schema, and every distinct one a run holds
@@ -236,11 +239,13 @@ fn write_summary(
               excluded_timed_out, excluded_skipped, guardrail_profile,
               guardrail_max_file_bytes, guardrail_parse_timeout_ms,
               guardrail_helper_timeout_ms, guardrail_posting_cap,
-              guardrail_pair_budget, guardrail_max_component, folded_runs,
+              guardrail_pair_budget, guardrail_sibling_candidate_budget,
+              guardrail_sibling_per_group_cap, guardrail_sibling_total_cap,
+              guardrail_max_component, folded_runs,
               subsumed_runs, split_components, pair_budget_exhausted, baseline_digest)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
-                 ?27, ?28, ?29, ?30, ?31)",
+                 ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)",
         params![
             run_id,
             count(summary.analyzed_files.total),
@@ -282,6 +287,18 @@ fn write_summary(
                 .guardrails
                 .as_ref()
                 .map(|row| count(row.pair_budget)),
+            summary
+                .guardrails
+                .as_ref()
+                .map(|row| count(row.sibling_candidate_budget)),
+            summary
+                .guardrails
+                .as_ref()
+                .map(|row| count(row.sibling_per_group_cap)),
+            summary
+                .guardrails
+                .as_ref()
+                .map(|row| count(row.sibling_total_cap)),
             summary
                 .guardrails
                 .as_ref()

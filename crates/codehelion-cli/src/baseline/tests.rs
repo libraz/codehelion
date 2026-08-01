@@ -61,6 +61,7 @@ fn group(fingerprint: &str) -> StoredGroup {
         similarity: None,
         semantic: None,
         suppressed_by: None,
+        siblings: Vec::new(),
         members: vec![
             member("f1", "src/a.rs", true),
             member("f2", "src/b.rs", false),

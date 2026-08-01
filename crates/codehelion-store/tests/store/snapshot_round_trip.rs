@@ -46,6 +46,61 @@ fn a_snapshot_round_trips_through_queries() {
         Err(StoreError::MalformedId { .. })
     ));
 }
+
+#[test]
+fn a_sibling_round_trips_without_becoming_a_primary_member() {
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.units.push(UnitRow {
+        fingerprint: unit_fp(2),
+        language: Language::Rust,
+        kind: UnitKind::Function,
+        name: Some("incomplete_checksum".to_string()),
+        file_path: "src/c.rs".to_string(),
+        start_line: 30,
+        end_line: 36,
+        token_count: 31,
+    });
+    snapshot.sibling_groups.push(SiblingGroupRow {
+        group: group_fp(9),
+        siblings: vec![SiblingRow {
+            unit: 2,
+            content: frag_fp(2),
+            finding: finding(203),
+            clone_type: CloneClass::Type3,
+            confidence: Confidence::Low,
+            similarity: SimilarityBreakdownRow {
+                weight_version: "structural-verify-v1".to_string(),
+                lexical: 0.72,
+                structural: 0.91,
+                control_flow: Some(0.8),
+                type_similarity: None,
+                api: Some(0.7),
+                composite: 0.76,
+                min_pairwise: 0.76,
+                confidence_band: Confidence::Low,
+            },
+            boilerplate: None,
+        }],
+    });
+    let mut store = Store::open_in_memory().unwrap();
+    let run_id = store.record_snapshot(&snapshot).unwrap();
+
+    let groups = store.run_groups(run_id).unwrap();
+    assert_eq!(groups[0].members.len(), 2);
+    assert_eq!(groups[0].siblings.len(), 1);
+    let sibling = &groups[0].siblings[0];
+    assert_eq!(sibling.member.file_path, "src/c.rs");
+    assert_eq!(
+        sibling.member.unit_name.as_deref(),
+        Some("incomplete_checksum")
+    );
+    assert_eq!(sibling.member.finding_hex, finding(203).to_hex());
+    assert_eq!(sibling.clone_type, "type-3");
+    assert_eq!(sibling.confidence_band, "low");
+    assert!((sibling.composite - 0.76).abs() < f64::EPSILON);
+}
 /// What a run reported about itself has to come back the way it went in,
 /// stage order and drop order included: a report rebuilt from these rows is
 /// compared byte for byte against the one the scan printed.

@@ -272,6 +272,33 @@ pub struct StoredGroup {
     pub semantic: Option<StoredSemanticEvidence>,
     /// The group's occurrences.
     pub members: Vec<StoredMember>,
+    /// Supplemental incomplete local mirrors, never primary members.
+    pub siblings: Vec<StoredSibling>,
+}
+
+/// One sibling reconstructed from the dedicated group-sibling table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredSibling {
+    /// The verifier classification.
+    pub clone_type: String,
+    /// The verifier confidence band.
+    pub confidence_band: String,
+    /// Composite-weight recipe used by the comparison.
+    pub weight_version: String,
+    /// Per-dimension verifier evidence.
+    pub lexical: f64,
+    /// Per-dimension verifier evidence.
+    pub structural: f64,
+    /// Per-dimension verifier evidence.
+    pub control_flow: Option<f64>,
+    /// Per-dimension verifier evidence.
+    pub type_similarity: Option<f64>,
+    /// Per-dimension verifier evidence.
+    pub api: Option<f64>,
+    /// Composite verifier similarity.
+    pub composite: f64,
+    /// The ungrouped sibling occurrence.
+    pub member: StoredMember,
 }
 
 /// Decode the constrained evidence label stored with a clone group.

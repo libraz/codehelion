@@ -61,12 +61,14 @@ mod model;
 mod pairs;
 mod regions;
 mod reporting;
+mod siblings;
 mod units;
 
 use evidence::{UnitEvidence, token_count_meets_minimum, unit_evidence, unit_meets_minimum};
 use pairs::{lift_to_unit_pairs, unrepresented_pairs};
 use regions::{confirm_regions, drop_subsumed, grow_runs};
 use reporting::{dominant_boilerplate_members, group_detail, written_once_per_width_members};
+use siblings::sweep_siblings;
 use units::{flatten_units, line_range, view};
 
 #[cfg(test)]

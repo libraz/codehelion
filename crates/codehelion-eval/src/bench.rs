@@ -549,6 +549,7 @@ pub fn measure_store_insert(
         suppressions: Vec::new(),
         units: unit_rows,
         groups: group_rows,
+        sibling_groups: Vec::new(),
         features: Vec::new(),
         files: Vec::new(),
         compiler_helpers: Vec::new(),

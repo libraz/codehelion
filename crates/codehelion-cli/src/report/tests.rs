@@ -143,6 +143,39 @@ pub(super) fn sample_report() -> Report {
             compiler: None,
         },
         groups: vec![visible_group(), suppressed_group()],
+        siblings: Vec::new(),
+    }
+}
+
+/// One supplemental local mirror for the sample report's first primary group.
+pub(super) fn sample_siblings() -> GroupSiblings {
+    GroupSiblings {
+        group_fingerprint: "0b".repeat(16),
+        siblings: vec![Sibling {
+            clone_type: "type-3".to_string(),
+            confidence_band: "low".to_string(),
+            similarity: SiblingSimilarity {
+                weight_version: "structural-verify-v1".to_string(),
+                lexical: 0.72,
+                structural: 0.91,
+                control_flow: Some(0.8),
+                type_similarity: None,
+                api: Some(0.7),
+                composite: 0.76,
+            },
+            member: Member {
+                finding_id: "f0".repeat(16),
+                content: "f1".repeat(16),
+                file: "src/incomplete.rs".to_string(),
+                language: "rust".to_string(),
+                start_line: 30,
+                end_line: 36,
+                unit: Some("incomplete_checksum".to_string()),
+                boilerplate: None,
+                tokens: 31,
+                canonical: false,
+            },
+        }],
     }
 }
 
@@ -404,6 +437,47 @@ fn a_duplicated_run_states_its_extent_in_every_view() {
         "1 of them are runs duplicated inside units that are not clones of each other; \
          4 more were folded into the groups that already cover them and 2 into longer runs"
     ));
+}
+
+#[test]
+fn a_sibling_is_exported_but_text_hides_it_until_requested() {
+    let mut report = sample_report();
+    report.siblings = vec![sample_siblings()];
+
+    let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    assert_eq!(value["siblings"][0]["group_fingerprint"], "0b".repeat(16));
+    assert_eq!(
+        value["siblings"][0]["siblings"][0]["member"]["file"],
+        "src/incomplete.rs"
+    );
+    assert_eq!(
+        value["siblings"][0]["siblings"][0]["similarity"]["composite"],
+        0.76
+    );
+
+    let mut default_text = Vec::new();
+    report
+        .render_text(TextOptions::default(), &mut default_text)
+        .unwrap();
+    assert!(
+        !String::from_utf8(default_text)
+            .unwrap()
+            .contains("sibling type-3")
+    );
+
+    let mut shown_text = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                show_siblings: true,
+                ..TextOptions::default()
+            },
+            &mut shown_text,
+        )
+        .unwrap();
+    let shown_text = String::from_utf8(shown_text).unwrap();
+    assert!(shown_text.contains("sibling type-3 low (0.76): src/incomplete.rs:30"));
+    assert!(shown_text.contains("incomplete_checksum"));
 }
 
 #[test]

@@ -63,6 +63,9 @@ pub struct StructuralConfig {
     pub max_shape_divergence: f64,
     /// Medoid grouping.
     pub grouping: GroupingConfig,
+    /// Bounded post-grouping search for incomplete copies beside an established
+    /// group. This never changes primary group membership.
+    pub siblings: SiblingConfig,
 }
 
 impl Default for StructuralConfig {
@@ -78,6 +81,45 @@ impl Default for StructuralConfig {
             verification_budget: DEFAULT_VERIFICATION_BUDGET,
             max_shape_divergence: DEFAULT_MAX_SHAPE_DIVERGENCE,
             grouping: GroupingConfig::default(),
+            siblings: SiblingConfig::default(),
+        }
+    }
+}
+
+/// Tuning for the post-grouping sibling sweep.
+///
+/// A sibling is deliberately weaker than a group member: it is an ungrouped
+/// unit in a file that already hosts a cohesive group member, compared only
+/// to that group's canonical unit. The sweep finds incomplete local mirrors
+/// without inventing primary similarity edges or allowing a near-copy to pull
+/// a group apart or together.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SiblingConfig {
+    /// How far below the normal Type-3 threshold a sibling may land.
+    ///
+    /// The effective threshold is clamped to the normal threshold's
+    /// non-negative range, so an invalidly large delta cannot turn every
+    /// unrelated unit into a sibling.
+    pub similarity_delta: f64,
+    /// Maximum canonical-to-ungrouped comparisons in the sweep.
+    pub candidate_budget: usize,
+    /// Maximum siblings retained for one primary group.
+    pub per_group_cap: usize,
+    /// Maximum siblings retained over the whole structural report.
+    pub total_cap: usize,
+}
+
+impl Default for SiblingConfig {
+    fn default() -> Self {
+        Self {
+            // The normal Type-3 gate has a narrow measured 0.69/0.71 gap.
+            // Siblings are intentionally triage evidence, not primary clone
+            // membership, so they may recover a small omitted tail while
+            // still requiring substantial verifier agreement.
+            similarity_delta: 0.10,
+            candidate_budget: 50_000,
+            per_group_cap: 8,
+            total_cap: 1_000,
         }
     }
 }
@@ -364,6 +406,50 @@ pub struct StructuralStats {
     pub severed_pairs: usize,
     /// Grouping statistics.
     pub grouping: GroupingStats,
+    /// Post-grouping sibling-sweep accounting.
+    pub siblings: SiblingSweepStats,
+}
+
+/// Counters for the bounded post-grouping sibling sweep.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SiblingSweepStats {
+    /// Established primary groups considered for local siblings.
+    pub groups_considered: usize,
+    /// Canonical-to-ungrouped comparisons eligible under the file rule.
+    pub eligible_candidates: usize,
+    /// Candidates handed to the verifier.
+    pub candidates_examined: usize,
+    /// Siblings retained after the relaxed verifier threshold.
+    pub accepted: usize,
+    /// Candidates left unexamined because `candidate_budget` was reached.
+    pub candidate_budget_dropped: usize,
+    /// Candidates left unexamined after their group reached `per_group_cap`.
+    pub per_group_cap_dropped: usize,
+    /// Candidates left unexamined after the report reached `total_cap`.
+    pub total_cap_dropped: usize,
+}
+
+/// One incomplete local mirror attached to an established primary group.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructuralSibling {
+    /// The ungrouped unit. It is never added to `StructuralGroup::members`.
+    pub unit: usize,
+    /// The verifier's clone classification, or Type-3 for a relaxed-only hit.
+    pub clone_type: CloneClass,
+    /// The verifier confidence; relaxed-only hits remain low confidence.
+    pub confidence: verify::Confidence,
+    /// The canonical-to-sibling similarity breakdown.
+    pub breakdown: SimilarityBreakdown,
+}
+
+/// Siblings of one primary group, addressed by its index in
+/// [`StructuralReport::groups`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupSiblings {
+    /// Index of the owning primary group.
+    pub group: usize,
+    /// Siblings in deterministic unit-fingerprint order.
+    pub siblings: Vec<StructuralSibling>,
 }
 
 /// The structural run's output: cohesive groups over [`Self::units`], plus the
@@ -384,6 +470,9 @@ pub struct StructuralReport {
     /// Verified clone pairs no group holds both halves of, strongest first.
     /// Real copies that a partition into groups cannot express.
     pub unrepresented: Vec<VerifiedPair>,
+    /// Incomplete local mirrors attached to primary groups without changing
+    /// the primary grouping relation.
+    pub siblings: Vec<GroupSiblings>,
     /// Funnel statistics.
     pub stats: StructuralStats,
 }

@@ -408,6 +408,10 @@ pub(crate) fn guardrails_row(guardrails: &report::Guardrails) -> GuardrailsRow {
         helper_timeout_ms: guardrails.helper_timeout_ms,
         posting_cap: u64::try_from(guardrails.posting_cap).unwrap_or(u64::MAX),
         pair_budget: u64::try_from(guardrails.pair_budget).unwrap_or(u64::MAX),
+        sibling_candidate_budget: u64::try_from(guardrails.sibling_candidate_budget)
+            .unwrap_or(u64::MAX),
+        sibling_per_group_cap: u64::try_from(guardrails.sibling_per_group_cap).unwrap_or(u64::MAX),
+        sibling_total_cap: u64::try_from(guardrails.sibling_total_cap).unwrap_or(u64::MAX),
         max_component: u64::try_from(guardrails.max_component).unwrap_or(u64::MAX),
     }
 }

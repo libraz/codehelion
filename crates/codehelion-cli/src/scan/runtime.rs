@@ -280,8 +280,8 @@ fn lex_one(source: &SourceUnit, budget: std::time::Duration) -> FileOutcome<Lexe
 /// Resolve the audit-database path with the authority that selected it.
 ///
 /// `--db` is an explicit user instruction and may name storage outside the
-/// scan. A database setting discovered while searching the repository is not:
-/// it is confined to the repository boundary, including its existing symlink
+/// scan. A database setting from a configuration found at the scan root is
+/// not: it is confined to the repository boundary, including its existing symlink
 /// components. `--untrusted` applies that confinement to any configured path,
 /// even one from an explicitly named configuration file.
 ///
@@ -299,11 +299,8 @@ pub(crate) fn database_path(
         return Ok(path.to_path_buf());
     }
     let boundary = repository_root(root);
-    let discovered_in_tree = matches!(
-        &config.source,
-        ConfigSource::Discovered(path) if path.starts_with(&boundary)
-    );
-    if untrusted || discovered_in_tree {
+    let discovered = matches!(&config.source, ConfigSource::Discovered(_));
+    if untrusted || discovered {
         return confined_database_path(
             &boundary,
             &config.config.database,

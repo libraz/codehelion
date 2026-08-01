@@ -352,6 +352,9 @@ impl Report {
             )?;
             for group in visible.iter().take(limit) {
                 render_group(group, opts, palette, out)?;
+                if opts.show_siblings {
+                    self.render_siblings(group, out)?;
+                }
             }
             if visible.len() > limit {
                 writeln!(out, "  ... and {} more groups", visible.len() - limit)?;
@@ -388,6 +391,9 @@ impl Report {
                 };
                 for group in suppressed.iter().take(limit) {
                     render_group(group, opts, palette, out)?;
+                    if opts.show_siblings {
+                        self.render_siblings(group, out)?;
+                    }
                 }
                 if suppressed.len() > limit {
                     writeln!(
@@ -397,6 +403,36 @@ impl Report {
                     )?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Render local incomplete mirrors only when the text caller requested
+    /// them. JSON and SARIF retain the data unconditionally.
+    fn render_siblings(&self, group: &Group, out: &mut impl Write) -> io::Result<()> {
+        let Some(siblings) = self
+            .siblings
+            .iter()
+            .find(|siblings| siblings.group_fingerprint == group.fingerprint)
+        else {
+            return Ok(());
+        };
+        for sibling in &siblings.siblings {
+            let member = &sibling.member;
+            writeln!(
+                out,
+                "    sibling {} {} ({:.2}): {}:{}{}",
+                sibling.clone_type,
+                sibling.confidence_band,
+                sibling.similarity.composite,
+                member.file,
+                member.start_line,
+                member
+                    .unit
+                    .as_deref()
+                    .map(|unit| format!(" ({unit})"))
+                    .unwrap_or_default(),
+            )?;
         }
         Ok(())
     }
