@@ -1923,6 +1923,57 @@ pub struct CrossLanguageGroupDetail {
     pub members: Vec<CrossLanguageGroupMemberDetail>,
 }
 
+/// One clone group looked up on its own.
+///
+/// The group itself is the same [`Group`] a report carries, rendered by the
+/// same code: a lookup that described a finding differently from the report it
+/// came out of would be a second account of the same facts.
+#[derive(Debug, Serialize)]
+pub struct CloneGroupDetail {
+    /// Version of this detail document.
+    pub schema_version: &'static str,
+    /// Local database the group was read from.
+    pub database: String,
+    /// The group, with its members and the inputs its ranking read.
+    pub group: Group,
+}
+
+impl CloneGroupDetail {
+    /// Version this detail document is emitted under.
+    pub const SCHEMA_VERSION: &'static str = "clone-group-explain-v1";
+
+    /// The detail as pretty-printed JSON, newline-terminated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when serialization fails.
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        let mut text = serde_json::to_string_pretty(self)?;
+        text.push('\n');
+        Ok(text)
+    }
+
+    /// Render the group the way a report lists it, with every member.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error from the writer.
+    pub fn render_text(&self, out: &mut impl Write) -> io::Result<()> {
+        writeln!(out, "clone group {}", self.group.fingerprint)?;
+        writeln!(out, "  database: {}", self.database)?;
+        render_group(
+            &self.group,
+            TextOptions {
+                verbose: true,
+                show_suppressed: true,
+                color: false,
+            },
+            &Palette { enabled: false },
+            out,
+        )
+    }
+}
+
 /// One origin-aware member of a cross-language explain result.
 #[derive(Debug, Serialize)]
 pub struct CrossLanguageGroupMemberDetail {

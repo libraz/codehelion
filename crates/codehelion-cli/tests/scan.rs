@@ -982,13 +982,82 @@ fn explain_looks_up_a_recorded_finding() {
     assert_eq!(value["group"]["fingerprint"].as_str().unwrap().len(), 32);
     assert!(value["scan_run"].as_i64().unwrap() >= 1);
 
-    // Well-formed but unknown id: a clear error, not silence.
+    // Well-formed but unknown id: a clear error naming everything it looked
+    // for, not silence and not a claim about one kind of id.
     cmd()
         .current_dir(dir.path())
         .args(["explain", "00000000000000000000000000000000"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no occurrence"));
+        .stderr(predicate::str::contains(
+            "no finding, clone group or cross-language comparison group",
+        ));
+}
+
+#[test]
+fn explain_takes_the_group_id_the_report_printed_and_an_abbreviation_of_it() {
+    let dir = fixture();
+    let root = dir.path();
+    let report = scan_json(root);
+    let group = visible_ids(&report)
+        .into_iter()
+        .next()
+        .expect("the fixture duplicates on purpose");
+
+    // The heading of a group in the report is a group fingerprint. Being
+    // unable to paste it back in is the trail these ids exist to keep,
+    // broken.
+    cmd()
+        .current_dir(root)
+        .args(["explain", &group])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("clone group {group}")))
+        .stdout(predicate::str::contains("maintenance risk"));
+
+    // An abbreviation resolves wherever it names one thing, as it already
+    // does for [suppression] clone-ids.
+    let output = cmd()
+        .current_dir(root)
+        .args(["explain", &group[..12], "--format", "json"])
+        .output()
+        .expect("run explain");
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+    assert_eq!(value["schema_version"], "clone-group-explain-v1");
+    assert_eq!(value["group"]["fingerprint"], group.as_str());
+    assert!(value["group"]["priority"]["inputs"]["instances"].as_u64() >= Some(2));
+    assert!(value["group"]["members"].as_array().expect("members").len() >= 2);
+}
+
+#[test]
+fn text_that_is_not_a_usable_id_is_refused_with_the_reason() {
+    let dir = fixture();
+    let root = dir.path();
+    scan_json(root);
+
+    cmd()
+        .current_dir(root)
+        .args(["explain", "0a1b"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("too short"));
+
+    cmd()
+        .current_dir(root)
+        .args(["explain", "not-hex-at-all"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("hexadecimal"));
+
+    // Every recorded id starts with the empty string, so an empty prefix is
+    // the one that always collides; it is refused for length first.
+    cmd()
+        .current_dir(root)
+        .args(["explain", ""])
+        .assert()
+        .failure();
 }
 
 #[test]

@@ -156,6 +156,47 @@ pub struct StoredMember {
     pub is_canonical: bool,
 }
 
+/// One clone group looked up on its own, with the run that recorded it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredGroupDetail {
+    /// Run the group was read from.
+    pub run_id: i64,
+    /// The group itself.
+    pub group: StoredGroup,
+}
+
+/// A kind of recorded identifier a lookup can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdKind {
+    /// One occurrence of a clone group.
+    Occurrence,
+    /// A clone group, as its report heading names it.
+    CloneGroup,
+    /// A group from an explicit cross-language comparison.
+    CrossLanguageGroup,
+}
+
+impl IdKind {
+    /// What this kind is called when a message has to name it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Occurrence => "finding",
+            Self::CloneGroup => "clone group",
+            Self::CrossLanguageGroup => "cross-language comparison group",
+        }
+    }
+}
+
+/// One recorded identifier matching a lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdMatch {
+    /// What the id identifies.
+    pub kind: IdKind,
+    /// The full hex id.
+    pub id: String,
+}
+
 /// One stored clone group with its members.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredGroup {
@@ -1961,6 +2002,83 @@ impl Store {
             groups.push(group);
         }
         Ok(groups)
+    }
+
+    /// One clone group by the hex form of its fingerprint, from the most
+    /// recent run that recorded it, with the run it came from.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn group(&self, fingerprint_hex: &str) -> Result<Option<StoredGroupDetail>, StoreError> {
+        let run_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT g.scan_run_id
+                 FROM clone_group g
+                 JOIN fingerprint f ON f.id = g.group_fingerprint_id
+                 WHERE lower(hex(f.hash)) = ?1
+                 ORDER BY g.scan_run_id DESC
+                 LIMIT 1",
+                params![fingerprint_hex],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(run_id) = run_id else {
+            return Ok(None);
+        };
+        // Read through the run's groups rather than assembling one here: a
+        // group's members, similarity and evidence are gathered in one place,
+        // and a second gatherer is a second answer waiting to disagree.
+        Ok(self
+            .run_groups(run_id)?
+            .into_iter()
+            .find(|group| group.fingerprint_hex == fingerprint_hex)
+            .map(|group| StoredGroupDetail { run_id, group }))
+    }
+
+    /// Every recorded id starting with `prefix`, across the kinds a lookup can
+    /// name.
+    ///
+    /// Returned in full rather than capped: an abbreviated id is only accepted
+    /// above a length that makes a collision unlikely, and a caller reporting
+    /// an ambiguity has to be able to list all of it.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn ids_starting_with(&self, prefix: &str) -> Result<Vec<IdMatch>, StoreError> {
+        let prefix = prefix.to_ascii_lowercase();
+        let pattern = format!("{prefix}%");
+        let mut matches = Vec::new();
+        let mut collect = |sql: &str, kind: IdKind| -> Result<(), StoreError> {
+            let mut stmt = self.conn.prepare(sql)?;
+            let ids: Vec<String> = stmt
+                .query_map(params![pattern], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            matches.extend(ids.into_iter().map(|id| IdMatch { kind, id }));
+            Ok(())
+        };
+        collect(
+            "SELECT DISTINCT lower(hex(m.finding_id)) AS hex_id
+             FROM clone_group_member m
+             WHERE hex_id LIKE ?1 ORDER BY hex_id",
+            IdKind::Occurrence,
+        )?;
+        collect(
+            "SELECT DISTINCT lower(hex(f.hash)) AS hex_id
+             FROM clone_group g
+             JOIN fingerprint f ON f.id = g.group_fingerprint_id
+             WHERE hex_id LIKE ?1 ORDER BY hex_id",
+            IdKind::CloneGroup,
+        )?;
+        collect(
+            "SELECT DISTINCT lower(hex(group_id)) AS hex_id
+             FROM cross_language_semantic_group
+             WHERE hex_id LIKE ?1 ORDER BY hex_id",
+            IdKind::CrossLanguageGroup,
+        )?;
+        Ok(matches)
     }
 
     /// The priority a recorded run assigned one clone group.

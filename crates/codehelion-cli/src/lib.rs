@@ -33,12 +33,16 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use codehelion_core::doctor;
 use codehelion_store::Store;
+use codehelion_store::query::{IdKind, IdMatch};
 
 use crate::cli::{
     ArtifactAction, BaselineAction, CacheAction, Cli, Command, ConfigAction, DetailFormat,
     ExplainArgs, Mode, ReportArgs, ScanArgs,
 };
 use crate::config::ConfigSource;
+
+/// Digits in a full stable id.
+const FULL_ID_CHARS: usize = 32;
 
 /// Exit code returned when a scan reports findings and gating is requested.
 pub const EXIT_FINDINGS: u8 = 3;
@@ -515,16 +519,14 @@ fn recorded_ranking(detectors: &[(String, String)]) -> Result<report::RankingInf
     })
 }
 
-/// Look up one ordinary finding or explicit cross-language comparison group
-/// by its stable id and print its detail.
+/// Look up one recorded id and print what it identifies.
 ///
-/// Ordinary findings render [`report::FindingDetail`]. Comparison-domain
-/// groups render [`report::CrossLanguageGroupDetail`] and remain outside normal
-/// scan snapshots, baselines, and savings.
-#[allow(
-    clippy::too_many_lines,
-    reason = "the lookup and both reporter forms share one complete finding detail"
-)]
+/// An id names one of three things: an occurrence of a clone group, a clone
+/// group itself, or a group from an explicit cross-language comparison. The
+/// kind is decided by looking the id up rather than by its shape, and an
+/// abbreviation is accepted wherever it names exactly one of them — the
+/// report prints group ids in full, and retyping thirty-two hex digits to ask
+/// about what is on the screen is a break in the trail the ids exist to keep.
 fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
     let path = resolve_db(args.db.as_deref())?;
     if !path.is_file() {
@@ -534,48 +536,149 @@ fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
         );
     }
     let store = Store::open(&path)?;
-    let occurrence = store.occurrence(&args.finding_id)?;
-    let Some(occurrence) = occurrence else {
-        let Some(group) = store.cross_language_group(&args.finding_id)? else {
+    let found = resolve_id(&store, &args.finding_id, &path)?;
+    match found.kind {
+        IdKind::Occurrence => explain_occurrence(&store, &found.id, args, out),
+        IdKind::CloneGroup => explain_clone_group(&store, &found.id, &path, args, out),
+        IdKind::CrossLanguageGroup => explain_cross_language_group(&store, &found.id, args, out),
+    }
+}
+
+/// Turn what the caller typed into the one recorded id it names.
+///
+/// # Errors
+///
+/// Fails when the text is not an id at all, when nothing recorded starts with
+/// it, and when more than one thing does — the last listing the candidates,
+/// because the answer is to type more of one of them.
+fn resolve_id(store: &Store, typed: &str, path: &Path) -> Result<IdMatch> {
+    let prefix = typed.to_ascii_lowercase();
+    if !prefix.chars().all(|c| c.is_ascii_hexdigit()) || prefix.len() > FULL_ID_CHARS {
+        bail!("{typed} is not an id: ids are up to {FULL_ID_CHARS} hexadecimal digits");
+    }
+    if prefix.len() < suppress::MIN_CLONE_ID_CHARS {
+        bail!(
+            "{typed} is too short to identify one thing; give at least {} of the {FULL_ID_CHARS} digits",
+            suppress::MIN_CLONE_ID_CHARS
+        );
+    }
+    the_one(typed, store.ids_starting_with(&prefix)?, path)
+}
+
+/// The single id `matches` names, or why it does not name one.
+///
+/// Separated from the lookup so that both unwelcome answers can be tested:
+/// forcing two recorded ids to share eight hex digits is not something a
+/// fixture can arrange.
+fn the_one(typed: &str, mut matches: Vec<IdMatch>, path: &Path) -> Result<IdMatch> {
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => bail!(
+            "no finding, clone group or cross-language comparison group with id {typed} in {}",
+            path.display()
+        ),
+        _ => {
+            let listed: Vec<String> = matches
+                .iter()
+                .map(|found| format!("{} {}", found.kind.label(), found.id))
+                .collect();
             bail!(
-                "no occurrence or cross-language comparison group with id {} in {}",
-                args.finding_id,
-                path.display()
-            );
-        };
-        let detail = report::CrossLanguageGroupDetail {
-            schema_version: "cross-language-explain-v1",
-            group_id: group.group_id_hex,
-            comparison_id: group.comparison_id_hex,
-            policy_version: group.policy_version,
-            root_path: group.root_path,
-            origin_variants: group.origin_variants,
-            rule_id: group.rule_id,
-            rule_version: group.rule_version,
-            semantic_confidence: group.semantic_confidence,
-            correspondence_ids: group.correspondence_ids,
-            members: group
-                .members
-                .into_iter()
-                .map(|member| report::CrossLanguageGroupMemberDetail {
-                    origin_variant: member.origin_variant,
-                    language: member.language,
-                    file: member.file_path,
-                    start_line: member.start_line,
-                    end_line: member.end_line,
-                    unit: member.unit_name,
-                    graph: member.graph,
-                })
-                .collect(),
-        };
-        match args.format {
-            DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
-            DetailFormat::Text => detail.render_text(out)?,
+                "{typed} names {} things; give more of one of them: {}",
+                matches.len(),
+                listed.join(", ")
+            )
         }
-        return Ok(Outcome::Success);
+    }
+}
+
+/// Print one clone group as the report lists it, with every member.
+fn explain_clone_group(
+    store: &Store,
+    fingerprint: &str,
+    path: &Path,
+    args: &ExplainArgs,
+    out: &mut impl Write,
+) -> Result<Outcome> {
+    let Some(found) = store.group(fingerprint)? else {
+        bail!("no clone group with id {fingerprint} in {}", path.display());
     };
+    let priority = store
+        .run_group_priority(found.run_id, fingerprint)?
+        .with_context(|| format!("clone group {fingerprint} was recorded without a ranking"))?;
+    let detail = report::CloneGroupDetail {
+        schema_version: report::CloneGroupDetail::SCHEMA_VERSION,
+        database: path.display().to_string(),
+        group: recorded_group(found.group, &priority)?,
+    };
+    match args.format {
+        DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
+        DetailFormat::Text => detail.render_text(out)?,
+    }
+    Ok(Outcome::Success)
+}
+
+/// Print one group from an explicit cross-language comparison.
+///
+/// Comparison-domain groups stay outside normal scan snapshots, baselines and
+/// savings, so they render their own detail rather than a report group.
+fn explain_cross_language_group(
+    store: &Store,
+    group_id: &str,
+    args: &ExplainArgs,
+    out: &mut impl Write,
+) -> Result<Outcome> {
+    let group = store
+        .cross_language_group(group_id)?
+        .with_context(|| format!("cross-language comparison group {group_id} went missing"))?;
+    let detail = report::CrossLanguageGroupDetail {
+        schema_version: "cross-language-explain-v1",
+        group_id: group.group_id_hex,
+        comparison_id: group.comparison_id_hex,
+        policy_version: group.policy_version,
+        root_path: group.root_path,
+        origin_variants: group.origin_variants,
+        rule_id: group.rule_id,
+        rule_version: group.rule_version,
+        semantic_confidence: group.semantic_confidence,
+        correspondence_ids: group.correspondence_ids,
+        members: group
+            .members
+            .into_iter()
+            .map(|member| report::CrossLanguageGroupMemberDetail {
+                origin_variant: member.origin_variant,
+                language: member.language,
+                file: member.file_path,
+                start_line: member.start_line,
+                end_line: member.end_line,
+                unit: member.unit_name,
+                graph: member.graph,
+            })
+            .collect(),
+    };
+    match args.format {
+        DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
+        DetailFormat::Text => detail.render_text(out)?,
+    }
+    Ok(Outcome::Success)
+}
+
+/// Print one occurrence of a clone group, with what the run recorded about the
+/// group it belongs to.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one occurrence's complete detail, assembled in one place"
+)]
+fn explain_occurrence(
+    store: &Store,
+    finding_id: &str,
+    args: &ExplainArgs,
+    out: &mut impl Write,
+) -> Result<Outcome> {
+    let occurrence = store
+        .occurrence(finding_id)?
+        .with_context(|| format!("occurrence {finding_id} went missing"))?;
     let source_artifact_mappings = store
-        .artifact_fragment_mappings(&args.finding_id)?
+        .artifact_fragment_mappings(finding_id)?
         .into_iter()
         .map(|mapping| report::SourceArtifactMappingDetail {
             artifact_analysis_id: mapping.analysis_id,
@@ -1043,6 +1146,43 @@ mod tests {
         };
         let error = scan_command(&args, &mut Vec::new()).expect_err("mode must be semantic");
         assert!(format!("{error:#}").contains("--compare-languages requires --mode semantic"));
+    }
+
+    #[test]
+    fn an_id_naming_more_than_one_thing_lists_them_rather_than_picking() {
+        let path = Path::new(".codehelion/audit.db");
+        let candidates = vec![
+            IdMatch {
+                kind: IdKind::Occurrence,
+                id: "aa11bb22cc33".to_string(),
+            },
+            IdMatch {
+                kind: IdKind::CloneGroup,
+                id: "aa11bb22dd44".to_string(),
+            },
+        ];
+
+        let error = the_one("aa11bb22", candidates, path).expect_err("two things, not one");
+        let text = format!("{error:#}");
+        // Picking one would be a guess, and a guess about which finding
+        // somebody is reading is worse than a question.
+        assert!(text.contains("names 2 things"), "{text}");
+        assert!(text.contains("finding aa11bb22cc33"), "{text}");
+        assert!(text.contains("clone group aa11bb22dd44"), "{text}");
+
+        let found = the_one(
+            "aa11bb22cc33",
+            vec![IdMatch {
+                kind: IdKind::Occurrence,
+                id: "aa11bb22cc33".to_string(),
+            }],
+            path,
+        )
+        .expect("one thing");
+        assert_eq!(found.kind, IdKind::Occurrence);
+
+        let error = the_one("aa11bb22", Vec::new(), path).expect_err("nothing recorded");
+        assert!(format!("{error:#}").contains("no finding, clone group or"));
     }
 
     #[test]

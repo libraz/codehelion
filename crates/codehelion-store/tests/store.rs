@@ -21,7 +21,7 @@ use codehelion_core::stable_id::{
     FragmentFingerprint, UnitFingerprint,
 };
 use codehelion_core::verify::Confidence;
-use codehelion_store::query::StoredVariant;
+use codehelion_store::query::{IdKind, StoredVariant};
 use codehelion_store::snapshot::{
     CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow, CrossLanguageSemanticMemberRow,
     FeatureRow, FileRow, FunnelDropRow, FunnelStageRow, GroupRow, MemberRow, PriorityRow,
@@ -385,6 +385,45 @@ fn a_database_recorded_under_another_layout_is_rejected() {
         Store::open(&path),
         Err(StoreError::UnsupportedSchema { found: 99 })
     ));
+}
+
+#[test]
+fn a_group_can_be_read_by_its_fingerprint_and_found_by_an_abbreviation() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let run = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+
+    let expected = &store.run_groups(run).unwrap()[0];
+    let fingerprint = expected.fingerprint_hex.clone();
+    let members = expected.members.len();
+    let finding = expected.members[0].finding_hex.clone();
+
+    // The same group the run lists, read on its own: what a report prints as
+    // a heading has to be usable to ask about that heading.
+    let found = store
+        .group(&fingerprint)
+        .unwrap()
+        .expect("the group the run recorded");
+    assert_eq!(found.run_id, run);
+    assert_eq!(found.group.members.len(), members);
+
+    assert!(store.group(&"f".repeat(32)).unwrap().is_none());
+
+    // Both id kinds answer to an abbreviation, and each says which it is.
+    let group_matches = store.ids_starting_with(&fingerprint[..12]).unwrap();
+    assert_eq!(group_matches.len(), 1);
+    assert_eq!(group_matches[0].kind, IdKind::CloneGroup);
+    assert_eq!(group_matches[0].id, fingerprint);
+
+    let finding_matches = store.ids_starting_with(&finding[..12]).unwrap();
+    assert_eq!(finding_matches.len(), 1);
+    assert_eq!(finding_matches[0].kind, IdKind::Occurrence);
+    assert_eq!(finding_matches[0].id, finding);
+
+    assert!(store.ids_starting_with("ffffffffffff").unwrap().is_empty());
 }
 
 #[test]
