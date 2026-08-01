@@ -1,7 +1,7 @@
 # codehelion
 
 [![CI](https://github.com/libraz/codehelion/actions/workflows/ci.yml/badge.svg)](https://github.com/libraz/codehelion/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/codehelion.svg)](https://crates.io/crates/codehelion)
+[![crates.io](https://img.shields.io/crates/v/codehelion-cli.svg)](https://crates.io/crates/codehelion-cli)
 [![codecov](https://codecov.io/gh/libraz/codehelion/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/codehelion)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
@@ -49,10 +49,16 @@ load or execute the inspected artifact.
   read supported binary formats without running them. Debug companions are
   accepted only after the matching ELF build ID, Mach-O UUID or PE CodeView/PDB
   identity has been verified.
+
+`artifact analyze --debug-file companion` can inspect a native debug companion
+without a source scan. Add `--source-run` and `--build-variant` only when
+requesting source-artifact correlation.
 - **Separated priority measures** — findings are ordered by clone confidence,
   maintenance risk and refactoring difficulty reported side by side, never by
   one opaque score, and every measure shows the inputs it was derived from.
-- **Deterministic output** — the same input produces byte-identical reports.
+- **Deterministic findings** — the same input produces the same finding IDs and
+  group order. Run metadata such as timestamps and local paths deliberately
+  describes the individual invocation.
 - **Visible limits** — every resource ceiling that fires (file size, parse
   timeout, candidate budget) is counted in the report, never silently applied.
   On a tree large enough for the candidate budget to stop the search, the
@@ -71,6 +77,10 @@ cargo install --path crates/codehelion-cli
 ```
 
 The result is a single self-contained binary; SQLite is bundled.
+
+The CLI and every non-semantic component require Rust 1.85 or newer. The
+optional Rust semantic helper has a separate Rust 1.95-or-newer build
+requirement; its higher toolchain need does not change the CLI's MSRV.
 
 Semantic scanning additionally needs the helper for each language you want to
 analyse. Install the helpers onto `PATH`, then use `doctor` to confirm their
@@ -92,14 +102,41 @@ codehelion scan --format json --output report.json path/to/repo
 codehelion scan --format sarif --output report.sarif   # SARIF 2.1.0 log
 codehelion scan --verbose     # list every clone group and member
 codehelion scan --untrusted   # read a tree nobody vouches for under lowered ceilings
+codehelion report --run 1     # render a recorded scan again
 codehelion explain <ID>       # show a finding from the local database
-codehelion baseline           # manage accepted-findings baselines
+codehelion explain <ID> --format json
+codehelion baseline create    # freeze the latest findings as a baseline
 codehelion cache status       # local-database location and size
+codehelion cache clear --force # permanently delete the local audit database
 codehelion config init        # write a commented codehelion.toml template
+codehelion config show        # print the effective configuration
 codehelion doctor             # report available analysis components
 codehelion artifact analyze path/to/binary
+codehelion artifact report --analysis 1
 codehelion artifact compare before/binary after/binary
+codehelion artifact calibration --source-run 1
 ```
+
+When an artifact command receives `--build-variant manifest.json`, its identity
+uses the canonical JSON value: whitespace and object-member ordering do not
+change the build variant.
+
+The main scan controls are:
+
+- `--config <file>` and `--db <path>` choose the configuration and local database.
+- `--jobs <n>` sets frontend read-and-lex workers (capped at four times host parallelism); clone grouping and report rendering remain serial. `--no-ignore` also reads ignored files.
+- `--baseline <file>` compares with accepted findings; `--show-suppressed` includes hidden findings in text output.
+- `--include-trivial` restores predicate families to their measured priority in Structural and Semantic mode.
+- `--fail-on-findings` returns exit code 3 when visible findings remain.
+- `--compare-build-variants` and `--compare-languages` request separate Semantic comparisons; they never merge ordinary scan partitions.
+- `cache clear --force` permanently removes the local audit database; it always requires the explicit confirmation flag.
+
+### Exit status
+
+- `0`: command completed successfully.
+- `1`: an operational error prevented completion.
+- `2`: command-line usage was invalid.
+- `3`: `scan --fail-on-findings` found one or more visible findings.
 
 Artifact inspection parses local bytes and never executes the inspected
 program. It rejects inputs above 512 MiB by default, runs parsing in a worker
@@ -107,9 +144,14 @@ with a 30-second deadline, and accepts `--max-bytes` and `--timeout-seconds`
 when a deliberate adjustment is needed. On Linux,
 `--max-memory-bytes <bytes>` also enforces a worker virtual-memory ceiling;
 other platforms reject that option rather than silently ignoring it.
+The versioned IR retained for `artifact report` is separately capped at 64 MiB;
+an analysis whose persisted details exceed that limit fails without writing a
+partial database record.
 
 Findings are grouped into clone groups; each group and member carries a stable
-ID you can suppress, baseline or look up later with `explain`.
+ID you can suppress, baseline or look up later with `explain`. The default
+text report prints each listed member as `[finding <ID>]`, so the identifier is
+ready to paste into `codehelion explain <ID>`.
 
 Reports come out ordered by the composed priority, which weighs several
 measures against one another. When the job in front of you is one of those
@@ -166,6 +208,7 @@ the current scan rather than carrying it across.
 # min-clone-tokens = 20             # smallest clone reported, in tokens
 # literal-normalization = "full"    # "preserve", "category" or "full"
 # database = ".codehelion/audit.db" # local-database location
+# jobs = 4                           # frontend read-and-lex workers (capped at 4× host parallelism); grouping/reporting stay serial
 
 [languages]
 # headers = "detect"                # grammar for a bare ".h": "detect", "c", "cpp"
@@ -180,10 +223,14 @@ the current scan rather than carrying it across.
                                     # writes, hidden by default; set to [] to
                                     # read them, or pass --include-vendored
 # symbols = []                      # globs over the name of the enclosing unit
-# clone-ids = []                    # stable clone ids (hex, prefix allowed)
-# generated-markers = ["@generated", "do not edit", "automatically generated"]
+# clone-ids = []                    # stable clone ids (hex; prefixes need at least 8 characters)
+# generated-markers = ["@generated", "do not edit", "automatically generated", "auto-generated", "autogenerated"]
                                     # banners flagging machine output, matched
                                     # without regard to case; replaces defaults
+# split-pairs = "rank-down"        # verified pairs that no complete clone group
+                                    # can hold; reported below complete groups
+# width-family = "hide"            # one routine per integer width; set to
+                                    # "report" where it can be unified
 
 [limits]                            # resource ceilings, all reported when hit
 # max-file-bytes = 2097152
@@ -193,6 +240,17 @@ the current scan rather than carrying it across.
 # pair-budget = 1000000             # per pairing pass, not shared between them
 # max-component = 1024
 ```
+
+split-pairs controls verified pairs that cannot belong to the same complete
+clone group; they remain visible by default, below complete groups. width-family
+controls routines that differ only by integer width and is hidden by default.
+Set it to "report" when a macro, generic, or template could express the family
+once. Structural and Semantic scans apply these classifications; Fast scans say
+explicitly when they are unavailable.
+
+Each scan creates its persistent local audit database at
+`.codehelion/audit.db` under the scan root by default. Add `.codehelion/` to
+the repository's `.gitignore`; this database is not an expendable build cache.
 
 `.h` is the one extension C and C++ share, and the grammar it is read with
 decides what the analysis can see inside it: a C++ header read as C recovers
@@ -220,24 +278,41 @@ make hooks         # install the pre-commit git hook
 ```
 
 Guardrails: `rustfmt` with a pinned config; `clippy` `pedantic` + `nursery`
-with warnings as errors and `unsafe` forbidden; `cargo-deny` bans network and
-process-spawning crates to enforce the fully-local design; tests are written
-alongside the code they cover and a pre-commit hook runs the whole `make check`
-suite.
+with warnings as errors and `unsafe` forbidden; `cargo-deny` checks dependency
+advisories, bans and licences; `clippy.toml` disallows process spawning and
+network sockets in the scan path. Tests are written alongside the code they
+cover and a pre-commit hook runs the whole `make check` suite.
 
 ## Project layout
 
 ```text
 crates/
+  codehelion-artifact/        shared artifact analysis and correlation
+  codehelion-artifact-archive/ archive member discovery
+  codehelion-artifact-elf/    ELF parsing
+  codehelion-artifact-macho/  Mach-O parsing
+  codehelion-artifact-pe/     PE/COFF parsing
+  codehelion-artifact-wasm/   WebAssembly parsing
+  codehelion-backend-clang/   out-of-process C/C++ compiler helper
+  codehelion-backend-rust/    out-of-process Rust compiler helper
   codehelion-cli/            command-line interface, config, reporters
   codehelion-core/           discovery, clone engine, fingerprints, doctor
-  codehelion-store/          SQLite current-scan store (snapshots, baselines)
+  codehelion-eval/           accuracy-evaluation harness and internal tools
+  codehelion-fixtures/       test fixture trees
   codehelion-frontend-rust/  build-free Rust lexer frontend
   codehelion-frontend-c/     build-free C lexer frontend
   codehelion-frontend-cpp/   build-free C++ lexer frontend
-  codehelion-eval/           accuracy-evaluation harness (internal)
+  codehelion-helper/         helper protocol and client
+  codehelion-helper-conformance/ helper protocol conformance tests
+  codehelion-store/          SQLite current-scan store (snapshots, baselines)
 corpus/                      labeled evaluation corpus (see corpus/README.md)
 ```
+
+## Limitations
+
+Incomplete or edited copies are harder to detect. codehelion is not a
+mirror-consistency checker: the Structural detector can miss an otherwise
+similar mirror when it diverges enough not to become a candidate.
 
 ## License
 
