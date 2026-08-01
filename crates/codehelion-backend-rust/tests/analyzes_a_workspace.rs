@@ -12,6 +12,9 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use codehelion_helper::ir::{
@@ -28,7 +31,7 @@ const PATIENT: Duration = Duration::from_mins(5);
 
 fn helper() -> Helper {
     Helper::start(
-        std::path::Path::new(env!("CARGO_BIN_EXE_codehelion-backend-rust")),
+        Path::new(env!("CARGO_BIN_EXE_codehelion-backend-rust")),
         PATIENT,
     )
     .expect("the helper should start and shake hands")
@@ -46,13 +49,51 @@ fn unit(fixture: &str, member: &str, crate_name: &str) -> UnitRef {
     }
 }
 
+/// One helper per fixture, for the analyses that only read.
+///
+/// Answering the first question about a project means reading its metadata and
+/// indexing the standard library, which the helper keeps for as long as its
+/// process lives. A test that starts its own helper pays that again, and this
+/// file asks a handful of fixtures the same read-only questions from dozens of
+/// tests: on a cold machine the repeated indexing is most of what this file
+/// costs and none of what it checks.
+///
+/// Per fixture rather than one for the whole file, because a single helper
+/// would serialize tests that have nothing to do with each other. Each still
+/// makes a real request over the wire; what is shared is the reading, which is
+/// what the helper caches anyway. The tests that are about the process itself
+/// — the handshake, a granted execution permission, a clean shutdown — still
+/// start one of their own.
+static READING: LazyLock<Mutex<BTreeMap<PathBuf, &'static Mutex<Helper>>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+/// The fixture `file` belongs to, which is what decides the project a helper
+/// would have to read. A path outside the fixtures stands for itself.
+fn fixture_of(file: &Path) -> PathBuf {
+    let rust = codehelion_fixtures::root().join("rust");
+    file.ancestors()
+        .find(|path| path.parent() == Some(rust.as_path()))
+        .unwrap_or(file)
+        .to_path_buf()
+}
+
+fn reading(file: &Path) -> &'static Mutex<Helper> {
+    READING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(fixture_of(file))
+        // Leaked deliberately: the helper is meant to outlive every test that
+        // reads this fixture, and the process it owns goes when the test binary
+        // does.
+        .or_insert_with(|| Box::leak(Box::new(Mutex::new(helper()))))
+}
+
 fn analyze(unit: &UnitRef) -> Analysis {
-    let mut helper = helper();
-    let analysis = helper
+    reading(Path::new(&unit.file))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
         .analyze(unit, &[Capability::Types])
-        .expect("the helper should answer");
-    helper.shutdown().expect("the helper should stop cleanly");
-    analysis
+        .expect("the helper should answer")
 }
 
 fn analyzed(unit: &UnitRef) -> Box<CompilerIr> {
@@ -639,7 +680,7 @@ fn permitting_a_build_script_runs_it_and_analyses_what_it_wrote() {
 /// Copy a fixture's own files, and only those: a `target` directory left by an
 /// earlier run would be carried into a tree whose whole point is that nothing
 /// has been built in it yet.
-fn copy_fixture(from: &std::path::Path, to: &std::path::Path) {
+fn copy_fixture(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).expect("create the copy");
     for entry in std::fs::read_dir(from).expect("read the fixture") {
         let entry = entry.expect("read an entry");
@@ -755,7 +796,7 @@ fn a_direct_dependency_feature_is_part_of_the_build_description() {
 /// same way, so an empty answer is the answer.
 #[test]
 fn a_tree_with_no_project_in_it_is_described_as_having_no_build() {
-    let described = describe(std::path::Path::new("/nowhere/at/all"));
+    let described = describe(Path::new("/nowhere/at/all"));
     assert_eq!(described, codehelion_helper::BuildDescription::default());
 }
 
@@ -768,7 +809,7 @@ fn a_project_that_enables_nothing_is_still_described_by_its_target() {
     assert!(!described.cfgs.is_empty());
 }
 
-fn describe(root: &std::path::Path) -> codehelion_helper::BuildDescription {
+fn describe(root: &Path) -> codehelion_helper::BuildDescription {
     let mut helper = helper();
     let described = helper.describe(root).expect("the helper should answer");
     helper.shutdown().expect("the helper should stop cleanly");
