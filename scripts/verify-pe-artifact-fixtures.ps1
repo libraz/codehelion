@@ -81,7 +81,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Source fixture scan failed with exit code $LASTEXITCODE"
     }
-    $sourceRun = (Get-Content -Raw -LiteralPath $scan | ConvertFrom-Json).run_id
+    $sourceRun = (Get-Content -Raw -LiteralPath $scan | ConvertFrom-Json).run.run_id
     if ($null -eq $sourceRun) {
         throw 'Source fixture scan did not produce a run ID'
     }

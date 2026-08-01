@@ -777,10 +777,14 @@ fn install_channel(exe: &Path) -> &'static str {
     if has("site-packages") {
         return "pypi";
     }
+    // A build directory is recognised by its shape rather than by the literal
+    // name `target`: `CARGO_TARGET_DIR` renames it, and the tools that wrap a
+    // build pick their own name for it, so a binary under `llvm-cov-target` is
+    // as local a build as one under `target`.
     let is_cargo_target = components
         .iter()
         .zip(components.iter().skip(1))
-        .any(|(a, b)| a == "target" && (b == "debug" || b == "release"));
+        .any(|(a, b)| a.ends_with("target") && (b == "debug" || b == "release"));
     if is_cargo_target {
         return "local build";
     }
@@ -1172,6 +1176,10 @@ mod tests {
         );
         assert_eq!(
             channel("/work/codehelion/target/release/codehelion"),
+            "local build"
+        );
+        assert_eq!(
+            channel("/work/codehelion/target/llvm-cov-target/debug/codehelion"),
             "local build"
         );
         assert_eq!(

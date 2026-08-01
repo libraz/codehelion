@@ -164,15 +164,22 @@ impl Database {
     /// not the root the database was found from, and a name matched only one
     /// way would come back unanswerable for every unit of a project scanned
     /// from a subdirectory.
+    ///
+    /// Both spellings are compared as paths rather than as strings. A generator
+    /// writes `src/a.cpp` on every platform while a path rebuilt here carries
+    /// the separator the platform uses, and on Windows the two name one file
+    /// that no string comparison calls equal.
     pub(crate) fn unit(
         &self,
         unit: &str,
         selector: Option<&CompileCommandSelector>,
     ) -> Option<&Entry> {
-        let absolute = canonical(Path::new(unit));
+        let named = Path::new(unit);
+        let absolute = canonical(named);
         self.entries.iter().find(|entry| {
             selector.is_none_or(|wanted| entry.selector == *wanted)
-                && (codehelion_helper::ir::spell(Some(&self.root), &entry.file) == unit
+                && (Path::new(&codehelion_helper::ir::spell(Some(&self.root), &entry.file))
+                    == named
                     || entry.file == absolute)
         })
     }

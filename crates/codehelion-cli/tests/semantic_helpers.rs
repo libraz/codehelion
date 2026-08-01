@@ -518,7 +518,11 @@ fn cross_language_result_expected_fixture() -> tempfile::TempDir {
         std::fs::copy(corpus.join(relative), root.join(relative))
             .unwrap_or_else(|error| panic!("copying result/expected corpus {relative}: {error}"));
     }
-    let mut arguments = vec!["clang++".to_string(), "-std=c++23".to_string()];
+    // `c++2b` rather than `c++23`: the fixture needs `<expected>`, and the
+    // oldest Clang this project reads a project with does not recognise the
+    // final spelling of the standard that introduced it. Both spellings select
+    // the same standard on every Clang that accepts either.
+    let mut arguments = vec!["clang++".to_string(), "-std=c++2b".to_string()];
     arguments.extend(cpp_standard_library_arguments());
     arguments.extend(["-c".to_string(), "cpp/direct.cpp".to_string()]);
     let database = serde_json::json!([{

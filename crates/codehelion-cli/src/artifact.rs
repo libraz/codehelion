@@ -163,7 +163,8 @@ fn run_isolated_request(
     Ok(Outcome::Success)
 }
 
-/// Run the request sent by [`run_isolated`] without starting another worker.
+/// Run the request an isolated artifact run sends, without starting another
+/// worker.
 ///
 /// # Errors
 ///

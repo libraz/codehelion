@@ -41,7 +41,7 @@ printf '%s\n' '{"target":"arm64-apple-darwin","debug_info":true}' \
 
 dwarfdump --uuid "$fixture_root/libduplicates.dylib" \
     "$fixture_root/libduplicates.dylib.dSYM" \
-    | rg -q 'UUID:'
+    | grep -qE 'UUID:'
 test -f "$fixture_root/libduplicates.dylib.dSYM/Contents/Resources/DWARF/libduplicates.dylib"
 
 cargo run --quiet -p codehelion-cli -- scan \
@@ -62,11 +62,11 @@ cargo run --quiet -p codehelion-cli -- artifact analyze \
     --db "$temporary_root/artifact.sqlite" \
     --output "$temporary_root/report.json"
 
-rg -q '"format": "mach-o"' "$temporary_root/report.json"
-rg -q '"name": "_duplicate_left"' "$temporary_root/report.json"
-rg -q '"name": "_duplicate_right"' "$temporary_root/report.json"
-rg -q '"data_segments": [1-9]' "$temporary_root/report.json"
-rg -q '"source_mappings": [1-9]' "$temporary_root/report.json"
-rg -q '"source_mapping": true' "$temporary_root/report.json"
+grep -qE '"format": "mach-o"' "$temporary_root/report.json"
+grep -qE '"name": "_duplicate_left"' "$temporary_root/report.json"
+grep -qE '"name": "_duplicate_right"' "$temporary_root/report.json"
+grep -qE '"data_segments": [1-9]' "$temporary_root/report.json"
+grep -qE '"source_mappings": [1-9]' "$temporary_root/report.json"
+grep -qE '"source_mapping": true' "$temporary_root/report.json"
 
 printf '%s\n' 'Mach-O artifact fixture end-to-end verification passed'
