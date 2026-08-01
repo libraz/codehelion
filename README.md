@@ -151,7 +151,10 @@ the current scan rather than carrying it across.
 # refactoring-ease = 1              # duplication costs is a question about the code
 
 [suppression]
-# paths = []                        # path globs to hide; vendored trees go here
+# paths = []                        # path globs to hide
+# vendored-paths = [...]            # trees the project vendors rather than
+                                    # writes, hidden by default; set to [] to
+                                    # read them, or pass --include-vendored
 # symbols = []                      # globs over the name of the enclosing unit
 # clone-ids = []                    # stable clone ids (hex, prefix allowed)
 # generated-markers = ["@generated", "do not edit", "automatically generated"]

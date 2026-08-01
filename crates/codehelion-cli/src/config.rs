@@ -19,6 +19,31 @@ use serde::{Deserialize, Serialize};
 /// File name discovered by the upward search.
 pub const CONFIG_FILE_NAME: &str = "codehelion.toml";
 
+/// Directories a project conventionally vendors upstream code into, as globs.
+///
+/// Written as globs rather than names so that what is matched is what the
+/// configuration says, in the syntax `[suppression] paths` already uses, and
+/// so a project can extend the list in the same form. The leading `**/` lets
+/// a vendored tree sit anywhere; matching whole path components is what keeps
+/// `external/` from also claiming `external_api/`.
+///
+/// `.gitignore` is honoured during discovery and covers the trees nobody
+/// commits, which is why fetched-dependency directories appear here: a
+/// vendored tree is committed, so nothing else excludes it.
+pub const DEFAULT_VENDORED_PATHS: &[&str] = &[
+    "**/third_party/**",
+    "**/thirdparty/**",
+    "**/vendor/**",
+    "**/vendored/**",
+    "**/external/**",
+    "**/extern/**",
+    "**/deps/**",
+    "**/subprojects/**",
+    "**/node_modules/**",
+    "**/Godeps/**",
+    "**/.venv/**",
+];
+
 /// Literal-normalization strategy for Type-2 detection.
 ///
 /// The default is [`Full`](LiteralNormalization::Full): normalizing every
@@ -172,6 +197,18 @@ impl BoilerplatePolicy {
 pub struct Suppression {
     /// Path globs whose matches are excluded from findings.
     pub paths: Vec<String>,
+    /// Path globs naming trees the project vendors rather than writes.
+    ///
+    /// Separate from [`paths`](Self::paths) because it carries defaults and
+    /// that one does not: a reader has to be able to tell what they asked for
+    /// apart from what they were given. Upstream code duplicating itself is
+    /// nobody's maintenance burden here — a copy of it cannot be unified with
+    /// anything, and it drowns the tree the project does write. A group
+    /// spanning a vendored tree and the project's own code stays visible, as
+    /// with every other rule: a group is hidden only when every member is.
+    ///
+    /// Set to `[]` to scan vendored trees like anything else.
+    pub vendored_paths: Vec<String>,
     /// Globs matched against the name of the unit an occurrence sits in, for
     /// suppressing families of functions or types wherever they live.
     pub symbols: Vec<String>,
@@ -240,6 +277,10 @@ impl Default for Suppression {
     fn default() -> Self {
         Self {
             paths: Vec::new(),
+            vendored_paths: DEFAULT_VENDORED_PATHS
+                .iter()
+                .map(|glob| (*glob).to_string())
+                .collect(),
             symbols: Vec::new(),
             clone_ids: Vec::new(),
             generated_markers: DEFAULT_MARKERS.iter().map(|m| (*m).to_string()).collect(),
@@ -569,11 +610,16 @@ pub const TEMPLATE: &str = "\
 # headers = \"detect\"
 
 # [suppression]
-# Globs matched against a file's path, relative to the scan root. A vendored
-# or imported tree is the usual entry — \"third_party/**\", \"vendor/**\" —
-# because nothing else here reads provenance from a path, and duplication you
-# did not write is duplication you cannot act on.
+# Globs matched against a file's path, relative to the scan root. Nothing else
+# here reads provenance from a path, so this is where a tree the project does
+# not maintain goes when the vendored defaults below do not already name it.
 # paths = []
+# Globs naming the trees the project vendors rather than writes. Setting this
+# replaces the defaults shown; set it to [] to read vendored code like any
+# other. Duplication spanning a vendored tree and the project's own code stays
+# visible either way, as with every rule here: a group is hidden only when
+# every occurrence in it is. `--include-vendored` undoes this for one run.
+# vendored-paths = [\"**/third_party/**\", \"**/thirdparty/**\", \"**/vendor/**\", \"**/vendored/**\", \"**/external/**\", \"**/extern/**\", \"**/deps/**\", \"**/subprojects/**\", \"**/node_modules/**\", \"**/Godeps/**\", \"**/.venv/**\"]
 # Globs matched against the name of the unit an occurrence sits in.
 # symbols = []
 # Stable clone-group ids (hex, or a prefix of at least 8 characters). An id

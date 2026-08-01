@@ -1029,6 +1029,11 @@ const UNTRUSTED_PROFILE: &str = "untrusted";
 /// means "each pass keeps its own default", and every one of those defaults is
 /// above the profile's number.
 pub(crate) fn guarded(mut cfg: Config, args: &ScanArgs) -> (Config, Option<report::Guardrails>) {
+    // Undoing a default the tool applied unasked, for this run only: the
+    // configuration file is not edited and the next run hides them again.
+    if args.include_vendored {
+        cfg.suppression.vendored_paths.clear();
+    }
     if !args.untrusted {
         return (cfg, None);
     }
@@ -1814,6 +1819,7 @@ mod tests {
             compare_languages: false,
             show_suppressed: false,
             include_trivial: false,
+            include_vendored: false,
             verbose: false,
             fail_on_findings: false,
             untrusted,

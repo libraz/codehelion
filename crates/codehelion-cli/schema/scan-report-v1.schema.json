@@ -363,7 +363,8 @@
           "type": "object",
           "required": [
             "noise",
-            "by_rule"
+            "by_rule",
+            "vendored"
           ],
           "properties": {
             "noise": {
@@ -371,6 +372,10 @@
             },
             "by_rule": {
               "type": "integer"
+            },
+            "vendored": {
+              "type": "integer",
+              "description": "Groups hidden because every occurrence sits in a vendored tree, counted within `by_rule`. Reported on its own because this is the one rule that fires without anybody configuring it."
             }
           }
         },

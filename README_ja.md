@@ -137,7 +137,9 @@ BuildVariant または detector version が異なる場合は、履歴を引き�
 # refactoring-ease = 1              # コード側の性質であり設定で変えない
 
 [suppression]
-# paths = []                        # 隠すパス glob。vendor 配下はここへ
+# paths = []                        # 隠すパス glob
+# vendored-paths = [...]            # 自分では書かない vendored ツリー。既定で
+                                    # 隠す。[] にするか --include-vendored で解除
 # symbols = []                      # 所属ユニット名に対する glob
 # clone-ids = []                    # 安定クローン ID（hex、前方一致可）
 # generated-markers = ["@generated", "do not edit", "automatically generated"]

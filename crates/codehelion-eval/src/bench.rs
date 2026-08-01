@@ -781,6 +781,10 @@ pub fn measure_scan(
         .arg("scan")
         .arg(corpus)
         .args(["--mode", mode, "--format", "json"])
+        // A timing run measures the work of reading a tree, and skipping part
+        // of one on a presentation setting would make two corpora's numbers
+        // depend on their directory names.
+        .arg("--include-vendored")
         .arg("--db")
         .arg(&db)
         .arg("--output")

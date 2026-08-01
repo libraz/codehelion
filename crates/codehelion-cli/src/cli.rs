@@ -380,6 +380,13 @@ pub struct ScanArgs {
     /// Also list suppressed groups, with the reason each was hidden.
     #[arg(long)]
     pub show_suppressed: bool,
+    /// Report duplication inside vendored trees, which is hidden by default.
+    ///
+    /// A flag rather than only a configuration key because the default is one
+    /// the tool applies unasked, and undoing it for one run should not need a
+    /// file edit.
+    #[arg(long)]
+    pub include_vendored: bool,
     /// Keep trivially-shaped predicate groups at their measured priority.
     ///
     /// By default these groups are reported below behavioural duplication;

@@ -46,15 +46,19 @@
 //!   collapsed score column.
 //!
 //! Before the first release, schema fragments are assembled into one baseline.
-//! `schema_meta` records that baseline as version one. A database from an
-//! earlier development layout is rejected and recreated without conversion.
+//! `schema_meta` records which baseline a database holds. A database from any
+//! other layout is rejected and recreated without conversion.
 
 use rusqlite::Connection;
 
 use crate::StoreError;
 
-/// The single unreleased development schema baseline.
-pub const SCHEMA_VERSION: i64 = 1;
+/// The one unreleased development schema baseline this build reads.
+///
+/// A database recorded under another one is rejected rather than migrated.
+/// Nothing is lost by that: the audit database holds the latest scan, which
+/// re-running the scan reproduces.
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Full pre-release database layout. Existing development databases are not
 /// transformed; create a fresh database when this contract changes.
@@ -728,8 +732,9 @@ CREATE TABLE source_unit (
 CREATE TABLE suppression (
     id      INTEGER PRIMARY KEY,
     scope   TEXT NOT NULL CHECK (scope IN
-                ('path_glob', 'symbol_pattern', 'ast_pattern', 'inline_comment',
-                 'attribute', 'stable_clone_id', 'baseline', 'generated_marker')),
+                ('path_glob', 'vendored_path', 'symbol_pattern', 'ast_pattern',
+                 'inline_comment', 'attribute', 'stable_clone_id', 'baseline',
+                 'generated_marker')),
     pattern TEXT NOT NULL,
     reason  TEXT,
     active  INTEGER NOT NULL CHECK (active IN (0, 1))
@@ -838,17 +843,20 @@ pub(crate) fn initialize(conn: &mut Connection) -> Result<(), StoreError> {
     }
 
     match version(conn)? {
-        1 => Ok(()),
+        SCHEMA_VERSION => Ok(()),
         0 => apply_baseline(conn),
         found => Err(StoreError::UnsupportedSchema { found }),
     }
 }
 
-/// Apply the only baseline atomically and record schema version one.
+/// Apply the only baseline atomically and record which one it is.
 fn apply_baseline(conn: &mut Connection) -> Result<(), StoreError> {
     let tx = conn.transaction()?;
     tx.execute_batch(BASELINE_SQL)?;
-    tx.execute("INSERT INTO schema_meta (id, version) VALUES (1, 1)", [])?;
+    tx.execute(
+        "INSERT INTO schema_meta (id, version) VALUES (1, ?1)",
+        [SCHEMA_VERSION],
+    )?;
     tx.commit()?;
     Ok(())
 }

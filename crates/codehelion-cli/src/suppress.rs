@@ -2,11 +2,16 @@
 //!
 //! Suppression never deletes a finding: a suppressed group is still detected,
 //! recorded and counted; it is hidden from the default report and its stored
-//! finding references the rule that matched. Three rule kinds select
+//! finding references the rule that matched. Four rule kinds select
 //! occurrences:
 //!
 //! - **path globs** (`[suppression] paths` in the configuration): every
 //!   occurrence inside a matching file is suppressed;
+//! - **vendored globs** (`[suppression] vendored-paths`): the same, over the
+//!   trees a project vendors rather than writes. The one rule kind carrying
+//!   defaults, so a run that applied it says so and names
+//!   `--include-vendored`; a glob somebody wrote outranks it, so a hidden
+//!   finding is attributed to the decision actually made about it;
 //! - **symbol globs** (`[suppression] symbols`): every occurrence sitting in
 //!   a unit whose name matches is suppressed, wherever that unit lives;
 //! - **inline markers**: a comment line containing `codehelion:ignore`
@@ -45,6 +50,14 @@ use crate::config::Suppression;
 /// The marker text an inline suppression comment must contain.
 pub(crate) const INLINE_MARKER: &str = "codehelion:ignore";
 
+/// Rule scope recorded for a vendored-tree glob.
+///
+/// Kept apart from `path_glob` because this is the one rule kind that fires
+/// without anybody having configured it: a reader has to be able to see that
+/// a finding was hidden by a default, and to tell that default apart from
+/// their own rules when deciding what to change.
+pub(crate) const VENDORED_SCOPE: &str = "vendored_path";
+
 /// Shortest accepted clone-id prefix.
 ///
 /// Abbreviating an id is convenient, but too short a prefix would suppress
@@ -78,6 +91,9 @@ pub(crate) fn marker_lines(text: &str) -> Vec<u32> {
 #[derive(Debug)]
 pub(crate) struct Rules {
     path_matchers: Vec<GlobMatcher>,
+    /// Vendored-tree globs paired with their rule index in `rows`. Kept apart
+    /// from `path_matchers`, whose position in that list *is* its rule index.
+    vendored_matchers: Vec<(GlobMatcher, usize)>,
     /// Symbol globs paired with their rule index in `rows`.
     symbol_matchers: Vec<(GlobMatcher, usize)>,
     /// Lower-case clone-id prefixes paired with their rule index in `rows`.
@@ -96,6 +112,8 @@ pub(crate) struct Rules {
 pub(crate) struct FileSuppression {
     /// Rule index when the whole file matches a path glob.
     path_rule: Option<usize>,
+    /// Rule index when the file sits in a vendored tree.
+    vendored_rule: Option<usize>,
     /// Rule index of the symbol glob matching each unit's name, if any.
     symbol_units: Vec<Option<usize>>,
     /// Whether each unit of the file is marker-suppressed.
@@ -127,6 +145,17 @@ impl Rules {
                 reason: None,
             });
         }
+        let mut vendored_matchers = Vec::with_capacity(suppression.vendored_paths.len());
+        for pattern in &suppression.vendored_paths {
+            let glob = Glob::new(pattern)
+                .with_context(|| format!("suppression vendored path glob {pattern:?}"))?;
+            rows.push(SuppressionRuleRow {
+                scope: VENDORED_SCOPE.to_string(),
+                pattern: pattern.clone(),
+                reason: Some("vendored code, which this project does not write".to_string()),
+            });
+            vendored_matchers.push((glob.compile_matcher(), rows.len() - 1));
+        }
         for pattern in &suppression.symbols {
             let glob = Glob::new(pattern)
                 .with_context(|| format!("suppression symbol glob {pattern:?}"))?;
@@ -156,6 +185,7 @@ impl Rules {
         });
         Ok(Self {
             path_matchers,
+            vendored_matchers,
             symbol_matchers,
             clone_ids,
             inline_rule,
@@ -257,6 +287,11 @@ impl Rules {
             .path_matchers
             .iter()
             .position(|matcher| matcher.is_match(path));
+        let vendored_rule = self
+            .vendored_matchers
+            .iter()
+            .find(|(matcher, _)| matcher.is_match(path))
+            .map(|&(_, rule)| rule);
         let symbol_units = units
             .iter()
             .map(|unit| {
@@ -273,6 +308,7 @@ impl Rules {
             .collect();
         FileSuppression {
             path_rule,
+            vendored_rule,
             symbol_units,
             suppressed_units: suppressed_units(markers, &lines),
             marker_lines: markers.to_vec(),
@@ -295,6 +331,10 @@ impl Rules {
     /// Configured rules come before the in-source marker, and the broader
     /// configured rule comes first: a path glob covers whole files, a symbol
     /// glob covers named units, the marker covers one unit.
+    ///
+    /// A rule somebody wrote outranks the vendored default, so that a report
+    /// attributes a hidden finding to the decision that was actually made
+    /// about it.
     pub(crate) fn member_rule(
         &self,
         file: &FileSuppression,
@@ -303,6 +343,9 @@ impl Rules {
         unit: Option<usize>,
     ) -> Option<usize> {
         if let Some(index) = file.path_rule {
+            return Some(index);
+        }
+        if let Some(index) = file.vendored_rule {
             return Some(index);
         }
         if let Some(index) = unit.and_then(|index| file.symbol_units.get(index).copied().flatten())
@@ -405,9 +448,14 @@ mod tests {
     }
 
     /// A configuration carrying only the rules a test cares about.
+    ///
+    /// The vendored defaults are cleared: a test naming its own globs is about
+    /// those globs, and eleven more compiled behind them would make every rule
+    /// index in it depend on a list nobody here wrote.
     fn suppression(paths: &[&str], symbols: &[&str], clone_ids: &[&str]) -> Suppression {
         Suppression {
             paths: paths.iter().map(|p| (*p).to_string()).collect(),
+            vendored_paths: Vec::new(),
             symbols: symbols.iter().map(|s| (*s).to_string()).collect(),
             clone_ids: clone_ids.iter().map(|c| (*c).to_string()).collect(),
             ..Suppression::default()
@@ -421,6 +469,46 @@ mod tests {
             end_line: lines.1,
             name,
         }
+    }
+
+    #[test]
+    fn a_vendored_glob_matches_whole_path_components_and_yields_to_a_written_rule() {
+        let mut config = suppression(&["src/generated/**"], &[], &[]);
+        config.vendored_paths = vec![
+            "**/external/**".to_string(),
+            "**/src/generated/**".to_string(),
+        ];
+        let rules = Rules::compile(&config, false).unwrap();
+
+        // A vendored tree anywhere, at the root or nested.
+        for path in ["external/lib.rs", "deep/external/lib.rs"] {
+            let file = rules.evaluate_file(path, &[], &[unit(None, (1, 5))]);
+            let rule = rules.member_rule(&file, 1, 5, Some(0)).expect("hidden");
+            assert_eq!(rules.rows[rule].scope, VENDORED_SCOPE, "{path}");
+        }
+
+        // A directory whose name only starts like a vendored one is the
+        // project's own code.
+        let lookalike = rules.evaluate_file("external_api/lib.rs", &[], &[unit(None, (1, 5))]);
+        assert_eq!(rules.member_rule(&lookalike, 1, 5, Some(0)), None);
+
+        // Both rules cover this file. A report attributes it to the one
+        // somebody wrote, which is the one they can change.
+        let both = rules.evaluate_file("src/generated/lib.rs", &[], &[unit(None, (1, 5))]);
+        let rule = rules.member_rule(&both, 1, 5, Some(0)).expect("hidden");
+        assert_eq!(rules.rows[rule].scope, "path_glob");
+    }
+
+    #[test]
+    fn a_vendored_default_that_matched_nothing_is_not_reported_as_an_unused_rule() {
+        let mut config = suppression(&[], &[], &[]);
+        config.vendored_paths = vec!["**/external/**".to_string()];
+        let rules = Rules::compile(&config, false).unwrap();
+
+        // The unused-rule note exists to catch a rule somebody wrote that took
+        // no effect. Saying that about a default would fire on every project
+        // that vendors nothing, which is most of them.
+        assert!(rules.unused(&BTreeSet::new()).is_empty());
     }
 
     #[test]
@@ -510,15 +598,16 @@ mod tests {
 
     #[test]
     fn hostless_occurrences_use_their_own_line_range() {
-        let rules = Rules::compile(&Suppression::default(), true).unwrap();
+        let rules = Rules::compile(&suppression(&[], &[], &[]), true).unwrap();
+        let inline = rules.rows.len() - 1;
         let file = rules.evaluate_file("src/lib.rs", &[7], &[]);
-        assert_eq!(rules.member_rule(&file, 5, 9, None), Some(0));
+        assert_eq!(rules.member_rule(&file, 5, 9, None), Some(inline));
         assert_eq!(rules.member_rule(&file, 10, 14, None), None);
     }
 
     #[test]
     fn without_markers_no_inline_rule_is_recorded() {
-        let rules = Rules::compile(&Suppression::default(), false).unwrap();
+        let rules = Rules::compile(&suppression(&[], &[], &[]), false).unwrap();
         assert!(rules.rows.is_empty());
         let file = rules.evaluate_file("src/lib.rs", &[], &[unit(None, (1, 5))]);
         assert_eq!(rules.member_rule(&file, 1, 5, Some(0)), None);

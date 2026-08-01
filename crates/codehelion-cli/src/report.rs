@@ -29,6 +29,7 @@ use codehelion_store::snapshot::{FunnelDropRow, FunnelStageRow, SummaryRow, Unus
 use serde::{Deserialize, Serialize};
 
 use crate::config::Suppression as SuppressionConfig;
+use crate::suppress::VENDORED_SCOPE;
 
 /// Version of the JSON report format.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -516,6 +517,13 @@ pub fn restored(files: FileCounts, stored: &SummaryRow, groups: &[Group]) -> Sum
         suppressed: SuppressedCounts {
             noise: suppressed_as(SuppressionKind::Noise),
             by_rule: suppressed_as(SuppressionKind::Rule),
+            vendored: count(&|group| {
+                group
+                    .suppressed
+                    .as_ref()
+                    .and_then(|cause| cause.scope.as_deref())
+                    == Some(VENDORED_SCOPE)
+            }),
         },
         unused_suppressions: stored
             .unused_suppressions
@@ -793,6 +801,13 @@ pub struct SuppressedCounts {
     pub noise: u64,
     /// Groups hidden by a configured or inline suppression rule.
     pub by_rule: u64,
+    /// Groups hidden because every occurrence sits in a vendored tree.
+    ///
+    /// Counted separately, and included in
+    /// [`by_rule`](Self::by_rule), because this is the one rule that fires
+    /// without anybody configuring it. A default nobody can see is a default
+    /// nobody can disagree with.
+    pub vendored: u64,
 }
 
 /// One clone group.
@@ -1535,6 +1550,16 @@ impl Report {
                  other; {} more were folded into the groups that already cover them and {} \
                  into longer runs",
                 runs.fragment_scope, runs.folded_runs, runs.subsumed_runs,
+            )?;
+        }
+        // Hidden without anybody asking, so the report says it happened and
+        // says how to undo it.
+        if summary.suppressed.vendored > 0 {
+            writeln!(
+                out,
+                "    {} of them are duplication inside vendored trees, which this project does \
+                 not write; --include-vendored reports them",
+                summary.suppressed.vendored,
             )?;
         }
         if summary.groups.test_code > 0 {
@@ -2465,6 +2490,7 @@ pub(super) mod tests {
                 suppressed: SuppressedCounts {
                     noise: 0,
                     by_rule: 1,
+                    vendored: 0,
                 },
                 unused_suppressions: Vec::new(),
                 funnel: vec![

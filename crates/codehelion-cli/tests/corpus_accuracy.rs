@@ -192,6 +192,12 @@ fn scan(corpus: &Path, database: &Path) -> String {
         .arg("scan")
         .arg(corpus)
         .args(["--mode", "structural", "--format", "json"])
+        // The labels describe every duplication in the tree, so the
+        // measurement has to see every one of them. A corpus with a directory
+        // the vendored default happens to name — bitflags writes its
+        // external-crate integrations in `src/external` — would otherwise have
+        // its ground truth moved by a presentation setting.
+        .arg("--include-vendored")
         .arg("--db")
         .arg(database)
         .output()

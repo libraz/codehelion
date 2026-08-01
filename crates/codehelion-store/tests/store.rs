@@ -362,9 +362,9 @@ fn clone_fragments_keep_the_variant_that_minted_their_fingerprints() {
     assert_eq!(fragments[1].file_path, "src/b.rs");
 }
 
-/// Any layout marker other than the v1 baseline is rejected.
+/// Any layout marker other than the baseline this build reads is rejected.
 #[test]
-fn a_development_database_before_summaries_is_rejected() {
+fn a_database_recorded_under_another_layout_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("audit.db");
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
@@ -377,13 +377,13 @@ fn a_development_database_before_summaries_is_rejected() {
     }
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute("UPDATE schema_meta SET version = 2", [])
+        conn.execute("UPDATE schema_meta SET version = 99", [])
             .unwrap();
     }
 
     assert!(matches!(
         Store::open(&path),
-        Err(StoreError::UnsupportedSchema { found: 2 })
+        Err(StoreError::UnsupportedSchema { found: 99 })
     ));
 }
 

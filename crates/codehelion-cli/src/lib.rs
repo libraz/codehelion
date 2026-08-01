@@ -1036,6 +1036,7 @@ mod tests {
             compare_languages: true,
             show_suppressed: false,
             include_trivial: false,
+            include_vendored: false,
             verbose: false,
             fail_on_findings: false,
             untrusted: false,

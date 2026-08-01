@@ -1235,6 +1235,125 @@ fn resolving_a_duplication_makes_its_entry_stale_and_update_drops_it() {
     );
 }
 
+/// A tree whose duplication sits in a vendored subtree, in a directory whose
+/// name merely starts like one, and in the project's own code.
+fn vendored_fixture() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("third_party/r8brain")).unwrap();
+    std::fs::create_dir_all(root.join("external_api")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    // Upstream code duplicating itself: nobody here can unify it.
+    std::fs::write(root.join("third_party/r8brain/a.rs"), CHECKSUM_RS).unwrap();
+    std::fs::write(root.join("third_party/r8brain/b.rs"), CHECKSUM_RS).unwrap();
+    // A directory whose name only starts like a vendored one.
+    std::fs::write(root.join("external_api/a.rs"), FORMAT_RS).unwrap();
+    std::fs::write(root.join("external_api/b.rs"), FORMAT_RS).unwrap();
+    dir
+}
+
+/// A Rust function unlike anything else in the fixtures, for a pair that has
+/// to land in its own group.
+const TRIM_RS: &str = "pub fn trim_suffix(text: &str, suffix: &str) -> String {
+    if text.ends_with(suffix) {
+        let cut = text.len() - suffix.len();
+        return text[..cut].to_string();
+    }
+    text.to_string()
+}
+";
+
+#[test]
+fn vendored_trees_are_hidden_by_default_and_the_report_says_it_did_that() {
+    let dir = vendored_fixture();
+    let root = dir.path();
+
+    let report = scan_json(root);
+    let visible: Vec<&serde_json::Value> = report["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .filter(|group| group["suppressed"].is_null())
+        .collect();
+    // A name that merely starts like a vendored one is the project's own code:
+    // globs match whole path components, so `external/` does not claim it.
+    assert_eq!(visible.len(), 1, "{visible:?}");
+    assert_eq!(visible[0]["members"][0]["file"], "external_api/a.rs");
+
+    let hidden = report["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .find(|group| group["suppressed"]["scope"] == "vendored_path")
+        .expect("the vendored pair, suppressed rather than dropped");
+    assert!(
+        hidden["suppressed"]["pattern"]
+            .as_str()
+            .expect("the glob that matched")
+            .contains("third_party")
+    );
+    assert_eq!(report["summary"]["suppressed"]["vendored"], 1);
+
+    // Applied without anybody asking, so the run says so and names the way out.
+    cmd()
+        .current_dir(root)
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("duplication inside vendored trees")
+                .and(predicate::str::contains("--include-vendored")),
+        );
+}
+
+#[test]
+fn vendored_suppression_can_be_undone_for_one_run_or_switched_off() {
+    let dir = vendored_fixture();
+    let root = dir.path();
+
+    let included = scan_json_with(root, &["--include-vendored"]);
+    assert_eq!(included["summary"]["suppressed"]["vendored"], 0);
+    assert_eq!(visible_ids(&included).len(), 2);
+
+    std::fs::write(
+        root.join("codehelion.toml"),
+        "[suppression]\nvendored-paths = []\n",
+    )
+    .unwrap();
+    let configured = scan_json(root);
+    assert_eq!(configured["summary"]["suppressed"]["vendored"], 0);
+    assert_eq!(visible_ids(&configured).len(), 2);
+}
+
+#[test]
+fn duplication_between_a_vendored_tree_and_the_project_stays_visible() {
+    let dir = vendored_fixture();
+    let root = dir.path();
+    // The project copied upstream code into its own tree. Nothing about that
+    // is upstream's problem, and hiding half of it would hide all of it.
+    std::fs::write(root.join("third_party/r8brain/c.rs"), TRIM_RS).unwrap();
+    std::fs::write(root.join("src/ours.rs"), TRIM_RS).unwrap();
+
+    let report = scan_json(root);
+    let crossing = report["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .find(|group| {
+            group["members"]
+                .as_array()
+                .expect("members")
+                .iter()
+                .any(|member| member["file"] == "src/ours.rs")
+        })
+        .expect("the group crossing the boundary");
+    assert!(
+        crossing["suppressed"].is_null(),
+        "a group is hidden only when every occurrence in it is: {crossing:?}"
+    );
+}
+
 /// The checksum function rewritten, for writing over both copies of it at
 /// once: the same duplication in the same two places, made of other content,
 /// so it is known by another id.
