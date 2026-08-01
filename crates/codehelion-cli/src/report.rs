@@ -185,6 +185,10 @@ pub struct RunInfo {
     /// Path of the local database the snapshot was recorded in.
     pub database: String,
     /// Row id of the recorded scan run.
+    ///
+    /// Not a counter and not an ordering: a scan replaces the snapshot before
+    /// it, so the database holds one run at a time. The id exists to name the
+    /// recorded run to `report --run`, not to place it in a sequence.
     pub run_id: i64,
 }
 
@@ -1440,10 +1444,13 @@ impl Report {
                 summary.groups.test_code,
             )?;
         }
+        // The database keeps one scan, so printing a run number would advertise
+        // a history that is not there. What a reader needs instead is where the
+        // snapshot went and how to compare it with an earlier one.
         writeln!(
             out,
-            "  snapshot: run {} in {}",
-            self.run.run_id, self.run.database
+            "  snapshot: {} (one scan at a time; compare with an earlier scan through a baseline)",
+            self.run.database
         )?;
         if !summary.unused_suppressions.is_empty() {
             let names: Vec<String> = summary

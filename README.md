@@ -41,7 +41,10 @@ load or execute the inspected artifact.
   structural, control-flow, type and API similarity separately; a dimension the
   mode cannot measure is reported as absent rather than guessed.
 - **Local current-scan storage** — the latest scan is stored in SQLite; text,
-  JSON and SARIF reports are exports from that current snapshot.
+  JSON and SARIF reports are exports from that current snapshot. A scan
+  replaces the one before it, so there is no history to page through and no
+  lineage between scans; a baseline is what carries one scan forward for a
+  later one to measure itself against.
 - **Local artifact inspection** — `artifact analyze` and `artifact compare`
   read supported binary formats without running them. Debug companions are
   accepted only after the matching ELF build ID, Mach-O UUID or PE CodeView/PDB
@@ -109,8 +112,11 @@ Findings are grouped into clone groups; each group and member carries a stable
 ID you can suppress, baseline or look up later with `explain`.
 
 Once a finding is accepted, `codehelion baseline create` freezes it and later
-scans can suppress it. If the build variant or detector versions differ, create
-a fresh baseline for the current scan rather than carrying it across.
+scans can suppress it. Because the database holds one scan at a time, a
+baseline is also how a before and an after are compared: a later scan reports
+how many of the frozen entries it still finds and how many it no longer does.
+If the build variant or detector versions differ, create a fresh baseline for
+the current scan rather than carrying it across.
 
 ## Configuration
 

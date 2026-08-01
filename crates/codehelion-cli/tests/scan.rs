@@ -155,7 +155,7 @@ fn report_reformats_a_recorded_run_without_scanning_again() {
         .args(["report", "--run", &run_id.to_string(), "--format", "text"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(format!("snapshot: run {run_id}")));
+        .stdout(predicate::str::contains("snapshot:"));
 
     let sarif = cmd()
         .current_dir(dir.path())
@@ -1080,6 +1080,32 @@ fn a_scan_under_different_settings_has_nothing_to_compare_with() {
         value["summary"].get("changes").is_none(),
         "the Fast run is not a baseline for the Structural one"
     );
+}
+
+#[test]
+fn a_second_scan_replaces_the_first_instead_of_stacking_up() {
+    let dir = fixture();
+    let root = dir.path();
+
+    let first = scan_json(root);
+    let second = scan_json(root);
+    assert_eq!(
+        first["run"]["run_id"], second["run"]["run_id"],
+        "one snapshot at a time, so the recorded run id is a name and not a counter"
+    );
+
+    // Printing a run number invites reading it as a growing history, and the
+    // reader who wants a before and after needs pointing at what does that.
+    cmd()
+        .current_dir(root)
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("one scan at a time")
+                .and(predicate::str::contains("baseline"))
+                .and(predicate::str::contains("snapshot: run ").not()),
+        );
 }
 
 /// The fingerprints of every group a report lists, visible or not.

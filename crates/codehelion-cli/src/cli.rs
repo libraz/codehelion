@@ -384,7 +384,9 @@ pub struct ScanArgs {
 /// Arguments for the `report` subcommand.
 #[derive(Debug, clap::Args)]
 pub struct ReportArgs {
-    /// Row id of the completed scan to render again.
+    /// Row id of the completed scan to render again, as the scan that recorded
+    /// it reported. The database keeps one scan, so this names that snapshot
+    /// rather than picking one out of a history.
     #[arg(long)]
     pub run: i64,
     /// Report format.

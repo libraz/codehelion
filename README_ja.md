@@ -32,7 +32,9 @@ PE/COFF、静的アーカイブをローカルで読み取り、観測済みサ�
   type / API の similarity を個別に報告します。そのモードで測定できない次元は推測せず、
   測定なしとして報告します。
 - **ローカルの現行スキャン保存** — 最新のスキャンは SQLite データベースへ保存されます。
-  text / JSON / SARIF レポートはその現行スナップショットの export です。
+  text / JSON / SARIF レポートはその現行スナップショットの export です。スキャンは
+  直前のスナップショットを置き換えるため、遡れる履歴もスキャン間の lineage も
+  ありません。あるスキャンを次のスキャンの比較対象として持ち越すのは baseline の役割です。
 - **ローカルの成果物検査** — `artifact analyze` と `artifact compare` は対応するバイナリ形式を
   実行せずに読み取ります。デバッグ情報は ELF build ID、Mach-O UUID、または PE CodeView/PDB identity が
   一致した場合にだけ受け入れます。
@@ -96,8 +98,11 @@ codehelion artifact compare before/binary after/binary
 持ちます。この ID で suppression・baseline 登録・`explain` での後日参照ができます。
 
 判断済みの finding は `codehelion baseline create` で凍結でき、以降のスキャンは
-既知のものを抑止できます。BuildVariant または detector version が異なる場合は、
-履歴を引き継がず現行スキャンから baseline を作り直します。
+既知のものを抑止できます。データベースが保持するスキャンは常に 1 件なので、
+前後比較の手段も baseline です。以降のスキャンは、凍結済みエントリのうち今回も
+見つかった件数と、もう見つからなくなった件数を報告します。BuildVariant または
+detector version が異なる場合は、履歴を引き継がず現行スキャンから baseline を
+作り直します。
 
 ## 設定
 
