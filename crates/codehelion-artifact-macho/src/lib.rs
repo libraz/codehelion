@@ -6,22 +6,22 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use codehelion_artifact::symbols::demangle;
+use codehelion_artifact::x86::{X86_NORMALIZATION_VERSION, normalize_x86, trim_inferred_padding};
 use codehelion_artifact::{
     ArtifactBackend, ArtifactCapabilities, ArtifactDataSegment, ArtifactError, ArtifactFingerprint,
     ArtifactFormat, ArtifactImport, ArtifactImportKind, ArtifactIr, ArtifactRelocation,
     ArtifactSection, ArtifactSymbol, NormalizedInstructions,
 };
-use iced_x86::{Decoder, DecoderOptions, OpKind};
-use object::{
-    Architecture, Object, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind, SymbolKind,
-};
+use object::read::macho::{FatArch, MachOFatFile32, MachOFatFile64};
+use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind};
 
 /// Parser backend for Mach-O executable and relocatable objects.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MachOBackend;
 
-/// Version of the x86 instruction-shape normalization representation.
-pub const MACHO_NORMALIZATION_VERSION: &str = "x86-operand-shape-v1";
+/// Version of the shared x86 instruction-shape normalization representation.
+pub const MACHO_NORMALIZATION_VERSION: &str = X86_NORMALIZATION_VERSION;
 
 impl ArtifactBackend for MachOBackend {
     fn format(&self) -> ArtifactFormat {
@@ -31,7 +31,11 @@ impl ArtifactBackend for MachOBackend {
     fn detects(&self, bytes: &[u8]) -> bool {
         matches!(
             bytes.get(..4),
-            Some([0xfe, 0xed, 0xfa, 0xce | 0xcf] | [0xce | 0xcf, 0xfa, 0xed, 0xfe])
+            Some(
+                [0xfe, 0xed, 0xfa, 0xce | 0xcf]
+                    | [0xce | 0xcf, 0xfa, 0xed, 0xfe]
+                    | [0xca, 0xfe, 0xba, 0xbe | 0xbf]
+            )
         )
     }
 
@@ -66,7 +70,13 @@ impl MachOBackend {
         bytes: &[u8],
         debug_companion: Option<&[u8]>,
     ) -> Result<ArtifactIr, ArtifactError> {
-        let file = object::File::parse(bytes).map_err(|error| malformed(error.to_string()))?;
+        if !self.detects(bytes) {
+            return Err(ArtifactError::WrongFormat {
+                expected: ArtifactFormat::MachO,
+            });
+        }
+        let (artifact, offset) = mach_o_slice(bytes)?;
+        let file = object::File::parse(artifact).map_err(|error| malformed(error.to_string()))?;
         if file.format() != object::BinaryFormat::MachO {
             return Err(ArtifactError::WrongFormat {
                 expected: ArtifactFormat::MachO,
@@ -74,6 +84,7 @@ impl MachOBackend {
         }
         let debug_file = debug_companion
             .map(|companion| {
+                let (companion, _) = mach_o_slice(companion)?;
                 let companion =
                     object::File::parse(companion).map_err(|error| malformed(error.to_string()))?;
                 if companion.format() != object::BinaryFormat::MachO
@@ -96,6 +107,7 @@ impl MachOBackend {
             &symbol_addresses,
             &mut ir,
         );
+        shift_file_offsets(&mut ir, offset);
         ir.capabilities = ArtifactCapabilities {
             symbols: !ir.symbols.is_empty(),
             call_graph: false,
@@ -104,6 +116,56 @@ impl MachOBackend {
             data_segments: !ir.data_segments.is_empty(),
         };
         Ok(ir)
+    }
+}
+
+fn mach_o_slice(bytes: &[u8]) -> Result<(&[u8], u64), ArtifactError> {
+    match object::FileKind::parse(bytes).map_err(|error| malformed(error.to_string()))? {
+        object::FileKind::MachO32 | object::FileKind::MachO64 => Ok((bytes, 0)),
+        object::FileKind::MachOFat32 => {
+            let fat = MachOFatFile32::parse(bytes).map_err(|error| malformed(error.to_string()))?;
+            fat_slice(&fat, bytes)
+        }
+        object::FileKind::MachOFat64 => {
+            let fat = MachOFatFile64::parse(bytes).map_err(|error| malformed(error.to_string()))?;
+            fat_slice(&fat, bytes)
+        }
+        _ => Err(ArtifactError::WrongFormat {
+            expected: ArtifactFormat::MachO,
+        }),
+    }
+}
+
+fn fat_slice<'a, Fat: FatArch>(
+    fat: &object::read::macho::MachOFatFile<'a, Fat>,
+    bytes: &'a [u8],
+) -> Result<(&'a [u8], u64), ArtifactError> {
+    let arch = fat
+        .arches()
+        .first()
+        .ok_or_else(|| malformed("fat Mach-O has no architecture slices".to_owned()))?;
+    let (offset, _) = arch.file_range();
+    let slice = arch
+        .data(bytes)
+        .map_err(|error| malformed(error.to_string()))?;
+    Ok((slice, offset))
+}
+
+fn shift_file_offsets(ir: &mut ArtifactIr, offset: u64) {
+    if offset == 0 {
+        return;
+    }
+    for section in &mut ir.sections {
+        section.offset = section.offset.saturating_add(offset);
+    }
+    for segment in &mut ir.data_segments {
+        segment.offset = segment.offset.saturating_add(offset);
+    }
+    for symbol in &mut ir.symbols {
+        symbol.offset = symbol.offset.saturating_add(offset);
+    }
+    for relocation in &mut ir.relocations {
+        relocation.offset = relocation.offset.saturating_add(offset);
     }
 }
 
@@ -151,7 +213,7 @@ fn collect_sections(file: &object::File<'_>, ir: &mut ArtifactIr) -> Result<(), 
 fn collect_imports(file: &object::File<'_>, ir: &mut ArtifactIr) {
     let mut names = BTreeSet::new();
     for symbol in file.symbols() {
-        if symbol.kind() == SymbolKind::Text && symbol.is_undefined() {
+        if symbol.is_undefined() {
             if let Some(name) = symbol
                 .name()
                 .ok()
@@ -166,7 +228,7 @@ fn collect_imports(file: &object::File<'_>, ir: &mut ArtifactIr) {
         .extend(names.into_iter().map(|name| ArtifactImport {
             module: None,
             name: Some(name),
-            kind: ArtifactImportKind::Function,
+            kind: ArtifactImportKind::Other,
         }));
 }
 
@@ -187,7 +249,9 @@ fn collect_symbols(
         let mut symbols: Vec<_> = file
             .symbols()
             .filter(|symbol| {
-                symbol.section_index() == Some(section_index) && !symbol.is_undefined()
+                symbol.section_index() == Some(section_index)
+                    && symbol.kind() == object::SymbolKind::Text
+                    && !symbol.is_undefined()
             })
             .collect();
         symbols.sort_by_key(ObjectSymbol::address);
@@ -213,6 +277,11 @@ fn collect_symbols(
             let Some(code) = data.get(start..start.saturating_add(size)) else {
                 continue;
             };
+            let code = if symbol.size() == 0 {
+                trim_inferred_padding(code, file.architecture())
+            } else {
+                code
+            };
             if code.is_empty() {
                 continue;
             }
@@ -234,7 +303,7 @@ fn collect_symbols(
                 exported: symbol.is_global(),
                 section: u32::try_from(section_index.0).ok(),
                 offset: section_offset.saturating_add(relative),
-                size: u64::try_from(size).unwrap_or(u64::MAX),
+                size: u64::try_from(code.len()).unwrap_or(u64::MAX),
                 size_inferred: symbol.size() == 0,
                 code: code.to_vec(),
                 normalized,
@@ -242,7 +311,10 @@ fn collect_symbols(
             });
             addresses.insert(
                 fingerprint,
-                (symbol.address(), u64::try_from(size).unwrap_or(u64::MAX)),
+                (
+                    symbol.address(),
+                    u64::try_from(code.len()).unwrap_or(u64::MAX),
+                ),
             );
         }
     }
@@ -258,47 +330,6 @@ fn relocation_target_name(file: &object::File<'_>, target: RelocationTarget) -> 
         .and_then(|symbol| symbol.name().ok())
         .filter(|name| !name.is_empty())
         .map(demangle)
-}
-
-fn demangle(name: &str) -> String {
-    if let Ok(symbol) = rustc_demangle::try_demangle(name) {
-        return format!("{symbol:#}");
-    }
-    cpp_demangle::Symbol::new(name.as_bytes())
-        .ok()
-        .and_then(|symbol| symbol.demangle().ok())
-        .unwrap_or_else(|| name.to_owned())
-}
-
-fn normalize_x86(bytes: &[u8], architecture: Architecture) -> Option<NormalizedInstructions> {
-    let bitness = match architecture {
-        Architecture::I386 => 32,
-        Architecture::X86_64 => 64,
-        _ => return None,
-    };
-    let mut decoder = Decoder::with_ip(bitness, bytes, 0, DecoderOptions::NONE);
-    let mut normalized = Vec::new();
-    while decoder.can_decode() {
-        let instruction = decoder.decode();
-        if instruction.is_invalid() {
-            return None;
-        }
-        normalized.extend((instruction.code() as u32).to_le_bytes());
-        normalized.push(u8::try_from(instruction.op_count()).ok()?);
-        for operand in 0..instruction.op_count() {
-            let kind = instruction.op_kind(operand);
-            normalized.push(kind as u8);
-            if kind == OpKind::Memory {
-                normalized.push(instruction.memory_size() as u8);
-                normalized.push(u8::try_from(instruction.memory_index_scale()).ok()?);
-                normalized.push(u8::try_from(instruction.memory_displ_size()).ok()?);
-            }
-        }
-    }
-    Some(NormalizedInstructions {
-        version: MACHO_NORMALIZATION_VERSION.to_owned(),
-        bytes: normalized,
-    })
 }
 
 fn symbol_fingerprint(
@@ -343,7 +374,7 @@ mod tests {
 
     use super::*;
     use object::write::{Object as WriteObject, StandardSection, Symbol, SymbolSection};
-    use object::{BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
+    use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
     use proptest::prelude::*;
 
     fn macho_fixture() -> Vec<u8> {
@@ -367,6 +398,47 @@ mod tests {
         object.write().expect("write Mach-O fixture")
     }
 
+    fn macho_undefined_import_fixture() -> Vec<u8> {
+        let mut object = WriteObject::new(
+            BinaryFormat::MachO,
+            Architecture::X86_64,
+            Endianness::Little,
+        );
+        object.add_symbol(Symbol {
+            name: b"_external_call".to_vec(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Dynamic,
+            weak: false,
+            section: SymbolSection::Undefined,
+            flags: SymbolFlags::None,
+        });
+        object
+            .write()
+            .expect("write Mach-O undefined import fixture")
+    }
+
+    fn fat_macho_fixture() -> Vec<u8> {
+        let inner = macho_fixture();
+        let offset = 256_u32;
+        let mut bytes = Vec::new();
+        bytes.extend([0xca, 0xfe, 0xba, 0xbe]);
+        bytes.extend(1_u32.to_be_bytes());
+        bytes.extend(0x0100_0007_u32.to_be_bytes());
+        bytes.extend(3_u32.to_be_bytes());
+        bytes.extend(offset.to_be_bytes());
+        bytes.extend(
+            u32::try_from(inner.len())
+                .expect("fixture slice length fits")
+                .to_be_bytes(),
+        );
+        bytes.extend(8_u32.to_be_bytes());
+        bytes.resize(offset as usize, 0);
+        bytes.extend(inner);
+        bytes
+    }
+
     #[test]
     fn parses_a_macho_function_without_executing_it() {
         let ir = MachOBackend
@@ -387,11 +459,37 @@ mod tests {
     }
 
     #[test]
+    fn records_undefined_macho_symbols_as_imports() {
+        let ir = MachOBackend
+            .parse(&macho_undefined_import_fixture())
+            .expect("parse Mach-O undefined import fixture");
+        assert_eq!(ir.imports.len(), 1, "{ir:#?}");
+        assert_eq!(ir.imports[0].name.as_deref(), Some("__external_call"));
+        assert_eq!(ir.imports[0].kind, ArtifactImportKind::Other);
+    }
+
+    #[test]
+    fn parses_a_fat_macho_slice_without_losing_outer_identity() {
+        let bytes = fat_macho_fixture();
+        assert!(MachOBackend.detects(&bytes));
+        let ir = MachOBackend
+            .parse(&bytes)
+            .expect("fat Mach-O fixture parses");
+        assert_eq!(ir.observed_bytes, bytes.len() as u64);
+        assert_eq!(
+            ir.fingerprint,
+            ArtifactFingerprint::from_content("artifact", &bytes)
+        );
+        assert_eq!(ir.symbols.len(), 1, "{ir:#?}");
+        assert!(ir.symbols[0].offset >= 256);
+    }
+
+    #[test]
     fn other_bytes_do_not_claim_the_backend() {
         assert!(!MachOBackend.detects(b"not an object"));
         assert!(matches!(
             MachOBackend.parse(b"not an object"),
-            Err(ArtifactError::Malformed { .. })
+            Err(ArtifactError::WrongFormat { .. })
         ));
     }
 

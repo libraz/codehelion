@@ -9,21 +9,22 @@
 
 use core::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 pub mod dwarf;
 pub mod metrics;
+pub mod symbols;
+pub mod x86;
 
 /// Version of the artifact IR document.
-pub const ARTIFACT_IR_SCHEMA_VERSION: &str = "artifact-ir-v1";
+pub const ARTIFACT_IR_SCHEMA_VERSION: &str = "artifact-ir-v2";
 
 /// Version of the fingerprint recipe for parsed artifact entities.
 pub const ARTIFACT_FINGERPRINT_VERSION: &str = "artifact-fingerprint-v1";
 
 /// A binary container format that codehelion recognises.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ArtifactFormat {
     /// A WebAssembly core module or component.
     Wasm,
@@ -54,6 +55,34 @@ impl ArtifactFormat {
 impl fmt::Display for ArtifactFormat {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.name())
+    }
+}
+
+impl Serialize for ArtifactFormat {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for ArtifactFormat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "wasm" => Ok(Self::Wasm),
+            "elf" => Ok(Self::Elf),
+            "macho" => Ok(Self::MachO),
+            "pe-coff" => Ok(Self::PeCoff),
+            "archive" => Ok(Self::Archive),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["wasm", "elf", "macho", "pe-coff", "archive"],
+            )),
+        }
     }
 }
 
@@ -419,6 +448,8 @@ pub fn detect_format(bytes: &[u8]) -> Option<ArtifactFormat> {
         || bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xcf])
         || bytes.starts_with(&[0xce, 0xfa, 0xed, 0xfe])
         || bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+        || bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe])
+        || bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbf])
     {
         Some(ArtifactFormat::MachO)
     } else if bytes.starts_with(b"!<arch>\n") || bytes.starts_with(b"!<thin>\n") {
@@ -472,6 +503,10 @@ mod tests {
             detect_format(b"\xcf\xfa\xed\xfe"),
             Some(ArtifactFormat::MachO)
         );
+        assert_eq!(
+            detect_format(b"\xca\xfe\xba\xbe"),
+            Some(ArtifactFormat::MachO)
+        );
         assert_eq!(detect_format(&pe), Some(ArtifactFormat::PeCoff));
         assert_eq!(detect_format(&[0x64, 0x86]), Some(ArtifactFormat::PeCoff));
         assert_eq!(detect_format(b"MZ\x90\0"), None);
@@ -490,5 +525,22 @@ mod tests {
         assert_eq!(wasm.fingerprint, same.fingerprint);
         assert_ne!(wasm.fingerprint, changed.fingerprint);
         assert!(wasm.symbols.is_empty());
+    }
+
+    #[test]
+    fn serde_uses_the_same_format_labels_as_every_other_surface() {
+        for format in [
+            ArtifactFormat::Wasm,
+            ArtifactFormat::Elf,
+            ArtifactFormat::MachO,
+            ArtifactFormat::PeCoff,
+            ArtifactFormat::Archive,
+        ] {
+            let encoded = serde_json::to_string(&format).expect("format serializes");
+            assert_eq!(encoded, format!("\"{}\"", format.name()));
+            let decoded: ArtifactFormat = serde_json::from_str(&encoded).expect("format reads");
+            assert_eq!(decoded, format);
+        }
+        assert!(serde_json::from_str::<ArtifactFormat>("\"mach-o\"").is_err());
     }
 }

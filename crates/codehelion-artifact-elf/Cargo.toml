@@ -10,11 +10,8 @@ description = "ELF artifact parser backend for codehelion."
 
 [dependencies]
 codehelion-artifact = { version = "0.1.0", path = "../codehelion-artifact" }
-object = { version = "0.39", default-features = false, features = ["read", "elf"] }
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder"] }
-cpp_demangle = "0.5"
-rustc-demangle = "0.1"
-gimli = { version = "0.31", default-features = false, features = ["read"] }
+object = { version = "0.39", default-features = false, features = ["read", "elf"] }
 
 [dev-dependencies]
 object = { version = "0.39", default-features = false, features = ["write", "elf"] }

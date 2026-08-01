@@ -10,8 +10,6 @@ description = "WebAssembly artifact parser backend for codehelion."
 
 [dependencies]
 codehelion-artifact = { version = "0.1.0", path = "../codehelion-artifact" }
-cpp_demangle = "0.5"
-rustc-demangle = "0.1"
 wasmparser = "0.254"
 
 [dev-dependencies]

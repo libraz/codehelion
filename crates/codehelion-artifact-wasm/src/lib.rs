@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use codehelion_artifact::symbols::demangle;
 use codehelion_artifact::{
     ArtifactBackend, ArtifactCall, ArtifactCapabilities, ArtifactDataSegment, ArtifactError,
     ArtifactFingerprint, ArtifactFormat, ArtifactImport, ArtifactImportKind, ArtifactIr,
@@ -174,9 +175,13 @@ impl ArtifactBackend for WasmBackend {
         }
 
         let mut by_index = BTreeMap::new();
-        for function in &state.functions {
+        for function in &mut state.functions {
             let name = state.names.get(&function.index).map(|name| demangle(name));
-            let fingerprint = symbol_fingerprint(name.as_deref(), &function.normalized.bytes);
+            let normalized = NormalizedInstructions {
+                version: std::mem::take(&mut function.normalized.version),
+                bytes: std::mem::take(&mut function.normalized.bytes),
+            };
+            let fingerprint = symbol_fingerprint(name.as_deref(), &normalized.bytes);
             by_index.insert(function.index, fingerprint);
             ir.symbols.push(ArtifactSymbol {
                 fingerprint,
@@ -186,8 +191,8 @@ impl ArtifactBackend for WasmBackend {
                 offset: function.offset,
                 size: function.code.len() as u64,
                 size_inferred: false,
-                code: function.code.clone(),
-                normalized: Some(function.normalized.clone()),
+                code: std::mem::take(&mut function.code),
+                normalized: Some(normalized),
                 inline_stack: Vec::new(),
             });
         }
@@ -317,14 +322,14 @@ fn parse_function(
     body: &wasmparser::FunctionBody<'_>,
     bytes: &[u8],
 ) -> Result<PendingFunction, ArtifactError> {
-    let mut normalized = Vec::new();
+    let mut normalized = Vec::with_capacity(body.range().len());
     let mut calls = Vec::new();
     let operators = body
         .get_operators_reader()
         .map_err(|error| malformed(error.to_string()))?;
     for operator in operators.into_iter_with_offsets() {
         let (operator, offset) = operator.map_err(|error| malformed(error.to_string()))?;
-        normalized.extend(opcode_key(bytes, offset)?);
+        append_opcode_key(&mut normalized, bytes, offset)?;
         match operator {
             Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
                 calls.push(PendingCall::Direct(function_index));
@@ -353,17 +358,22 @@ fn parse_function(
 /// WebAssembly's extended opcodes start with an escape byte and a LEB128
 /// subopcode. Keeping that subopcode distinguishes operations while allowing
 /// local indices, call targets, labels, and constants to normalize away.
-fn opcode_key(bytes: &[u8], offset: usize) -> Result<Vec<u8>, ArtifactError> {
+fn append_opcode_key(
+    normalized: &mut Vec<u8>,
+    bytes: &[u8],
+    offset: usize,
+) -> Result<(), ArtifactError> {
     let opcode = *bytes
         .get(offset)
         .ok_or_else(|| malformed("operator offset lies outside the input".to_owned()))?;
     if !matches!(opcode, 0xfb..=0xfe) {
-        return Ok(vec![opcode]);
+        normalized.push(opcode);
+        return Ok(());
     }
     let (subopcode, _) = unsigned_leb(bytes, offset + 1)?;
-    let mut key = vec![opcode];
-    key.extend(subopcode.to_le_bytes());
-    Ok(key)
+    normalized.push(opcode);
+    normalized.extend(subopcode.to_le_bytes());
+    Ok(())
 }
 
 /// Read one unsigned LEB128 value only to distinguish an extended opcode.
@@ -394,16 +404,6 @@ fn symbol_fingerprint(name: Option<&str>, normalized: &[u8]) -> ArtifactFingerpr
     bytes.extend(WASM_NORMALIZATION_VERSION.as_bytes());
     bytes.extend(normalized);
     ArtifactFingerprint::from_content("wasm-symbol", &bytes)
-}
-
-fn demangle(name: &str) -> String {
-    if let Ok(symbol) = rustc_demangle::try_demangle(name) {
-        return format!("{symbol:#}");
-    }
-    cpp_demangle::Symbol::new(name.as_bytes())
-        .ok()
-        .and_then(|symbol| symbol.demangle().ok())
-        .unwrap_or_else(|| name.to_owned())
 }
 
 const fn section_name(id: u8) -> Option<&'static str> {
@@ -513,13 +513,17 @@ mod tests {
 
     #[test]
     fn normalization_keeps_extended_opcodes_and_drops_call_immediates() {
-        assert_eq!(opcode_key(&[0x10, 0x01], 0).unwrap(), vec![0x10]);
-        assert_eq!(opcode_key(&[0x10, 0x7f], 0).unwrap(), vec![0x10]);
-        assert_eq!(
-            opcode_key(&[0xfc, 0x83, 0x01], 0).unwrap(),
-            vec![0xfc, 131, 0, 0, 0]
+        let mut normalized = Vec::new();
+        append_opcode_key(&mut normalized, &[0x10, 0x01], 0).unwrap();
+        append_opcode_key(&mut normalized, &[0x10, 0x7f], 0).unwrap();
+        assert_eq!(normalized, vec![0x10, 0x10]);
+
+        let mut extended = Vec::new();
+        append_opcode_key(&mut extended, &[0xfc, 0x83, 0x01], 0).unwrap();
+        assert_eq!(extended, vec![0xfc, 131, 0, 0, 0]);
+        assert!(
+            append_opcode_key(&mut extended, &[0xfc, 0x80, 0x80, 0x80, 0x80, 0x80], 0,).is_err()
         );
-        assert!(opcode_key(&[0xfc, 0x80, 0x80, 0x80, 0x80, 0x80], 0).is_err());
     }
 
     #[test]

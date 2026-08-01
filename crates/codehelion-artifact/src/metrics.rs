@@ -18,6 +18,22 @@ use crate::{ArtifactDataSegment, ArtifactFingerprint, ArtifactIr, ArtifactSymbol
 /// format- or project-specific reason to do so.
 pub const DEFAULT_MIN_DUPLICATE_DATA_BYTES: u64 = 16;
 
+/// A model-derived estimate of a refactoring's byte impact.
+///
+/// Estimates may be negative when required call overhead outweighs the
+/// duplicate bytes attributed to the proposed refactoring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EstimatedRefactorSavingsBytes(pub i64);
+
+/// A before/after reduction verified for one controlled refactoring.
+///
+/// A verified change may be negative when the controlled change grows the
+/// artifact, so it cannot be represented by an unsigned observed count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct VerifiedSavingsBytes(pub i64);
+
 /// Duplicate groups found in one artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DuplicateReport {
@@ -50,9 +66,9 @@ pub struct SizeClassification {
     /// the bytes without changing behaviour or layout.
     pub upper_bound_savings_bytes: Option<u64>,
     /// A source-informed refactoring estimate, unavailable before mapping.
-    pub estimated_refactor_savings_bytes: Option<u64>,
+    pub estimated_refactor_savings_bytes: Option<EstimatedRefactorSavingsBytes>,
     /// A before/after measured reduction, unavailable for one artifact.
-    pub verified_savings_bytes: Option<u64>,
+    pub verified_savings_bytes: Option<VerifiedSavingsBytes>,
     /// Confidence in the duplicate observation. Exact byte equality is a
     /// direct observation, while normalized equality stays separate in the
     /// duplicate report.
@@ -152,12 +168,24 @@ pub fn find_duplicate_data(artifact: &ArtifactIr, min_bytes: u64) -> Vec<Duplica
 #[must_use]
 pub fn classify_sizes(artifact: &ArtifactIr) -> SizeClassification {
     let duplicates = find_duplicates(artifact);
+    let duplicate_data = find_duplicate_data(artifact, DEFAULT_MIN_DUPLICATE_DATA_BYTES);
+    classify_sizes_from_duplicates(artifact, &duplicates, &duplicate_data)
+}
+
+/// Derive size categories while reusing duplicate groups already calculated
+/// for another report surface.
+#[must_use]
+pub fn classify_sizes_from_duplicates(
+    artifact: &ArtifactIr,
+    duplicates: &DuplicateReport,
+    duplicate_data: &[DuplicateGroup],
+) -> SizeClassification {
     let duplicated_bytes = duplicates
         .exact
         .iter()
         .map(|group| group.duplicated_bytes)
         .sum();
-    let duplicated_data_bytes = find_duplicate_data(artifact, DEFAULT_MIN_DUPLICATE_DATA_BYTES)
+    let duplicated_data_bytes = duplicate_data
         .iter()
         .map(|group| group.duplicated_bytes)
         .sum();
@@ -263,64 +291,72 @@ pub fn dead_code_candidates(artifact: &ArtifactIr) -> Option<DeadCodeReport> {
 /// The returned regions overlap (a dominator retains its descendants too), so
 /// callers must never add them together as a total saving. Ambiguous duplicate
 /// fingerprints and unresolved calls are refused rather than guessed.
+///
+/// The immediate-dominator tree is derived with Lengauer--Tarjan. A virtual
+/// root joins parser-established roots, so a symbol shared by two entry points
+/// is not incorrectly retained by either one. The algorithm stores a constant
+/// amount of state per reachable symbol rather than a reachability set per
+/// symbol.
 #[must_use]
 pub fn retained_sizes(artifact: &ArtifactIr) -> Option<Vec<RetainedSize>> {
     let graph = resolved_graph(artifact)?;
-    let all = graph.reachable.clone();
-    let mut dominators: BTreeMap<_, BTreeSet<_>> = graph
-        .reachable
+    let symbols: Vec<_> = graph.reachable.iter().copied().collect();
+    let index: BTreeMap<_, _> = symbols
         .iter()
-        .map(|node| {
-            let initial = if graph.roots.contains(node) {
-                BTreeSet::from([*node])
-            } else {
-                all.clone()
-            };
-            (*node, initial)
-        })
+        .enumerate()
+        .map(|(position, symbol)| (*symbol, position + 1))
         .collect();
-    loop {
-        let mut changed = false;
-        for node in &graph.reachable {
-            if graph.roots.contains(node) {
-                continue;
-            }
-            let predecessors: Vec<_> = artifact
-                .calls
-                .iter()
-                .filter_map(|call| {
-                    (call.target == Some(*node) && graph.reachable.contains(&call.caller))
-                        .then_some(call.caller)
-                })
-                .collect();
-            if predecessors.is_empty() {
-                continue;
-            }
-            let mut intersection = dominators[&predecessors[0]].clone();
-            for predecessor in predecessors.iter().skip(1) {
-                intersection.retain(|candidate| dominators[predecessor].contains(candidate));
-            }
-            intersection.insert(*node);
-            if dominators[node] != intersection {
-                dominators.insert(*node, intersection);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
+    let mut successors = vec![Vec::new(); symbols.len() + 1];
+    successors[0] = graph.roots.iter().map(|root| index[root]).collect();
+    for call in &artifact.calls {
+        if graph.reachable.contains(&call.caller)
+            && let Some(target) = call
+                .target
+                .filter(|target| graph.reachable.contains(target))
+        {
+            successors[index[&call.caller]].push(index[&target]);
         }
     }
-    let mut result: Vec<_> = graph
-        .reachable
+
+    let (dfs_vertices, parents) = depth_first_tree(&successors);
+    let mut dfs_index = vec![None; successors.len()];
+    for (position, vertex) in dfs_vertices.iter().copied().enumerate() {
+        dfs_index[vertex] = Some(position);
+    }
+    let mut predecessors = vec![Vec::new(); dfs_vertices.len()];
+    for (vertex, edges) in successors.iter().enumerate() {
+        let Some(from) = dfs_index[vertex] else {
+            continue;
+        };
+        for target in edges {
+            if let Some(to) = dfs_index[*target] {
+                predecessors[to].push(from);
+            }
+        }
+    }
+    let immediate = lengauer_tarjan(&predecessors, &parents);
+    let mut retained = dfs_vertices
         .iter()
-        .map(|symbol| RetainedSize {
-            symbol: *symbol,
-            retained_bytes: graph
-                .reachable
-                .iter()
-                .filter(|node| dominators[node].contains(symbol))
-                .map(|node| graph.sizes[node])
-                .sum(),
+        .map(|vertex| {
+            if *vertex == 0 {
+                0
+            } else {
+                graph.sizes[&symbols[*vertex - 1]]
+            }
+        })
+        .collect::<Vec<_>>();
+    for node in (1..retained.len()).rev() {
+        if let Some(parent) = immediate[node] {
+            retained[parent] = retained[parent].saturating_add(retained[node]);
+        }
+    }
+    let mut result: Vec<_> = dfs_vertices
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(position, vertex)| RetainedSize {
+            symbol: symbols[*vertex - 1],
+            retained_bytes: retained[position],
         })
         .collect();
     result.sort_by(|left, right| {
@@ -330,6 +366,102 @@ pub fn retained_sizes(artifact: &ArtifactIr) -> Option<Vec<RetainedSize>> {
             .then_with(|| left.symbol.cmp(&right.symbol))
     });
     Some(result)
+}
+
+/// Iterative DFS ordering and its parent relation, both in DFS indexes.
+fn depth_first_tree(successors: &[Vec<usize>]) -> (Vec<usize>, Vec<Option<usize>>) {
+    let mut vertices = vec![0];
+    let mut parents = vec![None];
+    let mut index = vec![None; successors.len()];
+    index[0] = Some(0);
+    let mut stack = vec![(0usize, 0usize)];
+    while let Some((vertex, next_edge)) = stack.last_mut() {
+        if *next_edge == successors[*vertex].len() {
+            stack.pop();
+            continue;
+        }
+        let target = successors[*vertex][*next_edge];
+        *next_edge += 1;
+        if index[target].is_some() {
+            continue;
+        }
+        let Some(parent) = index[*vertex] else {
+            continue;
+        };
+        index[target] = Some(vertices.len());
+        vertices.push(target);
+        parents.push(Some(parent));
+        stack.push((target, 0));
+    }
+    (vertices, parents)
+}
+
+/// Immediate dominators from a DFS predecessor graph, using Lengauer--Tarjan.
+fn lengauer_tarjan(predecessors: &[Vec<usize>], parents: &[Option<usize>]) -> Vec<Option<usize>> {
+    let nodes = predecessors.len();
+    let mut semi: Vec<_> = (0..nodes).collect();
+    let mut labels: Vec<_> = (0..nodes).collect();
+    let mut ancestors = vec![None; nodes];
+    let mut buckets = vec![Vec::new(); nodes];
+    let mut immediate = vec![None; nodes];
+
+    for node in (1..nodes).rev() {
+        for predecessor in &predecessors[node] {
+            let candidate = lt_eval(*predecessor, &mut ancestors, &mut labels, &semi);
+            semi[node] = semi[node].min(semi[candidate]);
+        }
+        buckets[semi[node]].push(node);
+        let Some(parent) = parents[node] else {
+            continue;
+        };
+        ancestors[node] = Some(parent);
+        for member in std::mem::take(&mut buckets[parent]) {
+            let candidate = lt_eval(member, &mut ancestors, &mut labels, &semi);
+            immediate[member] = Some(if semi[candidate] < semi[member] {
+                candidate
+            } else {
+                parent
+            });
+        }
+    }
+    for node in 1..nodes {
+        let Some(parent) = immediate[node] else {
+            continue;
+        };
+        if parent != semi[node] {
+            immediate[node] = immediate[parent];
+        }
+    }
+    immediate
+}
+
+/// Evaluate one union-find label while applying path compression.
+fn lt_eval(
+    node: usize,
+    ancestors: &mut [Option<usize>],
+    labels: &mut [usize],
+    semi: &[usize],
+) -> usize {
+    if ancestors[node].is_none() {
+        return node;
+    }
+    lt_compress(node, ancestors, labels, semi);
+    labels[node]
+}
+
+/// Compress the union-find path used by Lengauer--Tarjan evaluation.
+fn lt_compress(node: usize, ancestors: &mut [Option<usize>], labels: &mut [usize], semi: &[usize]) {
+    let Some(parent) = ancestors[node] else {
+        return;
+    };
+    let Some(_) = ancestors[parent] else {
+        return;
+    };
+    lt_compress(parent, ancestors, labels, semi);
+    if semi[labels[parent]] < semi[labels[node]] {
+        labels[node] = labels[parent];
+    }
+    ancestors[node] = ancestors[parent];
 }
 
 /// Facts available only when every local graph edge and identity is sound.
@@ -402,20 +534,17 @@ fn groups<'a>(
     symbols: &'a [ArtifactSymbol],
     key: impl Fn(&'a ArtifactSymbol) -> Option<(&'a str, &'a [u8])>,
 ) -> Vec<DuplicateGroup> {
-    let mut buckets: BTreeMap<(String, Vec<u8>), Vec<&ArtifactSymbol>> = BTreeMap::new();
+    let mut buckets: BTreeMap<(&str, &[u8]), Vec<&ArtifactSymbol>> = BTreeMap::new();
     for symbol in symbols {
         let Some((version, content)) = key(symbol) else {
             continue;
         };
-        buckets
-            .entry((version.to_owned(), content.to_vec()))
-            .or_default()
-            .push(symbol);
+        buckets.entry((version, content)).or_default().push(symbol);
     }
     let mut result: Vec<DuplicateGroup> = buckets
         .into_iter()
         .filter(|(_, members)| members.len() > 1)
-        .map(|((version, content), members)| group(&version, &content, members))
+        .map(|((version, content), members)| group(version, content, members))
         .collect();
     result.sort_by(|left, right| {
         right
@@ -446,11 +575,11 @@ fn group(version: &str, content: &[u8], symbols: Vec<&ArtifactSymbol>) -> Duplic
 }
 
 fn groups_data(segments: &[ArtifactDataSegment], min_bytes: u64) -> Vec<DuplicateGroup> {
-    let mut buckets: BTreeMap<Vec<u8>, Vec<&ArtifactDataSegment>> = BTreeMap::new();
+    let mut buckets: BTreeMap<&[u8], Vec<&ArtifactDataSegment>> = BTreeMap::new();
     for segment in segments {
         if segment.bytes.len() as u64 >= min_bytes {
             buckets
-                .entry(segment.bytes.clone())
+                .entry(segment.bytes.as_slice())
                 .or_default()
                 .push(segment);
         }
@@ -471,7 +600,7 @@ fn groups_data(segments: &[ArtifactDataSegment], min_bytes: u64) -> Vec<Duplicat
             let total = members.iter().map(|member| member.size).sum::<u64>();
             let canonical = members.iter().map(|member| member.size).max().unwrap_or(0);
             DuplicateGroup {
-                fingerprint: group_fingerprint("data-exact", &bytes),
+                fingerprint: group_fingerprint("data-exact", bytes),
                 duplicated_bytes: total.saturating_sub(canonical),
                 members,
             }
@@ -721,6 +850,41 @@ mod tests {
         assert_eq!(value(entry.fingerprint), 6);
         assert_eq!(value(left.fingerprint), 5);
         assert_eq!(value(right.fingerprint), 3);
+    }
+
+    #[test]
+    fn retained_size_handles_a_deep_call_chain_without_quadratic_state() {
+        const DEPTH: usize = 10_000;
+        let mut artifact = ArtifactIr::empty(ArtifactFormat::Wasm, b"input");
+        artifact.symbols = (0..DEPTH)
+            .map(|offset| symbol(u64::try_from(offset).unwrap(), &[1], None))
+            .collect();
+        artifact.symbols[0].exported = true;
+        artifact.capabilities.call_graph = true;
+        artifact.calls = artifact
+            .symbols
+            .windows(2)
+            .map(|pair| crate::ArtifactCall {
+                caller: pair[0].fingerprint,
+                target: Some(pair[1].fingerprint),
+                unresolved: None,
+            })
+            .collect();
+
+        let retained = retained_sizes(&artifact).unwrap();
+        assert_eq!(retained.len(), DEPTH);
+        let value = |fingerprint| {
+            retained
+                .iter()
+                .find(|item| item.symbol == fingerprint)
+                .unwrap()
+                .retained_bytes
+        };
+        assert_eq!(
+            value(artifact.symbols[0].fingerprint),
+            u64::try_from(DEPTH).unwrap()
+        );
+        assert_eq!(value(artifact.symbols[DEPTH - 1].fingerprint), 1);
     }
 
     #[test]

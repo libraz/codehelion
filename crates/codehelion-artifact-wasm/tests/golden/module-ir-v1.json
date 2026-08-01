@@ -1,5 +1,5 @@
 {
-  "schema_version": "artifact-ir-v1",
+  "schema_version": "artifact-ir-v2",
   "format": "wasm",
   "capabilities": {
     "symbols": true,

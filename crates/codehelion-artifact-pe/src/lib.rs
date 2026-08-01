@@ -8,23 +8,22 @@
 use std::collections::BTreeSet;
 use std::io::Cursor;
 
+use codehelion_artifact::symbols::demangle;
+use codehelion_artifact::x86::{X86_NORMALIZATION_VERSION, normalize_x86, trim_inferred_padding};
 use codehelion_artifact::{
     ArtifactBackend, ArtifactCapabilities, ArtifactDataSegment, ArtifactError, ArtifactFingerprint,
     ArtifactFormat, ArtifactImport, ArtifactImportKind, ArtifactIr, ArtifactRelocation,
     ArtifactSection, ArtifactSymbol, NormalizedInstructions,
 };
-use iced_x86::{Decoder, DecoderOptions, OpKind};
-use object::{
-    Architecture, Object, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind, SymbolKind,
-};
+use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind};
 use pdb::{FallibleIterator, PDB};
 
 /// Parser backend for PE images and COFF objects.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PeCoffBackend;
 
-/// Version of the x86 instruction-shape normalization representation.
-pub const PE_COFF_NORMALIZATION_VERSION: &str = "x86-operand-shape-v1";
+/// Version of the shared x86 instruction-shape normalization representation.
+pub const PE_COFF_NORMALIZATION_VERSION: &str = X86_NORMALIZATION_VERSION;
 
 impl ArtifactBackend for PeCoffBackend {
     fn format(&self) -> ArtifactFormat {
@@ -69,6 +68,11 @@ impl PeCoffBackend {
         bytes: &[u8],
         pdb_bytes: Option<&[u8]>,
     ) -> Result<ArtifactIr, ArtifactError> {
+        if !self.detects(bytes) {
+            return Err(ArtifactError::WrongFormat {
+                expected: ArtifactFormat::PeCoff,
+            });
+        }
         let file = object::File::parse(bytes).map_err(|error| malformed(error.to_string()))?;
         if !matches!(
             file.format(),
@@ -82,6 +86,9 @@ impl PeCoffBackend {
         collect_sections(&file, &mut ir)?;
         collect_imports(&file, &mut ir);
         let symbol_ranges = collect_symbols(&file, &mut ir)?;
+        if ir.symbols.is_empty() {
+            infer_text_regions(&file, &mut ir)?;
+        }
         if let Some(pdb_bytes) = pdb_bytes {
             collect_pdb_frames(&file, pdb_bytes, &symbol_ranges, &mut ir)?;
         }
@@ -148,7 +155,7 @@ fn collect_sections(file: &object::File<'_>, ir: &mut ArtifactIr) -> Result<(), 
 fn collect_imports(file: &object::File<'_>, ir: &mut ArtifactIr) {
     let mut names = BTreeSet::new();
     for symbol in file.symbols() {
-        if symbol.kind() == SymbolKind::Text && symbol.is_undefined() {
+        if symbol.is_undefined() {
             if let Some(name) = symbol
                 .name()
                 .ok()
@@ -163,7 +170,7 @@ fn collect_imports(file: &object::File<'_>, ir: &mut ArtifactIr) {
         .extend(names.into_iter().map(|name| ArtifactImport {
             module: None,
             name: Some(name),
-            kind: ArtifactImportKind::Function,
+            kind: ArtifactImportKind::Other,
         }));
 }
 
@@ -184,7 +191,9 @@ fn collect_symbols(
         let mut symbols: Vec<_> = file
             .symbols()
             .filter(|symbol| {
-                symbol.section_index() == Some(section_index) && !symbol.is_undefined()
+                symbol.section_index() == Some(section_index)
+                    && symbol.kind() == object::SymbolKind::Text
+                    && !symbol.is_undefined()
             })
             .collect();
         symbols.sort_by_key(ObjectSymbol::address);
@@ -210,6 +219,11 @@ fn collect_symbols(
             let Some(code) = data.get(start..start.saturating_add(size)) else {
                 continue;
             };
+            let code = if symbol.size() == 0 {
+                trim_inferred_padding(code, file.architecture())
+            } else {
+                code
+            };
             if code.is_empty() {
                 continue;
             }
@@ -231,7 +245,7 @@ fn collect_symbols(
                 exported: symbol.is_global(),
                 section: u32::try_from(section_index.0).ok(),
                 offset: section_offset.saturating_add(relative),
-                size: u64::try_from(size).unwrap_or(u64::MAX),
+                size: u64::try_from(code.len()).unwrap_or(u64::MAX),
                 size_inferred: symbol.size() == 0,
                 code: code.to_vec(),
                 normalized,
@@ -242,11 +256,45 @@ fn collect_symbols(
                 start: symbol.address(),
                 end: symbol
                     .address()
-                    .saturating_add(u64::try_from(size).unwrap_or(u64::MAX)),
+                    .saturating_add(u64::try_from(code.len()).unwrap_or(u64::MAX)),
             });
         }
     }
     Ok(ranges)
+}
+
+/// Preserve executable code in a PE/COFF image that has no COFF symbols.
+///
+/// Linked release images commonly omit the symbol table. One explicitly
+/// inferred region per text section says that code was observed while making
+/// clear that no function boundary was available.
+fn infer_text_regions(file: &object::File<'_>, ir: &mut ArtifactIr) -> Result<(), ArtifactError> {
+    for section in file
+        .sections()
+        .filter(|section| section.kind() == SectionKind::Text)
+    {
+        let data = section
+            .data()
+            .map_err(|error| malformed(error.to_string()))?;
+        if data.is_empty() {
+            continue;
+        }
+        let (offset, _) = section.file_range().unwrap_or((0, 0));
+        let normalized = normalize_x86(data, file.architecture());
+        ir.symbols.push(ArtifactSymbol {
+            fingerprint: symbol_fingerprint(None, section.name().ok(), normalized.as_ref(), data),
+            name: None,
+            exported: false,
+            section: u32::try_from(section.index().0).ok(),
+            offset,
+            size: u64::try_from(data.len()).unwrap_or(u64::MAX),
+            size_inferred: true,
+            code: data.to_vec(),
+            normalized,
+            inline_stack: Vec::new(),
+        });
+    }
+    Ok(())
 }
 
 /// Attach PDB line records to symbol identities after checking `CodeView` identity.
@@ -393,47 +441,6 @@ fn relocation_target_name(file: &object::File<'_>, target: RelocationTarget) -> 
         .map(demangle)
 }
 
-fn demangle(name: &str) -> String {
-    if let Ok(symbol) = rustc_demangle::try_demangle(name) {
-        return format!("{symbol:#}");
-    }
-    cpp_demangle::Symbol::new(name.as_bytes())
-        .ok()
-        .and_then(|symbol| symbol.demangle().ok())
-        .unwrap_or_else(|| name.to_owned())
-}
-
-fn normalize_x86(code: &[u8], architecture: Architecture) -> Option<NormalizedInstructions> {
-    let bitness = match architecture {
-        Architecture::I386 => 32,
-        Architecture::X86_64 => 64,
-        _ => return None,
-    };
-    let mut decoder = Decoder::with_ip(bitness, code, 0, DecoderOptions::NONE);
-    let mut normalized = Vec::new();
-    while decoder.can_decode() {
-        let instruction = decoder.decode();
-        if instruction.is_invalid() {
-            return None;
-        }
-        normalized.extend((instruction.code() as u32).to_le_bytes());
-        normalized.push(u8::try_from(instruction.op_count()).ok()?);
-        for operand in 0..instruction.op_count() {
-            let kind = instruction.op_kind(operand);
-            normalized.push(kind as u8);
-            if kind == OpKind::Memory {
-                normalized.push(instruction.memory_size() as u8);
-                normalized.push(u8::try_from(instruction.memory_index_scale()).ok()?);
-                normalized.push(u8::try_from(instruction.memory_displ_size()).ok()?);
-            }
-        }
-    }
-    Some(NormalizedInstructions {
-        version: PE_COFF_NORMALIZATION_VERSION.to_owned(),
-        bytes: normalized,
-    })
-}
-
 fn symbol_fingerprint(
     name: Option<&str>,
     section: Option<&str>,
@@ -476,7 +483,7 @@ mod tests {
 
     use super::*;
     use object::write::{Object as WriteObject, StandardSection, Symbol, SymbolSection};
-    use object::{BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
+    use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
     use proptest::prelude::*;
 
     fn coff_fixture() -> Vec<u8> {
@@ -495,6 +502,30 @@ mod tests {
             flags: SymbolFlags::None,
         });
         object.write().expect("write COFF fixture")
+    }
+
+    fn coff_fixture_without_symbols() -> Vec<u8> {
+        let mut object =
+            WriteObject::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let text = object.section_id(StandardSection::Text);
+        object.append_section_data(text, &[0x90, 0xc3], 1);
+        object.write().expect("write symbol-free COFF fixture")
+    }
+
+    fn coff_undefined_import_fixture() -> Vec<u8> {
+        let mut object =
+            WriteObject::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        object.add_symbol(Symbol {
+            name: b"external_call".to_vec(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Dynamic,
+            weak: false,
+            section: SymbolSection::Undefined,
+            flags: SymbolFlags::None,
+        });
+        object.write().expect("write COFF undefined import fixture")
     }
 
     #[test]
@@ -517,11 +548,33 @@ mod tests {
     }
 
     #[test]
+    fn symbol_free_coff_keeps_an_explicitly_inferred_text_region() {
+        let ir = PeCoffBackend
+            .parse(&coff_fixture_without_symbols())
+            .expect("parse symbol-free COFF fixture");
+        assert_eq!(ir.symbols.len(), 1, "{ir:#?}");
+        assert!(ir.capabilities.symbols);
+        assert!(ir.symbols[0].size_inferred);
+        assert_eq!(ir.symbols[0].name, None);
+        assert_eq!(ir.symbols[0].code, vec![0x90, 0xc3]);
+    }
+
+    #[test]
+    fn records_undefined_coff_symbols_as_imports() {
+        let ir = PeCoffBackend
+            .parse(&coff_undefined_import_fixture())
+            .expect("parse COFF undefined import fixture");
+        assert_eq!(ir.imports.len(), 1, "{ir:#?}");
+        assert_eq!(ir.imports[0].name.as_deref(), Some("external_call"));
+        assert_eq!(ir.imports[0].kind, ArtifactImportKind::Other);
+    }
+
+    #[test]
     fn other_bytes_do_not_claim_the_backend() {
         assert!(!PeCoffBackend.detects(b"not an object"));
         assert!(matches!(
             PeCoffBackend.parse(b"not an object"),
-            Err(ArtifactError::Malformed { .. })
+            Err(ArtifactError::WrongFormat { .. })
         ));
     }
 

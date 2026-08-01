@@ -33,14 +33,41 @@ impl ArtifactBackend for ArchiveBackend {
         let archive = ArchiveFile::parse(bytes).map_err(|error| malformed(error.to_string()))?;
         let mut ir = ArtifactIr::empty(ArtifactFormat::Archive, bytes);
         for member in archive.members() {
-            let member = member.map_err(|error| malformed(error.to_string()))?;
+            let member = match member {
+                Ok(member) => member,
+                Err(error) => {
+                    ir.archive_members.push(incomplete_member(
+                        "<truncated archive member>".to_owned(),
+                        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                        0,
+                        &error.to_string(),
+                    ));
+                    break;
+                }
+            };
             let name = String::from_utf8_lossy(member.name()).into_owned();
             let (offset, size) = member.file_range();
             let thin = member.is_thin();
-            let data = member
-                .data(bytes)
-                .map_err(|error| malformed(error.to_string()))?;
-            let fingerprint = ArtifactFingerprint::from_content("archive-member", data);
+            let data = match member.data(bytes) {
+                Ok(data) => data,
+                Err(error) => {
+                    ir.archive_members.push(incomplete_member(
+                        name,
+                        offset,
+                        size,
+                        &error.to_string(),
+                    ));
+                    continue;
+                }
+            };
+            let fingerprint = if thin {
+                // Thin members deliberately have no local payload. Their
+                // declared member paths are still distinct local evidence,
+                // unlike hashing the same empty byte slice for every member.
+                ArtifactFingerprint::from_content("thin-archive-member", name.as_bytes())
+            } else {
+                ArtifactFingerprint::from_content("archive-member", data)
+            };
             let format = detect_format(data);
             let mut provenance = ArtifactArchiveMember {
                 name,
@@ -84,6 +111,23 @@ impl ArtifactBackend for ArchiveBackend {
             relocations: true,
             data_segments: true,
         }
+    }
+}
+
+/// Record an unreadable archive member without discarding earlier members.
+fn incomplete_member(name: String, offset: u64, size: u64, error: &str) -> ArtifactArchiveMember {
+    let identity = format!("{name}:{offset}:{size}");
+    ArtifactArchiveMember {
+        name,
+        fingerprint: ArtifactFingerprint::from_content(
+            "archive-incomplete-member",
+            identity.as_bytes(),
+        ),
+        offset,
+        size,
+        format: None,
+        thin: false,
+        parse_error: Some(format!("truncated or unreadable archive member: {error}")),
     }
 }
 
@@ -241,6 +285,13 @@ mod tests {
         archive
     }
 
+    fn thin_archive_fixture() -> Vec<u8> {
+        let mut archive = b"!<thin>\n".to_vec();
+        archive.extend(archive_member("left.obj", b""));
+        archive.extend(archive_member("right.obj", b""));
+        archive
+    }
+
     #[test]
     fn delegates_local_coff_members_without_executing_them() {
         let ir = ArchiveBackend
@@ -256,6 +307,46 @@ mod tests {
         assert_eq!(ir.symbols.len(), 2, "{ir:#?}");
         assert_ne!(ir.symbols[0].fingerprint, ir.symbols[1].fingerprint);
         assert!(ir.capabilities.symbols);
+    }
+
+    #[test]
+    fn a_truncated_later_member_keeps_the_earlier_members_available() {
+        let mut bytes = archive_fixture();
+        bytes.truncate(bytes.len().saturating_sub(1));
+
+        let ir = ArchiveBackend
+            .parse(&bytes)
+            .expect("a readable archive prefix remains useful");
+        assert!(
+            ir.archive_members
+                .iter()
+                .any(|member| member.name == "left.obj" && member.parse_error.is_none()),
+            "the complete leading member remains available: {:#?}",
+            ir.archive_members
+        );
+        assert!(
+            ir.archive_members.iter().any(|member| {
+                member
+                    .parse_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("truncated or unreadable"))
+            }),
+            "the unreadable tail is accounted for: {:#?}",
+            ir.archive_members
+        );
+    }
+
+    #[test]
+    fn thin_members_keep_distinct_path_based_fingerprints() {
+        let ir = ArchiveBackend
+            .parse(&thin_archive_fixture())
+            .expect("parse thin archive manifest");
+        assert_eq!(ir.archive_members.len(), 2, "{ir:#?}");
+        assert!(ir.archive_members.iter().all(|member| member.thin));
+        assert_ne!(
+            ir.archive_members[0].fingerprint,
+            ir.archive_members[1].fingerprint
+        );
     }
 
     #[test]

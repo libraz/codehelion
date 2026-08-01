@@ -12,6 +12,10 @@ use crate::{ArtifactFingerprint, ArtifactInlineFrame, ArtifactIr, ArtifactSource
 ///
 /// Malformed or absent debug metadata deliberately degrades to no mappings.
 /// Addresses are used only for the local join and are never stored as IDs.
+#[allow(
+    clippy::too_many_lines,
+    reason = "DWARF collection and the local address-to-symbol join form one parser boundary"
+)]
 pub fn attach_dwarf_frames<S: BuildHasher>(
     file: &object::File<'_>,
     symbol_addresses: &HashMap<ArtifactFingerprint, (u64, u64), S>,
@@ -71,18 +75,34 @@ pub fn attach_dwarf_frames<S: BuildHasher>(
     if frames.is_empty() && line_records.is_empty() {
         return;
     }
+    frames.sort_by_key(|frame| frame.begin);
+    line_records.sort_by_key(|frame| frame.address);
+    let mut symbols: Vec<_> = symbol_addresses
+        .iter()
+        .map(|(fingerprint, (address, size))| (*fingerprint, *address, *size))
+        .collect();
+    symbols.sort_by_key(|(_, address, _)| *address);
+    let frame_matches = frames_at_symbol_addresses(&frames, &symbols);
+    let symbol_rows: HashMap<_, _> = ir
+        .symbols
+        .iter()
+        .enumerate()
+        .map(|(index, symbol)| (symbol.fingerprint, index))
+        .collect();
     let mut source_paths = BTreeSet::new();
-    for (fingerprint, (address, size)) in symbol_addresses {
-        let mut matching: Vec<_> = frames
-            .iter()
-            .filter(|candidate| candidate.begin <= *address && *address < candidate.end)
-            .map(|candidate| (candidate.depth, candidate.frame.clone()))
+    for ((fingerprint, address, size), frame_indexes) in symbols.into_iter().zip(frame_matches) {
+        let mut matching: Vec<_> = frame_indexes
+            .into_iter()
+            .map(|index| (frames[index].depth, frames[index].frame.clone()))
             .collect();
-        let symbol_end = address.saturating_add(*size);
+        let symbol_end = address.saturating_add(size);
+        let line_start = line_records.partition_point(|candidate| candidate.address < address);
         matching.extend(
             line_records
-                .iter()
-                .filter(|candidate| *address <= candidate.address && candidate.address < symbol_end)
+                .get(line_start..)
+                .into_iter()
+                .flatten()
+                .take_while(|candidate| candidate.address < symbol_end)
                 .map(|candidate| (isize::MAX, candidate.frame.clone())),
         );
         matching.sort_by(|left, right| {
@@ -97,11 +117,8 @@ pub fn attach_dwarf_frames<S: BuildHasher>(
         if matching.is_empty() {
             continue;
         }
-        if let Some(symbol) = ir
-            .symbols
-            .iter_mut()
-            .find(|symbol| symbol.fingerprint == *fingerprint)
-        {
+        if let Some(index) = symbol_rows.get(&fingerprint) {
+            let symbol = &mut ir.symbols[*index];
             symbol.inline_stack = matching.into_iter().map(|(_, frame)| frame).collect();
             source_paths.extend(symbol.inline_stack.iter().map(|frame| frame.source.clone()));
         }
@@ -111,6 +128,27 @@ pub fn attach_dwarf_frames<S: BuildHasher>(
             .into_iter()
             .map(|uri| ArtifactSourceMapping { uri }),
     );
+}
+
+fn frames_at_symbol_addresses(
+    frames: &[DwarfFrame],
+    symbols: &[(ArtifactFingerprint, u64, u64)],
+) -> Vec<Vec<usize>> {
+    let mut active = BTreeSet::new();
+    let mut next = 0;
+    symbols
+        .iter()
+        .map(|(_, address, _)| {
+            while next < frames.len() && frames[next].begin <= *address {
+                active.insert((frames[next].end, next));
+                next += 1;
+            }
+            while active.first().is_some_and(|(end, _)| *end <= *address) {
+                let _ = active.pop_first();
+            }
+            active.iter().map(|(_, index)| *index).collect()
+        })
+        .collect()
 }
 
 fn debug_section<'data, 'file>(
@@ -276,4 +314,66 @@ pub fn resolve_source_path(
         None => compilation_directory.map(ToString::to_string),
     };
     base.map_or_else(|| file.to_string(), |base| under(&base, file))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DwarfFrame, frames_at_symbol_addresses, resolve_source_path};
+    use crate::{ArtifactFingerprint, ArtifactInlineFrame, ArtifactSourceLocationEvidenceKind};
+
+    fn frame(begin: u64, end: u64) -> DwarfFrame {
+        DwarfFrame {
+            begin,
+            end,
+            depth: 0,
+            frame: ArtifactInlineFrame {
+                evidence_kind: ArtifactSourceLocationEvidenceKind::Dwarf,
+                source: "fixture.rs".to_owned(),
+                line: Some(1),
+                column: None,
+            },
+        }
+    }
+
+    #[test]
+    fn frame_join_advances_a_sweep_index_without_rescanning_all_frames() {
+        let frames = [frame(10, 30), frame(20, 25), frame(40, 50)];
+        let symbols = [
+            (ArtifactFingerprint::from_content("test", b"first"), 12, 4),
+            (ArtifactFingerprint::from_content("test", b"second"), 22, 2),
+            (ArtifactFingerprint::from_content("test", b"third"), 45, 3),
+        ];
+        assert_eq!(
+            frames_at_symbol_addresses(&frames, &symbols),
+            vec![vec![0], vec![1, 0], vec![2]]
+        );
+    }
+
+    #[test]
+    fn relative_paths_keep_their_declared_directory_context_without_reading_source() {
+        assert_eq!(
+            resolve_source_path("src/main.cpp", None, Some("/work/tree")),
+            "/work/tree/src/main.cpp"
+        );
+        assert_eq!(
+            resolve_source_path("header.hpp", Some("include"), Some("/work/tree")),
+            "/work/tree/include/header.hpp"
+        );
+        assert_eq!(
+            resolve_source_path("entry.cpp", Some("/other/build"), Some("/work/tree")),
+            "/other/build/entry.cpp"
+        );
+        assert_eq!(
+            resolve_source_path("/outside/entry.cpp", Some("include"), Some("/work/tree")),
+            "/outside/entry.cpp"
+        );
+        assert_eq!(
+            resolve_source_path("src/main.cpp", None, Some("/work/tree/")),
+            "/work/tree/src/main.cpp"
+        );
+        assert_eq!(
+            resolve_source_path("header.hpp", Some("include/"), Some("/work/tree/")),
+            "/work/tree/include/header.hpp"
+        );
+    }
 }
