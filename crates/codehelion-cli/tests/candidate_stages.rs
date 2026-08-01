@@ -125,15 +125,15 @@ const CORPORA: &[Expected] = &[
     },
     Expected {
         path: "labeled/cjson/snapshot",
-        groups: 18,
-        without_near_match: 18,
-        without_shape_gate: 18,
+        groups: 17,
+        without_near_match: 17,
+        without_shape_gate: 17,
     },
     Expected {
         path: "labeled/lz4/snapshot",
-        groups: 29,
-        without_near_match: 29,
-        without_shape_gate: 29,
+        groups: 28,
+        without_near_match: 28,
+        without_shape_gate: 28,
     },
     Expected {
         path: "labeled/serde-json/snapshot",
@@ -346,4 +346,60 @@ fn removing_a_candidate_stage_changes_nothing_it_was_recorded_to_change() {
     }
     println!("{table}");
     assert!(complaints.is_empty(), "\n{complaints}");
+}
+
+/// Verification is the expensive final comparison rather than another
+/// candidate pass. Its ceiling must therefore stop all precise comparisons
+/// without pretending that the candidates were never discovered.
+#[test]
+fn verification_budget_is_a_visible_deterministic_ceiling() {
+    let root = repo_root();
+    let (irs, languages) = parse_tree(&root.join("corpus/synthetic/rust"));
+    let complete = analyze(&irs, languages, &StructuralConfig::default());
+    assert!(
+        complete.stats.unit_pairs > 0,
+        "fixture supplies candidate pairs"
+    );
+
+    let bounded = StructuralConfig {
+        verification_budget: 0,
+        ..StructuralConfig::default()
+    };
+    let limited = analyze(&irs, languages, &bounded);
+    assert_eq!(limited.stats.unit_pairs, complete.stats.unit_pairs);
+    assert_eq!(
+        limited.stats.verification_budget_dropped,
+        complete.stats.unit_pairs
+    );
+    assert_eq!(limited.stats.verified_pairs, 0);
+    assert!(limited.groups.groups.is_empty());
+}
+
+/// `min-clone-tokens` is a detector floor in Structural mode, not only a
+/// ranking parameter. The raw candidate accounting remains visible even when
+/// the configured floor rejects every finite parsed unit.
+#[test]
+fn structural_minimum_clone_tokens_filters_candidates_before_verification() {
+    let root = repo_root();
+    let (irs, languages) = parse_tree(&root.join("corpus/synthetic/rust"));
+    let complete = analyze(&irs, languages, &StructuralConfig::default());
+    assert!(
+        complete.stats.unit_pairs > 0,
+        "fixture supplies structural candidate pairs"
+    );
+
+    let filtered = analyze(
+        &irs,
+        languages,
+        &StructuralConfig {
+            min_clone_tokens: u32::MAX,
+            ..StructuralConfig::default()
+        },
+    );
+    assert_eq!(filtered.stats.unit_pairs, 0);
+    assert!(filtered.stats.below_min_clone_token_pairs > 0);
+    assert_eq!(filtered.stats.verified_pairs, 0);
+    assert!(filtered.groups.groups.is_empty());
+    assert!(filtered.unrepresented.is_empty());
+    assert!(filtered.regions.is_empty());
 }

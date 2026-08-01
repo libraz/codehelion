@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v1.schema.json",
+  "title": "codehelion artifact comparison report v1",
+  "description": "Machine-readable before/after comparison of two locally read artifacts. The direct before-minus-after measurement is named observed_size_reduction_bytes; verified savings occurs only in a controlled calibration.",
+  "type": "object",
+  "required": [
+    "schema_version", "before", "after", "observed_size_reduction_bytes",
+    "duplicated_code_delta_bytes", "duplicated_data_delta_bytes", "calibration",
+    "symbol_changes", "symbol_deltas", "duplicate_group_deltas",
+    "build_variant_warning", "assumptions"
+  ],
+  "properties": {
+    "schema_version": { "const": "artifact-comparison-report-v1" },
+    "before": { "$ref": "#/$defs/artifact" },
+    "after": { "$ref": "#/$defs/artifact" },
+    "observed_size_reduction_bytes": { "type": "integer" },
+    "duplicated_code_delta_bytes": { "type": "integer" },
+    "duplicated_data_delta_bytes": { "type": "integer" },
+    "calibration": { "$ref": "#/$defs/calibration" },
+    "symbol_changes": { "$ref": "#/$defs/symbol_changes" },
+    "symbol_deltas": { "type": "array", "items": { "$ref": "#/$defs/symbol_delta" } },
+    "duplicate_group_deltas": { "type": "array", "items": { "$ref": "#/$defs/duplicate_group_delta" } },
+    "build_variant_warning": { "type": ["string", "null"] },
+    "assumptions": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "required": ["path", "format", "fingerprint", "build_variant", "sizes"],
+      "properties": {
+        "path": { "type": "string" },
+        "format": { "enum": ["wasm", "elf", "macho", "pe-coff", "archive"] },
+        "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "build_variant": { "$ref": "#/$defs/build_variant" },
+        "sizes": { "$ref": "#/$defs/sizes" }
+      }
+    },
+    "build_variant": {
+      "type": ["object", "null"],
+      "required": ["manifest_path", "fingerprint"],
+      "properties": {
+        "manifest_path": { "type": "string" },
+        "fingerprint": { "type": "string" }
+      }
+    },
+    "sizes": {
+      "type": "object",
+      "required": [
+        "observed_bytes", "duplicated_bytes", "retained_bytes", "shared_dependency_bytes",
+        "duplicated_data_bytes", "upper_bound_savings_bytes", "estimated_refactor_savings_bytes",
+        "verified_savings_bytes", "clone_confidence", "savings_confidence", "assumptions"
+      ],
+      "properties": {
+        "observed_bytes": { "type": "integer", "minimum": 0 },
+        "duplicated_bytes": { "type": "integer", "minimum": 0 },
+        "retained_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "shared_dependency_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "duplicated_data_bytes": { "type": "integer", "minimum": 0 },
+        "upper_bound_savings_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "estimated_refactor_savings_bytes": { "type": ["integer", "null"] },
+        "verified_savings_bytes": { "type": ["integer", "null"] },
+        "clone_confidence": { "type": "string" },
+        "savings_confidence": { "type": "string" },
+        "assumptions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "calibration": {
+      "type": ["object", "null"],
+      "required": [
+        "source_run", "clone_group_fingerprint", "estimated_refactor_savings_bytes",
+        "verified_savings_bytes", "absolute_error_bytes", "relative_error"
+      ],
+      "properties": {
+        "source_run": { "type": "integer" },
+        "clone_group_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "estimated_refactor_savings_bytes": { "type": "integer" },
+        "verified_savings_bytes": { "type": "integer" },
+        "absolute_error_bytes": { "type": "integer", "minimum": 0 },
+        "relative_error": { "type": ["number", "null"], "minimum": 0 }
+      }
+    },
+    "symbol_changes": {
+      "type": "object",
+      "required": ["added", "removed", "modified_named_symbols"],
+      "properties": {
+        "added": { "type": "integer", "minimum": 0 },
+        "removed": { "type": "integer", "minimum": 0 },
+        "modified_named_symbols": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "symbol_delta": {
+      "type": "object",
+      "required": ["kind", "name", "fingerprint", "size_delta_bytes"],
+      "properties": {
+        "kind": { "type": "string" },
+        "name": { "type": ["string", "null"] },
+        "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "size_delta_bytes": { "type": "integer" }
+      }
+    },
+    "duplicate_group_delta": {
+      "type": "object",
+      "required": ["kind", "fingerprint", "duplicated_bytes_delta", "members_delta"],
+      "properties": {
+        "kind": { "type": "string" },
+        "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "duplicated_bytes_delta": { "type": "integer" },
+        "members_delta": { "type": "integer" }
+      }
+    }
+  }
+}

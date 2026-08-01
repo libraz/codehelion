@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use codehelion_core::discovery::AnalysisMode;
 use serde::{Deserialize, Serialize};
 
 /// Top-level command-line parser.
@@ -76,11 +77,27 @@ pub enum Mode {
 impl Mode {
     /// What this mode is called, as it is typed and as a message names it.
     #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Fast => "fast",
-            Self::Structural => "structural",
-            Self::Semantic => "semantic",
+    pub fn name(self) -> &'static str {
+        AnalysisMode::from(self).name()
+    }
+}
+
+impl From<Mode> for AnalysisMode {
+    fn from(mode: Mode) -> Self {
+        match mode {
+            Mode::Fast => Self::Fast,
+            Mode::Structural => Self::Structural,
+            Mode::Semantic => Self::Semantic,
+        }
+    }
+}
+
+impl From<AnalysisMode> for Mode {
+    fn from(mode: AnalysisMode) -> Self {
+        match mode {
+            AnalysisMode::Fast => Self::Fast,
+            AnalysisMode::Structural => Self::Structural,
+            AnalysisMode::Semantic => Self::Semantic,
         }
     }
 }
@@ -196,6 +213,15 @@ pub const DEFAULT_ARTIFACT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 /// Default wall-clock ceiling for one isolated artifact worker.
 pub const DEFAULT_ARTIFACT_TIMEOUT_SECONDS: u64 = 30;
 
+/// Maximum input accepted by the untrusted artifact preset.
+pub const UNTRUSTED_ARTIFACT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Worker deadline applied by the untrusted artifact preset.
+pub const UNTRUSTED_ARTIFACT_TIMEOUT_SECONDS: u64 = 10;
+
+/// Address-space ceiling applied by the untrusted preset where enforceable.
+pub const UNTRUSTED_ARTIFACT_MAX_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Arguments for the `artifact` subcommand.
 #[derive(Debug, Clone, clap::Args, Serialize, Deserialize)]
 pub struct ArtifactArgs {
@@ -204,7 +230,9 @@ pub struct ArtifactArgs {
     /// Report format.
     #[arg(long, value_enum, default_value_t = ArtifactFormat::Text)]
     pub format: ArtifactFormat,
-    /// Require this input format instead of accepting automatic detection.
+    /// Require magic-byte detection to identify the input as this format.
+    ///
+    /// This is an assertion, not an override: a mismatch is rejected.
     #[arg(long, value_enum)]
     pub input_format: Option<ArtifactInputFormat>,
     /// Write the report to this file instead of standard output.
@@ -232,6 +260,9 @@ pub struct ArtifactArgs {
     /// refuse the request rather than silently ignoring it.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub max_memory_bytes: Option<u64>,
+    /// Clamp input, time, and supported memory ceilings for an artifact nobody vouches for.
+    #[arg(long)]
+    pub untrusted: bool,
     /// JSON manifest describing this artifact's build variant.
     #[arg(long)]
     pub build_variant: Option<PathBuf>,
@@ -252,7 +283,9 @@ pub struct ArtifactArgs {
     /// only with the same `LC_UUID`, and PE companions only with the matching
     /// `CodeView` PDB GUID and an eligible PDB age. Without this option,
     /// Mach-O analysis also checks its conventional sibling dSYM bundle.
-    #[arg(long, requires = "source_run")]
+    /// This input is independent of source correlation; only `--source-run`
+    /// requires a matching build-variant manifest.
+    #[arg(long)]
     pub debug_file: Option<PathBuf>,
     /// Local database path, overriding the configured location.
     #[arg(long)]
@@ -264,6 +297,8 @@ pub struct ArtifactArgs {
 pub enum ArtifactAction {
     /// Analyse one compiled artifact.
     Analyze(ArtifactArgs),
+    /// Re-render one saved compiled-artifact analysis without reopening its input.
+    Report(ArtifactReportArgs),
     /// Run an already validated artifact request inside the isolated worker.
     #[command(hide = true)]
     Isolated(ArtifactIsolatedArgs),
@@ -271,6 +306,26 @@ pub enum ArtifactAction {
     Compare(ArtifactCompareArgs),
     /// Summarize controlled savings-calibration measurements.
     Calibration(ArtifactCalibrationArgs),
+}
+
+/// Arguments for `artifact report`.
+#[derive(Debug, clap::Args)]
+pub struct ArtifactReportArgs {
+    /// Saved artifact analysis to re-render.
+    #[arg(long)]
+    pub analysis: i64,
+    /// Local database path holding the saved analysis.
+    #[arg(long)]
+    pub db: Option<PathBuf>,
+    /// Report format.
+    #[arg(long, value_enum, default_value_t = ArtifactFormat::Text)]
+    pub format: ArtifactFormat,
+    /// Write the report to this file instead of standard output.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    /// Include every extracted symbol in a text report.
+    #[arg(long)]
+    pub verbose: bool,
 }
 
 /// Private file-based request passed from an artifact command to its worker.
@@ -308,6 +363,11 @@ pub struct ArtifactCompareArgs {
     pub before: PathBuf,
     /// Later artifact.
     pub after: PathBuf,
+    /// Require magic-byte detection to identify both artifacts as this format.
+    ///
+    /// This is an assertion, not an override: either mismatch is rejected.
+    #[arg(long, value_enum)]
+    pub input_format: Option<ArtifactInputFormat>,
     /// JSON manifest describing the earlier artifact's build variant.
     ///
     /// Supplying both manifests lets the comparison report warn when build
@@ -340,6 +400,9 @@ pub struct ArtifactCompareArgs {
     /// refuse the request rather than silently ignoring it.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub max_memory_bytes: Option<u64>,
+    /// Clamp input, time, and supported memory ceilings for artifacts nobody vouches for.
+    #[arg(long)]
+    pub untrusted: bool,
     /// Source scan that produced the clone group being calibrated.
     ///
     /// Must be used with `--clone-group`, both build-variant manifests, and
@@ -371,13 +434,18 @@ pub struct ScanArgs {
     /// Write the report to this file instead of standard output.
     #[arg(long)]
     pub output: Option<PathBuf>,
+    /// Replace an existing output file.
+    #[arg(long)]
+    pub force: bool,
     /// Configuration file to use instead of the discovered `codehelion.toml`.
     #[arg(long)]
     pub config: Option<PathBuf>,
     /// Also scan files that `.gitignore` and related ignore files would hide.
     #[arg(long)]
     pub no_ignore: bool,
-    /// Number of worker threads (default: automatic).
+    /// Frontend read-and-lex worker threads (default: automatic).
+    ///
+    /// Clone grouping and report rendering remain serial.
     #[arg(long)]
     pub jobs: Option<usize>,
     /// Local database path, overriding the configured location.
@@ -396,8 +464,9 @@ pub struct ScanArgs {
     pub baseline_mode: BaselineMode,
     /// Also compare exact duplicate units between distinct C/C++ build variants.
     ///
-    /// Normal scan snapshots remain partition-local. This opt-in emits and
-    /// stores a separate comparison; it never changes a partition's variant.
+    /// Requires Semantic mode. Normal scan snapshots remain partition-local.
+    /// This opt-in emits and stores a separate comparison; it never changes a
+    /// partition's variant.
     #[arg(long)]
     pub compare_build_variants: bool,
     /// Compare registered Rust and C++ semantic pipelines across explicitly
@@ -408,7 +477,8 @@ pub struct ScanArgs {
     /// variants retained.
     #[arg(long)]
     pub compare_languages: bool,
-    /// Also list suppressed groups, with the reason each was hidden.
+    /// Also list suppressed groups in a text report, with the reason each was
+    /// hidden. JSON and SARIF always retain suppressed findings.
     #[arg(long)]
     pub show_suppressed: bool,
     /// Order the report on this axis instead of the composed priority.
@@ -451,6 +521,10 @@ pub struct ScanArgs {
     /// Let a compiler helper run these classes of the project's own code:
     /// build-script, proc-macro, configure, compiler-wrapper, generated-source.
     ///
+    /// Only build-script is implemented by a compiler helper at present.
+    /// The other class names are reserved protocol values and are rejected
+    /// as unavailable rather than as a missing installation.
+    ///
     /// Nothing runs without this. A flag rather than a configuration key for
     /// the same reason as `--untrusted`, and stronger: the file that would
     /// carry the setting is one the tree being scanned supplies.
@@ -461,6 +535,12 @@ pub struct ScanArgs {
 /// Arguments for the `report` subcommand.
 #[derive(Debug, clap::Args)]
 pub struct ReportArgs {
+    /// Repository path whose configuration and local database to use.
+    #[arg(long, default_value = ".")]
+    pub path: PathBuf,
+    /// Configuration file to use instead of the one discovered from `--path`.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
     /// Row id of the completed scan to render again, as the scan that recorded
     /// it reported. The database keeps one scan, so this names that snapshot
     /// rather than picking one out of a history.
@@ -472,7 +552,11 @@ pub struct ReportArgs {
     /// Write the report to this file instead of standard output.
     #[arg(long)]
     pub output: Option<PathBuf>,
-    /// Also list suppressed groups, with the reason each was hidden.
+    /// Replace an existing output file.
+    #[arg(long)]
+    pub force: bool,
+    /// Also list suppressed groups in a text report, with the reason each was
+    /// hidden. JSON and SARIF always retain suppressed findings.
     #[arg(long)]
     pub show_suppressed: bool,
     /// Order the report on this axis instead of the composed priority.
@@ -496,6 +580,12 @@ pub struct ReportArgs {
 /// Arguments for the `explain` subcommand.
 #[derive(Debug, clap::Args)]
 pub struct ExplainArgs {
+    /// Repository path whose configuration and local database to use.
+    #[arg(long, default_value = ".")]
+    pub path: PathBuf,
+    /// Configuration file to use instead of the one discovered from `--path`.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
     /// Stable finding or cross-language comparison group ID to explain.
     pub finding_id: String,
     /// Output format for the detail view.
@@ -548,6 +638,9 @@ pub struct BaselineArgs {
     /// Scanned path whose recorded run the baseline is taken from.
     #[arg(default_value = ".")]
     pub path: PathBuf,
+    /// Configuration file to use instead of the one discovered from the scanned path.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
     /// Baseline file to write.
     #[arg(long, default_value = BASELINE_FILE_NAME)]
     pub file: PathBuf,
@@ -564,15 +657,30 @@ pub struct BaselineArgs {
 pub enum CacheAction {
     /// Show the local database's location and size.
     Status {
+        /// Repository path whose configuration and local database to use.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Configuration file to use instead of the one discovered from `--path`.
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Local database path, overriding the configured location.
         #[arg(long)]
         db: Option<PathBuf>,
     },
-    /// Delete the local database.
+    /// Permanently delete the local database.
     Clear {
+        /// Repository path whose configuration and local database to use.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Configuration file to use instead of the one discovered from `--path`.
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Local database path, overriding the configured location.
         #[arg(long)]
         db: Option<PathBuf>,
+        /// Confirm permanent deletion of the local audit database.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -585,6 +693,15 @@ mod tests {
     fn cli_definition_is_valid() {
         // `debug_assert` catches structural mistakes in the clap definition.
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn cli_modes_round_trip_through_the_core_mode_identity() {
+        for mode in [Mode::Fast, Mode::Structural, Mode::Semantic] {
+            let core = AnalysisMode::from(mode);
+            assert_eq!(Mode::from(core), mode);
+            assert_eq!(mode.name(), core.name());
+        }
     }
 
     #[test]
@@ -646,8 +763,8 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)] // Expected parse outcomes are the test subject.
-    fn debug_file_requires_an_explicit_correlated_source_run() {
-        let error = Cli::try_parse_from([
+    fn debug_file_can_be_used_without_source_correlation() {
+        let parsed = Cli::try_parse_from([
             "codehelion",
             "artifact",
             "analyze",
@@ -655,7 +772,14 @@ mod tests {
             "--debug-file",
             "fixture.debug",
         ])
-        .expect_err("debug file without a source run must be rejected");
-        assert!(error.to_string().contains("--source-run"));
+        .expect("a debug file is valid without source correlation");
+        let Command::Artifact {
+            action: ArtifactAction::Analyze(args),
+        } = parsed.command
+        else {
+            return;
+        };
+        assert_eq!(args.source_run, None);
+        assert_eq!(args.debug_file, Some(PathBuf::from("fixture.debug")));
     }
 }

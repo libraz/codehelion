@@ -1,4 +1,4 @@
-//! Precision of Structural mode over hand-labelled real code.
+//! Precision of Fast and Structural modes over hand-labelled real code.
 //!
 //! The synthetic corpora answer "how much of what is there does it find". They
 //! cannot answer "how much of what it reports is real", because a generated
@@ -24,33 +24,16 @@
 //!
 //! # What the "put forward" column has said so far
 //!
-//! Ranking a finding down is not, in general, a precision device. On eight of
-//! these projects the column moves by a point or two against the overall
-//! figure or not at all — down on three, up on one, unchanged on four — which
-//! is what it should do if the findings the report files below the rest are
-//! about as likely to be real as the ones above. That agrees with the reason
-//! they are filed there: a pair says less per finding than a group does, and a
-//! test suite repeats itself on purpose, neither of which is a claim that the
-//! finding is wrong.
+//! Ranking a finding down is not, in general, a precision device: a verdict
+//! says whether duplication is real and worth reporting, while ranking says
+//! what to read first. The column records where the fold falls, not whether it
+//! is right. Measuring the latter would need a distinct verdict about action
+//! priority.
 //!
-//! The ninth is eleven points higher put forward than overall, and it is the
-//! only case whose test suite is in scope at all. What the column measures
-//! there is the four groups in the library against the twenty-one in the
-//! suite, so the gap is the difference between the two bodies of code rather
-//! than anything the ranking knows. Which is the point of having the column:
-//! where it moves, it says what moved it.
-//!
-//! Added up, ranking down files twenty confirmed findings below the rest
-//! against nine refuted ones, and the put-forward figure comes out a point
-//! under the overall one. Read as a precision device that is a loss. It is not
-//! read that way here, because these verdicts cannot settle it either way: a
-//! verdict says the duplication is real and worth reporting, and ranking down
-//! does not dispute either — it says to read something else first. Two of every
-//! three findings it sets aside are real, which is what filing rather than
-//! hiding is for. Measuring whether the order is the right one needs a verdict
-//! nobody has written: not whether a finding is worth reporting, but whether it
-//! is the one to do something about. Until that exists, this column says where
-//! the fold falls and not whether it falls in the right place.
+//! Aggregate pins use only cases whose `snapshot.toml` records a reproducible
+//! origin. A local-only case remains visible and pinned on the machine that
+//! can materialize it, but cannot make a portable precision number depend on
+//! one developer's directory layout.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::fmt::Write as _;
@@ -67,10 +50,9 @@ use codehelion_eval::metrics::{
 };
 use codehelion_eval::schema::{DetectionResult, Finding, Fragment};
 
-/// One labelled corpus and the verdict split it currently produces.
-struct Expected {
-    /// Directory under `corpus/labeled`.
-    name: &'static str,
+/// The verdict split one analysis mode currently produces.
+#[derive(Clone, Copy)]
+struct Verdicts {
     /// Groups ruled a clone worth reporting.
     confirmed: usize,
     /// Groups ruled a lookalike that must not be reported.
@@ -79,6 +61,31 @@ struct Expected {
     forward_confirmed: usize,
     /// Of the refuted groups, the ones the report puts forward.
     forward_refuted: usize,
+    /// Findings which need a human verdict before precision can be claimed.
+    unjudged: usize,
+    /// Findings matched by inconsistent labels.
+    conflicting: usize,
+}
+
+/// One labelled corpus and the verdict split it currently produces.
+struct Expected {
+    /// Directory under `corpus/labeled`.
+    name: &'static str,
+    /// Whether `snapshot.toml` supplies a reproducible source origin. Local
+    /// cases remain useful as individual observations but do not define the
+    /// aggregate precision pins.
+    has_origin: bool,
+    /// Groups ruled a clone worth reporting.
+    confirmed: usize,
+    /// Groups ruled a lookalike that must not be reported.
+    refuted: usize,
+    /// Of the confirmed groups, the ones the report puts forward.
+    forward_confirmed: usize,
+    /// Of the refuted groups, the ones the report puts forward.
+    forward_refuted: usize,
+    /// Fast-mode measurements. The structural fields above predate Fast-mode
+    /// coverage and remain the Structural pins used by the detailed analysis.
+    fast: Verdicts,
 }
 
 /// The labelled corpora, with the split each currently reaches.
@@ -91,66 +98,147 @@ struct Expected {
 const CORPORA: &[Expected] = &[
     Expected {
         name: "fast-yaml-cpp",
+        has_origin: false,
         confirmed: 20,
         refuted: 2,
         forward_confirmed: 19,
         forward_refuted: 2,
+        fast: Verdicts {
+            confirmed: 14,
+            refuted: 1,
+            forward_confirmed: 14,
+            forward_refuted: 1,
+            unjudged: 146,
+            conflicting: 0,
+        },
     },
     Expected {
         name: "fast-yaml",
+        has_origin: true,
         confirmed: 1,
         refuted: 0,
         forward_confirmed: 1,
         forward_refuted: 0,
+        fast: Verdicts {
+            confirmed: 1,
+            refuted: 0,
+            forward_confirmed: 1,
+            forward_refuted: 0,
+            unjudged: 20,
+            conflicting: 0,
+        },
     },
     Expected {
         name: "codehelion-store",
+        has_origin: true,
         confirmed: 2,
         refuted: 0,
         forward_confirmed: 2,
         forward_refuted: 0,
+        fast: Verdicts {
+            confirmed: 0,
+            refuted: 0,
+            forward_confirmed: 0,
+            forward_refuted: 0,
+            unjudged: 17,
+            conflicting: 0,
+        },
     },
     Expected {
         name: "cjson",
+        has_origin: true,
         confirmed: 14,
         refuted: 6,
         forward_confirmed: 14,
         forward_refuted: 6,
+        fast: Verdicts {
+            confirmed: 13,
+            refuted: 6,
+            forward_confirmed: 13,
+            forward_refuted: 6,
+            unjudged: 86,
+            conflicting: 0,
+        },
     },
     Expected {
         name: "lz4",
+        has_origin: true,
         confirmed: 17,
-        refuted: 16,
+        refuted: 15,
         forward_confirmed: 17,
         forward_refuted: 15,
+        fast: Verdicts {
+            confirmed: 16,
+            refuted: 9,
+            forward_confirmed: 16,
+            forward_refuted: 9,
+            unjudged: 231,
+            conflicting: 0,
+        },
     },
     Expected {
         name: "serde-json",
+        has_origin: true,
         confirmed: 44,
         refuted: 21,
         forward_confirmed: 39,
         forward_refuted: 21,
+        fast: Verdicts {
+            confirmed: 32,
+            refuted: 29,
+            forward_confirmed: 32,
+            forward_refuted: 29,
+            unjudged: 618,
+            conflicting: 1,
+        },
     },
     Expected {
         name: "spdlog",
+        has_origin: true,
         confirmed: 21,
         refuted: 17,
         forward_confirmed: 21,
         forward_refuted: 17,
+        fast: Verdicts {
+            confirmed: 25,
+            refuted: 1,
+            forward_confirmed: 25,
+            forward_refuted: 1,
+            unjudged: 159,
+            conflicting: 0,
+        },
     },
     Expected {
         name: "bitflags",
-        confirmed: 16,
+        has_origin: true,
+        confirmed: 14,
         refuted: 9,
         forward_confirmed: 3,
         forward_refuted: 1,
+        fast: Verdicts {
+            confirmed: 3,
+            refuted: 2,
+            forward_confirmed: 3,
+            forward_refuted: 2,
+            unjudged: 233,
+            conflicting: 0,
+        },
     },
     Expected {
         name: "tinyxml2",
+        has_origin: true,
         confirmed: 11,
         refuted: 12,
         forward_confirmed: 10,
         forward_refuted: 12,
+        fast: Verdicts {
+            confirmed: 3,
+            refuted: 8,
+            forward_confirmed: 3,
+            forward_refuted: 8,
+            unjudged: 48,
+            conflicting: 0,
+        },
     },
 ];
 
@@ -183,13 +271,13 @@ const ORDERINGS: &[Ordering] = &[
         name: "priority",
         at_10: 1.0,
         at_50: 0.98,
-        map: 0.9362,
+        map: 0.9230,
     },
     Ordering {
         name: "size",
-        at_10: 1.0,
-        at_50: 0.94,
-        map: 0.8555,
+        at_10: 0.90,
+        at_50: 0.88,
+        map: 0.8179,
     },
 ];
 
@@ -200,10 +288,10 @@ const ORDERINGS: &[Ordering] = &[
 /// one silently redistributes every finding here. What the numbers say about
 /// the bands themselves is argued from the table, not from this assertion.
 const BANDS: &[(&str, usize, usize)] = &[
-    ("high", 72, 69),
-    ("medium", 17, 3),
-    ("low", 14, 5),
-    ("(unscored)", 43, 6),
+    ("high", 67, 67),
+    ("medium", 15, 3),
+    ("low", 10, 5),
+    ("(unscored)", 32, 5),
 ];
 
 /// The length spans of the two verdict populations, as last measured: the
@@ -213,7 +301,7 @@ const BANDS: &[(&str, usize, usize)] = &[
 /// The last number is the one with an argument attached — it is the price of a
 /// length floor, and it is why there is not one — so it is pinned rather than
 /// printed and re-argued from memory.
-const SIZES: (u32, u32, u32, u32, usize) = (4, 96, 3, 26, 115);
+const SIZES: (u32, u32, u32, u32, usize) = (4, 96, 3, 26, 101);
 
 /// What a floor on each similarity axis could remove without hiding a real
 /// clone, as last measured.
@@ -250,6 +338,11 @@ fn moved(actual: f64, pinned: f64) -> bool {
     format!("{actual:.4}") != format!("{pinned:.4}")
 }
 
+/// Render a rate without turning an absent denominator into a failed result.
+fn show_measure(value: Option<f64>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |measure| format!("{measure:.4}"))
+}
+
 /// Compare the ranking the tool prints against sorting by size, and complain
 /// when either has moved or when the composition stops earning its place.
 ///
@@ -277,9 +370,9 @@ fn report_ranking(
     let measured = [("priority", ranked), ("size", by_size)];
     for (name, verdicts) in measured {
         println!(
-            "{name:<22} {:>8.4} {:>8.4} {:>8.4}",
-            verdicts.precision_at(10),
-            verdicts.precision_at(50),
+            "{name:<22} {:>8} {:>8} {:>8.4}",
+            show_measure(verdicts.precision_at(10)),
+            show_measure(verdicts.precision_at(50)),
             verdicts.mean_average_precision(),
         );
     }
@@ -290,14 +383,22 @@ fn report_ranking(
                 ("precision@50", verdicts.precision_at(50), expected.at_50),
                 (
                     "mean average precision",
-                    verdicts.mean_average_precision(),
+                    Some(verdicts.mean_average_precision()),
                     expected.map,
                 ),
             ] {
-                if moved(actual, was) {
+                if actual.is_some_and(|actual| moved(actual, was)) {
                     writeln!(
                         complaints,
-                        "{what} ordered by {} is {actual:.4}, recorded as {was:.4}",
+                        "{what} ordered by {} is {}, recorded as {was:.4}",
+                        expected.name,
+                        show_measure(actual),
+                    )
+                    .expect("writing to a string cannot fail");
+                } else if actual.is_none() {
+                    writeln!(
+                        complaints,
+                        "{what} ordered by {} was unmeasured",
                         expected.name,
                     )
                     .expect("writing to a string cannot fail");
@@ -328,13 +429,18 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Scan a corpus in Structural mode and return its report JSON.
-fn scan(corpus: &Path, database: &Path) -> String {
+/// Whether at least one labelled snapshot was available for measurement.
+const fn has_materialized_snapshot(unmaterialized: usize, total: usize) -> bool {
+    unmaterialized < total
+}
+
+/// Scan a corpus in one source-analysis mode and return its report JSON.
+fn scan(corpus: &Path, mode: &str, database: &Path) -> String {
     let output = Command::cargo_bin("codehelion")
         .expect("binary should build")
         .arg("scan")
         .arg(corpus)
-        .args(["--mode", "structural", "--format", "json"])
+        .args(["--mode", mode, "--format", "json"])
         // The labels describe every duplication in the tree, so the
         // measurement has to see every one of them. A corpus with a directory
         // the vendored default happens to name — bitflags writes its
@@ -354,128 +460,20 @@ fn scan(corpus: &Path, database: &Path) -> String {
     String::from_utf8(output.stdout).expect("report is utf-8")
 }
 
-#[test]
-fn every_labelled_group_still_gets_the_verdict_it_was_given() {
-    let root = repo_root();
-    let scratch = tempfile::tempdir().expect("temp dir");
-    // "put forward" is precision over the findings the report asks to be read
-    // first, which is the number a reader's first impression is made of. It
-    // sits beside the overall figure rather than replacing it: the difference
-    // between the two is what ranking a finding down is worth.
-    let mut table = String::from(
-        "\ncorpus            precision  put forward  confirmed  refuted  unjudged  conflicts\n",
-    );
-    let mut complaints = String::new();
-    let mut unmaterialized = 0usize;
-    // The same verdicts added up across every case that was scored. Nothing
-    // here is pinned — each corpus's split already is, and this is their sum —
-    // but no per-corpus row asks the question it answers, which is what ranking
-    // a finding down does to the population it is applied to.
-    let mut every = Adjudication {
-        confirmed: 0,
-        refuted: 0,
-        conflicting: 0,
-        unjudged: 0,
-        actionable_confirmed: 0,
-        actionable_refuted: 0,
-    };
-    let mut sizes = SizeSplit::default();
-    let mut axes = AxisSplit::default();
-    // Which corpora the "written once per width" rule reaches, and in total.
-    let mut widths = String::from("\nwritten once per width\n");
-    let mut every_width = WidthFamily::default();
-    let mut bands = BandSplit::default();
-    // Which classes of lookalike the report still shows, which is what says
-    // where the next rule would have to work.
-    let mut reasons = ReasonSplit::default();
-    // Two orderings of the same verdicts: the one the tool prints, and the one
-    // anybody would reach for without it.
-    let mut ranked = RankedVerdicts::default();
-    let mut by_size = RankedVerdicts::default();
-
-    for expected in CORPORA {
-        let corpus = root.join("corpus/labeled").join(expected.name);
-        let labels_path = corpus.join("labels.json");
-        let labels_text = std::fs::read_to_string(&labels_path)
-            .unwrap_or_else(|error| panic!("reading {}: {error}", labels_path.display()));
-        let labels = LabelSet::from_json(&labels_text).expect("labels parse");
-
-        // The sources belong to the projects they came from and are not
-        // committed here; the case records the commit they are cut from, and
-        // the script rebuilds them. Say so rather than passing quietly.
-        let snapshot = corpus.join("snapshot");
-        if !snapshot.is_dir() {
-            unscored_row(expected.name, &mut table);
-            unmaterialized += 1;
-            continue;
-        }
-
-        let database = scratch.path().join(format!("{}.db", expected.name));
-        let report = scan(&snapshot, &database);
-        let (result, _lines) = detected::from_report_json(&report)
-            .unwrap_or_else(|error| panic!("reading the report for {}: {error}", expected.name));
-
-        let ruled = adjudicate(&result, &labels, DEFAULT_MATCH_THRESHOLD);
-        sizes.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
-        axes.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
-        width_family(
-            expected.name,
-            &snapshot,
-            &result,
-            &labels,
-            &mut every_width,
-            &mut widths,
-            &mut complaints,
-        );
-        bands.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
-        reasons.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
-        ranked.record(&result, &labels, DEFAULT_MATCH_THRESHOLD, |finding| {
-            finding.score
-        });
-        #[allow(clippy::cast_precision_loss)]
-        by_size.record(
-            &result,
-            &labels,
-            DEFAULT_MATCH_THRESHOLD,
-            |finding: &Finding| finding.size_tokens as f64,
-        );
-        row(expected.name, &ruled, &mut table);
-        absorb(&mut every, &ruled);
-        compare_verdicts(expected, &ruled, &mut complaints);
-    }
-    if every.judged() > 0 {
-        row("every case", &every, &mut table);
-    }
-
-    // Every measure below this line accumulates across the whole corpus, so a
-    // partial set produces a number that is not the recorded one and is not a
-    // regression either. Print it, compare nothing.
-    let whole = unmaterialized == 0;
-    if !ranked.is_empty() {
-        report_ranking(&ranked, &by_size, whole, &mut complaints);
-    }
-    println!("{table}");
-    if every.judged() > 0 {
-        println!(
-            "ranking down filed {} confirmed and {} refuted below the rest\n",
-            every.confirmed - every.actionable_confirmed,
-            every.refuted - every.actionable_refuted,
-        );
-    }
-    print_measures(&sizes, &axes, &widths, &every_width, &bands, &reasons);
-    if whole {
-        compare_bands(&bands, &mut complaints);
-        compare_sizes(&sizes, &mut complaints);
-        compare_floors(&axes, &mut complaints);
+/// The recorded verdicts for one corpus and mode.
+fn recorded_verdicts(expected: &Expected, mode: &str) -> Verdicts {
+    if mode == "fast" {
+        expected.fast
     } else {
-        println!(
-            "\n{unmaterialized} of {} labelled corpora have no snapshot and were not scored, \
-             so the measures over the whole corpus were printed and not compared.\n\
-             Run corpus/scripts/materialize-labeled.sh to cut them from their pinned commits.",
-            CORPORA.len(),
-        );
+        Verdicts {
+            confirmed: expected.confirmed,
+            refuted: expected.refuted,
+            forward_confirmed: expected.forward_confirmed,
+            forward_refuted: expected.forward_refuted,
+            unjudged: 0,
+            conflicting: 0,
+        }
     }
-    assert!(complaints.is_empty(), "\n{complaints}");
 }
 
 /// Print every measure that accumulates over the whole corpus.
@@ -524,7 +522,7 @@ fn print_measures(
 /// threshold, and no threshold over this corpus has ever separated the two
 /// populations. This says how far apart the rule has actually been seen to
 /// reach, so reaching further is a change somebody reads.
-const WIDTH_FAMILY: &[(&str, usize, usize)] = &[("lz4", 5, 57), ("serde-json", 7, 5)];
+const WIDTH_FAMILY: &[(&str, usize, usize)] = &[("lz4", 4, 57), ("serde-json", 7, 5)];
 
 /// The row for a corpus whose sources are not on this machine. Dashes, not
 /// zeroes: nothing was measured, which is not the same as measuring nothing.
@@ -658,9 +656,9 @@ fn tokens_of(snapshot: &Path, fragment: &Fragment) -> Option<Vec<Token>> {
 fn row(name: &str, ruled: &Adjudication, table: &mut String) {
     writeln!(
         table,
-        "{name:<16} {:>9.4} {:>12.4} {:>10} {:>8} {:>9} {:>10}",
-        ruled.precision(),
-        ruled.actionable_precision(),
+        "{name:<16} {:>9} {:>12} {:>10} {:>8} {:>9} {:>10}",
+        show_measure(ruled.precision()),
+        show_measure(ruled.actionable_precision()),
         ruled.confirmed,
         ruled.refuted,
         ruled.unjudged,
@@ -797,3 +795,8 @@ fn compare_sizes(sizes: &SizeSplit, complaints: &mut String) {
         .expect("writing to a string cannot fail");
     }
 }
+
+#[path = "labeled_precision/corpus_policy.rs"]
+mod corpus_policy;
+#[path = "labeled_precision/verdict_regression.rs"]
+mod verdict_regression;

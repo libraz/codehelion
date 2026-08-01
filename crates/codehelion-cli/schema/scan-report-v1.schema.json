@@ -45,7 +45,8 @@
         "detector_versions",
         "database",
         "run_id",
-        "ranking"
+        "ranking",
+        "configuration"
       ],
       "properties": {
         "tool_version": {
@@ -85,6 +86,30 @@
         },
         "ranking": {
           "$ref": "#/$defs/ranking"
+        },
+        "configuration": {
+          "type": "object",
+          "required": [
+            "source",
+            "min_clone_tokens"
+          ],
+          "properties": {
+            "source": {
+              "type": "string",
+              "enum": [
+                "defaults",
+                "root",
+                "explicit"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "min_clone_tokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
         }
       }
     },
@@ -150,7 +175,8 @@
         "unused_suppressions",
         "funnel",
         "split_components",
-        "pair_budget_exhausted"
+        "pair_budget_exhausted",
+        "search_truncated"
       ],
       "properties": {
         "files": {
@@ -214,7 +240,13 @@
           "required": [
             "generated",
             "by_glob",
-            "skipped"
+            "skipped",
+            "too_large",
+            "binary",
+            "unreadable",
+            "walk_errors",
+            "timed_out",
+            "symlinks"
           ],
           "properties": {
             "generated": {
@@ -225,6 +257,36 @@
             },
             "skipped": {
               "type": "integer"
+            },
+            "too_large": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Files over the configured size ceiling."
+            },
+            "binary": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Files identified as binary before parsing."
+            },
+            "unreadable": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Files the walker or frontend could not read."
+            },
+            "walk_errors": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Directory entries the source walker could not read."
+            },
+            "timed_out": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Files that exceeded the parse-time allowance."
+            },
+            "symlinks": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Symbolic links deliberately left unresolved by the source walker."
             }
           }
         },
@@ -238,8 +300,11 @@
             "matched",
             "stale",
             "appeared",
+            "expanded",
+            "expanded_instances",
             "stale_tokens",
             "appeared_tokens",
+            "expanded_tokens",
             "gone"
           ],
           "properties": {
@@ -266,6 +331,14 @@
               "type": "integer",
               "description": "Groups this run reports that the baseline never froze."
             },
+            "expanded": {
+              "type": "integer",
+              "description": "Frozen groups that now have more occurrences than the baseline covered."
+            },
+            "expanded_instances": {
+              "type": "integer",
+              "description": "Occurrences added across expanded groups."
+            },
             "stale_tokens": {
               "type": "integer",
               "description": "Tokens the stale entries repeated when they were frozen. Read beside `appeared_tokens`: a count of groups says nothing about size, so removing one large duplication that leaves three small ones behind reads as a regression without both numbers."
@@ -273,6 +346,10 @@
             "appeared_tokens": {
               "type": "integer",
               "description": "Tokens the groups that appeared repeat now."
+            },
+            "expanded_tokens": {
+              "type": "integer",
+              "description": "Repeated tokens added across expanded groups."
             },
             "gone": {
               "type": "array",
@@ -355,7 +432,7 @@
             },
             "test_code": {
               "type": "integer",
-              "description": "How many of the total live wholly in a test suite; zero in modes that cannot read the test marker."
+              "description": "How many of the total live wholly in a test suite; zero in modes that do not build Structural units."
             }
           }
         },
@@ -453,6 +530,21 @@
           "type": "boolean",
           "description": "True when the candidate-pair budget ran out and results may be incomplete."
         },
+        "search_truncated": {
+          "type": "boolean",
+          "description": "True when one or more candidate-search resource ceilings truncated the search and findings may be incomplete."
+        },
+        "unapplied_suppression_policies": {
+          "type": "array",
+          "description": "Suppression policies Fast mode could not apply because it does not classify boilerplate, test-only code, or integer-width families.",
+          "items": {
+            "enum": [
+              "suppression.boilerplate",
+              "suppression.test-code",
+              "suppression.width-family"
+            ]
+          }
+        },
         "guardrails": {
           "type": "object",
           "description": "Ceilings lowered on the command line rather than by the configuration. Absent when the run worked under the configured ones.",
@@ -460,7 +552,10 @@
             "profile",
             "max_file_bytes",
             "parse_timeout_ms",
-            "pair_budget"
+            "helper_timeout_ms",
+            "posting_cap",
+            "pair_budget",
+            "max_component"
           ],
           "properties": {
             "profile": {
@@ -477,10 +572,25 @@
               "minimum": 0,
               "description": "Longest one file was parsed for, in milliseconds."
             },
+            "helper_timeout_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Longest a compiler helper may answer for one source unit, in milliseconds."
+            },
+            "posting_cap": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Longest posting list or fragment class admitted to pairing."
+            },
             "pair_budget": {
               "type": "integer",
               "minimum": 0,
               "description": "Largest number of candidate pairs any pairing pass examined."
+            },
+            "max_component": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Largest related unit component refined as one group."
             }
           }
         },
@@ -516,6 +626,44 @@
               "type": "integer",
               "minimum": 0,
               "description": "How many times the helper had to be restarted during the run."
+            },
+            "execution_refusals": {
+              "type": "array",
+              "description": "Execution classes that prevented compiler coverage, with their exact scoped opt-in.",
+              "items": {
+                "type": "object",
+                "required": [
+                  "execution",
+                  "files",
+                  "cost",
+                  "permission_argument",
+                  "message"
+                ],
+                "properties": {
+                  "execution": {
+                    "type": "string",
+                    "description": "Stable execution-class name."
+                  },
+                  "files": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Files left without a compiler answer by this refusal."
+                  },
+                  "cost": {
+                    "type": "string",
+                    "description": "Information unavailable without this execution class."
+                  },
+                  "permission_argument": {
+                    "type": "string",
+                    "pattern": "^--allow-execution=",
+                    "description": "Exact command-line argument that permits only this class."
+                  },
+                  "message": {
+                    "type": "string",
+                    "description": "Human-readable refusal explanation."
+                  }
+                }
+              }
             }
           }
         }
@@ -532,10 +680,12 @@
         "similarity",
         "boilerplate",
         "test_code",
+        "test_code_evidence",
         "width_family",
         "split_pair",
         "suppressed",
-        "members"
+        "members",
+        "artifact_savings"
       ],
       "properties": {
         "fingerprint": {
@@ -566,6 +716,11 @@
         "confidence": {
           "type": "number",
           "description": "Minimum pairwise similarity across the group."
+        },
+        "entropy_bits": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Absolute Shannon entropy of the canonical occurrence's normalized-token distribution. The noise decision uses a length-normalized ratio; this raw value remains audit evidence."
         },
         "priority": {
           "$ref": "#/$defs/priority"
@@ -602,13 +757,19 @@
             "trivial-body",
             "forwarding",
             "macro-repetition",
+            "guarded-dispatch",
+            "configured-answer",
             null
           ],
           "description": "The boilerplate shape matching at least four fifths of members; null when no shape is dominant. Individual member classifications retain the exceptions."
         },
         "test_code": {
           "type": "boolean",
-          "description": "Whether every member is test code, recognised from the test marker in the source. False for a group spanning a test and the code it exercises: that duplication crosses the boundary."
+          "description": "Whether every member is test code. False for a group spanning a test and the code it exercises: that duplication crosses the boundary."
+        },
+        "test_code_evidence": {
+          "enum": ["marker", "path", null],
+          "description": "Why the group is test code: marker wins when any member has source-marker evidence; path means every member is recognised from a configured test path; null means the group is not wholly test code."
         },
         "width_family": {
           "type": "boolean",
@@ -635,8 +796,12 @@
           "required": ["state"],
           "properties": {
             "state": {
-              "enum": ["continuing", "new"],
-              "description": "Whether the baseline froze this group."
+              "enum": ["continuing", "new", "expanded"],
+              "description": "Whether the baseline froze this group, or froze it with fewer occurrences."
+            },
+            "added_instances": {
+              "type": "integer",
+              "description": "Occurrences beyond the baseline's covered count for an expanded group."
             },
             "derived_from": {
               "type": "object",
@@ -656,6 +821,63 @@
         },
         "semantic": {
           "$ref": "#/$defs/semantic_evidence"
+        },
+        "artifact_savings": {
+          "type": "array",
+          "description": "Artifact-correlated refactoring estimates for this clone group; estimates are not guarantees.",
+          "items": {
+            "type": "object",
+            "required": [
+              "artifact_analysis_id",
+              "source_build_variant_fingerprint",
+              "artifact_build_variant_fingerprint",
+              "duplicated_bytes",
+              "estimated_refactor_savings_bytes",
+              "mapping_confidence",
+              "clone_confidence",
+              "model_confidence",
+              "savings_confidence",
+              "model_schema_version",
+              "assumptions"
+            ],
+            "properties": {
+              "artifact_analysis_id": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "source_build_variant_fingerprint": {
+                "type": "string"
+              },
+              "artifact_build_variant_fingerprint": {
+                "type": "string"
+              },
+              "duplicated_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "estimated_refactor_savings_bytes": {
+                "type": "integer"
+              },
+              "mapping_confidence": {
+                "type": "string"
+              },
+              "clone_confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "model_confidence": {
+                "type": "string"
+              },
+              "savings_confidence": {
+                "type": "string"
+              },
+              "model_schema_version": {
+                "type": "string"
+              },
+              "assumptions": {}
+            }
+          }
         },
         "members": {
           "type": "array",
@@ -750,7 +972,10 @@
           "type": "number"
         },
         "control_flow": {
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "type_similarity": {
           "oneOf": [
@@ -786,7 +1011,8 @@
           "enum": [
             "high",
             "medium",
-            "low"
+            "low",
+            null
           ]
         }
       }
@@ -897,7 +1123,7 @@
         },
         "reason": {
           "type": "string",
-          "description": "Engine noise category, present when kind is noise."
+          "description": "Engine noise category or suppression-rule judgement, when available."
         },
         "scope": {
           "type": "string",
@@ -906,6 +1132,10 @@
         "pattern": {
           "type": "string",
           "description": "Suppression-rule pattern, present when kind is rule."
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether the stored suppression rule was active, present when kind is rule."
         }
       }
     },

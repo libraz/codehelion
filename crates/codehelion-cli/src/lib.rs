@@ -23,6 +23,8 @@ pub mod cli;
 pub mod config;
 pub mod report;
 pub mod scan;
+#[doc(hidden)]
+pub mod scan_lock;
 pub mod semantic;
 pub mod suppress;
 
@@ -32,8 +34,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use codehelion_core::doctor;
-use codehelion_store::Store;
-use codehelion_store::query::{IdKind, IdMatch};
+use codehelion_store::query::{IdKind, IdMatch, RunOrigin};
+use codehelion_store::{Store, fingerprint_hex};
 
 use crate::cli::{
     ArtifactAction, BaselineAction, CacheAction, Cli, Command, ConfigAction, DetailFormat,
@@ -120,6 +122,7 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
         Command::Baseline { action } => baseline(action, out),
         Command::Artifact { action } => match action {
             ArtifactAction::Analyze(args) => artifact::run(args, out),
+            ArtifactAction::Report(args) => artifact::report(args, out),
             ArtifactAction::Isolated(args) => artifact::run_isolated_worker(args),
             ArtifactAction::Compare(args) => artifact::compare(args, out),
             ArtifactAction::Calibration(args) => artifact::calibration(args, out),
@@ -207,8 +210,14 @@ fn doctor_artifacts(out: &mut impl Write) -> Result<()> {
 }
 
 fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
+    if args.compare_build_variants && args.mode != Mode::Semantic {
+        bail!("--compare-build-variants requires --mode semantic");
+    }
     if args.compare_languages && args.mode != Mode::Semantic {
         bail!("--compare-languages requires --mode semantic");
+    }
+    if args.include_trivial && args.mode == Mode::Fast {
+        bail!("--include-trivial requires --mode structural or --mode semantic");
     }
     // Resolved before the mode is dispatched on, because a permission that
     // nothing in the chosen mode could act on is refused rather than accepted:
@@ -223,635 +232,9 @@ fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
 }
 
 /// Re-render a completed snapshot without reading the scanned source tree.
-fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<Outcome> {
-    let path = resolve_db(args.db.as_deref())?;
-    if !path.is_file() {
-        bail!(
-            "no local database at {}; run `codehelion scan` first",
-            path.display()
-        );
-    }
-    let store = Store::open(&path)?;
-    let run = store
-        .run_summary(args.run)?
-        .with_context(|| format!("no recorded run {} in {}", args.run, path.display()))?;
-    let finished_at = run
-        .finished_at
-        .as_deref()
-        .context("the selected run did not complete and cannot be reported")?;
-    let origin = store.run_origin(run.id)?;
-    let variant = store
-        .build_variant(&origin.variant_fingerprint)?
-        .context("the selected run has no stored build variant")?;
-    let summary_row = store
-        .run_summary_row(run.id)?
-        .context("the selected run has no stored summary")?;
-    let mut groups = Vec::new();
-    for group in store.run_groups(run.id)? {
-        let priority = store
-            .run_group_priority(run.id, &group.fingerprint_hex)?
-            .with_context(|| {
-                format!(
-                    "recorded run {} has no saved priority for clone group {}",
-                    run.id, group.fingerprint_hex
-                )
-            })?;
-        groups.push(recorded_group(group, &priority)?);
-    }
-    // Ordered on the axis alone. The scan that recorded these entries also
-    // knew which of them its configuration ranked down; a rebuild reads the
-    // database and not that configuration, so it does not re-apply a policy
-    // it cannot see.
-    let sort = args.sort.axis();
-    groups.sort_by(|left, right| report::compare_on(left, right, sort));
-    let language_counts = store.run_language_counts(run.id)?;
-    let files = report::FileCounts {
-        total: language_counts.values().copied().sum(),
-        rust: language_counts.get("rust").copied().unwrap_or(0),
-        c: language_counts.get("c").copied().unwrap_or(0),
-        cpp: language_counts.get("cpp").copied().unwrap_or(0),
-    };
-    let ranking = recorded_ranking(&origin.detector_versions)?;
-    let model = report::Report {
-        schema_version: report::SCHEMA_VERSION,
-        run: report::RunInfo {
-            tool_version: run.tool_version,
-            mode: run.analysis_mode,
-            root: run.root_path,
-            started_at: run.started_at,
-            finished_at: finished_at.to_string(),
-            build_variant: report::BuildVariantInfo {
-                mode: variant.analysis_mode,
-                languages: variant
-                    .languages
-                    .as_deref()
-                    .map_or_else(Vec::new, |languages| {
-                        languages
-                            .split(',')
-                            .filter(|language| !language.is_empty())
-                            .map(ToOwned::to_owned)
-                            .collect()
-                    }),
-                headers: variant.header_language.filter(|header| !header.is_empty()),
-                normalization_version: u32::try_from(origin.normalization_version)
-                    .context("stored normalization version does not fit the report")?,
-                fingerprint: variant.fingerprint,
-            },
-            detector_versions: origin
-                .detector_versions
-                .iter()
-                .map(|(component, version)| report::DetectorVersion {
-                    component: component.clone(),
-                    version: version.clone(),
-                })
-                .collect(),
-            ranking,
-            database: path.display().to_string(),
-            run_id: run.id,
-        },
-        summary: report::restored(files, &summary_row, &groups),
-        groups,
-    };
-    scan::write_report_options(
-        scan::ReportOutput {
-            format: args.format,
-            output: args.output.as_deref(),
-            verbose: args.verbose,
-            show_suppressed: args.show_suppressed,
-            sort,
-            min_identifier_jaccard: args.min_identifier_jaccard,
-        },
-        out,
-        &model,
-    )?;
-    Ok(Outcome::Success)
-}
+pub(crate) mod report_command;
 
-/// Rebuild a report group from exactly the values a snapshot persisted.
-fn recorded_group(
-    group: codehelion_store::query::StoredGroup,
-    priority: &codehelion_store::query::StoredPriority,
-) -> Result<report::Group> {
-    let stored_suppression = group.suppressed_by;
-    let suppress_reason = group.suppress_reason;
-    let count = |value: i64| u64::try_from(value).unwrap_or(0);
-    let line = |value: Option<i64>| u32::try_from(value.unwrap_or(0)).unwrap_or(0);
-    let identifier_jaccard = group.identifier_jaccard;
-    let api_similarity = group
-        .similarity
-        .as_ref()
-        .and_then(|similarity| similarity.api);
-    let body_materiality = match (
-        group.has_loop,
-        group.has_dynamic_allocation,
-        group.call_count.and_then(|count| u64::try_from(count).ok()),
-    ) {
-        (Some(has_loop), Some(has_dynamic_allocation), Some(call_count)) => {
-            Some(report::BodyMateriality {
-                has_loop,
-                has_dynamic_allocation,
-                call_count,
-            })
-        }
-        _ => None,
-    };
-    Ok(report::Group {
-        fingerprint: group.fingerprint_hex,
-        clone_type: group.clone_type,
-        scope: group.member_scope,
-        statements: group.statements.map(count),
-        confidence: group.score,
-        priority: recorded_priority_for_report(
-            priority,
-            group.score,
-            identifier_jaccard,
-            api_similarity,
-            body_materiality,
-        )?,
-        identifier_jaccard,
-        body_materiality,
-        similarity: group.similarity.map(|stored| report::Similarity {
-            weight_version: stored.weight_version,
-            lexical: stored.lexical,
-            structural: stored.structural,
-            control_flow: stored.control_flow,
-            type_similarity: stored.type_similarity,
-            api: stored.api,
-            composite: stored.composite,
-            min_pairwise: stored.min_pairwise,
-            confidence_band: stored.confidence_band,
-        }),
-        boilerplate: group.boilerplate,
-        test_code: group.test_code,
-        width_family: group.width_family,
-        split_pair: group.split_pair,
-        suppressed: recorded_suppression(suppress_reason, stored_suppression),
-        // A recorded run is re-rendered on its own; a baseline is something a
-        // scan is given, and nothing about it is stored with the snapshot.
-        baseline: None,
-        semantic: group.semantic.map(|evidence| report::SemanticEvidence {
-            schema_version: evidence.schema_version,
-            rules: vec![report::SemanticRuleEvidence {
-                id: evidence.rule_id,
-                version: evidence.rule_version,
-                confidence: evidence.rule_confidence,
-            }],
-            graphs: evidence.graphs,
-            node_mappings: evidence
-                .node_mappings
-                .into_iter()
-                .map(|mapping| report::SemanticNodeMapping {
-                    corresponding_member: mapping.corresponding_member,
-                    canonical: mapping.canonical,
-                    corresponding: mapping.corresponding,
-                })
-                .collect(),
-        }),
-        members: group
-            .members
-            .into_iter()
-            .map(|member| report::Member {
-                finding_id: member.finding_hex,
-                content: member.content_hex,
-                file: member.file_path,
-                language: member.language,
-                start_line: line(member.start_line),
-                end_line: line(member.end_line),
-                unit: member.unit_name,
-                boilerplate: member.boilerplate,
-                tokens: count(member.token_count),
-                canonical: member.is_canonical,
-            })
-            .collect(),
-    })
-}
-
-/// Convert the ranking values saved with one group without re-applying rules.
-fn recorded_priority_for_report(
-    stored: &codehelion_store::query::StoredPriority,
-    similarity: f64,
-    identifier_jaccard: Option<f64>,
-    api_similarity: Option<f64>,
-    body_materiality: Option<report::BodyMateriality>,
-) -> Result<report::Priority> {
-    let count = |value: i64| u64::try_from(value).unwrap_or(0);
-    Ok(report::Priority {
-        value: stored.final_priority,
-        clone_confidence: stored.clone_confidence,
-        maintenance_risk: stored
-            .maintenance_risk
-            .context("recorded priority is missing maintenance risk")?,
-        refactoring_difficulty: stored
-            .refactoring_difficulty
-            .context("recorded priority is missing refactoring difficulty")?,
-        semantic_confidence: stored.semantic_confidence,
-        source_artifact_confidence: stored.source_artifact_confidence,
-        savings_confidence: stored.savings_confidence,
-        inputs: report::PriorityInputs {
-            smallest_member_tokens: count(stored.facts.smallest_member_tokens),
-            largest_member_tokens: count(stored.facts.largest_member_tokens),
-            instances: count(stored.facts.instances),
-            similarity,
-            files: count(stored.facts.files),
-            directories: count(stored.facts.directories),
-            languages: count(stored.facts.languages),
-            min_clone_tokens: count(
-                stored
-                    .facts
-                    .min_clone_tokens
-                    .context("recorded priority is missing the clone-length floor")?,
-            ),
-            identifier_jaccard,
-            api_similarity,
-            has_loop: body_materiality.map(|body| body.has_loop),
-            has_dynamic_allocation: body_materiality.map(|body| body.has_dynamic_allocation),
-            call_count: body_materiality.map(|body| body.call_count),
-            churn: None,
-            ownership_spread: None,
-        },
-    })
-}
-
-/// Rebuild the suppression label that the snapshot recorded for one group.
-fn recorded_suppression(
-    reason: Option<String>,
-    rule: Option<codehelion_store::query::StoredSuppressionRef>,
-) -> Option<report::Suppression> {
-    reason.map_or_else(
-        || {
-            rule.map(|rule| report::Suppression {
-                kind: report::SuppressionKind::Rule,
-                reason: None,
-                scope: Some(rule.scope),
-                pattern: Some(rule.pattern),
-            })
-        },
-        |reason| {
-            Some(report::Suppression {
-                kind: report::SuppressionKind::Noise,
-                reason: Some(reason),
-                scope: None,
-                pattern: None,
-            })
-        },
-    )
-}
-
-/// Recover the recorded ranking weights from their persisted recipe.
-fn recorded_ranking(detectors: &[(String, String)]) -> Result<report::RankingInfo> {
-    let recipe = detectors
-        .iter()
-        .find_map(|(component, version)| (component == "ranking").then_some(version))
-        .context("the selected run has no stored ranking recipe")?;
-    let (with_risk, ease) = recipe
-        .rsplit_once("-ease")
-        .context("stored ranking recipe has no ease weight")?;
-    let (_, risk) = with_risk
-        .rsplit_once("-risk")
-        .context("stored ranking recipe has no maintenance-risk weight")?;
-    Ok(report::RankingInfo {
-        recipe: recipe.clone(),
-        maintenance_risk: risk
-            .parse()
-            .context("stored ranking maintenance-risk weight is invalid")?,
-        refactoring_ease: ease
-            .parse()
-            .context("stored ranking refactoring-ease weight is invalid")?,
-    })
-}
-
-/// Look up one recorded id and print what it identifies.
-///
-/// An id names one of three things: an occurrence of a clone group, a clone
-/// group itself, or a group from an explicit cross-language comparison. The
-/// kind is decided by looking the id up rather than by its shape, and an
-/// abbreviation is accepted wherever it names exactly one of them — the
-/// report prints group ids in full, and retyping thirty-two hex digits to ask
-/// about what is on the screen is a break in the trail the ids exist to keep.
-fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
-    let path = resolve_db(args.db.as_deref())?;
-    if !path.is_file() {
-        bail!(
-            "no local database at {}; run `codehelion scan` first",
-            path.display()
-        );
-    }
-    let store = Store::open(&path)?;
-    let found = resolve_id(&store, &args.finding_id, &path)?;
-    match found.kind {
-        IdKind::Occurrence => explain_occurrence(&store, &found.id, args, out),
-        IdKind::CloneGroup => explain_clone_group(&store, &found.id, &path, args, out),
-        IdKind::CrossLanguageGroup => explain_cross_language_group(&store, &found.id, args, out),
-    }
-}
-
-/// Turn what the caller typed into the one recorded id it names.
-///
-/// # Errors
-///
-/// Fails when the text is not an id at all, when nothing recorded starts with
-/// it, and when more than one thing does — the last listing the candidates,
-/// because the answer is to type more of one of them.
-fn resolve_id(store: &Store, typed: &str, path: &Path) -> Result<IdMatch> {
-    let prefix = typed.to_ascii_lowercase();
-    if !prefix.chars().all(|c| c.is_ascii_hexdigit()) || prefix.len() > FULL_ID_CHARS {
-        bail!("{typed} is not an id: ids are up to {FULL_ID_CHARS} hexadecimal digits");
-    }
-    if prefix.len() < suppress::MIN_CLONE_ID_CHARS {
-        bail!(
-            "{typed} is too short to identify one thing; give at least {} of the {FULL_ID_CHARS} digits",
-            suppress::MIN_CLONE_ID_CHARS
-        );
-    }
-    the_one(typed, store.ids_starting_with(&prefix)?, path)
-}
-
-/// The single id `matches` names, or why it does not name one.
-///
-/// Separated from the lookup so that both unwelcome answers can be tested:
-/// forcing two recorded ids to share eight hex digits is not something a
-/// fixture can arrange.
-fn the_one(typed: &str, mut matches: Vec<IdMatch>, path: &Path) -> Result<IdMatch> {
-    match matches.len() {
-        1 => Ok(matches.remove(0)),
-        0 => bail!(
-            "no finding, clone group or cross-language comparison group with id {typed} in {}",
-            path.display()
-        ),
-        _ => {
-            let listed: Vec<String> = matches
-                .iter()
-                .map(|found| format!("{} {}", found.kind.label(), found.id))
-                .collect();
-            bail!(
-                "{typed} names {} things; give more of one of them: {}",
-                matches.len(),
-                listed.join(", ")
-            )
-        }
-    }
-}
-
-/// Print one clone group as the report lists it, with every member.
-fn explain_clone_group(
-    store: &Store,
-    fingerprint: &str,
-    path: &Path,
-    args: &ExplainArgs,
-    out: &mut impl Write,
-) -> Result<Outcome> {
-    let Some(found) = store.group(fingerprint)? else {
-        bail!("no clone group with id {fingerprint} in {}", path.display());
-    };
-    let priority = store
-        .run_group_priority(found.run_id, fingerprint)?
-        .with_context(|| format!("clone group {fingerprint} was recorded without a ranking"))?;
-    let detail = report::CloneGroupDetail {
-        schema_version: report::CloneGroupDetail::SCHEMA_VERSION,
-        database: path.display().to_string(),
-        group: recorded_group(found.group, &priority)?,
-    };
-    match args.format {
-        DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
-        DetailFormat::Text => detail.render_text(out)?,
-    }
-    Ok(Outcome::Success)
-}
-
-/// Print one group from an explicit cross-language comparison.
-///
-/// Comparison-domain groups stay outside normal scan snapshots, baselines and
-/// savings, so they render their own detail rather than a report group.
-fn explain_cross_language_group(
-    store: &Store,
-    group_id: &str,
-    args: &ExplainArgs,
-    out: &mut impl Write,
-) -> Result<Outcome> {
-    let group = store
-        .cross_language_group(group_id)?
-        .with_context(|| format!("cross-language comparison group {group_id} went missing"))?;
-    let detail = report::CrossLanguageGroupDetail {
-        schema_version: "cross-language-explain-v1",
-        group_id: group.group_id_hex,
-        comparison_id: group.comparison_id_hex,
-        policy_version: group.policy_version,
-        root_path: group.root_path,
-        origin_variants: group.origin_variants,
-        rule_id: group.rule_id,
-        rule_version: group.rule_version,
-        semantic_confidence: group.semantic_confidence,
-        correspondence_ids: group.correspondence_ids,
-        members: group
-            .members
-            .into_iter()
-            .map(|member| report::CrossLanguageGroupMemberDetail {
-                origin_variant: member.origin_variant,
-                language: member.language,
-                file: member.file_path,
-                start_line: member.start_line,
-                end_line: member.end_line,
-                unit: member.unit_name,
-                graph: member.graph,
-            })
-            .collect(),
-    };
-    match args.format {
-        DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
-        DetailFormat::Text => detail.render_text(out)?,
-    }
-    Ok(Outcome::Success)
-}
-
-/// Print one occurrence of a clone group, with what the run recorded about the
-/// group it belongs to.
-#[allow(
-    clippy::too_many_lines,
-    reason = "one occurrence's complete detail, assembled in one place"
-)]
-fn explain_occurrence(
-    store: &Store,
-    finding_id: &str,
-    args: &ExplainArgs,
-    out: &mut impl Write,
-) -> Result<Outcome> {
-    let occurrence = store
-        .occurrence(finding_id)?
-        .with_context(|| format!("occurrence {finding_id} went missing"))?;
-    let source_artifact_mappings = store
-        .artifact_fragment_mappings(finding_id)?
-        .into_iter()
-        .map(|mapping| report::SourceArtifactMappingDetail {
-            artifact_analysis_id: mapping.analysis_id,
-            artifact_symbol_fingerprint: mapping_fingerprint_hex(
-                mapping.artifact_symbol_fingerprint,
-            ),
-            source_build_variant_fingerprint: mapping_fingerprint_hex(
-                mapping.source_build_variant_fingerprint,
-            ),
-            artifact_build_variant_fingerprint: mapping_fingerprint_hex(
-                mapping.build_variant_fingerprint,
-            ),
-            confidence: mapping_confidence_label(mapping.confidence).to_owned(),
-            evidence: mapping.evidence,
-            attributed_bytes: mapping.attributed_bytes,
-        })
-        .collect();
-    let clone_group_savings = store
-        .clone_group_savings(occurrence.scan_run_id, &occurrence.group_fingerprint_hex)?
-        .into_iter()
-        .map(|(artifact_analysis_id, savings)| {
-            Ok(report::CloneGroupSavingsDetail {
-                artifact_analysis_id,
-                source_build_variant_fingerprint: mapping_fingerprint_hex(
-                    savings.source_build_variant_fingerprint,
-                ),
-                artifact_build_variant_fingerprint: mapping_fingerprint_hex(
-                    savings.artifact_build_variant_fingerprint,
-                ),
-                duplicated_bytes: savings.duplicated_bytes,
-                estimated_refactor_savings_bytes: savings.estimated_refactor_savings_bytes,
-                mapping_confidence: savings_confidence_label(savings.mapping_confidence).to_owned(),
-                clone_confidence: savings.clone_confidence,
-                model_confidence: savings_confidence_label(savings.model_confidence).to_owned(),
-                savings_confidence: savings_confidence_label(savings.savings_confidence).to_owned(),
-                model_schema_version: savings.model_schema_version,
-                assumptions: serde_json::from_str(&savings.assumptions_json)
-                    .context("parsing persisted structured savings assumptions")?,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let line = |value: Option<i64>| u32::try_from(value.unwrap_or(0)).unwrap_or(0);
-    let detail = report::FindingDetail {
-        member: report::Member {
-            finding_id: occurrence.member.finding_hex,
-            content: occurrence.member.content_hex,
-            file: occurrence.member.file_path,
-            language: occurrence.member.language,
-            start_line: line(occurrence.member.start_line),
-            end_line: line(occurrence.member.end_line),
-            unit: occurrence.member.unit_name,
-            boilerplate: occurrence.member.boilerplate,
-            tokens: u64::try_from(occurrence.member.token_count).unwrap_or(0),
-            canonical: occurrence.member.is_canonical,
-        },
-        group: report::GroupRef {
-            fingerprint: occurrence.group_fingerprint_hex,
-            clone_type: occurrence.clone_type,
-            scope: occurrence.member_scope,
-            confidence: occurrence.score,
-            priority: occurrence.priority.as_ref().map(recorded_priority),
-            members: u64::try_from(occurrence.member_count).unwrap_or(0),
-            boilerplate: occurrence.boilerplate,
-            test_code: occurrence.test_code,
-            split_pair: occurrence.split_pair,
-            similarity: occurrence.similarity.map(|stored| report::Similarity {
-                weight_version: stored.weight_version,
-                lexical: stored.lexical,
-                structural: stored.structural,
-                control_flow: stored.control_flow,
-                type_similarity: stored.type_similarity,
-                api: stored.api,
-                composite: stored.composite,
-                min_pairwise: stored.min_pairwise,
-                confidence_band: stored.confidence_band,
-            }),
-            semantic: occurrence
-                .semantic
-                .map(|evidence| report::SemanticEvidence {
-                    schema_version: evidence.schema_version,
-                    rules: vec![report::SemanticRuleEvidence {
-                        id: evidence.rule_id,
-                        version: evidence.rule_version,
-                        confidence: evidence.rule_confidence,
-                    }],
-                    graphs: evidence.graphs,
-                    node_mappings: evidence
-                        .node_mappings
-                        .into_iter()
-                        .map(|mapping| report::SemanticNodeMapping {
-                            corresponding_member: mapping.corresponding_member,
-                            canonical: mapping.canonical,
-                            corresponding: mapping.corresponding,
-                        })
-                        .collect(),
-                }),
-            suppressed: occurrence.suppression.map(|rule| report::Suppression {
-                kind: report::SuppressionKind::Rule,
-                reason: None,
-                scope: Some(rule.scope),
-                pattern: Some(rule.pattern),
-            }),
-        },
-        scan_run: occurrence.scan_run_id,
-        source_artifact_mappings,
-        clone_group_savings,
-    };
-    match args.format {
-        DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
-        DetailFormat::Text => detail.render_text(out)?,
-    }
-    Ok(Outcome::Success)
-}
-
-fn mapping_fingerprint_hex(fingerprint: [u8; 16]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut hex = String::with_capacity(fingerprint.len().saturating_mul(2));
-    for byte in fingerprint {
-        hex.push(char::from(HEX[usize::from(byte >> 4)]));
-        hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    hex
-}
-
-const fn mapping_confidence_label(
-    confidence: codehelion_store::artifact::ArtifactAnalysisMappingConfidence,
-) -> &'static str {
-    match confidence {
-        codehelion_store::artifact::ArtifactAnalysisMappingConfidence::Exact => "exact",
-        codehelion_store::artifact::ArtifactAnalysisMappingConfidence::Strong => "strong",
-        codehelion_store::artifact::ArtifactAnalysisMappingConfidence::Weak => "weak",
-        codehelion_store::artifact::ArtifactAnalysisMappingConfidence::Ambiguous => "ambiguous",
-    }
-}
-
-const fn savings_confidence_label(
-    confidence: codehelion_store::artifact::ArtifactAnalysisSavingsConfidence,
-) -> &'static str {
-    match confidence {
-        codehelion_store::artifact::ArtifactAnalysisSavingsConfidence::High => "high",
-        codehelion_store::artifact::ArtifactAnalysisSavingsConfidence::Medium => "medium",
-        codehelion_store::artifact::ArtifactAnalysisSavingsConfidence::Low => "low",
-        codehelion_store::artifact::ArtifactAnalysisSavingsConfidence::Unavailable => "unavailable",
-    }
-}
-
-/// A stored ranking as the detail view shows it.
-///
-/// A count that will not fit is reported at the ceiling rather than wrapping:
-/// a group with more occurrences than a `u64` can hold is past anything the
-/// derivation would say about it anyway.
-fn recorded_priority(stored: &codehelion_store::query::StoredPriority) -> report::RecordedPriority {
-    let count = |value: i64| u64::try_from(value).unwrap_or(u64::MAX);
-    report::RecordedPriority {
-        value: stored.final_priority,
-        clone_confidence: stored.clone_confidence,
-        maintenance_risk: stored.maintenance_risk,
-        refactoring_difficulty: stored.refactoring_difficulty,
-        semantic_confidence: stored.semantic_confidence,
-        source_artifact_confidence: stored.source_artifact_confidence,
-        savings_confidence: stored.savings_confidence,
-        inputs: report::RecordedInputs {
-            smallest_member_tokens: count(stored.facts.smallest_member_tokens),
-            largest_member_tokens: count(stored.facts.largest_member_tokens),
-            instances: count(stored.facts.instances),
-            files: count(stored.facts.files),
-            directories: count(stored.facts.directories),
-            languages: count(stored.facts.languages),
-            min_clone_tokens: stored.facts.min_clone_tokens.map(count),
-        },
-    }
-}
+use report_command::{explain, report_command};
 
 /// Append the binary's install channel and location to the doctor report.
 fn doctor_install(out: &mut impl Write) -> Result<()> {
@@ -962,6 +345,10 @@ fn is_git_ignored(repo_root: &Path, target: &Path) -> bool {
 /// Both actions read a scan that already happened rather than performing one:
 /// a baseline is a judgement about a result, and taking it from the recorded
 /// result keeps the judgement and the report it refers to the same thing.
+#[allow(
+    clippy::too_many_lines,
+    reason = "create and update share the same invocation and compatibility contract"
+)]
 fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
     let (args, create) = match action {
         BaselineAction::Create(args) => (args, true),
@@ -971,8 +358,8 @@ fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
         .path
         .canonicalize()
         .with_context(|| format!("resolving path {}", args.path.display()))?;
-    let cfg = config::load(None, &root)?.config;
-    let db_path = scan::database_path(&root, args.db.as_deref(), &cfg);
+    let resolved_config = config::load(args.config.as_deref(), &root)?;
+    let db_path = scan::database_path(&root, args.db.as_deref(), &resolved_config, false)?;
     if !db_path.is_file() {
         bail!(
             "no local database at {}; run `codehelion scan` first",
@@ -981,14 +368,21 @@ fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
     }
     let store = Store::open(&db_path)?;
     let root_path = root.to_string_lossy();
-    let Some(origin) = store.latest_completed_run(&root_path)? else {
+    let invocation = store.latest_completed_invocation(&root_path)?;
+    if invocation.is_empty() {
         bail!(
             "{} holds no completed scan of {}; run `codehelion scan` first",
             db_path.display(),
             root.display()
         );
-    };
-    let groups = store.run_groups(origin.id)?;
+    }
+    let runs: Vec<_> = invocation
+        .into_iter()
+        .map(|origin| {
+            let groups = store.run_groups(origin.id)?;
+            Ok((origin, groups))
+        })
+        .collect::<Result<_>>()?;
 
     if create {
         if args.file.exists() && !args.force {
@@ -997,47 +391,75 @@ fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
                 args.file.display()
             );
         }
-        let recorded = baseline::Baseline::from_run(&origin, &groups, &scan::rfc3339_now());
+        let recorded = baseline::Baseline::from_runs(&runs, &scan::rfc3339_now())?;
         recorded.write(&args.file)?;
         writeln!(
             out,
-            "wrote {} ({} findings frozen from run {}, {} mode)",
+            "wrote {} ({} findings frozen across {} build variants from {} run parts)",
             args.file.display(),
-            recorded.entries.len(),
-            origin.id,
-            origin.analysis_mode,
+            recorded
+                .partitions
+                .iter()
+                .map(|partition| partition.entries.len())
+                .sum::<usize>(),
+            recorded.partitions.len(),
+            runs.len(),
         )?;
         return Ok(Outcome::Success);
     }
 
     let existing = baseline::Baseline::load(&args.file)?;
-    let fit = existing.compatibility(&origin.variant_fingerprint, &origin.detector_versions);
-    if let Some(reason) = fit.mismatch {
-        bail!(
-            "{} does not describe run {}: {}",
-            args.file.display(),
-            origin.id,
-            reason
+    let mut pruned = existing.clone();
+    let mut dropped = Vec::new();
+    for (origin, groups) in &runs {
+        let Some(partition) = existing.partition(&origin.variant_fingerprint) else {
+            bail!(
+                "{} does not describe run {}: it has no partition for build variant {}",
+                args.file.display(),
+                origin.id,
+                origin.variant_fingerprint
+            );
+        };
+        let fit = partition.compatibility(&origin.detector_versions);
+        if let Some(reason) = fit.mismatch {
+            bail!(
+                "{} does not describe run {}: {}",
+                args.file.display(),
+                origin.id,
+                reason
+            );
+        }
+        let present: std::collections::BTreeSet<String> = groups
+            .iter()
+            .map(|group| group.fingerprint_hex.clone())
+            .collect();
+        let (next, part_dropped) = pruned.pruned_partition(&origin.variant_fingerprint, &present);
+        pruned = next;
+        dropped.extend(
+            part_dropped
+                .into_iter()
+                .map(|id| (origin.variant_fingerprint.clone(), id)),
         );
     }
-    if let Some(caveat) = fit.caveat {
-        writeln!(out, "note: {caveat}")?;
-    }
-    let present: std::collections::BTreeSet<String> = groups
-        .iter()
-        .map(|group| group.fingerprint_hex.clone())
-        .collect();
-    let (pruned, dropped) = existing.pruned(&present);
     pruned.write(&args.file)?;
     writeln!(
         out,
-        "updated {} ({} entries kept, {} resolved and dropped)",
+        "updated {} ({} entries kept across {} build variants, {} resolved and dropped)",
         args.file.display(),
-        pruned.entries.len(),
+        pruned
+            .partitions
+            .iter()
+            .map(|partition| partition.entries.len())
+            .sum::<usize>(),
+        pruned.partitions.len(),
         dropped.len(),
     )?;
-    for id in &dropped {
-        writeln!(out, "  resolved: {id}")?;
+    for (variant, id) in &dropped {
+        writeln!(
+            out,
+            "  resolved [{}]: {id}",
+            variant.get(..12).unwrap_or(variant)
+        )?;
     }
     Ok(Outcome::Success)
 }
@@ -1048,10 +470,12 @@ fn config_command(action: &ConfigAction, out: &mut impl Write) -> Result<Outcome
             let start = std::env::current_dir().context("resolving the current directory")?;
             let resolved = config::load(config.as_deref(), &start)?;
             match &resolved.source {
-                ConfigSource::File(path) => writeln!(out, "# source: {}", path.display())?,
+                ConfigSource::Explicit(path) | ConfigSource::Discovered(path) => {
+                    writeln!(out, "# source: {}", path.display())?;
+                }
                 ConfigSource::Defaults => writeln!(out, "# source: built-in defaults")?,
             }
-            write!(out, "{}", resolved.config.to_toml()?)?;
+            write!(out, "{}", resolved.config.to_display_toml()?)?;
             Ok(Outcome::Success)
         }
         ConfigAction::Init { output, force } => {
@@ -1074,16 +498,27 @@ fn config_command(action: &ConfigAction, out: &mut impl Write) -> Result<Outcome
 
 fn cache_command(action: &CacheAction, out: &mut impl Write) -> Result<Outcome> {
     match action {
-        CacheAction::Status { db } => {
-            let path = resolve_db(db.as_deref())?;
+        CacheAction::Status { path, config, db } => {
+            let path = resolve_db_at(path, db.as_deref(), config.as_deref())?;
             match std::fs::metadata(&path) {
                 Ok(meta) => writeln!(out, "database: {} ({} bytes)", path.display(), meta.len())?,
                 Err(_) => writeln!(out, "database: {} (absent)", path.display())?,
             }
             Ok(Outcome::Success)
         }
-        CacheAction::Clear { db } => {
-            let path = resolve_db(db.as_deref())?;
+        CacheAction::Clear {
+            path,
+            config,
+            db,
+            force,
+        } => {
+            if !force {
+                bail!(
+                    "`cache clear` permanently deletes the local audit database; pass --force to confirm"
+                );
+            }
+            let path = resolve_db_at(path, db.as_deref(), config.as_deref())?;
+            let _lock = scan_lock::acquire(&path)?;
             if path.exists() {
                 std::fs::remove_file(&path)
                     .with_context(|| format!("removing {}", path.display()))?;
@@ -1099,250 +534,25 @@ fn cache_command(action: &CacheAction, out: &mut impl Write) -> Result<Outcome> 
 /// Resolve the local-database path: an explicit flag wins, otherwise the
 /// configured location (discovered `codehelion.toml` or defaults).
 fn resolve_db(flag: Option<&Path>) -> Result<PathBuf> {
-    if let Some(path) = flag {
-        return Ok(path.to_path_buf());
-    }
-    let start = std::env::current_dir().context("resolving the current directory")?;
-    Ok(config::load(None, &start)?.config.database)
+    let root = std::env::current_dir()
+        .context("resolving the current directory")?
+        .canonicalize()
+        .context("resolving the current directory")?;
+    resolve_db_at(&root, flag, None)
+}
+
+/// Resolve a local-database path for the repository selected by one command.
+///
+/// All source-audit commands use this path so an explicit database, a named
+/// configuration, and a discovered configuration receive identical handling.
+fn resolve_db_at(root: &Path, flag: Option<&Path>, config_path: Option<&Path>) -> Result<PathBuf> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("resolving path {}", root.display()))?;
+    let resolved_config = config::load(config_path, &root)?;
+    scan::database_path(&root, flag, &resolved_config, false)
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use crate::cli::{BaselineMode, SortAxis};
-    use codehelion_core::discovery::Language;
-    use codehelion_core::semantic::{
-        OperationAttributes, OperationEdge, OperationEdgeKind, OperationKind, OperationNode,
-        SemanticOperationGraph,
-    };
-    use codehelion_core::stable_id::{CrossLanguageComparisonId, CrossLanguageGroupId};
-    use codehelion_store::snapshot::{
-        CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow,
-        CrossLanguageSemanticMemberRow,
-    };
-
-    #[test]
-    fn cross_language_comparison_requires_semantic_mode() {
-        let args = ScanArgs {
-            sort: SortAxis::default(),
-            min_identifier_jaccard: None,
-            path: PathBuf::from("."),
-            mode: Mode::Fast,
-            format: cli::Format::Text,
-            output: None,
-            config: None,
-            no_ignore: false,
-            jobs: None,
-            db: None,
-            baseline: None,
-            baseline_mode: BaselineMode::Suppress,
-            allow_execution: None,
-            compare_build_variants: false,
-            compare_languages: true,
-            show_suppressed: false,
-            include_trivial: false,
-            include_vendored: false,
-            verbose: false,
-            fail_on_findings: false,
-            untrusted: false,
-        };
-        let error = scan_command(&args, &mut Vec::new()).expect_err("mode must be semantic");
-        assert!(format!("{error:#}").contains("--compare-languages requires --mode semantic"));
-    }
-
-    #[test]
-    fn an_id_naming_more_than_one_thing_lists_them_rather_than_picking() {
-        let path = Path::new(".codehelion/audit.db");
-        let candidates = vec![
-            IdMatch {
-                kind: IdKind::Occurrence,
-                id: "aa11bb22cc33".to_string(),
-            },
-            IdMatch {
-                kind: IdKind::CloneGroup,
-                id: "aa11bb22dd44".to_string(),
-            },
-        ];
-
-        let error = the_one("aa11bb22", candidates, path).expect_err("two things, not one");
-        let text = format!("{error:#}");
-        // Picking one would be a guess, and a guess about which finding
-        // somebody is reading is worse than a question.
-        assert!(text.contains("names 2 things"), "{text}");
-        assert!(text.contains("finding aa11bb22cc33"), "{text}");
-        assert!(text.contains("clone group aa11bb22dd44"), "{text}");
-
-        let found = the_one(
-            "aa11bb22cc33",
-            vec![IdMatch {
-                kind: IdKind::Occurrence,
-                id: "aa11bb22cc33".to_string(),
-            }],
-            path,
-        )
-        .expect("one thing");
-        assert_eq!(found.kind, IdKind::Occurrence);
-
-        let error = the_one("aa11bb22", Vec::new(), path).expect_err("nothing recorded");
-        assert!(format!("{error:#}").contains("no finding, clone group or"));
-    }
-
-    #[test]
-    fn explain_reads_a_cross_language_group_without_turning_it_into_a_finding() {
-        let directory = tempfile::tempdir().unwrap();
-        let database = directory.path().join("audit.db");
-        let graph = SemanticOperationGraph::new(
-            Language::Rust,
-            [1; 32],
-            vec![
-                OperationNode {
-                    kind: OperationKind::Source,
-                    attributes: OperationAttributes::default(),
-                },
-                OperationNode {
-                    kind: OperationKind::Collect,
-                    attributes: OperationAttributes::default(),
-                },
-            ],
-            vec![OperationEdge {
-                from: 0,
-                to: 1,
-                kind: OperationEdgeKind::Data,
-            }],
-        )
-        .unwrap();
-        let graph_json = serde_json::to_string(&graph).unwrap();
-        let cpp_graph =
-            SemanticOperationGraph::new(Language::Cpp, [2; 32], graph.nodes, graph.edges).unwrap();
-        let cpp_graph_json = serde_json::to_string(&cpp_graph).unwrap();
-        let origins = vec!["cpp-variant".to_string(), "rust-variant".to_string()];
-        let groups = vec![CrossLanguageSemanticGroupRow {
-            group_id: CrossLanguageGroupId::from_bytes([72; 16]),
-            rule_id: "cross-language-sequence-pipeline-v1".to_string(),
-            rule_version: 1,
-            semantic_confidence: 0.55,
-            correspondence_ids: vec!["sequence-map-v1".to_string()],
-            members: vec![
-                CrossLanguageSemanticMemberRow {
-                    origin_variant: "rust-variant".to_string(),
-                    language: Language::Rust,
-                    file_path: "rust/src/lib.rs".to_string(),
-                    start_line: 3,
-                    end_line: 6,
-                    unit_name: Some("map_values".to_string()),
-                    graph_schema_version: "sog-v1".to_string(),
-                    graph_json,
-                },
-                CrossLanguageSemanticMemberRow {
-                    origin_variant: "cpp-variant".to_string(),
-                    language: Language::Cpp,
-                    file_path: "cpp/src/map.cpp".to_string(),
-                    start_line: 3,
-                    end_line: 6,
-                    unit_name: Some("map_values".to_string()),
-                    graph_schema_version: "sog-v1".to_string(),
-                    graph_json: cpp_graph_json,
-                },
-            ],
-        }];
-        let comparison = CrossLanguageComparisonSnapshot {
-            root_path: "/repo",
-            comparison_id: CrossLanguageComparisonId::from_bytes([71; 16]),
-            policy_version: "cross-language-semantic-v1",
-            started_at: "2026-07-31T00:00:00Z",
-            finished_at: "2026-07-31T00:00:01Z",
-            origins: &origins,
-            groups: &groups,
-        };
-        Store::open(&database)
-            .unwrap()
-            .record_cross_language_comparison(&comparison)
-            .unwrap();
-
-        let args = ExplainArgs {
-            finding_id: "48".repeat(16),
-            format: DetailFormat::Text,
-            db: Some(database),
-        };
-        let mut output = Vec::new();
-        assert_eq!(explain(&args, &mut output).unwrap(), Outcome::Success);
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("cross-language semantic group"));
-        assert!(output.contains("sequence-map-v1"));
-        assert!(output.contains("rust rust/src/lib.rs:3-6 (rust-variant)"));
-    }
-
-    #[test]
-    fn dispatch_doctor_writes_diagnostics() {
-        let mut buffer = Vec::new();
-        let outcome = dispatch(&Command::Doctor, &mut buffer).expect("dispatch should succeed");
-        assert_eq!(outcome, Outcome::Success);
-        let text = String::from_utf8(buffer).expect("output is utf-8");
-        assert!(text.contains("codehelion"));
-        assert!(text.contains(env!("CARGO_PKG_VERSION")));
-        // The test binary runs from the cargo target directory.
-        assert!(text.contains("install: local build"));
-        assert!(text.contains("OS memory, network, and filesystem containment unavailable"));
-        assert!(text.contains("artifacts:"));
-        assert!(text.contains("wasm: available"));
-        assert!(text.contains("restricted semantic rules: 12 enabled"));
-    }
-
-    #[test]
-    fn interrogating_a_helper_honours_the_requested_containment() {
-        let program = tempfile::NamedTempFile::new().expect("creating placeholder helper");
-        let facts = interrogate(
-            "placeholder-helper",
-            Some(program.path()),
-            codehelion_helper::SandboxRequest::require_memory_limit(4096),
-        )
-        .expect("configured file is considered for interrogation");
-        let doctor::HelperState::Silent(why) = facts.state else {
-            panic!("an unenforceable limit must stop before starting: {facts:?}");
-        };
-        assert!(
-            why.contains("OS memory containment is unavailable"),
-            "{why}"
-        );
-    }
-
-    #[test]
-    fn install_channel_is_inferred_from_the_executable_location() {
-        let channel = |path: &str| install_channel(Path::new(path));
-        assert_eq!(
-            channel("/opt/homebrew/Cellar/codehelion/0.1.0/bin/codehelion"),
-            "homebrew"
-        );
-        assert_eq!(channel("/home/user/.linuxbrew/bin/codehelion"), "homebrew");
-        assert_eq!(
-            channel("/home/user/.cargo/bin/codehelion"),
-            "cargo (crates.io)"
-        );
-        assert_eq!(
-            channel("/venv/lib/python3.12/site-packages/codehelion/bin/codehelion"),
-            "pypi"
-        );
-        assert_eq!(
-            channel("/work/codehelion/target/release/codehelion"),
-            "local build"
-        );
-        assert_eq!(
-            channel("/work/codehelion/target/llvm-cov-target/debug/codehelion"),
-            "local build"
-        );
-        assert_eq!(
-            channel("/usr/local/bin/codehelion"),
-            "standalone (archive or manual install)"
-        );
-    }
-
-    #[test]
-    fn findings_outcome_maps_to_dedicated_exit_code() {
-        assert_eq!(Outcome::Success.exit_code(), ExitCode::SUCCESS);
-        assert_eq!(
-            Outcome::FindingsPresent.exit_code(),
-            ExitCode::from(EXIT_FINDINGS)
-        );
-    }
-}
+mod tests;

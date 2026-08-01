@@ -23,7 +23,8 @@
 //!   survives tokenization, so a baseline does not evaporate on reformatting;
 //! - adding a member whose content is new *does* move it, so a duplication
 //!   that spreads to a new place stops being covered by a judgement made
-//!   before it spread.
+//!   before it spread. Repeating content already in the group need not move
+//!   the fingerprint, so an added occurrence is compared by its count.
 //!
 //! Source locations are recorded alongside each entry, but no entry is ever
 //! *matched* on one: line numbers move under edits that change nothing about
@@ -56,7 +57,7 @@
 //!
 //! [`CloneGroupFingerprint`]: codehelion_core::stable_id::CloneGroupFingerprint
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -71,7 +72,7 @@ use crate::report::DetectorVersion;
 /// the facts it does not carry guessed at. Recreating the baseline from the
 /// current scan is the fix, and is cheap: a baseline is a record of a
 /// judgement about the tree as it stands, not an archive.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// A baseline file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +85,18 @@ pub struct Baseline {
     pub tool_version: String,
     /// Root the recorded run scanned.
     pub root: String,
+    /// Frozen findings by the build variant that minted their stable ids.
+    ///
+    /// Semantic scans can record several independently compiled partitions
+    /// in one invocation. Keeping their entries apart means a baseline can
+    /// cover the whole invocation without pretending their identities are
+    /// interchangeable.
+    pub partitions: Vec<BaselinePartition>,
+}
+
+/// Frozen findings from one completed scan partition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaselinePartition {
     /// Row id of the run the entries came from, for tracing them back.
     pub from_run: i64,
     /// The build variant the ids were computed under.
@@ -170,38 +183,59 @@ pub struct Anchor {
 impl Baseline {
     /// Freeze the reported findings of one recorded run.
     ///
-    /// Groups the run already hid are left out: a baseline records what was
-    /// visible, and freezing an already-hidden group would keep hiding it
-    /// after the rule that hid it was removed — a suppression nobody asked
-    /// for, attributed to the wrong cause.
+    /// Groups hidden by an ordinary suppression rule are left out: a baseline
+    /// records what was visible, and freezing one would keep hiding it after
+    /// the rule that hid it was removed. A prior baseline is different: it is
+    /// precisely the frozen set being refreshed, so those groups remain part
+    /// of a newly created baseline.
     #[must_use]
     pub fn from_run(origin: &RunOrigin, groups: &[StoredGroup], created_at: &str) -> Self {
-        let entries = groups
-            .iter()
-            .filter(|group| group.suppressed_by.is_none() && group.suppress_reason.is_none())
-            .map(Entry::from_group)
-            .collect();
         Self {
             schema_version: SCHEMA_VERSION,
             created_at: created_at.to_string(),
             tool_version: origin.tool_version.clone(),
             root: origin.root_path.clone(),
-            from_run: origin.id,
-            build_variant: Provenance {
-                mode: origin.analysis_mode.clone(),
-                normalization_version: origin.normalization_version,
-                fingerprint: origin.variant_fingerprint.clone(),
-            },
-            detector_versions: origin
-                .detector_versions
-                .iter()
-                .map(|(component, version)| DetectorVersion {
-                    component: component.clone(),
-                    version: version.clone(),
-                })
-                .collect(),
-            entries,
+            partitions: vec![BaselinePartition::from_run(origin, groups)],
         }
+    }
+
+    /// Freeze every completed partition of one scan invocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the caller mixes origins from different
+    /// invocations, roots or tool versions, or when no completed partition
+    /// was supplied.
+    pub fn from_runs(runs: &[(RunOrigin, Vec<StoredGroup>)], created_at: &str) -> Result<Self> {
+        let Some((first, _)) = runs.first() else {
+            bail!("a baseline needs at least one completed scan partition");
+        };
+        if runs.iter().any(|(origin, _)| {
+            origin.root_path != first.root_path
+                || origin.tool_version != first.tool_version
+                || origin.started_at != first.started_at
+        }) {
+            bail!(
+                "a baseline cannot combine scan partitions from different invocations, roots or tool versions"
+            );
+        }
+        let mut partitions: Vec<_> = runs
+            .iter()
+            .map(|(origin, groups)| BaselinePartition::from_run(origin, groups))
+            .collect();
+        partitions.sort_by(|left, right| {
+            left.build_variant
+                .fingerprint
+                .cmp(&right.build_variant.fingerprint)
+                .then_with(|| left.from_run.cmp(&right.from_run))
+        });
+        Ok(Self {
+            schema_version: SCHEMA_VERSION,
+            created_at: created_at.to_string(),
+            tool_version: first.tool_version.clone(),
+            root: first.root_path.clone(),
+            partitions,
+        })
     }
 
     /// Read a baseline file.
@@ -244,70 +278,113 @@ impl Baseline {
         std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
     }
 
-    /// The group ids this baseline covers.
+    /// The group ids this baseline covers across all build variants.
     #[must_use]
     pub fn ids(&self) -> BTreeSet<&str> {
-        self.entries
+        self.partitions
             .iter()
-            .map(|entry| entry.group.as_str())
+            .flat_map(|partition| partition.entries.iter().map(|entry| entry.group.as_str()))
             .collect()
     }
 
-    /// Drop the entries whose duplication a later run no longer reports,
-    /// returning the pruned baseline and the ids that went.
-    ///
-    /// Only removal happens here. A finding that appeared since the baseline
-    /// was recorded is exactly what a baseline exists to surface, so taking it
-    /// in silently would defeat the mechanism; adopting new findings is what
-    /// re-recording the baseline is for.
+    /// Partition recorded for `variant_fingerprint`, if this baseline has
+    /// one. Callers reject a missing partition rather than silently applying
+    /// entries minted for another build variant.
     #[must_use]
-    pub fn pruned(&self, present: &BTreeSet<String>) -> (Self, Vec<String>) {
+    pub fn partition(&self, variant_fingerprint: &str) -> Option<&BaselinePartition> {
+        self.partitions
+            .iter()
+            .find(|partition| partition.build_variant.fingerprint == variant_fingerprint)
+    }
+
+    /// Drop stale entries from exactly one matching variant partition.
+    ///
+    /// A variant absent from the baseline remains absent: baseline update
+    /// never adopts newly appeared findings or newly discovered partitions.
+    #[must_use]
+    pub fn pruned_partition(
+        &self,
+        variant_fingerprint: &str,
+        present: &BTreeSet<String>,
+    ) -> (Self, Vec<String>) {
         let mut kept = self.clone();
+        let Some(partition) = kept
+            .partitions
+            .iter_mut()
+            .find(|partition| partition.build_variant.fingerprint == variant_fingerprint)
+        else {
+            return (kept, Vec::new());
+        };
+        let dropped = partition.prune(present);
+        (kept, dropped)
+    }
+}
+
+impl BaselinePartition {
+    /// Freeze the visible findings from one completed run.
+    fn from_run(origin: &RunOrigin, groups: &[StoredGroup]) -> Self {
+        let entries = groups
+            .iter()
+            .filter(|group| {
+                group.suppress_reason.is_none()
+                    && group
+                        .suppressed_by
+                        .as_ref()
+                        .is_none_or(|suppression| suppression.scope == "baseline")
+            })
+            .map(Entry::from_group)
+            .collect();
+        Self {
+            from_run: origin.id,
+            build_variant: Provenance {
+                mode: origin.analysis_mode.clone(),
+                normalization_version: origin.normalization_version,
+                fingerprint: origin.variant_fingerprint.clone(),
+            },
+            detector_versions: origin
+                .detector_versions
+                .iter()
+                .filter(|(component, _)| is_baseline_detector_component(component))
+                .map(|(component, version)| DetectorVersion {
+                    component: component.clone(),
+                    version: version.clone(),
+                })
+                .collect(),
+            entries,
+        }
+    }
+
+    /// Drop entries absent from a later comparable run, returning their ids.
+    fn prune(&mut self, present: &BTreeSet<String>) -> Vec<String> {
         let mut dropped = Vec::new();
-        kept.entries.retain(|entry| {
+        self.entries.retain(|entry| {
             let still_there = present.contains(&entry.group);
             if !still_there {
                 dropped.push(entry.group.clone());
             }
             still_there
         });
-        (kept, dropped)
+        dropped
     }
 
-    /// How well this baseline describes a run under `variant_fingerprint`
-    /// with `detectors`.
+    /// How well this partition describes a run under `detectors`.
     ///
-    /// A build variant moves every id when it changes, so a baseline recorded
-    /// under another one is not wrong about the code — it is talking about ids
-    /// that no longer exist, and matching nothing is the expected outcome
-    /// rather than a sign the duplication is gone.
-    ///
-    /// Detector versions must also match exactly. Nothing here maps a
-    /// superseded detector rule onto its replacement, so two runs scored under
-    /// different rules are not compared.
+    /// Detector versions must match exactly. Nothing here maps a superseded
+    /// detector rule onto its replacement, so two runs scored under different
+    /// rules are not compared.
     #[must_use]
-    pub fn compatibility(
-        &self,
-        variant_fingerprint: &str,
-        detectors: &[(String, String)],
-    ) -> Compatibility {
-        if self.build_variant.fingerprint != variant_fingerprint {
-            return Compatibility {
-                mismatch: Some(format!(
-                    "recorded under build variant {} in {} mode, and this run is variant {}",
-                    short(&self.build_variant.fingerprint),
-                    self.build_variant.mode,
-                    short(variant_fingerprint),
-                )),
-                caveat: None,
-            };
-        }
+    pub fn compatibility(&self, detectors: &[(String, String)]) -> Compatibility {
         let mut recorded: Vec<(String, String)> = self
             .detector_versions
             .iter()
+            .filter(|entry| is_baseline_detector_component(&entry.component))
             .map(|entry| (entry.component.clone(), entry.version.clone()))
             .collect();
-        let mut current = detectors.to_vec();
+        let mut current: Vec<(String, String)> = detectors
+            .iter()
+            .filter(|(component, _)| is_baseline_detector_component(component))
+            .cloned()
+            .collect();
         recorded.sort_unstable();
         current.sort_unstable();
         Compatibility {
@@ -315,9 +392,18 @@ impl Baseline {
                 "recorded under different detector versions; recreate the baseline from this scan before using it"
                     .to_string(),
             ),
-            caveat: None,
         }
     }
+}
+
+/// Whether a recorded component contributes to a finding's stable identity.
+///
+/// Ranking is presentation only. `compiler_ir` records the optional helper
+/// answer schema; compiler evidence may adjust confidence but must not create
+/// or remove a source finding, so an unavailable helper cannot invalidate a
+/// baseline of the same source analysis.
+fn is_baseline_detector_component(component: &str) -> bool {
+    component != "ranking" && component != codehelion_store::compiler::IR_SCHEMA_COMPONENT
 }
 
 /// One group of the scan a baseline is being read against.
@@ -325,6 +411,8 @@ impl Baseline {
 pub struct ScanGroup<'a> {
     /// Hex clone-group fingerprint.
     pub group: &'a str,
+    /// Occurrences the scan found in this group.
+    pub instances: u64,
     /// Tokens this group repeats, on the same footing as
     /// [`Entry::duplicated_tokens`].
     pub duplicated_tokens: u64,
@@ -345,6 +433,8 @@ pub struct Delta {
     /// Groups the scan reports that the baseline did not freeze, in scan
     /// order.
     pub appeared: Vec<Appeared>,
+    /// Frozen groups that now have more occurrences than the baseline froze.
+    pub expanded: Vec<Expanded>,
     /// Entries the scan still reports.
     pub continuing: u64,
 }
@@ -373,6 +463,17 @@ pub struct Appeared {
     pub derived_from: Option<Derivation>,
 }
 
+/// A frozen group whose duplication has spread to more occurrences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expanded {
+    /// Hex group fingerprint.
+    pub group: String,
+    /// Occurrences added after this baseline was recorded.
+    pub added_instances: u64,
+    /// Repeated tokens added with those occurrences.
+    pub added_tokens: u64,
+}
+
 /// The gone entry a group appears to have re-formed from.
 ///
 /// Read it as "this stands where that stood", not as identity. Sites are
@@ -387,8 +488,8 @@ pub struct Derivation {
     pub shared_sites: u64,
 }
 
-impl Baseline {
-    /// Sort a scan's groups into what this baseline froze and what it did not.
+impl BaselinePartition {
+    /// Sort a scan's groups into what this partition froze and what it did not.
     ///
     /// `reported` is every group the scan found, whether or not a rule hid it:
     /// an entry is stale when the duplication is gone, not when some other
@@ -396,7 +497,11 @@ impl Baseline {
     #[must_use]
     pub fn delta(&self, reported: &[ScanGroup<'_>]) -> Delta {
         let present: BTreeSet<&str> = reported.iter().map(|group| group.group).collect();
-        let frozen: BTreeSet<&str> = self.entries.iter().map(|e| e.group.as_str()).collect();
+        let frozen: BTreeMap<&str, &Entry> = self
+            .entries
+            .iter()
+            .map(|entry| (entry.group.as_str(), entry))
+            .collect();
 
         let gone: Vec<&Entry> = self
             .entries
@@ -421,11 +526,24 @@ impl Baseline {
                 .collect(),
             appeared: reported
                 .iter()
-                .filter(|group| !frozen.contains(group.group))
+                .filter(|group| !frozen.contains_key(group.group))
                 .map(|group| Appeared {
                     group: group.group.to_string(),
                     duplicated_tokens: group.duplicated_tokens,
                     derived_from: derivation(&group.sites, &vacated),
+                })
+                .collect(),
+            expanded: reported
+                .iter()
+                .filter_map(|group| {
+                    let entry = frozen.get(group.group)?;
+                    (group.instances > entry.instances).then(|| Expanded {
+                        group: group.group.to_string(),
+                        added_instances: group.instances - entry.instances,
+                        added_tokens: group
+                            .duplicated_tokens
+                            .saturating_sub(entry.duplicated_tokens),
+                    })
                 })
                 .collect(),
         }
@@ -471,8 +589,6 @@ fn tokens(count: i64) -> u64 {
 pub struct Compatibility {
     /// Why none of the entries can match, when none can.
     pub mismatch: Option<String>,
-    /// What differs without stopping the entries matching.
-    pub caveat: Option<String>,
 }
 
 impl Entry {
@@ -527,268 +643,6 @@ pub fn duplicated_tokens(members: impl Iterator<Item = u64>, canonical: u64) -> 
     members.sum::<u64>().saturating_sub(canonical)
 }
 
-/// An id abbreviated for a message, where the full 32 characters would drown
-/// the sentence they sit in.
-fn short(hex: &str) -> &str {
-    hex.get(..12).unwrap_or(hex)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use codehelion_store::query::{StoredMember, StoredSuppressionRef};
-
-    fn origin() -> RunOrigin {
-        RunOrigin {
-            id: 7,
-            root_path: "/repo".to_string(),
-            tool_version: "0.1.0".to_string(),
-            analysis_mode: "structural".to_string(),
-            finished_at: "2026-07-27T00:00:05Z".to_string(),
-            variant_fingerprint: "abcdef0123456789".to_string(),
-            normalization_version: 1,
-            detector_versions: vec![("fp-schema".to_string(), "fp-schema-v1".to_string())],
-        }
-    }
-
-    fn member(finding: &str, path: &str, canonical: bool) -> StoredMember {
-        StoredMember {
-            language: "rust".to_string(),
-            content_hex: "c0".repeat(16),
-            finding_hex: finding.to_string(),
-            file_path: path.to_string(),
-            start_line: Some(10),
-            end_line: Some(20),
-            token_count: 42,
-            unit_name: Some("parse".to_string()),
-            boilerplate: None,
-            is_canonical: canonical,
-        }
-    }
-
-    fn group(fingerprint: &str) -> StoredGroup {
-        StoredGroup {
-            fingerprint_hex: fingerprint.to_string(),
-            clone_type: "type-2".to_string(),
-            member_scope: "unit".to_string(),
-            score: 0.9,
-            entropy_bits: 4.0,
-            suppress_reason: None,
-            boilerplate: None,
-            split_pair: false,
-            test_code: false,
-            width_family: false,
-            statements: None,
-            identifier_jaccard: None,
-            has_loop: None,
-            has_dynamic_allocation: None,
-            call_count: None,
-            similarity: None,
-            semantic: None,
-            suppressed_by: None,
-            members: vec![
-                member("f1", "src/a.rs", true),
-                member("f2", "src/b.rs", false),
-            ],
-        }
-    }
-
-    #[test]
-    fn freezing_a_run_records_what_it_reported_and_what_it_was() {
-        let groups = vec![group("aa11"), group("bb22")];
-        let baseline = Baseline::from_run(&origin(), &groups, "2026-07-27T01:00:00Z");
-
-        assert_eq!(baseline.schema_version, SCHEMA_VERSION);
-        assert_eq!(baseline.from_run, 7);
-        assert_eq!(baseline.build_variant.fingerprint, "abcdef0123456789");
-        assert_eq!(baseline.entries.len(), 2);
-        assert_eq!(baseline.entries[0].group, "aa11");
-        assert_eq!(baseline.entries[0].instances, 2);
-        let sites: Vec<&str> = baseline.entries[0]
-            .occurrences
-            .iter()
-            .map(|occurrence| occurrence.file.as_str())
-            .collect();
-        assert_eq!(sites, vec!["src/a.rs", "src/b.rs"]);
-        let findings: Vec<&str> = baseline.entries[0]
-            .occurrences
-            .iter()
-            .map(|occurrence| occurrence.finding.as_str())
-            .collect();
-        assert_eq!(findings, vec!["f1", "f2"]);
-        // Two 42-token copies repeat everything past the one a reader keeps.
-        assert_eq!(baseline.entries[0].duplicated_tokens, 42);
-        let anchor = baseline.entries[0].anchor.as_ref().expect("an anchor");
-        assert_eq!(anchor.file, "src/a.rs");
-        assert_eq!(anchor.unit.as_deref(), Some("parse"));
-    }
-
-    #[test]
-    fn a_group_the_run_already_hid_is_not_frozen_again() {
-        let mut hidden = group("cc33");
-        hidden.suppressed_by = Some(StoredSuppressionRef {
-            scope: "path_glob".to_string(),
-            pattern: "vendor/**".to_string(),
-        });
-        let mut noisy = group("dd44");
-        noisy.suppress_reason = Some("low-entropy".to_string());
-
-        let baseline = Baseline::from_run(
-            &origin(),
-            &[group("aa11"), hidden, noisy],
-            "2026-07-27T01:00:00Z",
-        );
-        // Freezing a hidden group would outlive the rule that hid it.
-        assert_eq!(baseline.ids(), BTreeSet::from(["aa11"]));
-    }
-
-    #[test]
-    fn pruning_drops_what_is_gone_and_adopts_nothing_new() {
-        let baseline = Baseline::from_run(
-            &origin(),
-            &[group("aa11"), group("bb22")],
-            "2026-07-27T01:00:00Z",
-        );
-        let present: BTreeSet<String> = ["aa11".to_string(), "ee55".to_string()]
-            .into_iter()
-            .collect();
-
-        let (pruned, dropped) = baseline.pruned(&present);
-        assert_eq!(dropped, vec!["bb22".to_string()]);
-        // `ee55` appeared after the baseline was recorded: that is precisely
-        // what the baseline exists to show, so it is not taken in.
-        assert_eq!(pruned.ids(), BTreeSet::from(["aa11"]));
-    }
-
-    /// A scan group standing at `sites`, with `tokens` repeated.
-    fn scanned<'a>(group: &'a str, tokens: u64, sites: &[(&'a str, &'a str)]) -> ScanGroup<'a> {
-        ScanGroup {
-            group,
-            duplicated_tokens: tokens,
-            sites: sites
-                .iter()
-                .map(|(file, unit)| (*file, Some(*unit)))
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn a_delta_sorts_a_scan_into_gone_continuing_and_appeared() {
-        let baseline = Baseline::from_run(
-            &origin(),
-            &[group("aa11"), group("bb22")],
-            "2026-07-27T01:00:00Z",
-        );
-
-        let delta = baseline.delta(&[
-            scanned("aa11", 40, &[("src/a.rs", "parse")]),
-            scanned("ee55", 90, &[("src/z.rs", "other")]),
-        ]);
-
-        assert_eq!(delta.continuing, 1);
-        assert_eq!(delta.gone.len(), 1);
-        assert_eq!(delta.gone[0].group, "bb22");
-        assert_eq!(delta.gone[0].duplicated_tokens, 42);
-        assert_eq!(delta.appeared.len(), 1);
-        assert_eq!(delta.appeared[0].group, "ee55");
-        assert_eq!(delta.appeared[0].duplicated_tokens, 90);
-        // Nothing vacated `src/z.rs`, so nothing is claimed about where it
-        // came from.
-        assert_eq!(delta.appeared[0].derived_from, None);
-    }
-
-    #[test]
-    fn a_group_standing_where_a_gone_entry_stood_is_named_as_its_successor() {
-        // Both entries were frozen over the same two units, which is what
-        // happens when one duplication sits inside another.
-        let baseline = Baseline::from_run(
-            &origin(),
-            &[group("aa11"), group("bb22")],
-            "2026-07-27T01:00:00Z",
-        );
-
-        // `bb22` is gone; a group nobody has seen before now stands in the
-        // same two units. Reporting it as plain "new" would read as a
-        // regression to whoever had just removed `bb22`.
-        let delta = baseline.delta(&[
-            scanned("aa11", 42, &[("src/a.rs", "parse"), ("src/b.rs", "parse")]),
-            scanned("ff66", 30, &[("src/a.rs", "parse"), ("src/b.rs", "parse")]),
-        ]);
-
-        let derived = delta.appeared[0]
-            .derived_from
-            .as_ref()
-            .expect("a predecessor at the same sites");
-        assert_eq!(derived.group, "bb22");
-        assert_eq!(derived.shared_sites, 2);
-    }
-
-    #[test]
-    fn an_entry_that_is_still_reported_is_not_offered_as_a_predecessor() {
-        let baseline = Baseline::from_run(&origin(), &[group("aa11")], "2026-07-27T01:00:00Z");
-
-        // `aa11` still stands, so a second group over the same units is
-        // duplication that was added, not duplication that moved.
-        let delta = baseline.delta(&[
-            scanned("aa11", 42, &[("src/a.rs", "parse")]),
-            scanned("ff66", 30, &[("src/a.rs", "parse")]),
-        ]);
-
-        assert_eq!(delta.appeared.len(), 1);
-        assert_eq!(delta.appeared[0].derived_from, None);
-    }
-
-    #[test]
-    fn a_baseline_round_trips_through_a_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested/baseline.json");
-        let baseline = Baseline::from_run(&origin(), &[group("aa11")], "2026-07-27T01:00:00Z");
-
-        baseline.write(&path).unwrap();
-        assert_eq!(Baseline::load(&path).unwrap(), baseline);
-
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.ends_with('\n'), "a text file ends with a newline");
-        assert!(text.contains("\"group\": \"aa11\""), "readable by hand");
-    }
-
-    #[test]
-    fn a_file_from_a_schema_this_build_does_not_read_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("baseline.json");
-        let mut baseline = Baseline::from_run(&origin(), &[], "2026-07-27T01:00:00Z");
-        baseline.schema_version = SCHEMA_VERSION + 1;
-        baseline.write(&path).unwrap();
-
-        let err = Baseline::load(&path).expect_err("an unreadable schema version");
-        assert!(format!("{err:#}").contains("schema version"));
-    }
-
-    #[test]
-    fn a_baseline_says_when_it_describes_a_different_run() {
-        let baseline = Baseline::from_run(&origin(), &[group("aa11")], "2026-07-27T01:00:00Z");
-        let detectors = vec![("fp-schema".to_string(), "fp-schema-v1".to_string())];
-
-        let fit = baseline.compatibility("abcdef0123456789", &detectors);
-        assert_eq!(fit.mismatch, None);
-        assert_eq!(fit.caveat, None);
-
-        let other_variant = baseline
-            .compatibility("999999999999", &detectors)
-            .mismatch
-            .expect("a different variant is a mismatch");
-        assert!(other_variant.contains("build variant"));
-
-        let bumped = vec![(
-            "fp-schema".to_string(),
-            "different-fingerprint-v1".to_string(),
-        )];
-        let other_detector = baseline
-            .compatibility("abcdef0123456789", &bumped)
-            .mismatch
-            .expect("a moved fingerprint schema is a mismatch");
-        assert!(other_detector.contains("different detector versions"));
-        assert!(other_detector.contains("recreate the baseline"));
-    }
-}
+mod tests;

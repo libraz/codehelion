@@ -52,8 +52,9 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::{
-    BuildVariantInfo, DetectorVersion, Group, Member, Priority, RankingInfo, Report,
-    SCOPE_FRAGMENT, Similarity, Summary, Suppression, SuppressionKind,
+    ArtifactSavings, BodyMateriality, BuildVariantInfo, CompilerCoverage, DetectorVersion, Group,
+    Member, Priority, RankingInfo, Report, SCOPE_FRAGMENT, Similarity, Summary, Suppression,
+    SuppressionKind,
 };
 
 /// SARIF version this reporter emits.
@@ -71,7 +72,7 @@ pub const SARIF_SCHEMA_URI: &str =
 pub const FINGERPRINT_KEY: &str = "cloneGroupFingerprint/v1";
 
 /// Base id every reported location is relative to.
-const SRCROOT: &str = "SRCROOT";
+pub(crate) const SRCROOT: &str = "SRCROOT";
 
 /// The level every clone rule reports at; see the module documentation.
 const LEVEL: &str = "note";
@@ -154,8 +155,14 @@ enum Notice {
     NotAsked,
     /// Files a compiler was asked about and supplied nothing for.
     Unanswered,
-    /// Comparison that stopped at its budget rather than at the end.
-    PairsTruncated,
+    /// Candidate search that stopped at one or more resource ceilings.
+    SearchTruncated,
+    /// Grouping split a candidate set at its configured ceiling.
+    GroupingCeilingCut,
+    /// The parser recovered from source it could not fully follow.
+    ParserCoverage,
+    /// Fast mode could not apply configured structural suppression policies.
+    UnappliedSuppressionPolicies,
 }
 
 /// The notifications this tool can emit, in the order they are declared: a
@@ -168,7 +175,7 @@ enum Notice {
 /// run recovered from cost no coverage, and one that did not shows up as the
 /// files it could not answer for. A notification for it would put a fact about
 /// the tool's health in the list a reader is using to judge the tool's reach.
-const NOTICES: [NoticeSpec; 3] = [
+const NOTICES: [NoticeSpec; 6] = [
     NoticeSpec {
         kind: Notice::NotAsked,
         id: "coverage/not-asked",
@@ -192,14 +199,41 @@ const NOTICES: [NoticeSpec; 3] = [
         level: "warning",
     },
     NoticeSpec {
-        kind: Notice::PairsTruncated,
-        id: "coverage/pairs-truncated",
-        name: "CandidatePairBudgetExhausted",
-        short: "Comparison stopped at the candidate-pair budget",
-        full: "The run reached the largest number of candidate pairs it was \
-               allowed to examine and stopped comparing. Duplication the tree \
-               holds may be absent from these results.",
+        kind: Notice::SearchTruncated,
+        id: "coverage/search-truncated",
+        name: "CandidateSearchTruncated",
+        short: "Candidate search stopped at a resource ceiling",
+        full: "The run stopped examining one or more candidate collections at \
+               a configured resource ceiling. Duplication the tree holds may \
+               be absent from these results.",
         level: "warning",
+    },
+    NoticeSpec {
+        kind: Notice::GroupingCeilingCut,
+        id: "coverage/grouping-ceiling",
+        name: "GroupingCeilingCutCandidateSet",
+        short: "A grouping ceiling cut a related candidate set",
+        full: "A configured grouping ceiling split a related candidate set before every \
+               relationship could be checked. Some groups or cross-group relationships may \
+               be absent from these results.",
+        level: "warning",
+    },
+    NoticeSpec {
+        kind: Notice::ParserCoverage,
+        id: "coverage/parser-recovery",
+        name: "ParserRecoveredFromUnparsedSource",
+        short: "The parser could not fully follow part of the source",
+        full: "The parser recovered from source tokens it could not attach to structure. \
+               Findings in the affected files may describe only the portion it followed.",
+        level: "warning",
+    },
+    NoticeSpec {
+        kind: Notice::UnappliedSuppressionPolicies,
+        id: "coverage/unapplied-suppression-policy",
+        name: "FastModeCouldNotApplySuppressionPolicies",
+        short: "Fast mode could not apply structural suppression policies",
+        full: "Fast mode compares tokens but does not classify boilerplate, test-only code, or integer-width families. The named suppression policies were not applied; use Structural or Semantic mode to apply them.",
+        level: "note",
     },
 ];
 
@@ -404,6 +438,18 @@ struct NotificationProperties {
     /// Which reason a compiler gave, in the vocabulary the JSON report uses.
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    /// Candidate relationships a grouping ceiling left unexamined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relationships: Option<u64>,
+    /// Source tokens the parser could not attach to structure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unparsed_tokens: Option<u64>,
+    /// Unparsed tokens as a share of the analysed token count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unparsed_share: Option<f64>,
+    /// Suppression configuration paths Fast mode could not apply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policies: Option<Vec<String>>,
 }
 
 /// Everything this run has to say about what it did not see.
@@ -446,6 +492,10 @@ fn occurrences(kind: Notice, report: &Report) -> Vec<(String, NotificationProper
                     NotificationProperties {
                         files: Some(coverage.not_asked),
                         reason: None,
+                        relationships: None,
+                        unparsed_tokens: None,
+                        unparsed_share: None,
+                        policies: None,
                     },
                 )
             })
@@ -455,38 +505,164 @@ fn occurrences(kind: Notice, report: &Report) -> Vec<(String, NotificationProper
         // whose build script was not allowed to run has nothing in common with
         // what to do about a helper that died, and a single number would leave
         // a reader to guess which they have.
-        Notice::Unanswered => compiler
-            .into_iter()
-            .flat_map(|coverage| coverage.unavailable.iter())
-            .filter(|(_, count)| **count > 0)
-            .map(|(reason, count)| {
-                (
-                    format!(
-                        "a compiler was asked about {count} file(s) and supplied nothing: {reason}"
-                    ),
-                    NotificationProperties {
-                        files: Some(*count),
-                        reason: Some(reason.clone()),
-                    },
-                )
-            })
-            .collect(),
-        Notice::PairsTruncated => {
-            if report.summary.pair_budget_exhausted {
+        Notice::Unanswered => unanswered_occurrences(compiler),
+        Notice::SearchTruncated => {
+            if report.summary.search_truncated {
                 vec![(
-                    "comparison stopped at the candidate-pair budget, so duplication this tree \
+                    "candidate search stopped at a resource ceiling, so duplication this tree \
                      holds may be missing from these results"
                         .to_string(),
                     NotificationProperties {
                         files: None,
                         reason: None,
+                        relationships: None,
+                        unparsed_tokens: None,
+                        unparsed_share: None,
+                        policies: None,
                     },
                 )]
             } else {
                 Vec::new()
             }
         }
+        Notice::GroupingCeilingCut => grouping_ceiling_occurrences(report),
+        Notice::ParserCoverage => parser_coverage_occurrences(report),
+        Notice::UnappliedSuppressionPolicies => {
+            (!report.summary.unapplied_suppression_policies.is_empty())
+                .then(|| {
+                    (
+                        format!(
+                            "Fast mode did not apply suppression policies that require structural \
+                         classifications: {}; run with --mode structural or --mode semantic to \
+                         apply them",
+                            report.summary.unapplied_suppression_policies.join(", "),
+                        ),
+                        NotificationProperties {
+                            files: None,
+                            reason: None,
+                            relationships: None,
+                            unparsed_tokens: None,
+                            unparsed_share: None,
+                            policies: Some(report.summary.unapplied_suppression_policies.clone()),
+                        },
+                    )
+                })
+                .into_iter()
+                .collect()
+        }
     }
+}
+
+/// Describe compiler requests that could not supply an answer.
+fn unanswered_occurrences(
+    compiler: Option<&CompilerCoverage>,
+) -> Vec<(String, NotificationProperties)> {
+    compiler
+        .into_iter()
+        .flat_map(|coverage| {
+            coverage
+                .unavailable
+                .iter()
+                .filter(|(_, count)| **count > 0)
+                .map(move |(reason, count)| {
+                    let message = execution_refusal_message(coverage, reason, *count)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "a compiler was asked about {count} file(s) and supplied nothing: {reason}"
+                            )
+                        });
+                    (
+                        message,
+                        NotificationProperties {
+                            files: Some(*count),
+                            reason: Some(reason.clone()),
+                            relationships: None,
+                            unparsed_tokens: None,
+                            unparsed_share: None,
+                            policies: None,
+                        },
+                    )
+                })
+        })
+        .collect()
+}
+
+/// Turn a denied execution class into the policy's actionable explanation.
+fn execution_refusal_message(
+    coverage: &CompilerCoverage,
+    reason: &str,
+    files: u64,
+) -> Option<String> {
+    (reason == "requires_execution")
+        .then(|| {
+            coverage
+                .execution_refusals
+                .iter()
+                .find(|refusal| refusal.files == files)
+                .map(|refusal| format!("{} file(s): {}", refusal.files, refusal.message))
+        })
+        .flatten()
+}
+
+/// State how many relationships a grouping ceiling left unexamined.
+fn grouping_ceiling_occurrences(report: &Report) -> Vec<(String, NotificationProperties)> {
+    let relationships = report
+        .summary
+        .funnel
+        .iter()
+        .flat_map(|stage| &stage.dropped)
+        .filter(|drop| drop.cause == "the_ceiling_cut_the_set")
+        .map(|drop| drop.count)
+        .sum::<u64>();
+    (relationships > 0)
+        .then(|| {
+            (
+                format!(
+                    "a grouping ceiling left {relationships} candidate relationship(s) \
+                     unexamined, so some clone groups may be absent"
+                ),
+                NotificationProperties {
+                    files: None,
+                    reason: None,
+                    relationships: Some(relationships),
+                    unparsed_tokens: None,
+                    unparsed_share: None,
+                    policies: None,
+                },
+            )
+        })
+        .into_iter()
+        .collect()
+}
+
+/// State the amount of source a recovering parser could not follow.
+fn parser_coverage_occurrences(report: &Report) -> Vec<(String, NotificationProperties)> {
+    report
+        .summary
+        .unparsed
+        .as_ref()
+        .filter(|unparsed| unparsed.tokens > 0)
+        .map(|unparsed| {
+            (
+                format!(
+                    "the parser could not follow {} token(s), {:.2}% of the analysed source \
+                     across {} file(s)",
+                    unparsed.tokens,
+                    unparsed.share * 100.0,
+                    unparsed.files,
+                ),
+                NotificationProperties {
+                    files: Some(unparsed.files),
+                    reason: None,
+                    relationships: None,
+                    unparsed_tokens: Some(unparsed.tokens),
+                    unparsed_share: Some(unparsed.share),
+                    policies: None,
+                },
+            )
+        })
+        .into_iter()
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -541,8 +717,7 @@ struct ResultEntry<'a> {
     locations: Vec<Location<'a>>,
     related_locations: Vec<Location<'a>>,
     partial_fingerprints: BTreeMap<&'static str, &'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    suppressions: Option<[SuppressionEntry; 1]>,
+    suppressions: Vec<SuppressionEntry>,
     properties: ResultProperties<'a>,
 }
 
@@ -583,7 +758,9 @@ impl<'a> From<&'a Group> for ResultEntry<'a> {
             suppressions: group
                 .suppressed
                 .as_ref()
-                .map(|cause| [SuppressionEntry::from(cause)]),
+                .map(SuppressionEntry::from)
+                .into_iter()
+                .collect(),
             properties: ResultProperties {
                 clone_type: &group.clone_type,
                 scope: &group.scope,
@@ -591,11 +768,16 @@ impl<'a> From<&'a Group> for ResultEntry<'a> {
                 confidence: group.confidence,
                 priority: &group.priority,
                 similarity: group.similarity.as_ref(),
+                identifier_jaccard: group.identifier_jaccard,
+                body_materiality: group.body_materiality.as_ref(),
                 boilerplate: group.boilerplate.as_deref(),
                 test_code: group.test_code,
+                test_code_evidence: group.test_code_evidence,
+                width_family: group.width_family,
                 split_pair: group.split_pair,
                 suppressed: group.suppressed.as_ref(),
                 semantic: group.semantic.as_ref(),
+                artifact_savings: &group.artifact_savings,
             },
         }
     }
@@ -763,458 +945,27 @@ struct ResultProperties<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     similarity: Option<&'a Similarity>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    identifier_jaccard: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body_materiality: Option<&'a BodyMateriality>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     boilerplate: Option<&'a str>,
     test_code: bool,
+    test_code_evidence: Option<codehelion_core::test_code::TestCodeEvidence>,
+    width_family: bool,
     split_pair: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     suppressed: Option<&'a Suppression>,
     #[serde(skip_serializing_if = "Option::is_none")]
     semantic: Option<&'a super::SemanticEvidence>,
+    artifact_savings: &'a [ArtifactSavings],
 }
 
-/// Percent-encode a path as a URI reference relative to [`SRCROOT`].
-///
-/// Everything outside the unreserved set is escaped, so a path containing
-/// spaces or non-ASCII characters still yields a valid URI. Backslashes become
-/// separators: a URI path is separated by `/` on every platform.
-fn uri_reference(path: &str) -> String {
-    let mut uri = String::with_capacity(path.len());
-    for byte in path.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
-                uri.push(char::from(byte));
-            }
-            b'\\' => uri.push('/'),
-            _ => {
-                const HEX: [u8; 16] = *b"0123456789ABCDEF";
-                uri.push('%');
-                uri.push(char::from(HEX[usize::from(byte >> 4)]));
-                uri.push(char::from(HEX[usize::from(byte & 0x0f)]));
-            }
-        }
-    }
-    uri
-}
+pub(crate) mod uri;
 
-/// Absolute `file:` URI for the scan root, with the trailing slash that marks
-/// it as a directory the result URIs are resolved against.
-fn root_uri(root: &str) -> String {
-    let encoded = uri_reference(root);
-    let mut uri = String::from("file://");
-    if !encoded.starts_with('/') {
-        uri.push('/');
-    }
-    uri.push_str(&encoded);
-    if !uri.ends_with('/') {
-        uri.push('/');
-    }
-    uri
-}
-
-/// Restate an RFC 3339 UTC timestamp with the millisecond precision SARIF
-/// specifies (`yyyy-MM-ddTHH:mm:ss.sssZ`). A value in another shape is passed
-/// through unchanged rather than mangled.
-fn millisecond_timestamp(value: &str) -> String {
-    let Some(rest) = value.strip_suffix('Z') else {
-        return value.to_string();
-    };
-    let (seconds, fraction) = rest.split_once('.').unwrap_or((rest, ""));
-    if !seconds.contains('T') {
-        return value.to_string();
-    }
-    let mut millis: String = fraction.chars().take(3).collect();
-    while millis.len() < 3 {
-        millis.push('0');
-    }
-    format!("{seconds}.{millis}Z")
-}
+use uri::millisecond_timestamp;
+pub(crate) use uri::{root_uri, uri_reference};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use crate::report::tests::{sample_report, structural_group};
-
-    fn sarif(report: &Report) -> serde_json::Value {
-        serde_json::from_str(&report.to_sarif().unwrap()).unwrap()
-    }
-
-    #[test]
-    fn the_log_names_its_version_and_the_tool_that_produced_it() {
-        let value = sarif(&sample_report());
-        assert_eq!(value["version"], "2.1.0");
-        assert_eq!(value["$schema"], SARIF_SCHEMA_URI);
-        assert_eq!(value["runs"].as_array().unwrap().len(), 1);
-
-        let driver = &value["runs"][0]["tool"]["driver"];
-        assert_eq!(driver["name"], "codehelion");
-        assert_eq!(driver["version"], "0.1.0");
-        // The rule table is fixed, so a rule index means the same thing in
-        // every log this tool writes.
-        let rules = driver["rules"].as_array().unwrap();
-        assert_eq!(rules.len(), 4);
-        assert_eq!(rules[2]["id"], "clone/type-3");
-        assert_eq!(rules[2]["defaultConfiguration"]["level"], "note");
-        assert_eq!(rules[3]["id"], "clone/restricted-semantic");
-
-        let run = &value["runs"][0];
-        assert_eq!(run["automationDetails"]["id"], "codehelion/fast");
-        assert_eq!(
-            run["originalUriBaseIds"]["SRCROOT"]["uri"],
-            "file:///work/project/"
-        );
-        assert_eq!(run["invocations"][0]["executionSuccessful"], true);
-        // SARIF timestamps carry milliseconds, not the microseconds the JSON
-        // report records.
-        assert_eq!(
-            run["invocations"][0]["startTimeUtc"],
-            "2026-01-01T00:00:00.000Z"
-        );
-    }
-
-    #[test]
-    fn a_group_becomes_one_result_pointing_at_its_canonical_instance() {
-        let value = sarif(&sample_report());
-        let result = &value["runs"][0]["results"][0];
-        assert_eq!(result["ruleId"], "clone/type-1");
-        assert_eq!(result["ruleIndex"], 0);
-        assert_eq!(result["level"], "note");
-        assert_eq!(result["occurrenceCount"], 7);
-        assert!(
-            result["message"]["text"]
-                .as_str()
-                .unwrap()
-                .starts_with("type-1 clone group: 7 occurrences, 80 tokens")
-        );
-
-        let primary = &result["locations"][0];
-        assert_eq!(
-            primary["physicalLocation"]["artifactLocation"]["uri"],
-            "src/file0.rs"
-        );
-        assert_eq!(
-            primary["physicalLocation"]["artifactLocation"]["uriBaseId"],
-            "SRCROOT"
-        );
-        assert_eq!(primary["physicalLocation"]["region"]["startLine"], 1);
-        assert_eq!(primary["physicalLocation"]["region"]["endLine"], 9);
-        assert_eq!(primary["logicalLocations"][0]["name"], "checksum");
-        assert_eq!(primary["properties"]["canonical"], true);
-
-        // Every member is reachable, the canonical one included.
-        let related = result["relatedLocations"].as_array().unwrap();
-        assert_eq!(related.len(), 7);
-        assert_eq!(related[0]["id"], 0);
-        assert_eq!(
-            related[0]["message"]["text"],
-            "occurrence 1 of 7 (canonical instance)"
-        );
-        assert_eq!(related[6]["message"]["text"], "occurrence 7 of 7");
-        assert_eq!(
-            related[6]["properties"]["finding_id"],
-            format!("{:032x}", 6)
-        );
-
-        // The stable clone id travels with the result.
-        assert_eq!(
-            result["partialFingerprints"][FINGERPRINT_KEY],
-            "0b".repeat(16)
-        );
-    }
-
-    #[test]
-    fn restricted_semantic_group_uses_its_own_rule_and_preserves_evidence() {
-        let mut report = sample_report();
-        let group = &mut report.groups[0];
-        group.clone_type = "restricted-semantic".to_string();
-        group.semantic = Some(super::super::SemanticEvidence {
-            schema_version: "sog-v1".to_string(),
-            rules: vec![super::super::SemanticRuleEvidence {
-                id: "sequence-pipeline-v1".to_string(),
-                version: 1,
-                confidence: 0.7,
-            }],
-            graphs: vec![
-                super::super::tests::semantic_graph(),
-                super::super::tests::semantic_graph(),
-            ],
-            node_mappings: vec![super::super::SemanticNodeMapping {
-                corresponding_member: 1,
-                canonical: 0,
-                corresponding: 0,
-            }],
-        });
-        let value = sarif(&report);
-        let result = &value["runs"][0]["results"][0];
-        assert_eq!(result["ruleId"], "clone/restricted-semantic");
-        assert_eq!(
-            result["properties"]["semantic"]["rules"][0]["id"],
-            "sequence-pipeline-v1"
-        );
-    }
-
-    #[test]
-    fn the_similarity_breakdown_reaches_the_result_intact() {
-        let mut report = sample_report();
-        report.groups.push(structural_group());
-        let value = sarif(&report);
-        let result = &value["runs"][0]["results"][2];
-
-        assert_eq!(result["ruleId"], "clone/type-3");
-        assert_eq!(result["ruleIndex"], 2);
-        let properties = &result["properties"];
-        assert_eq!(properties["clone_type"], "type-3");
-        assert_eq!(
-            properties["priority"]["inputs"]["largest_member_tokens"],
-            60
-        );
-        assert_eq!(properties["similarity"]["composite"], 0.82);
-        assert_eq!(
-            properties["similarity"]["weight_version"],
-            "structural-verify-v1"
-        );
-        // The dimension the mode could not measure stays absent here too.
-        assert_eq!(
-            properties["similarity"]["type_similarity"],
-            serde_json::Value::Null
-        );
-        assert!(
-            result["message"]["text"]
-                .as_str()
-                .unwrap()
-                .contains("type n/a")
-        );
-        // The classified shape travels with the result too, so no reporter
-        // says less about a group than another.
-        let mut classified = sample_report();
-        let mut group = structural_group();
-        group.boilerplate = Some("macro-repetition".to_string());
-        classified.groups.push(group);
-        assert_eq!(
-            sarif(&classified)["runs"][0]["results"][2]["properties"]["boilerplate"],
-            "macro-repetition"
-        );
-
-        // As does whether the group lives wholly in a test suite, which is why
-        // it may sit low in a report that still lists it.
-        let mut suite = sample_report();
-        let mut group = structural_group();
-        group.test_code = true;
-        suite.groups.push(group);
-        let log = sarif(&suite);
-        assert_eq!(
-            log["runs"][0]["results"][2]["properties"]["test_code"],
-            true
-        );
-        assert_eq!(
-            log["runs"][0]["results"][0]["properties"]["test_code"],
-            false
-        );
-
-        // A mode that scores no dimensions omits the key rather than
-        // inventing values.
-        assert!(
-            value["runs"][0]["results"][0]["properties"]
-                .get("similarity")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn a_suppressed_group_is_reported_as_suppressed_not_dropped() {
-        let value = sarif(&sample_report());
-        let results = value["runs"][0]["results"].as_array().unwrap();
-        assert_eq!(results.len(), 2, "the hidden group is still reported");
-
-        let suppression = &results[1]["suppressions"][0];
-        assert_eq!(suppression["kind"], "external");
-        assert_eq!(suppression["justification"], "path glob \"vendor/**\"");
-        assert_eq!(results[1]["properties"]["suppressed"]["scope"], "path_glob");
-        assert!(results[0].get("suppressions").is_none());
-    }
-
-    #[test]
-    fn an_inline_marker_is_the_only_in_source_suppression() {
-        let inline = Suppression {
-            kind: SuppressionKind::Rule,
-            reason: None,
-            scope: Some("inline_comment".to_string()),
-            pattern: Some("codehelion:ignore".to_string()),
-        };
-        assert_eq!(SuppressionEntry::from(&inline).kind, "inSource");
-
-        let noise = Suppression {
-            kind: SuppressionKind::Noise,
-            reason: Some("low-entropy".to_string()),
-            scope: None,
-            pattern: None,
-        };
-        let entry = SuppressionEntry::from(&noise);
-        assert_eq!(entry.kind, "external");
-        assert_eq!(entry.justification, "low-entropy noise");
-    }
-
-    #[test]
-    fn the_run_property_bag_keeps_what_sarif_has_no_field_for() {
-        let value = sarif(&sample_report());
-        let properties = &value["runs"][0]["properties"];
-        assert_eq!(properties["report_schema_version"], 1);
-        assert_eq!(properties["mode"], "fast");
-        assert_eq!(properties["build_variant"]["normalization_version"], 1);
-        assert_eq!(properties["detector_versions"][0]["component"], "fp-schema");
-        assert_eq!(properties["summary"]["files"]["total"], 2);
-        assert_eq!(properties["run_id"], 1);
-    }
-
-    fn coverage(not_asked: u64, unavailable: &[(&str, u64)]) -> crate::report::CompilerCoverage {
-        crate::report::CompilerCoverage {
-            answered: 3,
-            not_asked,
-            unavailable: unavailable
-                .iter()
-                .map(|(reason, count)| ((*reason).to_string(), *count))
-                .collect(),
-            restarts: 2,
-        }
-    }
-
-    /// A short result list is what a clean tree and an unreadable one both look
-    /// like. Which one this is has to be said outright, in the place a consumer
-    /// reads without having been taught this tool's property keys.
-    #[test]
-    fn what_a_run_could_not_read_is_said_rather_than_left_to_the_property_bag() {
-        let mut report = sample_report();
-        report.summary.compiler = Some(coverage(
-            5,
-            &[("helper_died", 1), ("requires_execution", 2)],
-        ));
-        let value = sarif(&report);
-        let run = &value["runs"][0];
-        let notifications = run["invocations"][0]["toolExecutionNotifications"]
-            .as_array()
-            .unwrap();
-        assert_eq!(notifications.len(), 3);
-
-        assert_eq!(notifications[0]["descriptor"]["id"], "coverage/not-asked");
-        assert_eq!(notifications[0]["level"], "note");
-        assert_eq!(notifications[0]["properties"]["files"], 5);
-
-        // One per reason: a build script nobody allowed to run and a helper
-        // that died call for different things, and one total would leave a
-        // reader to guess which they have.
-        for (at, reason, files) in [(1, "helper_died", 1), (2, "requires_execution", 2)] {
-            let notification = &notifications[at];
-            assert_eq!(notification["descriptor"]["id"], "coverage/unanswered");
-            assert_eq!(notification["level"], "warning");
-            assert_eq!(notification["properties"]["reason"], reason);
-            assert_eq!(notification["properties"]["files"], files);
-            assert!(
-                notification["message"]["text"]
-                    .as_str()
-                    .unwrap()
-                    .contains(reason)
-            );
-        }
-
-        // Reading less of a tree than it holds is an outcome, not a failure.
-        assert_eq!(run["invocations"][0]["executionSuccessful"], true);
-
-        // And the index has to land on the descriptor it names, or a consumer
-        // resolving it by position gets somebody else's sentence.
-        let declared = run["tool"]["driver"]["notifications"].as_array().unwrap();
-        assert_eq!(declared.len(), NOTICES.len());
-        for notification in notifications {
-            let index = notification["descriptor"]["index"].as_u64().unwrap();
-            let at = usize::try_from(index).unwrap();
-            assert_eq!(declared[at]["id"], notification["descriptor"]["id"]);
-        }
-    }
-
-    /// A run told to stop comparing before it ran out of things to compare has
-    /// findings missing for a reason that is not the tree's.
-    #[test]
-    fn a_comparison_that_stopped_at_its_budget_says_so() {
-        let mut report = sample_report();
-        report.summary.pair_budget_exhausted = true;
-        let value = sarif(&report);
-        let notifications = value["runs"][0]["invocations"][0]["toolExecutionNotifications"]
-            .as_array()
-            .unwrap();
-        assert_eq!(notifications.len(), 1);
-        assert_eq!(
-            notifications[0]["descriptor"]["id"],
-            "coverage/pairs-truncated"
-        );
-        assert_eq!(notifications[0]["level"], "warning");
-        // Nothing was counted in files, so nothing claims to have been.
-        assert!(notifications[0]["properties"].get("files").is_none());
-    }
-
-    /// Silence and an empty complaint are different claims. A mode that asks no
-    /// compiler never had one to make, and a run that asked about everything it
-    /// read has nothing outstanding — neither is served by an empty array that
-    /// reads as a report that came back clean.
-    #[test]
-    fn a_run_with_nothing_to_report_about_itself_reports_nothing() {
-        let value = sarif(&sample_report());
-        assert!(
-            value["runs"][0]["invocations"][0]
-                .get("toolExecutionNotifications")
-                .is_none()
-        );
-        // The catalogue is still there, because what the tool can say does not
-        // depend on what this run had to say.
-        assert_eq!(
-            value["runs"][0]["tool"]["driver"]["notifications"]
-                .as_array()
-                .unwrap()
-                .len(),
-            NOTICES.len()
-        );
-
-        // Nor does a compiler that answered about everything file an empty one.
-        let mut answered = sample_report();
-        answered.summary.compiler = Some(coverage(0, &[]));
-        let value = sarif(&answered);
-        assert!(
-            value["runs"][0]["invocations"][0]
-                .get("toolExecutionNotifications")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn paths_are_escaped_into_valid_uri_references() {
-        assert_eq!(uri_reference("src/lib.rs"), "src/lib.rs");
-        assert_eq!(uri_reference("src/a b.rs"), "src/a%20b.rs");
-        assert_eq!(uri_reference("src\\win.rs"), "src/win.rs");
-        assert_eq!(uri_reference("src/日本.rs"), "src/%E6%97%A5%E6%9C%AC.rs");
-        assert_eq!(root_uri("/work/my project"), "file:///work/my%20project/");
-        assert_eq!(root_uri("C:\\work"), "file:///C:/work/");
-    }
-
-    #[test]
-    fn timestamps_are_restated_at_millisecond_precision() {
-        assert_eq!(
-            millisecond_timestamp("2026-01-01T00:00:00.123456Z"),
-            "2026-01-01T00:00:00.123Z"
-        );
-        assert_eq!(
-            millisecond_timestamp("2026-01-01T00:00:00Z"),
-            "2026-01-01T00:00:00.000Z"
-        );
-        // Anything else is passed through rather than mangled.
-        assert_eq!(millisecond_timestamp("unknown"), "unknown");
-    }
-
-    #[test]
-    fn a_member_without_lines_reports_no_region() {
-        let mut report = sample_report();
-        report.groups[0].members[0].start_line = 0;
-        report.groups[0].members[0].end_line = 0;
-        let value = sarif(&report);
-        let physical = &value["runs"][0]["results"][0]["locations"][0]["physicalLocation"];
-        assert!(physical.get("region").is_none());
-        assert_eq!(physical["artifactLocation"]["uri"], "src/file0.rs");
-    }
-}
+mod tests;

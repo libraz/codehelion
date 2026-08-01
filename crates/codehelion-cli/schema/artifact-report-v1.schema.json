@@ -4,17 +4,51 @@
   "title": "codehelion artifact report",
   "description": "Machine-readable analysis of one locally read compiled artifact.",
   "type": "object",
-  "required": ["schema_version", "path", "format", "fingerprint", "sizes"],
+  "required": [
+    "schema_version",
+    "path",
+    "format",
+    "fingerprint",
+    "sizes",
+    "sections",
+    "section_details",
+    "imports",
+    "import_details",
+    "relocations",
+    "relocation_details",
+    "data_segments",
+    "data_segment_details"
+  ],
   "properties": {
     "schema_version": { "const": "artifact-report-v1" },
     "path": { "type": "string" },
-    "format": { "type": "string", "enum": ["wasm", "elf", "mach-o", "pe-coff", "archive"] },
+    "format": { "type": "string", "enum": ["wasm", "elf", "macho", "pe-coff", "archive"] },
     "fingerprint": { "$ref": "#/$defs/fingerprint" },
     "analysis_id": { "type": ["integer", "null"] },
     "build_variant": { "$ref": "#/$defs/build_variant" },
     "sizes": { "$ref": "#/$defs/sizes" },
     "correlation": { "$ref": "#/$defs/correlation" },
     "generic_origins": { "type": "array" },
+    "sections": { "type": "integer", "minimum": 0 },
+    "section_details": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/section" }
+    },
+    "imports": { "type": "integer", "minimum": 0 },
+    "import_details": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/import" }
+    },
+    "relocations": { "type": "integer", "minimum": 0 },
+    "relocation_details": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/relocation" }
+    },
+    "data_segments": { "type": "integer", "minimum": 0 },
+    "data_segment_details": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/data_segment" }
+    },
     "archive_members": {
       "type": "array",
       "items": { "$ref": "#/$defs/archive_member" }
@@ -30,6 +64,48 @@
         "fingerprint": { "$ref": "#/$defs/fingerprint" }
       }
     },
+    "section": {
+      "type": "object",
+      "required": ["name", "offset", "size", "executable"],
+      "properties": {
+        "name": { "type": ["string", "null"] },
+        "offset": { "type": "integer", "minimum": 0 },
+        "size": { "type": "integer", "minimum": 0 },
+        "executable": { "type": "boolean" }
+      }
+    },
+    "import": {
+      "type": "object",
+      "required": ["module", "name", "kind"],
+      "properties": {
+        "module": { "type": ["string", "null"] },
+        "name": { "type": ["string", "null"] },
+        "kind": {
+          "type": "string",
+          "enum": ["function", "table", "memory", "global", "tag", "other"]
+        }
+      }
+    },
+    "relocation": {
+      "type": "object",
+      "required": ["section", "offset", "kind", "target"],
+      "properties": {
+        "section": { "type": ["integer", "null"], "minimum": 0 },
+        "offset": { "type": "integer", "minimum": 0 },
+        "kind": { "type": "string" },
+        "target": { "type": ["string", "null"] }
+      }
+    },
+    "data_segment": {
+      "type": "object",
+      "required": ["fingerprint", "section", "offset", "size"],
+      "properties": {
+        "fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "section": { "type": ["integer", "null"], "minimum": 0 },
+        "offset": { "type": "integer", "minimum": 0 },
+        "size": { "type": "integer", "minimum": 0 }
+      }
+    },
     "archive_member": {
       "type": "object",
       "required": ["name", "fingerprint", "offset", "size", "format", "thin", "parse_error"],
@@ -38,7 +114,7 @@
         "fingerprint": { "$ref": "#/$defs/fingerprint" },
         "offset": { "type": "integer", "minimum": 0 },
         "size": { "type": "integer", "minimum": 0 },
-        "format": { "type": ["string", "null"], "enum": ["wasm", "elf", "mach-o", "pe-coff", "archive", null] },
+        "format": { "type": ["string", "null"], "enum": ["wasm", "elf", "macho", "pe-coff", "archive", null] },
         "thin": { "type": "boolean" },
         "parse_error": { "type": ["string", "null"] }
       }

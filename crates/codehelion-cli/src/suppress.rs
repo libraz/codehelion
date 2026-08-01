@@ -39,7 +39,7 @@
 //! (Generated-file markers are a further mechanism, applied earlier: those
 //! files are excluded during discovery, before any candidate exists.)
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use codehelion_store::snapshot::SuppressionRuleRow;
@@ -86,13 +86,13 @@ pub(crate) fn marker_lines(text: &str) -> Vec<u32> {
 
 /// Compiled suppression rules for one scan.
 ///
-/// `rows` is what the snapshot records; rule indices returned by the
-/// evaluation methods index into it.
+/// `rows` is what the snapshot records; every compiled matcher carries the
+/// index of the row it represents.
 #[derive(Debug)]
 pub(crate) struct Rules {
-    path_matchers: Vec<GlobMatcher>,
-    /// Vendored-tree globs paired with their rule index in `rows`. Kept apart
-    /// from `path_matchers`, whose position in that list *is* its rule index.
+    /// Path globs paired with their rule index in `rows`.
+    path_matchers: Vec<(GlobMatcher, usize)>,
+    /// Vendored-tree globs paired with their rule index in `rows`.
     vendored_matchers: Vec<(GlobMatcher, usize)>,
     /// Symbol globs paired with their rule index in `rows`.
     symbol_matchers: Vec<(GlobMatcher, usize)>,
@@ -101,10 +101,11 @@ pub(crate) struct Rules {
     /// Index of the inline-marker rule in `rows`, present only when at least
     /// one marker was seen in the scanned sources.
     inline_rule: Option<usize>,
-    /// The group ids a baseline froze, and the index of the rule that hides
-    /// them. One rule stands for the whole file: which entry matched is the
-    /// file's business, and it is where the reader has to look anyway.
-    baseline: Option<(BTreeSet<String>, usize)>,
+    /// The group ids and maximum covered occurrence count a baseline froze,
+    /// plus the index of the rule that hides them. One rule stands for the
+    /// whole file: which entry matched is the file's business, and it is
+    /// where the reader has to look anyway.
+    baseline: Option<(BTreeMap<String, u64>, usize)>,
     pub(crate) rows: Vec<SuppressionRuleRow>,
 }
 
@@ -120,6 +121,19 @@ pub(crate) struct FileSuppression {
     suppressed_units: Vec<bool>,
     /// The file's marker lines, for occurrences outside any unit.
     marker_lines: Vec<u32>,
+    /// Every configured selector that matched this file or one of its units.
+    ///
+    /// This deliberately includes a selector that lost precedence for a
+    /// particular finding: a matched rule is not stale merely because a more
+    /// specific rule decided what the report displays.
+    matched_rules: BTreeSet<usize>,
+}
+
+impl FileSuppression {
+    /// Every selector that matched this file or one of its units.
+    pub(crate) fn matched_rules(&self) -> impl Iterator<Item = usize> + '_ {
+        self.matched_rules.iter().copied()
+    }
 }
 
 impl Rules {
@@ -138,12 +152,12 @@ impl Rules {
         for pattern in &suppression.paths {
             let glob =
                 Glob::new(pattern).with_context(|| format!("suppression path glob {pattern:?}"))?;
-            path_matchers.push(glob.compile_matcher());
             rows.push(SuppressionRuleRow {
                 scope: "path_glob".to_string(),
                 pattern: pattern.clone(),
                 reason: None,
             });
+            path_matchers.push((glob.compile_matcher(), rows.len() - 1));
         }
         let mut vendored_matchers = Vec::with_capacity(suppression.vendored_paths.len());
         for pattern in &suppression.vendored_paths {
@@ -200,21 +214,21 @@ impl Rules {
     /// The rule's pattern is the file rather than any one id: a baseline is a
     /// decision recorded in one place, and pointing at that place is what a
     /// reader needs in order to reverse it.
-    pub(crate) fn add_baseline(&mut self, file: &str, ids: BTreeSet<String>) -> usize {
+    pub(crate) fn add_baseline(&mut self, file: &str, covered: BTreeMap<String, u64>) -> usize {
         self.rows.push(SuppressionRuleRow {
             scope: "baseline".to_string(),
             pattern: file.to_string(),
             reason: Some("recorded before this baseline".to_string()),
         });
         let index = self.rows.len() - 1;
-        self.baseline = Some((ids, index));
+        self.baseline = Some((covered, index));
         index
     }
 
     /// The rule hiding a group because a baseline froze it, if one did.
-    pub(crate) fn baseline_rule(&self, fingerprint_hex: &str) -> Option<usize> {
-        let (ids, rule) = self.baseline.as_ref()?;
-        ids.contains(fingerprint_hex).then_some(*rule)
+    pub(crate) fn baseline_rule(&self, fingerprint_hex: &str, instances: u64) -> Option<usize> {
+        let (covered, rule) = self.baseline.as_ref()?;
+        (instances <= *covered.get(fingerprint_hex)?).then_some(*rule)
     }
 
     /// Register a rule that matches by code shape rather than by location,
@@ -232,8 +246,8 @@ impl Rules {
         self.rows.len() - 1
     }
 
-    /// The configured rules that hid nothing in this run, in the order they
-    /// were written.
+    /// The configured rules whose selectors matched no source or finding in
+    /// this run, in the order they were written.
     ///
     /// A rule that matches nothing is the worst failure mode suppression has:
     /// it reads as an instruction that took effect while the findings it was
@@ -241,6 +255,8 @@ impl Rules {
     /// duplication it judged has changed and the judgement no longer applies
     /// to anything. Either way the user has to be told.
     ///
+    /// Source selectors are counted when they match, even if a
+    /// higher-precedence selector later decides which rule the report cites.
     /// Only rules the user wrote are considered. The inline-marker rule is
     /// registered from markers actually found in the sources, and the shape
     /// and attribute rules are registered from categories this run actually
@@ -283,25 +299,36 @@ impl Rules {
         markers: &[u32],
         units: &[UnitSpan<'_>],
     ) -> FileSuppression {
-        let path_rule = self
+        let path_matches: Vec<usize> = self
             .path_matchers
             .iter()
-            .position(|matcher| matcher.is_match(path));
-        let vendored_rule = self
+            .filter_map(|(matcher, rule)| matcher.is_match(path).then_some(*rule))
+            .collect();
+        let path_rule = path_matches.first().copied();
+        let vendored_matches: Vec<usize> = self
             .vendored_matchers
             .iter()
-            .find(|(matcher, _)| matcher.is_match(path))
-            .map(|&(_, rule)| rule);
+            .filter_map(|(matcher, rule)| matcher.is_match(path).then_some(*rule))
+            .collect();
+        let vendored_rule = vendored_matches.first().copied();
+        let mut matched_rules: BTreeSet<usize> = path_matches.into_iter().collect();
+        matched_rules.extend(vendored_matches);
         let symbol_units = units
             .iter()
             .map(|unit| {
                 let name = unit.name?;
-                self.symbol_matchers
+                let matches: Vec<usize> = self
+                    .symbol_matchers
                     .iter()
-                    .find(|(matcher, _)| matcher.is_match(name))
-                    .map(|&(_, rule)| rule)
+                    .filter_map(|(matcher, rule)| matcher.is_match(name).then_some(*rule))
+                    .collect();
+                matched_rules.extend(&matches);
+                matches.first().copied()
             })
             .collect();
+        if let Some(rule) = self.inline_rule.filter(|_| !markers.is_empty()) {
+            matched_rules.insert(rule);
+        }
         let lines: Vec<(u32, u32)> = units
             .iter()
             .map(|unit| (unit.start_line, unit.end_line))
@@ -312,6 +339,7 @@ impl Rules {
             symbol_units,
             suppressed_units: suppressed_units(markers, &lines),
             marker_lines: markers.to_vec(),
+            matched_rules,
         }
     }
 
@@ -525,6 +553,29 @@ mod tests {
 
         let clean = rules.evaluate_file("src/other.rs", &[], &[unit(None, (1, 5))]);
         assert_eq!(rules.member_rule(&clean, 1, 5, Some(0)), None);
+    }
+
+    #[test]
+    fn path_matchers_hold_the_row_of_the_rule_they_represent() {
+        let rules = Rules::compile(
+            &suppression(&["generated/**", "vendor/**"], &["test_*"], &[]),
+            false,
+        )
+        .unwrap();
+        let file = rules.evaluate_file("vendor/lib.rs", &[], &[unit(None, (1, 5))]);
+        let rule = rules
+            .member_rule(&file, 1, 5, Some(0))
+            .expect("path matches");
+        assert_eq!(rules.rows[rule].scope, "path_glob");
+        assert_eq!(rules.rows[rule].pattern, "vendor/**");
+        assert_eq!(
+            rules
+                .path_matchers
+                .iter()
+                .map(|(_, row)| *row)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 
     #[test]

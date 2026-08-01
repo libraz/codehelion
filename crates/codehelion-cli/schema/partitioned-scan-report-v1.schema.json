@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/partitioned-scan-report-v1.schema.json",
+  "title": "codehelion partitioned scan report v1",
+  "description": "Machine-readable result of a scan that keeps source findings separated by build variant.",
+  "type": "object",
+  "required": ["schema_version", "$schema", "partitions"],
+  "properties": {
+    "schema_version": { "const": "partitioned-scan-report-v1" },
+    "$schema": {
+      "const": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/partitioned-scan-report-v1.schema.json"
+    },
+    "partitions": {
+      "type": "array",
+      "items": {
+        "$ref": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v1.schema.json"
+      }
+    },
+    "cross_variant_comparison": {
+      "type": "object",
+      "description": "Optional exact Type-1 comparison between distinct build variants. It never merges the partition findings."
+    },
+    "cross_variant_comparison_status": {
+      "type": "object",
+      "description": "Why an explicitly requested exact Type-1 build-variant comparison did not run. This is distinct from a completed comparison with zero groups.",
+      "required": ["status", "comparison_kind", "reason", "origin_variants"],
+      "properties": {
+        "status": { "const": "not_run" },
+        "comparison_kind": { "const": "exact-type-1-whole-units" },
+        "reason": { "type": "string" },
+        "origin_variants": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "cross_language_comparison": {
+      "type": "object",
+      "description": "Optional restricted semantic comparison between language-specific partitions. It never merges the partition findings."
+    }
+  }
+}
