@@ -1,9 +1,10 @@
 //! The snapshot write path.
 //!
-//! A scan's results are committed as one atomic snapshot: every row of a
-//! [`Snapshot`] lands inside a single transaction, so an interrupted write
-//! leaves no partial scan in the database — the run either exists completely
-//! or not at all.
+//! A single-partition scan's results are committed as one atomic snapshot:
+//! every row of a [`Snapshot`] lands inside one transaction. A multi-partition
+//! scan records each partition as non-readable `running` data, then atomically
+//! promotes every partition only after the whole invocation succeeds. Thus an
+//! interrupted semantic invocation leaves its prior completed snapshot intact.
 //!
 //! Fingerprint rows are content-addressed: identical identifiers produced
 //! under the identical analysis context share one row across scans, which is
@@ -12,7 +13,7 @@
 //! written as anchor columns on the per-scan rows and participates in no
 //! identity.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::{CloneClass, CloneScope};
@@ -27,6 +28,7 @@ use codehelion_core::stable_id::{
     CrossVariantComparisonId, CrossVariantGroupId, FindingId, FragmentFingerprint, HASH_ALGORITHM,
     UnitFingerprint,
 };
+use codehelion_core::test_code::TestCodeEvidence;
 use codehelion_core::verify::Confidence;
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -120,7 +122,7 @@ pub struct SimilarityBreakdownRow {
     /// Rename-invariant structural agreement.
     pub structural: f64,
     /// Control-flow-profile agreement (a syntactic approximation).
-    pub control_flow: f64,
+    pub control_flow: Option<f64>,
     /// Type agreement, or `None` when types are unavailable.
     pub type_similarity: Option<f64>,
     /// Call-name multiset agreement, or `None` when neither unit calls
@@ -148,6 +150,8 @@ pub struct GroupRow {
     /// Whether every member is test code. A recorded fact about the code, as
     /// `boilerplate` is: what a report does with it is a separate decision.
     pub test_code: bool,
+    /// Why the group is test code, when every member is test code.
+    pub test_code_evidence: Option<TestCodeEvidence>,
     /// Whether this group is a verified pair that no larger group could hold,
     /// and so the one kind of group whose members appear in another too.
     pub split_pair: bool,
@@ -365,6 +369,10 @@ pub struct Snapshot<'a> {
     pub tool_version: &'a str,
     /// Hash of the effective configuration.
     pub config_hash: &'a str,
+    /// How the effective configuration was selected.
+    pub config_source: &'a str,
+    /// Configuration file path when one supplied the effective settings.
+    pub config_path: Option<&'a str>,
     /// RFC 3339 start time, supplied by the caller.
     pub started_at: &'a str,
     /// RFC 3339 finish time, supplied by the caller.
@@ -534,6 +542,8 @@ pub struct CrossLanguageSemanticMemberRow {
 /// the first.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SummaryRow {
+    /// Files that successfully reached analysis, split by language.
+    pub analyzed_files: FileCountsRow,
     /// Source lines across the analysed files.
     pub lines: u64,
     /// Tokens across the analysed files.
@@ -548,7 +558,25 @@ pub struct SummaryRow {
     pub excluded_generated: u64,
     /// Files dropped by the configured include/exclude globs.
     pub excluded_by_glob: u64,
-    /// Files dropped for any other cause (size, binary content, read errors).
+    /// Files dropped because they exceeded the configured size ceiling.
+    pub excluded_too_large: u64,
+    /// Files dropped because their head identified them as binary.
+    pub excluded_binary: u64,
+    /// Files the walker or selected frontend could not read.
+    pub excluded_unreadable: u64,
+    /// Symbolic links deliberately left unresolved by the source walker.
+    pub excluded_symlinks: u64,
+    /// Directory entries the source walker could not read.
+    pub excluded_walk_errors: u64,
+    /// Files dropped after exceeding the configured parse-time allowance.
+    pub excluded_timed_out: u64,
+    /// The concrete resource profile applied to this run, when one was.
+    pub guardrails: Option<GuardrailsRow>,
+    /// Files dropped for causes other than generated markers or globs.
+    ///
+    /// This is retained as the sum of the reason-specific fields for the
+    /// summary's original public aggregate. Consumers needing an explanation
+    /// use the individual fields above.
     pub excluded_skipped: u64,
     /// Duplicated runs left out because a reported whole-unit group already
     /// covers them.
@@ -569,6 +597,38 @@ pub struct SummaryRow {
     pub funnel: Vec<FunnelStageRow>,
     /// Configured suppression rules that hid nothing in the run.
     pub unused_suppressions: Vec<UnusedRuleRow>,
+}
+
+/// Analysed-file counts recorded with a summary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FileCountsRow {
+    /// All files that reached analysis.
+    pub total: u64,
+    /// Analysed Rust files.
+    pub rust: u64,
+    /// Analysed C files.
+    pub c: u64,
+    /// Analysed C++ files.
+    pub cpp: u64,
+}
+
+/// Concrete resource ceilings a scan applied for one profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardrailsRow {
+    /// Name of the applied profile.
+    pub profile: String,
+    /// Largest file read, in bytes.
+    pub max_file_bytes: u64,
+    /// Per-file parse allowance, in milliseconds.
+    pub parse_timeout_ms: u64,
+    /// Compiler-helper request allowance, in milliseconds.
+    pub helper_timeout_ms: u64,
+    /// Largest posting list admitted to pairing.
+    pub posting_cap: u64,
+    /// Largest candidate-pair budget per pass.
+    pub pair_budget: u64,
+    /// Largest related component refined together.
+    pub max_component: u64,
 }
 
 /// How much of the source the parser could not follow.
@@ -627,1066 +687,6 @@ pub struct FileRow {
     pub byte_len: u64,
 }
 
-impl Store {
-    /// Replace the stored snapshot atomically and return its row id.
-    ///
-    /// # Errors
-    ///
-    /// Any failure — malformed input (such as a member referencing a
-    /// non-existent unit) or an underlying database error — rolls the whole
-    /// replacement back; the prior completed snapshot remains intact.
-    pub fn record_snapshot(&mut self, snapshot: &Snapshot<'_>) -> Result<i64, StoreError> {
-        self.record_snapshot_part(snapshot, true)
-    }
-
-    /// Record one partition of the current scan.
-    ///
-    /// The first partition replaces the prior scan; later partitions belong to
-    /// that same invocation and are appended before its report is emitted.
-    /// Callers must never use `false` to retain a completed earlier scan.
-    ///
-    /// # Errors
-    ///
-    /// Returns any validation or database error while preserving transaction
-    /// atomicity for the partition being written.
-    pub fn record_snapshot_part(
-        &mut self,
-        snapshot: &Snapshot<'_>,
-        replace_existing: bool,
-    ) -> Result<i64, StoreError> {
-        let tx = self.conn.transaction()?;
-        if replace_existing {
-            clear_previous_snapshot(&tx)?;
-        }
-        let run_id = write_snapshot(&tx, snapshot)?;
-        tx.commit()?;
-        Ok(run_id)
-    }
-
-    /// Persist one opt-in cross-build-variant comparison.
-    ///
-    /// Every invocation gets a row even when its comparison identity repeats,
-    /// so an explicit comparison always describes the inputs it received.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the comparison cannot be written atomically.
-    pub fn record_cross_variant_comparison(
-        &mut self,
-        comparison: &CrossVariantComparisonSnapshot<'_>,
-    ) -> Result<i64, StoreError> {
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT INTO cross_variant_comparison
-                 (comparison_id, policy_version, root_path, started_at, finished_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                comparison.comparison_id.as_bytes().as_slice(),
-                comparison.policy_version,
-                comparison.root_path,
-                comparison.started_at,
-                comparison.finished_at,
-            ],
-        )?;
-        let comparison_row = tx.last_insert_rowid();
-        for origin in comparison.origins {
-            tx.execute(
-                "INSERT INTO cross_variant_comparison_origin
-                     (comparison_id, build_variant_fingerprint) VALUES (?1, ?2)",
-                params![comparison_row, origin],
-            )?;
-        }
-        for group in comparison.groups {
-            tx.execute(
-                "INSERT INTO cross_variant_clone_group
-                     (comparison_id, group_id, clone_type, member_count)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    comparison_row,
-                    group.group_id.as_bytes().as_slice(),
-                    group.clone_type.name(),
-                    i64::try_from(group.members.len()).unwrap_or(i64::MAX),
-                ],
-            )?;
-            let group_row = tx.last_insert_rowid();
-            for member in &group.members {
-                tx.execute(
-                    "INSERT INTO cross_variant_clone_member
-                         (group_id, origin_variant_fingerprint, language, file_path,
-                          start_line, end_line, unit_name, token_count)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        group_row,
-                        member.origin_variant,
-                        member.language.name(),
-                        member.file_path,
-                        i64::from(member.start_line),
-                        i64::from(member.end_line),
-                        member.unit_name,
-                        i64::try_from(member.token_count).unwrap_or(i64::MAX),
-                    ],
-                )?;
-            }
-        }
-        tx.commit()?;
-        Ok(comparison_row)
-    }
-
-    /// Persist one opt-in Rust-to-C++ semantic comparison.
-    ///
-    /// This uses tables distinct from both normal snapshots and exact
-    /// cross-build comparisons, so the result domains stay separate.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a group lacks its closed evidence or when the
-    /// comparison cannot be written atomically.
-    pub fn record_cross_language_comparison(
-        &mut self,
-        comparison: &CrossLanguageComparisonSnapshot<'_>,
-    ) -> Result<i64, StoreError> {
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT INTO cross_language_comparison
-                 (comparison_id, policy_version, root_path, started_at, finished_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                comparison.comparison_id.as_bytes().as_slice(),
-                comparison.policy_version,
-                comparison.root_path,
-                comparison.started_at,
-                comparison.finished_at,
-            ],
-        )?;
-        let comparison_row = tx.last_insert_rowid();
-        for origin in comparison.origins {
-            tx.execute(
-                "INSERT INTO cross_language_comparison_origin
-                     (comparison_id, build_variant_fingerprint) VALUES (?1, ?2)",
-                params![comparison_row, origin],
-            )?;
-        }
-        for group in comparison.groups {
-            validate_cross_language_group(group)?;
-            let correspondence_ids =
-                serde_json::to_string(&group.correspondence_ids).map_err(|error| {
-                    StoreError::InvalidSemanticEvidence {
-                        reason: format!(
-                            "serializing cross-language API correspondence IDs: {error}"
-                        ),
-                    }
-                })?;
-            tx.execute(
-                "INSERT INTO cross_language_semantic_group
-                     (comparison_id, group_id, rule_id, rule_version, semantic_confidence,
-                      correspondence_ids_json, member_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    comparison_row,
-                    group.group_id.as_bytes().as_slice(),
-                    group.rule_id,
-                    i64::from(group.rule_version),
-                    group.semantic_confidence,
-                    correspondence_ids,
-                    i64::try_from(group.members.len()).unwrap_or(i64::MAX),
-                ],
-            )?;
-            let group_row = tx.last_insert_rowid();
-            for member in &group.members {
-                tx.execute(
-                    "INSERT INTO cross_language_semantic_member
-                         (group_id, origin_variant_fingerprint, language, file_path,
-                          start_line, end_line, unit_name, graph_schema_version, graph_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        group_row,
-                        member.origin_variant,
-                        member.language.name(),
-                        member.file_path,
-                        i64::from(member.start_line),
-                        i64::from(member.end_line),
-                        member.unit_name,
-                        member.graph_schema_version,
-                        member.graph_json,
-                    ],
-                )?;
-            }
-        }
-        tx.commit()?;
-        Ok(comparison_row)
-    }
-}
-
-/// Drop the earlier scan before writing its replacement.
-///
-/// A local database is the current scan's canonical storage, not a ledger.
-fn clear_previous_snapshot(tx: &Transaction<'_>) -> Result<(), StoreError> {
-    tx.execute("DELETE FROM scan_run", [])?;
-    Ok(())
-}
-
-fn validate_cross_language_group(group: &CrossLanguageSemanticGroupRow) -> Result<(), StoreError> {
-    if !group.semantic_confidence.is_finite()
-        || !(0.0..=1.0).contains(&group.semantic_confidence)
-        || group.rule_id.is_empty()
-        || group.correspondence_ids.is_empty()
-        || group.members.len() != 2
-    {
-        return Err(StoreError::InvalidSemanticEvidence {
-            reason: "cross-language group lacks bounded rule evidence".to_string(),
-        });
-    }
-    let mut has_rust = false;
-    let mut has_cpp = false;
-    let mut origins = BTreeSet::new();
-    for member in &group.members {
-        if !matches!(member.language, Language::Rust | Language::Cpp)
-            || member.graph_schema_version != SOG_SCHEMA_VERSION
-        {
-            return Err(StoreError::InvalidSemanticEvidence {
-                reason: "cross-language member has an unsupported language or graph schema"
-                    .to_string(),
-            });
-        }
-        let graph: SemanticOperationGraph =
-            serde_json::from_str(&member.graph_json).map_err(|error| {
-                StoreError::InvalidSemanticEvidence {
-                    reason: format!("decoding cross-language member graph: {error}"),
-                }
-            })?;
-        if graph.schema_version != member.graph_schema_version {
-            return Err(StoreError::InvalidSemanticEvidence {
-                reason: "cross-language member graph schema disagrees with its stored metadata"
-                    .to_string(),
-            });
-        }
-        if graph.language != member.language {
-            return Err(StoreError::InvalidSemanticEvidence {
-                reason: "cross-language member graph language disagrees with its stored metadata"
-                    .to_string(),
-            });
-        }
-        has_rust |= member.language == Language::Rust;
-        has_cpp |= member.language == Language::Cpp;
-        origins.insert(member.origin_variant.as_str());
-    }
-    if !has_rust || !has_cpp || origins.len() != 2 {
-        return Err(StoreError::InvalidSemanticEvidence {
-            reason: "cross-language group must contain one Rust and one C++ origin".to_string(),
-        });
-    }
-    Ok(())
-}
-
-fn write_snapshot(tx: &Transaction<'_>, snapshot: &Snapshot<'_>) -> Result<i64, StoreError> {
-    let variant_id = upsert_variant(tx, snapshot.variant)?;
-
-    tx.execute(
-        "INSERT INTO scan_run
-             (build_variant_id, root_path, tool_version, config_hash,
-              analysis_mode, started_at, finished_at, min_clone_tokens, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'completed')",
-        params![
-            variant_id,
-            snapshot.root_path,
-            snapshot.tool_version,
-            snapshot.config_hash,
-            snapshot.variant.mode.name(),
-            snapshot.started_at,
-            snapshot.finished_at,
-            i64::from(snapshot.min_clone_tokens),
-        ],
-    )?;
-    let run_id = tx.last_insert_rowid();
-
-    for (component, version) in snapshot.detector_versions {
-        record_detector_version(tx, run_id, component, version)?;
-    }
-
-    let suppression_row_ids = write_suppressions(tx, &snapshot.suppressions)?;
-    // Units first: members and features reference them by index.
-    let unit_row_ids = write_units(tx, snapshot, run_id, variant_id)?;
-    for group in &snapshot.groups {
-        write_group(
-            tx,
-            snapshot,
-            run_id,
-            variant_id,
-            group,
-            &unit_row_ids,
-            &suppression_row_ids,
-        )?;
-    }
-    write_features(tx, snapshot, run_id, variant_id, &unit_row_ids)?;
-    write_files(tx, &snapshot.files, run_id)?;
-    // The compiler IR names its own schema, and every distinct one a run holds
-    // becomes a declared detector version of that run: the per-unit column
-    // says what each answer was written against, and nothing at run level
-    // would otherwise say that this run holds compiler IR at all.
-    for schema in crate::compiler::write(tx, snapshot, run_id, variant_id)? {
-        record_detector_version(tx, run_id, crate::compiler::IR_SCHEMA_COMPONENT, &schema)?;
-    }
-    write_summary(tx, &snapshot.summary, run_id)?;
-    Ok(run_id)
-}
-
-/// Declare `component` at `version` for `run_id`, reusing the existing row
-/// when the pair has been recorded before.
-fn record_detector_version(
-    tx: &Transaction<'_>,
-    run_id: i64,
-    component: &str,
-    version: &str,
-) -> Result<(), StoreError> {
-    tx.execute(
-        "INSERT OR IGNORE INTO detector_version (component, version) VALUES (?1, ?2)",
-        params![component, version],
-    )?;
-    tx.execute(
-        "INSERT OR IGNORE INTO scan_run_detector_version (scan_run_id, detector_version_id)
-         SELECT ?1, id FROM detector_version WHERE component = ?2 AND version = ?3",
-        params![run_id, component, version],
-    )?;
-    Ok(())
-}
-
-/// Record what the run reported about itself: the source it read, the funnel
-/// it narrowed through, and the rules that hid nothing.
-fn write_summary(
-    tx: &Transaction<'_>,
-    summary: &SummaryRow,
-    run_id: i64,
-) -> Result<(), StoreError> {
-    let count = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
-    tx.execute(
-        "INSERT INTO run_summary
-             (scan_run_id, lines, tokens, lexer_diagnostics, unparsed_files,
-              unparsed_tokens, excluded_generated, excluded_by_glob,
-              excluded_skipped, folded_runs, subsumed_runs, split_components,
-              pair_budget_exhausted, baseline_digest)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-        params![
-            run_id,
-            count(summary.lines),
-            count(summary.tokens),
-            count(summary.lexer_diagnostics),
-            summary.unparsed.map(|row| count(row.files)),
-            summary.unparsed.map(|row| count(row.tokens)),
-            count(summary.excluded_generated),
-            count(summary.excluded_by_glob),
-            count(summary.excluded_skipped),
-            count(summary.folded_runs),
-            count(summary.subsumed_runs),
-            count(summary.split_components),
-            summary.pair_budget_exhausted,
-            summary.baseline_digest,
-        ],
-    )?;
-    for (position, stage) in summary.funnel.iter().enumerate() {
-        let position = i64::try_from(position).unwrap_or(i64::MAX);
-        tx.execute(
-            "INSERT INTO run_funnel_stage (scan_run_id, position, name, passed)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![run_id, position, stage.name, count(stage.passed)],
-        )?;
-        for (ordinal, drop) in stage.dropped.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO run_funnel_drop
-                     (scan_run_id, position, ordinal, cause, dropped)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    run_id,
-                    position,
-                    i64::try_from(ordinal).unwrap_or(i64::MAX),
-                    drop.cause,
-                    count(drop.count),
-                ],
-            )?;
-        }
-    }
-    for (ordinal, rule) in summary.unused_suppressions.iter().enumerate() {
-        tx.execute(
-            "INSERT INTO run_unused_suppression (scan_run_id, ordinal, scope, pattern)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                run_id,
-                i64::try_from(ordinal).unwrap_or(i64::MAX),
-                rule.scope,
-                rule.pattern,
-            ],
-        )?;
-    }
-    Ok(())
-}
-
-/// Record the tree the run read, one row per file.
-fn write_files(tx: &Transaction<'_>, files: &[FileRow], run_id: i64) -> Result<(), StoreError> {
-    for file in files {
-        tx.execute(
-            "INSERT INTO scanned_file
-                 (scan_run_id, relative_path, content_hash, language, byte_len)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                run_id,
-                file.relative_path,
-                file.content_hash,
-                file.language.name(),
-                i64::try_from(file.byte_len).unwrap_or(i64::MAX),
-            ],
-        )?;
-    }
-    Ok(())
-}
-
-/// Persist per-unit candidate-extraction features: the scalar `unit_feature`
-/// row and every hash occurrence, deduplicating feature fingerprints by their
-/// full analysis context.
-fn write_features(
-    tx: &Transaction<'_>,
-    snapshot: &Snapshot<'_>,
-    run_id: i64,
-    variant_id: i64,
-    unit_row_ids: &[i64],
-) -> Result<(), StoreError> {
-    for feature in &snapshot.features {
-        let unit_row_id =
-            *unit_row_ids
-                .get(feature.host_unit)
-                .ok_or(StoreError::UnknownUnitIndex {
-                    index: feature.host_unit,
-                    units: unit_row_ids.len(),
-                })?;
-        let language = snapshot.units[feature.host_unit].language;
-        let frontend_version = frontend_version_for(snapshot, language);
-        tx.execute(
-            "INSERT INTO unit_feature
-                 (source_unit_id, feature_schema_version, vector_counts,
-                  max_depth, node_count, cfg_op_count, cfg_max_loop_depth,
-                  cfg_branch_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                unit_row_id,
-                feature.feature_schema_version,
-                encode_counts(&feature.vector_counts),
-                feature.max_depth,
-                feature.node_count,
-                feature.cfg_op_count,
-                feature.cfg_max_loop_depth,
-                feature.cfg_branch_count,
-            ],
-        )?;
-        for occ in &feature.occurrences {
-            let fp_id = upsert_feature_fingerprint(
-                tx,
-                occ.kind,
-                &occ.hash,
-                feature.feature_schema_version,
-                frontend_version,
-                snapshot.variant.mode.name(),
-                language.name(),
-                variant_id,
-            )?;
-            tx.execute(
-                "INSERT INTO feature_occurrence
-                     (scan_run_id, feature_fingerprint_id, source_unit_id,
-                      start_byte, end_byte, extent)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    run_id,
-                    fp_id,
-                    unit_row_id,
-                    i64::try_from(occ.start_byte).unwrap_or(i64::MAX),
-                    i64::try_from(occ.end_byte).unwrap_or(i64::MAX),
-                    occ.extent,
-                ],
-            )?;
-        }
-    }
-    Ok(())
-}
-
-/// Little-endian encoding of the characteristic-vector counts, one `u32` per
-/// shape-tag slot.
-fn encode_counts(counts: &[u32; SHAPE_TAG_SLOTS]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(SHAPE_TAG_SLOTS * 4);
-    for &count in counts {
-        bytes.extend_from_slice(&count.to_le_bytes());
-    }
-    bytes
-}
-
-/// Record the active suppression rules, reusing existing `(scope, pattern)`
-/// rows so rules stay content-addressed across runs.
-fn write_suppressions(
-    tx: &Transaction<'_>,
-    rules: &[SuppressionRuleRow],
-) -> Result<Vec<i64>, StoreError> {
-    let mut row_ids = Vec::with_capacity(rules.len());
-    for rule in rules {
-        let existing: Option<i64> = tx
-            .query_row(
-                "SELECT id FROM suppression
-                 WHERE scope = ?1 AND pattern = ?2 AND active = 1",
-                params![rule.scope, rule.pattern],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let id = if let Some(id) = existing {
-            id
-        } else {
-            tx.execute(
-                "INSERT INTO suppression (scope, pattern, reason, active)
-                 VALUES (?1, ?2, ?3, 1)",
-                params![rule.scope, rule.pattern, rule.reason],
-            )?;
-            tx.last_insert_rowid()
-        };
-        row_ids.push(id);
-    }
-    Ok(row_ids)
-}
-
-fn write_units(
-    tx: &Transaction<'_>,
-    snapshot: &Snapshot<'_>,
-    run_id: i64,
-    variant_id: i64,
-) -> Result<Vec<i64>, StoreError> {
-    let mut unit_row_ids = Vec::with_capacity(snapshot.units.len());
-    for unit in &snapshot.units {
-        let fp_id = upsert_fingerprint(
-            tx,
-            "unit",
-            unit.fingerprint.as_bytes(),
-            snapshot,
-            variant_id,
-            unit.language,
-        )?;
-        tx.execute(
-            "INSERT INTO source_unit
-                 (scan_run_id, fingerprint_id, language, unit_kind, name,
-                  file_path, start_line, end_line, token_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                run_id,
-                fp_id,
-                unit.language.name(),
-                unit.kind.name(),
-                unit.name,
-                unit.file_path,
-                unit.start_line,
-                unit.end_line,
-                i64::try_from(unit.token_count).unwrap_or(i64::MAX),
-            ],
-        )?;
-        unit_row_ids.push(tx.last_insert_rowid());
-    }
-    Ok(unit_row_ids)
-}
-
-#[allow(clippy::too_many_arguments)] // transaction hand-off, one call site
-/// The persisted ranking for one group in one scan.
-fn write_finding(
-    tx: &Transaction<'_>,
-    run_id: i64,
-    group_row_id: i64,
-    group: &GroupRow,
-    suppression_row_ids: &[i64],
-) -> Result<(), StoreError> {
-    let suppression_row_id = match group.suppressed_by {
-        Some(index) => Some(*suppression_row_ids.get(index).ok_or(
-            StoreError::UnknownSuppressionIndex {
-                index,
-                rules: suppression_row_ids.len(),
-            },
-        )?),
-        None => None,
-    };
-    tx.execute(
-        "INSERT INTO finding
-             (scan_run_id, clone_group_id, suppression_id,
-              clone_confidence, maintenance_risk, refactoring_difficulty,
-              final_priority, semantic_confidence,
-              source_artifact_mapping_confidence, savings_confidence)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![
-            run_id,
-            group_row_id,
-            suppression_row_id,
-            group.priority.clone_confidence,
-            group.priority.maintenance_risk,
-            group.priority.refactoring_difficulty,
-            group.priority.final_priority,
-            group.priority.semantic_confidence,
-            group.priority.source_artifact_confidence,
-            group.priority.savings_confidence,
-        ],
-    )?;
-    Ok(())
-}
-
-fn write_group(
-    tx: &Transaction<'_>,
-    snapshot: &Snapshot<'_>,
-    run_id: i64,
-    variant_id: i64,
-    group: &GroupRow,
-    unit_row_ids: &[i64],
-    suppression_row_ids: &[i64],
-) -> Result<(), StoreError> {
-    let group_fp_id =
-        upsert_group_fingerprint(tx, group.fingerprint.as_bytes(), snapshot, variant_id)?;
-    tx.execute(
-        "INSERT INTO clone_group
-             (scan_run_id, group_fingerprint_id, clone_type, member_scope,
-              member_count, score, entropy_bits, suppress_reason, boilerplate,
-              test_code, split_pair, width_family, statements, identifier_jaccard,
-              has_loop, has_dynamic_allocation, call_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-        params![
-            run_id,
-            group_fp_id,
-            group.clone_type.name(),
-            group.member_scope.name(),
-            i64::try_from(group.members.len()).unwrap_or(i64::MAX),
-            group.score,
-            group.entropy_bits,
-            group.suppress_reason,
-            group.boilerplate.map(Boilerplate::name),
-            group.test_code,
-            group.split_pair,
-            group.width_family,
-            group.statements,
-            group.identifier_jaccard,
-            group.has_loop,
-            group.has_dynamic_allocation,
-            group
-                .call_count
-                .map(|count| i64::try_from(count).unwrap_or(i64::MAX)),
-        ],
-    )?;
-    let group_row_id = tx.last_insert_rowid();
-
-    write_finding(tx, run_id, group_row_id, group, suppression_row_ids)?;
-    write_group_similarity(tx, group_row_id, group.similarity.as_ref())?;
-
-    let mut fragment_row_ids = Vec::with_capacity(group.members.len());
-    for (index, member) in group.members.iter().enumerate() {
-        let host_row_id = match member.host_unit {
-            Some(unit_index) => Some(*unit_row_ids.get(unit_index).ok_or(
-                StoreError::UnknownUnitIndex {
-                    index: unit_index,
-                    units: unit_row_ids.len(),
-                },
-            )?),
-            None => None,
-        };
-        let fragment_fp_id = upsert_fingerprint(
-            tx,
-            "fragment",
-            member.content.as_bytes(),
-            snapshot,
-            variant_id,
-            member.language,
-        )?;
-        tx.execute(
-            "INSERT INTO fragment
-                 (scan_run_id, source_unit_id, fingerprint_id, fragment_kind,
-                  file_path, start_line, end_line, token_count)
-             VALUES (?1, ?2, ?3, 'matched_run', ?4, ?5, ?6, ?7)",
-            params![
-                run_id,
-                host_row_id,
-                fragment_fp_id,
-                member.file_path,
-                member.start_line,
-                member.end_line,
-                i64::try_from(member.token_count).unwrap_or(i64::MAX),
-            ],
-        )?;
-        let fragment_row_id = tx.last_insert_rowid();
-        fragment_row_ids.push(fragment_row_id);
-        tx.execute(
-            "INSERT INTO clone_group_member
-                 (clone_group_id, fragment_id, finding_id, is_canonical, boilerplate)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                group_row_id,
-                fragment_row_id,
-                member.finding.as_bytes().as_slice(),
-                i64::from(index == 0),
-                member.boilerplate.map(Boilerplate::name),
-            ],
-        )?;
-    }
-    if let Some(evidence) = &group.semantic {
-        write_semantic_evidence(tx, group_row_id, &fragment_row_ids, evidence)?;
-    }
-    Ok(())
-}
-
-/// Persist the graph and rule evidence that makes a restricted semantic group
-/// explainable. Member graph order is the group's canonical member order.
-fn write_semantic_evidence(
-    tx: &Transaction<'_>,
-    group_row_id: i64,
-    fragment_row_ids: &[i64],
-    evidence: &SemanticEvidenceRow,
-) -> Result<(), StoreError> {
-    if evidence.schema_version != SOG_SCHEMA_VERSION {
-        return Err(StoreError::InvalidSemanticEvidence {
-            reason: format!(
-                "group evidence schema {} is not supported ({SOG_SCHEMA_VERSION})",
-                evidence.schema_version
-            ),
-        });
-    }
-    if evidence.graphs.len() != fragment_row_ids.len() {
-        return Err(StoreError::InvalidSemanticEvidence {
-            reason: format!(
-                "{} graphs for {} group members",
-                evidence.graphs.len(),
-                fragment_row_ids.len()
-            ),
-        });
-    }
-    tx.execute(
-        "INSERT INTO semantic_group_evidence
-             (clone_group_id, schema_version, rule_id, rule_version, rule_confidence)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            group_row_id,
-            evidence.schema_version,
-            evidence.rule_id,
-            evidence.rule_version,
-            evidence.rule_confidence,
-        ],
-    )?;
-    for (fragment_row_id, graph) in fragment_row_ids.iter().zip(&evidence.graphs) {
-        if graph.schema_version != evidence.schema_version {
-            return Err(StoreError::InvalidSemanticEvidence {
-                reason: "member graph schema does not match group evidence".to_string(),
-            });
-        }
-        let parsed: SemanticOperationGraph =
-            serde_json::from_str(&graph.graph_json).map_err(|error| {
-                StoreError::InvalidSemanticEvidence {
-                    reason: format!("decoding member graph JSON: {error}"),
-                }
-            })?;
-        if parsed.schema_version != graph.schema_version {
-            return Err(StoreError::InvalidSemanticEvidence {
-                reason: "member graph JSON schema does not match its row".to_string(),
-            });
-        }
-        SemanticOperationGraph::new(
-            parsed.language,
-            parsed.build_variant_fingerprint,
-            parsed.nodes,
-            parsed.edges,
-        )
-        .map_err(|error| StoreError::InvalidSemanticEvidence {
-            reason: format!("member graph violates the SOG contract: {error}"),
-        })?;
-        tx.execute(
-            "INSERT INTO semantic_operation_graph (fragment_id, schema_version, graph_json)
-             VALUES (?1, ?2, ?3)",
-            params![fragment_row_id, graph.schema_version, graph.graph_json],
-        )?;
-    }
-    for mapping in &evidence.node_mappings {
-        tx.execute(
-            "INSERT INTO semantic_node_mapping
-                 (clone_group_id, corresponding_member, canonical_node, corresponding_node)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                group_row_id,
-                mapping.corresponding_member,
-                mapping.canonical,
-                mapping.corresponding
-            ],
-        )?;
-    }
-    Ok(())
-}
-
-/// Persist a group's similarity breakdown, when the mode measured one.
-fn write_group_similarity(
-    tx: &Transaction<'_>,
-    group_row_id: i64,
-    similarity: Option<&SimilarityBreakdownRow>,
-) -> Result<(), StoreError> {
-    let Some(similarity) = similarity else {
-        return Ok(());
-    };
-    tx.execute(
-        "INSERT INTO clone_group_similarity
-             (clone_group_id, weight_version, lexical, structural,
-              control_flow, type_similarity, api, composite, min_pairwise,
-              confidence_band)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![
-            group_row_id,
-            similarity.weight_version,
-            similarity.lexical,
-            similarity.structural,
-            similarity.control_flow,
-            similarity.type_similarity,
-            similarity.api,
-            similarity.composite,
-            similarity.min_pairwise,
-            similarity.confidence_band.name(),
-        ],
-    )?;
-    Ok(())
-}
-
-fn upsert_variant(tx: &Transaction<'_>, variant: &BuildVariant) -> Result<i64, StoreError> {
-    let languages = variant
-        .languages
-        .enabled()
-        .into_iter()
-        .map(Language::name)
-        .collect::<Vec<_>>()
-        .join(",");
-    let headers = variant.headers.map_or("", Language::name);
-    // The languages whose builds were resolved, as a set: which of them a run
-    // reached first is not a fact about the tree, and the identity beside this
-    // column already carries what each was told.
-    let build_language = variant
-        .builds
-        .iter()
-        .map(BuildConfiguration::language)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>()
-        .join(",");
-    // `ON CONFLICT DO NOTHING` rather than `INSERT OR IGNORE`: the variant is
-    // expected to be there already, but only the fingerprint clash is
-    // expected. `OR IGNORE` would swallow a `CHECK` violation too and leave the
-    // row absent, which surfaces later as a variant that cannot be found rather
-    // than as the value that was wrong.
-    tx.execute(
-        "INSERT INTO build_variant
-             (variant_fingerprint, canonical, analysis_mode, normalization_version,
-              languages, header_language, build_language)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT (variant_fingerprint) DO NOTHING",
-        params![
-            variant.fingerprint(),
-            variant.canonical(),
-            variant.mode.name(),
-            variant.normalization_version,
-            languages,
-            headers,
-            build_language,
-        ],
-    )?;
-    let id: i64 = tx.query_row(
-        "SELECT id FROM build_variant WHERE variant_fingerprint = ?1",
-        params![variant.fingerprint()],
-        |row| row.get(0),
-    )?;
-    // Describe the row even when it was already there. Equal fingerprints are
-    // equal variants, so this writes back what is already written — except on a
-    // row recorded before variants were described, which is the row that has
-    // nothing to say and is worth filling in.
-    tx.execute(
-        "UPDATE build_variant
-            SET languages = ?2, header_language = ?3, build_language = ?4
-          WHERE id = ?1",
-        params![id, languages, headers, build_language],
-    )?;
-    write_variant_settings(tx, id, variant)?;
-    Ok(id)
-}
-
-/// Record what the compiler was told, replacing whatever the row held.
-///
-/// The settings are derived from the same enumeration the variant's identity
-/// is, so rewriting them for an existing row restores the same values; a row
-/// from before they were recorded gains them.
-fn write_variant_settings(
-    tx: &Transaction<'_>,
-    variant_id: i64,
-    variant: &BuildVariant,
-) -> Result<(), StoreError> {
-    tx.execute(
-        "DELETE FROM build_variant_setting WHERE build_variant_id = ?1",
-        params![variant_id],
-    )?;
-    // Written under the language whose build it came from. The two languages
-    // name some of the same settings — both have a `compiler_version` — and a
-    // record keyed by the name alone would have one compiler's answer standing
-    // for the other's.
-    for build in &variant.builds {
-        for setting in build.settings() {
-            for (position, value) in setting.shape.values().into_iter().enumerate() {
-                tx.execute(
-                    "INSERT INTO build_variant_setting
-                         (build_variant_id, language, name, position, value)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        variant_id,
-                        build.language(),
-                        setting.name,
-                        i64::try_from(position).unwrap_or(i64::MAX),
-                        value
-                    ],
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn upsert_fingerprint(
-    tx: &Transaction<'_>,
-    kind: &str,
-    hash: &[u8; 16],
-    snapshot: &Snapshot<'_>,
-    variant_id: i64,
-    language: Language,
-) -> Result<i64, StoreError> {
-    let frontend_version = frontend_version_for(snapshot, language);
-    insert_fingerprint_row(
-        tx,
-        kind,
-        hash,
-        snapshot.variant.normalization_version,
-        frontend_version,
-        snapshot.variant.mode.name(),
-        language.name(),
-        variant_id,
-    )
-}
-
-fn upsert_group_fingerprint(
-    tx: &Transaction<'_>,
-    hash: &[u8; 16],
-    snapshot: &Snapshot<'_>,
-    variant_id: i64,
-) -> Result<i64, StoreError> {
-    // Group fingerprints span languages and frontends; both columns hold the
-    // empty string so the UNIQUE constraint still deduplicates them.
-    insert_fingerprint_row(
-        tx,
-        "clone_group",
-        hash,
-        snapshot.variant.normalization_version,
-        "",
-        snapshot.variant.mode.name(),
-        "",
-        variant_id,
-    )
-}
-
-/// Insert (or reuse) a feature-fingerprint row and return its id. Feature
-/// fingerprints deduplicate on their full context, `feature_schema_version`
-/// included, so identical hashes from incompatible recipes stay distinct.
-#[allow(clippy::too_many_arguments)] // one row, one call site per column set
-fn upsert_feature_fingerprint(
-    tx: &Transaction<'_>,
-    kind: FeatureKind,
-    hash: &[u8; 16],
-    feature_schema_version: &str,
-    frontend_version: &str,
-    mode: &str,
-    language: &str,
-    variant_id: i64,
-) -> Result<i64, StoreError> {
-    tx.execute(
-        "INSERT OR IGNORE INTO feature_fingerprint
-             (kind, hash_algo, hash, feature_schema_version, frontend_version,
-              analysis_mode, language, build_variant_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            kind.name(),
-            HASH_ALGORITHM,
-            hash.as_slice(),
-            feature_schema_version,
-            frontend_version,
-            mode,
-            language,
-            variant_id,
-        ],
-    )?;
-    Ok(tx.query_row(
-        "SELECT id FROM feature_fingerprint
-         WHERE kind = ?1 AND hash_algo = ?2 AND hash = ?3
-           AND feature_schema_version = ?4 AND frontend_version = ?5
-           AND analysis_mode = ?6 AND language = ?7 AND build_variant_id = ?8",
-        params![
-            kind.name(),
-            HASH_ALGORITHM,
-            hash.as_slice(),
-            feature_schema_version,
-            frontend_version,
-            mode,
-            language,
-            variant_id,
-        ],
-        |row| row.get(0),
-    )?)
-}
-
-#[allow(clippy::too_many_arguments)] // one row, one call site per column set
-fn insert_fingerprint_row(
-    tx: &Transaction<'_>,
-    kind: &str,
-    hash: &[u8; 16],
-    normalization_version: u32,
-    frontend_version: &str,
-    mode: &str,
-    language: &str,
-    variant_id: i64,
-) -> Result<i64, StoreError> {
-    tx.execute(
-        "INSERT OR IGNORE INTO fingerprint
-             (kind, hash_algo, hash, normalization_version, frontend_version,
-              analysis_mode, language, build_variant_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            kind,
-            HASH_ALGORITHM,
-            hash.as_slice(),
-            normalization_version,
-            frontend_version,
-            mode,
-            language,
-            variant_id,
-        ],
-    )?;
-    Ok(tx.query_row(
-        "SELECT id FROM fingerprint
-         WHERE kind = ?1 AND hash_algo = ?2 AND hash = ?3
-           AND normalization_version = ?4 AND frontend_version = ?5
-           AND analysis_mode = ?6 AND language = ?7 AND build_variant_id = ?8",
-        params![
-            kind,
-            HASH_ALGORITHM,
-            hash.as_slice(),
-            normalization_version,
-            frontend_version,
-            mode,
-            language,
-            variant_id,
-        ],
-        |row| row.get(0),
-    )?)
-}
-
-/// The frontend version active for `language` in this snapshot, from the
-/// declared detector versions (`frontend.<language>` component).
-fn frontend_version_for<'a>(snapshot: &'a Snapshot<'_>, language: Language) -> &'a str {
-    let component = match language {
-        Language::Rust => "frontend.rust",
-        Language::C => "frontend.c",
-        Language::Cpp => "frontend.cpp",
-    };
-    snapshot
-        .detector_versions
-        .iter()
-        .find(|(c, _)| c == component)
-        .map_or("unknown", |(_, v)| v.as_str())
-}
+mod groups;
+mod variant;
+mod write;

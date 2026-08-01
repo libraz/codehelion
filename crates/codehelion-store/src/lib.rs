@@ -24,19 +24,39 @@ pub mod schema;
 pub mod snapshot;
 
 use std::path::Path;
+use std::time::Duration;
 
 use rusqlite::Connection;
+
+/// Time one local connection waits for another codehelion writer to finish.
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Render a 16-byte persisted fingerprint in its canonical lowercase form.
+#[must_use]
+pub fn fingerprint_hex(fingerprint: [u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(fingerprint.len().saturating_mul(2));
+    for byte in fingerprint {
+        text.push(char::from(HEX[usize::from(byte >> 4)]));
+        text.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    text
+}
 
 /// Storage errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     /// An underlying database error.
-    #[error("database error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-    /// The database is not the one pre-release baseline this build supports.
+    #[error("database error: {message}")]
+    Sqlite {
+        /// Database driver's user-facing diagnostic, retained without repeating
+        /// it as an error source in a higher-level context chain.
+        message: String,
+    },
+    /// The database is not the baseline this build supports.
     #[error(
-        "database schema version {found} is not the current pre-release baseline; \
-         delete the development database and run a fresh scan"
+        "database schema version {found} is not supported by this codehelion build; \
+         move the database aside, then run a fresh scan"
     )]
     UnsupportedSchema {
         /// Version recorded in the database, or zero when its layout has no marker.
@@ -71,6 +91,24 @@ pub enum StoreError {
         index: usize,
         /// Number of rules in the snapshot.
         rules: usize,
+    },
+    /// A caller tried to read a run before its scan invocation completed.
+    #[error("scan run {run_id} did not complete and cannot be read")]
+    RunNotCompleted {
+        /// Row id of the incomplete run.
+        run_id: i64,
+    },
+    /// A caller asked for a run that this database does not hold.
+    #[error("scan run {run_id} was not found in this database")]
+    RunNotFound {
+        /// Row id of the absent run.
+        run_id: i64,
+    },
+    /// A scan invocation tried to complete a row that was not still running.
+    #[error("scan run {run_id} is not a running partition")]
+    RunNotRunning {
+        /// Row id of the unexpected run state.
+        run_id: i64,
     },
     /// An identifier string was not a 32-digit hex id.
     #[error("malformed identifier {id:?}: expected 32 hex digits")]
@@ -116,6 +154,16 @@ pub enum StoreError {
         /// Why the evidence cannot be recorded safely.
         reason: String,
     },
+    /// A full artifact IR would exceed the bounded local storage budget.
+    #[error(
+        "artifact analysis IR is {size_bytes} bytes, exceeding the storage limit of {maximum_bytes} bytes"
+    )]
+    ArtifactIrTooLarge {
+        /// Serialized document size requested by the caller.
+        size_bytes: usize,
+        /// Largest document size the local store accepts.
+        maximum_bytes: usize,
+    },
     /// Stored mapping evidence was not valid for the version this build knows.
     #[error("invalid stored source-artifact mapping evidence: {source}")]
     MappingEvidenceJson {
@@ -123,6 +171,14 @@ pub enum StoreError {
         #[from]
         source: serde_json::Error,
     },
+}
+
+impl From<rusqlite::Error> for StoreError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sqlite {
+            message: error.to_string(),
+        }
+    }
 }
 
 /// An open local database at the current schema.
@@ -136,10 +192,12 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// [`StoreError::UnsupportedSchema`] when an earlier development layout
+    /// [`StoreError::UnsupportedSchema`] when an incompatible layout
     /// exists at the path; otherwise any underlying database error.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        Self::from_connection(Connection::open(path)?)
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        Self::from_connection(conn)
     }
 
     /// Open a fresh in-memory database (used by tests and dry runs).
@@ -152,6 +210,7 @@ impl Store {
     }
 
     fn from_connection(mut conn: Connection) -> Result<Self, StoreError> {
+        conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         schema::initialize(&mut conn)?;
         Ok(Self { conn })
@@ -176,6 +235,41 @@ mod tests {
     fn an_in_memory_store_uses_the_current_baseline() {
         let store = Store::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), schema::SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn file_backed_stores_use_wal_and_wait_for_a_concurrent_writer() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let store = Store::open(file.path()).unwrap();
+        let journal_mode: String = store
+            .conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        let busy_timeout_ms: i64 = store
+            .conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(journal_mode, "wal");
+        assert_eq!(busy_timeout_ms, 5_000);
+    }
+
+    #[test]
+    fn fingerprint_hex_is_lowercase_and_fixed_width() {
+        assert_eq!(fingerprint_hex([0xab; 16]), "ab".repeat(16));
+    }
+
+    #[test]
+    fn user_facing_storage_errors_do_not_repeat_causes_or_internal_labels() {
+        let error = StoreError::UnsupportedSchema { found: 99 }.to_string();
+        assert!(error.contains("not supported by this codehelion build"));
+        assert!(!error.contains("pre-release"));
+        assert!(!error.contains("development database"));
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"not an sqlite database").unwrap();
+        let error = Store::open(file.path()).unwrap_err().to_string();
+        assert_eq!(error.matches("file is not a database").count(), 1);
     }
 
     #[test]
