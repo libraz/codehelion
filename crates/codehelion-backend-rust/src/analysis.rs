@@ -138,7 +138,7 @@ impl Workspaces {
             .entry((root.clone(), permitted))
             .or_insert_with(|| load(&root, permitted));
         match loaded {
-            Err(_) => Outcome::Unavailable(Unavailability::NoBuildInformation),
+            Err(_) => Outcome::Unavailable(Unavailability::MetadataUnavailable),
             Ok(loaded) => ra_ap_hir::attach_db(&loaded.db, || analyze_crate(loaded, unit)),
         }
     }
@@ -203,20 +203,20 @@ fn cargo_config() -> ra_ap_project_model::CargoConfig {
         // and evidence made of unknowns is worse than no evidence: it looks
         // like agreement.
         sysroot: Some(ra_ap_project_model::RustLibSource::Discover),
+        // Resolving a target project is part of reading it. It must neither
+        // contact a registry. `project_workspace` first proves that Cargo can
+        // read this project with `--offline --locked`; rust-analyzer then
+        // redirects its own offline read to an isolated lockfile copy. The
+        // metadata list is separate because rust-analyzer forwards it
+        // independently.
+        extra_args: vec!["--offline".to_owned()],
+        metadata_extra_args: vec!["--offline".to_owned()],
         ..ra_ap_project_model::CargoConfig::default()
     }
 }
 
-/// What the workspace at `manifest` is read under.
-///
-/// A member's own features and those of its direct dependencies. A direct
-/// dependency's feature selection lives in the member's manifest, yet it does
-/// not necessarily change `Cargo.lock`; omitting it could therefore merge two
-/// different resolved programs. Transitive packages remain out: their feature
-/// sets are derived from the direct selections and the lockfile, and recording
-/// every resolver-internal choice would split a variant when Cargo changes an
-/// irrelevant implementation detail.
-fn describe_workspace(manifest: &Path) -> Result<BuildDescription, String> {
+fn project_workspace(manifest: &Path) -> Result<ra_ap_project_model::ProjectWorkspace, String> {
+    verify_locked_offline_metadata(manifest)?;
     let path = manifest
         .to_str()
         .and_then(|path| ra_ap_vfs::AbsPathBuf::try_from(path).ok())
@@ -230,6 +230,56 @@ fn describe_workspace(manifest: &Path) -> Result<BuildDescription, String> {
         .map_err(|error| error.to_string())?;
     let workspace = ra_ap_project_model::ProjectWorkspace::load(found, &cargo_config(), &|_| {})
         .map_err(|error| error.to_string())?;
+    if let ra_ap_project_model::ProjectWorkspaceKind::Cargo {
+        error: Some(error), ..
+    } = &workspace.kind
+    {
+        return Err(format!(
+            "Cargo metadata requires a local locked dependency resolution: {error}"
+        ));
+    }
+    Ok(workspace)
+}
+
+/// Prove that Cargo can resolve the project without either network access or a
+/// lockfile update before rust-analyzer loads it through its isolated copy.
+#[allow(
+    clippy::disallowed_types,
+    reason = "this compiler helper is the designated subprocess isolation boundary"
+)]
+fn verify_locked_offline_metadata(manifest: &Path) -> Result<(), String> {
+    let output = std::process::Command::new("cargo")
+        .args([
+            "metadata",
+            "--format-version=1",
+            "--offline",
+            "--locked",
+            "--manifest-path",
+        ])
+        .arg(manifest)
+        .current_dir(manifest.parent().unwrap_or_else(|| Path::new(".")))
+        .output()
+        .map_err(|error| format!("could not start Cargo metadata: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "Cargo metadata requires a local locked dependency resolution: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+/// What the workspace at `manifest` is read under.
+///
+/// A member's own features and those of its direct dependencies. A direct
+/// dependency's feature selection lives in the member's manifest, yet it does
+/// not necessarily change `Cargo.lock`; omitting it could therefore merge two
+/// different resolved programs. Transitive packages remain out: their feature
+/// sets are derived from the direct selections and the lockfile, and recording
+/// every resolver-internal choice would split a variant when Cargo changes an
+/// irrelevant implementation detail.
+fn describe_workspace(manifest: &Path) -> Result<BuildDescription, String> {
+    let workspace = project_workspace(manifest)?;
     let mut cfgs: Vec<String> = workspace
         .rustc_cfg
         .iter()
@@ -279,6 +329,7 @@ fn load(manifest: &Path, permitted: Permissions) -> Result<Loaded, String> {
     let root = manifest
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    project_workspace(manifest)?;
     let (db, vfs, _proc_macro) =
         ra_ap_load_cargo::load_workspace_at(manifest, &config, &load_config, &|_| {})
             .map_err(|error| error.to_string())?;
@@ -288,6 +339,11 @@ fn load(manifest: &Path, permitted: Permissions) -> Result<Loaded, String> {
 /// Everything the compiler knows about one crate, collected into the wire IR.
 fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
     let db = &loaded.db;
+    let requested_path = Path::new(&unit.file);
+    if file_of(loaded, requested_path).is_none() {
+        return Outcome::Unavailable(Unavailability::NoBuildInformation);
+    }
+    let requested_file = codehelion_helper::ir::spell(Some(&loaded.root), requested_path);
     let Some(krate) = Crate::all(db).into_iter().find(|krate| {
         krate
             .display_name(db)
@@ -303,7 +359,14 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
     while let Some(module) = modules.pop() {
         modules.extend(module.children(db));
         for definition in module.declarations(db) {
-            collect(loaded, definition, None, &mut ir, &mut types);
+            collect(
+                loaded,
+                definition,
+                None,
+                &requested_file,
+                &mut ir,
+                &mut types,
+            );
         }
     }
     // What the macros invoked in this file declared. The walk above passes
@@ -315,6 +378,7 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
             loaded,
             expanded.definition,
             Some(&expanded.anchor),
+            &requested_file,
             &mut ir,
             &mut types,
         );
@@ -387,6 +451,7 @@ fn collect(
     loaded: &Loaded,
     definition: ModuleDef,
     origin: Option<&Anchor>,
+    requested_file: &str,
     ir: &mut CompilerIr,
     types: &mut TypeTable,
 ) {
@@ -396,6 +461,9 @@ fn collect(
             let Some(anchor) = anchored(loaded, origin, function.source(db)) else {
                 return;
             };
+            if anchor.expansion.file != requested_file {
+                return;
+            }
             let returns = types.intern(&function.ret_type(db), db);
             ir.symbols.push(ResolvedSymbol {
                 id: path_of(function.name(db).as_str(), function.module(db), db),
@@ -411,16 +479,20 @@ fn collect(
         }
         ModuleDef::Adt(adt) => {
             let name = adt.name(db).as_str().to_string();
-            if let Some(anchor) = adt_anchor(loaded, origin, adt) {
-                ir.symbols.push(ResolvedSymbol {
-                    id: path_of(&name, adt.module(db), db),
-                    name: name.clone(),
-                    kind: SymbolKind::Type,
-                    anchor,
-                    type_index: None,
-                    external: false,
-                });
+            let Some(anchor) = adt_anchor(loaded, origin, adt) else {
+                return;
+            };
+            if anchor.expansion.file != requested_file {
+                return;
             }
+            ir.symbols.push(ResolvedSymbol {
+                id: path_of(&name, adt.module(db), db),
+                name: name.clone(),
+                kind: SymbolKind::Type,
+                anchor,
+                type_index: None,
+                external: false,
+            });
             if let Adt::Struct(structure) = adt {
                 for field in structure.fields(db) {
                     let Some(anchor) = anchored(loaded, origin, field.source(db)) else {
@@ -443,6 +515,9 @@ fn collect(
             let Some(anchor) = anchored(loaded, origin, konst.source(db)) else {
                 return;
             };
+            if anchor.expansion.file != requested_file {
+                return;
+            }
             let name = konst
                 .name(db)
                 .map(|name| name.as_str().to_string())
@@ -461,6 +536,9 @@ fn collect(
             let Some(anchor) = anchored(loaded, origin, statik.source(db)) else {
                 return;
             };
+            if anchor.expansion.file != requested_file {
+                return;
+            }
             let name = statik.name(db).as_str().to_string();
             let index = types.intern(&statik.ty(db), db);
             ir.symbols.push(ResolvedSymbol {
@@ -635,4 +713,16 @@ fn display_of(ty: &ra_ap_hir::Type<'_>, db: &RootDatabase) -> String {
         || category(ty, db).name().to_string(),
         |adt| adt.name(db).as_str().to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cargo_config;
+
+    #[test]
+    fn rust_analyzer_metadata_is_offline_after_the_locked_preflight() {
+        let config = cargo_config();
+        assert_eq!(config.extra_args, ["--offline"]);
+        assert_eq!(config.metadata_extra_args, ["--offline"]);
+    }
 }

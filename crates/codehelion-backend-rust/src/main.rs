@@ -41,6 +41,10 @@ use crate::analysis::{Outcome, Permissions, Workspaces};
 const NAME: &str = "codehelion-backend-rust";
 
 fn main() -> std::process::ExitCode {
+    if let Err(error) = codehelion_helper::enforce_current_process_limit_from_environment() {
+        eprintln!("{NAME}: {error}");
+        return std::process::ExitCode::FAILURE;
+    }
     let mut backend = RustBackend::default();
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();

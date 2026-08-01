@@ -15,10 +15,14 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use codehelion_helper::ir::{Anchor, BasicBlock, ControlFlowGraph, Edge, EdgeKind};
 
 use crate::database::ValidatedArguments;
+
+static CLANG_AVAILABLE: OnceLock<bool> = OnceLock::new();
+static CLANGXX_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
 /// The one source definition to which a dumped compiler CFG can be anchored.
 #[derive(Debug, Clone)]
@@ -35,6 +39,19 @@ pub(crate) fn available() -> bool {
 }
 
 fn compiler_available(name: &str) -> bool {
+    let cache = match name {
+        "clang" => &CLANG_AVAILABLE,
+        "clang++" => &CLANGXX_AVAILABLE,
+        _ => return false,
+    };
+    cached_availability(cache, || probe_compiler(name))
+}
+
+fn cached_availability(cache: &OnceLock<bool>, probe: impl FnOnce() -> bool) -> bool {
+    *cache.get_or_init(probe)
+}
+
+fn probe_compiler(name: &str) -> bool {
     Command::new(name)
         .arg("--version")
         .stdin(Stdio::null())
@@ -276,6 +293,20 @@ fn block_number(line: &str) -> Option<(u32, bool, bool)> {
 mod tests {
     use super::*;
     use codehelion_helper::ir::{Anchor, SourceRange};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn compiler_availability_is_probed_once_per_executable() {
+        let cache = OnceLock::new();
+        let probes = AtomicUsize::new(0);
+        let probe = || {
+            probes.fetch_add(1, Ordering::Relaxed);
+            true
+        };
+        assert!(cached_availability(&cache, probe));
+        assert!(cached_availability(&cache, || false));
+        assert_eq!(probes.load(Ordering::Relaxed), 1);
+    }
 
     fn anchor() -> Anchor {
         Anchor::written_here(SourceRange {

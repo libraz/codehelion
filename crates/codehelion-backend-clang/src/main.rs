@@ -56,6 +56,10 @@ use crate::database::Database;
 const NAME: &str = "codehelion-backend-clang";
 
 fn main() -> std::process::ExitCode {
+    if let Err(error) = codehelion_helper::enforce_current_process_limit_from_environment() {
+        eprintln!("{NAME}: {error}");
+        return std::process::ExitCode::FAILURE;
+    }
     // Loaded before a word is exchanged. A program that has no compiler to
     // analyse with has nothing to negotiate, and the sentence naming the
     // library that is missing is more use than a handshake that succeeds into
