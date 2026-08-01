@@ -139,6 +139,49 @@ fn analyzed(unit: &UnitRef) -> Box<CompilerIr> {
     }
 }
 
+#[test]
+fn project_arguments_cannot_reparse_options_from_config_or_response_files() {
+    for nested_option in ["--config={path}", "@{path}"] {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let root = directory.path().canonicalize().expect("temp dir exists");
+        let source = root.join("unit.cpp");
+        let options = root.join("project-options.cfg");
+        std::fs::write(
+            &source,
+            "#ifdef OPTIONS_WERE_REPARSED\nint injected_by_options() { return 1; }\n#endif\n",
+        )
+        .expect("write source");
+        std::fs::write(&options, "-DOPTIONS_WERE_REPARSED\n").expect("write nested options");
+        let nested_option = nested_option.replace("{path}", &options.display().to_string());
+        let database = serde_json::json!([{
+            "directory": root,
+            "arguments": ["clang++", "-std=c++20", nested_option, source],
+            "file": source,
+        }]);
+        std::fs::write(
+            root.join("compile_commands.json"),
+            serde_json::to_vec_pretty(&database).expect("serialize database"),
+        )
+        .expect("write database");
+        let unit = UnitRef {
+            unit: source.display().to_string(),
+            file: source.display().to_string(),
+            variant: "host".to_string(),
+        };
+
+        let mut helper = helper();
+        let analysis = helper
+            .analyze(&unit, &[Capability::Types, Capability::MirCfg])
+            .expect("the helper should reject the command without crashing");
+        helper.shutdown().expect("the helper should stop cleanly");
+        assert_eq!(
+            analysis,
+            Analysis::Missing(Unavailability::NoBuildInformation),
+            "project-controlled nested options must fail closed: {nested_option}"
+        );
+    }
+}
+
 /// The resolved type of the first symbol called `name`.
 fn type_of<'a>(ir: &'a CompilerIr, name: &str) -> &'a ResolvedType {
     let symbol = ir

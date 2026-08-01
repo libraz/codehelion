@@ -73,10 +73,16 @@ pub(crate) fn analyze(
         // other unit's command would answer about a program this one is not.
         return Outcome::Unavailable(Unavailability::NoBuildInformation);
     };
+    let Ok(arguments) = entry.arguments() else {
+        // Validation happens before constructing a libclang index. A command
+        // with an unknown or executable option is not a partial reading: it is
+        // a build variant this helper cannot safely answer about.
+        return Outcome::Unavailable(Unavailability::NoBuildInformation);
+    };
     let index = Index::new(clang, false, false);
     let Ok(parsed) = index
         .parser(&entry.file)
-        .arguments(&entry.arguments)
+        .arguments(arguments.as_slice())
         .detailed_preprocessing_record(true)
         .skip_function_bodies(false)
         .parse()
@@ -98,7 +104,7 @@ pub(crate) fn analyze(
     reading.walk(parsed.get_entity());
     let cfg = want
         .contains(&Capability::MirCfg)
-        .then(|| cfg_dump::produce(entry, &reading.functions))
+        .then(|| cfg_dump::produce(&entry.file, arguments, &reading.functions))
         .flatten();
     let mut ir = CompilerIr::empty(unit.clone());
     ir.anchored_at = Some(database.root.display().to_string());

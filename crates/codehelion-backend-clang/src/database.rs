@@ -34,9 +34,9 @@ const LOCATIONS: [&str; 2] = ["compile_commands.json", "build/compile_commands.j
 pub(crate) struct Entry {
     /// The source it is compiled from.
     pub(crate) file: PathBuf,
-    /// The arguments to parse it with: the recorded invocation without its
-    /// compiler, its input, or where it was to write its output.
-    pub(crate) arguments: Vec<String>,
+    /// The validated arguments to parse it with, or the reason the recorded
+    /// invocation cannot safely be used by either compiler frontend.
+    arguments: Result<ValidatedArguments, String>,
     /// The macros defined on the command line, as the flags spelled them.
     pub(crate) definitions: Vec<String>,
     /// The complete database identity used to select this entry.
@@ -44,63 +44,273 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
-    /// Arguments safe for the helper-owned syntax-only CFG frontend.
+    /// Arguments safe for both libclang and the helper-owned CFG frontend.
     ///
     /// Build commands can ask a compiler to load code, re-expand response
     /// files, or write an output. The CFG reader neither needs nor permits
     /// any of those. Refusing the entire auxiliary reading is deliberate: a
     /// command whose nested arguments are not known safe must not become safe
     /// by selectively guessing which pieces to retain.
-    pub(crate) fn cfg_arguments(&self) -> Result<Vec<String>, String> {
-        let mut safe = Vec::with_capacity(self.arguments.len());
-        for argument in &self.arguments {
-            if is_unsafe_for_cfg(argument) {
-                return Err(format!(
-                    "unsafe compiler argument for CFG frontend: {argument}"
-                ));
-            }
-            safe.push(argument.clone());
-        }
-        Ok(safe)
+    pub(crate) fn arguments(&self) -> Result<&ValidatedArguments, &str> {
+        self.arguments.as_ref().map_err(String::as_str)
     }
 }
 
-/// Whether an argument could make the fixed syntax-only command load code,
-/// perform another command-line parse, or write an auxiliary artifact.
+/// Compiler arguments that the helper may give to either frontend.
 ///
-/// This is intentionally a deny list with a fail-closed response for every
-/// Clang escape hatch. Normal preprocessing, include and language options are
-/// retained because changing them would analyse a different program.
-fn is_unsafe_for_cfg(argument: &str) -> bool {
+/// Construction is private so an unchecked compilation-database argument
+/// cannot accidentally reach libclang or the subprocess. The parser is an
+/// allow list: an option added by a future compiler is unavailable until its
+/// operand shape and read-only behaviour are reviewed here.
+pub(crate) struct ValidatedArguments(Vec<String>);
+
+impl ValidatedArguments {
+    fn parse(arguments: &[String]) -> Result<Self, String> {
+        let mut accepted = Vec::with_capacity(arguments.len());
+        let mut index = 0;
+        while index < arguments.len() {
+            let argument = &arguments[index];
+            if explicitly_forbidden(argument) {
+                return Err(format!("compiler argument is not allowed: {argument}"));
+            }
+            if discard_without_value(argument) {
+                index += 1;
+                continue;
+            }
+            if SAFE_FLAGS.contains(&argument.as_str()) {
+                accepted.push(argument.clone());
+                index += 1;
+                continue;
+            }
+            if let Some(value) = joined_short_value(argument) {
+                require_nonempty(argument, value)?;
+                accepted.push(argument.clone());
+                index += 1;
+                continue;
+            }
+            if let Some(value) = joined_long_value(argument) {
+                require_nonempty(argument, value)?;
+                accepted.push(argument.clone());
+                index += 1;
+                continue;
+            }
+            if SAFE_WITH_VALUE.contains(&argument.as_str()) {
+                let Some(value) = arguments.get(index + 1) else {
+                    return Err(format!("compiler argument requires a value: {argument}"));
+                };
+                if value.is_empty() {
+                    return Err(format!("compiler argument has an empty value: {argument}"));
+                }
+                accepted.push(argument.clone());
+                accepted.push(value.clone());
+                index += 2;
+                continue;
+            }
+            return Err(format!("compiler argument is not allowed: {argument}"));
+        }
+        Ok(Self(accepted))
+    }
+
+    /// The exact arguments whose option/value boundaries were validated.
+    pub(crate) fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+}
+
+/// Read-only switches whose meaning does not consume another argument.
+const SAFE_FLAGS: &[&str] = &[
+    "-ansi",
+    "-fblocks",
+    "-fborland-extensions",
+    "-fdeclspec",
+    "-fdelayed-template-parsing",
+    "-fexceptions",
+    "-ffreestanding",
+    "-fms-compatibility",
+    "-fms-extensions",
+    "-fno-blocks",
+    "-fno-builtin",
+    "-fno-exceptions",
+    "-fno-rtti",
+    "-fno-signed-char",
+    "-fno-threadsafe-statics",
+    "-fno-unsigned-char",
+    "-fno-use-cxa-atexit",
+    "-fno-wchar",
+    "-fobjc-arc",
+    "-fobjc-weak",
+    "-fopenmp",
+    "-frtti",
+    "-fshort-enums",
+    "-fshort-wchar",
+    "-fsigned-char",
+    "-fsyntax-only",
+    "-fthreadsafe-statics",
+    "-funsigned-char",
+    "-fuse-cxa-atexit",
+    "-fwchar",
+    "-m32",
+    "-m64",
+    "-malign-double",
+    "-mno-align-double",
+    "-mno-red-zone",
+    "-mred-zone",
+    "-nobuiltininc",
+    "-nostdinc",
+    "-nostdinc++",
+    "-nostdsysteminc",
+    "-pthread",
+    "-undef",
+];
+
+/// Read-only switches that consume their following argument.
+const SAFE_WITH_VALUE: &[&str] = &[
+    "--sysroot",
+    "--target",
+    "-D",
+    "-F",
+    "-I",
+    "-U",
+    "-arch",
+    "-idirafter",
+    "-iframework",
+    "-iframeworkwithsysroot",
+    "-imacros",
+    "-include",
+    "-iprefix",
+    "-iquote",
+    "-isystem",
+    "-isysroot",
+    "-iwithprefix",
+    "-iwithprefixbefore",
+    "-std",
+    "-target",
+    "-working-directory",
+    "-x",
+];
+
+/// Short options for which Clang accepts the value in the same word.
+fn joined_short_value(argument: &str) -> Option<&str> {
+    ["-D", "-U", "-I", "-F"].into_iter().find_map(|option| {
+        argument
+            .strip_prefix(option)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+/// Long options whose joined spelling has an explicit `=` boundary.
+fn joined_long_value(argument: &str) -> Option<&str> {
+    [
+        "--sysroot=",
+        "--target=",
+        "-fclang-abi-compat=",
+        "-fdebug-prefix-map=",
+        "-ffile-prefix-map=",
+        "-fmacro-prefix-map=",
+        "-fms-compatibility-version=",
+        "-fpack-struct=",
+        "-fvisibility=",
+        "-isysroot=",
+        "-mabi=",
+        "-march=",
+        "-mcpu=",
+        "-mfloat-abi=",
+        "-mfpu=",
+        "-mtune=",
+        "-std=",
+        "-stdlib=",
+        "-target=",
+        "-working-directory=",
+        "-x=",
+    ]
+    .into_iter()
+    .find_map(|option| argument.strip_prefix(option))
+}
+
+fn require_nonempty(argument: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        Err(format!("compiler argument has an empty value: {argument}"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Diagnostics and optimization controls that cannot affect the parsed
+/// program and are intentionally not forwarded to either frontend.
+fn discard_without_value(argument: &str) -> bool {
+    argument == "-pedantic"
+        || argument == "-pedantic-errors"
+        || argument == "-Qunused-arguments"
+        || matches!(
+            argument,
+            "-O" | "-O0"
+                | "-O1"
+                | "-O2"
+                | "-O3"
+                | "-O4"
+                | "-Ofast"
+                | "-Og"
+                | "-Os"
+                | "-Oz"
+                | "-g"
+                | "-g0"
+                | "-g1"
+                | "-g2"
+                | "-g3"
+                | "-ggdb"
+                | "-ggdb0"
+                | "-ggdb1"
+                | "-ggdb2"
+                | "-ggdb3"
+                | "-gline-tables-only"
+        )
+        || argument.starts_with("-R")
+        || argument.starts_with("-W")
+}
+
+/// Known command-line re-parsing and pass-through families are named here as
+/// a defence-in-depth boundary before broad diagnostic namespaces are dropped.
+/// Everything else still has to match the allow list and therefore fails
+/// closed without relying on this list being exhaustive.
+fn explicitly_forbidden(argument: &str) -> bool {
     argument.starts_with('@')
         || matches!(
             argument,
-            "-Xclang" | "-cc1" | "-mllvm" | "-load" | "-plugin"
+            "--config"
+                | "--config-user-dir"
+                | "--config-system-dir"
+                | "-B"
+                | "-Xanalyzer"
+                | "-Xassembler"
+                | "-Xclang"
+                | "-Xlinker"
+                | "-Xpreprocessor"
+                | "-Wa"
+                | "-Wl"
+                | "-Wp"
+                | "-add-plugin"
+                | "-load"
+                | "-mllvm"
+                | "-plugin"
         )
-        || argument.starts_with("-Xclang=")
-        || argument.starts_with("-cc1")
-        || argument.starts_with("-mllvm")
-        || argument.starts_with("-load")
-        || argument.starts_with("-plugin")
-        || argument.starts_with("-fplugin")
-        || argument.starts_with("-fpass-plugin")
-        || argument.starts_with("-analyzer-")
-        || argument.starts_with("-fmodules")
-        || argument.starts_with("-fmodule-")
-        || argument.starts_with("-fimplicit-module")
-        || argument.starts_with("-include-pch")
-        || argument.starts_with("-emit-pch")
-        || argument.starts_with("-emit-module")
-        || argument.starts_with("-fmodule-output")
-        || argument.starts_with("-fmodule-cache-path")
-        || argument.starts_with("-save-temps")
-        || argument.starts_with("-serialize-diagnostics")
-        || argument.starts_with("-fdiagnostics-serialize-file")
-        || argument.starts_with("-ftime-trace")
-        || argument.starts_with("-MJ")
-        || argument.starts_with("-E")
-        || argument.starts_with("-S")
-        || argument.starts_with("-emit-")
+        || [
+            "--config=",
+            "--config-user-dir=",
+            "--config-system-dir=",
+            "-B",
+            "-Wa,",
+            "-Wl,",
+            "-Wp,",
+            "-Xanalyzer=",
+            "-Xassembler=",
+            "-Xclang=",
+            "-Xlinker=",
+            "-Xpreprocessor=",
+            "-fpass-plugin",
+            "-fplugin",
+        ]
+        .into_iter()
+        .any(|prefix| argument.starts_with(prefix))
 }
 
 /// A compilation database, and the directory a project rooted at it spells its
@@ -232,10 +442,12 @@ impl RawEntry {
         // it as it is. The two are one file and no plain string comparison
         // says so.
         let file = canonical(&written);
-        let mut entry = Entry {
+        let parsed_arguments = parse_arguments(&words, &written, directory.as_deref());
+        let arguments = ValidatedArguments::parse(&parsed_arguments);
+        Some(Entry {
             file: file.clone(),
-            arguments: Vec::new(),
-            definitions: Vec::new(),
+            arguments,
+            definitions: definitions(&words),
             selector: CompileCommandSelector {
                 file: file.display().to_string(),
                 directory: directory
@@ -243,14 +455,7 @@ impl RawEntry {
                     .map(|path| canonical(path).display().to_string()),
                 arguments: words.clone(),
             },
-        };
-        // Matched against the path as the command spells it rather than as the
-        // filesystem does: the argument to drop is the one the command carries,
-        // and asking the filesystem about every other argument to find it would
-        // be a search for something already in hand.
-        entry.arguments = parse_arguments(&words, &written, directory.as_deref());
-        entry.definitions = definitions(&words);
-        Some(entry)
+        })
     }
 }
 
@@ -451,7 +656,10 @@ mod tests {
 
         assert_eq!(entry.file, Path::new("/work/build/src/a.cpp"));
         assert_eq!(
-            entry.arguments,
+            entry
+                .arguments()
+                .expect("ordinary compilation arguments are safe")
+                .as_slice(),
             [
                 "-working-directory=/work/build",
                 "-std=c++17",
@@ -463,59 +671,188 @@ mod tests {
     }
 
     #[test]
-    fn cfg_frontend_refuses_plugin_and_clang_internal_execution_flags() {
-        let entry = Entry {
-            file: PathBuf::from("/work/src/a.cpp"),
-            arguments: [
-                "-std=c++20",
-                "-Xclang",
-                "-load",
-                "-fplugin=/work/plugin.so",
-                "-fplugin-arg-test=value",
-                "-I/work/include",
-            ]
-            .map(str::to_string)
-            .to_vec(),
-            definitions: Vec::new(),
-            selector: CompileCommandSelector {
-                file: "/work/src/a.cpp".to_string(),
-                directory: None,
-                arguments: Vec::new(),
-            },
-        };
-        assert!(entry.cfg_arguments().is_err());
+    fn compiler_arguments_fail_closed_for_execution_and_output_options() {
+        let rejected: &[&[&str]] = &[
+            &["--config", "evil.cfg"],
+            &["--config=evil.cfg"],
+            &["--config-user-dir", "/tmp/config"],
+            &["--config-user-dir=/tmp/config"],
+            &["--config-system-dir", "/tmp/config"],
+            &["--config-system-dir=/tmp/config"],
+            &["-B", "/tmp/toolchain"],
+            &["-B/tmp/toolchain"],
+            &["@evil.rsp"],
+            &["-Xclang", "-load"],
+            &["-load", "/tmp/plugin.so"],
+            &["-plugin", "example"],
+            &["-add-plugin", "example"],
+            &["-fplugin=/tmp/plugin.so"],
+            &["-fplugin-arg-example=value"],
+            &["-fpass-plugin=/tmp/pass.so"],
+            &["-fmodules"],
+            &["-fmodule-file=/tmp/module.pcm"],
+            &["-fmodule-map-file=/tmp/module.modulemap"],
+            &["-fimplicit-modules"],
+            &["-include-pch", "/tmp/header.pch"],
+            &["-emit-pch"],
+            &["-emit-module"],
+            &["-ast-merge", "/tmp/unit.ast"],
+            &["-emit-ast"],
+            &["-o", "/tmp/output"],
+            &["-save-temps"],
+            &["-serialize-diagnostics", "/tmp/diagnostics.dia"],
+            &["-ftime-trace"],
+            &["-MJ", "/tmp/fragment.json"],
+            &["-analyzer-checker=example"],
+            &["-Xanalyzer", "-analyzer-output=text"],
+            &["-mllvm", "-example"],
+            &["-Xpreprocessor", "-example"],
+            &["-Wp,-example"],
+            &["-Xlinker", "-example"],
+            &["-Wl,-example"],
+            &["-Xassembler", "-example"],
+            &["-Wa,-example"],
+            &["--future-unknown-option"],
+            &["positional-operand.cpp"],
+        ];
+        for arguments in rejected {
+            let arguments: Vec<String> = arguments.iter().map(ToString::to_string).collect();
+            assert!(
+                ValidatedArguments::parse(&arguments).is_err(),
+                "unexpectedly accepted {arguments:?}"
+            );
+        }
     }
 
     #[test]
-    fn cfg_frontend_retains_the_build_reading_when_it_is_syntax_only_safe() {
-        let entry = Entry {
-            file: PathBuf::from("/work/src/a.cpp"),
-            arguments: [
-                "-working-directory=/work/build",
-                "-std=c++20",
-                "-DLEVEL=2",
-                "-I/work/include",
-            ]
-            .map(str::to_string)
-            .to_vec(),
-            definitions: Vec::new(),
-            selector: CompileCommandSelector {
-                file: "/work/src/a.cpp".to_string(),
-                directory: None,
-                arguments: Vec::new(),
-            },
-        };
+    fn allow_list_retains_joined_and_separate_semantic_inputs() {
+        let arguments = [
+            "-working-directory=/work/build",
+            "-working-directory",
+            "/work/other-build",
+            "-std=c++20",
+            "-std",
+            "c++23",
+            "-DLEVEL=2",
+            "-D",
+            "FEATURE=1",
+            "-UOLD",
+            "-U",
+            "OLDER",
+            "-I/work/include",
+            "-I",
+            "/work/generated",
+            "-isystem",
+            "/opt/sdk/include",
+            "-include",
+            "/work/prefix.hpp",
+            "--target=x86_64-unknown-linux-gnu",
+            "-target",
+            "aarch64-apple-darwin",
+            "-m64",
+            "-mabi=lp64",
+        ]
+        .map(str::to_string)
+        .to_vec();
         assert_eq!(
-            entry
-                .cfg_arguments()
-                .expect("ordinary parsing flags are safe"),
-            [
-                "-working-directory=/work/build",
-                "-std=c++20",
-                "-DLEVEL=2",
-                "-I/work/include",
-            ]
+            ValidatedArguments::parse(&arguments)
+                .expect("ordinary parsing flags are safe")
+                .as_slice(),
+            arguments
         );
+    }
+
+    #[test]
+    fn option_operands_are_consumed_once_and_missing_operands_are_rejected() {
+        let arguments = ["-I", "-Xclang", "-D", "-load", "-include", "-plugin"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(
+            ValidatedArguments::parse(&arguments)
+                .expect("option-looking paths and macro names are still operands")
+                .as_slice(),
+            arguments
+        );
+        for option in SAFE_WITH_VALUE {
+            assert!(
+                ValidatedArguments::parse(&[(*option).to_string()]).is_err(),
+                "accepted {option} without its operand"
+            );
+        }
+    }
+
+    #[test]
+    fn both_compilation_database_command_forms_reach_the_same_allow_list() {
+        let from_arguments = RawEntry {
+            file: "/work/src/a.cpp".to_string(),
+            directory: Some("/work/build".to_string()),
+            arguments: Some(
+                [
+                    "clang++",
+                    "-D",
+                    "LEVEL=2",
+                    "-UOLD",
+                    "-I",
+                    "../include",
+                    "-isystem",
+                    "/opt/sdk/include",
+                    "-include",
+                    "prefix.hpp",
+                    "-std",
+                    "c++20",
+                    "--target=x86_64-unknown-linux-gnu",
+                    "/work/src/a.cpp",
+                ]
+                .map(str::to_string)
+                .to_vec(),
+            ),
+            command: None,
+        }
+        .entry()
+        .expect("arguments entry");
+        assert!(from_arguments.arguments().is_ok());
+
+        let from_command = RawEntry {
+            file: "/work/src/a.cpp".to_string(),
+            directory: Some("/work/build".to_string()),
+            arguments: None,
+            command: Some(
+                "clang++ -DLEVEL=2 -U OLD -I../include -isystem /opt/sdk/include \
+                 -include prefix.hpp -std=c++20 -target x86_64-unknown-linux-gnu \
+                 /work/src/a.cpp"
+                    .to_string(),
+            ),
+        }
+        .entry()
+        .expect("command entry");
+        assert!(from_command.arguments().is_ok());
+
+        for unsafe_entry in [
+            RawEntry {
+                file: "/work/src/a.cpp".to_string(),
+                directory: Some("/work/build".to_string()),
+                arguments: Some(
+                    ["clang++", "--config=evil.cfg", "/work/src/a.cpp"]
+                        .map(str::to_string)
+                        .to_vec(),
+                ),
+                command: None,
+            },
+            RawEntry {
+                file: "/work/src/a.cpp".to_string(),
+                directory: Some("/work/build".to_string()),
+                arguments: None,
+                command: Some("clang++ @evil.rsp /work/src/a.cpp".to_string()),
+            },
+        ] {
+            assert!(
+                unsafe_entry
+                    .entry()
+                    .expect("entry is retained so analysis can report unavailable")
+                    .arguments()
+                    .is_err()
+            );
+        }
     }
 
     /// The relative include path in the entry above is relative to the
@@ -537,7 +874,12 @@ mod tests {
         .entry()
         .expect("the entry carries a command");
         assert_eq!(
-            entry.arguments.first().map(String::as_str),
+            entry
+                .arguments()
+                .expect("include path is safe")
+                .as_slice()
+                .first()
+                .map(String::as_str),
             Some("-working-directory=/work/build")
         );
     }
@@ -643,7 +985,10 @@ mod tests {
         // The unit's own source still says which unit this is rather than how
         // it is read, so it is still not one of the arguments.
         assert_eq!(
-            entry.arguments,
+            entry
+                .arguments()
+                .expect("standard selection is safe")
+                .as_slice(),
             ["-working-directory=/work/build", "-std=c++17"]
         );
     }

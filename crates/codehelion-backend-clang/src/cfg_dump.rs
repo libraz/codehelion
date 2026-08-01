@@ -18,7 +18,7 @@ use std::process::{Command, Stdio};
 
 use codehelion_helper::ir::{Anchor, BasicBlock, ControlFlowGraph, Edge, EdgeKind};
 
-use crate::database::Entry;
+use crate::database::ValidatedArguments;
 
 /// The one source definition to which a dumped compiler CFG can be anchored.
 #[derive(Debug, Clone)]
@@ -51,11 +51,18 @@ fn compiler_available(name: &str) -> bool {
 /// definition share a name; overloads or ambiguous compiler output are
 /// omitted.  That conservatism keeps a graph from being attached to the wrong
 /// source range.
-pub(crate) fn produce(entry: &Entry, functions: &[FunctionAnchor]) -> Option<ControlFlowGraph> {
-    let compiler = compiler_for(&entry.file)?;
-    let arguments = entry.cfg_arguments().ok()?;
+pub(crate) fn produce(
+    file: &Path,
+    arguments: &ValidatedArguments,
+    functions: &[FunctionAnchor],
+) -> Option<ControlFlowGraph> {
+    let compiler = compiler_for(file)?;
     let output = Command::new(compiler)
-        .args(arguments)
+        // Clang otherwise searches user, system, and executable-relative
+        // default configuration files selected by the database's target.
+        // None of those files is part of the reviewed argument set.
+        .arg("--no-default-config")
+        .args(arguments.as_slice())
         // Place these after database arguments so the helper owns the mode
         // even if a build command originally requested an object file.
         .arg("-fsyntax-only")
@@ -65,7 +72,7 @@ pub(crate) fn produce(entry: &Entry, functions: &[FunctionAnchor]) -> Option<Con
             "-Xclang",
             "-analyzer-checker=debug.DumpCFG",
         ])
-        .arg(&entry.file)
+        .arg(file)
         .stdin(Stdio::null())
         .output()
         .ok()?;
