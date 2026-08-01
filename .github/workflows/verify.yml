@@ -1,0 +1,149 @@
+name: Verify
+
+# The checks that cost a second operating system, a compiler helper built
+# against a pinned libclang, or a real build toolchain. They answer questions
+# the CI workflow cannot, and they take long enough that running them on every
+# push would make the quick answer arrive no sooner than the slow one, so they
+# run when a change lands on main and whenever they are asked for.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux is covered on every change by the CI workflow. These two are
+        # the ones that catch what a single platform cannot: path spelling,
+        # separators, and the native shells.
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --workspace --all-targets --all-features
+
+  semantic-fixtures:
+    name: Semantic helpers and SQLite (${{ matrix.rust }} / Clang ${{ matrix.clang }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Pin the image/package pairing instead of asking whichever libclang
+          # happens to be newest on `ubuntu-latest`. These are independently
+          # built helpers and full Semantic scans, so every row verifies both
+          # protocol handshake and SQLite persistence against a real runtime.
+          - runner: ubuntu-22.04
+            rust: '1.95.0'
+            clang: '14'
+            libclang_package: libclang-14-dev
+            # The C++ fixtures include `<expected>`, which the standard library
+            # this image ships by default does not have. Naming the oldest one
+            # that does keeps the row about the libclang version rather than
+            # about a header that is simply absent.
+            libstdcxx_package: g++-12
+            golden: true
+          - runner: ubuntu-24.04
+            rust: stable
+            clang: '18'
+            libclang_package: libclang-18-dev
+            libstdcxx_package: g++-13
+            golden: false
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install matrix Rust toolchain
+        run: rustup toolchain install ${{ matrix.rust }} --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      # The driver as well as the library: libclang reads a project through the
+      # same resource directory and standard-library search the driver
+      # establishes, and a translation unit it cannot find headers for comes
+      # back unanalysed rather than failing loudly.
+      - name: Install Clang and a C++ standard library
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ${{ matrix.libclang_package }} \
+            clang-${{ matrix.clang }} \
+            ${{ matrix.libstdcxx_package }}
+      - name: Build optional compiler helpers
+        run: cargo +${{ matrix.rust }} build -p codehelion-backend-rust -p codehelion-backend-clang
+      - name: Exercise Semantic scans
+        run: cargo +${{ matrix.rust }} test -p codehelion-cli --test semantic_helpers -- --ignored --skip compiler_ir_matches_its_golden_snapshot
+      - name: Check versioned compiler IR goldens
+        if: matrix.golden
+        run: cargo +${{ matrix.rust }} test -p codehelion-cli --test semantic_helpers compiler_ir_matches_its_golden_snapshot -- --ignored
+
+  artifact-fixtures:
+    name: Artifact fixture end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # The fixture programs are compiled in a scratch directory outside the
+      # checkout, where rust-toolchain.toml does not apply. The target has to
+      # be added to the toolchain this job pins, which is what the fixtures are
+      # built with there — adding it from inside the repository would install
+      # it against the toolchain the file selects instead, and leave the one
+      # doing the compiling without it.
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and analyse real WASM and ELF fixtures
+        run: make verify-artifact-fixtures
+
+  macho-artifact-fixtures:
+    name: Mach-O artifact fixture end-to-end
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and analyse real Mach-O and dSYM fixtures
+        run: make verify-macho-artifact-fixtures
+
+  pe-artifact-fixtures:
+    name: PE/PDB artifact fixture end-to-end
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and analyse real PE/PDB fixtures
+        shell: pwsh
+        run: .\scripts\verify-pe-artifact-fixtures.ps1
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Collect coverage
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

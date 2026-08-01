@@ -1,9 +1,15 @@
 name: CI
 
+# What every change is checked against. Everything here runs on one runner
+# family and is expected to finish quickly enough to read before moving on;
+# the checks that need a second operating system, a compiler helper, or a real
+# build toolchain live in the verify workflow, which runs when a change lands
+# on main.
 on:
   push:
     branches: [main, develop]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -14,41 +20,39 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  semantic-fixtures:
-    name: Semantic helpers and SQLite (${{ matrix.rust }} / Clang ${{ matrix.clang }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Pin the image/package pairing instead of asking whichever libclang
-          # happens to be newest on `ubuntu-latest`. These are independently
-          # built helpers and full Semantic scans, so every row verifies both
-          # protocol handshake and SQLite persistence against a real runtime.
-          - runner: ubuntu-22.04
-            rust: '1.95.0'
-            clang: '14'
-            libclang_package: libclang-14-dev
-            golden: true
-          - runner: ubuntu-24.04
-            rust: stable
-            clang: '18'
-            libclang_package: libclang-18-dev
-            golden: false
+  lint:
+    name: fmt + clippy + docs + boundaries
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install matrix Rust toolchain
-        run: rustup toolchain install ${{ matrix.rust }} --profile minimal
-      - name: Install libclang
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ matrix.libclang_package }}
-      - name: Build optional compiler helpers
-        run: cargo +${{ matrix.rust }} build -p codehelion-backend-rust -p codehelion-backend-clang
-      - name: Exercise Semantic scans
-        run: cargo +${{ matrix.rust }} test -p codehelion-cli --test semantic_helpers -- --ignored --skip compiler_ir_matches_its_golden_snapshot
-      - name: Check versioned compiler IR goldens
-        if: matrix.golden
-        run: cargo +${{ matrix.rust }} test -p codehelion-cli --test semantic_helpers compiler_ir_matches_its_golden_snapshot -- --ignored
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Verify compiler helper boundaries
+        run: make verify-helper-boundaries
+      - name: Verify artifact dependency boundary
+        run: make verify-artifact-boundaries
+      - name: Docs
+        run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Formatting, lints and docs belong to the lint job. Running them here as
+      # well only buys a second copy of the same answer.
+      - name: Test
+        run: cargo test --workspace --all-targets --all-features
 
   helperless-modes:
     name: Fast and Structural without compiler helpers
@@ -63,66 +67,6 @@ jobs:
         run: cargo test -p codehelion-cli --test scan fast_and_structural_modes_run_without_compiler_helpers
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/codehelion-helperless-target
-
-  artifact-fixtures:
-    name: Artifact fixture end-to-end
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      # The fixture programs are compiled in a scratch directory outside the
-      # checkout, where rust-toolchain.toml does not apply. The target has to
-      # be added to the toolchain this job pins, which is what the fixtures are
-      # built with there — adding it from inside the repository would install
-      # it against the toolchain the file selects instead, and leave the one
-      # doing the compiling without it.
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          targets: wasm32-unknown-unknown
-      - name: Build and analyse real WASM and ELF fixtures
-        run: make verify-artifact-fixtures
-
-  macho-artifact-fixtures:
-    name: Mach-O artifact fixture end-to-end
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build and analyse real Mach-O and dSYM fixtures
-        run: make verify-macho-artifact-fixtures
-
-  pe-artifact-fixtures:
-    name: PE/PDB artifact fixture end-to-end
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build and analyse real PE/PDB fixtures
-        shell: pwsh
-        run: .\scripts\verify-pe-artifact-fixtures.ps1
-
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # Keep this portable across the native shells of all three runners.
-      # Linux additionally verifies shell-based dependency boundaries in the
-      # lint job; the four commands below are the platform-independent body of
-      # `make check`.
-      - name: Check
-        run: |
-          cargo fmt --all --check
-          cargo clippy --workspace --all-targets --all-features -- -D warnings
-          cargo test --workspace --all-targets --all-features
-          cargo doc --workspace --no-deps --all-features
-        env:
-          RUSTDOCFLAGS: "-D warnings"
 
   accuracy:
     name: detection accuracy
@@ -140,28 +84,6 @@ jobs:
       - name: Measure
         run: make eval
 
-  lint:
-    name: fmt + clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Format
-        run: cargo fmt --all --check
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Verify compiler helper boundaries
-        run: make verify-helper-boundaries
-      - name: Verify artifact dependency boundary
-        run: make verify-artifact-boundaries
-      - name: Docs
-        run: cargo doc --no-deps --all-features
-        env:
-          RUSTDOCFLAGS: "-D warnings"
-
   msrv:
     name: minimum supported rust version
     runs-on: ubuntu-latest
@@ -178,24 +100,3 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
-
-  coverage:
-    name: coverage
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Collect coverage
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          files: lcov.info
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
