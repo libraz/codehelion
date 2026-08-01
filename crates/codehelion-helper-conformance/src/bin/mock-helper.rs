@@ -13,6 +13,7 @@
 //! mock-helper undescribed       # cannot say what the tree is built with
 //! mock-helper inert             # runs nothing, whatever it is permitted
 //! mock-helper untyped           # cannot resolve types
+//! mock-helper unnamed           # cannot resolve names
 //! mock-helper slow              # answers, eventually
 //! mock-helper deaf              # never answers
 //! mock-helper deaf-after-setup  # establishes the run, then hangs on analysis
@@ -177,9 +178,16 @@ fn identity(behaviour: &str) -> HelperIdentity {
     };
     let capabilities = if behaviour == "untyped" {
         vec![Capability::CallTargets]
+    } else if behaviour == "unnamed" {
+        vec![
+            Capability::Types,
+            Capability::CallTargets,
+            Capability::MacroExpansion,
+        ]
     } else {
         vec![
             Capability::Types,
+            Capability::NameResolution,
             Capability::CallTargets,
             Capability::MacroExpansion,
         ]

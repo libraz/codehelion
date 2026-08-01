@@ -102,6 +102,17 @@ pub enum Absence {
 }
 
 impl Capability {
+    /// Every capability this protocol revision understands.
+    pub const ALL: [Self; 7] = [
+        Self::Types,
+        Self::NameResolution,
+        Self::CallTargets,
+        Self::MirCfg,
+        Self::MacroExpansion,
+        Self::TemplateInstantiation,
+        Self::OverloadResolution,
+    ];
+
     /// Stable lowercase identifier, the same spelling this serializes as.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -595,15 +606,7 @@ mod tests {
     /// by it.
     #[test]
     fn what_a_capability_is_called_is_what_it_is_sent_as() {
-        for capability in [
-            Capability::Types,
-            Capability::NameResolution,
-            Capability::CallTargets,
-            Capability::MirCfg,
-            Capability::MacroExpansion,
-            Capability::TemplateInstantiation,
-            Capability::OverloadResolution,
-        ] {
+        for capability in Capability::ALL {
             let sent = serde_json::to_string(&capability).unwrap();
             assert_eq!(sent, format!("\"{}\"", capability.name()));
         }

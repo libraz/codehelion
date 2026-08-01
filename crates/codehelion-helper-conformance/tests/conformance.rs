@@ -115,6 +115,41 @@ fn a_helper_that_cannot_resolve_types_is_refused_rather_than_degraded() {
 }
 
 #[test]
+fn a_helper_that_cannot_resolve_names_is_refused_rather_than_degraded() {
+    let error = start("unnamed", DEADLINE).expect_err("name resolution is not optional");
+    assert!(
+        matches!(
+            error,
+            HelperError::MissingRequiredCapability {
+                missing: Capability::NameResolution
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_busy_helper_shutdown_does_not_spend_another_analysis_timeout() {
+    let analysis_timeout = Duration::from_secs(2);
+    let mut helper = start("deaf-after-setup", analysis_timeout).expect("it shakes hands");
+    let analysis = helper
+        .analyze(&unit("src/hung.rs"), &[Capability::Types])
+        .expect_err("the analysis does not answer");
+    assert!(
+        matches!(analysis, HelperError::TimedOut { .. }),
+        "{analysis:?}"
+    );
+
+    let started = Instant::now();
+    helper.shutdown().expect("the hung child is killed");
+    assert!(
+        started.elapsed() < analysis_timeout / 2,
+        "shutdown waited {:?} after an analysis timeout of {analysis_timeout:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn a_helper_that_stops_answering_is_given_up_on_at_the_deadline() {
     let deadline = Duration::from_millis(300);
     let started = Instant::now();

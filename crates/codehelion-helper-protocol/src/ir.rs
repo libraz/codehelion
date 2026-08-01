@@ -706,6 +706,8 @@ pub fn spell(root: Option<&Path>, path: &Path) -> String {
 pub enum Unavailability {
     /// Analyzing it would mean running code from the project.
     RequiresExecution,
+    /// Cargo cannot resolve dependencies without network access or a lockfile change.
+    MetadataUnavailable,
     /// Nothing says how the file is compiled.
     NoBuildInformation,
     /// The helper was built for a different toolchain than the project uses.
@@ -726,6 +728,7 @@ impl Unavailability {
     pub const fn name(self) -> &'static str {
         match self {
             Self::RequiresExecution => "requires_execution",
+            Self::MetadataUnavailable => "metadata_unavailable",
             Self::NoBuildInformation => "no_build_information",
             Self::ToolchainMismatch => "toolchain_mismatch",
             Self::HelperTimedOut => "helper_timed_out",
@@ -820,6 +823,7 @@ mod tests {
         assert!(Unavailability::HelperTimedOut.worth_retrying());
         for settled in [
             Unavailability::RequiresExecution,
+            Unavailability::MetadataUnavailable,
             Unavailability::NoBuildInformation,
             Unavailability::ToolchainMismatch,
             Unavailability::UnreadableSchema,

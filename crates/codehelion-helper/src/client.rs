@@ -27,14 +27,21 @@ use std::process::{Child, ChildStdin};
 
 use crate::ir::{CompilerIr, Unavailability, UnitRef};
 use crate::protocol::{
-    Analyze, BuildDescription, Capability, ClientIdentity, CompileCommandSelector, DescribeBuild,
-    Execution, FrameError, HelperIdentity, PROTOCOL_VERSION, Request, RequestBody, Response,
-    ResponseBody, read_frame, write_frame,
+    Absence, Analyze, BuildDescription, Capability, ClientIdentity, CompileCommandSelector,
+    DescribeBuild, Execution, FrameError, HelperIdentity, PROTOCOL_VERSION, Request, RequestBody,
+    Response, ResponseBody, read_frame, write_frame,
 };
 use crate::sandbox::{SandboxError, SandboxRequest, spawn};
 
 /// How long a request waits before the helper is treated as unresponsive.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Longest time shutdown waits for an acknowledgement before killing a helper.
+///
+/// A shutdown follows completed work, so an unresponsive helper has already
+/// spent its useful time. Letting cleanup consume the full analysis deadline
+/// turns each hung helper into a second timeout.
+const SHUTDOWN_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Lines of helper standard error kept for diagnostics.
 ///
@@ -284,7 +291,7 @@ impl Helper {
     /// acknowledging is not an error — it left, which is what was asked.
     pub fn shutdown(mut self) -> Result<(), HelperError> {
         let id = self.send(RequestBody::Shutdown)?;
-        match self.receive(id) {
+        match self.receive_with_timeout(id, self.timeout.min(SHUTDOWN_ACK_TIMEOUT)) {
             Ok(ResponseBody::Shutdown) | Err(HelperError::Died { .. }) => {}
             Ok(_) | Err(_) => {
                 let _ = self.child.kill();
@@ -399,9 +406,13 @@ impl Helper {
                 required: PROTOCOL_VERSION,
             });
         }
-        for required in [Capability::Types] {
-            if !identity.capabilities.contains(&required) {
-                return Err(HelperError::MissingRequiredCapability { missing: required });
+        for capability in Capability::ALL {
+            if capability.absence() == Absence::Refuse
+                && !identity.capabilities.contains(&capability)
+            {
+                return Err(HelperError::MissingRequiredCapability {
+                    missing: capability,
+                });
             }
         }
         self.identity = *identity;
@@ -427,7 +438,16 @@ impl Helper {
 
     /// Wait for the answer to `expected`, or for the deadline.
     fn receive(&mut self, expected: u64) -> Result<ResponseBody, HelperError> {
-        match self.responses.recv_timeout(self.timeout) {
+        self.receive_with_timeout(expected, self.timeout)
+    }
+
+    /// Wait for the answer to `expected`, subject to one operation's deadline.
+    fn receive_with_timeout(
+        &mut self,
+        expected: u64,
+        timeout: Duration,
+    ) -> Result<ResponseBody, HelperError> {
+        match self.responses.recv_timeout(timeout) {
             Ok(Ok(response)) => {
                 // Both the handshake and every later response use the one
                 // revision this build accepts.
@@ -458,9 +478,7 @@ impl Helper {
                 }
             }
             Ok(Err(error)) => Err(self.explain(error)),
-            Err(RecvTimeoutError::Timeout) => Err(HelperError::TimedOut {
-                timeout: self.timeout,
-            }),
+            Err(RecvTimeoutError::Timeout) => Err(HelperError::TimedOut { timeout }),
             Err(RecvTimeoutError::Disconnected) => Err(HelperError::Died {
                 stderr: self.diagnostics(),
             }),
@@ -798,6 +816,7 @@ mod tests {
         assert_eq!(locate("codehelion-backend-nothing-at-all", None), None);
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn a_required_memory_limit_is_rejected_before_starting_the_helper() {
         let error = Helper::start_with_sandbox(
@@ -810,6 +829,22 @@ mod tests {
         assert!(matches!(
             error,
             HelperError::Sandbox(SandboxError::MemoryLimitUnavailable { bytes: 4096 })
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_enforceable_memory_limit_reaches_process_startup() {
+        let error = Helper::start_with_sandbox(
+            Path::new("/this/helper/does/not/need/to/exist"),
+            &[],
+            DEFAULT_TIMEOUT,
+            SandboxRequest::require_memory_limit(4096),
+        )
+        .expect_err("the nonexistent program must fail at startup");
+        assert!(matches!(
+            error,
+            HelperError::Sandbox(SandboxError::NotStarted { .. })
         ));
     }
 }

@@ -50,4 +50,28 @@ for package in codehelion-core codehelion-cli; do
     done <"$dependency_file"
 done
 
+# Storage consumes the versioned IR contract, not the crate that can launch
+# and supervise external programs. This keeps persistence usable without
+# acquiring any process-management or sandbox dependencies.
+store_dependency_file=$(mktemp "${TMPDIR:-/tmp}/codehelion-store-deps.XXXXXX")
+temporary_files="$temporary_files $store_dependency_file"
+"$cargo_cmd" tree --locked --package codehelion-store --edges normal --target all \
+    --no-dedupe --prefix none --format '{p}' >"$store_dependency_file"
+while IFS= read -r dependency; do
+    crate=${dependency%% *}
+    if [ "$crate" = codehelion-helper ]; then
+        printf '%s\n' 'error: codehelion-store depends on the process-managing codehelion-helper crate' >&2
+        printf '%s\n' '       depend on codehelion-helper-protocol for compiler IR instead.' >&2
+        exit 1
+    fi
+done <"$store_dependency_file"
+
+# The shared contract itself must remain inert. Framing may read and write the
+# caller-provided stream, but the crate must never start or supervise a process.
+if grep -R -n -E 'std::process|tokio::process|Command::new|Child::(wait|kill)' \
+    crates/codehelion-helper-protocol/src; then
+    printf '%s\n' 'error: codehelion-helper-protocol contains process-management code' >&2
+    exit 1
+fi
+
 printf '%s\n' 'compiler helper dependency boundaries verified'
