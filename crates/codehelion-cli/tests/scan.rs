@@ -1423,6 +1423,197 @@ fn duplication_between_a_vendored_tree_and_the_project_stays_visible() {
     );
 }
 
+/// How to read one axis's measure off a reported group.
+type Measure = fn(&serde_json::Value) -> f64;
+
+/// What each `--sort` axis is called and how to read the measure it names off
+/// a reported group, so a test can hold the report to the axis it asked for.
+const AXES: [(&str, Measure); 4] = [
+    ("priority", |group| {
+        group["priority"]["value"].as_f64().expect("a value")
+    }),
+    ("identifier-jaccard", |group| {
+        group["identifier_jaccard"].as_f64().expect("a measure")
+    }),
+    ("instances", |group| {
+        group["priority"]["inputs"]["instances"]
+            .as_f64()
+            .expect("a count")
+    }),
+    ("duplicated-tokens", |group| {
+        let members = group["members"].as_array().expect("members");
+        let size = |member: &serde_json::Value| member["tokens"].as_f64().expect("a size");
+        let total: f64 = members.iter().map(size).sum();
+        let canonical = members
+            .iter()
+            .find(|member| member["canonical"] == true)
+            .map_or(0.0, size);
+        total - canonical
+    }),
+];
+
+/// What a group measures on one axis, in the order the report listed them.
+///
+/// Structural mode, because raw identifier agreement is measured on whole
+/// units and a mode that does not read units has nothing to say about it.
+fn axis_values(report: &serde_json::Value, measure: Measure) -> Vec<f64> {
+    report["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .map(measure)
+        .collect()
+}
+
+#[test]
+fn every_sort_axis_orders_the_report_on_what_it_names() {
+    let dir = fixture();
+    let root = dir.path();
+
+    for (axis, measure) in AXES {
+        let report = scan_json_with(root, &["--mode", "structural", "--sort", axis]);
+        let values = axis_values(&report, measure);
+        assert!(values.len() > 1, "the fixture has something to order");
+        assert!(
+            values.windows(2).all(|pair| pair[0] >= pair[1]),
+            "{axis} listed out of its own order: {values:?}"
+        );
+        // Nothing about the axis may change which findings there are.
+        assert_eq!(
+            group_ids(&report).len(),
+            group_ids(&scan_json_with(root, &["--mode", "structural"])).len(),
+            "the {axis} axis changed the findings rather than their order"
+        );
+    }
+}
+
+#[test]
+fn the_chosen_axis_reorders_the_report_and_says_so_in_the_heading() {
+    let dir = fixture();
+    let root = dir.path();
+
+    let by_priority = group_ids(&scan_json_with(root, &["--mode", "structural"]));
+    let by_instances = group_ids(&scan_json_with(
+        root,
+        &["--mode", "structural", "--sort", "instances"],
+    ));
+    assert_ne!(
+        by_priority, by_instances,
+        "the fixture ranks these two axes differently, so the flag has to show"
+    );
+    // The same run again, because an order a reader cites has to survive a
+    // rerun of the scan that produced it.
+    assert_eq!(
+        by_instances,
+        group_ids(&scan_json_with(
+            root,
+            &["--mode", "structural", "--sort", "instances"],
+        )),
+    );
+
+    cmd()
+        .current_dir(root)
+        .args(["scan", ".", "--mode", "structural", "--sort", "instances"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("top groups by instances:"));
+}
+
+#[test]
+fn a_recorded_run_can_be_read_back_on_another_axis() {
+    let dir = fixture();
+    let root = dir.path();
+    let scanned = scan_json_with(root, &["--mode", "structural"]);
+    let run_id = scanned["run"]["run_id"].as_i64().expect("a run id");
+
+    let output = cmd()
+        .current_dir(root)
+        .args([
+            "report",
+            "--run",
+            &run_id.to_string(),
+            "--format",
+            "json",
+            "--sort",
+            "instances",
+        ])
+        .output()
+        .expect("reread the recorded run");
+    assert!(output.status.success(), "{output:?}");
+    let reread: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+
+    let instances = AXES
+        .iter()
+        .find(|(axis, _)| *axis == "instances")
+        .expect("the instances axis")
+        .1;
+    let values = axis_values(&reread, instances);
+    assert!(
+        values.windows(2).all(|pair| pair[0] >= pair[1]),
+        "the recorded run came back out of the order it was asked for: {values:?}"
+    );
+    let mut listed = group_ids(&reread);
+    let mut recorded = group_ids(&scanned);
+    listed.sort();
+    recorded.sort();
+    assert_eq!(
+        listed, recorded,
+        "an axis is a way of reading the snapshot, not of changing it"
+    );
+}
+
+#[test]
+fn an_identifier_floor_narrows_the_listing_without_moving_a_count() {
+    let dir = fixture();
+    let root = dir.path();
+
+    let listed = |extra: &[&str]| {
+        let output = cmd()
+            .current_dir(root)
+            .args(["scan", ".", "--mode", "structural"])
+            .args(extra)
+            .output()
+            .expect("run scan");
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).expect("text output")
+    };
+    let full = listed(&[]);
+    let floored = listed(&["--min-identifier-jaccard", "0.9"]);
+
+    let counted = |text: &str| {
+        text.lines()
+            .find(|line| line.trim_start().starts_with("clone groups:"))
+            .expect("the group count")
+            .to_string()
+    };
+    assert_eq!(
+        counted(&full),
+        counted(&floored),
+        "a view chose what to list, so it may not restate what was found"
+    );
+    assert!(
+        floored.contains("group(s) are not listed: raw identifier agreement below 0.90"),
+        "what a floor left out has to be said: {floored}"
+    );
+    assert!(
+        floored
+            .lines()
+            .filter(|line| line.contains("type-2"))
+            .count()
+            < full.lines().filter(|line| line.contains("type-2")).count(),
+        "the renamed copies sit under the floor and should have gone"
+    );
+
+    // Exports carry the findings rather than a reading of them.
+    assert_eq!(
+        group_ids(&scan_json_with(root, &["--mode", "structural"])),
+        group_ids(&scan_json_with(
+            root,
+            &["--mode", "structural", "--min-identifier-jaccard", "0.9"],
+        )),
+    );
+}
+
 /// The checksum function rewritten, for writing over both copies of it at
 /// once: the same duplication in the same two places, made of other content,
 /// so it is known by another id.

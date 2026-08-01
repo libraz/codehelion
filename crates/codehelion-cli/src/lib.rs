@@ -258,13 +258,12 @@ fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<Outcome> {
             })?;
         groups.push(recorded_group(group, &priority)?);
     }
-    groups.sort_by(|left, right| {
-        right
-            .priority
-            .value
-            .total_cmp(&left.priority.value)
-            .then_with(|| left.fingerprint.cmp(&right.fingerprint))
-    });
+    // Ordered on the axis alone. The scan that recorded these entries also
+    // knew which of them its configuration ranked down; a rebuild reads the
+    // database and not that configuration, so it does not re-apply a policy
+    // it cannot see.
+    let sort = args.sort.axis();
+    groups.sort_by(|left, right| report::compare_on(left, right, sort));
     let language_counts = store.run_language_counts(run.id)?;
     let files = report::FileCounts {
         total: language_counts.values().copied().sum(),
@@ -319,6 +318,8 @@ fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<Outcome> {
             output: args.output.as_deref(),
             verbose: args.verbose,
             show_suppressed: args.show_suppressed,
+            sort,
+            min_identifier_jaccard: args.min_identifier_jaccard,
         },
         out,
         &model,
@@ -1109,7 +1110,7 @@ fn resolve_db(flag: Option<&Path>) -> Result<PathBuf> {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::cli::BaselineMode;
+    use crate::cli::{BaselineMode, SortAxis};
     use codehelion_core::discovery::Language;
     use codehelion_core::semantic::{
         OperationAttributes, OperationEdge, OperationEdgeKind, OperationKind, OperationNode,
@@ -1124,6 +1125,8 @@ mod tests {
     #[test]
     fn cross_language_comparison_requires_semantic_mode() {
         let args = ScanArgs {
+            sort: SortAxis::default(),
+            min_identifier_jaccard: None,
             path: PathBuf::from("."),
             mode: Mode::Fast,
             format: cli::Format::Text,

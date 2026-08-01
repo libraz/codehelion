@@ -757,6 +757,7 @@ fn run_with(
         timed_out,
         weights: cfg.priority.weights(),
         min_clone_tokens: u64::from(cfg.min_clone_tokens),
+        sort: args.sort.axis(),
     };
     // Ranked before recorded: the audit database and the report are two views
     // of one verdict about where each finding belongs, not two derivations of
@@ -888,6 +889,7 @@ fn run_semantic_partition(
         timed_out,
         weights: cfg.priority.weights(),
         min_clone_tokens: u64::from(cfg.min_clone_tokens),
+        sort: args.sort.axis(),
     };
     let groups = build_groups(&inputs);
     let stored = summary_row(
@@ -2698,6 +2700,8 @@ struct ReportInputs<'a> {
     weights: Weights,
     /// The run's minimum clone length, which the ranking reads sizes against.
     min_clone_tokens: u64,
+    /// The axis the run puts its entries in order on.
+    sort: report::Sort,
 }
 
 impl ReportInputs<'_> {
@@ -2762,8 +2766,8 @@ impl ReportInputs<'_> {
 const REGION_SIMILARITY: f64 = 1.0;
 
 /// Every reported entry, in the order the views render them: ranked-down
-/// entries last, then priority descending, then fingerprint ascending, so
-/// every view is stable across reruns.
+/// entries last, then the run's chosen axis descending, then fingerprint
+/// ascending, so every view is stable across reruns.
 ///
 /// Duplicated units and duplicated runs share one ranking. They describe the
 /// code differently, and each entry says which it is, but they compete for
@@ -2787,7 +2791,7 @@ fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
         .chain((0..inputs.semantic_groups.len()).map(|index| build_semantic_group(inputs, index)))
         .chain((0..inputs.semantic_pairs.len()).map(|index| build_semantic_pair(inputs, index)))
         .collect();
-    report::order(&mut entries, inputs.suppression);
+    report::order(&mut entries, inputs.suppression, inputs.sort);
     entries
 }
 
@@ -4237,7 +4241,7 @@ mod tests {
         extract_cross_language_candidates, presentation_suppression, run_with, semantic_sandbox,
         structural_config, verify_cross_language_candidates,
     };
-    use crate::cli::{Format, Mode};
+    use crate::cli::{Format, Mode, SortAxis};
     use codehelion_core::semantic::{OperationAttributes, OperationKind, OperationNode};
     use std::path::PathBuf;
 
@@ -4288,6 +4292,8 @@ mod tests {
     #[test]
     fn untrusted_semantic_requires_an_enforceable_memory_limit() {
         let args = ScanArgs {
+            sort: SortAxis::default(),
+            min_identifier_jaccard: None,
             path: PathBuf::from("."),
             mode: Mode::Semantic,
             format: Format::Text,
@@ -4347,6 +4353,8 @@ mod tests {
     fn an_empty_tree_is_not_reported_as_a_missing_compiler() {
         let dir = tempfile::tempdir().unwrap();
         let args = ScanArgs {
+            sort: SortAxis::default(),
+            min_identifier_jaccard: None,
             path: dir.path().to_path_buf(),
             mode: Mode::Semantic,
             format: Format::Text,

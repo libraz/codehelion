@@ -111,6 +111,30 @@ other platforms reject that option rather than silently ignoring it.
 Findings are grouped into clone groups; each group and member carries a stable
 ID you can suppress, baseline or look up later with `explain`.
 
+Reports come out ordered by the composed priority, which weighs several
+measures against one another. When the job in front of you is one of those
+measures, order on it instead:
+
+```sh
+codehelion scan --sort duplicated-tokens    # the most repeated code first
+codehelion scan --sort instances            # the most widely copied first
+codehelion scan --sort identifier-jaccard   # the most alike by name first
+```
+
+For maintainability work, `--sort identifier-jaccard` with a floor is usually
+the shortest path to something worth unifying: copies that still agree on their
+identifiers are copies nobody has diverged yet, and those are the ones a single
+shared function can still replace.
+
+```sh
+codehelion scan --mode structural --sort identifier-jaccard --min-identifier-jaccard 0.7
+```
+
+The floor is a view over the same findings — it decides what the text listing
+shows, and changes no count, no export and nothing recorded. Raw identifier
+agreement is measured on whole units, so a run that reports fragments has no
+value to compare and the report says how many entries that left out.
+
 Once a finding is accepted, `codehelion baseline create` freezes it and later
 scans hide it. Because the database holds one scan at a time, a baseline is
 also how a before and an after are compared:

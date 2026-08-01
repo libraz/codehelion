@@ -97,6 +97,29 @@ codehelion artifact compare before/binary after/binary
 検出結果はクローングループにまとめられ、グループとメンバーそれぞれが安定 ID を
 持ちます。この ID で suppression・baseline 登録・`explain` での後日参照ができます。
 
+レポートは既定で合成された priority 順に並びます。priority は複数の指標を重み付け
+して束ねた値なので、目の前の作業がそのうちのひとつの指標そのものである場合は、
+その軸で直接並べ替えられます。
+
+```sh
+codehelion scan --sort duplicated-tokens    # 繰り返されているトークン量が多い順
+codehelion scan --sort instances            # 複製された箇所が多い順
+codehelion scan --sort identifier-jaccard   # 識別子の一致度が高い順
+```
+
+保守性を目的とする場合は、`--sort identifier-jaccard` に下限を付けるのが当たりを
+引きやすい方法です。識別子がまだ一致している複製は、まだ誰も分岐させていない複製
+であり、共通関数ひとつで置き換えられる余地が残っています。
+
+```sh
+codehelion scan --mode structural --sort identifier-jaccard --min-identifier-jaccard 0.7
+```
+
+この下限は同じ検出結果に対する見え方の指定です。テキスト表示の対象を決めるだけで、
+集計値・エクスポート・記録内容のいずれも変えません。識別子の一致度はユニット全体
+に対して測るため、fragment を報告する実行では比較する値がなく、その分を「表示しな
+かった件数」として明示します。
+
 判断済みの finding は `codehelion baseline create` で凍結でき、以降のスキャンは
 それを隠します。データベースが保持するスキャンは常に 1 件なので、前後比較の
 手段も baseline です。

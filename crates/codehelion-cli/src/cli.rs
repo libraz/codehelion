@@ -96,6 +96,37 @@ pub enum Format {
     Sarif,
 }
 
+/// An axis a report can be put in order on.
+///
+/// Offered because no one measure orders duplication well for every job, and
+/// a reader who knows which measure matters to the work in front of them
+/// should not have to re-sort the output by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum SortAxis {
+    /// The composed ranking value.
+    #[default]
+    Priority,
+    /// Raw identifier agreement against the canonical member.
+    IdentifierJaccard,
+    /// Tokens the group repeats past its canonical member.
+    DuplicatedTokens,
+    /// Number of occurrences.
+    Instances,
+}
+
+impl SortAxis {
+    /// The report-side axis this selects.
+    #[must_use]
+    pub const fn axis(self) -> crate::report::Sort {
+        match self {
+            Self::Priority => crate::report::Sort::Priority,
+            Self::IdentifierJaccard => crate::report::Sort::IdentifierJaccard,
+            Self::DuplicatedTokens => crate::report::Sort::DuplicatedTokens,
+            Self::Instances => crate::report::Sort::Instances,
+        }
+    }
+}
+
 /// What a scan does with the findings its baseline froze.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum BaselineMode {
@@ -380,6 +411,16 @@ pub struct ScanArgs {
     /// Also list suppressed groups, with the reason each was hidden.
     #[arg(long)]
     pub show_suppressed: bool,
+    /// Order the report on this axis instead of the composed priority.
+    #[arg(long, value_enum, default_value_t = SortAxis::Priority)]
+    pub sort: SortAxis,
+    /// Leave groups below this raw identifier agreement out of the text
+    /// listing, saying how many were left out.
+    ///
+    /// A view over the same findings: nothing is recorded, no count moves,
+    /// and the JSON and SARIF exports are unaffected.
+    #[arg(long, value_name = "JACCARD")]
+    pub min_identifier_jaccard: Option<f64>,
     /// Report duplication inside vendored trees, which is hidden by default.
     ///
     /// A flag rather than only a configuration key because the default is one
@@ -434,6 +475,16 @@ pub struct ReportArgs {
     /// Also list suppressed groups, with the reason each was hidden.
     #[arg(long)]
     pub show_suppressed: bool,
+    /// Order the report on this axis instead of the composed priority.
+    #[arg(long, value_enum, default_value_t = SortAxis::Priority)]
+    pub sort: SortAxis,
+    /// Leave groups below this raw identifier agreement out of the text
+    /// listing, saying how many were left out.
+    ///
+    /// A view over the same findings: nothing is recorded, no count moves,
+    /// and the JSON and SARIF exports are unaffected.
+    #[arg(long, value_name = "JACCARD")]
+    pub min_identifier_jaccard: Option<f64>,
     /// List every group and every member instead of the summarised excerpt.
     #[arg(long)]
     pub verbose: bool,

@@ -141,6 +141,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         weights: cfg.priority.weights(),
         min_clone_tokens: u64::from(cfg.min_clone_tokens),
         literals: engine_config.literals,
+        sort: args.sort.axis(),
     };
     let stored = summary_row(&inputs, baseline.as_ref().map(ScanBaseline::digest));
     let groups = rank_and_record(&mut inputs, &cfg, &contexts, file_rows(&sources), &stored)?;
@@ -285,6 +286,8 @@ struct BuildInputs<'a> {
     min_clone_tokens: u64,
     /// The literal strategy the content ids were folded under.
     literals: LiteralNorm,
+    /// The axis the run puts its entries in order on.
+    sort: report::Sort,
 }
 
 /// The configured suppression rules that hid nothing this run, read off the
@@ -418,7 +421,7 @@ fn build_report(
     stored: &SummaryRow,
     mut groups: Vec<report::Group>,
 ) -> Report {
-    report::order(&mut groups, inputs.suppression);
+    report::order(&mut groups, inputs.suppression, inputs.sort);
     Report {
         schema_version: report::SCHEMA_VERSION,
         run: run_info(inputs),
@@ -551,6 +554,8 @@ pub(crate) fn write_report(args: &ScanArgs, out: &mut impl Write, model: &Report
             output: args.output.as_deref(),
             verbose: args.verbose,
             show_suppressed: args.show_suppressed,
+            sort: args.sort.axis(),
+            min_identifier_jaccard: args.min_identifier_jaccard,
         },
         out,
         model,
@@ -568,6 +573,11 @@ pub(crate) struct ReportOutput<'a> {
     pub verbose: bool,
     /// Whether text output includes suppressed groups.
     pub show_suppressed: bool,
+    /// The axis the entries were put in order on, named in the listing's
+    /// heading.
+    pub sort: report::Sort,
+    /// A floor on raw identifier agreement for the listing only.
+    pub min_identifier_jaccard: Option<f64>,
 }
 
 /// Render a complete report with the common output path.
@@ -584,6 +594,8 @@ pub(crate) fn write_report_options(
                 verbose: options.verbose,
                 color: options.output.is_none() && std::io::stdout().is_terminal(),
                 show_suppressed: options.show_suppressed,
+                sort: options.sort,
+                min_identifier_jaccard: options.min_identifier_jaccard,
             };
             let mut buffer = Vec::new();
             model.render_text(options, &mut buffer)?;
@@ -851,6 +863,8 @@ fn partitioned_text(
         verbose: args.verbose,
         color: args.output.is_none() && std::io::stdout().is_terminal(),
         show_suppressed: args.show_suppressed,
+        sort: args.sort.axis(),
+        min_identifier_jaccard: args.min_identifier_jaccard,
     };
     let mut rendered = Vec::new();
     for model in models {
@@ -1709,6 +1723,7 @@ const fn civil_from_days(days: i64) -> (i64, i64, i64) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::cli::SortAxis;
 
     #[test]
     fn cross_language_comparison_stays_in_its_own_report_domain() {
@@ -1804,6 +1819,8 @@ mod tests {
 
     fn scan_args(untrusted: bool) -> ScanArgs {
         ScanArgs {
+            sort: SortAxis::default(),
+            min_identifier_jaccard: None,
             path: PathBuf::from("."),
             mode: Mode::Fast,
             format: Format::Text,

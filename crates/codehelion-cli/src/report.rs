@@ -17,6 +17,7 @@
 
 pub mod sarif;
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
@@ -398,18 +399,109 @@ impl FunnelDrop {
     }
 }
 
+/// An axis a report can be put in order on.
+///
+/// The ranking exists because no single measure orders duplication well, and
+/// the same reasoning says a reader may know which measure matters to the work
+/// in front of them. Offering the axes outright is cheaper than pretending the
+/// composed value fits every job — and it is what a reader who distrusts the
+/// ranking would otherwise do by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Sort {
+    /// The composed ranking value.
+    #[default]
+    Priority,
+    /// Raw identifier agreement against the canonical member: how much of the
+    /// vocabulary the copies share before normalization.
+    IdentifierJaccard,
+    /// Tokens the group repeats past its canonical member.
+    DuplicatedTokens,
+    /// Number of occurrences.
+    Instances,
+}
+
+impl Sort {
+    /// What this axis is called on the command line and in a heading.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Priority => "priority",
+            Self::IdentifierJaccard => "identifier Jaccard",
+            Self::DuplicatedTokens => "duplicated tokens",
+            Self::Instances => "instances",
+        }
+    }
+
+    /// Which of two entries the axis puts first, before ties are broken.
+    ///
+    /// Each axis compares in its own arithmetic rather than through a shared
+    /// numeric key: a count is an integer, and widening one to compare it
+    /// against a score would trade exactness for a uniformity nothing needs.
+    fn compare(self, a: &Group, b: &Group) -> Ordering {
+        match self {
+            Self::Priority => descending(Some(a.priority.value), Some(b.priority.value)),
+            Self::IdentifierJaccard => descending(a.identifier_jaccard, b.identifier_jaccard),
+            Self::DuplicatedTokens => duplicated_tokens(b).cmp(&duplicated_tokens(a)),
+            Self::Instances => b
+                .priority
+                .inputs
+                .instances
+                .cmp(&a.priority.inputs.instances),
+        }
+    }
+}
+
+/// Biggest first, with a measurement nobody made last.
+///
+/// Absent is not the same as low: putting the unmeasured in with the worst
+/// would report a guess as a reading.
+fn descending(a: Option<f64>, b: Option<f64>) -> Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => b.total_cmp(&a),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// Compare two entries on one axis alone, biggest first, ties broken by
+/// fingerprint so the result is the same on every machine.
+///
+/// Separate from [`order`] because a view rebuilt from the database has the
+/// entries but not the configuration that decides what gets ranked down, and
+/// the axis has to mean the same thing in both.
+#[must_use]
+pub fn compare_on(a: &Group, b: &Group, sort: Sort) -> Ordering {
+    sort.compare(a, b)
+        .then_with(|| a.fingerprint.cmp(&b.fingerprint))
+}
+
+/// Tokens a group repeats: everything past the one copy a reader would keep.
+#[must_use]
+pub fn duplicated_tokens(group: &Group) -> u64 {
+    let total: u64 = group.members.iter().map(|member| member.tokens).sum();
+    let canonical = group
+        .members
+        .iter()
+        .find(|member| member.canonical)
+        .map_or(0, |member| member.tokens);
+    total.saturating_sub(canonical)
+}
+
 /// Put the entries in the order every view of a report shows them in.
 ///
 /// Three keys, in this order: whether the configuration ranks the entry down,
-/// then priority descending, then fingerprint ascending. The first is what
-/// keeps boilerplate and test-suite repetition below the code under test
+/// then the chosen axis descending, then fingerprint ascending. The first is
+/// what keeps boilerplate and test-suite repetition below the code under test
 /// without changing what either of them scored; the last makes ties come out
-/// the same on every machine.
+/// the same on every machine. Changing the axis changes only the middle key —
+/// what is ranked down stays ranked down, because that is a statement about
+/// the finding rather than about which measure the reader is following.
 ///
 /// One function rather than one per pipeline: the order is a property of the
 /// report, and a scan that assembled its entries and a run rebuilt from the
 /// database have to agree about it.
-pub fn order(groups: &mut [Group], suppression: &SuppressionConfig) {
+pub fn order(groups: &mut [Group], suppression: &SuppressionConfig, sort: Sort) {
     let ranked_down = |group: &Group| {
         suppression.ranks_down(
             group
@@ -424,8 +516,7 @@ pub fn order(groups: &mut [Group], suppression: &SuppressionConfig) {
     groups.sort_by(|a, b| {
         ranked_down(a)
             .cmp(&ranked_down(b))
-            .then_with(|| b.priority.value.total_cmp(&a.priority.value))
-            .then_with(|| a.fingerprint.cmp(&b.fingerprint))
+            .then_with(|| compare_on(a, b, sort))
     });
 }
 
@@ -1330,6 +1421,16 @@ pub struct TextOptions {
     pub color: bool,
     /// Also list suppressed groups, with the reason each was hidden.
     pub show_suppressed: bool,
+    /// The axis the report was put in order on, for the listing's heading.
+    pub sort: Sort,
+    /// Leave groups whose raw identifier agreement is below this out of the
+    /// listing, saying how many were left out.
+    ///
+    /// A view, not a rule: nothing is recorded, no count moves, and the same
+    /// run rendered without it lists everything. It exists because a reader
+    /// working maintainability picks a floor on this measure and works down
+    /// from there, and doing it by hand means leaving the tool.
+    pub min_identifier_jaccard: Option<f64>,
 }
 
 /// Minimal ANSI styling, disabled when the output is not a terminal.
@@ -1612,10 +1713,21 @@ impl Report {
         palette: &Palette,
         out: &mut impl Write,
     ) -> io::Result<()> {
-        let visible: Vec<&Group> = self
+        let reported: Vec<&Group> = self
             .groups
             .iter()
             .filter(|group| group.suppressed.is_none())
+            .collect();
+        let visible: Vec<&Group> = reported
+            .iter()
+            .copied()
+            .filter(|group| {
+                opts.min_identifier_jaccard.is_none_or(|floor| {
+                    group
+                        .identifier_jaccard
+                        .is_some_and(|measured| measured >= floor)
+                })
+            })
             .collect();
         if !visible.is_empty() {
             let limit = if opts.verbose {
@@ -1624,13 +1736,31 @@ impl Report {
                 TEXT_GROUP_LIMIT
             };
             writeln!(out)?;
-            writeln!(out, "{}", palette.bold("top groups by priority:"))?;
+            writeln!(
+                out,
+                "{}",
+                palette.bold(&format!("top groups by {}:", opts.sort.name()))
+            )?;
             for group in visible.iter().take(limit) {
                 render_group(group, opts, palette, out)?;
             }
             if visible.len() > limit {
                 writeln!(out, "  ... and {} more groups", visible.len() - limit)?;
             }
+        }
+        // A floor that quietly swallowed the unmeasured, or the listing that
+        // came out of it, would read as "there is nothing else". Said after
+        // the listing because it qualifies what was just read.
+        if let Some(floor) = opts.min_identifier_jaccard
+            && reported.len() > visible.len()
+        {
+            writeln!(out)?;
+            writeln!(
+                out,
+                "  {} group(s) are not listed: raw identifier agreement below {floor:.2}, or not \
+                 measured in this mode",
+                reported.len() - visible.len(),
+            )?;
         }
 
         if opts.show_suppressed {
@@ -1757,9 +1887,17 @@ fn render_group(
         (_, 0 | 1) => "within one directory",
         _ => "across directories",
     };
+    // Raw identifier agreement sits on the heading rather than inside the
+    // list of ranking inputs: it is the measure that most often decides
+    // whether a group is worth opening, and it was unreadable buried among
+    // seven other numbers.
+    let identifiers = group.identifier_jaccard.map_or_else(
+        || " identifiers n/a".to_string(),
+        |value| format!(" identifiers {value:.2}"),
+    );
     writeln!(
         out,
-        "  {} {}{scope} priority {:.2} [{spread}]{overlap}{marker}",
+        "  {} {}{scope} priority {:.2}{identifiers} [{spread}]{overlap}{marker}",
         palette.cyan(&group.fingerprint),
         group.clone_type,
         priority.value,
@@ -1768,21 +1906,18 @@ fn render_group(
     // The composed number is never shown on its own: the three measures that
     // made it say why the finding is where it is, and disagreeing with the
     // placement means disagreeing with one of them.
-    let identifier_evidence = group.identifier_jaccard.map_or_else(String::new, |value| {
-        format!(", raw identifiers {value:.2} Jaccard")
-    });
     writeln!(
         out,
         "    confidence {:.2}, maintenance risk {:.2}, refactoring difficulty {:.2} \
-         ({} instances, {}-{} tokens, {:.2} similarity{}, {} file(s))",
+         ({} instances, {}-{} tokens, {} repeated, {:.2} similarity, {} file(s))",
         priority.clone_confidence,
         priority.maintenance_risk,
         priority.refactoring_difficulty,
         priority.inputs.instances,
         priority.inputs.smallest_member_tokens,
         priority.inputs.largest_member_tokens,
+        duplicated_tokens(group),
         priority.inputs.similarity,
-        identifier_evidence,
         priority.inputs.files,
     )?;
     if let Some(similarity) = &group.similarity {
@@ -1966,7 +2101,7 @@ impl CloneGroupDetail {
             TextOptions {
                 verbose: true,
                 show_suppressed: true,
-                color: false,
+                ..TextOptions::default()
             },
             &Palette { enabled: false },
             out,
@@ -3174,7 +3309,10 @@ pub(super) mod tests {
              control-flow 0.90, type n/a, api 0.75); cohesion 0.79; \
              confidence medium [structural-verify-v1]"
         ));
-        assert!(text.contains("raw identifiers 0.50 Jaccard"));
+        // On the heading, beside the value the default order reads, because a
+        // reader following identifier agreement needs it where the ordering
+        // can be checked against it.
+        assert!(text.contains("identifiers 0.50"));
         assert!(text.contains("body evidence: loop yes"));
     }
 
@@ -3447,8 +3585,8 @@ pub(super) mod tests {
     fn verbose_text_lists_every_member_and_suppressed_section_is_opt_in() {
         let opts = TextOptions {
             verbose: true,
-            color: false,
             show_suppressed: true,
+            ..TextOptions::default()
         };
         let mut buffer = Vec::new();
         sample_report().render_text(opts, &mut buffer).unwrap();
@@ -3464,8 +3602,7 @@ pub(super) mod tests {
         let render = |verbose| {
             let opts = TextOptions {
                 verbose,
-                color: false,
-                show_suppressed: false,
+                ..TextOptions::default()
             };
             let mut buffer = Vec::new();
             sample_report().render_text(opts, &mut buffer).unwrap();
@@ -3483,9 +3620,8 @@ pub(super) mod tests {
     #[test]
     fn colored_text_uses_ansi_codes_only_when_enabled() {
         let opts = TextOptions {
-            verbose: false,
             color: true,
-            show_suppressed: false,
+            ..TextOptions::default()
         };
         let mut buffer = Vec::new();
         sample_report().render_text(opts, &mut buffer).unwrap();
@@ -3706,5 +3842,50 @@ pub(super) mod tests {
             confidence_band: None,
         };
         assert!(similarity.line().contains("confidence n/a"));
+    }
+
+    /// Absent is not low. A mode that measures identifier agreement on some
+    /// entries and not others would otherwise report the unmeasured ones as
+    /// the least alike, which is a claim nothing was made about.
+    #[test]
+    fn an_entry_with_no_measurement_on_the_axis_is_listed_after_the_measured() {
+        let mut measured = visible_group();
+        measured.identifier_jaccard = Some(0.1);
+        let mut unmeasured = suppressed_group();
+        unmeasured.identifier_jaccard = None;
+
+        assert_eq!(
+            compare_on(&measured, &unmeasured, Sort::IdentifierJaccard),
+            Ordering::Less,
+        );
+        assert_eq!(
+            compare_on(&unmeasured, &measured, Sort::IdentifierJaccard),
+            Ordering::Greater,
+        );
+    }
+
+    /// Two entries that tie on the axis still have to come out in one order,
+    /// or a reader citing a position cites a coin toss.
+    #[test]
+    fn entries_that_tie_on_the_axis_fall_back_to_the_stable_id() {
+        let left = visible_group();
+        let mut right = suppressed_group();
+        right.priority = left.priority.clone();
+
+        assert!(left.fingerprint < right.fingerprint);
+        assert_eq!(compare_on(&left, &right, Sort::Priority), Ordering::Less);
+    }
+
+    #[test]
+    fn repeated_tokens_count_everything_past_the_copy_that_would_be_kept() {
+        let group = visible_group();
+        let total: u64 = group.members.iter().map(|member| member.tokens).sum();
+        let canonical = group
+            .members
+            .iter()
+            .find(|member| member.canonical)
+            .expect("a canonical member")
+            .tokens;
+        assert_eq!(duplicated_tokens(&group), total - canonical);
     }
 }
