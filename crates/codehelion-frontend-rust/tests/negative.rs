@@ -21,6 +21,7 @@ use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::features;
 use codehelion_core::ir::{Shape, StructuralFrontend, SyntaxIrFile};
+use codehelion_core::stable_id::FragmentFingerprint;
 use codehelion_core::structural::{self, StructuralConfig, StructuralReport};
 use codehelion_core::verify::{self, UnitView, Verdict, VerifyConfig};
 use codehelion_frontend_rust::ir::RustStructuralFrontend;
@@ -75,6 +76,9 @@ fn negative_verdicts() -> Vec<(String, Verdict)> {
                 &UnitView {
                     statements: &first.1,
                     tokens: &file.tokens,
+                    content: FragmentFingerprint::from_bytes(
+                        [u8::try_from(i).unwrap_or(u8::MAX); 16],
+                    ),
                     features: &extracted.units[i],
                     types: None,
                     apis: None,
@@ -82,6 +86,9 @@ fn negative_verdicts() -> Vec<(String, Verdict)> {
                 &UnitView {
                     statements: &second.1,
                     tokens: &file.tokens,
+                    content: FragmentFingerprint::from_bytes(
+                        [u8::try_from(j).unwrap_or(u8::MAX); 16],
+                    ),
                     features: &extracted.units[j],
                     types: None,
                     apis: None,

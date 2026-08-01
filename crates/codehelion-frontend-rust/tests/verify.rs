@@ -7,6 +7,7 @@
 use codehelion_core::clone_class::CloneClass;
 use codehelion_core::features::{self, UnitFeatures};
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
+use codehelion_core::stable_id::FragmentFingerprint;
 use codehelion_core::verify::{self, UnitView, VerifyConfig};
 use codehelion_frontend_rust::ir::RustStructuralFrontend;
 
@@ -97,6 +98,7 @@ fn view(prepared: &Prepared) -> UnitView<'_> {
     UnitView {
         statements,
         tokens: &prepared.ir.tokens,
+        content: FragmentFingerprint::from_bytes([0; 16]),
         features: &prepared.features,
         types: None,
         apis: None,

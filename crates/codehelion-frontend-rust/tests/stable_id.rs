@@ -135,6 +135,14 @@ fn unrelated_edits_leave_every_stable_id_unchanged() {
 }
 
 #[test]
+fn leading_blank_lines_leave_every_stable_id_unchanged() {
+    let base = ids_of(&[&file_a(), CHECKSUM]);
+    let shifted = format!("\n\n{CHECKSUM}");
+    let edited = ids_of(&[&file_a(), &shifted]);
+    assert_eq!(base, edited);
+}
+
+#[test]
 fn type1_edits_leave_every_stable_id_unchanged() {
     let base = ids_of(&[&file_a(), CHECKSUM]);
     let edited = ids_of(&[&file_a(), B_TYPE1_EDITS]);
@@ -142,7 +150,7 @@ fn type1_edits_leave_every_stable_id_unchanged() {
 }
 
 #[test]
-fn moving_a_file_leaves_every_stable_id_unchanged() {
+fn renaming_a_file_leaves_every_stable_id_unchanged() {
     // The engine identifies files by input position and never hashes a path,
     // so a moved or renamed file is exactly a reordered input.
     let base = ids_of(&[&file_a(), CHECKSUM]);

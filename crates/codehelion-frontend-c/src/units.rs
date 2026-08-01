@@ -17,7 +17,9 @@
 
 use std::collections::HashMap;
 
-use codehelion_core::frontend::{SourceSpan, Token, TokenKind, Unit, UnitKind};
+use codehelion_core::frontend::{
+    Diagnostic, DiagnosticKind, SourceSpan, Token, TokenKind, Unit, UnitKind,
+};
 
 use crate::dialect::Dialect;
 
@@ -78,6 +80,11 @@ const LAMBDA_TRAILER_KEYWORDS: &[&str] = &[
     "typename",
 ];
 
+/// Maximum tokens one record-declaration lookahead may inspect before
+/// declining an uncertain boundary. This keeps malformed declarations from
+/// making every record keyword scan the rest of the file.
+const MAX_DECLARATION_LOOKAHEAD: usize = 256;
+
 /// Matched delimiter pairs of every kind (`()`, `{}`, `[]`), in both
 /// directions.
 struct DelimPairs {
@@ -119,17 +126,24 @@ fn delim_pairs(tokens: &[Token]) -> DelimPairs {
     DelimPairs { close_of, open_of }
 }
 
-/// Detect unit boundaries in `tokens` under `dialect`, in source order.
+/// Detect unit boundaries and recoverable boundary errors under `dialect`.
 #[must_use]
-pub fn detect(tokens: &[Token], dialect: &Dialect) -> Vec<Unit> {
+pub fn detect(tokens: &[Token], dialect: &Dialect) -> (Vec<Unit>, Vec<Diagnostic>) {
     let pairs = delim_pairs(tokens);
     let records = record_units(tokens, &pairs, dialect);
 
     let mut units = records.clone();
+    let mut diagnostics = Vec::new();
     for (i, token) in tokens.iter().enumerate() {
         if token.kind == TokenKind::Punctuation && token.text == "{" {
-            if let Some(unit) = function_unit(tokens, &pairs, &records, i) {
-                units.push(unit);
+            if let Some(result) = function_unit(tokens, &pairs, &records, i) {
+                match result {
+                    Ok(unit) => units.push(unit),
+                    Err(span) => diagnostics.push(Diagnostic {
+                        kind: DiagnosticKind::UnmatchedDelimiter,
+                        span,
+                    }),
+                }
             }
         }
         if dialect.lambdas && token.kind == TokenKind::Punctuation && token.text == "[" {
@@ -140,7 +154,7 @@ pub fn detect(tokens: &[Token], dialect: &Dialect) -> Vec<Unit> {
     }
 
     units.sort_by_key(|u| (u.token_start, u.token_end));
-    units
+    (units, diagnostics)
 }
 
 /// Record bodies: `struct`/`union` (and for C++ `class`) definitions.
@@ -188,7 +202,11 @@ fn record_units(tokens: &[Token], pairs: &DelimPairs, dialect: &Dialect) -> Vec<
 /// means the keyword is part of a declarator or expression (`struct Foo
 /// *make(void)`, `sizeof(struct S)`), not a definition.
 fn record_body_open(tokens: &[Token], from: usize) -> Option<usize> {
-    for (offset, token) in tokens[from..].iter().enumerate() {
+    for (offset, token) in tokens[from..]
+        .iter()
+        .take(MAX_DECLARATION_LOOKAHEAD)
+        .enumerate()
+    {
         if token.kind == TokenKind::Punctuation {
             match token.text.as_str() {
                 "{" => return Some(from + offset),
@@ -206,7 +224,7 @@ fn function_unit(
     pairs: &DelimPairs,
     records: &[Unit],
     body_open: usize,
-) -> Option<Unit> {
+) -> Option<Result<Unit, SourceSpan>> {
     // Walk backwards over the signature trailer to the parameter list.
     let mut j = body_open.checked_sub(1)?;
     for _ in 0..64 {
@@ -253,7 +271,7 @@ fn resolve_signature(
     records: &[Unit],
     close: usize,
     body_open: usize,
-) -> Option<Unit> {
+) -> Option<Result<Unit, SourceSpan>> {
     let mut close = close;
     for _ in 0..32 {
         let &open = pairs.open_of.get(&close)?;
@@ -280,6 +298,16 @@ fn resolve_signature(
             }
             // The parameter list itself must be parenthesised.
             if tokens[close].text != ")" {
+                return None;
+            }
+            // A bare `MACRO(args) { ... }` is a block-bodied macro
+            // invocation, not a C/C++ function definition. Apply this only
+            // after walking constructor-initialiser entries back to the
+            // actual parameter list.
+            let inside_record = records
+                .iter()
+                .any(|record| record.token_start < name_i && name_i < record.token_end);
+            if !inside_record && !has_declaration_prefix(tokens, name_i) {
                 return None;
             }
             let tilde = name_i
@@ -322,6 +350,20 @@ fn resolve_signature(
     None
 }
 
+/// Whether tokens before a candidate name can introduce a function declarator.
+///
+/// This deliberately only rejects the unqualified, bare identifier form. It
+/// keeps user-defined return types, pointer/reference declarators, qualified
+/// C++ names and destructors available to the conservative boundary finder.
+fn has_declaration_prefix(tokens: &[Token], name_i: usize) -> bool {
+    name_i.checked_sub(1).is_some_and(|previous| {
+        let token = &tokens[previous];
+        matches!(token.kind, TokenKind::Identifier | TokenKind::Keyword)
+            || (token.kind == TokenKind::Punctuation
+                && matches!(token.text.as_str(), "*" | "&" | "&&" | "::" | "~"))
+    })
+}
+
 fn make_function(
     tokens: &[Token],
     pairs: &DelimPairs,
@@ -330,9 +372,13 @@ fn make_function(
     name_i: usize,
     name: String,
     body_open: usize,
-) -> Unit {
-    let close_brace = pairs.close_of.get(&body_open).copied();
-    let end = close_brace.unwrap_or(tokens.len() - 1);
+) -> Result<Unit, SourceSpan> {
+    let end = pairs.close_of.get(&body_open).copied().ok_or_else(|| {
+        // Do not turn a malformed body into a function that extends to EOF.
+        // The caller records this at the Fast frontend's ordinary diagnostic
+        // boundary, where scan summaries already count recovery events.
+        span_of(tokens, body_open, body_open)
+    })?;
     let inside_record = records
         .iter()
         .any(|r| r.token_start < name_i && name_i < r.token_end);
@@ -341,13 +387,13 @@ fn make_function(
     } else {
         UnitKind::Function
     };
-    Unit {
+    Ok(Unit {
         kind,
         name: Some(name),
         token_start: unit_start,
         token_end: end + 1,
         span: span_of(tokens, unit_start, end),
-    }
+    })
 }
 
 /// Try to recognise the `[` at `i` as the start of a block-bodied lambda.
@@ -417,7 +463,7 @@ mod tests {
     use crate::lexer::lex;
 
     fn units_of(source: &str) -> Vec<Unit> {
-        detect(&lex(source, &dialect::C).0, &dialect::C)
+        detect(&lex(source, &dialect::C).0, &dialect::C).0
     }
 
     #[test]
@@ -483,6 +529,17 @@ mod tests {
     }
 
     #[test]
+    fn block_bodied_macro_invocations_are_not_function_units() {
+        for invocation in [
+            "TEST_F(QueueTest, Pushes) { ASSERT_TRUE(1); }",
+            "list_for_each(node, head) { visit(node); }",
+            "TAILQ_FOREACH(entry, queue, links) { consume(entry); }",
+        ] {
+            assert!(units_of(invocation).is_empty(), "{invocation}");
+        }
+    }
+
+    #[test]
     fn initializer_braces_are_not_functions() {
         assert!(units_of("int a[] = {1, 2, 3};").is_empty());
         assert!(
@@ -496,9 +553,30 @@ mod tests {
     fn a_units_token_range_covers_its_body() {
         let src = "int f(void) { return 1; }";
         let tokens = lex(src, &dialect::C).0;
-        let units = detect(&tokens, &dialect::C);
+        let (units, diagnostics) = detect(&tokens, &dialect::C);
+        assert!(diagnostics.is_empty());
         let f = &units[0];
         assert_eq!(tokens[f.token_end - 1].text, "}");
         assert_eq!(tokens[f.token_start].text, "f");
+    }
+
+    #[test]
+    fn record_declaration_lookahead_is_bounded() {
+        let source = format!(
+            "struct {} {{ int value; }};",
+            "field ".repeat(MAX_DECLARATION_LOOKAHEAD)
+        );
+        let tokens = lex(&source, &dialect::C).0;
+        assert_eq!(record_body_open(&tokens, 1), None);
+    }
+
+    #[test]
+    fn an_unclosed_function_body_is_not_stretched_to_end_of_file() {
+        let tokens = lex("int tail(void) { int value = 1;", &dialect::C).0;
+        let (units, diagnostics) = detect(&tokens, &dialect::C);
+
+        assert!(units.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].kind, DiagnosticKind::UnmatchedDelimiter);
     }
 }

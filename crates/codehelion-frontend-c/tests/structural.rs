@@ -235,12 +235,12 @@ fn an_unrolled_run_is_not_a_clone_of_itself() {
         );
     }
 
-    // What the two functions do share is still reported: the narrower store is
-    // the wider one's first four bytes.
-    assert_eq!(
-        report.groups.groups.len(),
-        1,
-        "the two stores are one group"
+    // What the two functions share is reported above as a cross-unit region.
+    // Their whole bodies are not a group: one store is only a prefix of the
+    // other, so calling them a unit clone would duplicate the region finding.
+    assert!(
+        report.groups.groups.is_empty(),
+        "the partial duplication must not become a whole-unit group"
     );
 }
 

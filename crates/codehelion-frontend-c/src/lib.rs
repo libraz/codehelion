@@ -20,9 +20,15 @@ pub mod units;
 use codehelion_core::discovery::Language;
 use codehelion_core::frontend::{Frontend, LexedFile};
 
-/// Version tag of this frontend, used as a fingerprint input. Bump it whenever
-/// a change alters the token stream or unit boundaries for unchanged input.
-pub const FRONTEND_VERSION: &str = "c-lexer-v1";
+/// Version of the lexer and unit-boundary machinery shared by C and C++.
+///
+/// It is embedded in both Fast frontend fingerprint tags. Bump it whenever a
+/// change to the shared implementation changes tokens or unit boundaries.
+pub const C_FAMILY_LEXER_VERSION: &str = "c-family-lexer-v4";
+
+/// Version tag of this frontend, used as a fingerprint input. The C dialect
+/// revision and the shared C-family lexer revision are both part of it.
+pub const FRONTEND_VERSION: &str = "c-lexer-v1+c-family-lexer-v4";
 
 /// The C Fast-mode frontend.
 #[derive(Debug, Clone, Copy, Default)]
@@ -38,8 +44,9 @@ impl Frontend for CFrontend {
     }
 
     fn lex(&self, source: &str) -> LexedFile {
-        let (tokens, diagnostics) = lexer::lex(source, &dialect::C);
-        let units = units::detect(&tokens, &dialect::C);
+        let (tokens, mut diagnostics) = lexer::lex(source, &dialect::C);
+        let (units, unit_diagnostics) = units::detect(&tokens, &dialect::C);
+        diagnostics.extend(unit_diagnostics);
         LexedFile {
             language: Language::C,
             frontend_version: FRONTEND_VERSION,
@@ -59,6 +66,7 @@ mod tests {
         let frontend = CFrontend;
         assert_eq!(frontend.language(), Language::C);
         assert_eq!(frontend.frontend_version(), FRONTEND_VERSION);
+        assert!(FRONTEND_VERSION.ends_with(C_FAMILY_LEXER_VERSION));
     }
 
     #[test]

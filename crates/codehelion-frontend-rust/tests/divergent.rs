@@ -15,6 +15,7 @@ use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::features;
 use codehelion_core::ir::{Shape, StructuralFrontend, SyntaxIrFile};
+use codehelion_core::stable_id::FragmentFingerprint;
 use codehelion_core::structural::{self, StructuralConfig, StructuralReport};
 use codehelion_core::verify::{self, SimilarityBreakdown, UnitView, VerifyConfig};
 use codehelion_frontend_rust::ir::RustStructuralFrontend;
@@ -60,6 +61,7 @@ fn breakdown(name: &str) -> SimilarityBreakdown {
         &UnitView {
             statements: &seed_statements,
             tokens: &seed.tokens,
+            content: FragmentFingerprint::from_bytes([0; 16]),
             features: &seed_features.units[0],
             types: None,
             apis: None,
@@ -67,6 +69,7 @@ fn breakdown(name: &str) -> SimilarityBreakdown {
         &UnitView {
             statements: &variant_statements,
             tokens: &variant.tokens,
+            content: FragmentFingerprint::from_bytes([1; 16]),
             features: &variant_features.units[0],
             types: None,
             apis: None,
@@ -87,7 +90,7 @@ fn disturbing_control_flow_moves_only_the_control_flow_and_structure_dimensions(
     for name in CONTROL_FLOW {
         let scores = breakdown(name);
         assert!(
-            scores.control_flow < 1.0,
+            scores.control_flow.is_some_and(|value| value < 1.0),
             "{name} disturbs control flow, so the dimension must react: {scores:?}"
         );
         assert_eq!(
@@ -172,15 +175,16 @@ fn renaming_every_callee_shows_in_the_text_as_well_as_the_call_surface() {
     let scores = breakdown(CALLS_SWAPPED);
     // The rename touches nothing but the callee names, so the two shape
     // dimensions are untouched.
-    for (dimension, value) in [
-        ("structural", scores.structural),
-        ("control flow", scores.control_flow),
-    ] {
-        assert!(
-            (value - 1.0).abs() < 1e-9,
-            "the rename leaves {dimension} untouched, got {value}"
-        );
-    }
+    assert!(
+        (scores.structural - 1.0).abs() < 1e-9,
+        "the rename leaves structural similarity untouched, got {}",
+        scores.structural
+    );
+    assert_eq!(
+        scores.control_flow,
+        Some(1.0),
+        "the rename leaves control-flow similarity untouched"
+    );
     assert_eq!(
         scores.api,
         Some(0.0),

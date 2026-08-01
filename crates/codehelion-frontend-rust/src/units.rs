@@ -19,6 +19,11 @@ const CLOSURE_PRECEDERS: &[&str] = &[
 /// Punctuation allowed between a closure's bars (parameter patterns).
 const CLOSURE_PARAM_PUNCT: &[&str] = &[",", ":", "&", "<", ">", "(", ")", "::", "_"];
 
+/// Maximum tokens one declaration lookahead may inspect before declining an
+/// uncertain unit boundary. This prevents a malformed run of declaration-like
+/// tokens from turning every `fn`/`impl` marker into a full-file scan.
+const MAX_DECLARATION_LOOKAHEAD: usize = 256;
+
 /// Detect unit boundaries in `tokens`, in source order.
 ///
 /// Crate-internal: the public entry point is
@@ -90,15 +95,24 @@ fn impl_body_ranges(tokens: &[Token], braces: &HashMap<usize, usize>) -> Vec<(us
     ranges
 }
 
-/// Index of the first `{` at or after `from`, stopping at a `;` (which means the
-/// construct has no block body).
+/// Index of the first declaration-body `{` at or after `from`, stopping at a
+/// top-level `;` (which means the construct has no block body).
 fn first_brace_after(tokens: &[Token], from: usize) -> Option<usize> {
-    for (offset, token) in tokens[from..].iter().enumerate() {
+    let mut brackets = 0usize;
+    for (offset, token) in tokens[from..]
+        .iter()
+        .take(MAX_DECLARATION_LOOKAHEAD)
+        .enumerate()
+    {
         if token.kind == TokenKind::Punctuation {
-            if token.text == "{" {
+            if token.text == "[" {
+                brackets = brackets.saturating_add(1);
+            } else if token.text == "]" {
+                brackets = brackets.saturating_sub(1);
+            } else if token.text == "{" && brackets == 0 {
                 return Some(from + offset);
             }
-            if token.text == ";" {
+            if token.text == ";" && brackets == 0 {
                 return None;
             }
         }
@@ -263,6 +277,14 @@ mod tests {
     }
 
     #[test]
+    fn array_return_types_do_not_hide_a_function_body() {
+        let units = units_of("fn digest() -> [u8; 32] { [0; 32] }");
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].kind, UnitKind::Function);
+        assert_eq!(units[0].name.as_deref(), Some("digest"));
+    }
+
+    #[test]
     fn methods_inside_impl_are_methods_and_the_impl_is_a_unit() {
         let src = "impl Foo { fn a(&self) {} fn b(&self) {} }";
         let units = units_of(src);
@@ -306,5 +328,12 @@ mod tests {
         // token_end is exclusive and points one past the closing brace.
         assert_eq!(f.token_start, 0);
         assert!(f.token_end <= lex("fn f() { 1 }").0.len());
+    }
+
+    #[test]
+    fn declaration_lookahead_is_bounded() {
+        let source = format!("fn {} {{}}", "name ".repeat(MAX_DECLARATION_LOOKAHEAD));
+        let tokens = lex(&source).0;
+        assert_eq!(first_brace_after(&tokens, 0), None);
     }
 }

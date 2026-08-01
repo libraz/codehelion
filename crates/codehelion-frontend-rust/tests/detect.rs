@@ -8,21 +8,42 @@ use std::path::PathBuf;
 use codehelion_core::clone_class::CloneClass;
 use codehelion_core::engine::{self, EngineConfig, InputFile};
 use codehelion_core::frontend::{Frontend, LexedFile};
+use codehelion_eval::labels::{LabelPair, LabelSet};
+use codehelion_eval::schema::{CloneType, Fragment};
 use codehelion_frontend_rust::RustFrontend;
 
 const CORPUS: &str = "../../corpus/synthetic/rust-partial";
-const FILES: [&str; 3] = ["seed.rs", "partial1.rs", "partial2.rs"];
 
-fn lex_corpus() -> Vec<LexedFile> {
-    FILES
+/// Labels and lexed sources of the committed Fast-mode corpus.
+struct Corpus {
+    labels: LabelSet,
+    files: Vec<String>,
+    lexed: Vec<LexedFile>,
+}
+
+fn corpus() -> Corpus {
+    let root = PathBuf::from(CORPUS);
+    let labels_path = root.join("labels.json");
+    let labels = LabelSet::from_json(
+        &std::fs::read_to_string(&labels_path)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", labels_path.display())),
+    )
+    .expect("committed corpus labels parse");
+    let files = labels.files.clone();
+    let lexed = files
         .iter()
         .map(|name| {
-            let path = PathBuf::from(CORPUS).join(name);
+            let path = root.join(name);
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
             RustFrontend.lex(&source)
         })
-        .collect()
+        .collect();
+    Corpus {
+        labels,
+        files,
+        lexed,
+    }
 }
 
 fn detect_corpus(lexed: &[LexedFile]) -> engine::EngineReport {
@@ -56,39 +77,60 @@ fn found(
     })
 }
 
-#[test]
-fn labelled_type1_transplant_is_recovered() {
-    let lexed = lex_corpus();
-    let report = detect_corpus(&lexed);
-    // A measurement loop transplanted verbatim from seed.rs into an unrelated
-    // host function in partial1.rs.
-    assert!(
-        found(&report, CloneClass::Type1, 0, (9, 22), 1, (10, 23)),
-        "type-1 transplant seed.rs:9-22 <-> partial1.rs:10-23 not found; groups: {:#?}",
-        report.groups
-    );
+fn file_index(files: &[String], fragment: &Fragment) -> usize {
+    files
+        .iter()
+        .position(|file| file == &fragment.file)
+        .unwrap_or_else(|| panic!("label refers to unlisted file {}", fragment.file))
+}
+
+fn clone_class(clone_type: CloneType) -> CloneClass {
+    match clone_type {
+        CloneType::Type1 => CloneClass::Type1,
+        CloneType::Type2 => CloneClass::Type2,
+        CloneType::Type3 => CloneClass::Type3,
+        CloneType::RestrictedSemantic => {
+            panic!("Fast-mode corpus label cannot use restricted-semantic")
+        }
+    }
+}
+
+fn pair_is_recovered(report: &engine::EngineReport, files: &[String], pair: &LabelPair) -> bool {
+    let [left, right] = pair.fragments.as_slice() else {
+        panic!("label {} must contain exactly two fragments", pair.id);
+    };
+    found(
+        report,
+        clone_class(pair.clone_type),
+        file_index(files, left),
+        (left.start_line, left.end_line),
+        file_index(files, right),
+        (right.start_line, right.end_line),
+    )
 }
 
 #[test]
-fn labelled_type2_transplant_is_recovered() {
-    let lexed = lex_corpus();
-    let report = detect_corpus(&lexed);
-    // A checksum statement run transplanted with renames and a changed
-    // literal from seed.rs into an unrelated host function in partial2.rs.
-    assert!(
-        found(&report, CloneClass::Type2, 0, (34, 41), 2, (10, 17)),
-        "type-2 transplant seed.rs:34-41 <-> partial2.rs:10-17 not found; groups: {:#?}",
-        report.groups
-    );
+fn every_labelled_fast_pair_is_recovered() {
+    let corpus = corpus();
+    let report = detect_corpus(&corpus.lexed);
+    for pair in &corpus.labels.clone_pairs {
+        assert!(
+            pair_is_recovered(&report, &corpus.files, pair),
+            "{} ({}) not found; groups: {:#?}",
+            pair.id,
+            pair.clone_type.as_str(),
+            report.groups
+        );
+    }
 }
 
 #[test]
 fn partial_matches_are_anchored_to_their_host_units() {
-    let lexed = lex_corpus();
-    let report = detect_corpus(&lexed);
+    let corpus = corpus();
+    let report = detect_corpus(&corpus.lexed);
     for group in &report.groups {
         for member in &group.members {
-            let units = &lexed[member.file].units;
+            let units = &corpus.lexed[member.file].units;
             let Some(unit_idx) = member.unit else {
                 continue;
             };
@@ -103,9 +145,9 @@ fn partial_matches_are_anchored_to_their_host_units() {
 
 #[test]
 fn corpus_detection_is_deterministic() {
-    let lexed = lex_corpus();
-    let first = detect_corpus(&lexed);
-    let second = detect_corpus(&lexed);
+    let corpus = corpus();
+    let first = detect_corpus(&corpus.lexed);
+    let second = detect_corpus(&corpus.lexed);
     assert_eq!(first.stats, second.stats);
     assert_eq!(first.groups.len(), second.groups.len());
     for (a, b) in first.groups.iter().zip(second.groups.iter()) {

@@ -15,6 +15,7 @@ use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::grouping::GroupingConfig;
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
 use codehelion_core::structural::{self, StructuralConfig, StructuralReport, StructuralUnit};
+use codehelion_core::test_code::TestCodeEvidence;
 use codehelion_frontend_cpp::ir::CppStructuralFrontend;
 
 const CORPUS: &str = "../../corpus/synthetic/cpp";
@@ -241,6 +242,12 @@ fn a_case_written_as_a_framework_macro_is_recognised_as_test_code() {
         "a case macro marks the body it opens"
     );
     assert!(
+        cases
+            .iter()
+            .all(|unit| unit.test_code_evidence == Some(TestCodeEvidence::Marker)),
+        "TEST_F carries explicit marker evidence"
+    );
+    assert!(
         report
             .units
             .iter()
@@ -254,7 +261,17 @@ fn a_case_written_as_a_framework_macro_is_recognised_as_test_code() {
         .groups
         .iter()
         .find(|group| group.members.iter().all(|&m| report.units[m].test_code));
-    assert!(suite.is_some(), "the duplicated cases group together");
+    let suite = suite.expect("the duplicated cases group together");
+    let index = report
+        .groups
+        .groups
+        .iter()
+        .position(|group| group == suite)
+        .expect("the suite group remains in the report");
+    assert_eq!(
+        report.details[index].test_code_evidence,
+        Some(TestCodeEvidence::Marker)
+    );
 }
 
 /// One loader that hands its error upwards untouched and one that catches it,

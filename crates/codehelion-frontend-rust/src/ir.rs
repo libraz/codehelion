@@ -12,23 +12,26 @@
 //! not an `ExprStmt(Call)` pair.
 //!
 //! Nothing is executed or expanded: macro definitions and invocations are
-//! recorded as nodes over their raw token trees. Malformed regions become
-//! [`Shape::Error`] nodes plus byte ranges in [`SyntaxIrFile::error_ranges`],
-//! and parsing never aborts the file.
+//! recorded as nodes over their raw token trees. Malformed regions and
+//! CST-depth truncation become [`Shape::Error`] nodes plus byte ranges in
+//! [`SyntaxIrFile::error_ranges`].
+//! Delimiter nesting is checked with the nonrecursive lexer before the Rust
+//! parser constructs its CST, so excessive nesting also becomes explicit
+//! truncation data.
 
 use codehelion_core::discovery::Language;
 use codehelion_core::frontend::{
     Lexeme, LexemeInterner, LiteralKind, SourceSpan, Token, TokenKind,
 };
 use codehelion_core::ir::{
-    ByteRange, IR_SCHEMA_VERSION, IrNode, Shape, StructuralFrontend, SyntaxIrFile,
+    ByteRange, IR_SCHEMA_VERSION, IrNode, MAX_IR_DEPTH, Shape, StructuralFrontend, SyntaxIrFile,
 };
 use ra_ap_syntax::{Edition, SourceFile, SyntaxKind, SyntaxNode};
 
 /// Version tag of this structural frontend, used as a fingerprint input. Bump
 /// it whenever a change alters the token stream or the IR tree for unchanged
 /// input.
-pub const STRUCTURAL_FRONTEND_VERSION: &str = "rust-ir-v1";
+pub const STRUCTURAL_FRONTEND_VERSION: &str = "rust-ir-v2";
 
 /// Edition the parser assumes. Parsing is edition-tolerant enough for audit
 /// purposes; a wrong guess degrades to error ranges, never to a lost file.
@@ -49,6 +52,60 @@ const ASSIGN_OPS: &[SyntaxKind] = &[
     SyntaxKind::SHREQ,
 ];
 
+/// Return the source range that must not enter the recursive Rust CST parser.
+///
+/// The Rust lexer is nonrecursive and already treats comments and literals as
+/// atomic tokens, so delimiter text inside either cannot be mistaken for
+/// syntax here. The parser is only entered while this same nesting budget can
+/// still bound the structural IR it would produce.
+fn delimiter_nesting_overflow(tokens: &[Token], source_len: usize) -> Option<ByteRange> {
+    let mut expected_closers = Vec::new();
+    for token in tokens {
+        match token.text.as_str() {
+            "{" => expected_closers.push("}"),
+            "(" => expected_closers.push(")"),
+            "[" => expected_closers.push("]"),
+            "}" | ")" | "]" if expected_closers.last() == Some(&token.text.as_str()) => {
+                expected_closers.pop();
+            }
+            _ => continue,
+        }
+
+        if expected_closers.len() > MAX_IR_DEPTH {
+            return Some(ByteRange {
+                start: token.span.start_byte,
+                end: source_len,
+            });
+        }
+    }
+    None
+}
+
+/// Build the explicit partial result returned when preflight blocks CST
+/// construction for excessive delimiter nesting.
+fn depth_error_file(tokens: Vec<Token>, range: ByteRange) -> SyntaxIrFile {
+    let token_start = tokens.partition_point(|token| token.span.start_byte < range.start);
+    let token_end = tokens.partition_point(|token| token.span.start_byte < range.end);
+    SyntaxIrFile {
+        language: Language::Rust,
+        frontend_version: STRUCTURAL_FRONTEND_VERSION,
+        ir_schema_version: IR_SCHEMA_VERSION,
+        tokens,
+        roots: vec![IrNode {
+            shape: Shape::Error,
+            name: None,
+            token_start,
+            token_end,
+            range,
+            children: Vec::new(),
+        }],
+        diagnostics: Vec::new(),
+        error_ranges: vec![range],
+        depth_truncated: true,
+        test_module: false,
+    }
+}
+
 /// The Rust Structural-mode frontend.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RustStructuralFrontend;
@@ -63,6 +120,11 @@ impl StructuralFrontend for RustStructuralFrontend {
     }
 
     fn parse(&self, source: &str) -> SyntaxIrFile {
+        let (preflight_tokens, _) = crate::lexer::lex(source);
+        if let Some(range) = delimiter_nesting_overflow(&preflight_tokens, source.len()) {
+            return depth_error_file(preflight_tokens, range);
+        }
+
         let parse = SourceFile::parse(source, PARSE_EDITION);
         let root = parse.syntax_node();
 
@@ -71,7 +133,7 @@ impl StructuralFrontend for RustStructuralFrontend {
 
         let mut roots = Vec::new();
         for child in root.children() {
-            builder.visit(&child, &mut roots);
+            builder.visit(&child, &mut roots, 1);
         }
 
         for error in parse.errors() {
@@ -96,6 +158,7 @@ impl StructuralFrontend for RustStructuralFrontend {
             // frontend reports problems through `error_ranges` only.
             diagnostics: Vec::new(),
             error_ranges: builder.error_ranges,
+            depth_truncated: builder.depth_truncated,
             test_module: false,
         }
     }
@@ -229,6 +292,7 @@ struct IrBuilder<'s> {
     /// Byte offset of the start of each source line.
     line_starts: Vec<usize>,
     error_ranges: Vec<ByteRange>,
+    depth_truncated: bool,
 }
 
 impl<'s> IrBuilder<'s> {
@@ -246,6 +310,7 @@ impl<'s> IrBuilder<'s> {
             token_starts: Vec::new(),
             line_starts,
             error_ranges: Vec::new(),
+            depth_truncated: false,
         }
     }
 
@@ -297,26 +362,31 @@ impl<'s> IrBuilder<'s> {
     }
 
     /// Map one CST node onto the IR, appending zero or more nodes to `out`.
-    fn visit(&mut self, cst: &SyntaxNode, out: &mut Vec<IrNode>) {
+    fn visit(&mut self, cst: &SyntaxNode, out: &mut Vec<IrNode>, depth: usize) {
+        if depth >= MAX_IR_DEPTH {
+            self.emit_depth_error(cst, out);
+            return;
+        }
+
         match classify(cst) {
             Mapping::Emit(shape) => {
                 let name = self.node_name(cst);
-                let node = self.build_node(shape, name, cst);
+                let node = self.build_node(shape, name, cst, depth);
                 out.push(node);
             }
             Mapping::Native(kind) => {
                 let shape = Shape::Native(self.interner.intern(kind));
-                let node = self.build_node(shape, None, cst);
+                let node = self.build_node(shape, None, cst, depth);
                 out.push(node);
             }
             Mapping::ExprStmt => {
                 if inner_expression_emits(cst) {
                     // The inner expression's own node is the statement.
                     for child in cst.children() {
-                        self.visit(&child, out);
+                        self.visit(&child, out, depth + 1);
                     }
                 } else {
-                    let node = self.build_node(Shape::ExprStmt, None, cst);
+                    let node = self.build_node(Shape::ExprStmt, None, cst, depth);
                     out.push(node);
                 }
             }
@@ -324,22 +394,28 @@ impl<'s> IrBuilder<'s> {
                 self.error_ranges.push(byte_range(cst));
                 // Recurse anyway: real parsers wrap intact regions in error
                 // nodes, and those descendants must still be recovered.
-                let node = self.build_node(Shape::Error, None, cst);
+                let node = self.build_node(Shape::Error, None, cst, depth);
                 out.push(node);
             }
             Mapping::Transparent => {
                 for child in cst.children() {
-                    self.visit(&child, out);
+                    self.visit(&child, out, depth + 1);
                 }
             }
         }
     }
 
     /// Build an [`IrNode`] for `cst`, visiting its children first.
-    fn build_node(&mut self, shape: Shape, name: Option<Lexeme>, cst: &SyntaxNode) -> IrNode {
+    fn build_node(
+        &mut self,
+        shape: Shape,
+        name: Option<Lexeme>,
+        cst: &SyntaxNode,
+        depth: usize,
+    ) -> IrNode {
         let mut children = Vec::new();
         for child in cst.children() {
-            self.visit(&child, &mut children);
+            self.visit(&child, &mut children, depth + 1);
         }
         let range = byte_range(cst);
         IrNode {
@@ -350,6 +426,21 @@ impl<'s> IrBuilder<'s> {
             range,
             children,
         }
+    }
+
+    /// Preserve an unvisited CST subtree as recoverable truncation data.
+    fn emit_depth_error(&mut self, cst: &SyntaxNode, out: &mut Vec<IrNode>) {
+        let range = byte_range(cst);
+        self.depth_truncated = true;
+        self.error_ranges.push(range);
+        out.push(IrNode {
+            shape: Shape::Error,
+            name: None,
+            token_start: self.token_index_at(range.start),
+            token_end: self.token_index_at(range.end),
+            range,
+            children: Vec::new(),
+        });
     }
 
     /// Index of the first emitted token starting at or after `byte`.
@@ -389,9 +480,74 @@ fn byte_range(node: &SyntaxNode) -> ByteRange {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use codehelion_core::ir::MAX_IR_DEPTH;
 
     fn parse(source: &str) -> SyntaxIrFile {
         RustStructuralFrontend.parse(source)
+    }
+
+    fn assert_bounded_depth_truncation(file: &SyntaxIrFile, source_len: usize) {
+        assert!(
+            file.depth_truncated,
+            "a depth-limited parse must be distinguished from ordinary recovery"
+        );
+        let mut deepest = 0;
+        let mut error_leaves = Vec::new();
+        let mut pending: Vec<(&IrNode, usize)> = file.roots.iter().map(|root| (root, 1)).collect();
+        while let Some((node, depth)) = pending.pop() {
+            deepest = deepest.max(depth);
+            if node.shape == Shape::Error && node.children.is_empty() {
+                error_leaves.push(node.range);
+            }
+            pending.extend(node.children.iter().rev().map(|child| (child, depth + 1)));
+        }
+
+        assert!(
+            deepest <= MAX_IR_DEPTH,
+            "IR depth {deepest} exceeds the frontend limit {MAX_IR_DEPTH}"
+        );
+        assert!(
+            error_leaves.iter().any(|range| {
+                !range.is_empty() && range.end <= source_len && file.error_ranges.contains(range)
+            }),
+            "depth truncation must be represented by an Error leaf and error range"
+        );
+
+        let mut visited = 0;
+        file.walk(&mut |_| visited += 1);
+        assert_eq!(visited, file.node_count());
+    }
+
+    #[test]
+    fn deeply_nested_rust_is_truncated_without_unbounded_ir() {
+        let depth = 10_000;
+        let ignored_braces = "{".repeat(depth);
+        let control_source =
+            format!("fn control() {{ /* {ignored_braces} */ let text = \"{ignored_braces}\"; }}");
+        let control = parse(&control_source);
+        assert!(control.error_ranges.is_empty());
+        assert!(
+            control.roots.iter().all(|node| node.shape != Shape::Error),
+            "delimiters in comments and literals must not consume nesting budget"
+        );
+
+        let mut builder_guard_source = String::from("fn builder_guard() ");
+        builder_guard_source.push_str(&"{".repeat(MAX_IR_DEPTH));
+        builder_guard_source.push_str("()");
+        builder_guard_source.push_str(&"}".repeat(MAX_IR_DEPTH));
+        let builder_guard_file = parse(&builder_guard_source);
+        assert_bounded_depth_truncation(&builder_guard_file, builder_guard_source.len());
+
+        let mut source = String::from("fn deeply_nested() ");
+        source.push_str(&"{".repeat(depth));
+        source.push_str("()");
+        source.push_str(&"}".repeat(depth));
+
+        let file = parse(&source);
+        assert_bounded_depth_truncation(&file, source.len());
+        drop(file);
+        drop(builder_guard_file);
+        drop(control);
     }
 
     fn shape_label(shape: &Shape) -> String {
@@ -759,7 +915,7 @@ trait T {
     fn file_carries_language_and_versions() {
         let frontend = RustStructuralFrontend;
         assert_eq!(frontend.language(), Language::Rust);
-        assert_eq!(frontend.frontend_version(), "rust-ir-v1");
+        assert_eq!(frontend.frontend_version(), "rust-ir-v2");
 
         let file = parse("fn a() {}");
         assert_eq!(file.language, Language::Rust);

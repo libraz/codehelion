@@ -4,8 +4,8 @@
 //! whole (through their `\` line continuations): Fast mode does not
 //! preprocess, so both sides of an `#if` stay in the stream as ordinary
 //! tokens while the directive lines themselves never pollute clone content.
-//! Every other lexeme becomes a token carrying its raw text and a
-//! reporting-only source span. Malformed spans (unterminated strings,
+//! Every other lexeme becomes a token carrying its preprocessor-normalized
+//! text and a reporting-only source span. Malformed spans (unterminated strings,
 //! characters and block comments) are recorded as diagnostics and lexing
 //! resumes, so a single broken construct never discards the rest of the file.
 //! Macros are not expanded: an invocation's name and delimiters are ordinary
@@ -15,6 +15,7 @@
 //! set, the operator inventory and the dialect-only literal forms (raw
 //! strings, digit separators), so the same machinery lexes both C and C++.
 
+use codehelion_core::conditional::{ArmPath, ArmTracker, StaticCondition};
 use codehelion_core::frontend::{
     Diagnostic, DiagnosticKind, LexemeInterner, LiteralKind, SourceSpan, Token, TokenKind,
 };
@@ -26,6 +27,28 @@ const RAW_STRING_PREFIXES: &[&str] = &["u8R", "LR", "uR", "UR", "R"];
 
 /// Encoding prefixes of ordinary string and character literals, longest first.
 const TEXT_PREFIXES: &[&str] = &["u8", "L", "u", "U"];
+
+/// C/C++ digraph spellings and their single-token meanings.
+const DIGRAPHS: &[(&str, &str)] = &[
+    ("%:%:", "##"),
+    ("<:", "["),
+    (":>", "]"),
+    ("<%", "{"),
+    ("%>", "}"),
+    ("%:", "#"),
+];
+
+/// C/C++ trigraph spellings other than `??/`, which may form a line splice.
+const TRIGRAPHS: &[(&str, &str)] = &[
+    ("??=", "#"),
+    ("??(", "["),
+    ("??)", "]"),
+    ("??<", "{"),
+    ("??>", "}"),
+    ("??!", "|"),
+    ("??'", "^"),
+    ("??-", "~"),
+];
 
 fn is_ident_start(c: char) -> bool {
     c.is_alphabetic() || c == '_'
@@ -133,6 +156,16 @@ impl<'d, 's> Lexer<'d, 's> {
         });
     }
 
+    /// Emit a token with preprocessor-normalized spelling but source span.
+    fn push_normalized(&mut self, kind: TokenKind, start: Mark, text: &str) {
+        let text = self.interner.intern(text);
+        self.tokens.push(Token {
+            kind,
+            text,
+            span: self.span_from(start),
+        });
+    }
+
     fn diagnose(&mut self, kind: DiagnosticKind, start: Mark) {
         let span = self.span_from(start);
         self.diagnostics.push(Diagnostic { kind, span });
@@ -141,19 +174,24 @@ impl<'d, 's> Lexer<'d, 's> {
     /// Whether a `\` at the current position splices the line; if so consume
     /// it together with its line break.
     fn try_line_splice(&mut self) -> bool {
-        if self.peek(0) != Some('\\') {
+        let marker_width = if self.peek(0) == Some('\\') {
+            1
+        } else if self.matches_ahead("??/") {
+            3
+        } else {
             return false;
-        }
-        match (self.peek(1), self.peek(2)) {
+        };
+        match (self.peek(marker_width), self.peek(marker_width + 1)) {
             (Some('\n'), _) => {
-                self.bump();
-                self.bump();
+                for _ in 0..=marker_width {
+                    self.bump();
+                }
                 true
             }
             (Some('\r'), Some('\n')) => {
-                self.bump();
-                self.bump();
-                self.bump();
+                for _ in 0..(marker_width + 2) {
+                    self.bump();
+                }
                 true
             }
             _ => false,
@@ -162,6 +200,13 @@ impl<'d, 's> Lexer<'d, 's> {
 
     fn run(mut self) -> (Vec<Token>, Vec<Diagnostic>) {
         while let Some(c) = self.peek(0) {
+            // A UTF-8 BOM is an encoding marker, not source text. Consume it
+            // only at byte zero. Keep its byte width in spans without letting
+            // it shift the source column visible to users.
+            if self.i == 0 && c == '\u{feff}' {
+                self.i += 1;
+                continue;
+            }
             if c.is_whitespace() {
                 if c == '\n' {
                     self.line_has_token = false;
@@ -177,7 +222,7 @@ impl<'d, 's> Lexer<'d, 's> {
                 self.consume_block_comment();
                 continue;
             }
-            if c == '#' && !self.line_has_token {
+            if self.is_directive_marker() && !self.line_has_token {
                 self.consume_directive();
                 continue;
             }
@@ -490,19 +535,39 @@ impl<'d, 's> Lexer<'d, 's> {
 
     fn consume_ident(&mut self) {
         let start = self.mark();
-        while self.peek(0).is_some_and(is_ident_continue) {
+        let mut normalized = String::new();
+        loop {
+            if self.try_line_splice() {
+                continue;
+            }
+            let Some(ch) = self.peek(0) else {
+                break;
+            };
+            if !is_ident_continue(ch) {
+                break;
+            }
+            normalized.push(ch);
             self.bump();
         }
-        let kind = if self.dialect.keywords.contains(&self.text_from(start)) {
+        let kind = if self.dialect.keywords.contains(&normalized.as_str()) {
             TokenKind::Keyword
         } else {
             TokenKind::Identifier
         };
-        self.push(kind, start);
+        self.push_normalized(kind, start, &normalized);
     }
 
     fn consume_punct(&mut self) {
         let start = self.mark();
+        for &(spelling, normalized) in DIGRAPHS.iter().chain(TRIGRAPHS) {
+            if self.matches_ahead(spelling) {
+                for _ in spelling.chars() {
+                    self.bump();
+                }
+                self.push_normalized(TokenKind::Punctuation, start, normalized);
+                return;
+            }
+        }
         for op in self.dialect.multi_punct {
             if self.matches_ahead(op) {
                 for _ in 0..op.chars().count() {
@@ -523,12 +588,132 @@ impl<'d, 's> Lexer<'d, 's> {
             self.diagnose(DiagnosticKind::UnexpectedCharacter, start);
         }
     }
+
+    fn is_directive_marker(&self) -> bool {
+        self.peek(0) == Some('#') || self.matches_ahead("%:") || self.matches_ahead("??=")
+    }
 }
 
 /// Lex `source` under `dialect` into tokens and diagnostics.
 #[must_use]
 pub fn lex(source: &str, dialect: &Dialect) -> (Vec<Token>, Vec<Diagnostic>) {
     Lexer::new(source, dialect).run()
+}
+
+/// Record the preprocessor arm active at each token.
+///
+/// Directives never become clone content, but their nesting determines whether
+/// two otherwise-equal C-family snippets can coexist in one build. This pass
+/// intentionally recognises only literal `0` / `1` conditions; macro and
+/// expression evaluation belongs to a compiler frontend, not Fast mode.
+#[must_use]
+pub fn conditional_paths(source: &str, tokens: &[Token]) -> Vec<ArmPath> {
+    let directives = directives(source);
+    if !directives_are_balanced(&directives) {
+        return vec![ArmPath::default(); tokens.len()];
+    }
+    let mut next_directive = 0usize;
+    let mut tracker = ArmTracker::default();
+    let mut paths = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        while directives
+            .get(next_directive)
+            .is_some_and(|(offset, _)| *offset < token.span.start_byte)
+        {
+            apply_directive(&mut tracker, directives[next_directive].1);
+            next_directive += 1;
+        }
+        paths.push(tracker.current());
+    }
+    paths
+}
+
+/// Refuse to infer exclusions from an unterminated or otherwise unbalanced
+/// directive sequence. Missing a suppression is safer than hiding a clone.
+fn directives_are_balanced(directives: &[(usize, ConditionalDirective)]) -> bool {
+    let mut depth = 0usize;
+    for (_, directive) in directives {
+        match directive {
+            ConditionalDirective::Begin(_) => depth = depth.saturating_add(1),
+            ConditionalDirective::Next(_) | ConditionalDirective::End if depth == 0 => {
+                return false;
+            }
+            ConditionalDirective::Next(_) => {}
+            ConditionalDirective::End => depth -= 1,
+        }
+    }
+    depth == 0
+}
+
+/// One directive that changes the active conditional arm.
+#[derive(Clone, Copy)]
+enum ConditionalDirective {
+    /// Enter an `#if`-style condition.
+    Begin(StaticCondition),
+    /// Enter an `#elif` or `#else` arm.
+    Next(StaticCondition),
+    /// Leave an `#endif`.
+    End,
+}
+
+/// Extract line-start C preprocessor directives without interpreting code.
+fn directives(source: &str) -> Vec<(usize, ConditionalDirective)> {
+    let mut directives = Vec::new();
+    let mut offset = 0usize;
+    for line in source.split_inclusive('\n') {
+        if let Some(directive) = directive(line) {
+            directives.push((offset, directive));
+        }
+        offset += line.len();
+    }
+    directives
+}
+
+/// Classify one physical directive line when it starts with a directive mark.
+fn directive(line: &str) -> Option<ConditionalDirective> {
+    let line = line.trim_start_matches([' ', '\t', '\r']);
+    let line = line
+        .strip_prefix('#')
+        .or_else(|| line.strip_prefix("%:"))
+        .or_else(|| line.strip_prefix("??="))?
+        .trim_start();
+    let word_end = line
+        .find(|ch: char| !ch.is_ascii_alphabetic())
+        .unwrap_or(line.len());
+    let (word, tail) = line.split_at(word_end);
+    let condition = static_condition(tail);
+    match word {
+        "if" => Some(ConditionalDirective::Begin(condition)),
+        "ifdef" | "ifndef" => Some(ConditionalDirective::Begin(StaticCondition::Unknown)),
+        "elif" => Some(ConditionalDirective::Next(condition)),
+        "elifdef" | "elifndef" | "else" => {
+            Some(ConditionalDirective::Next(StaticCondition::Unknown))
+        }
+        "endif" => Some(ConditionalDirective::End),
+        _ => None,
+    }
+}
+
+/// Recognise only a whole literal condition; anything richer stays unknown.
+fn static_condition(tail: &str) -> StaticCondition {
+    let tail = tail
+        .split_once("//")
+        .map_or(tail, |(before, _)| before)
+        .trim();
+    match tail {
+        "0" => StaticCondition::False,
+        "1" => StaticCondition::True,
+        _ => StaticCondition::Unknown,
+    }
+}
+
+/// Apply a recognised directive to the current lexical arm.
+fn apply_directive(tracker: &mut ArmTracker, directive: ConditionalDirective) {
+    match directive {
+        ConditionalDirective::Begin(condition) => tracker.begin(condition),
+        ConditionalDirective::Next(condition) => tracker.next_arm(condition),
+        ConditionalDirective::End => tracker.end(),
+    }
 }
 
 #[cfg(test)]
@@ -599,6 +784,45 @@ mod tests {
         let src = "#if FLAG\nint a;\n#else\nint b;\n#endif\n";
         let texts = texts(src);
         assert_eq!(texts, vec!["int", "a", ";", "int", "b", ";"]);
+    }
+
+    #[test]
+    fn conditional_paths_separate_alternative_arms_and_literal_dead_code() {
+        let src = "#ifdef _WIN32\nint windows_value;\n#else\nint unix_value;\n#endif\n#if 0\nint dead_value;\n#else\nint live_value;\n#endif\n";
+        let (tokens, diagnostics) = lex_c(src);
+        assert!(diagnostics.is_empty());
+        let paths = conditional_paths(src, &tokens);
+        let path_for = |name: &str| {
+            let index = tokens
+                .iter()
+                .position(|token| token.text == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            &paths[index]
+        };
+
+        assert!(path_for("windows_value").excludes(path_for("unix_value")));
+        assert!(path_for("dead_value").is_unreachable());
+        assert!(!path_for("live_value").is_unreachable());
+    }
+
+    #[test]
+    fn unclosed_conditionals_do_not_invent_an_exclusion() {
+        let src = "#ifdef MAYBE\nint first_value;\n#else\nint second_value;\n";
+        let (tokens, diagnostics) = lex_c(src);
+        assert!(diagnostics.is_empty());
+        let paths = conditional_paths(src, &tokens);
+        let path_for = |name: &str| {
+            let index = tokens
+                .iter()
+                .position(|token| token.text == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            &paths[index]
+        };
+
+        assert!(
+            !path_for("first_value").excludes(path_for("second_value")),
+            "malformed directives must not hide a Fast finding"
+        );
     }
 
     #[test]
@@ -698,6 +922,29 @@ mod tests {
     }
 
     #[test]
+    fn line_splices_inside_identifiers_preserve_one_normalized_token() {
+        let texts = texts("int spl\\\nit = 1; int mo??/\nre = split;");
+        assert_eq!(
+            texts,
+            vec![
+                "int", "split", "=", "1", ";", "int", "more", "=", "split", ";"
+            ]
+        );
+    }
+
+    #[test]
+    fn digraphs_and_trigraphs_use_their_canonical_punctuation() {
+        let texts = texts("%:define COUNT 2\nint values<:COUNT:> = <% 1, 2 %>; int flag ??= 1;");
+        assert_eq!(
+            texts,
+            vec![
+                "int", "values", "[", "COUNT", "]", "=", "{", "1", ",", "2", "}", ";", "int",
+                "flag", "#", "1", ";"
+            ]
+        );
+    }
+
+    #[test]
     fn raw_strings_do_not_exist_in_c() {
         // `R"(x)"` in C is the identifier `R` followed by an ordinary string.
         let (tokens, diags) = lex_c("R\"(x)\"");
@@ -714,5 +961,18 @@ mod tests {
         assert_eq!(x.span.start_byte, 4);
         assert_eq!(x.span.end_byte, 5);
         assert_eq!(x.span.start_line, 1);
+    }
+
+    #[test]
+    fn skips_a_leading_utf8_bom_without_shifting_source_columns() {
+        let (tokens, diagnostics) = lex_c("\u{feff}int value;");
+        assert!(diagnostics.is_empty());
+
+        let keyword = &tokens[0];
+        assert_eq!(keyword.kind, TokenKind::Keyword);
+        assert_eq!(keyword.text, "int");
+        assert_eq!(keyword.span.start_byte, 3);
+        assert_eq!(keyword.span.start_line, 1);
+        assert_eq!(keyword.span.start_column, 1);
     }
 }

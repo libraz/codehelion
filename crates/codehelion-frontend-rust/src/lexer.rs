@@ -11,6 +11,7 @@
 use codehelion_core::frontend::{
     Diagnostic, DiagnosticKind, LexemeInterner, LiteralKind, SourceSpan, Token, TokenKind,
 };
+use std::str::Chars;
 
 /// Rust keywords. `true`/`false` are lexed as keywords rather than boolean
 /// literals, keeping token granularity uniform, which the minimum-clone-length
@@ -38,9 +39,8 @@ fn is_ident_continue(c: char) -> bool {
 
 struct Lexer<'s> {
     source: &'s str,
-    chars: Vec<char>,
-    byte_at: Vec<usize>,
-    i: usize,
+    chars: Chars<'s>,
+    byte: usize,
     line: u32,
     column: u32,
     interner: LexemeInterner,
@@ -51,26 +51,17 @@ struct Lexer<'s> {
 /// A position captured at the start of a token.
 #[derive(Clone, Copy)]
 struct Mark {
-    index: usize,
+    byte: usize,
     line: u32,
     column: u32,
 }
 
 impl<'s> Lexer<'s> {
     fn new(source: &'s str) -> Self {
-        let chars: Vec<char> = source.chars().collect();
-        let mut byte_at = Vec::with_capacity(chars.len() + 1);
-        let mut byte = 0;
-        for c in &chars {
-            byte_at.push(byte);
-            byte += c.len_utf8();
-        }
-        byte_at.push(source.len());
         Self {
             source,
-            chars,
-            byte_at,
-            i: 0,
+            chars: source.chars(),
+            byte: 0,
             line: 1,
             column: 1,
             interner: LexemeInterner::new(),
@@ -81,16 +72,16 @@ impl<'s> Lexer<'s> {
 
     /// The source text between a mark and the current position.
     fn text_from(&self, start: Mark) -> &'s str {
-        &self.source[self.byte_at[start.index]..self.byte_at[self.i]]
+        &self.source[start.byte..self.byte]
     }
 
     fn peek(&self, ahead: usize) -> Option<char> {
-        self.chars.get(self.i + ahead).copied()
+        self.chars.clone().nth(ahead)
     }
 
     const fn mark(&self) -> Mark {
         Mark {
-            index: self.i,
+            byte: self.byte,
             line: self.line,
             column: self.column,
         }
@@ -98,21 +89,21 @@ impl<'s> Lexer<'s> {
 
     /// Consume the current character, tracking line and column.
     fn bump(&mut self) {
-        if let Some(c) = self.chars.get(self.i) {
-            if *c == '\n' {
+        if let Some(c) = self.chars.next() {
+            if c == '\n' {
                 self.line += 1;
                 self.column = 1;
             } else {
                 self.column += 1;
             }
-            self.i += 1;
+            self.byte += c.len_utf8();
         }
     }
 
-    fn span_from(&self, start: Mark) -> SourceSpan {
+    const fn span_from(&self, start: Mark) -> SourceSpan {
         SourceSpan {
-            start_byte: self.byte_at[start.index],
-            end_byte: self.byte_at[self.i],
+            start_byte: start.byte,
+            end_byte: self.byte,
             start_line: start.line,
             start_column: start.column,
         }
@@ -134,6 +125,14 @@ impl<'s> Lexer<'s> {
 
     fn run(mut self) -> (Vec<Token>, Vec<Diagnostic>) {
         while let Some(c) = self.peek(0) {
+            // A UTF-8 BOM is an encoding marker, not source text. Consume it
+            // only at byte zero. Keep its byte width in spans without letting
+            // it shift the source column visible to users.
+            if self.byte == 0 && c == '\u{feff}' {
+                let _ = self.chars.next();
+                self.byte += c.len_utf8();
+                continue;
+            }
             if c.is_whitespace() {
                 self.bump();
                 continue;
@@ -227,13 +226,13 @@ impl<'s> Lexer<'s> {
                 self.consume_raw_string_body(start);
                 true
             }
-            (Some('b'), Some('"')) => {
+            (Some('b' | 'c'), Some('"')) => {
                 let start = self.mark();
                 self.bump();
                 self.consume_string_from(start);
                 true
             }
-            (Some('b'), Some('r')) if matches!(self.peek(2), Some('"' | '#')) => {
+            (Some('b' | 'c'), Some('r')) if matches!(self.peek(2), Some('"' | '#')) => {
                 let start = self.mark();
                 self.bump();
                 self.bump();
@@ -273,7 +272,26 @@ impl<'s> Lexer<'s> {
         self.bump();
         if self.peek(0) == Some('\\') {
             self.bump();
-            self.bump();
+            match self.peek(0) {
+                Some('x') => {
+                    self.bump();
+                    for _ in 0..2 {
+                        self.bump();
+                    }
+                }
+                Some('u') if self.peek(1) == Some('{') => {
+                    self.bump();
+                    self.bump();
+                    while let Some(ch) = self.peek(0) {
+                        self.bump();
+                        if ch == '}' {
+                            break;
+                        }
+                    }
+                }
+                Some(_) => self.bump(),
+                None => {}
+            }
         } else if self.peek(0).is_some_and(|c| c != '\'') {
             self.bump();
         }
@@ -356,30 +374,58 @@ impl<'s> Lexer<'s> {
         let start = self.mark();
         let is_hex_oct_bin = self.peek(0) == Some('0')
             && matches!(self.peek(1), Some('x' | 'X' | 'o' | 'O' | 'b' | 'B'));
+        if is_hex_oct_bin {
+            self.bump();
+            self.bump();
+            while self.peek(0).is_some_and(is_ident_continue) {
+                self.bump();
+            }
+            self.push(TokenKind::Literal(LiteralKind::Integer), start);
+            return;
+        }
+
+        while self
+            .peek(0)
+            .is_some_and(|ch| ch.is_ascii_digit() || ch == '_')
+        {
+            self.bump();
+        }
         let mut is_float = false;
-        while let Some(ch) = self.peek(0) {
-            if ch == '.' {
-                // Do not swallow `..` ranges or a method call on a literal.
-                if matches!(self.peek(1), Some('.' | '_'))
-                    || self.peek(1).is_some_and(char::is_alphabetic)
-                {
-                    break;
-                }
-                is_float = true;
+        // Do not swallow `..` ranges or a method call on a literal.
+        if self.peek(0) == Some('.')
+            && !matches!(self.peek(1), Some('.' | '_'))
+            && !self.peek(1).is_some_and(char::is_alphabetic)
+        {
+            is_float = true;
+            self.bump();
+            while self
+                .peek(0)
+                .is_some_and(|ch| ch.is_ascii_digit() || ch == '_')
+            {
                 self.bump();
-            } else if !is_hex_oct_bin && matches!(ch, 'e' | 'E') {
-                is_float = true;
-                self.bump();
-                if matches!(self.peek(0), Some('+' | '-')) {
-                    self.bump();
-                }
-            } else if is_ident_continue(ch) {
-                self.bump();
-            } else {
-                break;
             }
         }
-        let kind = if is_float && !is_hex_oct_bin {
+        if matches!(self.peek(0), Some('e' | 'E'))
+            && (self.peek(1).is_some_and(|ch| ch.is_ascii_digit())
+                || (matches!(self.peek(1), Some('+' | '-'))
+                    && self.peek(2).is_some_and(|ch| ch.is_ascii_digit())))
+        {
+            is_float = true;
+            self.bump();
+            if matches!(self.peek(0), Some('+' | '-')) {
+                self.bump();
+            }
+            while self
+                .peek(0)
+                .is_some_and(|ch| ch.is_ascii_digit() || ch == '_')
+            {
+                self.bump();
+            }
+        }
+        while self.peek(0).is_some_and(is_ident_continue) {
+            self.bump();
+        }
+        let kind = if is_float {
             LiteralKind::Float
         } else {
             LiteralKind::Integer
@@ -476,6 +522,15 @@ mod tests {
     }
 
     #[test]
+    fn cursor_tracks_utf8_bytes_without_a_character_index() {
+        let mut lexer = Lexer::new("é fn");
+        assert_eq!(lexer.chars.as_str(), "é fn");
+        lexer.bump();
+        assert_eq!(lexer.byte, "é".len());
+        assert_eq!(lexer.chars.as_str(), " fn");
+    }
+
+    #[test]
     fn drops_comments_and_whitespace() {
         let src = "let x = 1; // trailing\n/* block /* nested */ */ let y = 2;";
         let texts = texts(src);
@@ -493,6 +548,39 @@ mod tests {
     }
 
     #[test]
+    fn keeps_hex_and_unicode_character_escapes_together() {
+        let (tokens, diagnostics) =
+            lex("let a = '\\x41'; let b = '\\u{1f980}'; let c = b'\\xFF'; let tail = 1;");
+        assert!(diagnostics.is_empty());
+        let characters: Vec<_> = tokens
+            .iter()
+            .filter(|token| token.kind == TokenKind::Literal(LiteralKind::Char))
+            .map(|token| token.text.as_str())
+            .collect();
+        assert_eq!(characters, vec!["'\\x41'", "'\\u{1f980}'", "b'\\xFF'"]);
+        assert!(tokens.iter().any(|token| token.text.as_str() == "tail"));
+    }
+
+    #[test]
+    fn integer_suffixes_do_not_turn_into_exponents() {
+        let (tokens, diagnostics) = lex("a[1usize+x]; b[1isize+y]; c[1e2+z]");
+        assert!(diagnostics.is_empty());
+        let literals: Vec<_> = tokens
+            .iter()
+            .filter(|token| matches!(token.kind, TokenKind::Literal(_)))
+            .map(|token| (token.kind, token.text.as_str()))
+            .collect();
+        assert_eq!(
+            literals,
+            vec![
+                (TokenKind::Literal(LiteralKind::Integer), "1usize"),
+                (TokenKind::Literal(LiteralKind::Integer), "1isize"),
+                (TokenKind::Literal(LiteralKind::Float), "1e2"),
+            ]
+        );
+    }
+
+    #[test]
     fn handles_raw_and_byte_strings() {
         // Source: let a = r#"x "q" y"#; let b = b"z"; let c = br#"w"#;
         let src = "let a = r#\"x \"q\" y\"#; let b = b\"z\"; let c = br#\"w\"#;";
@@ -504,6 +592,19 @@ mod tests {
             .map(|t| t.text.as_str())
             .collect();
         assert_eq!(strings, vec!["r#\"x \"q\" y\"#", "b\"z\"", "br#\"w\"#"]);
+    }
+
+    #[test]
+    fn handles_c_and_raw_c_strings() {
+        let (tokens, diagnostics) = lex("let a = c\"path\"; let b = cr#\"raw # path\"#; tail();");
+        assert!(diagnostics.is_empty());
+        let strings: Vec<_> = tokens
+            .iter()
+            .filter(|token| token.kind == TokenKind::Literal(LiteralKind::String))
+            .map(|token| token.text.as_str())
+            .collect();
+        assert_eq!(strings, vec!["c\"path\"", "cr#\"raw # path\"#"]);
+        assert!(tokens.iter().any(|token| token.text.as_str() == "tail"));
     }
 
     #[test]
@@ -549,5 +650,18 @@ mod tests {
         let x = tokens.iter().find(|t| t.text == "x").expect("x token");
         assert_eq!(x.span.start_byte, 3);
         assert_eq!(x.span.end_byte, 4);
+    }
+
+    #[test]
+    fn skips_a_leading_utf8_bom_without_shifting_source_columns() {
+        let (tokens, diagnostics) = lex("\u{feff}fn f() {}");
+        assert!(diagnostics.is_empty());
+
+        let keyword = &tokens[0];
+        assert_eq!(keyword.kind, TokenKind::Keyword);
+        assert_eq!(keyword.text, "fn");
+        assert_eq!(keyword.span.start_byte, 3);
+        assert_eq!(keyword.span.start_line, 1);
+        assert_eq!(keyword.span.start_column, 1);
     }
 }

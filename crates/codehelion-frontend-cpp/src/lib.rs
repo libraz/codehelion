@@ -17,9 +17,9 @@ use codehelion_core::frontend::{Frontend, LexedFile};
 use codehelion_frontend_c::dialect::Dialect;
 use codehelion_frontend_c::{lexer, units};
 
-/// Version tag of this frontend, used as a fingerprint input. Bump it whenever
-/// a change alters the token stream or unit boundaries for unchanged input.
-pub const FRONTEND_VERSION: &str = "cpp-lexer-v1";
+/// Version tag of this frontend, used as a fingerprint input. The C++ dialect
+/// revision and the shared C-family lexer revision are both part of it.
+pub const FRONTEND_VERSION: &str = "cpp-lexer-v1+c-family-lexer-v4";
 
 /// C++ keywords (C++23). Contextual keywords (`override`, `final`, `import`,
 /// `module`) lex as identifiers, matching how the grammar treats them.
@@ -148,8 +148,9 @@ impl Frontend for CppFrontend {
     }
 
     fn lex(&self, source: &str) -> LexedFile {
-        let (tokens, diagnostics) = lexer::lex(source, &CPP);
-        let units = units::detect(&tokens, &CPP);
+        let (tokens, mut diagnostics) = lexer::lex(source, &CPP);
+        let (units, unit_diagnostics) = units::detect(&tokens, &CPP);
+        diagnostics.extend(unit_diagnostics);
         LexedFile {
             language: Language::Cpp,
             frontend_version: FRONTEND_VERSION,
@@ -175,6 +176,19 @@ mod tests {
         let frontend = CppFrontend;
         assert_eq!(frontend.language(), Language::Cpp);
         assert_eq!(frontend.frontend_version(), FRONTEND_VERSION);
+    }
+
+    #[test]
+    fn shared_lexer_revision_is_part_of_both_frontend_fingerprints() {
+        let shared = codehelion_frontend_c::C_FAMILY_LEXER_VERSION;
+        assert!(
+            codehelion_frontend_c::FRONTEND_VERSION.ends_with(shared),
+            "the C frontend fingerprint carries the shared lexer revision"
+        );
+        assert!(
+            FRONTEND_VERSION.ends_with(shared),
+            "the C++ frontend fingerprint carries the shared lexer revision"
+        );
     }
 
     #[test]
