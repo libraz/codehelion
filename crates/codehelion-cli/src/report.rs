@@ -927,9 +927,13 @@ pub struct Group {
     /// Per-dimension similarity evidence, when the mode measured it; `None`
     /// in modes that match content exactly and score no dimensions.
     pub similarity: Option<Similarity>,
-    /// Minimum raw-identifier Jaccard agreement against the canonical member.
+    /// Minimum raw-identifier Jaccard agreement against the canonical
+    /// occurrence.
     ///
-    /// This supports human triage only; it is not part of matching or priority.
+    /// For fragment-scope groups and split pairs, this is triage proxy evidence
+    /// for whether a shared refactoring target may exist, not a similarity
+    /// measure. It never affects clone detection, classification, or grouping;
+    /// ranking may use it only as weak refactoring-difficulty evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identifier_jaccard: Option<f64>,
     /// Material work shared by every member, when Structural mode measured it.

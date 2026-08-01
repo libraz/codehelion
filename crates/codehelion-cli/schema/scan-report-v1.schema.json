@@ -585,7 +585,7 @@
           "type": "number",
           "minimum": 0,
           "maximum": 1,
-          "description": "Minimum raw identifier-set Jaccard agreement against the canonical member. It never affects clone detection; priority uses it only as weak refactoring-difficulty evidence."
+          "description": "Minimum raw identifier-set Jaccard agreement against the canonical occurrence. For fragment-scope groups and split pairs, it is triage proxy evidence for whether a shared refactoring target may exist, not a similarity measure. It never affects clone detection, classification, or grouping; priority uses it only as weak refactoring-difficulty evidence."
         },
         "body_materiality": {
           "type": "object",
@@ -1057,7 +1057,7 @@
           "type": "number",
           "minimum": 0,
           "maximum": 1,
-          "description": "Minimum raw identifier-set agreement against the canonical member, when Structural mode measured it."
+          "description": "Minimum raw identifier-set agreement against the canonical occurrence, when Structural mode measured it. For fragment-scope groups and split pairs, it is triage proxy evidence for a potential shared refactoring target, not a similarity measure."
         },
         "api_similarity": {
           "type": "number",

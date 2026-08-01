@@ -259,6 +259,32 @@ pub struct RegionOccurrence {
     pub content: FragmentFingerprint,
 }
 
+/// A half-open token span in one [`SyntaxIrFile`].
+///
+/// This is a reporting anchor, not an identity input. Callers use it to
+/// measure raw source evidence after structural detection has completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceTokenSpan {
+    /// Index of the source file in the IR slice.
+    pub file: usize,
+    /// Index of the first token in the span.
+    pub token_start: usize,
+    /// Index one past the final token in the span.
+    pub token_end: usize,
+}
+
+impl SourceTokenSpan {
+    /// Construct a source-token span from half-open token indices.
+    #[must_use]
+    pub const fn new(file: usize, token_start: usize, token_end: usize) -> Self {
+        Self {
+            file,
+            token_start,
+            token_end,
+        }
+    }
+}
+
 /// A duplicated run of statements and every place it occurs.
 ///
 /// Unlike a [`GroupDetail`], whose members are only *similar*, every
@@ -1369,28 +1395,55 @@ fn is_allocation_api(name: &Lexeme) -> bool {
     )
 }
 
-/// The weakest identifier-set agreement between canonical and a member.
+/// The weakest raw identifier-set agreement between a canonical span and its
+/// corresponding spans.
+///
+/// This is reporting and triage evidence only. In particular, a duplicated
+/// run may have exact normalized content while this value is low because its
+/// names differ; the value is a proxy for whether a shared refactoring target
+/// may exist, not a similarity measurement and never an input to detection or
+/// grouping.
+#[must_use]
+pub fn span_identifier_jaccard(
+    files: &[SyntaxIrFile],
+    canonical: SourceTokenSpan,
+    corresponding: impl IntoIterator<Item = SourceTokenSpan>,
+) -> f64 {
+    let canonical = identifier_set(files, canonical);
+    corresponding
+        .into_iter()
+        .map(|span| set_jaccard(&canonical, &identifier_set(files, span)))
+        .min_by(f64::total_cmp)
+        .unwrap_or(1.0)
+}
+
+/// The weakest identifier-set agreement between a canonical unit and its
+/// group members.
 fn group_identifier_jaccard(
     group: &grouping::StructuralGroup,
     units: &[Unit],
     files: &[SyntaxIrFile],
 ) -> f64 {
-    let canonical = identifier_set(unit_tokens(&units[group.canonical], files));
-    group
-        .members
-        .iter()
-        .filter(|&&member| member != group.canonical)
-        .map(|&member| {
-            set_jaccard(
-                &canonical,
-                &identifier_set(unit_tokens(&units[member], files)),
-            )
-        })
-        .min_by(f64::total_cmp)
-        .unwrap_or(1.0)
+    span_identifier_jaccard(
+        files,
+        unit_token_span(&units[group.canonical]),
+        group
+            .members
+            .iter()
+            .filter(|&&member| member != group.canonical)
+            .map(|&member| unit_token_span(&units[member])),
+    )
 }
 
-fn identifier_set(tokens: &[Token]) -> BTreeSet<&str> {
+const fn unit_token_span(unit: &Unit) -> SourceTokenSpan {
+    SourceTokenSpan::new(unit.file, unit.tokens.0, unit.tokens.1)
+}
+
+fn identifier_set(files: &[SyntaxIrFile], span: SourceTokenSpan) -> BTreeSet<&str> {
+    let tokens = files
+        .get(span.file)
+        .and_then(|file| file.tokens.get(span.token_start..span.token_end))
+        .unwrap_or(&[]);
     tokens
         .iter()
         .filter(|token| matches!(token.kind, TokenKind::Identifier))

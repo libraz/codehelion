@@ -127,9 +127,12 @@ fn a_gapped_clone_is_detected_and_recorded_with_its_evidence() {
     );
     // Content entropy is measured, not defaulted.
     assert!(group.entropy_bits > 1.0);
+    let identifier_jaccard = group
+        .identifier_jaccard
+        .expect("raw identifier agreement is stored as triage evidence");
     assert!(
-        group.identifier_jaccard.is_some(),
-        "raw identifier agreement is stored as triage evidence"
+        (identifier_jaccard - 4.0 / 15.0).abs() < f64::EPSILON,
+        "the established whole-unit measurement must not change"
     );
     assert!(group.has_loop.is_some());
     assert!(group.has_dynamic_allocation.is_some());
@@ -946,6 +949,46 @@ fn run_fixture() -> tempfile::TempDir {
     dir
 }
 
+/// Two unrelated functions whose shared run is structurally identical only
+/// after every raw identifier in the run is renamed.
+const RENAMED_LEFT_RS: &str = "pub fn collect_records(records: &[u64]) -> u64 {
+    let mut accumulator = 0u64;
+    let mut sentinel = 7u64;
+    for sample in records {
+        let adjusted = sample + 1;
+        let doubled = adjusted * 2;
+        let reduced = doubled - 3;
+        accumulator += reduced;
+        sentinel ^= reduced;
+    }
+    accumulator + sentinel
+}
+";
+
+const RENAMED_RIGHT_RS: &str = "pub fn inspect_values(values: &[u64]) -> u64 {
+    let mut tally = 11u64;
+    let mut marker = 5u64;
+    for entry in values {
+        let shifted = entry + 1;
+        let amplified = shifted * 2;
+        let reserve = amplified - 3;
+        tally += reserve;
+        marker ^= reserve;
+    }
+    if tally > marker { tally } else { marker }
+}
+";
+
+fn renamed_run_fixture() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/left.rs"), RENAMED_LEFT_RS).unwrap();
+    std::fs::write(root.join("src/right.rs"), RENAMED_RIGHT_RS).unwrap();
+    dir
+}
+
 #[test]
 fn a_run_shared_by_unrelated_units_is_reported_as_a_run() {
     let dir = run_fixture();
@@ -980,6 +1023,7 @@ fn a_run_shared_by_unrelated_units_is_reported_as_a_run() {
     // Confirmed by content equality rather than scored across dimensions.
     assert_eq!(group["similarity"], serde_json::Value::Null);
     assert_eq!(group["confidence"], 1.0);
+    assert_eq!(group["identifier_jaccard"], 1.0);
     let units: Vec<&str> = group["members"]
         .as_array()
         .unwrap()
@@ -987,6 +1031,31 @@ fn a_run_shared_by_unrelated_units_is_reported_as_a_run() {
         .map(|member| member["unit"].as_str().unwrap())
         .collect();
     assert_eq!(units, vec!["audit_entries", "render_rows"]);
+}
+
+#[test]
+fn identifier_jaccard_distinguishes_verbatim_and_renamed_runs() {
+    let verbatim = scan_json(run_fixture().path());
+    let verbatim_run = verbatim["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["scope"] == "fragment")
+        .expect("the verbatim fixture reports its run");
+    assert_eq!(verbatim_run["identifier_jaccard"], 1.0);
+
+    let renamed = scan_json(renamed_run_fixture().path());
+    let renamed_run = renamed["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["scope"] == "fragment")
+        .expect("the renamed fixture reports its run");
+    assert_eq!(renamed_run["clone_type"], "type-2");
+    assert!(
+        renamed_run["identifier_jaccard"].as_f64().unwrap() < 0.05,
+        "the run replaces every raw identifier: {renamed_run:#?}"
+    );
 }
 
 #[test]
@@ -1007,6 +1076,7 @@ fn a_reported_run_is_recorded_against_the_units_that_host_it() {
     assert_eq!(group.clone_type, "type-1");
     // Entropy is measured over the run's own tokens, not its host unit's.
     assert!(group.entropy_bits > 1.0);
+    assert_eq!(group.identifier_jaccard, Some(1.0));
     for member in &group.members {
         let host = member.unit_name.as_deref().expect("a host unit");
         assert!(host == "audit_entries" || host == "render_rows");
@@ -1908,6 +1978,10 @@ fn one_relation_seen_in_many_places_is_reported_once() {
     // pair, so a reader who acts on it knows the whole extent of the work.
     let members = split[0]["members"].as_array().unwrap();
     assert_eq!(members.len(), copies * 2);
+    assert!(
+        split[0]["identifier_jaccard"].is_number(),
+        "a split pair carries raw-identifier triage evidence"
+    );
     assert_eq!(
         members
             .iter()

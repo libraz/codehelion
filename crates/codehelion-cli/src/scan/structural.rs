@@ -40,8 +40,8 @@ use codehelion_core::semantic::{
 };
 use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION, UnitFingerprint};
 use codehelion_core::structural::{
-    self, CrossVariantUnit, GroupDetail, RegionOccurrence, StructuralConfig, StructuralRegion,
-    StructuralReport, StructuralUnit, VerifiedPair,
+    self, CrossVariantUnit, GroupDetail, RegionOccurrence, SourceTokenSpan, StructuralConfig,
+    StructuralRegion, StructuralReport, StructuralUnit, VerifiedPair,
 };
 use codehelion_core::test_code::{self, TEST_CODE_VERSION};
 use codehelion_core::verify::{SimilarityBreakdown, WEIGHT_VERSION};
@@ -2621,6 +2621,34 @@ fn region_test_code(analysis: &StructuralReport, region: &StructuralRegion) -> b
         .all(|occurrence| analysis.units[occurrence.unit].test_code)
 }
 
+/// Raw identifier agreement between the first reported run occurrence and the
+/// remaining occurrences.
+///
+/// A run is already an exact normalized match. This is therefore triage-only
+/// proxy evidence for a possible shared refactoring target, not a similarity
+/// score and not an input to detection or grouping.
+fn region_identifier_jaccard(inputs: &ReportInputs<'_>, region: &StructuralRegion) -> f64 {
+    region.occurrences.first().map_or(1.0, |canonical| {
+        structural::span_identifier_jaccard(
+            inputs.irs,
+            region_token_span(canonical),
+            region.occurrences.iter().skip(1).map(region_token_span),
+        )
+    })
+}
+
+const fn unit_token_span(unit: &StructuralUnit) -> SourceTokenSpan {
+    SourceTokenSpan::new(unit.file, unit.token_start, unit.token_end)
+}
+
+const fn region_token_span(occurrence: &RegionOccurrence) -> SourceTokenSpan {
+    SourceTokenSpan::new(
+        occurrence.file,
+        occurrence.token_start,
+        occurrence.token_end,
+    )
+}
+
 /// Whether a run names a place inside its hosts rather than restating them.
 ///
 /// A unit group directs attention at whole units, so a run spanning most of
@@ -3328,6 +3356,23 @@ fn pair_members(pair: &VerifiedPair) -> Vec<usize> {
     members
 }
 
+/// Raw identifier agreement between a split pair's canonical unit and every
+/// corresponding unit.
+///
+/// A split pair is a verified clone relation, but its raw names are only
+/// triage evidence for a possible shared refactoring target. They do not
+/// establish similarity and cannot affect detection or grouping.
+fn split_pair_identifier_jaccard(inputs: &ReportInputs<'_>, pair: &VerifiedPair) -> f64 {
+    structural::span_identifier_jaccard(
+        inputs.irs,
+        unit_token_span(&inputs.analysis.units[pair.canonical]),
+        pair.members
+            .iter()
+            .filter(|&&member| member != pair.canonical)
+            .map(|&member| unit_token_span(&inputs.analysis.units[member])),
+    )
+}
+
 /// One verified clone relation that no group could hold, as a report entry.
 ///
 /// It is shaped exactly like a group, because that is what it is: a set whose
@@ -3349,7 +3394,7 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             confidence: pair.similarity,
             priority: report::Priority::unranked(),
             similarity: None,
-            identifier_jaccard: None,
+            identifier_jaccard: Some(split_pair_identifier_jaccard(inputs, pair)),
             body_materiality: None,
             boilerplate: None,
             test_code: members
@@ -3417,7 +3462,7 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             // Confirmed by content equality, not scored across dimensions: there
             // is no breakdown to report.
             similarity: None,
-            identifier_jaccard: None,
+            identifier_jaccard: Some(region_identifier_jaccard(inputs, region)),
             body_materiality: None,
             // Boilerplate is classified over whole units; a run inside one carries
             // no such classification.
@@ -4113,7 +4158,7 @@ fn split_pair_row(
         entropy_bits: engine::content_entropy_bits(inputs.unit_tokens(canonical), inputs.literals),
         suppress_reason: None,
         boilerplate: None,
-        identifier_jaccard: None,
+        identifier_jaccard: Some(split_pair_identifier_jaccard(inputs, pair)),
         has_loop: None,
         has_dynamic_allocation: None,
         call_count: None,
@@ -4179,7 +4224,7 @@ fn region_row(
         entropy_bits: engine::content_entropy_bits(&canonical, inputs.literals),
         suppress_reason: None,
         boilerplate: None,
-        identifier_jaccard: None,
+        identifier_jaccard: Some(region_identifier_jaccard(inputs, region)),
         has_loop: None,
         has_dynamic_allocation: None,
         call_count: None,
