@@ -96,6 +96,27 @@ pub enum Format {
     Sarif,
 }
 
+/// What a scan does with the findings its baseline froze.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum BaselineMode {
+    /// Hide them, so the report is what came after the baseline.
+    Suppress,
+    /// Hide nothing, and mark each group as one the baseline froze or one it
+    /// did not.
+    Compare,
+}
+
+impl BaselineMode {
+    /// The name this mode is reported under.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Suppress => crate::report::BASELINE_SUPPRESS,
+            Self::Compare => crate::report::BASELINE_COMPARE,
+        }
+    }
+}
+
 /// Output format for a single finding's detail view.
 ///
 /// Kept apart from [`Format`]: SARIF describes a run's results, so offering it
@@ -331,9 +352,17 @@ pub struct ScanArgs {
     /// Local database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,
-    /// Hide the findings this baseline file froze, reporting what came after.
+    /// Read this baseline file, reporting what came after it.
     #[arg(long)]
     pub baseline: Option<PathBuf>,
+    /// What to do with the findings the baseline froze: hide them, or hide
+    /// nothing and report every group against it.
+    ///
+    /// Hiding is the right default for a tree with duplication somebody has
+    /// already decided about. Comparing is what working duplication down
+    /// needs, where the question is what moved rather than what is left.
+    #[arg(long, value_enum, default_value_t = BaselineMode::Suppress, requires = "baseline")]
+    pub baseline_mode: BaselineMode,
     /// Also compare exact duplicate units between distinct C/C++ build variants.
     ///
     /// Normal scan snapshots remain partition-local. This opt-in emits and

@@ -709,6 +709,7 @@ fn run_with(
     let mut rules = compile_rules(&cfg, &files, &analysis)?;
     let baseline = crate::scan::load_baseline(
         args.baseline.as_deref(),
+        args.baseline_mode,
         &mut rules.rules,
         &variant,
         &detector_versions(
@@ -782,7 +783,7 @@ fn run_with(
     // stale entry is one whose duplication this run does not list.
     model.summary.baseline = baseline
         .as_ref()
-        .map(|baseline| crate::scan::baseline_status(baseline, &model.groups));
+        .map(|baseline| crate::scan::apply_baseline(baseline, &mut model.groups));
     write_report(args, out, &model)?;
     Ok(crate::scan::outcome(args, &model))
 }
@@ -840,6 +841,7 @@ fn run_semantic_partition(
     let mut rules = compile_rules(cfg, &files, &analysis)?;
     let baseline = crate::scan::load_baseline(
         args.baseline.as_deref(),
+        args.baseline_mode,
         &mut rules.rules,
         &partition.variant,
         &detector_versions(
@@ -907,7 +909,7 @@ fn run_semantic_partition(
     model.summary.compiler = asked.as_ref().map(coverage);
     model.summary.baseline = baseline
         .as_ref()
-        .map(|baseline| crate::scan::baseline_status(baseline, &model.groups));
+        .map(|baseline| crate::scan::apply_baseline(baseline, &mut model.groups));
     let comparison_units =
         maybe_cross_comparison_units(args, &partition.variant, &files, &irs, &analysis);
     let cross_language_units = maybe_cross_language_comparison_units(
@@ -2833,6 +2835,7 @@ fn build_semantic_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group
             width_family: false,
             split_pair: true,
             suppressed: inputs.semantic_pair_suppressed[index].map(|rule| inputs.suppression(rule)),
+            baseline: None,
             semantic: Some(report::SemanticEvidence {
                 schema_version: pair.canonical.graph.schema_version.clone(),
                 rules: vec![report::SemanticRuleEvidence {
@@ -2920,6 +2923,7 @@ fn build_semantic_group(inputs: &ReportInputs<'_>, index: usize) -> report::Grou
             split_pair: false,
             suppressed: inputs.semantic_group_suppressed[index]
                 .map(|rule| inputs.suppression(rule)),
+            baseline: None,
             semantic: Some(report::SemanticEvidence {
                 schema_version: semantic_group.canonical.graph.schema_version.clone(),
                 rules: vec![report::SemanticRuleEvidence {
@@ -3267,6 +3271,7 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             test_code: detail.test_code,
             width_family: detail.width_family,
             suppressed,
+            baseline: None,
             split_pair: false,
             semantic: None,
             members: group
@@ -3350,6 +3355,7 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             // it exists because no group could hold both its members.
             width_family: false,
             suppressed,
+            baseline: None,
             split_pair: true,
             semantic: None,
             members: members
@@ -3416,6 +3422,7 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             // Runs inside two units say nothing about how the units differ.
             width_family: false,
             suppressed: inputs.region_suppressed[index].map(|rule| inputs.suppression(rule)),
+            baseline: None,
             split_pair: false,
             semantic: None,
             members: region
@@ -4290,6 +4297,7 @@ mod tests {
             jobs: None,
             db: None,
             baseline: None,
+            baseline_mode: crate::cli::BaselineMode::Suppress,
             allow_execution: None,
             compare_build_variants: false,
             compare_languages: false,
@@ -4347,6 +4355,7 @@ mod tests {
             jobs: None,
             db: Some(dir.path().join("audit.db")),
             baseline: None,
+            baseline_mode: crate::cli::BaselineMode::Suppress,
             allow_execution: None,
             compare_build_variants: false,
             compare_languages: false,

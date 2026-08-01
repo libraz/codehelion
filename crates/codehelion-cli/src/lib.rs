@@ -381,6 +381,9 @@ fn recorded_group(
         width_family: group.width_family,
         split_pair: group.split_pair,
         suppressed: recorded_suppression(suppress_reason, stored_suppression),
+        // A recorded run is re-rendered on its own; a baseline is something a
+        // scan is given, and nothing about it is stored with the snapshot.
+        baseline: None,
         semantic: group.semantic.map(|evidence| report::SemanticEvidence {
             schema_version: evidence.schema_version,
             rules: vec![report::SemanticRuleEvidence {
@@ -1003,6 +1006,7 @@ fn resolve_db(flag: Option<&Path>) -> Result<PathBuf> {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::cli::BaselineMode;
     use codehelion_core::discovery::Language;
     use codehelion_core::semantic::{
         OperationAttributes, OperationEdge, OperationEdgeKind, OperationKind, OperationNode,
@@ -1026,6 +1030,7 @@ mod tests {
             jobs: None,
             db: None,
             baseline: None,
+            baseline_mode: BaselineMode::Suppress,
             allow_execution: None,
             compare_build_variants: false,
             compare_languages: true,

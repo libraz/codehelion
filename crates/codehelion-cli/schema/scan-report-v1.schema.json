@@ -234,8 +234,13 @@
           "required": [
             "file",
             "entries",
+            "mode",
             "matched",
-            "stale"
+            "stale",
+            "appeared",
+            "stale_tokens",
+            "appeared_tokens",
+            "gone"
           ],
           "properties": {
             "file": {
@@ -245,6 +250,10 @@
             "entries": {
               "type": "integer"
             },
+            "mode": {
+              "enum": ["suppress", "compare"],
+              "description": "What the run was told to do with the frozen findings: hide them, or hide nothing and report every group against the baseline instead."
+            },
             "matched": {
               "type": "integer",
               "description": "Entries whose duplication this run still reports."
@@ -252,6 +261,50 @@
             "stale": {
               "type": "integer",
               "description": "Entries that hid nothing, the duplication they covered being gone. A number to act on with `baseline update`, not a fault."
+            },
+            "appeared": {
+              "type": "integer",
+              "description": "Groups this run reports that the baseline never froze."
+            },
+            "stale_tokens": {
+              "type": "integer",
+              "description": "Tokens the stale entries repeated when they were frozen. Read beside `appeared_tokens`: a count of groups says nothing about size, so removing one large duplication that leaves three small ones behind reads as a regression without both numbers."
+            },
+            "appeared_tokens": {
+              "type": "integer",
+              "description": "Tokens the groups that appeared repeat now."
+            },
+            "gone": {
+              "type": "array",
+              "description": "Every stale entry, so that what was removed can be read rather than only counted.",
+              "items": {
+                "type": "object",
+                "required": ["group", "clone_type", "duplicated_tokens"],
+                "properties": {
+                  "group": {
+                    "type": "string",
+                    "description": "Hex group fingerprint the baseline froze."
+                  },
+                  "clone_type": {
+                    "type": "string"
+                  },
+                  "duplicated_tokens": {
+                    "type": "integer",
+                    "description": "Tokens the entry repeated when it was frozen. Not a savings figure."
+                  },
+                  "anchor": {
+                    "type": "object",
+                    "description": "Where the entry's canonical occurrence sat, as the baseline recorded it. The code is gone, so this says where to remember it from rather than where to look now.",
+                    "required": ["file", "start_line", "end_line"],
+                    "properties": {
+                      "file": { "type": "string" },
+                      "start_line": { "type": "integer" },
+                      "end_line": { "type": "integer" },
+                      "unit": { "type": "string" }
+                    }
+                  }
+                }
+              }
             },
             "mismatch": {
               "type": "string",
@@ -570,6 +623,31 @@
             }
           ],
           "description": "Null when the group is visible in default reports."
+        },
+        "baseline": {
+          "type": "object",
+          "description": "What the baseline the run was given says about this group. Absent when the run was given none.",
+          "required": ["state"],
+          "properties": {
+            "state": {
+              "enum": ["continuing", "new"],
+              "description": "Whether the baseline froze this group."
+            },
+            "derived_from": {
+              "type": "object",
+              "description": "The entry that has gone from the same places, when one has. Removing a duplication rewrites the code around it, so the groups that come out of the rearrangement are new groups with new ids; this says the new one stands where the old one stood, which is what keeps progress from reading as a regression. A claim about places, not identity.",
+              "required": ["group", "shared_sites"],
+              "properties": {
+                "group": {
+                  "$ref": "#/$defs/hex"
+                },
+                "shared_sites": {
+                  "type": "integer",
+                  "description": "How many of this group's occurrences sit where that entry's did."
+                }
+              }
+            }
+          }
         },
         "semantic": {
           "$ref": "#/$defs/semantic_evidence"

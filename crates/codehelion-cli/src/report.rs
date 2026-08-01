@@ -45,6 +45,23 @@ const TEXT_GROUP_LIMIT: usize = 10;
 /// Number of members per group the default text report lists.
 const TEXT_MEMBER_LIMIT: usize = 5;
 
+/// Number of gone baseline entries the text report lists before saying how
+/// many it left out.
+const GONE_LISTED: usize = 10;
+
+/// [`BaselineStatus::mode`] value for hiding what the baseline froze.
+pub const BASELINE_SUPPRESS: &str = "suppress";
+
+/// [`BaselineStatus::mode`] value for hiding nothing and reporting each group
+/// against the baseline instead.
+pub const BASELINE_COMPARE: &str = "compare";
+
+/// [`GroupBaseline::state`] value for a group the baseline froze.
+pub const GROUP_CONTINUING: &str = "continuing";
+
+/// [`GroupBaseline::state`] value for a group the baseline did not freeze.
+pub const GROUP_NEW: &str = "new";
+
 /// A complete scan result: run metadata, summary counts and every group.
 #[derive(Debug, Serialize)]
 pub struct Report {
@@ -582,10 +599,28 @@ pub struct BaselineStatus {
     pub file: String,
     /// Entries the file holds.
     pub entries: u64,
+    /// What the run was told to do with the entries: [`BASELINE_SUPPRESS`] to
+    /// hide the findings they froze, [`BASELINE_COMPARE`] to hide nothing and
+    /// report each group against them instead.
+    pub mode: String,
     /// Entries that hid a finding in this run.
     pub matched: u64,
     /// Entries that hid nothing, the duplication they covered being gone.
     pub stale: u64,
+    /// Groups this run reports that the baseline never froze.
+    pub appeared: u64,
+    /// Tokens the stale entries repeated when they were frozen.
+    pub stale_tokens: u64,
+    /// Tokens the groups that appeared repeat now.
+    ///
+    /// Reported beside [`stale_tokens`](Self::stale_tokens) because a count of
+    /// groups says nothing about size: removing one large duplication that
+    /// leaves three small ones behind is progress that reads as a regression
+    /// until both numbers are on the page.
+    pub appeared_tokens: u64,
+    /// Every stale entry, so that what was removed can be read rather than
+    /// only counted.
+    pub gone: Vec<GoneGroup>,
     /// Why the baseline does not describe this run, when it does not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mismatch: Option<String>,
@@ -594,6 +629,55 @@ pub struct BaselineStatus {
     /// some of what went stale.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caveat: Option<String>,
+}
+
+/// A baseline entry whose duplication this run no longer reports.
+#[derive(Debug, Clone, Serialize)]
+pub struct GoneGroup {
+    /// Hex group fingerprint the baseline froze.
+    pub group: String,
+    /// The entry's clone classification.
+    pub clone_type: String,
+    /// Tokens it repeated when it was frozen.
+    pub duplicated_tokens: u64,
+    /// Where its canonical occurrence sat, as the baseline recorded it. The
+    /// code is gone, so this describes where to remember it from rather than
+    /// where to look now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<GoneAnchor>,
+}
+
+/// Where a gone entry's canonical occurrence sat.
+#[derive(Debug, Clone, Serialize)]
+pub struct GoneAnchor {
+    /// Path relative to the scan root.
+    pub file: String,
+    /// 1-based first line.
+    pub start_line: i64,
+    /// 1-based last line.
+    pub end_line: i64,
+    /// Name of the enclosing unit, when it had one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+/// What a baseline the run was given says about one group.
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupBaseline {
+    /// `continuing` when the baseline froze this group, `new` when it did not.
+    pub state: String,
+    /// The gone entry this group stands in place of, when one can be named.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<Derivation>,
+}
+
+/// The gone entry a group appears to have re-formed from.
+#[derive(Debug, Clone, Serialize)]
+pub struct Derivation {
+    /// Hex group fingerprint of the gone entry.
+    pub group: String,
+    /// How many of this group's occurrences sit where that entry's did.
+    pub shared_sites: u64,
 }
 
 /// Files the scan dropped, by cause. Nothing is omitted silently.
@@ -773,6 +857,10 @@ pub struct Group {
     pub split_pair: bool,
     /// Why the group is hidden from default reports; `None` when visible.
     pub suppressed: Option<Suppression>,
+    /// What the baseline the run was given says about this group; `None` when
+    /// the run was given none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<GroupBaseline>,
     /// Registered-rule evidence for a restricted semantic finding. Absent for
     /// textual and structural clone classes.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1388,6 +1476,19 @@ impl Report {
             if let Some(caveat) = &baseline.caveat {
                 writeln!(out, "    note: {caveat}")?;
             }
+            // The same three numbers said as a before and an after, which is
+            // the question somebody working duplication down is asking.
+            writeln!(
+                out,
+                "    since it was recorded: {} gone (-{} repeated tokens), {} new (+{}), \
+                 {} unchanged",
+                baseline.stale,
+                baseline.stale_tokens,
+                baseline.appeared,
+                baseline.appeared_tokens,
+                baseline.matched,
+            )?;
+            render_gone(baseline, out)?;
         }
         Ok(())
     }
@@ -1525,6 +1626,69 @@ impl Report {
     }
 }
 
+/// List what the baseline froze that this run no longer reports.
+///
+/// Only in compare mode: suppress mode is being asked to hide known
+/// duplication, and a list of duplication that is no longer there is not what
+/// it was asked for. The JSON report carries the list either way.
+fn render_gone(baseline: &BaselineStatus, out: &mut impl Write) -> io::Result<()> {
+    if baseline.mode != BASELINE_COMPARE || baseline.gone.is_empty() {
+        return Ok(());
+    }
+    for entry in baseline.gone.iter().take(GONE_LISTED) {
+        let anchor = entry.anchor.as_ref().map_or_else(String::new, |anchor| {
+            let unit = anchor
+                .unit
+                .as_deref()
+                .map_or_else(String::new, |name| format!(" in {name}"));
+            format!(
+                ", last seen at {}:{}{}",
+                anchor.file, anchor.start_line, unit
+            )
+        });
+        writeln!(
+            out,
+            "      gone {} {} ({} repeated tokens){}",
+            entry.group, entry.clone_type, entry.duplicated_tokens, anchor,
+        )?;
+    }
+    // A truncated list that does not say it was truncated reads as the whole
+    // answer.
+    if let Some(rest) = baseline.gone.len().checked_sub(GONE_LISTED)
+        && rest > 0
+    {
+        writeln!(
+            out,
+            "      and {rest} more not listed here; the JSON report has all of them",
+        )?;
+    }
+    Ok(())
+}
+
+/// Say where a group stands relative to the baseline the run was given.
+///
+/// Only groups the baseline did not freeze get a line. "Continuing" is the
+/// unremarkable case and marking every one of them would bury the two that
+/// matter; a group with a named predecessor is the case a reader would
+/// otherwise misread as duplication they had just added.
+fn render_group_baseline(group: &Group, out: &mut impl Write) -> io::Result<()> {
+    let Some(baseline) = &group.baseline else {
+        return Ok(());
+    };
+    if baseline.state != GROUP_NEW {
+        return Ok(());
+    }
+    match &baseline.derived_from {
+        Some(derived) => writeln!(
+            out,
+            "    new since the baseline, standing where {} stood ({} occurrence(s) in the \
+             same place)",
+            derived.group, derived.shared_sites,
+        ),
+        None => writeln!(out, "    new since the baseline"),
+    }
+}
+
 /// Render one group: the priority with its inputs spelled out, then its
 /// members. The non-verbose view truncates long member lists with an
 /// explicit count, never silently.
@@ -1575,6 +1739,7 @@ fn render_group(
         group.clone_type,
         priority.value,
     )?;
+    render_group_baseline(group, out)?;
     // The composed number is never shown on its own: the three measures that
     // made it say why the finding is where it is, and disagreeing with the
     // placement means disagreeing with one of them.
@@ -2335,6 +2500,7 @@ pub(super) mod tests {
                 test_code: false,
                 width_family: false,
                 suppressed: None,
+                baseline: None,
                 split_pair: false,
                 semantic: None,
                 members: (0..7)
@@ -2379,6 +2545,7 @@ pub(super) mod tests {
                     scope: Some("path_glob".to_string()),
                     pattern: Some("vendor/**".to_string()),
                 }),
+                baseline: None,
                 split_pair: false,
                 semantic: None,
                 members: vec![
@@ -2445,6 +2612,7 @@ pub(super) mod tests {
                 test_code: false,
                 width_family: false,
                 suppressed: None,
+                baseline: None,
                 split_pair: false,
                 semantic: None,
                 members: vec![
@@ -2497,6 +2665,7 @@ pub(super) mod tests {
                 test_code: false,
                 width_family: false,
                 suppressed: None,
+                baseline: None,
                 split_pair: false,
                 semantic: None,
                 members: vec![
@@ -2933,6 +3102,83 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_group_standing_where_a_gone_one_stood_says_so_and_the_rest_stay_quiet() {
+        let mut report = sample_report();
+        report.groups[0].baseline = Some(GroupBaseline {
+            state: GROUP_NEW.to_string(),
+            derived_from: Some(Derivation {
+                group: "aa11".to_string(),
+                shared_sites: 2,
+            }),
+        });
+        report.groups[1].baseline = Some(GroupBaseline {
+            state: GROUP_CONTINUING.to_string(),
+            derived_from: None,
+        });
+
+        let mut buffer = Vec::new();
+        report
+            .render_text(TextOptions::default(), &mut buffer)
+            .unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        assert!(
+            text.contains("new since the baseline, standing where aa11 stood (2 occurrence(s)"),
+            "{text}"
+        );
+        // Continuing is the unremarkable case, and marking every one of them
+        // would bury the one that matters.
+        assert_eq!(text.matches("since the baseline").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_comparison_says_how_much_went_as_well_as_how_many() {
+        let mut report = sample_report();
+        report.summary.baseline = Some(BaselineStatus {
+            file: "codehelion-baseline.json".to_string(),
+            entries: 12,
+            mode: BASELINE_COMPARE.to_string(),
+            matched: 8,
+            stale: 4,
+            appeared: 21,
+            stale_tokens: 3400,
+            appeared_tokens: 900,
+            gone: vec![GoneGroup {
+                group: "aa11".to_string(),
+                clone_type: "type-2".to_string(),
+                duplicated_tokens: 3400,
+                anchor: Some(GoneAnchor {
+                    file: "src/gone.rs".to_string(),
+                    start_line: 10,
+                    end_line: 40,
+                    unit: Some("validate".to_string()),
+                }),
+            }],
+            mismatch: None,
+            caveat: None,
+        });
+
+        let mut buffer = Vec::new();
+        report
+            .render_text(TextOptions::default(), &mut buffer)
+            .unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        // 21 new against 4 gone reads as a regression until the sizes are on
+        // the same line: the four that went were most of the duplication.
+        assert!(
+            text.contains(
+                "since it was recorded: 4 gone (-3400 repeated tokens), 21 new (+900), 8 unchanged"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "gone aa11 type-2 (3400 repeated tokens), last seen at src/gone.rs:10 in validate"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn json_field_names_appear_in_the_shipped_schema() {
         let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA).unwrap();
         assert_eq!(
@@ -2945,17 +3191,52 @@ pub(super) mod tests {
         report.summary.baseline = Some(BaselineStatus {
             file: "codehelion-baseline.json".to_string(),
             entries: 12,
+            mode: BASELINE_SUPPRESS.to_string(),
             matched: 11,
             stale: 1,
+            appeared: 3,
+            stale_tokens: 320,
+            appeared_tokens: 90,
+            gone: vec![GoneGroup {
+                group: "aa11".to_string(),
+                clone_type: "type-2".to_string(),
+                duplicated_tokens: 320,
+                anchor: Some(GoneAnchor {
+                    file: "src/gone.rs".to_string(),
+                    start_line: 10,
+                    end_line: 40,
+                    unit: Some("validate".to_string()),
+                }),
+            }],
             mismatch: Some("recorded under another build variant".to_string()),
             caveat: Some("grouped under different rules".to_string()),
         });
+        report.groups[0].baseline = Some(GroupBaseline {
+            state: GROUP_NEW.to_string(),
+            derived_from: Some(Derivation {
+                group: "aa11".to_string(),
+                shared_sites: 2,
+            }),
+        });
         let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+        let baseline_schema = &schema["$defs"]["summary"]["properties"]["baseline"]["properties"];
+        let group_baseline_schema =
+            &schema["$defs"]["group"]["properties"]["baseline"]["properties"];
         let checks = [
             (&value["groups"][3], &schema["$defs"]["group"]["properties"]),
+            (&value["summary"]["baseline"], baseline_schema),
             (
-                &value["summary"]["baseline"],
-                &schema["$defs"]["summary"]["properties"]["baseline"]["properties"],
+                &value["summary"]["baseline"]["gone"][0],
+                &baseline_schema["gone"]["items"]["properties"],
+            ),
+            (
+                &value["summary"]["baseline"]["gone"][0]["anchor"],
+                &baseline_schema["gone"]["items"]["properties"]["anchor"]["properties"],
+            ),
+            (&value["groups"][0]["baseline"], group_baseline_schema),
+            (
+                &value["groups"][0]["baseline"]["derived_from"],
+                &group_baseline_schema["derived_from"]["properties"],
             ),
             (&value, &schema["properties"]),
             (&value["run"], &schema["$defs"]["run"]["properties"]),
@@ -3006,8 +3287,13 @@ pub(super) mod tests {
         report.summary.baseline = Some(BaselineStatus {
             file: "codehelion-baseline.json".to_string(),
             entries: 12,
+            mode: BASELINE_SUPPRESS.to_string(),
             matched: 0,
             stale: 12,
+            appeared: 0,
+            stale_tokens: 0,
+            appeared_tokens: 0,
+            gone: Vec::new(),
             mismatch: Some("recorded under build variant aaaa in fast mode".to_string()),
             caveat: None,
         });
@@ -3025,8 +3311,13 @@ pub(super) mod tests {
         report.summary.baseline = Some(BaselineStatus {
             file: "codehelion-baseline.json".to_string(),
             entries: 12,
+            mode: BASELINE_SUPPRESS.to_string(),
             matched: 11,
             stale: 1,
+            appeared: 0,
+            stale_tokens: 0,
+            appeared_tokens: 0,
+            gone: Vec::new(),
             mismatch: None,
             caveat: None,
         });

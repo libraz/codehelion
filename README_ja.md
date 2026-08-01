@@ -98,11 +98,26 @@ codehelion artifact compare before/binary after/binary
 持ちます。この ID で suppression・baseline 登録・`explain` での後日参照ができます。
 
 判断済みの finding は `codehelion baseline create` で凍結でき、以降のスキャンは
-既知のものを抑止できます。データベースが保持するスキャンは常に 1 件なので、
-前後比較の手段も baseline です。以降のスキャンは、凍結済みエントリのうち今回も
-見つかった件数と、もう見つからなくなった件数を報告します。BuildVariant または
-detector version が異なる場合は、履歴を引き継がず現行スキャンから baseline を
-作り直します。
+それを隠します。データベースが保持するスキャンは常に 1 件なので、前後比較の
+手段も baseline です。
+
+```sh
+codehelion scan                       # ツリーを読む
+codehelion baseline create .          # 起点を記録する
+# ... 重複を減らす ...
+codehelion scan --baseline codehelion-baseline.json --baseline-mode compare
+```
+
+`compare` は何も隠しません。各グループを「baseline が凍結したもの」と「そうで
+ないもの」に分けて報告し、消えたトークン量と現れたトークン量を並べて出します。
+この 2 つが揃っていないと、大きな重複 4 件を解消して小さな重複 20 件が現れた
+状態が退行に見えてしまいます。また重複の解消はその周辺のコードも書き換えるため、
+組み替えの結果として現れるグループは新しい ID を持ちます。直前までエントリが
+あった場所に立っているグループは、誰かが足した重複としてではなく、そこに立って
+いるものとして報告されます。
+
+BuildVariant または detector version が異なる場合は、履歴を引き継がず現行
+スキャンから baseline を作り直します。
 
 ## 設定
 

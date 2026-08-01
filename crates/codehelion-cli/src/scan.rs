@@ -38,7 +38,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde_json::{Value, json};
 
 use crate::Outcome;
-use crate::cli::{Format, Mode, ScanArgs};
+use crate::cli::{BaselineMode, Format, Mode, ScanArgs};
 use crate::config::{self, Config, LiteralNormalization};
 use crate::report::{self, Report};
 use crate::suppress;
@@ -150,7 +150,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     // stale entry is one whose duplication this run does not list.
     model.summary.baseline = baseline
         .as_ref()
-        .map(|baseline| baseline_status(baseline, &model.groups));
+        .map(|baseline| apply_baseline(baseline, &mut model.groups));
     write_report(args, out, &model)?;
     Ok(outcome(args, &model))
 }
@@ -226,6 +226,7 @@ fn evaluate_suppression(
     let mut rules = suppress::Rules::compile(&cfg.suppression, any_markers)?;
     let baseline = load_baseline(
         args.baseline.as_deref(),
+        args.baseline_mode,
         &mut rules,
         variant,
         &detector_versions(
@@ -506,6 +507,9 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
             test_code: false,
             width_family: false,
             suppressed,
+            // Filled in later, if the run was given a baseline to read itself
+            // against: it takes the assembled groups to know.
+            baseline: None,
             split_pair: false,
             semantic: None,
             members: group
@@ -1270,6 +1274,10 @@ fn repository_root(root: &Path) -> PathBuf {
 pub(crate) struct ScanBaseline {
     /// The file as it was named on the command line.
     file: String,
+    /// What the scan was told to do with the entries.
+    mode: BaselineMode,
+    /// The frozen entries.
+    entries: crate::baseline::Baseline,
     /// The group ids it froze.
     ids: BTreeSet<String>,
     /// Why it does not describe this run, when it does not.
@@ -1311,6 +1319,7 @@ impl ScanBaseline {
 /// asked to have hidden.
 pub(crate) fn load_baseline(
     path: Option<&Path>,
+    mode: BaselineMode,
     rules: &mut suppress::Rules,
     variant: &BuildVariant,
     detectors: &[(String, String)],
@@ -1318,46 +1327,111 @@ pub(crate) fn load_baseline(
     let Some(path) = path else {
         return Ok(None);
     };
-    let baseline = crate::baseline::Baseline::load(path)?;
-    let fit = baseline.compatibility(&variant.fingerprint(), detectors);
-    let ids: BTreeSet<String> = baseline
+    let entries = crate::baseline::Baseline::load(path)?;
+    let fit = entries.compatibility(&variant.fingerprint(), detectors);
+    let ids: BTreeSet<String> = entries
         .entries
         .iter()
         .map(|entry| entry.group.clone())
         .collect();
     let file = path.display().to_string();
-    rules.add_baseline(&file, ids.clone());
+    // Compare mode registers no rule: it is the mode for reading what moved,
+    // and a report with the known half hidden cannot answer that.
+    if mode == BaselineMode::Suppress {
+        rules.add_baseline(&file, ids.clone());
+    }
     Ok(Some(ScanBaseline {
         file,
+        mode,
+        entries,
         ids,
         mismatch: fit.mismatch,
         caveat: fit.caveat,
     }))
 }
 
-/// What the baseline did to this run, counted against what the run found.
+/// Count this run against the baseline, and mark each group with where it
+/// stands relative to it.
 ///
 /// An entry counts as matched when the duplication it froze is still detected,
 /// whichever rule ended up hiding it: the question a stale count answers is
 /// whether the duplication is gone, not which reason won.
-pub(crate) fn baseline_status(
+pub(crate) fn apply_baseline(
     baseline: &ScanBaseline,
-    groups: &[report::Group],
+    groups: &mut [report::Group],
 ) -> report::BaselineStatus {
-    let reported: BTreeSet<&str> = groups
+    let scanned: Vec<crate::baseline::ScanGroup<'_>> = groups
         .iter()
-        .map(|group| group.fingerprint.as_str())
+        .map(|group| crate::baseline::ScanGroup {
+            group: group.fingerprint.as_str(),
+            duplicated_tokens: crate::baseline::duplicated_tokens(
+                group.members.iter().map(|member| member.tokens),
+                group
+                    .members
+                    .iter()
+                    .find(|member| member.canonical)
+                    .map_or(0, |member| member.tokens),
+            ),
+            sites: group
+                .members
+                .iter()
+                .map(|member| (member.file.as_str(), member.unit.as_deref()))
+                .collect(),
+        })
         .collect();
-    let matched = baseline
-        .ids
+    let delta = baseline.entries.delta(&scanned);
+
+    let derived: BTreeMap<&str, &crate::baseline::Appeared> = delta
+        .appeared
         .iter()
-        .filter(|id| reported.contains(id.as_str()))
-        .count();
+        .map(|appeared| (appeared.group.as_str(), appeared))
+        .collect();
+    for group in groups.iter_mut() {
+        let state = derived.get(group.fingerprint.as_str());
+        group.baseline = Some(report::GroupBaseline {
+            state: if state.is_some() {
+                report::GROUP_NEW
+            } else {
+                report::GROUP_CONTINUING
+            }
+            .to_string(),
+            derived_from: state
+                .and_then(|appeared| appeared.derived_from.as_ref())
+                .map(|derivation| report::Derivation {
+                    group: derivation.group.clone(),
+                    shared_sites: derivation.shared_sites,
+                }),
+        });
+    }
+
     report::BaselineStatus {
         file: baseline.file.clone(),
+        mode: baseline.mode.name().to_string(),
         entries: as_u64(baseline.ids.len()),
-        matched: as_u64(matched),
-        stale: as_u64(baseline.ids.len().saturating_sub(matched)),
+        matched: delta.continuing,
+        stale: as_u64(delta.gone.len()),
+        appeared: as_u64(delta.appeared.len()),
+        stale_tokens: delta.gone.iter().map(|entry| entry.duplicated_tokens).sum(),
+        appeared_tokens: delta
+            .appeared
+            .iter()
+            .map(|entry| entry.duplicated_tokens)
+            .sum(),
+        gone: delta
+            .gone
+            .iter()
+            .map(|entry| report::GoneGroup {
+                group: entry.group.clone(),
+                clone_type: entry.clone_type.clone(),
+                duplicated_tokens: entry.duplicated_tokens,
+                anchor: entry.anchor.as_ref().map(|anchor| report::GoneAnchor {
+                    file: anchor.file.clone(),
+                    start_line: anchor.start_line,
+                    end_line: anchor.end_line,
+                    unit: anchor.unit.clone(),
+                }),
+            })
+            .collect(),
         mismatch: baseline.mismatch.clone(),
         caveat: baseline.caveat.clone(),
     }
@@ -1734,6 +1808,7 @@ mod tests {
             jobs: None,
             db: None,
             baseline: None,
+            baseline_mode: BaselineMode::Suppress,
             allow_execution: None,
             compare_build_variants: false,
             compare_languages: false,

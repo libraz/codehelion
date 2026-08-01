@@ -1153,6 +1153,7 @@ fn a_baseline_hides_what_came_before_it_and_nothing_else() {
     assert!(visible_ids(&baselined).is_empty(), "all of it was frozen");
     let status = &baselined["summary"]["baseline"];
     assert_eq!(status["entries"], frozen.len());
+    assert_eq!(status["mode"], "suppress", "hiding is the default");
     assert_eq!(status["matched"], frozen.len());
     assert_eq!(status["stale"], 0);
     assert!(status.get("mismatch").is_none(), "the same run's own ids");
@@ -1232,6 +1233,147 @@ fn resolving_a_duplication_makes_its_entry_stale_and_update_drops_it() {
             .expect("a count"),
         u64::try_from(frozen).unwrap() - stale
     );
+}
+
+/// The checksum function rewritten, for writing over both copies of it at
+/// once: the same duplication in the same two places, made of other content,
+/// so it is known by another id.
+const CHECKSUM_REWORKED_RS: &str = "pub fn checksum_block(seed: u64, data: &[u64]) -> u64 {
+    let mut acc = seed;
+    for value in data {
+        acc = acc.wrapping_mul(31).wrapping_add(*value);
+        acc = acc.rotate_left(7);
+    }
+    acc ^ 0x5a5a
+}
+";
+
+/// A tree holding one duplicated Rust function and nothing else, so that a
+/// count of groups is a count of one thing.
+fn one_pair() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), CHECKSUM_RS).unwrap();
+    std::fs::write(root.join("src/b.rs"), CHECKSUM_RS).unwrap();
+    dir
+}
+
+#[test]
+fn comparing_against_a_baseline_names_what_went_and_what_took_its_place() {
+    let dir = one_pair();
+    let root = dir.path();
+    scan_json(root);
+    record_baseline(root);
+
+    // Both copies are reworked in step. The duplication has not been removed
+    // and has not spread; it is the same two functions in the same two files.
+    // Its content moved, though, and a group is identified by its content, so
+    // this is one group gone and another arriving in its place.
+    std::fs::write(root.join("src/a.rs"), CHECKSUM_REWORKED_RS).unwrap();
+    std::fs::write(root.join("src/b.rs"), CHECKSUM_REWORKED_RS).unwrap();
+
+    let after = scan_json_with(
+        root,
+        &["--baseline", "baseline.json", "--baseline-mode", "compare"],
+    );
+    let status = &after["summary"]["baseline"];
+    assert_eq!(status["mode"], "compare");
+    assert_eq!(status["stale"], 1);
+    assert_eq!(status["appeared"], 1);
+    assert!(
+        status["stale_tokens"].as_u64().expect("a count") > 0,
+        "what went is measured in tokens, not only in groups"
+    );
+    assert!(status["appeared_tokens"].as_u64().expect("a count") > 0);
+
+    // Compare mode hides nothing: a report with the known half missing cannot
+    // answer what moved.
+    let groups = after["groups"].as_array().expect("groups");
+    assert!(groups.iter().all(|group| group["suppressed"].is_null()));
+
+    let gone = status["gone"].as_array().expect("the entries that went");
+    assert_eq!(gone.len(), 1);
+    let arrived = groups
+        .iter()
+        .find(|group| group["baseline"]["state"] == "new")
+        .expect("the group that took its place");
+    // Without this the reader sees "1 new group" and reads it as duplication
+    // they have just introduced.
+    assert_eq!(
+        arrived["baseline"]["derived_from"]["group"],
+        gone[0]["group"]
+    );
+    assert_eq!(arrived["baseline"]["derived_from"]["shared_sites"], 2);
+}
+
+#[test]
+fn duplication_written_somewhere_new_is_not_credited_to_what_went() {
+    let dir = one_pair();
+    let root = dir.path();
+    scan_json(root);
+    record_baseline(root);
+
+    // The frozen pair goes, and an unrelated pair arrives in files nothing was
+    // ever frozen over. Nothing stood where this stands, so nothing is claimed.
+    std::fs::remove_file(root.join("src/b.rs")).unwrap();
+    std::fs::write(root.join("src/c.rs"), FORMAT_RS).unwrap();
+    std::fs::write(root.join("src/d.rs"), FORMAT_RS).unwrap();
+
+    let after = scan_json_with(
+        root,
+        &["--baseline", "baseline.json", "--baseline-mode", "compare"],
+    );
+    assert_eq!(after["summary"]["baseline"]["stale"], 1);
+    assert_eq!(after["summary"]["baseline"]["appeared"], 1);
+    let arrived = after["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .find(|group| group["baseline"]["state"] == "new")
+        .expect("the new pair");
+    assert!(arrived["baseline"].get("derived_from").is_none());
+}
+
+#[test]
+fn a_comparison_lists_what_went_and_a_suppression_does_not() {
+    let dir = one_pair();
+    let root = dir.path();
+    scan_json(root);
+    record_baseline(root);
+    std::fs::remove_file(root.join("src/b.rs")).unwrap();
+
+    let compared = cmd()
+        .current_dir(root)
+        .args([
+            "scan",
+            ".",
+            "--baseline",
+            "baseline.json",
+            "--baseline-mode",
+            "compare",
+        ])
+        .output()
+        .expect("run scan");
+    assert!(compared.status.success(), "{compared:?}");
+    let text = String::from_utf8(compared.stdout).expect("utf-8");
+    assert!(text.contains("since it was recorded:"), "{text}");
+    assert!(text.contains("1 gone"), "{text}");
+    assert!(text.contains("repeated tokens"), "{text}");
+    assert!(text.contains("last seen at src/a.rs"), "{text}");
+
+    // Suppress mode was asked to hide known duplication; a list of duplication
+    // that is no longer there is not what it was asked for.
+    let suppressed = cmd()
+        .current_dir(root)
+        .args(["scan", ".", "--baseline", "baseline.json"])
+        .output()
+        .expect("run scan");
+    assert!(suppressed.status.success(), "{suppressed:?}");
+    let text = String::from_utf8(suppressed.stdout).expect("utf-8");
+    assert!(text.contains("since it was recorded:"), "{text}");
+    assert!(!text.contains("last seen at"), "{text}");
 }
 
 #[test]

@@ -25,9 +25,25 @@
 //!   that spreads to a new place stops being covered by a judgement made
 //!   before it spread.
 //!
-//! Source locations are recorded alongside each entry, but only so a human
-//! reading the file can tell what an entry refers to. Nothing matches on
-//! them: line numbers move under edits that change nothing about the code.
+//! Source locations are recorded alongside each entry, but no entry is ever
+//! *matched* on one: line numbers move under edits that change nothing about
+//! the code, so a suppression keyed on a location would come and go with
+//! reformatting.
+//!
+//! # Why the sites are recorded anyway
+//!
+//! Removing a duplication rearranges the code around it, and the groups that
+//! come out of the rearrangement are new groups: a group fingerprint is
+//! derived from its members' content, and a finding id from its group, so
+//! nothing that identifies a finding survives the edit that made it. A run
+//! that reported those groups as simply "new" would read as a regression to
+//! the person who had just removed duplication.
+//!
+//! What does survive is the *site* — the file and the enclosing unit's name.
+//! Each entry therefore records the site of every occurrence, and a scan
+//! comparing itself against a baseline can say that a group appearing now
+//! stands where an entry that has just gone stood. That claim is descriptive
+//! and stated as such; it hides nothing and suppresses nothing.
 //!
 //! # Why the conditions are recorded with it
 //!
@@ -35,8 +51,8 @@
 //! set. A baseline made under different conditions would silently match
 //! nothing — the worst possible failure for a suppression, since it looks
 //! exactly like a suppression that worked. The file therefore records what it
-//! was made under and requires an exact match. This unreleased v1 product does
-//! not read, convert, or reinterpret older baseline formats.
+//! was made under and requires an exact match. A file written under another
+//! schema version is rejected rather than read, converted or reinterpreted.
 //!
 //! [`CloneGroupFingerprint`]: codehelion_core::stable_id::CloneGroupFingerprint
 
@@ -51,8 +67,11 @@ use crate::report::DetectorVersion;
 
 /// Version of the baseline file schema.
 ///
-/// This unreleased product starts its baseline format at version one.
-pub const SCHEMA_VERSION: u32 = 1;
+/// A file written under any other version is rejected rather than read with
+/// the facts it does not carry guessed at. Recreating the baseline from the
+/// current scan is the fix, and is cheap: a baseline is a record of a
+/// judgement about the tree as it stands, not an archive.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// A baseline file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,15 +114,44 @@ pub struct Entry {
     pub clone_type: String,
     /// How many occurrences the group had when it was frozen.
     pub instances: u64,
-    /// The stable finding id of each occurrence, in the order they were
-    /// recorded. Kept so a later run can say which occurrences it knew about,
-    /// not to match on.
-    pub findings: Vec<String>,
+    /// Tokens the occurrences past the canonical one repeat.
+    ///
+    /// A measure of how much duplication the entry stands for, so that a scan
+    /// reporting entries as gone can say how much went with them. Not a
+    /// savings figure: nothing here claims an artifact would shrink by this
+    /// much, or that unifying the occurrences is possible at all.
+    pub duplicated_tokens: u64,
+    /// Every occurrence, in the order they were recorded.
+    pub occurrences: Vec<Occurrence>,
     /// Where the canonical occurrence sat when the entry was written.
     /// Descriptive only — nothing matches on a location.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor: Option<Anchor>,
 }
+
+/// One occurrence of a frozen finding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Occurrence {
+    /// The stable finding id, so a scan that still reports this group can say
+    /// which occurrences it knew about. Not a match key.
+    pub finding: String,
+    /// Path relative to the scan root.
+    pub file: String,
+    /// Name of the enclosing unit, when it had one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+impl Occurrence {
+    /// The part of an occurrence that survives an edit to its content.
+    fn site(&self) -> Site<'_> {
+        (self.file.as_str(), self.unit.as_deref())
+    }
+}
+
+/// A file and the unit inside it, which is what an occurrence keeps when the
+/// code it holds is rewritten.
+pub type Site<'a> = (&'a str, Option<&'a str>);
 
 /// Where an occurrence sat, for a human reading the file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,8 +282,9 @@ impl Baseline {
     /// that no longer exist, and matching nothing is the expected outcome
     /// rather than a sign the duplication is gone.
     ///
-    /// Detector versions must also match exactly. There is no compatibility
-    /// table for superseded detector rules in the unreleased v1 product.
+    /// Detector versions must also match exactly. Nothing here maps a
+    /// superseded detector rule onto its replacement, so two runs scored under
+    /// different rules are not compared.
     #[must_use]
     pub fn compatibility(
         &self,
@@ -271,6 +320,152 @@ impl Baseline {
     }
 }
 
+/// One group of the scan a baseline is being read against.
+#[derive(Debug, Clone)]
+pub struct ScanGroup<'a> {
+    /// Hex clone-group fingerprint.
+    pub group: &'a str,
+    /// Tokens this group repeats, on the same footing as
+    /// [`Entry::duplicated_tokens`].
+    pub duplicated_tokens: u64,
+    /// Where each occurrence sits.
+    pub sites: BTreeSet<Site<'a>>,
+}
+
+/// What a scan found relative to the baseline it was given.
+///
+/// Three states and nothing else: an entry the scan still reports, an entry it
+/// no longer does, and a group it reports that the baseline never froze. The
+/// third is the one that misleads without help, which is what
+/// [`Appeared::derived_from`] is for.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Delta {
+    /// Entries the scan no longer reports, in baseline order.
+    pub gone: Vec<Gone>,
+    /// Groups the scan reports that the baseline did not freeze, in scan
+    /// order.
+    pub appeared: Vec<Appeared>,
+    /// Entries the scan still reports.
+    pub continuing: u64,
+}
+
+/// A frozen entry whose duplication the scan no longer reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gone {
+    /// Hex group fingerprint of the entry.
+    pub group: String,
+    /// The entry's clone classification.
+    pub clone_type: String,
+    /// Tokens it repeated when it was frozen.
+    pub duplicated_tokens: u64,
+    /// Where its canonical occurrence sat.
+    pub anchor: Option<Anchor>,
+}
+
+/// A group the scan reports that the baseline did not freeze.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Appeared {
+    /// Hex group fingerprint.
+    pub group: String,
+    /// Tokens it repeats.
+    pub duplicated_tokens: u64,
+    /// The entry that has gone from the same sites, when one has.
+    pub derived_from: Option<Derivation>,
+}
+
+/// The gone entry a group appears to have re-formed from.
+///
+/// Read it as "this stands where that stood", not as identity. Sites are
+/// compared because nothing derived from content survives the edit that
+/// removes a duplication; a group can therefore be named as the successor of
+/// at most one entry, and only of one that has actually gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Derivation {
+    /// Hex group fingerprint of the gone entry.
+    pub group: String,
+    /// How many of this group's occurrences sit at one of that entry's sites.
+    pub shared_sites: u64,
+}
+
+impl Baseline {
+    /// Sort a scan's groups into what this baseline froze and what it did not.
+    ///
+    /// `reported` is every group the scan found, whether or not a rule hid it:
+    /// an entry is stale when the duplication is gone, not when some other
+    /// rule got to it first.
+    #[must_use]
+    pub fn delta(&self, reported: &[ScanGroup<'_>]) -> Delta {
+        let present: BTreeSet<&str> = reported.iter().map(|group| group.group).collect();
+        let frozen: BTreeSet<&str> = self.entries.iter().map(|e| e.group.as_str()).collect();
+
+        let gone: Vec<&Entry> = self
+            .entries
+            .iter()
+            .filter(|entry| !present.contains(entry.group.as_str()))
+            .collect();
+        let vacated: Vec<(&str, BTreeSet<Site<'_>>)> = gone
+            .iter()
+            .map(|entry| (entry.group.as_str(), entry.sites()))
+            .collect();
+
+        Delta {
+            continuing: as_u64(self.entries.len() - gone.len()),
+            gone: gone
+                .iter()
+                .map(|entry| Gone {
+                    group: entry.group.clone(),
+                    clone_type: entry.clone_type.clone(),
+                    duplicated_tokens: entry.duplicated_tokens,
+                    anchor: entry.anchor.clone(),
+                })
+                .collect(),
+            appeared: reported
+                .iter()
+                .filter(|group| !frozen.contains(group.group))
+                .map(|group| Appeared {
+                    group: group.group.to_string(),
+                    duplicated_tokens: group.duplicated_tokens,
+                    derived_from: derivation(&group.sites, &vacated),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The vacated entry sharing the most sites with `sites`, if any shares one.
+///
+/// Ties go to the lowest fingerprint so that the same scan always names the
+/// same predecessor.
+fn derivation(
+    sites: &BTreeSet<Site<'_>>,
+    vacated: &[(&str, BTreeSet<Site<'_>>)],
+) -> Option<Derivation> {
+    vacated
+        .iter()
+        .filter_map(|(group, left)| {
+            let shared = sites.intersection(left).count();
+            (shared > 0).then(|| Derivation {
+                group: (*group).to_string(),
+                shared_sites: as_u64(shared),
+            })
+        })
+        .max_by(|a, b| {
+            a.shared_sites
+                .cmp(&b.shared_sites)
+                .then_with(|| b.group.cmp(&a.group))
+        })
+}
+
+/// A count as the width the report writes it in.
+fn as_u64(count: usize) -> u64 {
+    u64::try_from(count).unwrap_or(u64::MAX)
+}
+
+/// A stored token count as the width the report writes it in.
+fn tokens(count: i64) -> u64 {
+    u64::try_from(count).unwrap_or(0)
+}
+
 /// How well a baseline describes a run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Compatibility {
@@ -292,10 +487,21 @@ impl Entry {
             group: group.fingerprint_hex.clone(),
             clone_type: group.clone_type.clone(),
             instances: u64::try_from(group.members.len()).unwrap_or(u64::MAX),
-            findings: group
+            duplicated_tokens: duplicated_tokens(
+                group
+                    .members
+                    .iter()
+                    .map(|member| tokens(member.token_count)),
+                canonical.map_or(0, |member| tokens(member.token_count)),
+            ),
+            occurrences: group
                 .members
                 .iter()
-                .map(|member| member.finding_hex.clone())
+                .map(|member| Occurrence {
+                    finding: member.finding_hex.clone(),
+                    file: member.file_path.clone(),
+                    unit: member.unit_name.clone(),
+                })
                 .collect(),
             anchor: canonical.map(|member| Anchor {
                 file: member.file_path.clone(),
@@ -305,6 +511,20 @@ impl Entry {
             }),
         }
     }
+
+    /// The sites this entry's occurrences sat at.
+    fn sites(&self) -> BTreeSet<Site<'_>> {
+        self.occurrences.iter().map(Occurrence::site).collect()
+    }
+}
+
+/// Tokens a group repeats: everything past the one copy a reader would keep.
+///
+/// Deliberately not "savings". It says how much text is written more than
+/// once, which is a fact about the source, and stops there.
+#[must_use]
+pub fn duplicated_tokens(members: impl Iterator<Item = u64>, canonical: u64) -> u64 {
+    members.sum::<u64>().saturating_sub(canonical)
 }
 
 /// An id abbreviated for a message, where the full 32 characters would drown
@@ -385,7 +605,20 @@ mod tests {
         assert_eq!(baseline.entries.len(), 2);
         assert_eq!(baseline.entries[0].group, "aa11");
         assert_eq!(baseline.entries[0].instances, 2);
-        assert_eq!(baseline.entries[0].findings, vec!["f1", "f2"]);
+        let sites: Vec<&str> = baseline.entries[0]
+            .occurrences
+            .iter()
+            .map(|occurrence| occurrence.file.as_str())
+            .collect();
+        assert_eq!(sites, vec!["src/a.rs", "src/b.rs"]);
+        let findings: Vec<&str> = baseline.entries[0]
+            .occurrences
+            .iter()
+            .map(|occurrence| occurrence.finding.as_str())
+            .collect();
+        assert_eq!(findings, vec!["f1", "f2"]);
+        // Two 42-token copies repeat everything past the one a reader keeps.
+        assert_eq!(baseline.entries[0].duplicated_tokens, 42);
         let anchor = baseline.entries[0].anchor.as_ref().expect("an anchor");
         assert_eq!(anchor.file, "src/a.rs");
         assert_eq!(anchor.unit.as_deref(), Some("parse"));
@@ -426,6 +659,84 @@ mod tests {
         // `ee55` appeared after the baseline was recorded: that is precisely
         // what the baseline exists to show, so it is not taken in.
         assert_eq!(pruned.ids(), BTreeSet::from(["aa11"]));
+    }
+
+    /// A scan group standing at `sites`, with `tokens` repeated.
+    fn scanned<'a>(group: &'a str, tokens: u64, sites: &[(&'a str, &'a str)]) -> ScanGroup<'a> {
+        ScanGroup {
+            group,
+            duplicated_tokens: tokens,
+            sites: sites
+                .iter()
+                .map(|(file, unit)| (*file, Some(*unit)))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_delta_sorts_a_scan_into_gone_continuing_and_appeared() {
+        let baseline = Baseline::from_run(
+            &origin(),
+            &[group("aa11"), group("bb22")],
+            "2026-07-27T01:00:00Z",
+        );
+
+        let delta = baseline.delta(&[
+            scanned("aa11", 40, &[("src/a.rs", "parse")]),
+            scanned("ee55", 90, &[("src/z.rs", "other")]),
+        ]);
+
+        assert_eq!(delta.continuing, 1);
+        assert_eq!(delta.gone.len(), 1);
+        assert_eq!(delta.gone[0].group, "bb22");
+        assert_eq!(delta.gone[0].duplicated_tokens, 42);
+        assert_eq!(delta.appeared.len(), 1);
+        assert_eq!(delta.appeared[0].group, "ee55");
+        assert_eq!(delta.appeared[0].duplicated_tokens, 90);
+        // Nothing vacated `src/z.rs`, so nothing is claimed about where it
+        // came from.
+        assert_eq!(delta.appeared[0].derived_from, None);
+    }
+
+    #[test]
+    fn a_group_standing_where_a_gone_entry_stood_is_named_as_its_successor() {
+        // Both entries were frozen over the same two units, which is what
+        // happens when one duplication sits inside another.
+        let baseline = Baseline::from_run(
+            &origin(),
+            &[group("aa11"), group("bb22")],
+            "2026-07-27T01:00:00Z",
+        );
+
+        // `bb22` is gone; a group nobody has seen before now stands in the
+        // same two units. Reporting it as plain "new" would read as a
+        // regression to whoever had just removed `bb22`.
+        let delta = baseline.delta(&[
+            scanned("aa11", 42, &[("src/a.rs", "parse"), ("src/b.rs", "parse")]),
+            scanned("ff66", 30, &[("src/a.rs", "parse"), ("src/b.rs", "parse")]),
+        ]);
+
+        let derived = delta.appeared[0]
+            .derived_from
+            .as_ref()
+            .expect("a predecessor at the same sites");
+        assert_eq!(derived.group, "bb22");
+        assert_eq!(derived.shared_sites, 2);
+    }
+
+    #[test]
+    fn an_entry_that_is_still_reported_is_not_offered_as_a_predecessor() {
+        let baseline = Baseline::from_run(&origin(), &[group("aa11")], "2026-07-27T01:00:00Z");
+
+        // `aa11` still stands, so a second group over the same units is
+        // duplication that was added, not duplication that moved.
+        let delta = baseline.delta(&[
+            scanned("aa11", 42, &[("src/a.rs", "parse")]),
+            scanned("ff66", 30, &[("src/a.rs", "parse")]),
+        ]);
+
+        assert_eq!(delta.appeared.len(), 1);
+        assert_eq!(delta.appeared[0].derived_from, None);
     }
 
     #[test]

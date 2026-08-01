@@ -112,9 +112,24 @@ Findings are grouped into clone groups; each group and member carries a stable
 ID you can suppress, baseline or look up later with `explain`.
 
 Once a finding is accepted, `codehelion baseline create` freezes it and later
-scans can suppress it. Because the database holds one scan at a time, a
-baseline is also how a before and an after are compared: a later scan reports
-how many of the frozen entries it still finds and how many it no longer does.
+scans hide it. Because the database holds one scan at a time, a baseline is
+also how a before and an after are compared:
+
+```sh
+codehelion scan                       # read the tree
+codehelion baseline create .          # record where you are starting from
+# ... remove some duplication ...
+codehelion scan --baseline codehelion-baseline.json --baseline-mode compare
+```
+
+`compare` hides nothing. It reports each group as one the baseline froze or one
+it did not, and puts the tokens that went beside the tokens that arrived —
+without both, four large duplications resolved into twenty small ones reads as
+a regression. Removing a duplication also rewrites the code around it, so the
+groups that come out of the rearrangement carry new ids; one standing in the
+places an entry has just left is reported as standing there rather than as
+duplication somebody added.
+
 If the build variant or detector versions differ, create a fresh baseline for
 the current scan rather than carrying it across.
 
