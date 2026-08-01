@@ -242,21 +242,26 @@ fn body_braces(
     (close < unit.token_end).then_some((open, close))
 }
 
-/// The `{`/`}` indices of the first block after position `i`, stopping at `;`.
+/// The `{`/`}` indices of the first block after position `i`, stopping at a
+/// top-level `;`. Semicolons in a C/C++ `for` header are not statement ends.
 fn block_after(
     tokens: &[Token],
     braces: &HashMap<usize, usize>,
     i: usize,
 ) -> Option<(usize, usize)> {
+    let mut paren_depth = 0usize;
     for (offset, token) in tokens[i..].iter().enumerate() {
         if token.kind == TokenKind::Punctuation {
-            if token.text == "{" {
-                let open = i + offset;
-                let close = *braces.get(&open)?;
-                return Some((open, close));
-            }
-            if token.text == ";" {
-                return None;
+            match token.text.as_str() {
+                "(" => paren_depth += 1,
+                ")" => paren_depth = paren_depth.saturating_sub(1),
+                "{" if paren_depth == 0 => {
+                    let open = i + offset;
+                    let close = *braces.get(&open)?;
+                    return Some((open, close));
+                }
+                ";" if paren_depth == 0 => return None,
+                _ => {}
             }
         }
     }
@@ -421,6 +426,22 @@ mod tests {
         assert!(frags.iter().any(|f| f.kind == FragmentKind::Body));
         assert!(frags.iter().any(|f| f.kind == FragmentKind::Loop));
         assert!(frags.iter().any(|f| f.kind == FragmentKind::StmtRun));
+    }
+
+    #[test]
+    fn c_for_header_semicolons_do_not_hide_the_loop_body() {
+        // fn f ( ) { for ( int i = 0 ; i < n ; i ++ ) { a ; b ; } }
+        let tokens = quick("fn f ( ) { for ( int i = 0 ; i < n ; i ++ ) { a ; b ; } }");
+        let units = vec![unit(UnitKind::Function, 0, tokens.len())];
+        let braces = brace_pairs(&tokens);
+        let frags = fragments(&tokens, &units, &braces, 2, 8);
+
+        assert!(
+            frags
+                .iter()
+                .any(|fragment| fragment.kind == FragmentKind::Loop),
+            "the C for body must become a loop fragment"
+        );
     }
 
     #[test]

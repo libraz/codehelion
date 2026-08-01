@@ -326,20 +326,32 @@ mod tests {
 
     /// Build a unit node whose body holds the given shapes as one flat block.
     fn unit(shapes: &[Shape]) -> IrNode {
-        let node = |shape: Shape| IrNode {
-            shape,
+        let body = IrNode {
+            shape: Shape::Block,
             name: None,
             token_start: 0,
             token_end: 0,
             range: ByteRange { start: 0, end: 0 },
-            children: Vec::new(),
+            children: shapes
+                .iter()
+                .cloned()
+                .map(|shape| IrNode {
+                    shape,
+                    name: None,
+                    token_start: 0,
+                    token_end: 0,
+                    range: ByteRange { start: 0, end: 0 },
+                    children: Vec::new(),
+                })
+                .collect(),
         };
         IrNode {
-            children: vec![IrNode {
-                children: shapes.iter().cloned().map(node).collect(),
-                ..node(Shape::Block)
-            }],
-            ..node(Shape::Function)
+            shape: Shape::Function,
+            name: None,
+            token_start: 0,
+            token_end: 0,
+            range: ByteRange { start: 0, end: 0 },
+            children: vec![body],
         }
     }
 

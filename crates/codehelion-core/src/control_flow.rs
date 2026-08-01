@@ -128,6 +128,9 @@ pub struct ControlFlowStats {
     pub candidate_pairs: usize,
     /// Whether the pair budget ran out before all posting lists were paired.
     pub budget_exhausted: bool,
+    /// Candidate pairs in lists the pair budget refused after their
+    /// length-ratio gate was evaluated.
+    pub budget_dropped: usize,
 }
 
 /// The control-flow stage's output: candidate unit pairs plus funnel counters.
@@ -207,6 +210,7 @@ pub fn generate(files: &[FileFeatures], config: &ControlFlowConfig) -> ControlFl
         // refusing one list goes on to the next rather than ending the pass.
         if wanted > remaining {
             stats.budget_exhausted = true;
+            stats.budget_dropped = stats.budget_dropped.saturating_add(wanted);
             continue;
         }
         remaining -= wanted;
@@ -354,6 +358,7 @@ mod tests {
         let set = generate(&files, &config);
         assert!(set.pairs.is_empty());
         assert!(set.stats.budget_exhausted);
+        assert_eq!(set.stats.budget_dropped, 6);
     }
 
     #[test]

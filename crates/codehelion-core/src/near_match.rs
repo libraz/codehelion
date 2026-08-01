@@ -28,14 +28,17 @@
 //! 10): an LSH bucket larger than the posting cap is high-frequency structure
 //! and is dropped whole and counted, and a global pair budget bounds the
 //! distinct pairs examined, spent smallest-bucket-first so exhaustion drops
-//! the lowest-signal candidates. Everything dropped is counted in
+//! the lowest-signal candidates. The ceiling is checked from the bucket's
+//! pair count before materialising or deduplicating its pairs; once it fires,
+//! later buckets are not walked. Everything dropped is counted in
 //! [`NearMatchStats`].
 //!
 //! As in [`crate::candidate`], the budget is spent a bucket at a time: a bucket
 //! it cannot hold entirely is left alone rather than sampled, because a set of
 //! units compared to each other only in part is what grouping reads as a set
-//! that disagrees. A bucket costs only the pairs no earlier bucket already
-//! took, so the same pair banding twice is charged once.
+//! that disagrees. A bucket is charged by its full pair count before its pairs
+//! are materialised, which keeps the ceiling itself from incurring quadratic
+//! work.
 //!
 //! This design deliberately subsumes the separate size-bucket and
 //! prefix-filtering prefilters: LSH banding partitions the search, and the
@@ -161,6 +164,10 @@ pub struct NearMatchStats {
     pub candidate_pairs: usize,
     /// Whether the pair budget ran out before all buckets were paired.
     pub budget_exhausted: bool,
+    /// Candidate-pair work left in eligible buckets after the budget stopped
+    /// the pass. This counts the work the budget governs, before pairs from
+    /// separate LSH bands are deduplicated.
+    pub budget_dropped: usize,
 }
 
 /// The near-match stage's output: candidate unit pairs plus funnel statistics.
@@ -263,34 +270,38 @@ fn propose_pairs(
 
     let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut remaining = config.pair_budget;
-    for members in lists {
+    for (index, members) in lists.iter().enumerate() {
         stats.buckets += 1;
         if members.len() > config.posting_cap {
             stats.stop_buckets += 1;
             stats.stop_bucket_members += members.len();
             continue;
         }
-        // What this bucket adds, before deciding whether to take it: a pair an
-        // earlier bucket already holds is not a second candidate and is not
-        // charged for again. A bucket's own pairs are distinct by
-        // construction, so counting them is exact and costs no allocation.
-        let mut wanted = 0usize;
-        for (i, &a) in members.iter().enumerate() {
-            for &b in &members[i + 1..] {
-                let pair = if a <= b { (a, b) } else { (b, a) };
-                if !seen.contains(&pair) {
-                    wanted += 1;
-                }
-            }
-        }
-        // Dedup makes a bucket's cost depend on what came before it, so a
-        // bucket the allowance cannot hold does not end the pass: a later one
-        // may overlap what is already taken and cost nothing.
-        if wanted > remaining {
+        // The pair count is known from the bucket size. Check it before
+        // allocating or probing every pair: doing the O(k²) de-duplication to
+        // discover that the resource ceiling had already ruled the bucket out
+        // defeats the ceiling. Once a low-signal bucket cannot fit, the
+        // remaining sorted buckets are no smaller and are deliberately left
+        // unexamined too.
+        let possible = members
+            .len()
+            .saturating_mul(members.len().saturating_sub(1))
+            / 2;
+        if possible > remaining {
             stats.budget_exhausted = true;
-            continue;
+            stats.budget_dropped = lists[index..]
+                .iter()
+                .filter(|remaining| remaining.len() <= config.posting_cap)
+                .fold(0_usize, |total, remaining| {
+                    let pairs = remaining
+                        .len()
+                        .saturating_mul(remaining.len().saturating_sub(1))
+                        / 2;
+                    total.saturating_add(pairs)
+                });
+            break;
         }
-        remaining -= wanted;
+        remaining -= possible;
         for (i, &a) in members.iter().enumerate() {
             for &b in &members[i + 1..] {
                 let pair = if a <= b { (a, b) } else { (b, a) };
@@ -571,14 +582,15 @@ mod tests {
         let set = generate(&files, &config);
         assert_eq!(set.stats.proposed_pairs, 0);
         assert!(set.stats.budget_exhausted);
+        assert_eq!(set.stats.budget_dropped, 192);
     }
 
     #[test]
-    fn a_refused_bucket_does_not_stop_the_pass_accounting_for_the_rest() {
-        // A bucket costs only what no earlier bucket already took, so its cost
-        // does not follow its size and a refusal says nothing about the
-        // buckets behind it. The pass goes on to them, and its own count of
-        // what it looked at stays the count of what is there.
+    fn a_refused_bucket_stops_before_quadratic_deduplication() {
+        // Lists are visited smallest first. The two-unit bucket fits, then the
+        // three-unit bucket exceeds the remaining allowance. The latter and
+        // every larger bucket are left untouched: a resource ceiling must not
+        // spend quadratic work discovering it should have stopped.
         let units = vec![
             unit(&[1, 2, 3, 4], &[5, 6], 20),
             unit(&[1, 2, 3, 4], &[5, 6], 20),
@@ -596,10 +608,13 @@ mod tests {
             },
         );
         assert!(squeezed.stats.budget_exhausted);
-        assert_eq!(squeezed.stats.buckets, full.stats.buckets);
         // The two-unit bucket costs one pair and is met first, so it survives
         // the allowance the three-unit bucket cannot fit into.
         assert_eq!(squeezed.stats.proposed_pairs, 1);
+        assert!(
+            squeezed.stats.buckets < full.stats.buckets,
+            "the ceiling stops before walking buckets it cannot examine"
+        );
     }
 
     #[test]

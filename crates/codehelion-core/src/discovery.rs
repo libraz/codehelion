@@ -80,6 +80,8 @@ pub struct SkipReport {
     pub binary: u64,
     /// Files that could not be read.
     pub unreadable: u64,
+    /// Symbolic links deliberately left unresolved by the walker.
+    pub symlinks: u64,
     /// Directory entries the walker could not read.
     pub walk_errors: u64,
 }
@@ -88,7 +90,7 @@ impl SkipReport {
     /// Total number of skipped entries.
     #[must_use]
     pub const fn total(&self) -> u64 {
-        self.too_large + self.binary + self.unreadable + self.walk_errors
+        self.too_large + self.binary + self.unreadable + self.symlinks + self.walk_errors
     }
 }
 
@@ -169,6 +171,7 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
 
     let mut skipped = SkipReport {
         too_large: walked.too_large,
+        symlinks: walked.symlinks,
         walk_errors: walked.walk_errors,
         ..SkipReport::default()
     };
@@ -234,8 +237,8 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
 /// Reached only when no `.c`, `.cpp` or unambiguously-extended header was
 /// found at all, which in practice means a header-only library: every line the
 /// run will read is in these files, so the grammar is the whole result rather
-/// than a detail of it. Each header's head is read for a C++-only spelling and
-/// the first one that speaks decides — `language::speaks_cpp` says why one is
+/// than a detail of it. Each header is read for a C++-only spelling and the
+/// first one that speaks decides — `language::speaks_cpp` says why one is
 /// enough, and why C is the answer when none of them says otherwise.
 fn headers_read_alone(candidates: &[walk::Candidate]) -> Language {
     for candidate in candidates {
@@ -245,8 +248,7 @@ fn headers_read_alone(candidates: &[walk::Candidate]) -> Language {
         let Ok(bytes) = std::fs::read(&candidate.absolute_path) else {
             continue;
         };
-        let head = &bytes[..bytes.len().min(HEAD_BYTES)];
-        if language::speaks_cpp(&String::from_utf8_lossy(head)) {
+        if language::speaks_cpp(&String::from_utf8_lossy(&bytes)) {
             return Language::Cpp;
         }
     }
@@ -386,6 +388,56 @@ mod tests {
         assert_eq!(report.skipped.too_large, 1);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_counted_without_reading_or_following_them() {
+        use std::os::unix::fs::symlink;
+
+        let (_guard, root) = fixture();
+        let target = root.join("src/lib.rs");
+        symlink(&target, root.join("src/linked.rs")).unwrap();
+
+        let report = discover(&root, &DiscoveryConfig::default()).unwrap();
+        assert_eq!(report.skipped.symlinks, 1);
+        assert_eq!(report.skipped.total(), 1);
+        assert!(
+            report
+                .units
+                .iter()
+                .all(|unit| unit.relative_path != Path::new("src/linked.rs"))
+        );
+    }
+
+    #[test]
+    fn no_ignore_includes_dot_paths() {
+        let (_guard, root) = fixture();
+        fs::create_dir_all(root.join(".generated")).unwrap();
+        fs::write(root.join(".generated/extra.rs"), "pub fn extra() {}\n").unwrap();
+
+        let default = discover(&root, &DiscoveryConfig::default()).unwrap();
+        assert!(
+            default
+                .units
+                .iter()
+                .all(|unit| unit.relative_path != Path::new(".generated/extra.rs"))
+        );
+
+        let report = discover(
+            &root,
+            &DiscoveryConfig {
+                respect_gitignore: false,
+                ..DiscoveryConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            report
+                .units
+                .iter()
+                .any(|unit| unit.relative_path == Path::new(".generated/extra.rs"))
+        );
+    }
+
     #[test]
     fn language_selection_excludes_disabled_languages() {
         let (_guard, root) = fixture();
@@ -431,6 +483,21 @@ mod tests {
             Language::Cpp
         );
         assert_eq!(language_of(&["a.c", "b.c", "x.h"], "x.h"), Language::C);
+    }
+
+    #[test]
+    fn a_cpp_only_spelling_after_a_long_header_preamble_settles_the_dialect() {
+        let (_guard, root) = tree_of(&["only.h"]);
+        let preamble = "license line\n".repeat(HEAD_BYTES);
+        fs::write(
+            root.join("only.h"),
+            format!("/* {preamble} */\nnamespace audit {{ struct Entry {{}}; }}\n"),
+        )
+        .unwrap();
+
+        let report = discover(&root, &DiscoveryConfig::default()).unwrap();
+        assert_eq!(report.header_language, Language::Cpp);
+        assert_eq!(report.build_variant.headers, Some(Language::Cpp));
     }
 
     #[test]

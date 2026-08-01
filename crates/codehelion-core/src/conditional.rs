@@ -72,6 +72,9 @@ struct Arm {
     index: u32,
     /// Whether the parse of this conditional is worth believing.
     believed: bool,
+    /// Whether this arm can be reached without evaluating an unknown
+    /// condition. A literal `#if 0` is not source code any build can hold.
+    reachable: bool,
 }
 
 /// The conditionals enclosing a unit, outermost first.
@@ -81,6 +84,77 @@ struct Arm {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArmPath {
     arms: Vec<Arm>,
+}
+
+/// A literal condition that lexical preprocessing can establish without
+/// expanding macros or evaluating an expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaticCondition {
+    /// The condition is literally false.
+    False,
+    /// The condition is literally true.
+    True,
+    /// Evaluating the condition would require preprocessing context.
+    Unknown,
+}
+
+/// Tracks the lexical arm active at each token in a C-family source file.
+///
+/// This deliberately recognises only directive nesting and literal `0` / `1`
+/// conditions. It neither expands macros nor chooses an unknown arm; callers
+/// use the resulting paths solely to avoid comparing two arms that cannot
+/// coexist in one build.
+#[derive(Debug, Default)]
+pub struct ArmTracker {
+    path: ArmPath,
+    definitely_taken: Vec<bool>,
+    next: u32,
+}
+
+impl ArmTracker {
+    /// Start a preprocessor conditional and enter its first arm.
+    pub fn begin(&mut self, condition: StaticCondition) {
+        let reachable = condition != StaticCondition::False;
+        self.path.arms.push(Arm {
+            conditional: self.next,
+            index: 0,
+            believed: true,
+            reachable,
+        });
+        self.next = self.next.wrapping_add(1);
+        self.definitely_taken
+            .push(condition == StaticCondition::True);
+    }
+
+    /// Advance to an `#elif` or `#else` arm.
+    ///
+    /// A branch after a literal true arm is unreachable. Otherwise a literal
+    /// false `#elif` is unreachable while an unknown condition remains
+    /// possible, which is the conservative result without preprocessing.
+    pub fn next_arm(&mut self, condition: StaticCondition) {
+        let (Some(arm), Some(taken)) =
+            (self.path.arms.last_mut(), self.definitely_taken.last_mut())
+        else {
+            return;
+        };
+        arm.index = arm.index.saturating_add(1);
+        arm.reachable = !*taken && condition != StaticCondition::False;
+        if condition == StaticCondition::True {
+            *taken = true;
+        }
+    }
+
+    /// Leave the innermost preprocessor conditional.
+    pub fn end(&mut self) {
+        let _ = self.path.arms.pop();
+        let _ = self.definitely_taken.pop();
+    }
+
+    /// Return the arm path active for the next lexical token.
+    #[must_use]
+    pub fn current(&self) -> ArmPath {
+        self.path.clone()
+    }
 }
 
 impl ArmPath {
@@ -108,6 +182,7 @@ impl ArmPath {
                     conditional: *next,
                     index: 0,
                     believed: !stumbled_inside(node),
+                    reachable: true,
                 });
                 *next = next.wrapping_add(1);
             }
@@ -141,6 +216,13 @@ impl ArmPath {
             .zip(&other.arms)
             .find(|(a, b)| a != b)
             .is_some_and(|(a, b)| a.believed && b.believed && a.conditional == b.conditional)
+    }
+
+    /// Whether this path contains code no build can reach without evaluating
+    /// an unknown condition.
+    #[must_use]
+    pub fn is_unreachable(&self) -> bool {
+        self.arms.iter().any(|arm| !arm.reachable)
     }
 }
 

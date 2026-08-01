@@ -14,14 +14,20 @@
 //!
 //! # What counts
 //!
-//! Only an explicit marker in the source: whatever the language's own test
-//! tooling makes an author write to declare a case. In Rust that is an
-//! attribute; in C and C++ it is the macro the framework defines, which stands
-//! where a function's return type and name would. Directory conventions are
-//! not consulted, because path rules already express them and expressing one
-//! thing two ways invites the two to disagree. A unit inside a marked
-//! container — a module compiled only for tests — is test code too, since it
-//! exists to serve the cases in it.
+//! An explicit marker in the source is the strongest evidence: whatever the
+//! language's own test tooling makes an author write to declare a case. In
+//! Rust that is an attribute; in C and C++ it is the macro the framework
+//! defines, which stands where a function's return type and name would. A
+//! unit inside a marked container — a module compiled only for tests — is test
+//! code too, since it exists to serve the cases in it.
+//!
+//! Paths are also evidence, not a suppression rule. The conventional test
+//! paths in [`DEFAULT_TEST_PATHS`] classify otherwise unmarked helpers as test
+//! code so presentation can rank them below production findings without hiding
+//! them. The caller may replace or disable those patterns. Reports retain
+//! whether a group was recognised by a marker or a path, and a marker wins
+//! whenever both apply, so the two sources of evidence never disagree
+//! silently.
 //!
 //! # A container the file does not hold
 //!
@@ -53,7 +59,81 @@ use crate::frontend::{Token, TokenKind};
 /// Recorded alongside the other detector versions: a change in what counts as
 /// test code changes how a report is ordered, so results from two versions are
 /// not comparable without saying so.
-pub const TEST_CODE_VERSION: &str = "test-code-v1";
+pub const TEST_CODE_VERSION: &str = "test-code-v2";
+
+/// Conventional paths that contain test code.
+///
+/// The patterns are applied only to source files the scan already selected, so
+/// the `.*` suffixes cover the Rust, C, and C++ extensions without classifying
+/// files from another language. They are configuration defaults rather than a
+/// hidden rule: callers can replace them or set the configured list to empty.
+pub const DEFAULT_TEST_PATHS: &[&str] = &[
+    "**/tests/**",
+    "**/test/**",
+    "**/__tests__/**",
+    "**/*_test.*",
+    "**/*_tests.*",
+    "**/test_*.*",
+    "**/*_spec.*",
+];
+
+/// Why a unit or group is recognised as test code.
+///
+/// A marker is stronger than a path. For a group, the value is present only
+/// when every member is test code; it is `Marker` when any member has marker
+/// evidence and `Path` only when every member has path evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TestCodeEvidence {
+    /// The source declares the test with a language or framework marker.
+    Marker,
+    /// The file's path matches a configured test-path convention.
+    Path,
+}
+
+impl TestCodeEvidence {
+    /// The spelling used in persisted reports and database rows.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Marker => "marker",
+            Self::Path => "path",
+        }
+    }
+
+    /// Decode a persisted evidence spelling.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "marker" => Some(Self::Marker),
+            "path" => Some(Self::Path),
+            _ => None,
+        }
+    }
+}
+
+/// Aggregate member evidence for one group.
+///
+/// Every member must be test code for a group to be test code. Among those
+/// groups, one marker is enough to name the aggregate `marker`; otherwise all
+/// members are path-derived and it names `path`.
+#[must_use]
+pub fn aggregate_evidence(
+    evidence: impl IntoIterator<Item = Option<TestCodeEvidence>>,
+) -> Option<TestCodeEvidence> {
+    let mut any = false;
+    let mut marker = false;
+    for item in evidence {
+        let item = item?;
+        any = true;
+        marker |= item == TestCodeEvidence::Marker;
+    }
+    any.then_some(if marker {
+        TestCodeEvidence::Marker
+    } else {
+        TestCodeEvidence::Path
+    })
+}
 
 /// The identifier a test attribute is built around.
 ///
@@ -567,6 +647,38 @@ mod tests {
         assert!(!is_marked(Language::Rust, &[]));
     }
 
+    #[test]
+    fn default_test_paths_cover_directories_and_rust_c_cpp_file_conventions() {
+        assert_eq!(
+            DEFAULT_TEST_PATHS,
+            [
+                "**/tests/**",
+                "**/test/**",
+                "**/__tests__/**",
+                "**/*_test.*",
+                "**/*_tests.*",
+                "**/test_*.*",
+                "**/*_spec.*",
+            ]
+        );
+    }
+
+    #[test]
+    fn aggregate_evidence_requires_every_member_and_prefers_markers() {
+        assert_eq!(
+            aggregate_evidence([Some(TestCodeEvidence::Path), Some(TestCodeEvidence::Path)]),
+            Some(TestCodeEvidence::Path)
+        );
+        assert_eq!(
+            aggregate_evidence([Some(TestCodeEvidence::Path), Some(TestCodeEvidence::Marker),]),
+            Some(TestCodeEvidence::Marker)
+        );
+        assert_eq!(
+            aggregate_evidence([Some(TestCodeEvidence::Marker), None]),
+            None
+        );
+    }
+
     /// The suite flags for a set of files given as `(path, source pieces)`,
     /// every one of them Rust.
     fn suite_over(files: &[(&str, &[&str])]) -> Vec<bool> {
@@ -649,9 +761,10 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_named_for_tests_that_nobody_declared_is_ordinary_code() {
-        // The convention is not the evidence. Without the attribute somewhere
-        // in the tree, a `tests` directory is a directory.
+    fn a_directory_named_for_tests_that_nobody_declared_is_not_a_marked_module() {
+        // This resolver follows only Rust module declarations. The caller
+        // applies configured path evidence later, after it has the whole
+        // structural report to classify.
         let suite = suite_over(&[
             ("src/lib.rs", &["fn", "run", "(", ")", "{", "}"]),
             ("src/tests/parser.rs", &["fn", "check", "(", ")", "{", "}"]),

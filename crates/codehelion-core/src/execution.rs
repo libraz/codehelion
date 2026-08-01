@@ -248,6 +248,20 @@ pub struct Limits {
     /// Largest number of candidate pairs generated before a run gives up on
     /// generating more and says so.
     pub max_candidates: usize,
+    /// Longest posting list or fragment class admitted to candidate pairing.
+    ///
+    /// This bounds the fan-out before the pair budget applies. Keeping it
+    /// separate makes the untrusted profile cap both the number of lists and
+    /// the work one high-frequency list can create.
+    pub posting_cap: usize,
+    /// Largest related component refined as one group.
+    ///
+    /// Complete-linkage refinement can repeatedly compare a component, so a
+    /// distinct ceiling keeps an adversarially large related set bounded even
+    /// after candidate generation has stopped.
+    pub max_component: usize,
+    /// Longest a compiler helper may spend answering for one source unit.
+    pub helper_timeout: Duration,
     /// What may run.
     pub execution: ExecutionPolicy,
 }
@@ -259,6 +273,12 @@ impl Default for Limits {
             parse_timeout: Duration::from_secs(30),
             max_subprocess_bytes: None,
             max_candidates: 5_000_000,
+            // The structural candidate pipeline's default is the largest
+            // shipped posting ceiling. The untrusted profile below is lower
+            // than both it and the Fast pipeline's smaller default.
+            posting_cap: 256,
+            max_component: 1024,
+            helper_timeout: Duration::from_secs(300),
             execution: ExecutionPolicy::deny_all(),
         }
     }
@@ -278,6 +298,17 @@ impl Limits {
             parse_timeout: Duration::from_secs(5),
             max_subprocess_bytes: Some(1024 * 1024 * 1024),
             max_candidates: 500_000,
+            // 32 is below Fast's 64 and Structural's 256 default caps, so it
+            // constrains every shipped pairing path rather than only one.
+            posting_cap: 32,
+            // Refinement has super-linear worst-case cost. 128 keeps the
+            // contained piece small enough for the profile while preserving a
+            // useful amount of context for ordinary duplicate families.
+            max_component: 128,
+            // Compiler helpers may legitimately take longer than a lexer,
+            // but five minutes makes a stalled helper an unbounded wait for an
+            // untrusted tree. Thirty seconds is deliberately conservative.
+            helper_timeout: Duration::from_secs(30),
             execution: ExecutionPolicy::deny_all(),
         }
     }
@@ -292,11 +323,27 @@ impl Limits {
         self.max_file_bytes <= other.max_file_bytes
             && self.parse_timeout <= other.parse_timeout
             && self.max_candidates <= other.max_candidates
+            && self.posting_cap <= other.posting_cap
+            && self.max_component <= other.max_component
+            && self.helper_timeout <= other.helper_timeout
+            && option_ceiling_at_most(self.max_subprocess_bytes, other.max_subprocess_bytes)
             && self
                 .execution
                 .permitted()
                 .iter()
                 .all(|class| other.execution.permits(*class))
+    }
+}
+
+/// Whether an optional memory ceiling is no weaker than another one.
+///
+/// `None` means no ceiling, so a bounded profile is at most an unbounded one,
+/// while an unbounded profile is never at most a bounded one.
+const fn option_ceiling_at_most(left: Option<u64>, right: Option<u64>) -> bool {
+    match (left, right) {
+        (_, None) => true,
+        (Some(left), Some(right)) => left <= right,
+        (None, Some(_)) => false,
     }
 }
 

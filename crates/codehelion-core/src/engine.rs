@@ -25,10 +25,11 @@ mod detect;
 mod group;
 mod segment;
 
-pub use group::{content_entropy_bits, group_pairs};
+pub use group::{content_entropy_bits, entropy_ratio, group_pairs};
 pub use normalize::LiteralNorm;
 
 use crate::clone_class::CloneClass;
+use crate::conditional::ArmPath;
 use crate::frontend::{Token, Unit};
 
 /// One lexed file, as the engine consumes it.
@@ -64,9 +65,9 @@ pub struct EngineConfig {
     pub pair_budget: usize,
     /// Largest number of consecutive statements cut as one candidate fragment.
     pub max_statement_window: usize,
-    /// Groups whose content entropy is below this many bits are marked
-    /// suppressed as degenerate repetition.
-    pub entropy_floor: f64,
+    /// Groups whose normalized content-entropy ratio is below this value are
+    /// marked suppressed as degenerate repetition.
+    pub entropy_ratio_floor: f64,
     /// Groups with more members than this are marked suppressed as recurring
     /// boilerplate.
     pub degree_cap: usize,
@@ -81,7 +82,7 @@ impl Default for EngineConfig {
             posting_cap: 64,
             pair_budget: 1_000_000,
             max_statement_window: 8,
-            entropy_floor: 3.9,
+            entropy_ratio_floor: 0.60,
             degree_cap: 16,
         }
     }
@@ -128,9 +129,11 @@ impl SuppressReason {
 /// A verified match between two instances of the same content.
 #[derive(Debug, Clone)]
 pub struct ClonePair {
-    /// Hash of the matched content; pairs with equal keys carry identical
-    /// content and merge into one group.
+    /// Compact candidate-derived content key retained for deterministic
+    /// presentation ordering.
     pub content_key: u64,
+    /// Collision-resistant matched-content identity used for grouping.
+    pub(crate) content_digest: fingerprint::ContentDigest,
     /// Clone classification.
     pub clone_type: CloneClass,
     /// Fraction of positions whose raw text also matches (1.0 for Type-1).
@@ -144,7 +147,7 @@ pub struct ClonePair {
 /// A set of instances sharing identical matched content.
 #[derive(Debug, Clone)]
 pub struct CloneGroup {
-    /// Hash of the shared content.
+    /// Compact content key retained for deterministic presentation ordering.
     pub content_key: u64,
     /// Clone classification: Type-2 if any member differs in raw text.
     pub clone_type: CloneClass,
@@ -200,6 +203,9 @@ pub struct EngineStats {
     pub hash_collisions: usize,
     /// Whether the pair budget ran out before all candidates were examined.
     pub pair_budget_exhausted: bool,
+    /// Candidate pairs that cannot coexist because they occupy alternative
+    /// preprocessor arms, or an arm known to be unreachable.
+    pub conditional_pairs: usize,
 }
 
 /// The engine's output: clone groups plus run statistics.
@@ -218,6 +224,36 @@ pub struct EngineReport {
 /// deterministically sorted.
 #[must_use]
 pub fn detect(files: &[InputFile<'_>], config: &EngineConfig) -> EngineReport {
+    detect_inner(files, None, config)
+}
+
+/// Detect clones while excluding pairs separated by C-family preprocessor arms.
+///
+/// `arm_paths` is parallel to `files`, and each path slice is parallel to its
+/// file's token stream. Invalid metadata is ignored rather than causing an
+/// analysis failure; the ordinary Fast result is safer than trusting a partial
+/// conditional map.
+#[must_use]
+pub fn detect_with_arm_paths(
+    files: &[InputFile<'_>],
+    arm_paths: &[&[ArmPath]],
+    config: &EngineConfig,
+) -> EngineReport {
+    let arm_paths = (arm_paths.len() == files.len()
+        && arm_paths
+            .iter()
+            .zip(files)
+            .all(|(paths, file)| paths.len() == file.tokens.len()))
+    .then_some(arm_paths);
+    detect_inner(files, arm_paths, config)
+}
+
+/// Shared Fast detection implementation, with optional preprocessor context.
+fn detect_inner(
+    files: &[InputFile<'_>],
+    arm_paths: Option<&[&[ArmPath]]>,
+    config: &EngineConfig,
+) -> EngineReport {
     let mut stats = EngineStats {
         files: files.len(),
         tokens: files.iter().map(|f| f.tokens.len()).sum(),
@@ -256,11 +292,38 @@ pub fn detect(files: &[InputFile<'_>], config: &EngineConfig) -> EngineReport {
         &mut stats,
         &mut fragment_budget,
     ));
+    if let Some(arm_paths) = arm_paths {
+        let before = pairs.len();
+        pairs.retain(|pair| pair_can_coexist(arm_paths, pair));
+        stats.conditional_pairs = before.saturating_sub(pairs.len());
+    }
     stats.pairs = pairs.len();
     stats.pair_budget_exhausted = raw_budget.exhausted() || fragment_budget.exhausted();
 
     let groups = group_pairs(&pairs, files, config);
     EngineReport { groups, stats }
+}
+
+/// Whether a reported pair can be present in one C-family build.
+fn pair_can_coexist(paths: &[&[ArmPath]], pair: &ClonePair) -> bool {
+    let Some(left) = instance_arm_path(paths, &pair.a) else {
+        return false;
+    };
+    let Some(right) = instance_arm_path(paths, &pair.b) else {
+        return false;
+    };
+    !left.is_unreachable()
+        && !right.is_unreachable()
+        && (pair.a.file != pair.b.file || !left.excludes(right))
+}
+
+/// Return a common conditional path only when a match remains in one arm.
+fn instance_arm_path<'a>(paths: &'a [&[ArmPath]], instance: &Instance) -> Option<&'a ArmPath> {
+    let range = paths
+        .get(instance.file)?
+        .get(instance.token_start..instance.token_end)?;
+    let first = range.first()?;
+    range.iter().all(|path| path == first).then_some(first)
 }
 
 #[cfg(test)]
@@ -367,6 +430,54 @@ mod tests {
         // The match is anchored to the enclosing function on both sides.
         assert_eq!(group.members[0].unit, Some(0));
         assert!((group.score - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn alternative_preprocessor_arms_do_not_form_a_fast_clone_group() {
+        use crate::conditional::{ArmTracker, StaticCondition};
+
+        let first = quick(FN_A);
+        let mut tokens = first.clone();
+        tokens.extend(quick(FN_A));
+        let split = first.len();
+        let units = [function_unit(0, split), function_unit(split, tokens.len())];
+        let files = [InputFile {
+            tokens: &tokens,
+            units: &units,
+        }];
+        let mut tracker = ArmTracker::default();
+        tracker.begin(StaticCondition::Unknown);
+        let mut paths = vec![tracker.current(); split];
+        tracker.next_arm(StaticCondition::Unknown);
+        paths.extend(vec![tracker.current(); tokens.len() - split]);
+
+        let report = detect_with_arm_paths(&files, &[&paths], &EngineConfig::default());
+        assert!(report.groups.is_empty(), "groups: {:?}", report.groups);
+        assert!(report.stats.conditional_pairs > 0);
+    }
+
+    #[test]
+    fn literal_false_preprocessor_arm_does_not_form_a_fast_clone_group() {
+        use crate::conditional::{ArmTracker, StaticCondition};
+
+        let first = quick(FN_A);
+        let mut tokens = first.clone();
+        tokens.extend(quick(FN_A));
+        let split = first.len();
+        let units = [function_unit(0, split), function_unit(split, tokens.len())];
+        let files = [InputFile {
+            tokens: &tokens,
+            units: &units,
+        }];
+        let mut tracker = ArmTracker::default();
+        tracker.begin(StaticCondition::False);
+        let mut paths = vec![tracker.current(); split];
+        tracker.end();
+        paths.extend(vec![tracker.current(); tokens.len() - split]);
+
+        let report = detect_with_arm_paths(&files, &[&paths], &EngineConfig::default());
+        assert!(report.groups.is_empty(), "groups: {:?}", report.groups);
+        assert!(report.stats.conditional_pairs > 0);
     }
 
     #[test]
@@ -492,6 +603,78 @@ mod tests {
         let report = detect(&files, &config);
         assert!(report.stats.pair_budget_exhausted);
         assert!(report.groups.is_empty());
+    }
+
+    #[test]
+    fn a_pair_budget_never_reports_a_partial_candidate_class() {
+        // Seven consistently renamed bodies share one Type-2 candidate class
+        // with 21 relationships. A budget for only three relationships must
+        // omit the entire class, not report an arbitrary three-member group.
+        let sources: Vec<Vec<Token>> = (0..7)
+            .map(|index| {
+                quick(&format!(
+                    "fn function_{index} ( ) {{ let local_{index} = input_{index} + delta_{index} ; emit ( local_{index} , input_{index} , delta_{index} ) ; }}"
+                ))
+            })
+            .collect();
+        let units: Vec<Vec<Unit>> = sources
+            .iter()
+            .map(|tokens| vec![function_unit(0, tokens.len())])
+            .collect();
+        let files: Vec<InputFile<'_>> = sources
+            .iter()
+            .zip(&units)
+            .map(|(tokens, units)| InputFile { tokens, units })
+            .collect();
+        let complete = EngineConfig {
+            min_clone_tokens: 12,
+            posting_cap: 7,
+            pair_budget: 21,
+            ..EngineConfig::default()
+        };
+        let complete_report = detect(&files, &complete);
+        let complete_groups: Vec<_> = complete_report
+            .groups
+            .iter()
+            .filter(|group| group.clone_type == CloneClass::Type2)
+            .collect();
+        assert_eq!(complete_groups.len(), 1, "groups: {complete_groups:#?}");
+        assert_eq!(complete_groups[0].members.len(), 7);
+
+        let truncated = EngineConfig {
+            pair_budget: 3,
+            ..complete
+        };
+        let truncated_report = detect(&files, &truncated);
+        assert!(truncated_report.stats.pair_budget_exhausted);
+        assert_eq!(truncated_report.stats.fragment_pairs_available, 21);
+        assert_eq!(truncated_report.stats.fragment_candidates, 0);
+        assert!(
+            truncated_report.groups.is_empty(),
+            "a partial class must not become a smaller group: {:?}",
+            truncated_report.groups
+        );
+
+        // Fast-mode Type-1 seeding uses the same whole-class rule. The
+        // repeated source yields several eligible winnow lists, each with
+        // seven members; none may leak a three-member prefix.
+        let repeated = quick(FN_A);
+        let repeated_units = vec![function_unit(0, repeated.len())];
+        let repeated_files: Vec<InputFile<'_>> = (0..7)
+            .map(|_| InputFile {
+                tokens: &repeated,
+                units: &repeated_units,
+            })
+            .collect();
+        let raw_report = detect(&repeated_files, &truncated);
+        assert!(raw_report.stats.pair_budget_exhausted);
+        assert!(raw_report.stats.raw_pairs_available >= 21);
+        assert_eq!(raw_report.stats.seed_candidates, 0);
+        assert!(
+            raw_report.groups.is_empty(),
+            "groups: {:?}",
+            raw_report.groups
+        );
     }
 
     /// The pass that finds renamed copies must not be starved by the pass

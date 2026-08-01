@@ -49,7 +49,9 @@
 //! An inner block's run sits inside its enclosing statement, so a duplicated
 //! loop body is also detected as part of the duplicated loop. The larger region
 //! is the one worth reporting, so a region whose source spans are contained in
-//! another region's on both sides is absorbed into it and counted.
+//! another region's on both sides is absorbed into it and counted. Containment
+//! is indexed per file pair with a first-span sweep and two-dimensional Fenwick
+//! query, so a bucket of `m` folded regions costs `O(m log² m)`, not `O(m²)`.
 //!
 //! Output is deterministic: regions are keyed and ordered by content position
 //! alone, and the fold never depends on the order seeds arrive in.
@@ -59,6 +61,12 @@ use std::collections::BTreeMap;
 use crate::candidate::{CandidatePair, StatementRun};
 use crate::features::FeatureKind;
 use crate::ir::ByteRange;
+
+/// Version of the maximal-region folding and containment rules.
+///
+/// This changes which structural findings survive when the folding, extent, or
+/// containment policy changes, so it is recorded in the detector contract.
+pub const MAXIMAL_VERSION: &str = "maximal-v1";
 
 /// Default minimum reportable region length, in statements: the shortest
 /// window length, so the floor never silently discards a run the seed layer
@@ -246,14 +254,7 @@ pub fn consolidate(pairs: &[CandidatePair], config: &MaximalConfig) -> RegionSet
             continue;
         };
         stats.seeds += 1;
-        let a_bytes = ByteRange {
-            start: pair.a.start_byte,
-            end: pair.a.end_byte,
-        };
-        let b_bytes = ByteRange {
-            start: pair.b.start_byte,
-            end: pair.b.end_byte,
-        };
+        let (a_bytes, b_bytes) = pair_ranges(pair);
         if diverges(a_bytes, b_bytes, config.max_extent_ratio) {
             stats.divergent_extent += 1;
             continue;
@@ -313,9 +314,9 @@ pub fn consolidate(pairs: &[CandidatePair], config: &MaximalConfig) -> RegionSet
         )
     });
 
-    // Containment can only hold between regions over the same two files, so
-    // the quadratic scan runs inside a file-pair bucket rather than over every
-    // region in the corpus.
+    // Containment can only hold between regions over the same two files. Keep
+    // those candidates together, then answer each two-span containment query
+    // through an offline index rather than scanning a generated-code bucket.
     let mut buckets: BTreeMap<(usize, usize), Vec<CloneRegion>> = BTreeMap::new();
     for region in folded {
         if region.a.run.length < config.min_statements {
@@ -326,15 +327,18 @@ pub fn consolidate(pairs: &[CandidatePair], config: &MaximalConfig) -> RegionSet
             stats.self_overlapping += 1;
             continue;
         }
-        let kept = buckets.entry((region.a.file, region.b.file)).or_default();
-        if kept.iter().any(|outer| contains(outer, &region)) {
-            stats.absorbed += 1;
-            continue;
-        }
-        kept.push(region);
+        buckets
+            .entry((region.a.file, region.b.file))
+            .or_default()
+            .push(region);
     }
 
-    let mut kept: Vec<CloneRegion> = buckets.into_values().flatten().collect();
+    let mut kept: Vec<CloneRegion> = Vec::new();
+    for bucket in buckets.into_values() {
+        let (bucket, absorbed) = remove_contained(bucket);
+        stats.absorbed += absorbed;
+        kept.extend(bucket);
+    }
     kept.sort_unstable();
     stats.regions = kept.len();
     let shared = share(&kept);
@@ -344,6 +348,143 @@ pub fn consolidate(pairs: &[CandidatePair], config: &MaximalConfig) -> RegionSet
         shared,
         stats,
     }
+}
+
+/// The source byte spans carried by a candidate pair.
+const fn pair_ranges(pair: &CandidatePair) -> (ByteRange, ByteRange) {
+    (
+        ByteRange {
+            start: pair.a.start_byte,
+            end: pair.a.end_byte,
+        },
+        ByteRange {
+            start: pair.b.start_byte,
+            end: pair.b.end_byte,
+        },
+    )
+}
+
+/// Remove regions covered on both spans by an earlier region in one file pair.
+fn remove_contained(mut regions: Vec<CloneRegion>) -> (Vec<CloneRegion>, usize) {
+    // Sweep the first span from left to right. For equal starts, put the
+    // widest span first, so a pair of equal regions leaves one canonical
+    // representative instead of removing both.
+    regions.sort_by_key(|region| {
+        (
+            region.a.range.start,
+            std::cmp::Reverse(region.a.range.end),
+            region.b.range.start,
+            std::cmp::Reverse(region.b.range.end),
+            region.a,
+            region.b,
+        )
+    });
+    let mut index = ContainmentIndex::for_regions(&regions);
+    let mut kept = Vec::with_capacity(regions.len());
+    let mut absorbed = 0;
+    for region in regions {
+        if index.contains(&region) {
+            absorbed += 1;
+        } else {
+            index.insert(&region);
+            kept.push(region);
+        }
+    }
+    (kept, absorbed)
+}
+
+/// Offline two-dimensional range index for the second half of a clone region.
+///
+/// The outer sweep supplies the first-span start condition. Each Fenwick node
+/// covers a prefix of second-span starts and holds another Fenwick tree over
+/// first-span ends. Its value is the greatest second-span end seen there, so a
+/// query proves all remaining containment conditions in `O(log² m)`.
+struct ContainmentIndex {
+    /// Sorted unique starts of the second span.
+    second_starts: Vec<usize>,
+    /// Per outer Fenwick node, the possible ends of the first span.
+    first_ends: Vec<Vec<usize>>,
+    /// Per outer Fenwick node, maximum second-span ends by reversed first end.
+    greatest_second_ends: Vec<Vec<usize>>,
+}
+
+impl ContainmentIndex {
+    fn for_regions(regions: &[CloneRegion]) -> Self {
+        let mut second_starts: Vec<usize> =
+            regions.iter().map(|region| region.b.range.start).collect();
+        second_starts.sort_unstable();
+        second_starts.dedup();
+
+        let mut first_ends = vec![Vec::new(); second_starts.len() + 1];
+        for region in regions {
+            let mut node = second_starts.partition_point(|&start| start < region.b.range.start) + 1;
+            while node < first_ends.len() {
+                first_ends[node].push(region.a.range.end);
+                node += lowbit(node);
+            }
+        }
+        for ends in &mut first_ends {
+            ends.sort_unstable();
+            ends.dedup();
+        }
+        let greatest_second_ends = first_ends
+            .iter()
+            .map(|ends| vec![0; ends.len() + 1])
+            .collect();
+
+        Self {
+            second_starts,
+            first_ends,
+            greatest_second_ends,
+        }
+    }
+
+    /// Record one earlier region from the first-span sweep.
+    fn insert(&mut self, region: &CloneRegion) {
+        let mut node = self
+            .second_starts
+            .partition_point(|&start| start < region.b.range.start)
+            + 1;
+        while node < self.first_ends.len() {
+            let ends = &self.first_ends[node];
+            let reversed = ends.len() - ends.partition_point(|&end| end < region.a.range.end);
+            let values = &mut self.greatest_second_ends[node];
+            let mut position = reversed;
+            while position < values.len() {
+                values[position] = values[position].max(region.b.range.end);
+                position += lowbit(position);
+            }
+            node += lowbit(node);
+        }
+    }
+
+    /// Whether an earlier region covers both spans of `region`.
+    fn contains(&self, region: &CloneRegion) -> bool {
+        let mut node = self
+            .second_starts
+            .partition_point(|&start| start <= region.b.range.start);
+        while node > 0 {
+            let ends = &self.first_ends[node];
+            let reversed = ends.len() - ends.partition_point(|&end| end < region.a.range.end);
+            let values = &self.greatest_second_ends[node];
+            let mut greatest = 0;
+            let mut position = reversed;
+            while position > 0 {
+                greatest = greatest.max(values[position]);
+                position -= lowbit(position);
+            }
+            if greatest >= region.b.range.end {
+                return true;
+            }
+            node -= lowbit(node);
+        }
+        false
+    }
+}
+
+/// Least significant set bit of a one-based Fenwick index.
+const fn lowbit(index: usize) -> usize {
+    index & index.wrapping_neg()
 }
 
 /// Collapse pairwise regions into one entry per duplicated run.
@@ -476,14 +617,6 @@ pub const fn adjoins(a: &RegionSide, b: &RegionSide) -> bool {
         && (a.run.end() == b.run.start || b.run.end() == a.run.start)
 }
 
-/// Whether `outer` covers `inner` on both sides, in the same files.
-const fn contains(outer: &CloneRegion, inner: &CloneRegion) -> bool {
-    outer.a.file == inner.a.file
-        && outer.b.file == inner.b.file
-        && covers(outer.a.range, inner.a.range)
-        && covers(outer.b.range, inner.b.range)
-}
-
 /// Whether two matched sides cover source lengths further apart than `ratio`.
 /// A zero-length side is never divergent: there is nothing to compare.
 fn diverges(a: ByteRange, b: ByteRange, ratio: f64) -> bool {
@@ -499,10 +632,6 @@ fn diverges(a: ByteRange, b: ByteRange, ratio: f64) -> bool {
     measured > ratio
 }
 
-const fn covers(outer: ByteRange, inner: ByteRange) -> bool {
-    outer.start <= inner.start && inner.end <= outer.end
-}
-
 const fn union(a: ByteRange, b: ByteRange) -> ByteRange {
     ByteRange {
         start: if a.start < b.start { a.start } else { b.start },
@@ -512,275 +641,4 @@ const fn union(a: ByteRange, b: ByteRange) -> ByteRange {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
-mod tests {
-    use super::*;
-    use crate::candidate::FragmentRef;
-    use crate::features::FeatureHash;
-
-    /// A run shorter than every indexed window never reaches this stage, so a
-    /// floor below the shortest one would be a setting with nothing to apply
-    /// to. Stated here because the derivation reads as arithmetic otherwise.
-    #[test]
-    fn the_floor_is_the_shortest_run_the_seed_layer_can_offer() {
-        let shortest = crate::features::WINDOW_LENGTHS
-            .iter()
-            .copied()
-            .min()
-            .expect("windows are indexed at some length");
-        assert_eq!(usize::try_from(DEFAULT_MIN_STATEMENTS).unwrap(), shortest);
-    }
-
-    /// A window seed at a statement offset, with byte anchors derived from the
-    /// offset so ranges stay ordered and non-overlapping between statements.
-    fn window(file: usize, unit: usize, block: u32, start: u32, length: u32) -> FragmentRef {
-        FragmentRef {
-            file,
-            unit,
-            start_byte: usize::try_from(start).unwrap() * 10,
-            end_byte: usize::try_from(start + length).unwrap() * 10,
-            extent: length,
-            run: Some(StatementRun {
-                block,
-                start,
-                length,
-            }),
-        }
-    }
-
-    fn seed(a: FragmentRef, b: FragmentRef) -> CandidatePair {
-        CandidatePair {
-            kind: FeatureKind::StatementWindow,
-            hash: FeatureHash::from_bytes([1; 16]),
-            a,
-            b,
-        }
-    }
-
-    #[test]
-    fn overlapping_seeds_fold_into_one_run() {
-        // Three stride-1 windows of length four covering statements 0..6 in
-        // one unit and 2..8 in the other.
-        let pairs: Vec<CandidatePair> = (0..3)
-            .map(|i| seed(window(0, 0, 0, i, 4), window(1, 0, 0, i + 2, 4)))
-            .collect();
-        let set = consolidate(&pairs, &MaximalConfig::default());
-
-        assert_eq!(set.regions.len(), 1);
-        let region = set.regions[0];
-        assert_eq!(region.a.run.start, 0);
-        assert_eq!(region.a.run.length, 6);
-        assert_eq!(region.b.run.start, 2);
-        assert_eq!(region.b.run.length, 6);
-        assert_eq!(region.a.range, ByteRange { start: 0, end: 60 });
-        assert_eq!(region.b.range, ByteRange { start: 20, end: 80 });
-        assert_eq!(region.seeds, 3);
-        assert_eq!(set.stats.seeds, 3);
-        assert_eq!(set.stats.regions, 1);
-    }
-
-    #[test]
-    fn a_gap_between_seeds_leaves_two_runs() {
-        // Statements 0..4 and 8..12 match; 4..8 does not. Bridging the gap
-        // would claim an exact match over statements the seeds never covered.
-        let pairs = vec![
-            seed(window(0, 0, 0, 0, 4), window(1, 0, 0, 0, 4)),
-            seed(window(0, 0, 0, 8, 4), window(1, 0, 0, 8, 4)),
-        ];
-        let set = consolidate(&pairs, &MaximalConfig::default());
-        assert_eq!(set.regions.len(), 2);
-        assert!(set.regions.iter().all(|region| region.a.run.length == 4));
-    }
-
-    #[test]
-    fn seeds_at_different_alignments_stay_apart() {
-        // The same statements on side a match two different stretches on side
-        // b. Those are two shared runs, not one long one.
-        let pairs = vec![
-            seed(window(0, 0, 0, 0, 4), window(1, 0, 0, 0, 4)),
-            seed(window(0, 0, 0, 1, 4), window(1, 0, 0, 9, 4)),
-        ];
-        let set = consolidate(&pairs, &MaximalConfig::default());
-        assert_eq!(set.regions.len(), 2);
-        assert!(set.regions.iter().all(|region| region.seeds == 1));
-    }
-
-    #[test]
-    fn a_run_contained_in_a_longer_one_is_absorbed() {
-        // A length-8 match and a length-4 match inside it, at the same
-        // alignment but in different blocks, so the fold cannot merge them.
-        let pairs = vec![
-            seed(window(0, 0, 0, 0, 8), window(1, 0, 0, 0, 8)),
-            seed(window(0, 0, 1, 2, 4), window(1, 0, 1, 2, 4)),
-        ];
-        let set = consolidate(&pairs, &MaximalConfig::default());
-        assert_eq!(set.regions.len(), 1);
-        assert_eq!(set.regions[0].a.run.length, 8);
-        assert_eq!(set.stats.folded, 2);
-        assert_eq!(set.stats.absorbed, 1);
-    }
-
-    #[test]
-    fn a_run_matching_a_shifted_copy_of_itself_is_dropped() {
-        // One block of repeated statements: window 0..4 equals window 1..5.
-        // Reporting that as two instances would double-count one stretch.
-        let pairs = vec![seed(window(0, 0, 0, 0, 4), window(0, 0, 0, 1, 4))];
-        let set = consolidate(&pairs, &MaximalConfig::default());
-        assert!(set.regions.is_empty());
-        assert_eq!(set.stats.self_overlapping, 1);
-    }
-
-    #[test]
-    fn two_runs_in_one_unit_that_do_not_touch_are_kept() {
-        let pairs = vec![seed(window(0, 0, 0, 0, 4), window(0, 0, 1, 20, 4))];
-        let set = consolidate(&pairs, &MaximalConfig::default());
-        assert_eq!(set.regions.len(), 1);
-        assert_eq!(set.stats.self_overlapping, 0);
-    }
-
-    /// The side a window seed describes, for the adjacency questions.
-    fn side(unit: usize, block: u32, start: u32, length: u32) -> RegionSide {
-        RegionSide {
-            file: 0,
-            unit,
-            run: StatementRun {
-                block,
-                start,
-                length,
-            },
-            range: ByteRange {
-                start: usize::try_from(start).unwrap() * 10,
-                end: usize::try_from(start + length).unwrap() * 10,
-            },
-        }
-    }
-
-    #[test]
-    fn a_run_that_continues_another_tiles_one_stretch() {
-        let first = side(0, 0, 0, 4);
-        assert!(adjoins(&first, &side(0, 0, 4, 4)), "end to end, in order");
-        assert!(adjoins(&side(0, 0, 4, 4), &first), "and in either order");
-
-        // One statement between them makes two sites, not one stretch.
-        assert!(!adjoins(&first, &side(0, 0, 5, 4)));
-        // A different block is a different stretch however the indices line up.
-        assert!(!adjoins(&first, &side(0, 1, 4, 4)));
-        // And two units are two sites however the file lays them out.
-        assert!(!adjoins(&first, &side(1, 0, 4, 4)));
-    }
-
-    #[test]
-    fn a_seed_whose_sides_cover_unequal_code_is_dropped() {
-        // Same four statement summaries, but one side spans three times the
-        // source: a loop with a long body summarises like a loop with a short
-        // one, and the size gap is what gives that away.
-        let mut a = window(0, 0, 0, 0, 4);
-        let mut b = window(1, 0, 0, 0, 4);
-        a.end_byte = a.start_byte + 100;
-        b.end_byte = b.start_byte + 300;
-        let set = consolidate(&[seed(a, b)], &MaximalConfig::default());
-        assert!(set.regions.is_empty());
-        assert_eq!(set.stats.seeds, 1);
-        assert_eq!(set.stats.divergent_extent, 1);
-
-        // The gate is a configured ratio, not a fixed rule.
-        let lenient = MaximalConfig {
-            max_extent_ratio: 4.0,
-            ..MaximalConfig::default()
-        };
-        assert_eq!(consolidate(&[seed(a, b)], &lenient).regions.len(), 1);
-    }
-
-    #[test]
-    fn the_minimum_length_drops_short_runs_and_counts_them() {
-        let pairs = vec![seed(window(0, 0, 0, 0, 4), window(1, 0, 0, 0, 4))];
-        let config = MaximalConfig {
-            min_statements: 5,
-            ..MaximalConfig::default()
-        };
-        let set = consolidate(&pairs, &config);
-        assert!(set.regions.is_empty());
-        assert_eq!(set.stats.below_minimum, 1);
-    }
-
-    #[test]
-    fn subtree_seeds_do_not_enter_the_fold() {
-        let mut pair = seed(window(0, 0, 0, 0, 4), window(1, 0, 0, 0, 4));
-        pair.kind = FeatureKind::Subtree;
-        pair.a.run = None;
-        pair.b.run = None;
-        let set = consolidate(&[pair], &MaximalConfig::default());
-        assert!(set.regions.is_empty());
-        assert_eq!(set.stats.seeds, 0);
-    }
-
-    #[test]
-    fn three_copies_of_one_run_are_one_shared_region_not_three_pairs() {
-        // Files 0, 1 and 2 hold the same four statements. Pairwise that is
-        // three matches describing one duplication.
-        let mut pairs = Vec::new();
-        for a in 0..3usize {
-            for b in a + 1..3 {
-                pairs.push(seed(window(a, 0, 0, 0, 4), window(b, 0, 0, 0, 4)));
-            }
-        }
-        let set = consolidate(&pairs, &MaximalConfig::default());
-        assert_eq!(set.regions.len(), 3);
-        assert_eq!(set.shared.len(), 1);
-        assert_eq!(set.stats.shared, 1);
-        let shared = &set.shared[0];
-        assert_eq!(shared.statements, 4);
-        let files: Vec<usize> = shared.occurrences.iter().map(|side| side.file).collect();
-        assert_eq!(files, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn two_unrelated_duplications_stay_separate() {
-        let pairs = vec![
-            seed(window(0, 0, 0, 0, 4), window(1, 0, 0, 0, 4)),
-            seed(window(2, 0, 0, 8, 4), window(3, 0, 0, 8, 4)),
-        ];
-        let set = consolidate(&pairs, &MaximalConfig::default());
-        assert_eq!(set.shared.len(), 2);
-        assert!(
-            set.shared
-                .iter()
-                .all(|region| region.occurrences.len() == 2)
-        );
-    }
-
-    #[test]
-    fn an_occurrence_matched_at_two_extents_belongs_to_both_sets() {
-        // File 0 shares six statements with file 1 and only the first four
-        // with file 2. Those are two duplications of different sizes, and
-        // merging them would claim file 2 holds all six.
-        let pairs = vec![
-            seed(window(0, 0, 0, 0, 4), window(1, 0, 0, 0, 4)),
-            seed(window(0, 0, 0, 2, 4), window(1, 0, 0, 2, 4)),
-            seed(window(0, 0, 1, 0, 4), window(2, 0, 0, 0, 4)),
-        ];
-        let set = consolidate(&pairs, &MaximalConfig::default());
-        let mut sizes: Vec<u32> = set.shared.iter().map(|region| region.statements).collect();
-        sizes.sort_unstable();
-        assert_eq!(sizes, vec![4, 6]);
-        assert!(
-            set.shared
-                .iter()
-                .all(|region| region.occurrences.len() == 2)
-        );
-    }
-
-    #[test]
-    fn folding_does_not_depend_on_seed_order() {
-        let forward = vec![
-            seed(window(0, 0, 0, 0, 4), window(1, 0, 0, 0, 4)),
-            seed(window(0, 0, 0, 1, 4), window(1, 0, 0, 1, 4)),
-            seed(window(0, 0, 0, 2, 4), window(1, 0, 0, 2, 4)),
-        ];
-        let mut backward = forward.clone();
-        backward.reverse();
-        assert_eq!(
-            consolidate(&forward, &MaximalConfig::default()),
-            consolidate(&backward, &MaximalConfig::default())
-        );
-    }
-}
+mod tests;

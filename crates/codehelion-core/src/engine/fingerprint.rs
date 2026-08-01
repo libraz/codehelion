@@ -3,9 +3,9 @@
 //! Every hash here is a pure function of token content (kind tags and
 //! normalized or raw text). No process randomness, no position, no file
 //! identity enters any hash, so runs are reproducible and equal content always
-//! collides intentionally. Hashes are 64-bit and used for candidate indexing
-//! only; every candidate match is verified token-by-token before it is
-//! reported, so a rare accidental collision costs time, not correctness.
+//! collides intentionally. The 64-bit FNV hashes are used only for candidate
+//! indexing. Grouping uses a domain-separated 128-bit BLAKE3 digest, so an
+//! attacker-controlled FNV collision cannot combine unrelated findings.
 
 use crate::frontend::Token;
 
@@ -13,6 +13,21 @@ use super::normalize::{NormAtom, NormToken};
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Collision-resistant identity of one matched token sequence for grouping.
+///
+/// This is deliberately separate from the 64-bit FNV candidate key. The
+/// latter keeps the index compact; this digest protects the user-visible
+/// equivalence relation after candidates have been verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ContentDigest([u8; 16]);
+
+impl ContentDigest {
+    #[cfg(test)]
+    pub(crate) const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+}
 
 /// Incremental FNV-1a over bytes.
 #[derive(Debug, Clone, Copy)]
@@ -80,6 +95,58 @@ pub fn norm_sequence_hash(tokens: &[NormToken<'_>]) -> u64 {
             h.bytes(&norm_token_hash(t).to_le_bytes())
         })
         .finish()
+}
+
+/// Collision-resistant grouping identity of a raw token sequence.
+#[must_use]
+pub(crate) fn raw_sequence_digest(tokens: &[Token]) -> ContentDigest {
+    let mut hasher = sequence_digest_hasher("codehelion/group/raw/v1", tokens.len());
+    for token in tokens {
+        hasher.update(&[token.kind.tag()]);
+        write_bytes(&mut hasher, token.text.as_bytes());
+    }
+    finish_digest(&hasher)
+}
+
+/// Collision-resistant grouping identity of a normalized token sequence.
+#[must_use]
+pub(crate) fn norm_sequence_digest(tokens: &[NormToken<'_>]) -> ContentDigest {
+    let mut hasher = sequence_digest_hasher("codehelion/group/normalized/v1", tokens.len());
+    for token in tokens {
+        hasher.update(&[token.tag]);
+        match token.atom {
+            NormAtom::Renamed(value) => {
+                hasher.update(&[1]);
+                hasher.update(&value.to_le_bytes());
+            }
+            NormAtom::Text(text) => {
+                hasher.update(&[2]);
+                write_bytes(&mut hasher, text.as_bytes());
+            }
+            NormAtom::Literal(class) => {
+                hasher.update(&[3, class]);
+            }
+        }
+    }
+    finish_digest(&hasher)
+}
+
+fn sequence_digest_hasher(domain: &str, token_count: usize) -> blake3::Hasher {
+    let mut hasher = blake3::Hasher::new();
+    write_bytes(&mut hasher, domain.as_bytes());
+    hasher.update(&u64::try_from(token_count).unwrap_or(u64::MAX).to_le_bytes());
+    hasher
+}
+
+fn write_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn finish_digest(hasher: &blake3::Hasher) -> ContentDigest {
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    ContentDigest(bytes)
 }
 
 /// Rolling polynomial hashes of every k-gram of `units` (mod 2^64):

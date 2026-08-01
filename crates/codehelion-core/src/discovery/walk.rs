@@ -2,8 +2,8 @@
 //!
 //! The walk is read-only and never follows symbolic links. It honours
 //! `.gitignore` and related ignore files by default so vendored and build
-//! output is skipped, and it applies a byte-size ceiling per file. Files that
-//! exceed the ceiling are counted, not silently dropped.
+//! output is skipped, and it applies a byte-size ceiling per file. Symbolic
+//! links and files that exceed the ceiling are counted, not silently dropped.
 
 use std::path::{Path, PathBuf};
 
@@ -39,6 +39,8 @@ pub(super) struct WalkOutput {
     pub(super) compile_commands: Option<PathBuf>,
     /// Files skipped because they exceeded the size ceiling.
     pub(super) too_large: u64,
+    /// Symbolic links deliberately left unresolved by the walker.
+    pub(super) symlinks: u64,
     /// Directory entries the walker could not read.
     pub(super) walk_errors: u64,
 }
@@ -60,6 +62,7 @@ pub(super) fn collect(root: &Path, settings: &WalkSettings) -> WalkOutput {
         manifests: Vec::new(),
         compile_commands: None,
         too_large: 0,
+        symlinks: 0,
         walk_errors: 0,
     };
 
@@ -71,7 +74,11 @@ pub(super) fn collect(root: &Path, settings: &WalkSettings) -> WalkOutput {
             .git_global(false)
             .git_exclude(false)
             .ignore(false)
-            .parents(false);
+            .parents(false)
+            // `--no-ignore` means every path under the requested root. The
+            // ignore crate's separate hidden-path filter otherwise still
+            // omits dot-directories even after all ignore files are disabled.
+            .hidden(false);
     }
 
     for result in builder.build() {
@@ -79,6 +86,13 @@ pub(super) fn collect(root: &Path, settings: &WalkSettings) -> WalkOutput {
             output.walk_errors += 1;
             continue;
         };
+        if entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_symlink())
+        {
+            output.symlinks += 1;
+            continue;
+        }
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }

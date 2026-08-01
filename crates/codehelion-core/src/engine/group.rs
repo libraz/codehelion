@@ -1,11 +1,11 @@
 //! Clone-pair grouping and noise scoring.
 //!
-//! Pairs whose matched content is identical (same content key) form one clone
-//! group; instances are deduplicated and the canonical instance is chosen by a
-//! deterministic tie-break. Exact-content equivalence classes trivially
-//! satisfy the constraint that every member match the canonical instance, so
-//! this interface can later be re-implemented with medoid-based grouping for
-//! near-match clones without changing callers.
+//! Pairs whose matched content has the same collision-resistant identity form
+//! one clone group; instances are deduplicated and the canonical instance is
+//! chosen by a deterministic tie-break. Exact-content equivalence classes
+//! trivially satisfy the constraint that every member match the canonical
+//! instance, so this interface can later be re-implemented with medoid-based
+//! grouping for near-match clones without changing callers.
 //!
 //! Each group carries two noise signals instead of being silently dropped:
 //! low content entropy (degenerate repetition such as long literal tables) and
@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::fingerprint::norm_token_hash;
+use super::fingerprint::{ContentDigest, norm_token_hash};
 use super::normalize::normalize;
 use super::{
     CloneClass, CloneGroup, ClonePair, EngineConfig, InputFile, Instance, LiteralNorm,
@@ -51,6 +51,23 @@ pub fn content_entropy_bits(tokens: &[Token], literals: LiteralNorm) -> f64 {
         .sum()
 }
 
+/// Entropy as a share of the largest value a token sequence of this length
+/// could have.
+///
+/// Absolute entropy grows simply because there are more positions to fill.
+/// Dividing by `log2(token_count)` makes the suppression floor describe
+/// diversity rather than clone length. Empty and one-token sequences carry no
+/// diversity evidence and return `0.0`.
+#[must_use]
+#[allow(clippy::cast_precision_loss)] // token counts are far below 2^52
+pub fn entropy_ratio(entropy_bits: f64, token_count: usize) -> f64 {
+    if token_count <= 1 {
+        0.0
+    } else {
+        entropy_bits / (token_count as f64).log2()
+    }
+}
+
 /// Entropy of one instance's matched content, under the run's literal
 /// strategy.
 fn entropy_bits(files: &[InputFile<'_>], instance: &Instance, config: &EngineConfig) -> f64 {
@@ -70,14 +87,17 @@ pub fn group_pairs(
     files: &[InputFile<'_>],
     config: &EngineConfig,
 ) -> Vec<CloneGroup> {
-    let mut by_key: BTreeMap<u64, Vec<&ClonePair>> = BTreeMap::new();
+    let mut by_key: BTreeMap<(u64, ContentDigest), Vec<&ClonePair>> = BTreeMap::new();
     for pair in pairs {
-        by_key.entry(pair.content_key).or_default().push(pair);
+        by_key
+            .entry((pair.content_key, pair.content_digest))
+            .or_default()
+            .push(pair);
     }
 
     let mut groups: Vec<CloneGroup> = by_key
         .into_iter()
-        .map(|(content_key, pairs)| {
+        .map(|((content_key, _), pairs)| {
             let mut members: Vec<Instance> = Vec::new();
             let mut seen: BTreeSet<(usize, usize, usize)> = BTreeSet::new();
             for pair in &pairs {
@@ -96,10 +116,12 @@ pub fn group_pairs(
             };
             let score = pairs.iter().map(|p| p.score).fold(f64::INFINITY, f64::min);
             let entropy = entropy_bits(files, &members[0], config);
+            let token_count = members[0].token_end - members[0].token_start;
+            let entropy_ratio = entropy_ratio(entropy, token_count);
             let degree = members.len();
             let suppressed = if degree > config.degree_cap {
                 Some(SuppressReason::HighFrequency)
-            } else if entropy < config.entropy_floor {
+            } else if entropy_ratio < config.entropy_ratio_floor {
                 Some(SuppressReason::LowEntropy)
             } else {
                 None
@@ -126,6 +148,7 @@ pub fn group_pairs(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::engine::fingerprint::raw_sequence_digest;
     use crate::frontend::{Lexeme, SourceSpan, TokenKind};
 
     fn tokens(texts: &[&str]) -> Vec<Token> {
@@ -145,6 +168,75 @@ mod tests {
             .collect()
     }
 
+    fn instance(file: usize) -> Instance {
+        Instance {
+            file,
+            token_start: 0,
+            token_end: 2,
+            start_line: 1,
+            end_line: 1,
+            unit: None,
+        }
+    }
+
+    #[test]
+    fn a_shared_64_bit_key_cannot_merge_distinct_verified_content() {
+        // Model an attacker-controlled FNV collision without relying on a
+        // particular construction: candidate keys are intentionally small,
+        // but the grouping relation must use the independent BLAKE3 digest.
+        let first = tokens(&["first", "content"]);
+        let second = tokens(&["first", "content"]);
+        let third = tokens(&["other", "tokens"]);
+        let fourth = tokens(&["other", "tokens"]);
+        let files = [
+            InputFile {
+                tokens: &first,
+                units: &[],
+            },
+            InputFile {
+                tokens: &second,
+                units: &[],
+            },
+            InputFile {
+                tokens: &third,
+                units: &[],
+            },
+            InputFile {
+                tokens: &fourth,
+                units: &[],
+            },
+        ];
+        let shared_candidate_key = 0x4b1d_fa11_u64;
+        let pairs = [
+            ClonePair {
+                content_key: shared_candidate_key,
+                content_digest: raw_sequence_digest(&first),
+                clone_type: CloneClass::Type1,
+                score: 1.0,
+                a: instance(0),
+                b: instance(1),
+            },
+            ClonePair {
+                content_key: shared_candidate_key,
+                content_digest: raw_sequence_digest(&third),
+                clone_type: CloneClass::Type1,
+                score: 1.0,
+                a: instance(2),
+                b: instance(3),
+            },
+        ];
+
+        let groups = group_pairs(&pairs, &files, &EngineConfig::default());
+
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|group| group.members.len() == 2));
+        assert!(
+            groups
+                .iter()
+                .all(|group| group.content_key == shared_candidate_key)
+        );
+    }
+
     #[test]
     fn entropy_separates_repetition_from_variety() {
         let empty = content_entropy_bits(&[], LiteralNorm::Full);
@@ -159,5 +251,22 @@ mod tests {
         let varied = content_entropy_bits(&tokens(&["a", "b", "c", "d"]), LiteralNorm::Full);
         assert!(varied > repeated);
         assert!((varied - 2.0).abs() < 1e-9, "expected 2 bits, got {varied}");
+
+        assert!(entropy_ratio(repeated, 4).abs() < 1e-12);
+        assert!((entropy_ratio(varied, 4) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn entropy_ratio_is_not_an_absolute_clone_length_floor() {
+        // Both slices are maximally diverse at their own length. Their bits
+        // differ because one is longer, but their normalized evidence is the
+        // same and neither can be hidden by a ratio floor below one.
+        let short = tokens(&["a", "b", "c", "d"]);
+        let long = tokens(&["a", "b", "c", "d", "e", "f", "g", "h"]);
+        let short_bits = content_entropy_bits(&short, LiteralNorm::Full);
+        let long_bits = content_entropy_bits(&long, LiteralNorm::Full);
+        assert!(long_bits > short_bits);
+        assert!((entropy_ratio(short_bits, short.len()) - 1.0).abs() < 1e-12);
+        assert!((entropy_ratio(long_bits, long.len()) - 1.0).abs() < 1e-12);
     }
 }

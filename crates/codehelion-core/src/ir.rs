@@ -37,7 +37,16 @@ use crate::frontend::{Diagnostic, Lexeme, Token};
 
 /// Version of the Syntax IR schema, recorded per file and hashed into every
 /// structural fingerprint.
-pub const IR_SCHEMA_VERSION: u32 = 1;
+pub const IR_SCHEMA_VERSION: u32 = 2;
+
+/// Maximum number of IR nodes on one root-to-leaf path emitted by the bundled
+/// structural frontends.
+///
+/// Frontends stop descending before this budget can be exceeded and preserve
+/// the omitted source region as an [`Shape::Error`] leaf. This keeps
+/// structural recovery bounded for mechanically generated and adversarial
+/// source files.
+pub const MAX_IR_DEPTH: usize = 500;
 
 /// A half-open byte range into the source text.
 ///
@@ -210,7 +219,9 @@ impl Shape {
 ///
 /// A node covers a contiguous token range (`token_start..token_end` indices
 /// into [`SyntaxIrFile::tokens`]) and a contiguous byte range of the source.
-/// Children are in source order and lie within their parent's ranges.
+/// Children are in source order and lie within their parent's ranges. Nodes
+/// destroy their descendants iteratively so dropping a recovered file does not
+/// consume stack space proportional to its depth.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IrNode {
     /// The node's shape.
@@ -236,10 +247,14 @@ impl IrNode {
     }
 
     /// Depth-first pre-order traversal over this node and its descendants.
+    ///
+    /// The traversal is iterative so callers can safely inspect externally
+    /// constructed IR too, even when it did not come from a bounded frontend.
     pub fn walk(&self, visit: &mut impl FnMut(&Self)) {
-        visit(self);
-        for child in &self.children {
-            child.walk(visit);
+        let mut pending = vec![self];
+        while let Some(node) = pending.pop() {
+            visit(node);
+            pending.extend(node.children.iter().rev());
         }
     }
 
@@ -262,6 +277,15 @@ impl IrNode {
             .filter(|child| child.shape.is_statement() || matches!(child.shape, Shape::Native(_)))
             .map(|child| StatementSummary::of(child, tokens))
             .collect()
+    }
+}
+
+impl Drop for IrNode {
+    fn drop(&mut self) {
+        let mut worklist = std::mem::take(&mut self.children);
+        while let Some(mut node) = worklist.pop() {
+            worklist.append(&mut node.children);
+        }
     }
 }
 
@@ -337,6 +361,13 @@ pub struct SyntaxIrFile {
     /// Source regions the parser marked as errors. Overlapping nodes are
     /// still emitted; these ranges only lower confidence downstream.
     pub error_ranges: Vec<ByteRange>,
+    /// Whether the frontend stopped descending after reaching its structural
+    /// depth budget.
+    ///
+    /// This is deliberately separate from [`Self::error_ranges`]: malformed
+    /// source is ordinary recovery, while a depth ceiling means the scan was
+    /// intentionally incomplete and must be reported as such.
+    pub depth_truncated: bool,
     /// Whether the file is the body of a module its tree declares test-only.
     ///
     /// Not something a parse can answer: the declaration carrying the marker
@@ -397,8 +428,9 @@ impl SyntaxIrFile {
 /// Like the Fast [`Frontend`](crate::frontend::Frontend), a structural
 /// frontend never executes, expands or resolves anything in the target code:
 /// it parses text and maps the tree. Malformed input degrades to
-/// [`Shape::Error`] nodes plus [`SyntaxIrFile::error_ranges`]; it never
-/// aborts the file.
+/// [`Shape::Error`] nodes plus [`SyntaxIrFile::error_ranges`]. A frontend
+/// that reaches its depth budget records the remaining source region in the
+/// same way instead of continuing recursive descent.
 pub trait StructuralFrontend {
     /// The language this frontend parses.
     fn language(&self) -> Language;
@@ -440,6 +472,23 @@ mod tests {
             },
             children: Vec::new(),
         }
+    }
+
+    #[test]
+    fn dropping_a_deep_tree_is_iterative() {
+        let mut tree = node(Shape::Block, 0, 0);
+        for _ in 0..10_000 {
+            tree = IrNode {
+                shape: Shape::Block,
+                name: None,
+                token_start: 0,
+                token_end: 0,
+                range: ByteRange { start: 0, end: 0 },
+                children: vec![tree],
+            };
+        }
+
+        drop(tree);
     }
 
     #[test]
@@ -593,6 +642,7 @@ mod tests {
             roots: vec![root],
             diagnostics: Vec::new(),
             error_ranges: Vec::new(),
+            depth_truncated: false,
             test_module: false,
         };
 
@@ -619,6 +669,7 @@ mod tests {
             roots,
             diagnostics: Vec::new(),
             error_ranges: Vec::new(),
+            depth_truncated: false,
             test_module: false,
         }
     }

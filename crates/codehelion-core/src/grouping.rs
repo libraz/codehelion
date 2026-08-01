@@ -71,7 +71,7 @@ use crate::verify::Confidence;
 /// medoid selection, the cohesion floors or the refinement order must bump it,
 /// as must a change to how the verdicts grouping could not place are folded
 /// into findings.
-pub const GROUPING_VERSION: &str = "grouping-v1";
+pub const GROUPING_VERSION: &str = "grouping-v3";
 
 /// Tuning for grouping. Similarities are in `[0, 1]`; the defaults are
 /// provisional and calibrated against the chain corpus.
@@ -91,15 +91,15 @@ pub struct GroupingConfig {
     /// [`Self::sampling_threshold`].
     pub sample_size: usize,
     /// Largest component refined as one piece. A component above this is cut
-    /// into consecutive pieces of this size in key order, each refined on its
-    /// own.
+    /// into key-ordered pieces, each refined on its own. Content-identical
+    /// units are never separated: one equivalence class can therefore exceed
+    /// this limit by itself.
     ///
-    /// Refinement is quadratic in the size of the component it runs on: every
-    /// round ejects the members too far from the medoid and re-refines them,
-    /// so a component where nearly every member ejects costs one full pass per
-    /// member. A codebase of thousands of structurally interchangeable units
-    /// — generated code, or a repository built to make the scan expensive —
-    /// produces exactly that component, which is why the ceiling exists at all
+    /// Refinement materializes the component's pairwise similarity matrix and
+    /// orders it once, so it costs O(k² log k) time and O(k²) memory. A
+    /// codebase of thousands of structurally interchangeable units — generated
+    /// code, or a repository built to make the scan expensive — still produces
+    /// exactly that component, which is why the ceiling exists at all
     /// (AGENTS.md §2-10, §7).
     ///
     /// Cutting costs recall, never soundness: each piece is refined by the
@@ -107,6 +107,8 @@ pub struct GroupingConfig {
     /// still cohesive. What is lost is the chance that two members landing in
     /// different pieces would have grouped. The cut is by stable key, so it is
     /// deterministic, and the count of components it fired on is reported.
+    /// Keeping equal-key units together prevents independently cut pieces
+    /// from minting the same content-derived group and finding identifiers.
     ///
     /// Which members the cut put apart is reported too, through
     /// [`GroupingSet::severed_by_the_ceiling`]. A caller that carries out the
@@ -276,12 +278,18 @@ pub fn group(
         }
     }
 
-    // Deterministic output order: by the medoid's key, then by size.
+    // Deterministic output order: by the medoid's key, then by group content.
     groups.sort_by(|left, right| {
         units[left.canonical]
             .key
             .cmp(&units[right.canonical].key)
             .then(left.members.len().cmp(&right.members.len()))
+            .then_with(|| {
+                left.members
+                    .iter()
+                    .map(|&member| units[member].key)
+                    .cmp(right.members.iter().map(|&member| units[member].key))
+            })
     });
     stats.groups = groups.len();
     GroupingSet {
@@ -414,8 +422,9 @@ fn union(parent: &mut [usize], a: usize, b: usize) {
 }
 
 /// The pieces of a component that refinement runs on: the component itself
-/// when it fits under [`GroupingConfig::max_component`], otherwise consecutive
-/// pieces of that size in key order.
+/// when it fits under [`GroupingConfig::max_component`], otherwise key-ordered
+/// pieces. An equal-key equivalence class is atomic: splitting it would create
+/// separate groups with the same content-derived identity.
 fn refinable_pieces(
     component: &[usize],
     units: &[GroupingUnit],
@@ -429,10 +438,32 @@ fn refinable_pieces(
     stats.oversized_components += 1;
     let mut ordered = component.to_vec();
     ordered.sort_by_key(|&member| units[member].key);
-    ordered
-        .chunks(limit)
-        .map(<[usize]>::to_vec)
-        .collect::<Vec<_>>()
+    let mut pieces = Vec::new();
+    let mut current = Vec::new();
+    let mut class_start = 0;
+    while class_start < ordered.len() {
+        let key = units[ordered[class_start]].key;
+        let class_end = ordered[class_start..]
+            .iter()
+            .position(|&member| units[member].key != key)
+            .map_or(ordered.len(), |offset| class_start + offset);
+        let class = &ordered[class_start..class_end];
+        if !current.is_empty() && current.len() + class.len() > limit {
+            pieces.push(std::mem::take(&mut current));
+        }
+        current.extend_from_slice(class);
+        // A content class larger than the ceiling is indivisible. Emit it as
+        // one oversized piece rather than minting identical groups from its
+        // arbitrary sub-pieces.
+        if current.len() > limit {
+            pieces.push(std::mem::take(&mut current));
+        }
+        class_start = class_end;
+    }
+    if !current.is_empty() {
+        pieces.push(current);
+    }
+    pieces
 }
 
 /// Refine one component into cohesive groups, appending them to `groups`.
@@ -469,7 +500,7 @@ fn refine_component(
     stats.medoid_ejections += rest.len();
 
     // Complete-linkage: remove members until the weakest pair clears the floor.
-    complete_linkage_trim(medoid, &mut kept, &mut rest, sim, config, stats);
+    complete_linkage_trim(medoid, &mut kept, &mut rest, units, sim, config, stats);
 
     if let Some(built) = build_group(medoid, &kept, units, sim) {
         groups.push(built);
@@ -532,52 +563,77 @@ fn total_similarity(member: usize, set: &[usize], sim: &SimilarityGraph) -> f64 
 /// removed member of the weakest pair is the non-medoid one with the lower
 /// total similarity inside `kept` (ties broken by the larger key), so the
 /// choice is deterministic and progress is guaranteed.
+///
+/// Pair similarities do not change while a component is refined.  Sort that
+/// matrix once, then discard inactive endpoints as members leave the set.
+/// Totals are a row cache: removing one member subtracts its row from every
+/// survivor.  The old implementation re-scanned the whole matrix and then
+/// re-summed two rows for every ejection, which made this O(k³).  This keeps
+/// the same decision rule in O(k² log k) time and O(k²) bounded memory.
 fn complete_linkage_trim(
     medoid: usize,
     kept: &mut Vec<usize>,
     rest: &mut Vec<usize>,
+    units: &[GroupingUnit],
     sim: &SimilarityGraph,
     config: &GroupingConfig,
     stats: &mut GroupingStats,
 ) {
+    let mut active = vec![false; units.len()];
+    for &member in kept.iter() {
+        active[member] = true;
+    }
+
+    let mut totals = vec![0.0; units.len()];
+    let mut pairs = Vec::with_capacity(kept.len().saturating_mul(kept.len().saturating_sub(1)) / 2);
+    for (index, &left) in kept.iter().enumerate() {
+        for &right in &kept[index + 1..] {
+            let similarity = sim.similarity(left, right);
+            totals[left] += similarity;
+            totals[right] += similarity;
+            pairs.push((similarity, canonical_pair(left, right, units), left, right));
+        }
+    }
+    pairs.sort_by(|left, right| {
+        left.0
+            .total_cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    let mut next_pair = 0;
+
     while kept.len() >= 2 {
-        let Some((weakest, worst_sim)) = weakest_pair(kept, sim) else {
+        while pairs
+            .get(next_pair)
+            .is_some_and(|(_, _, left, right)| !active[*left] || !active[*right])
+        {
+            next_pair += 1;
+        }
+        let Some(&(worst_sim, _, left, right)) = pairs.get(next_pair) else {
             break;
         };
         if worst_sim >= config.min_pairwise_similarity {
             break;
         }
-        let victim = pick_victim(medoid, weakest, kept, sim);
+        let victim = pick_victim(medoid, (left, right), &totals, units);
+        active[victim] = false;
+        for &member in kept.iter().filter(|&&member| member != victim) {
+            totals[member] -= sim.similarity(member, victim);
+        }
         kept.retain(|&m| m != victim);
         rest.push(victim);
         stats.linkage_splits += 1;
     }
 }
 
-/// The lowest-similarity pair inside `kept` and its similarity. `None` when
-/// there are fewer than two members.
-fn weakest_pair(kept: &[usize], sim: &SimilarityGraph) -> Option<((usize, usize), f64)> {
-    let mut worst: Option<((usize, usize), f64)> = None;
-    for (i, &left) in kept.iter().enumerate() {
-        for &right in &kept[i + 1..] {
-            let value = sim.similarity(left, right);
-            match worst {
-                Some((_, current)) if current <= value => {}
-                _ => worst = Some(((left, right), value)),
-            }
-        }
-    }
-    worst
-}
-
 /// From the weakest pair, pick the member to remove: never the medoid,
 /// otherwise the one with the lower total similarity inside `kept`, ties broken
-/// by the larger index (a stable, key-independent fallback).
+/// by the larger stable key. Equal keys name interchangeable content, so either
+/// occurrence has the same externally visible group identity.
 fn pick_victim(
     medoid: usize,
     (left, right): (usize, usize),
-    kept: &[usize],
-    sim: &SimilarityGraph,
+    totals: &[f64],
+    units: &[GroupingUnit],
 ) -> usize {
     if left == medoid {
         return right;
@@ -585,19 +641,31 @@ fn pick_victim(
     if right == medoid {
         return left;
     }
-    let left_total = total_similarity(left, kept, sim);
-    let right_total = total_similarity(right, kept, sim);
-    // Remove the lower-total member; on a tie remove the larger index.
+    let left_total = totals[left];
+    let right_total = totals[right];
+    // Remove the lower-total member; on a tie remove the larger content key.
     match left_total.total_cmp(&right_total) {
         std::cmp::Ordering::Less => left,
         std::cmp::Ordering::Greater => right,
         std::cmp::Ordering::Equal => {
-            if left > right {
+            if units[left].key >= units[right].key {
                 left
             } else {
                 right
             }
         }
+    }
+}
+
+/// An endpoint pair ordered by the units' stable keys. This is only used for
+/// deterministic tie-breaking; equal keys represent interchangeable content.
+fn canonical_pair(left: usize, right: usize, units: &[GroupingUnit]) -> ([u8; 16], [u8; 16]) {
+    let left_key = units[left].key;
+    let right_key = units[right].key;
+    if left_key <= right_key {
+        (left_key, right_key)
+    } else {
+        (right_key, left_key)
     }
 }
 
@@ -665,261 +733,4 @@ const fn weaker_confidence(a: Confidence, b: Confidence) -> Confidence {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
-mod tests {
-    use super::*;
-
-    /// Units keyed `0x00..`, `0x01..`, ... so key order matches index order.
-    fn units(count: usize) -> Vec<GroupingUnit> {
-        (0..count)
-            .map(|i| GroupingUnit {
-                key: [u8::try_from(i).unwrap(); 16],
-            })
-            .collect()
-    }
-
-    fn edge(a: usize, b: usize, similarity: f64) -> SimilarityEdge {
-        SimilarityEdge {
-            a,
-            b,
-            similarity,
-            class: CloneClass::Type3,
-            confidence: Confidence::Medium,
-        }
-    }
-
-    #[test]
-    fn a_transitive_chain_does_not_fuse_into_one_group() {
-        // 0-1-2-3-4, each adjacent pair strong, ends never compared. A plain
-        // connected-component grouping would return one group of five; medoid +
-        // complete-linkage must not, because 0 and 4 are dissimilar.
-        let units = units(5);
-        let edges = vec![
-            edge(0, 1, 0.9),
-            edge(1, 2, 0.9),
-            edge(2, 3, 0.9),
-            edge(3, 4, 0.9),
-        ];
-        let set = group(&units, &edges, &GroupingConfig::default());
-        assert_eq!(set.stats.components, 1, "the chain is one component");
-        assert!(
-            set.groups.iter().all(|g| g.members.len() < 5),
-            "no group may span the whole chain"
-        );
-        // Every reported group clears the cohesion floor on every internal pair.
-        for reported in &set.groups {
-            assert!(reported.min_pairwise >= 0.60);
-        }
-    }
-
-    #[test]
-    fn a_clique_is_one_group_with_a_deterministic_medoid() {
-        // A fully connected trio: one cohesive group, medoid is the smallest key
-        // on the total-similarity tie.
-        let units = units(3);
-        let edges = vec![edge(0, 1, 0.9), edge(1, 2, 0.9), edge(0, 2, 0.9)];
-        let set = group(&units, &edges, &GroupingConfig::default());
-        assert_eq!(set.groups.len(), 1);
-        let only = &set.groups[0];
-        assert_eq!(only.members.len(), 3);
-        assert_eq!(only.canonical, 0);
-        assert_eq!(only.members[0], 0, "medoid comes first");
-    }
-
-    /// Every pair among `count` units, all similar enough to group: one
-    /// component that refinement would otherwise handle as one piece.
-    fn clique(count: usize) -> Vec<SimilarityEdge> {
-        let mut edges = Vec::new();
-        for left in 0..count {
-            for right in (left + 1)..count {
-                edges.push(edge(left, right, 0.9));
-            }
-        }
-        edges
-    }
-
-    #[test]
-    fn a_component_over_the_ceiling_is_cut_into_pieces_and_the_cut_is_counted() {
-        let units = units(10);
-        let config = GroupingConfig {
-            max_component: 4,
-            ..GroupingConfig::default()
-        };
-        let set = group(&units, &clique(10), &config);
-        assert_eq!(set.stats.components, 1, "still one component");
-        assert_eq!(set.stats.oversized_components, 1, "the ceiling is reported");
-
-        // Recall is what the ceiling costs: the ten stay clones of each other
-        // but are reported as three groups instead of one.
-        assert_eq!(set.groups.len(), 3);
-        assert!(set.groups.iter().all(|g| g.members.len() <= 4));
-        let grouped: usize = set.groups.iter().map(|g| g.members.len()).sum();
-        assert_eq!(grouped, 10, "no member is lost to the cut");
-
-        // Soundness is what it does not cost: each piece is refined by the
-        // same rules, so every reported group is still cohesive.
-        assert!(
-            set.groups
-                .iter()
-                .all(|g| g.min_pairwise >= config.min_pairwise_similarity)
-        );
-    }
-
-    #[test]
-    fn the_cut_follows_the_keys_not_the_order_the_edges_arrived_in() {
-        let units = units(10);
-        let config = GroupingConfig {
-            max_component: 4,
-            ..GroupingConfig::default()
-        };
-        let mut reversed = clique(10);
-        reversed.reverse();
-        let forward = group(&units, &clique(10), &config);
-        let backward = group(&units, &reversed, &config);
-        assert_eq!(forward.groups, backward.groups);
-    }
-
-    #[test]
-    fn a_component_at_the_ceiling_is_refined_whole() {
-        let units = units(4);
-        let config = GroupingConfig {
-            max_component: 4,
-            ..GroupingConfig::default()
-        };
-        let set = group(&units, &clique(4), &config);
-        assert_eq!(set.stats.oversized_components, 0);
-        assert_eq!(set.groups.len(), 1);
-        assert_eq!(set.groups[0].members.len(), 4);
-        assert!(
-            !set.severed_by_the_ceiling(0, 3),
-            "nothing was cut, so nothing was severed"
-        );
-    }
-
-    #[test]
-    fn the_cut_says_which_pairs_it_kept_from_ever_meeting() {
-        // Ten mutual clones under a ceiling of four: cut into three pieces, so
-        // members of different pieces were never weighed against each other.
-        // A caller carrying out the relations no group holds has to tell that
-        // apart from a relation refinement considered and declined.
-        let units = units(10);
-        let config = GroupingConfig {
-            max_component: 4,
-            ..GroupingConfig::default()
-        };
-        let set = group(&units, &clique(10), &config);
-
-        let piece_of = |unit: usize| {
-            set.groups
-                .iter()
-                .position(|group| group.members.contains(&unit))
-                .expect("every member is grouped")
-        };
-        for left in 0..10 {
-            for right in (left + 1)..10 {
-                assert_eq!(
-                    set.severed_by_the_ceiling(left, right),
-                    piece_of(left) != piece_of(right),
-                    "{left} and {right}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_member_far_from_the_medoid_is_ejected() {
-        // 0,1,2 form a tight clique; 3 hangs off 2 weakly. 3 must not join the
-        // clique's group.
-        let units = units(4);
-        let edges = vec![
-            edge(0, 1, 0.95),
-            edge(0, 2, 0.95),
-            edge(1, 2, 0.95),
-            edge(2, 3, 0.62),
-        ];
-        let set = group(&units, &edges, &GroupingConfig::default());
-        let big = set
-            .groups
-            .iter()
-            .find(|g| g.members.contains(&0))
-            .expect("the clique forms a group");
-        assert!(
-            !big.members.contains(&3),
-            "the weakly attached member stays out of the clique"
-        );
-    }
-
-    #[test]
-    fn union_find_components_are_not_emitted_verbatim() {
-        // Two disjoint cliques: two components, two groups, and never one merged
-        // group.
-        let units = units(6);
-        let edges = vec![
-            edge(0, 1, 0.9),
-            edge(1, 2, 0.9),
-            edge(0, 2, 0.9),
-            edge(3, 4, 0.9),
-            edge(4, 5, 0.9),
-            edge(3, 5, 0.9),
-        ];
-        let set = group(&units, &edges, &GroupingConfig::default());
-        assert_eq!(set.stats.components, 2);
-        assert_eq!(set.groups.len(), 2);
-        assert!(set.groups.iter().all(|g| g.members.len() == 3));
-    }
-
-    #[test]
-    fn a_lone_unit_is_not_a_group() {
-        let units = units(2);
-        // No edges: two singletons, no group.
-        let set = group(&units, &[], &GroupingConfig::default());
-        assert!(set.groups.is_empty());
-    }
-
-    #[test]
-    fn the_group_takes_the_weakest_class_and_confidence() {
-        let units = units(3);
-        let edges = vec![
-            SimilarityEdge {
-                a: 0,
-                b: 1,
-                similarity: 0.95,
-                class: CloneClass::Type1,
-                confidence: Confidence::High,
-            },
-            SimilarityEdge {
-                a: 1,
-                b: 2,
-                similarity: 0.9,
-                class: CloneClass::Type3,
-                confidence: Confidence::Low,
-            },
-            SimilarityEdge {
-                a: 0,
-                b: 2,
-                similarity: 0.9,
-                class: CloneClass::Type2,
-                confidence: Confidence::Medium,
-            },
-        ];
-        let set = group(&units, &edges, &GroupingConfig::default());
-        let only = &set.groups[0];
-        assert_eq!(only.clone_type, CloneClass::Type3);
-        assert_eq!(only.confidence, Confidence::Low);
-    }
-
-    #[test]
-    fn grouping_is_deterministic_regardless_of_edge_order() {
-        let units = units(5);
-        let forward = vec![
-            edge(0, 1, 0.9),
-            edge(1, 2, 0.9),
-            edge(2, 3, 0.9),
-            edge(3, 4, 0.9),
-        ];
-        let mut reversed = forward.clone();
-        reversed.reverse();
-        let a = group(&units, &forward, &GroupingConfig::default());
-        let b = group(&units, &reversed, &GroupingConfig::default());
-        assert_eq!(a.groups, b.groups);
-    }
-}
+mod tests;

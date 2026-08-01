@@ -207,7 +207,7 @@ pub struct Token {
     pub span: SourceSpan,
 }
 
-/// The kind of a lexing problem.
+/// The kind of a recoverable Fast-frontend problem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticKind {
     /// A string literal was not closed before end of file.
@@ -218,9 +218,11 @@ pub enum DiagnosticKind {
     UnterminatedBlockComment,
     /// A byte that does not begin any valid token.
     UnexpectedCharacter,
+    /// An opening delimiter needed by a unit boundary had no matching closer.
+    UnmatchedDelimiter,
 }
 
-/// A recoverable lexing problem. Lexing continues past it.
+/// A recoverable Fast-frontend problem. Analysis continues past it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     /// What went wrong.
