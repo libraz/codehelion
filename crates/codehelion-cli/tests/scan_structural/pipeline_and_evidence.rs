@@ -36,6 +36,8 @@ fn untrusted_structural_scan_reports_all_effective_ceilings() {
             "helper_timeout_ms": 30_000,
             "posting_cap": 32,
             "pair_budget": 500_000,
+            "near_miss_delta": 0.05,
+            "near_miss_cap": 1_000,
             "sibling_candidate_budget": 50_000,
             "sibling_per_group_cap": 8,
             "sibling_total_cap": 1_000,

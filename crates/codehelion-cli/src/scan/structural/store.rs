@@ -6,13 +6,13 @@ use super::reporting::{
 };
 use super::{
     BTreeMap, CloneScope, CompilerHelperRow, CompilerOutcome, Config, ContentHash, Context,
-    FeatureRow, FileRow, GroupDetail, GroupRow, MemberRow, PriorityRow, REGION_SIMILARITY,
-    ReportInputs, Result, SemanticEvidenceRow, SemanticNodeMappingRow, SemanticOperationGraphRow,
-    SemanticUnitGraph, SiblingGroupRow, SiblingRow, SimilarityBreakdownRow, Snapshot,
-    StructuralGroup, SummaryRow, UnitRow, WEIGHT_VERSION, aggregate_test_code_evidence, bail,
-    engine, features, literal_norm, local_unit_indices, open_store, region_identifier_jaccard,
-    region_test_code_evidence, report, semantic, semantic_member_ranks, semantic_scope, shared,
-    stable_id, store_compiler,
+    FeatureRow, FileRow, GroupDetail, GroupRow, MemberRow, NearMissRow, PriorityRow,
+    REGION_SIMILARITY, ReportInputs, Result, SemanticEvidenceRow, SemanticNodeMappingRow,
+    SemanticOperationGraphRow, SemanticUnitGraph, SiblingGroupRow, SiblingRow,
+    SimilarityBreakdownRow, Snapshot, StructuralGroup, SummaryRow, UnitRow, WEIGHT_VERSION,
+    aggregate_test_code_evidence, bail, engine, features, literal_norm, local_unit_indices,
+    open_store, region_identifier_jaccard, region_test_code_evidence, report, semantic,
+    semantic_member_ranks, semantic_scope, shared, stable_id, store_compiler,
 };
 
 type SnapshotRows = (
@@ -61,6 +61,7 @@ pub(super) fn record(
         units,
         groups,
         sibling_groups: sibling_rows(inputs, &host_index)?,
+        near_misses: near_miss_rows(inputs, &host_index)?,
         features,
         compiler_helpers,
         compiler_units,
@@ -71,6 +72,38 @@ pub(super) fn record(
     } else {
         store.record_snapshot_part(&snapshot).map_err(Into::into)
     }
+}
+
+/// Convert bounded LSH diagnostics to the store's run-scoped representation.
+/// They deliberately carry no group or finding identity.
+fn near_miss_rows(
+    inputs: &ReportInputs<'_>,
+    host_index: &BTreeMap<usize, usize>,
+) -> Result<Vec<NearMissRow>> {
+    inputs
+        .analysis
+        .near_misses
+        .iter()
+        .map(|near_miss| {
+            let left = *host_index.get(&near_miss.a).with_context(|| {
+                format!(
+                    "near-miss source unit {} is missing from the snapshot",
+                    near_miss.a
+                )
+            })?;
+            let right = *host_index.get(&near_miss.b).with_context(|| {
+                format!(
+                    "near-miss source unit {} is missing from the snapshot",
+                    near_miss.b
+                )
+            })?;
+            Ok(NearMissRow {
+                left,
+                right,
+                estimated_jaccard: near_miss.estimated_jaccard,
+            })
+        })
+        .collect()
 }
 
 /// Convert core sibling evidence to the store's dedicated, non-membership
@@ -210,6 +243,12 @@ fn snapshot_rows(inputs: &ReportInputs<'_>, ranked: &[report::Group]) -> Result<
         for sibling in &siblings.siblings {
             host_index.entry(sibling.unit).or_insert(0);
         }
+    }
+    // Near misses are not findings, but both sides still need durable source
+    // anchors for `report --run` to reconstruct the diagnostic faithfully.
+    for near_miss in &inputs.analysis.near_misses {
+        host_index.entry(near_miss.a).or_insert(0);
+        host_index.entry(near_miss.b).or_insert(0);
     }
     for &index in &inputs.regions.reported {
         for occurrence in &inputs.analysis.regions[index].occurrences {

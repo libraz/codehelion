@@ -64,6 +64,41 @@ pub struct Report {
     /// not group members and are kept separate so primary clone membership
     /// stays a cohesive relation.
     pub siblings: Vec<GroupSiblings>,
+    /// Bounded LSH proposals immediately below the primary near-match estimate
+    /// gate. They are diagnostic telemetry, never findings or group members.
+    pub near_misses: Vec<NearMiss>,
+}
+
+/// One bounded LSH proposal that passed the size gate but fell just below the
+/// primary estimated-Jaccard threshold.
+#[derive(Debug, Serialize)]
+pub struct NearMiss {
+    /// MinHash-estimated Jaccard similarity below the primary gate.
+    pub estimated_jaccard: f64,
+    /// Lower side of the canonical proposal pair.
+    pub left: NearMissUnit,
+    /// Higher side of the canonical proposal pair.
+    pub right: NearMissUnit,
+}
+
+/// A source-unit anchor for a diagnostic near-match proposal.
+#[derive(Debug, Serialize)]
+pub struct NearMissUnit {
+    /// Stable whole-unit fingerprint, encoded as lowercase hexadecimal.
+    pub unit_fingerprint: String,
+    /// Source language.
+    pub language: String,
+    /// Source path relative to the scan root.
+    pub file: String,
+    /// 1-based source anchor.
+    pub start_line: u32,
+    /// 1-based source anchor.
+    pub end_line: u32,
+    /// Best-effort unit name, when parsing recovered one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// Token count of the whole unit.
+    pub tokens: u64,
 }
 
 /// Sibling findings owned by one primary clone group.
@@ -448,6 +483,10 @@ pub struct Guardrails {
     pub posting_cap: usize,
     /// Largest number of candidate pairs any pairing pass examined.
     pub pair_budget: usize,
+    /// Width of the estimated-Jaccard diagnostic band below the candidate threshold.
+    pub near_miss_delta: f64,
+    /// Maximum near-miss diagnostics retained by one run.
+    pub near_miss_cap: usize,
     /// Largest number of sibling-sweep comparisons.
     pub sibling_candidate_budget: usize,
     /// Maximum siblings retained by one primary group.
@@ -1023,6 +1062,9 @@ pub struct TextOptions {
     pub show_suppressed: bool,
     /// Also list incomplete local mirrors attached to visible primary groups.
     pub show_siblings: bool,
+    /// Also list run-scoped LSH diagnostics that narrowly missed the primary
+    /// candidate threshold.
+    pub show_near_misses: bool,
     /// The axis the report was put in order on, for the listing's heading.
     pub sort: Sort,
     /// Leave groups whose raw identifier agreement is below this out of the

@@ -1,5 +1,5 @@
 use super::*;
-use crate::report::tests::{sample_report, sample_siblings, structural_group};
+use crate::report::tests::{sample_near_miss, sample_report, sample_siblings, structural_group};
 
 fn sarif(report: &Report) -> serde_json::Value {
     serde_json::from_str(&report.to_sarif().unwrap()).unwrap()
@@ -105,6 +105,27 @@ fn a_sibling_is_a_property_of_its_primary_result_not_a_result_of_its_own() {
         0.76
     );
     assert_eq!(results[1]["properties"]["siblings"], serde_json::json!([]));
+}
+
+#[test]
+fn a_near_miss_is_a_run_property_not_a_primary_sarif_result() {
+    let mut report = sample_report();
+    report.near_misses = vec![sample_near_miss()];
+    let value = sarif(&report);
+
+    assert_eq!(
+        value["runs"][0]["properties"]["near_misses"][0]["left"]["file"],
+        "src/left.rs"
+    );
+    assert_eq!(
+        value["runs"][0]["properties"]["near_misses"][0]["estimated_jaccard"],
+        0.28
+    );
+    assert_eq!(
+        value["runs"][0]["results"].as_array().unwrap().len(),
+        report.groups.len(),
+        "a below-threshold proposal must never become a SARIF finding"
+    );
 }
 
 #[test]

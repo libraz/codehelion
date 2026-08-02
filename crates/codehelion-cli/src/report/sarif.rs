@@ -330,6 +330,7 @@ impl<'a> From<&'a Report> for Run<'a> {
                 summary: &report.summary,
                 database: &run.database,
                 run_id: run.run_id,
+                near_misses: &report.near_misses,
             },
         }
     }
@@ -705,6 +706,7 @@ struct RunProperties<'a> {
     summary: &'a Summary,
     database: &'a str,
     run_id: i64,
+    near_misses: &'a [super::NearMiss],
 }
 
 #[derive(Debug, Serialize)]

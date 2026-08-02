@@ -230,6 +230,21 @@ pub struct SiblingRow {
     pub boilerplate: Option<Boilerplate>,
 }
 
+/// One bounded, run-scoped LSH diagnostic that fell just below the primary
+/// near-match estimate gate.
+///
+/// Unlike a [`SiblingRow`], this has no owning group and no finding identity:
+/// it was never verified or promoted into a primary clone relation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NearMissRow {
+    /// Index into [`Snapshot::units`] of the lower proposed unit.
+    pub left: usize,
+    /// Index into [`Snapshot::units`] of the higher proposed unit.
+    pub right: usize,
+    /// MinHash-estimated Jaccard similarity that fell below the primary gate.
+    pub estimated_jaccard: f64,
+}
+
 /// Persisted registered-rule evidence for one restricted semantic group.
 #[derive(Debug, Clone)]
 pub struct SemanticEvidenceRow {
@@ -430,6 +445,8 @@ pub struct Snapshot<'a> {
     pub groups: Vec<GroupRow>,
     /// Incomplete local mirrors keyed by their owning primary group.
     pub sibling_groups: Vec<SiblingGroupRow>,
+    /// Bounded LSH diagnostics that are not primary findings or group members.
+    pub near_misses: Vec<NearMissRow>,
     /// Per-unit candidate-extraction features, referencing [`Self::units`] by
     /// index. Empty in Fast mode, which derives no structural features.
     pub features: Vec<FeatureRow>,

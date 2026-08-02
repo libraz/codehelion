@@ -1,10 +1,10 @@
 use super::{
     BTreeSet, BuildVariant, FileFeatures, GroupDetail, GroupingUnit, ResolvedTypes, SimilarityEdge,
-    StructuralConfig, StructuralRegion, StructuralReport, StructuralStats, StructuralUnit,
-    SyntaxIrFile, Unit, UnitEvidence, VerifyConfig, candidate, confirm_regions, control_flow,
-    drop_subsumed, features, flatten_units, group_detail, grouping, grow_runs, lift_to_unit_pairs,
-    maximal, near_match, sweep_siblings, token_count_meets_minimum, unit_evidence,
-    unit_meets_minimum, unrepresented_pairs, verify, view,
+    StructuralConfig, StructuralNearMiss, StructuralRegion, StructuralReport, StructuralStats,
+    StructuralUnit, SyntaxIrFile, Unit, UnitEvidence, VerifyConfig, candidate, confirm_regions,
+    control_flow, drop_subsumed, features, flatten_units, group_detail, grouping, grow_runs,
+    lift_to_unit_pairs, maximal, near_match, sweep_siblings, token_count_meets_minimum,
+    unit_evidence, unit_meets_minimum, unrepresented_pairs, verify, view,
 };
 
 /// Run the structural pipeline over parsed IR files.
@@ -46,6 +46,15 @@ pub fn analyze_resolved(
     let candidate = candidate::generate(&feature_files, &config.candidate);
     let near = near_match::generate(&feature_files, &config.near_match);
     let skeleton = control_flow::generate(&feature_files, &config.control_flow);
+    let near_misses = near
+        .near_misses
+        .iter()
+        .map(|near_miss| StructuralNearMiss {
+            a: offsets[near_miss.a.file] + near_miss.a.unit,
+            b: offsets[near_miss.b.file] + near_miss.b.unit,
+            estimated_jaccard: near_miss.estimated_jaccard,
+        })
+        .collect();
     let lifted = lift_to_unit_pairs(
         &candidate,
         &near,
@@ -184,6 +193,7 @@ pub fn analyze_resolved(
         details,
         unrepresented,
         siblings,
+        near_misses,
         stats,
     }
 }

@@ -59,7 +59,11 @@ impl Report {
         if opts.verbose {
             self.render_funnel(&palette, out)?;
         }
-        self.render_groups(opts, &palette, out)
+        self.render_groups(opts, &palette, out)?;
+        if opts.show_near_misses {
+            self.render_near_misses(&palette, out)?;
+        }
+        Ok(())
     }
 
     /// The stage-by-stage pass counts, wide enough to be read as a column.
@@ -403,6 +407,48 @@ impl Report {
                     )?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Render run-scoped diagnostics only when the text caller requested
+    /// them. They are not grouped or ranked because the primary detector
+    /// deliberately rejected them before verification.
+    fn render_near_misses(&self, palette: &Palette, out: &mut impl Write) -> io::Result<()> {
+        if self.near_misses.is_empty() {
+            return Ok(());
+        }
+        writeln!(out)?;
+        writeln!(out, "{}", palette.bold("near-match near misses:"))?;
+        for near_miss in self.near_misses.iter().take(TEXT_GROUP_LIMIT) {
+            writeln!(
+                out,
+                "  estimated Jaccard {:.2}: {}:{}{} ↔ {}:{}{}",
+                near_miss.estimated_jaccard,
+                near_miss.left.file,
+                near_miss.left.start_line,
+                near_miss
+                    .left
+                    .unit
+                    .as_deref()
+                    .map(|unit| format!(" ({unit})"))
+                    .unwrap_or_default(),
+                near_miss.right.file,
+                near_miss.right.start_line,
+                near_miss
+                    .right
+                    .unit
+                    .as_deref()
+                    .map(|unit| format!(" ({unit})"))
+                    .unwrap_or_default(),
+            )?;
+        }
+        if self.near_misses.len() > TEXT_GROUP_LIMIT {
+            writeln!(
+                out,
+                "  ... and {} more near misses",
+                self.near_misses.len() - TEXT_GROUP_LIMIT
+            )?;
         }
         Ok(())
     }

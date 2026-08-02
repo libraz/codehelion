@@ -550,6 +550,7 @@ pub fn measure_store_insert(
         units: unit_rows,
         groups: group_rows,
         sibling_groups: Vec::new(),
+        near_misses: Vec::new(),
         features: Vec::new(),
         files: Vec::new(),
         compiler_helpers: Vec::new(),

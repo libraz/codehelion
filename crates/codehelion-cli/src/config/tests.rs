@@ -68,6 +68,8 @@ fn degenerate_numeric_settings_are_rejected_with_their_key() {
         ),
         ("limits.posting-cap", "[limits]\nposting-cap = 1"),
         ("limits.pair-budget", "[limits]\npair-budget = 0"),
+        ("limits.near-miss-delta", "[limits]\nnear-miss-delta = 0"),
+        ("limits.near-miss-cap", "[limits]\nnear-miss-cap = 0"),
         ("limits.max-component", "[limits]\nmax-component = 1"),
     ] {
         let error = Config::from_toml(text).expect_err("degenerate value must be rejected");
@@ -111,6 +113,8 @@ fn limit_defaults_match_the_engine_and_discovery_defaults() {
     // mode at its own default rather than imposing one mode's on both.
     assert_eq!(limits.posting_cap, None);
     assert_eq!(limits.pair_budget, None);
+    assert_eq!(limits.near_miss_delta, None);
+    assert_eq!(limits.near_miss_cap, None);
     let grouping = codehelion_core::grouping::GroupingConfig::default();
     assert_eq!(limits.max_component, grouping.max_component);
     assert!(
@@ -127,11 +131,28 @@ fn partial_limits_section_keeps_other_ceilings_at_their_defaults() {
     assert_eq!(config.limits.max_file_bytes, 1024);
     assert_eq!(config.limits.posting_cap, Limits::default().posting_cap);
     assert_eq!(config.limits.pair_budget, Limits::default().pair_budget);
+    assert_eq!(
+        config.limits.near_miss_delta,
+        Limits::default().near_miss_delta
+    );
+    assert_eq!(config.limits.near_miss_cap, Limits::default().near_miss_cap);
     assert_eq!(config.limits.max_component, Limits::default().max_component);
     assert_eq!(
         config.limits.helper_timeout_ms,
         Limits::default().helper_timeout_ms
     );
+}
+
+#[test]
+fn near_miss_diagnostic_band_and_cap_are_configurable_and_bounded() {
+    let config = Config::from_toml("[limits]\nnear-miss-delta = 0.04\nnear-miss-cap = 7")
+        .expect("near-miss settings parse");
+    assert_eq!(config.limits.near_miss_delta, Some(0.04));
+    assert_eq!(config.limits.near_miss_cap, Some(7));
+
+    let error = Config::from_toml("[limits]\nnear-miss-delta = 0.31")
+        .expect_err("the default estimate threshold bounds the diagnostic band");
+    assert!(format!("{error:#}").contains("limits.near-miss-delta"));
 }
 
 #[test]

@@ -28,10 +28,10 @@ use codehelion_store::artifact::{
 use codehelion_store::query::{IdKind, StoredVariant};
 use codehelion_store::snapshot::{
     CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow, CrossLanguageSemanticMemberRow,
-    FeatureRow, FileRow, FunnelDropRow, FunnelStageRow, GroupRow, MemberRow, PriorityRow,
-    SemanticEvidenceRow, SemanticNodeMappingRow, SemanticOperationGraphRow, SiblingGroupRow,
-    SiblingRow, SimilarityBreakdownRow, Snapshot, SummaryRow, SuppressionRuleRow, UnitRow,
-    UnparsedRow, UnusedRuleRow,
+    FeatureRow, FileRow, FunnelDropRow, FunnelStageRow, GroupRow, MemberRow, NearMissRow,
+    PriorityRow, SemanticEvidenceRow, SemanticNodeMappingRow, SemanticOperationGraphRow,
+    SiblingGroupRow, SiblingRow, SimilarityBreakdownRow, Snapshot, SummaryRow, SuppressionRuleRow,
+    UnitRow, UnparsedRow, UnusedRuleRow,
 };
 use codehelion_store::{Store, StoreError};
 
@@ -193,6 +193,7 @@ fn sample_snapshot<'a>(
             ],
         }],
         sibling_groups: Vec::new(),
+        near_misses: Vec::new(),
         features: Vec::new(),
         files: vec![
             FileRow {

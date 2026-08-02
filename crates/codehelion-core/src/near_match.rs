@@ -84,6 +84,17 @@ pub const DEFAULT_POSTING_CAP: usize = 256;
 /// Default global candidate-pair upper bound.
 pub const DEFAULT_PAIR_BUDGET: usize = 2_000_000;
 
+/// Default width of the diagnostic band directly below the candidate gate.
+///
+/// Near misses are deliberately a small inspection window, not a second
+/// candidate stream. They make it possible to see proposals that only just
+/// missed the estimate gate without retaining the unbounded set of every
+/// rejected LSH collision.
+pub const DEFAULT_NEAR_MISS_DELTA: f64 = 0.05;
+
+/// Default global cap on retained near-match diagnostics.
+pub const DEFAULT_NEAR_MISS_CAP: usize = 1_000;
+
 /// Tuning for near-match candidate generation. Defaults are provisional and
 /// calibrated against the corpus with the funnel measurement.
 #[derive(Debug, Clone, PartialEq)]
@@ -104,6 +115,12 @@ pub struct NearMatchConfig {
     pub posting_cap: usize,
     /// Upper bound on distinct candidate pairs examined.
     pub pair_budget: usize,
+    /// Width of the diagnostic estimate band immediately below
+    /// [`Self::min_estimated_jaccard`].
+    pub near_miss_delta: f64,
+    /// Maximum below-threshold, size-compatible LSH proposals retained as
+    /// diagnostic near misses.
+    pub near_miss_cap: usize,
 }
 
 impl Default for NearMatchConfig {
@@ -116,6 +133,8 @@ impl Default for NearMatchConfig {
             min_estimated_jaccard: DEFAULT_MIN_ESTIMATED_JACCARD,
             posting_cap: DEFAULT_POSTING_CAP,
             pair_budget: DEFAULT_PAIR_BUDGET,
+            near_miss_delta: DEFAULT_NEAR_MISS_DELTA,
+            near_miss_cap: DEFAULT_NEAR_MISS_CAP,
         }
     }
 }
@@ -125,12 +144,42 @@ impl NearMatchConfig {
     fn rows(&self) -> usize {
         (self.num_hashes / self.bands.max(1)).max(1)
     }
+
+    /// Lowest estimate retained as a diagnostic near miss.
+    ///
+    /// A caller can ask for a wider band than the threshold itself, but it
+    /// still cannot retain estimates below zero. The upper endpoint remains
+    /// exclusive in [`is_near_miss`], so an estimate that clears the primary
+    /// candidate threshold can never be duplicated here.
+    fn near_miss_floor(&self) -> f64 {
+        (self.min_estimated_jaccard - self.near_miss_delta).max(0.0)
+    }
+
+    /// Whether a below-threshold estimate belongs to the diagnostic band.
+    fn is_near_miss(&self, estimate: f64) -> bool {
+        estimate >= self.near_miss_floor() && estimate < self.min_estimated_jaccard
+    }
 }
 
 /// A near-match candidate: two units whose structural shingle sets overlap
 /// enough to be a possible Type-3 clone. Canonical: `a < b`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NearMatchPair {
+    /// The lower unit.
+    pub a: UnitRef,
+    /// The higher unit.
+    pub b: UnitRef,
+    /// `MinHash`-estimated Jaccard similarity of the two shingle sets.
+    pub estimated_jaccard: f64,
+}
+
+/// One size-compatible LSH proposal whose estimate fell just below the
+/// primary candidate threshold.
+///
+/// This is diagnostic telemetry only. It is never lifted to verification,
+/// grouping, or a primary finding.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NearMatchNearMiss {
     /// The lower unit.
     pub a: UnitRef,
     /// The higher unit.
@@ -160,6 +209,13 @@ pub struct NearMatchStats {
     pub filtered_by_size: usize,
     /// Pairs dropped by the estimated-Jaccard gate.
     pub filtered_by_jaccard: usize,
+    /// Size-compatible, below-threshold pairs inside the configured
+    /// diagnostic band before its retention cap.
+    pub near_miss_band_pairs: usize,
+    /// Diagnostic near misses retained under the global cap.
+    pub near_misses_retained: usize,
+    /// Diagnostic near misses not retained after the global cap was reached.
+    pub near_miss_cap_dropped: usize,
     /// Candidate pairs emitted.
     pub candidate_pairs: usize,
     /// Whether the pair budget ran out before all buckets were paired.
@@ -175,6 +231,9 @@ pub struct NearMatchStats {
 pub struct NearMatchSet {
     /// Candidate pairs, deterministically ordered by `(a, b)`.
     pub pairs: Vec<NearMatchPair>,
+    /// Bounded diagnostic proposals immediately below the estimate threshold,
+    /// deterministically ordered by `(a, b)`.
+    pub near_misses: Vec<NearMatchNearMiss>,
     /// What the stage saw and dropped.
     pub stats: NearMatchStats,
 }
@@ -215,6 +274,7 @@ pub fn generate(files: &[FileFeatures], config: &NearMatchConfig) -> NearMatchSe
     // Apply the deterministic gates. `proposed` is already sorted, so output
     // ordering is stable without re-sorting.
     let mut pairs = Vec::new();
+    let mut near_misses = Vec::new();
     for (ai, bi) in proposed {
         let (ref_a, sig_a) = &signed[ai];
         let (ref_b, sig_b) = &signed[bi];
@@ -225,6 +285,18 @@ pub fn generate(files: &[FileFeatures], config: &NearMatchConfig) -> NearMatchSe
         let estimated = estimated_jaccard(sig_a, sig_b);
         if estimated < config.min_estimated_jaccard {
             stats.filtered_by_jaccard += 1;
+            if config.is_near_miss(estimated) {
+                stats.near_miss_band_pairs += 1;
+                if near_misses.len() < config.near_miss_cap {
+                    near_misses.push(NearMatchNearMiss {
+                        a: *ref_a,
+                        b: *ref_b,
+                        estimated_jaccard: estimated,
+                    });
+                } else {
+                    stats.near_miss_cap_dropped += 1;
+                }
+            }
             continue;
         }
         pairs.push(NearMatchPair {
@@ -234,7 +306,12 @@ pub fn generate(files: &[FileFeatures], config: &NearMatchConfig) -> NearMatchSe
         });
     }
     stats.candidate_pairs = pairs.len();
-    NearMatchSet { pairs, stats }
+    stats.near_misses_retained = near_misses.len();
+    NearMatchSet {
+        pairs,
+        near_misses,
+        stats,
+    }
 }
 
 /// Propose candidate index pairs (into `signed`) via LSH banding, applying the
@@ -520,6 +597,57 @@ mod tests {
         );
         // Even if LSH proposed nothing, the estimate gate would have caught it.
         assert_eq!(set.stats.candidate_pairs, 0);
+    }
+
+    #[test]
+    fn near_miss_band_includes_its_lower_bound_but_not_the_candidate_threshold() {
+        let config = NearMatchConfig {
+            min_estimated_jaccard: 0.75,
+            near_miss_delta: 0.25,
+            ..NearMatchConfig::default()
+        };
+        assert!(config.is_near_miss(0.5));
+        assert!(config.is_near_miss(0.749_999));
+        assert!(!config.is_near_miss(0.499_999));
+        assert!(
+            !config.is_near_miss(0.75),
+            "an estimate that reaches the candidate threshold is never a near miss"
+        );
+    }
+
+    #[test]
+    fn near_miss_storage_is_capped_deterministically_without_changing_candidates() {
+        let files = vec![file(vec![
+            unit(&[1, 2, 3, 4], &[5, 6], 20),
+            unit(&[1, 2, 3, 4], &[5, 6], 20),
+            unit(&[1, 2, 3, 4], &[5, 6], 20),
+        ])];
+        let uncapped = NearMatchConfig {
+            // No estimate can clear this threshold, so all three LSH
+            // proposals are diagnostic-only. This isolates storage policy
+            // from primary candidate selection.
+            min_estimated_jaccard: 1.1,
+            near_miss_delta: 1.1,
+            near_miss_cap: usize::MAX,
+            ..NearMatchConfig::default()
+        };
+        let full = generate(&files, &uncapped);
+        let capped = NearMatchConfig {
+            near_miss_cap: 2,
+            ..uncapped
+        };
+        let first = generate(&files, &capped);
+        let second = generate(&files, &capped);
+
+        assert!(full.pairs.is_empty());
+        assert_eq!(first.pairs, full.pairs);
+        assert_eq!(first.stats.candidate_pairs, full.stats.candidate_pairs);
+        assert_eq!(full.near_misses.len(), 3);
+        assert_eq!(first.near_misses.len(), 2);
+        assert_eq!(first.stats.near_miss_band_pairs, 3);
+        assert_eq!(first.stats.near_misses_retained, 2);
+        assert_eq!(first.stats.near_miss_cap_dropped, 1);
+        assert_eq!(first, second);
     }
 
     #[test]

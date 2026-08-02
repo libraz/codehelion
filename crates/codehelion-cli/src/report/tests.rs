@@ -144,6 +144,7 @@ pub(super) fn sample_report() -> Report {
         },
         groups: vec![visible_group(), suppressed_group()],
         siblings: Vec::new(),
+        near_misses: Vec::new(),
     }
 }
 
@@ -176,6 +177,31 @@ pub(super) fn sample_siblings() -> GroupSiblings {
                 canonical: false,
             },
         }],
+    }
+}
+
+/// One run-scoped LSH diagnostic shared by the JSON, text, and SARIF tests.
+pub(super) fn sample_near_miss() -> NearMiss {
+    NearMiss {
+        estimated_jaccard: 0.28,
+        left: NearMissUnit {
+            unit_fingerprint: "a1".repeat(16),
+            language: "rust".to_string(),
+            file: "src/left.rs".to_string(),
+            start_line: 10,
+            end_line: 24,
+            unit: Some("left_candidate".to_string()),
+            tokens: 48,
+        },
+        right: NearMissUnit {
+            unit_fingerprint: "b2".repeat(16),
+            language: "rust".to_string(),
+            file: "src/right.rs".to_string(),
+            start_line: 31,
+            end_line: 46,
+            unit: Some("right_candidate".to_string()),
+            tokens: 51,
+        },
     }
 }
 
@@ -478,6 +504,64 @@ fn a_sibling_is_exported_but_text_hides_it_until_requested() {
     let shown_text = String::from_utf8(shown_text).unwrap();
     assert!(shown_text.contains("sibling type-3 low (0.76): src/incomplete.rs:30"));
     assert!(shown_text.contains("incomplete_checksum"));
+}
+
+#[test]
+fn a_near_miss_is_exported_but_text_hides_it_until_requested() {
+    let mut report = sample_report();
+    report.near_misses = vec![sample_near_miss()];
+
+    let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    assert_eq!(value["near_misses"][0]["estimated_jaccard"], 0.28);
+    assert_eq!(value["near_misses"][0]["left"]["file"], "src/left.rs");
+    assert!(value["near_misses"][0].get("finding_id").is_none());
+    assert!(value["near_misses"][0].get("group_fingerprint").is_none());
+
+    let mut default_text = Vec::new();
+    report
+        .render_text(TextOptions::default(), &mut default_text)
+        .unwrap();
+    assert!(
+        !String::from_utf8(default_text)
+            .unwrap()
+            .contains("near-match near misses:")
+    );
+
+    let mut shown_text = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                show_near_misses: true,
+                ..TextOptions::default()
+            },
+            &mut shown_text,
+        )
+        .unwrap();
+    let shown_text = String::from_utf8(shown_text).unwrap();
+    assert!(shown_text.contains("near-match near misses:"));
+    assert!(shown_text.contains("estimated Jaccard 0.28: src/left.rs:10"));
+    assert!(shown_text.contains("src/right.rs:31"));
+}
+
+#[test]
+fn the_near_miss_text_flag_is_rejected_for_machine_formats() {
+    let error = crate::scan::write_report_options(
+        crate::scan::ReportOutput {
+            format: crate::cli::Format::Json,
+            output: None,
+            force: false,
+            verbose: false,
+            show_suppressed: false,
+            show_siblings: false,
+            show_near_misses: true,
+            sort: Sort::Priority,
+            min_identifier_jaccard: None,
+        },
+        &mut Vec::new(),
+        &sample_report(),
+    )
+    .expect_err("machine formats retain near misses without a display flag");
+    assert!(format!("{error:#}").contains("--show-near-misses applies only to text reports"));
 }
 
 #[test]
@@ -788,6 +872,7 @@ fn current_json_report_validates_against_the_shipped_v1_schema() {
     schemas.validate(&with_execution_refusal, index).unwrap();
 
     let mut report = sample_report();
+    report.near_misses = vec![sample_near_miss()];
     report.groups.push(structural_group());
     report.groups[2]
         .similarity

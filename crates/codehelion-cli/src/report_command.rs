@@ -37,6 +37,7 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
         .context("the selected run has no stored summary")?;
     let mut groups = recorded_groups(&store, run.id)?;
     let siblings = recorded_siblings(&store.run_groups(run.id)?);
+    let near_misses = recorded_near_misses(&store.run_near_misses(run.id)?);
     let sort = args.sort.axis();
     report::order(&mut groups, &resolved_config.config.suppression, sort);
     let compiler = store
@@ -89,6 +90,7 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
         },
         groups,
         siblings,
+        near_misses,
     };
     scan::hydrate_artifact_savings(&store, run.id, &mut model.groups)?;
     scan::write_report_options(
@@ -99,6 +101,7 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
             verbose: args.verbose,
             show_suppressed: args.show_suppressed,
             show_siblings: args.show_siblings,
+            show_near_misses: args.show_near_misses,
             sort,
             min_identifier_jaccard: args.min_identifier_jaccard,
         },
@@ -153,6 +156,36 @@ fn recorded_siblings(
         .collect()
 }
 
+/// Restore run-scoped near-match diagnostics without reinterpreting them as
+/// findings or attaching them to a primary clone group.
+fn recorded_near_misses(
+    near_misses: &[codehelion_store::query::StoredNearMiss],
+) -> Vec<report::NearMiss> {
+    near_misses
+        .iter()
+        .map(|near_miss| report::NearMiss {
+            estimated_jaccard: near_miss.estimated_jaccard,
+            left: recorded_near_miss_unit(&near_miss.left),
+            right: recorded_near_miss_unit(&near_miss.right),
+        })
+        .collect()
+}
+
+/// Convert one stored source-unit anchor to the public near-miss shape.
+fn recorded_near_miss_unit(
+    unit: &codehelion_store::query::StoredNearMissUnit,
+) -> report::NearMissUnit {
+    report::NearMissUnit {
+        unit_fingerprint: unit.fingerprint_hex.clone(),
+        language: unit.language.clone(),
+        file: unit.file_path.clone(),
+        start_line: u32::try_from(unit.start_line.unwrap_or(0)).unwrap_or(0),
+        end_line: u32::try_from(unit.end_line.unwrap_or(0)).unwrap_or(0),
+        unit: unit.unit_name.clone(),
+        tokens: u64::try_from(unit.token_count).unwrap_or(0),
+    }
+}
+
 /// Restore configuration provenance without letting the current configuration
 /// overwrite what the recorded run actually used.
 pub(crate) fn recorded_configuration(origin: &RunOrigin) -> Result<report::ConfigurationInfo> {
@@ -181,6 +214,48 @@ pub(crate) fn recorded_groups(store: &Store, run_id: i64) -> Result<Vec<report::
             recorded_group(group, &priority)
         })
         .collect()
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::items_after_test_module,
+    reason = "the command's private reconstruction helpers remain adjacent to their public callers"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recorded_near_misses_reconstruct_as_run_scoped_diagnostics() {
+        let stored = codehelion_store::query::StoredNearMiss {
+            estimated_jaccard: 0.28,
+            left: codehelion_store::query::StoredNearMissUnit {
+                fingerprint_hex: "a1".repeat(16),
+                language: "rust".to_string(),
+                file_path: "src/left.rs".to_string(),
+                start_line: Some(10),
+                end_line: Some(24),
+                token_count: 48,
+                unit_name: Some("left_candidate".to_string()),
+            },
+            right: codehelion_store::query::StoredNearMissUnit {
+                fingerprint_hex: "b2".repeat(16),
+                language: "rust".to_string(),
+                file_path: "src/right.rs".to_string(),
+                start_line: Some(31),
+                end_line: Some(46),
+                token_count: 51,
+                unit_name: Some("right_candidate".to_string()),
+            },
+        };
+
+        let restored = recorded_near_misses(&[stored]);
+        assert_eq!(restored.len(), 1);
+        assert!((restored[0].estimated_jaccard - 0.28).abs() < f64::EPSILON);
+        assert_eq!(restored[0].left.file, "src/left.rs");
+        assert_eq!(restored[0].right.file, "src/right.rs");
+        assert_eq!(restored[0].left.unit.as_deref(), Some("left_candidate"));
+    }
 }
 
 /// Resolve the configuration that also supplies a recorded report's view

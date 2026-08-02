@@ -32,6 +32,7 @@ fn comparison_and_presentation_flags_reject_unsupported_modes() {
         compare_languages: false,
         show_suppressed: false,
         show_siblings: false,
+        show_near_misses: false,
         include_trivial: false,
         include_vendored: false,
         verbose: false,

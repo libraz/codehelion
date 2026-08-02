@@ -322,6 +322,7 @@ fn snapshot<'a>(
         units: Vec::new(),
         groups: Vec::new(),
         sibling_groups: Vec::new(),
+        near_misses: Vec::new(),
         features: Vec::new(),
         files: Vec::new(),
         compiler_helpers: helpers,

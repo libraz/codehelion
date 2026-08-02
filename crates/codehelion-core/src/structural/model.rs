@@ -452,6 +452,21 @@ pub struct GroupSiblings {
     pub siblings: Vec<StructuralSibling>,
 }
 
+/// One LSH-proposed unit pair that passed the size gate but landed inside the
+/// bounded estimate band immediately below the primary near-match threshold.
+///
+/// This is run-scoped diagnostic telemetry, not a similarity edge. It never
+/// reaches verification, grouping, group membership, or primary findings.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StructuralNearMiss {
+    /// Index of the lower unit in [`StructuralReport::units`].
+    pub a: usize,
+    /// Index of the higher unit in [`StructuralReport::units`].
+    pub b: usize,
+    /// MinHash-estimated Jaccard similarity that missed the primary gate.
+    pub estimated_jaccard: f64,
+}
+
 /// The structural run's output: cohesive groups over [`Self::units`], plus the
 /// funnel statistics.
 #[derive(Debug, Clone, PartialEq)]
@@ -473,6 +488,9 @@ pub struct StructuralReport {
     /// Incomplete local mirrors attached to primary groups without changing
     /// the primary grouping relation.
     pub siblings: Vec<GroupSiblings>,
+    /// Bounded LSH diagnostics immediately below the primary near-match
+    /// estimate gate. These pairs are not primary findings.
+    pub near_misses: Vec<StructuralNearMiss>,
     /// Funnel statistics.
     pub stats: StructuralStats,
 }

@@ -301,6 +301,39 @@ pub struct StoredSibling {
     pub member: StoredMember,
 }
 
+/// One source-unit anchor retained for a run-scoped near-match diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredNearMissUnit {
+    /// Whole-unit fingerprint in canonical hexadecimal form.
+    pub fingerprint_hex: String,
+    /// Source language.
+    pub language: String,
+    /// Source path relative to the scan root.
+    pub file_path: String,
+    /// 1-based source anchor.
+    pub start_line: Option<i64>,
+    /// 1-based source anchor.
+    pub end_line: Option<i64>,
+    /// Token count of the unit.
+    pub token_count: i64,
+    /// Best-effort unit name.
+    pub unit_name: Option<String>,
+}
+
+/// One bounded LSH proposal that missed the primary estimate threshold.
+///
+/// It deliberately carries no group or finding identity: it was not verified
+/// and therefore is not a primary clone finding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredNearMiss {
+    /// MinHash-estimated Jaccard similarity below the primary gate.
+    pub estimated_jaccard: f64,
+    /// Lower side of the canonical proposal pair.
+    pub left: StoredNearMissUnit,
+    /// Higher side of the canonical proposal pair.
+    pub right: StoredNearMissUnit,
+}
+
 /// Decode the constrained evidence label stored with a clone group.
 fn stored_test_code_evidence(
     row: &Row<'_>,

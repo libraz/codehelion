@@ -101,6 +101,34 @@ fn a_sibling_round_trips_without_becoming_a_primary_member() {
     assert_eq!(sibling.confidence_band, "low");
     assert!((sibling.composite - 0.76).abs() < f64::EPSILON);
 }
+
+#[test]
+fn a_near_miss_round_trips_without_becoming_a_primary_finding() {
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.near_misses.push(NearMissRow {
+        left: 0,
+        right: 1,
+        estimated_jaccard: 0.28,
+    });
+    let mut store = Store::open_in_memory().unwrap();
+    let run_id = store.record_snapshot(&snapshot).unwrap();
+
+    let near_misses = store.run_near_misses(run_id).unwrap();
+    assert_eq!(near_misses.len(), 1);
+    let near_miss = &near_misses[0];
+    assert!((near_miss.estimated_jaccard - 0.28).abs() < f64::EPSILON);
+    assert_eq!(near_miss.left.file_path, "src/a.rs");
+    assert_eq!(near_miss.right.file_path, "src/b.rs");
+    assert_eq!(near_miss.left.unit_name.as_deref(), Some("checksum"));
+    assert_eq!(near_miss.right.unit_name.as_deref(), Some("checksum"));
+
+    let groups = store.run_groups(run_id).unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].members.len(), 2);
+    assert!(groups[0].siblings.is_empty());
+}
 /// What a run reported about itself has to come back the way it went in,
 /// stage order and drop order included: a report rebuilt from these rows is
 /// compared byte for byte against the one the scan printed.

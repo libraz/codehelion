@@ -485,6 +485,10 @@ pub struct ScanArgs {
     /// JSON and SARIF always retain sibling data.
     #[arg(long)]
     pub show_siblings: bool,
+    /// Also list bounded LSH proposals that narrowly missed the primary
+    /// near-match estimate gate. JSON and SARIF always retain these diagnostics.
+    #[arg(long)]
+    pub show_near_misses: bool,
     /// Order the report on this axis instead of the composed priority.
     #[arg(long, value_enum, default_value_t = SortAxis::Priority)]
     pub sort: SortAxis,
@@ -571,6 +575,10 @@ pub struct ReportArgs {
     /// JSON and SARIF always retain sibling data.
     #[arg(long)]
     pub show_siblings: bool,
+    /// Also list bounded LSH proposals that narrowly missed the primary
+    /// near-match estimate gate. JSON and SARIF always retain these diagnostics.
+    #[arg(long)]
+    pub show_near_misses: bool,
     /// Order the report on this axis instead of the composed priority.
     #[arg(long, value_enum, default_value_t = SortAxis::Priority)]
     pub sort: SortAxis,

@@ -33,6 +33,13 @@
       "items": {
         "$ref": "#/$defs/group_siblings"
       }
+    },
+    "near_misses": {
+      "type": "array",
+      "description": "Bounded LSH proposals immediately below the primary estimated-Jaccard gate. Diagnostic telemetry only: these are neither findings nor group members.",
+      "items": {
+        "$ref": "#/$defs/near_miss"
+      }
     }
   },
   "$defs": {
@@ -904,6 +911,28 @@
           "type": "array",
           "items": { "$ref": "#/$defs/sibling" }
         }
+      }
+    },
+    "near_miss": {
+      "type": "object",
+      "required": ["estimated_jaccard", "left", "right"],
+      "properties": {
+        "estimated_jaccard": { "type": "number", "minimum": 0, "maximum": 1 },
+        "left": { "$ref": "#/$defs/near_miss_unit" },
+        "right": { "$ref": "#/$defs/near_miss_unit" }
+      }
+    },
+    "near_miss_unit": {
+      "type": "object",
+      "required": ["unit_fingerprint", "language", "file", "start_line", "end_line", "tokens"],
+      "properties": {
+        "unit_fingerprint": { "$ref": "#/$defs/hex" },
+        "language": { "type": "string", "enum": ["rust", "c", "cpp"] },
+        "file": { "type": "string" },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "unit": { "type": "string" },
+        "tokens": { "type": "integer", "minimum": 0 }
       }
     },
     "sibling": {

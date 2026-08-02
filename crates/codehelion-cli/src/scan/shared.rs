@@ -82,6 +82,7 @@ pub(super) fn report(
         summary: report::restored(stored, &groups, analysis_mode),
         groups,
         siblings: Vec::new(),
+        near_misses: Vec::new(),
     }
 }
 

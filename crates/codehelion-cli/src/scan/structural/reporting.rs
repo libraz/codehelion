@@ -287,6 +287,11 @@ pub(super) fn funnel(
             .dropping("pair_budget", as_u64(near.budget_dropped))
             .dropping("length_ratio", as_u64(near.filtered_by_size))
             .dropping("estimated_jaccard", as_u64(near.filtered_by_jaccard)),
+        // This is a diagnostic side stream, not another candidate stage: it
+        // is deliberately limited to size-compatible proposals that already
+        // fell through the primary estimate gate.
+        report::FunnelStage::new("near-match near misses", as_u64(near.near_misses_retained))
+            .dropping("retention_cap", as_u64(near.near_miss_cap_dropped)),
         report::FunnelStage::new(
             "control-flow pairs",
             as_u64(stats.control_flow.candidate_pairs),
@@ -424,7 +429,38 @@ pub(super) fn build_report(
         inputs.variant.mode.name(),
     );
     report.siblings = build_siblings(inputs);
+    report.near_misses = build_near_misses(inputs);
     report
+}
+
+/// Convert bounded core near-match diagnostics into the run-scoped public
+/// shape. They do not become groups, siblings, or finding identities.
+fn build_near_misses(inputs: &ReportInputs<'_>) -> Vec<report::NearMiss> {
+    inputs
+        .analysis
+        .near_misses
+        .iter()
+        .map(|near_miss| report::NearMiss {
+            estimated_jaccard: near_miss.estimated_jaccard,
+            left: near_miss_unit(inputs, near_miss.a),
+            right: near_miss_unit(inputs, near_miss.b),
+        })
+        .collect()
+}
+
+/// Render one near-miss side without borrowing primary-member semantics.
+fn near_miss_unit(inputs: &ReportInputs<'_>, index: usize) -> report::NearMissUnit {
+    let unit = &inputs.analysis.units[index];
+    let file = &inputs.files[unit.file];
+    report::NearMissUnit {
+        unit_fingerprint: unit.fingerprint.to_hex(),
+        language: file.language.name().to_string(),
+        file: file.relative_path.clone(),
+        start_line: unit.start_line,
+        end_line: unit.end_line,
+        unit: unit.name.as_deref().map(ToString::to_string),
+        tokens: u64::try_from(unit.token_end.saturating_sub(unit.token_start)).unwrap_or(u64::MAX),
+    }
 }
 
 /// Convert core-owned sibling findings into the additive public report shape.

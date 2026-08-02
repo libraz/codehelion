@@ -65,6 +65,12 @@ pub(super) fn structural_config(cfg: &Config) -> StructuralConfig {
         config.near_match.pair_budget = budget;
         config.control_flow.pair_budget = budget;
     }
+    if let Some(delta) = cfg.limits.near_miss_delta {
+        config.near_match.near_miss_delta = delta;
+    }
+    if let Some(cap) = cfg.limits.near_miss_cap {
+        config.near_match.near_miss_cap = cap;
+    }
     config.grouping.max_component = cfg.limits.max_component;
     if let Some(budget) = cfg.limits.sibling_candidate_budget {
         config.siblings.candidate_budget = budget;

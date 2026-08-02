@@ -107,6 +107,7 @@ pub(super) fn rank_and_record(
         units,
         groups,
         sibling_groups: Vec::new(),
+        near_misses: Vec::new(),
         features: Vec::new(),
         files,
         // No compiler was asked anything: this mode reads source and nothing

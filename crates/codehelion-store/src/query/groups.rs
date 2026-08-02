@@ -2,13 +2,65 @@ use super::common::map_member;
 use super::{
     FileCountsRow, FunnelDropRow, FunnelStageRow, GuardrailsRow, IdKind, IdMatch,
     OptionalExtension, SOG_SCHEMA_VERSION, SemanticOperationGraph, Store, StoreError,
-    StoredFinding, StoredGroup, StoredGroupDetail, StoredMember, StoredPriority,
-    StoredSemanticEvidence, StoredSemanticNodeMapping, StoredSibling, StoredSimilarity,
-    StoredSuppressionRef, SummaryRow, UnparsedRow, UnusedRuleRow, params,
-    stored_test_code_evidence,
+    StoredFinding, StoredGroup, StoredGroupDetail, StoredMember, StoredNearMiss,
+    StoredNearMissUnit, StoredPriority, StoredSemanticEvidence, StoredSemanticNodeMapping,
+    StoredSibling, StoredSimilarity, StoredSuppressionRef, SummaryRow, UnparsedRow, UnusedRuleRow,
+    params, stored_test_code_evidence,
 };
 
 impl Store {
+    /// Bounded, run-scoped LSH diagnostics in the order the scan retained
+    /// them. They are deliberately read outside `run_groups`: a near miss has
+    /// no primary group ownership or finding identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn run_near_misses(&self, run_id: i64) -> Result<Vec<StoredNearMiss>, StoreError> {
+        self.conn
+            .prepare(
+                "SELECT n.estimated_jaccard,
+                        lower(hex(left_fp.hash)), left_unit.language, left_unit.file_path,
+                        left_unit.start_line, left_unit.end_line, left_unit.token_count,
+                        left_unit.name,
+                        lower(hex(right_fp.hash)), right_unit.language, right_unit.file_path,
+                        right_unit.start_line, right_unit.end_line, right_unit.token_count,
+                        right_unit.name
+                 FROM near_match_near_miss n
+                 JOIN source_unit left_unit ON left_unit.id = n.left_source_unit_id
+                 JOIN fingerprint left_fp ON left_fp.id = left_unit.fingerprint_id
+                 JOIN source_unit right_unit ON right_unit.id = n.right_source_unit_id
+                 JOIN fingerprint right_fp ON right_fp.id = right_unit.fingerprint_id
+                 WHERE n.scan_run_id = ?1
+                 ORDER BY n.ordinal ASC",
+            )?
+            .query_map(params![run_id], |row| {
+                Ok(StoredNearMiss {
+                    estimated_jaccard: row.get(0)?,
+                    left: StoredNearMissUnit {
+                        fingerprint_hex: row.get(1)?,
+                        language: row.get(2)?,
+                        file_path: row.get(3)?,
+                        start_line: row.get(4)?,
+                        end_line: row.get(5)?,
+                        token_count: row.get(6)?,
+                        unit_name: row.get(7)?,
+                    },
+                    right: StoredNearMissUnit {
+                        fingerprint_hex: row.get(8)?,
+                        language: row.get(9)?,
+                        file_path: row.get(10)?,
+                        start_line: row.get(11)?,
+                        end_line: row.get(12)?,
+                        token_count: row.get(13)?,
+                        unit_name: row.get(14)?,
+                    },
+                })
+            })?
+            .collect::<Result<_, _>>()
+            .map_err(Into::into)
+    }
+
     /// Number of separately recorded cross-build-variant comparisons.
     ///
     /// This deliberately reads a table outside `scan_run`: normal scan

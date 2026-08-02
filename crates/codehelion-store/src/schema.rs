@@ -58,7 +58,7 @@ use crate::StoreError;
 /// A database recorded under another one is rejected rather than migrated.
 /// Nothing is lost by that: the audit database holds the latest scan, which
 /// re-running the scan reproduces.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// Full pre-release database layout. Existing development databases are not
 /// transformed; create a fresh database when this contract changes.
@@ -276,6 +276,16 @@ CREATE TABLE clone_group_sibling (
     composite            REAL NOT NULL,
     boilerplate          TEXT CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition', 'guarded-dispatch', 'configured-answer')),
     PRIMARY KEY (clone_group_id, source_unit_id)
+) STRICT;
+CREATE TABLE near_match_near_miss (
+    scan_run_id          INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
+    ordinal              INTEGER NOT NULL,
+    left_source_unit_id  INTEGER NOT NULL REFERENCES source_unit (id) ON DELETE CASCADE,
+    right_source_unit_id INTEGER NOT NULL REFERENCES source_unit (id) ON DELETE CASCADE,
+    estimated_jaccard    REAL NOT NULL CHECK (estimated_jaccard >= 0 AND estimated_jaccard <= 1),
+    PRIMARY KEY (scan_run_id, ordinal),
+    UNIQUE (scan_run_id, left_source_unit_id, right_source_unit_id),
+    CHECK (left_source_unit_id != right_source_unit_id)
 ) STRICT;
 CREATE TABLE compiler_block (
     compiler_unit_id      INTEGER NOT NULL REFERENCES compiler_unit (id) ON DELETE CASCADE,
@@ -841,6 +851,8 @@ CREATE INDEX idx_clone_group_member_fragment
     ON clone_group_member (fragment_id, clone_group_id);
 CREATE INDEX idx_clone_group_sibling_group
     ON clone_group_sibling (clone_group_id);
+CREATE INDEX idx_near_match_near_miss_run
+    ON near_match_near_miss (scan_run_id, ordinal);
 CREATE INDEX idx_artifact_analysis_mapping_symbol
     ON artifact_analysis_source_mapping (artifact_analysis_id, artifact_symbol_fingerprint);
 CREATE INDEX idx_artifact_analysis_mapping_source

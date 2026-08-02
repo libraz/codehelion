@@ -1,4 +1,4 @@
-use super::groups::{write_group, write_sibling_groups};
+use super::groups::{write_group, write_near_misses, write_sibling_groups};
 use super::variant::{
     frontend_version_for, upsert_feature_fingerprint, upsert_fingerprint, upsert_variant,
 };
@@ -184,6 +184,7 @@ fn write_snapshot(
         group_row_ids.insert(*group.fingerprint.as_bytes(), group_row_id);
     }
     write_sibling_groups(tx, &snapshot.sibling_groups, &unit_row_ids, &group_row_ids)?;
+    write_near_misses(tx, run_id, &snapshot.near_misses, &unit_row_ids)?;
     write_features(tx, snapshot, run_id, variant_id, &unit_row_ids)?;
     write_files(tx, &snapshot.files, run_id)?;
     // The compiler IR names its own schema, and every distinct one a run holds

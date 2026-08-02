@@ -320,7 +320,7 @@ impl Default for Suppression {
 /// tree, so one number set here for both would be chosen for one mode and
 /// merely survived by the other. Left unset, each stays at the default its own
 /// measurements picked.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Limits {
     /// Per-file size ceiling in bytes; larger files are skipped and counted.
@@ -345,6 +345,13 @@ pub struct Limits {
     /// different spaces, and one number spent by whichever runs first would
     /// silence the other.
     pub pair_budget: Option<usize>,
+    /// Width of the diagnostic estimated-Jaccard band retained immediately
+    /// below Structural mode's primary near-match threshold. Unset selects the
+    /// structural default.
+    pub near_miss_delta: Option<f64>,
+    /// Maximum LSH-proposed near misses retained over one structural report.
+    /// Unset selects the structural default.
+    pub near_miss_cap: Option<usize>,
     /// Upper bound on the post-grouping sibling sweep's verifier comparisons.
     /// Unset selects the structural default.
     pub sibling_candidate_budget: Option<usize>,
@@ -410,6 +417,8 @@ impl Default for Limits {
             helper_timeout_ms: 300_000,
             posting_cap: None,
             pair_budget: None,
+            near_miss_delta: None,
+            near_miss_cap: None,
             sibling_candidate_budget: None,
             sibling_per_group_cap: None,
             sibling_total_cap: None,
@@ -439,6 +448,20 @@ impl Limits {
         }
         if self.pair_budget == Some(0) {
             bail!("limits.pair-budget must be at least 1 when set");
+        }
+        if self.near_miss_delta.is_some_and(|delta| {
+            !delta.is_finite()
+                || !(0.0..=codehelion_core::near_match::DEFAULT_MIN_ESTIMATED_JACCARD)
+                    .contains(&delta)
+                || delta == 0.0
+        }) {
+            bail!(
+                "limits.near-miss-delta must be finite and in 0.0..={} when set",
+                codehelion_core::near_match::DEFAULT_MIN_ESTIMATED_JACCARD
+            );
+        }
+        if self.near_miss_cap == Some(0) {
+            bail!("limits.near-miss-cap must be at least 1 when set");
         }
         if self.sibling_candidate_budget == Some(0) {
             bail!("limits.sibling-candidate-budget must be at least 1 when set");
@@ -476,6 +499,13 @@ impl Limits {
         self.pair_budget = Some(self.pair_budget.map_or(profile.max_candidates, |budget| {
             budget.min(profile.max_candidates)
         }));
+        let near_match_defaults = codehelion_core::near_match::NearMatchConfig::default();
+        self.near_miss_cap = Some(
+            self.near_miss_cap
+                .map_or(near_match_defaults.near_miss_cap, |cap| {
+                    cap.min(near_match_defaults.near_miss_cap)
+                }),
+        );
         let sibling_defaults = codehelion_core::structural::SiblingConfig::default();
         self.sibling_candidate_budget = Some(
             self.sibling_candidate_budget
@@ -658,6 +688,8 @@ impl Config {
         if self.jobs.is_none()
             || self.limits.posting_cap.is_none()
             || self.limits.pair_budget.is_none()
+            || self.limits.near_miss_delta.is_none()
+            || self.limits.near_miss_cap.is_none()
             || self.limits.sibling_candidate_budget.is_none()
             || self.limits.sibling_per_group_cap.is_none()
             || self.limits.sibling_total_cap.is_none()
@@ -671,6 +703,12 @@ impl Config {
             }
             if self.limits.pair_budget.is_none() {
                 text.push_str("# limits.pair-budget: mode-specific default\n");
+            }
+            if self.limits.near_miss_delta.is_none() {
+                text.push_str("# limits.near-miss-delta: structural default\n");
+            }
+            if self.limits.near_miss_cap.is_none() {
+                text.push_str("# limits.near-miss-cap: structural default\n");
             }
             if self.limits.sibling_candidate_budget.is_none() {
                 text.push_str("# limits.sibling-candidate-budget: structural default\n");

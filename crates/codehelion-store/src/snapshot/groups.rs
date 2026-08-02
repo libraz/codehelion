@@ -2,7 +2,7 @@ use super::variant::{upsert_fingerprint, upsert_group_fingerprint};
 use super::{
     BTreeMap, BTreeSet, Boilerplate, CrossLanguageComparisonSnapshot,
     CrossLanguageSemanticGroupRow, CrossVariantComparisonSnapshot, GroupRow, Language, MemberRow,
-    SOG_SCHEMA_VERSION, SemanticEvidenceRow, SemanticOperationGraph, SiblingGroupRow,
+    NearMissRow, SOG_SCHEMA_VERSION, SemanticEvidenceRow, SemanticOperationGraph, SiblingGroupRow,
     SimilarityBreakdownRow, Snapshot, Store, StoreError, TestCodeEvidence, Transaction, params,
 };
 
@@ -300,6 +300,43 @@ pub(super) fn write_sibling_groups(
                 sibling.boilerplate.map(Boilerplate::name),
             ])?;
         }
+    }
+    Ok(())
+}
+
+/// Persist bounded LSH diagnostics without creating findings or attaching
+/// them to a primary clone group.
+pub(super) fn write_near_misses(
+    tx: &Transaction<'_>,
+    run_id: i64,
+    near_misses: &[NearMissRow],
+    unit_row_ids: &[i64],
+) -> Result<(), StoreError> {
+    let mut insert = tx.prepare_cached(
+        "INSERT INTO near_match_near_miss
+             (scan_run_id, ordinal, left_source_unit_id, right_source_unit_id, estimated_jaccard)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    for (ordinal, near_miss) in near_misses.iter().enumerate() {
+        let left = *unit_row_ids
+            .get(near_miss.left)
+            .ok_or(StoreError::UnknownUnitIndex {
+                index: near_miss.left,
+                units: unit_row_ids.len(),
+            })?;
+        let right = *unit_row_ids
+            .get(near_miss.right)
+            .ok_or(StoreError::UnknownUnitIndex {
+                index: near_miss.right,
+                units: unit_row_ids.len(),
+            })?;
+        insert.execute(params![
+            run_id,
+            i64::try_from(ordinal).unwrap_or(i64::MAX),
+            left,
+            right,
+            near_miss.estimated_jaccard,
+        ])?;
     }
     Ok(())
 }

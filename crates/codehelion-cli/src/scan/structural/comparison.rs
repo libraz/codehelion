@@ -244,6 +244,8 @@ pub(super) fn copy_guardrails(guardrails: &report::Guardrails) -> report::Guardr
         helper_timeout_ms: guardrails.helper_timeout_ms,
         posting_cap: guardrails.posting_cap,
         pair_budget: guardrails.pair_budget,
+        near_miss_delta: guardrails.near_miss_delta,
+        near_miss_cap: guardrails.near_miss_cap,
         sibling_candidate_budget: guardrails.sibling_candidate_budget,
         sibling_per_group_cap: guardrails.sibling_per_group_cap,
         sibling_total_cap: guardrails.sibling_total_cap,

@@ -48,9 +48,9 @@ use codehelion_store::compiler::{self as store_compiler, CompilerHelperRow, Comp
 use codehelion_store::snapshot::{
     CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow, CrossLanguageSemanticMemberRow,
     CrossVariantComparisonSnapshot, CrossVariantGroupRow, CrossVariantMemberRow, FeatureRow,
-    FileRow, GroupRow, MemberRow, PriorityRow, SemanticEvidenceRow, SemanticNodeMappingRow,
-    SemanticOperationGraphRow, SiblingGroupRow, SiblingRow, SimilarityBreakdownRow, Snapshot,
-    SummaryRow, UnitRow,
+    FileRow, GroupRow, MemberRow, NearMissRow, PriorityRow, SemanticEvidenceRow,
+    SemanticNodeMappingRow, SemanticOperationGraphRow, SiblingGroupRow, SiblingRow,
+    SimilarityBreakdownRow, Snapshot, SummaryRow, UnitRow,
 };
 
 use super::{
