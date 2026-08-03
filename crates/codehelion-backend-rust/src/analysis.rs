@@ -873,7 +873,7 @@ fn display_of(ty: &ra_ap_hir::Type<'_>, db: &RootDatabase) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cargo_config, executable_named, helper_toolchain};
+    use super::{cargo_config, helper_toolchain};
 
     /// A located tool keeps the name it was found under, links and all.
     ///
@@ -881,10 +881,16 @@ mod tests {
     /// it was started as. Installations that link `rustup` to `rustup-init`
     /// are ordinary, and following that link hands every toolchain query to
     /// the installer instead.
+    ///
+    /// Stated where a link can be made without asking permission first. The
+    /// systems that cannot are the ones where the installations in question
+    /// do not exist either.
     #[test]
     #[cfg(unix)]
     #[allow(clippy::expect_used)] // Test setup requires a writable temporary directory.
     fn a_linked_tool_keeps_the_name_it_was_found_under() {
+        use super::executable_named;
+
         let directory = tempfile::tempdir().expect("a temporary directory");
         let target = directory.path().join("rustup-init");
         std::fs::write(&target, "").expect("writing the link target");
