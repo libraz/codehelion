@@ -18,11 +18,47 @@ fn normalized_golden_ir(ir: impl serde::Serialize, relative_file: &str, unit: &s
     value
 }
 
+/// Compare a normalized IR with the golden recorded for it.
+///
+/// Setting `CODEHELION_UPDATE_GOLDEN` rewrites the file instead of comparing,
+/// so a deliberate change to helper output is recorded from the same run that
+/// reveals it rather than transcribed by hand from an assertion message.
+fn assert_golden_ir(actual: &Value, name: &str, subject: &str) {
+    let path = repository_root().join(format!(
+        "crates/codehelion-cli/tests/fixtures/semantic/{name}.json"
+    ));
+    if std::env::var_os("CODEHELION_UPDATE_GOLDEN").is_some() {
+        let mut text = serde_json::to_string_pretty(actual).expect("golden IR is serializable");
+        text.push('\n');
+        std::fs::write(&path, text).expect("write golden IR");
+        return;
+    }
+    let expected: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read golden IR"))
+            .expect("golden IR is JSON");
+    assert_eq!(
+        *actual, expected,
+        "the {subject} helper IR changed; rerun with CODEHELION_UPDATE_GOLDEN=1 to record it"
+    );
+}
+
+/// The Clang helper reads a control-flow graph through a separate `clang`
+/// frontend invocation, and reports no CFG at all when that executable is
+/// absent. Comparing a golden against that degraded answer would let a machine
+/// without the prerequisite agree with a snapshot of what it cannot produce,
+/// so the prerequisite is stated as its own failure.
+fn assert_cfg_was_computed(ir: &Value, subject: &str) {
+    assert!(
+        !ir["cfg"].is_null(),
+        "the {subject} helper produced no control-flow graph: its CFG frontend needs a `clang` \
+         and `clang++` on PATH, not only a versioned `clang-N`"
+    );
+}
+
 /// A fixed Rust fixture supplies a complete compiler IR snapshot. The helper
 /// test matrix fixes its Rust and rust-analyzer versions, so a semantic change
 /// has to deliberately update this contract instead of moving unnoticed.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn rust_compiler_ir_matches_its_golden_snapshot() {
     let fixture = rust_fixture();
     let report = scan(fixture.path());
@@ -37,13 +73,8 @@ fn rust_compiler_ir_matches_its_golden_snapshot() {
             CompilerOutcome::Unavailable { .. } => None,
         })
         .expect("Rust helper returned an IR");
-    let expected: Value = serde_json::from_str(include_str!("../fixtures/semantic/rust-ir.json"))
-        .expect("Rust golden IR is JSON");
-    assert_eq!(
-        normalized_golden_ir(ir, "src/lib.rs", "semantic_fixture"),
-        expected,
-        "the Rust helper IR changed; update the versioned golden intentionally"
-    );
+    let actual = normalized_golden_ir(ir, "src/lib.rs", "semantic_fixture");
+    assert_golden_ir(&actual, "rust-ir", "Rust");
 }
 
 fn c_golden_fixture() -> tempfile::TempDir {
@@ -97,7 +128,6 @@ fn cpp_golden_fixture() -> tempfile::TempDir {
 /// A C fixture without system headers keeps the Clang golden independent of
 /// the host standard library while still exercising compile-database routing.
 #[test]
-#[ignore = "requires codehelion-backend-clang and libclang"]
 fn c_compiler_ir_matches_its_golden_snapshot() {
     let fixture = c_golden_fixture();
     let report = scan(fixture.path());
@@ -112,19 +142,14 @@ fn c_compiler_ir_matches_its_golden_snapshot() {
             CompilerOutcome::Unavailable { .. } => None,
         })
         .expect("C helper returned an IR");
-    let expected: Value = serde_json::from_str(include_str!("../fixtures/semantic/c-ir.json"))
-        .expect("C golden IR is JSON");
-    assert_eq!(
-        normalized_golden_ir(ir, "src/counter.c", "<fixture>/src/counter.c"),
-        expected,
-        "the C helper IR changed; update the versioned golden intentionally"
-    );
+    let actual = normalized_golden_ir(ir, "src/counter.c", "<fixture>/src/counter.c");
+    assert_cfg_was_computed(&actual, "C");
+    assert_golden_ir(&actual, "c-ir", "C");
 }
 
 /// A C++ fixture without system headers keeps the Clang golden independent of
 /// the host standard library while exercising the C++ frontend and database.
 #[test]
-#[ignore = "requires codehelion-backend-clang and libclang"]
 fn cpp_compiler_ir_matches_its_golden_snapshot() {
     let fixture = cpp_golden_fixture();
     let report = scan(fixture.path());
@@ -139,20 +164,15 @@ fn cpp_compiler_ir_matches_its_golden_snapshot() {
             CompilerOutcome::Unavailable { .. } => None,
         })
         .expect("C++ helper returned an IR");
-    let expected: Value = serde_json::from_str(include_str!("../fixtures/semantic/cpp-ir.json"))
-        .expect("C++ golden IR is JSON");
-    assert_eq!(
-        normalized_golden_ir(ir, "src/counter.cpp", "<fixture>/src/counter.cpp"),
-        expected,
-        "the C++ helper IR changed; update the versioned golden intentionally"
-    );
+    let actual = normalized_golden_ir(ir, "src/counter.cpp", "<fixture>/src/counter.cpp");
+    assert_cfg_was_computed(&actual, "C++");
+    assert_golden_ir(&actual, "cpp-ir", "C++");
 }
 
 /// Semantic analysis reads a project's build metadata but does not execute a
 /// procedural macro or `CMake` configure step unless a future helper explicitly
 /// implements and receives that permission.
 #[test]
-#[ignore = "requires codehelion-backend-rust, codehelion-backend-clang, and libclang"]
 fn semantic_scan_does_not_execute_proc_macros_or_cmake_by_default() {
     let rust_directory = tempfile::tempdir().expect("temporary Rust fixture");
     let rust_root = codehelion_fixtures::copy_rust("proc-macro", rust_directory.path())

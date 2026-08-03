@@ -1,9 +1,11 @@
-//! Semantic scan integration tests that require both optional compiler helpers.
+//! Semantic scan integration tests, run against the real compiler helpers.
 //!
-//! The test is ignored by default so a normal CLI-only test run remains useful
-//! on a machine without the optional programs. CI builds both helpers beside
-//! the CLI and runs it explicitly, exercising the complete process boundary
-//! and `SQLite` persistence path.
+//! These exercise the complete process boundary and the `SQLite` persistence
+//! path. They are ordinary tests: a workspace run builds both helper binaries
+//! beside the CLI, `rust-toolchain.toml` installs the sysroot sources the Rust
+//! helper reads, and libclang is loaded at run time. Nothing here is reserved
+//! for CI — a check that only one machine ever performs is a check nobody is
+//! keeping.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -21,7 +23,20 @@ fn cmd() -> Command {
     Command::cargo_bin("codehelion").expect("binary should build")
 }
 
-fn write_lockfile(root: &Path, package: &str) {
+/// Write the lockfile that belongs to the manifest already in `root`.
+///
+/// A Rust fixture is analysed only after the helper proves the tree resolves
+/// without a registry, and a manifest with no lockfile is the one shape that
+/// proof cannot be made for offline. The package name is read back out of the
+/// manifest rather than passed in, so a fixture cannot be added with a lockfile
+/// that names something else — or with none at all.
+fn lock_manifest(root: &Path) {
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("read fixture manifest");
+    let package = manifest
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("name = "))
+        .map(|name| name.trim().trim_matches('"'))
+        .expect("fixture manifest names a package");
     std::fs::write(
         root.join("Cargo.lock"),
         format!(
@@ -92,7 +107,7 @@ fn semantic_rust_corpus() -> (tempfile::TempDir, LabelSet) {
         "[package]\nname = \"semantic-corpus\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write corpus manifest");
-    write_lockfile(root, "semantic-corpus");
+    lock_manifest(root);
     for name in ["type1.rs", "type2.rs", "type3.rs"] {
         std::fs::copy(source.join(name), root.join("src").join(name))
             .unwrap_or_else(|error| panic!("copying corpus {name}: {error}"));
@@ -148,6 +163,7 @@ fn restricted_semantic_rust_corpus() -> (tempfile::TempDir, LabelSet) {
             panic!("copying restricted semantic corpus {relative}: {error}")
         });
     }
+    lock_manifest(root);
     let labels = LabelSet::from_json(
         &std::fs::read_to_string(root.join("labels.json"))
             .expect("read restricted semantic corpus labels"),
@@ -234,7 +250,7 @@ fn rust_fixture() -> tempfile::TempDir {
         "[package]\nname = \"semantic-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write Rust manifest");
-    write_lockfile(root, "semantic-fixture");
+    lock_manifest(root);
     std::fs::write(
         root.join("src/lib.rs"),
         "pub fn total(values: &[u64]) -> u64 { values.iter().sum() }\n",
@@ -255,7 +271,7 @@ fn rust_pipeline_fixture() -> tempfile::TempDir {
         "[package]\nname = \"semantic-pipeline-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write Rust manifest");
-    write_lockfile(root, "semantic-pipeline-fixture");
+    lock_manifest(root);
     std::fs::write(
         root.join("src/lib.rs"),
         "pub fn odds(values: &[u64]) -> Vec<u64> {\n    values.iter().filter(|value| **value % 2 == 1).map(|value| *value).collect()\n}\n\npub fn evens(values: &[u64]) -> Vec<u64> {\n    values.iter().filter(|value| **value % 2 == 0).map(|value| *value).collect()\n}\n",
@@ -308,7 +324,7 @@ fn rust_partial_pipeline_fixture() -> tempfile::TempDir {
         "[package]\nname = \"semantic-partial-pipeline-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write Rust manifest");
-    write_lockfile(root, "semantic-partial-pipeline-fixture");
+    lock_manifest(root);
     std::fs::write(
         root.join("src/lib.rs"),
         "pub fn odds(values: &[u64], keep: Option<u64>) -> Vec<u64> {\n    let collected: Vec<_> = values.iter().filter(|value| **value % 2 == 1).map(|value| *value).collect();\n    if keep.is_some() { collected } else { Vec::new() }\n}\n\npub fn evens(values: &[u64], keep: Option<u64>) -> Vec<u64> {\n    let collected: Vec<_> = values.iter().filter(|value| **value % 2 == 0).map(|value| *value).collect();\n    if keep.is_some() { collected } else { Vec::new() }\n}\n",
@@ -328,7 +344,7 @@ fn rust_loop_pipeline_fixture() -> tempfile::TempDir {
         "[package]\nname = \"semantic-loop-pipeline-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write Rust manifest");
-    write_lockfile(root, "semantic-loop-pipeline-fixture");
+    lock_manifest(root);
     std::fs::write(
         root.join("src/lib.rs"),
         "pub fn explicit<'a>(values: &'a [u64]) -> Vec<&'a u64> {\n    let mut collected = Vec::new();\n    for value in values {\n        collected.push(value);\n    }\n    collected\n}\n\npub fn iterator<'a>(values: &'a [u64]) -> Vec<&'a u64> {\n    values.iter().collect()\n}\n",
@@ -348,7 +364,7 @@ fn rust_reduce_pipeline_fixture() -> tempfile::TempDir {
         "[package]\nname = \"semantic-reduce-pipeline-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write Rust manifest");
-    write_lockfile(root, "semantic-reduce-pipeline-fixture");
+    lock_manifest(root);
     std::fs::write(
         root.join("src/lib.rs"),
         "pub fn sum(values: &[u64]) -> u64 {\n    values.iter().fold(0, |total, value| total + value)\n}\n\npub fn product(values: &[u64]) -> u64 {\n    values.iter().fold(1, |total, value| total * value)\n}\n",
@@ -369,7 +385,7 @@ fn rust_loop_reduce_fixture() -> tempfile::TempDir {
         "[package]\nname = \"semantic-loop-reduce-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write Rust manifest");
-    write_lockfile(root, "semantic-loop-reduce-fixture");
+    lock_manifest(root);
     std::fs::write(
         root.join("src/lib.rs"),
         "pub fn explicit(values: &[u64]) -> u64 {\n    let mut total = 0;\n    for value in values {\n        total += *value;\n    }\n    total\n}\n\npub fn iterator(values: &[u64]) -> u64 {\n    values.iter().fold(0, |total, value| total + *value)\n}\n\npub fn guarded(values: &[u64]) -> u64 {\n    let mut total = 0;\n    for value in values {\n        if *value > 0 {\n            total += *value;\n        }\n    }\n    total\n}\n",
@@ -390,7 +406,7 @@ fn rust_resource_lifetime_fixture() -> tempfile::TempDir {
         "[package]\nname = \"semantic-resource-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write Rust manifest");
-    write_lockfile(root, "semantic-resource-fixture");
+    lock_manifest(root);
     std::fs::write(
         root.join("src/lib.rs"),
         "pub fn inspect_first(path: &std::path::Path) {\n    let _file = std::fs::File::open(path).unwrap();\n}\n\npub fn inspect_second(path: &std::path::Path) {\n    let _file = std::fs::File::open(path).unwrap();\n}\n\npub fn inspect_third(path: &std::path::Path) {\n    let _file = std::fs::File::open(path).unwrap();\n}\n",
@@ -411,7 +427,7 @@ fn rust_direct_propagation_fixture() -> tempfile::TempDir {
         "[package]\nname = \"semantic-direct-result-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write Rust manifest");
-    write_lockfile(root, "semantic-direct-result-fixture");
+    lock_manifest(root);
     std::fs::write(
         root.join("src/lib.rs"),
         "pub fn operator(value: Result<u64, ()>) -> Result<u64, ()> {\n    Ok(value?)\n}\n\npub fn branches(value: Result<u64, ()>) -> Result<u64, ()> {\n    match value {\n        Ok(value) => Ok(value),\n        Err(error) => Err(error),\n    }\n}\n\npub fn transformed(value: Result<u64, ()>) -> Result<u64, ()> {\n    let value = value?;\n    Ok(value.saturating_add(1))\n}\n\npub fn option_operator(value: Option<u64>) -> Option<u64> {\n    Some(value?)\n}\n\npub fn option_branches(value: Option<u64>) -> Option<u64> {\n    match value {\n        Some(value) => Some(value),\n        None => None,\n    }\n}\n\npub fn option_transformed(value: Option<u64>) -> Option<u64> {\n    Some(value?.saturating_add(1))\n}\n\nmod project_lookalike {\n    #[allow(non_snake_case)]\n    fn Some(value: u64) -> Option<u64> {\n        Option::Some(value)\n    }\n\n    pub fn project_named_some(value: Option<u64>) -> Option<u64> {\n        Some(value?)\n    }\n}\n",
@@ -432,7 +448,7 @@ fn rust_optional_validation_fixture() -> tempfile::TempDir {
         "[package]\nname = \"semantic-optional-validation-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write Rust manifest");
-    write_lockfile(root, "semantic-optional-validation-fixture");
+    lock_manifest(root);
     std::fs::write(
         root.join("src/lib.rs"),
         "pub fn first(value: Option<u64>) -> bool {\n    if value.is_some() {\n        true\n    } else {\n        false\n    }\n}\n\npub fn second(value: Option<u64>) -> bool {\n    if value.is_some() {\n        false\n    } else {\n        true\n    }\n}\n\npub fn matched(value: Option<u64>) -> bool {\n    match value {\n        Some(_) => true,\n        None => false,\n    }\n}\n\npub fn early_first(value: Option<u64>) {\n    if !value.is_some() {\n        return;\n    }\n    let _ = value;\n}\n\npub fn early_second(value: Option<u64>) {\n    if !value.is_some() {\n        return;\n    }\n    let _ = value;\n}\n\npub fn compound(value: Option<u64>, keep: bool) -> bool {\n    if value.is_some() && keep {\n        true\n    } else {\n        false\n    }\n}\n\npub fn negative_nonreturn(value: Option<u64>) {\n    if !value.is_some() {\n        let _ = value;\n    }\n}\n\npub fn negative_value_return(value: Option<u64>) -> Option<u64> {\n    if !value.is_some() {\n        return None;\n    }\n    value\n}\n",
@@ -453,7 +469,7 @@ fn rust_result_validation_fixture() -> tempfile::TempDir {
         "[package]\nname = \"semantic-result-validation-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write Rust manifest");
-    write_lockfile(root, "semantic-result-validation-fixture");
+    lock_manifest(root);
     std::fs::write(
         root.join("src/lib.rs"),
         "pub fn first(value: Result<u64, ()>) -> bool {\n    if value.is_ok() {\n        true\n    } else {\n        false\n    }\n}\n\npub fn second(value: Result<u64, ()>) -> bool {\n    if value.is_ok() {\n        false\n    } else {\n        true\n    }\n}\n\npub fn compound(value: Result<u64, ()>, keep: bool) -> bool {\n    if value.is_ok() && keep {\n        true\n    } else {\n        false\n    }\n}\n\nstruct Lookalike;\n\nimpl Lookalike {\n    fn is_ok(&self) -> bool {\n        true\n    }\n}\n\nfn lookalike(value: Lookalike) -> bool {\n    if value.is_ok() {\n        true\n    } else {\n        false\n    }\n}\n",
@@ -475,6 +491,7 @@ fn cross_language_pipeline_fixture() -> tempfile::TempDir {
         std::fs::copy(corpus.join(relative), root.join(relative))
             .unwrap_or_else(|error| panic!("copying cross-language corpus {relative}: {error}"));
     }
+    lock_manifest(root);
     let mut arguments = vec!["clang++".to_string(), "-std=c++17".to_string()];
     arguments.extend(cpp_standard_library_arguments());
     arguments.extend(["-c".to_string(), "cpp/copied.cpp".to_string()]);
@@ -509,6 +526,7 @@ fn cross_language_direct_loop_fixture() -> tempfile::TempDir {
             panic!("copying cross-language loop corpus {relative}: {error}")
         });
     }
+    lock_manifest(root);
     let mut arguments = vec!["clang++".to_string(), "-std=c++17".to_string()];
     arguments.extend(cpp_standard_library_arguments());
     arguments.extend(["-c".to_string(), "cpp/range_loop.cpp".to_string()]);
@@ -539,6 +557,7 @@ fn cross_language_result_expected_fixture() -> tempfile::TempDir {
         std::fs::copy(corpus.join(relative), root.join(relative))
             .unwrap_or_else(|error| panic!("copying result/expected corpus {relative}: {error}"));
     }
+    lock_manifest(root);
     // `c++2b` rather than `c++23`: the fixture needs `<expected>`, and the
     // oldest Clang this project reads a project with does not recognise the
     // final spelling of the standard that introduced it. Both spellings select

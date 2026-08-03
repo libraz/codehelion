@@ -1,3 +1,9 @@
 [toolchain]
 channel = "stable"
-components = ["rustfmt", "clippy"]
+# `rust-src` is not a convenience. The Rust semantic helper resolves
+# standard-library names by reading the sysroot sources, so without it the
+# helper answers only about a project's own code and a test that asks it about
+# `std` reads the silence as a wrong answer. Naming it here installs it
+# wherever the repository is checked out, rather than leaving every machine and
+# every CI job to remember separately.
+components = ["rustfmt", "clippy", "rust-src"]

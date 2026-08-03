@@ -1,7 +1,6 @@
 use super::*;
 
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_scan_records_registered_pipeline_evidence() {
     let fixture = rust_pipeline_fixture();
     let root = fixture.path();
@@ -71,7 +70,6 @@ fn semantic_scan_records_registered_pipeline_evidence() {
 
 /// C++ serialization is admitted only as its exact resolved conversion pair.
 #[test]
-#[ignore = "requires codehelion-backend-clang and libclang"]
 fn semantic_scan_matches_only_closed_cpp_serialization_round_trips() {
     let fixture = cpp_serialization_fixture();
     let report = scan(fixture.path());
@@ -101,7 +99,6 @@ fn semantic_scan_matches_only_closed_cpp_serialization_round_trips() {
 /// real helper process. The assertion is a regression check, not a CI score
 /// gate or a claim that this compact corpus estimates field precision.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_rules_have_closed_corpus_evidence() {
     let (corpus, labels) = restricted_semantic_rust_corpus();
     let report = scan(corpus.path());
@@ -135,7 +132,6 @@ fn semantic_rules_have_closed_corpus_evidence() {
 /// The C++ serialization rule is enabled only after the Clang helper resolves
 /// both conversion calls in its labelled positive and negative corpus forms.
 #[test]
-#[ignore = "requires codehelion-backend-clang and libclang"]
 fn cpp_serialization_rule_has_closed_corpus_evidence() {
     let (corpus, labels) = restricted_semantic_cpp_corpus();
     let report = scan(corpus.path());
@@ -152,7 +148,6 @@ fn cpp_serialization_rule_has_closed_corpus_evidence() {
 /// after their real-helper corpus accepts both registered pairs and rejects
 /// transformed near misses.
 #[test]
-#[ignore = "requires codehelion-backend-clang and libclang"]
 fn cpp_plain_range_loop_forms_have_closed_corpus_evidence() {
     let (corpus, labels) = restricted_semantic_cpp_loop_corpus();
     let report = scan(corpus.path());
@@ -168,7 +163,6 @@ fn cpp_plain_range_loop_forms_have_closed_corpus_evidence() {
 /// Repeating a real-helper scan preserves the direct range-for findings and
 /// their rule-specific measurement.
 #[test]
-#[ignore = "requires codehelion-backend-clang and libclang"]
 fn cpp_plain_range_loop_metrics_are_stable_across_fresh_scans() {
     let (corpus, labels) = restricted_semantic_cpp_loop_corpus();
     let measure = |report: &Value| {
@@ -185,7 +179,6 @@ fn cpp_plain_range_loop_metrics_are_stable_across_fresh_scans() {
 
 /// Fresh C++ scans retain the same closed-rule findings and measurements.
 #[test]
-#[ignore = "requires codehelion-backend-clang and libclang"]
 fn cpp_serialization_rule_metrics_are_stable_across_fresh_scans() {
     let (corpus, labels) = restricted_semantic_cpp_corpus();
     let measure = |report: &Value| {
@@ -205,7 +198,6 @@ fn cpp_serialization_rule_metrics_are_stable_across_fresh_scans() {
 /// result stability and the per-kLOC rates in the same regression contract as
 /// the closed positive and negative examples.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_rule_metrics_are_stable_across_fresh_scans() {
     let (corpus, labels) = restricted_semantic_rust_corpus();
     let first = scan(corpus.path());
@@ -232,7 +224,6 @@ fn semantic_rule_metrics_are_stable_across_fresh_scans() {
 /// fragment finding. Its source lines must name the iterator expression, not
 /// the enclosing function, while its graph retains only the sequence nodes.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_scan_reports_partial_pipeline_source_ranges() {
     let fixture = rust_partial_pipeline_fixture();
     let report = scan(fixture.path());
@@ -272,7 +263,6 @@ fn semantic_scan_reports_partial_pipeline_source_ranges() {
 /// A plain explicit collection loop is comparable to the registered iterator
 /// collection pipeline when both represent only source and collection.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_scan_matches_a_plain_collection_loop_to_an_iterator_pipeline() {
     let fixture = rust_loop_pipeline_fixture();
     let report = scan(fixture.path());
@@ -308,7 +298,6 @@ fn semantic_scan_matches_a_plain_collection_loop_to_an_iterator_pipeline() {
 /// The resource rule is available only when the Rust helper proved the direct
 /// standard acquisition and the lexical scope supplied its `Drop` boundary.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_scan_matches_direct_standard_file_lifetimes() {
     let fixture = rust_resource_lifetime_fixture();
     let report = scan(fixture.path());
@@ -371,7 +360,6 @@ fn semantic_scan_matches_direct_standard_file_lifetimes() {
 /// guess: the helper must resolve both the source and fold calls before the
 /// same sequence rule may compare the two functions.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_scan_matches_registered_iterator_reductions() {
     let fixture = rust_reduce_pipeline_fixture();
     let report = scan(fixture.path());
@@ -409,7 +397,6 @@ fn semantic_scan_matches_registered_iterator_reductions() {
 /// pairs with the same closed iterator reduction. Its guarded sibling is not
 /// reconstructed as a reduction of every element.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_scan_matches_a_plain_reduce_loop_to_an_iterator_reduction() {
     let fixture = rust_loop_reduce_fixture();
     let report = scan(fixture.path());
@@ -466,7 +453,6 @@ fn semantic_scan_matches_a_plain_reduce_loop_to_an_iterator_reduction() {
 /// The direct `Result` rule needs the helper-confirmed form on both sides;
 /// a naked propagation expression is insufficient evidence for a finding.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_scan_matches_only_direct_result_propagation_forms() {
     let fixture = rust_direct_propagation_fixture();
     let report = scan(fixture.path());
@@ -507,7 +493,6 @@ fn semantic_scan_matches_only_direct_result_propagation_forms() {
 /// a transformation after `?` and a project constructor named `Some` remain
 /// non-matches even though both functions have the same standard fallible type.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_scan_matches_only_direct_option_propagation_forms() {
     let fixture = rust_direct_propagation_fixture();
     let report = scan(fixture.path());
@@ -540,7 +525,6 @@ fn semantic_scan_matches_only_direct_option_propagation_forms() {
 /// narrow early unit-return guard have the same closed validation evidence.
 /// Compound and other inverted conditions remain outside the vocabulary.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_scan_matches_only_direct_option_presence_checks() {
     let fixture = rust_optional_validation_fixture();
     let report = scan(fixture.path());
@@ -579,7 +563,6 @@ fn semantic_scan_matches_only_direct_option_presence_checks() {
 /// Compound and project-defined `is_ok` conditions stay outside the closed
 /// vocabulary, despite sharing the same source-level method spelling.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_scan_matches_only_direct_result_presence_checks() {
     let fixture = rust_result_validation_fixture();
     let report = scan(fixture.path());
@@ -618,7 +601,6 @@ fn semantic_scan_matches_only_direct_result_presence_checks() {
 /// through the explicit result/expected propagation rule. Transformed forms
 /// are not candidates for the direct-adapter correspondence.
 #[test]
-#[ignore = "requires codehelion-backend-rust, codehelion-backend-clang, and libclang"]
 fn semantic_cross_language_result_expected_uses_closed_propagation_evidence() {
     let fixture = cross_language_result_expected_fixture();
     let report = scan_comparing_languages(fixture.path());
@@ -690,7 +672,6 @@ fn semantic_cross_language_result_expected_uses_closed_propagation_evidence() {
 /// must resolve `Result::is_ok()` and `expected::has_value()` to their standard
 /// families, while the compound forms remain outside the closed rule.
 #[test]
-#[ignore = "requires codehelion-backend-rust, codehelion-backend-clang, and libclang"]
 fn semantic_cross_language_result_expected_uses_closed_validation_evidence() {
     let fixture = cross_language_result_expected_fixture();
     let report = scan_comparing_languages(fixture.path());
@@ -730,7 +711,6 @@ fn semantic_cross_language_result_expected_uses_closed_validation_evidence() {
 /// the compiler-backed scan still completes and retains its ordinary
 /// structural findings.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_rule_registry_can_disable_a_registered_pipeline() {
     let fixture = rust_pipeline_fixture();
     std::fs::write(

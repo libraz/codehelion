@@ -11,9 +11,7 @@ use super::*;
     reason = "the integration fixture is compiled outside the product scan path"
 )]
 fn cpp_template_specializations_correlate_to_a_debugless_object() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let dir = tempfile::tempdir().expect("temp dir");
     let root =
         codehelion_fixtures::copy_cpp("template-instantiation", dir.path()).expect("plant fixture");
@@ -185,9 +183,7 @@ fn cpp_template_specializations_correlate_to_a_debugless_object() {
 /// other partition's answer.
 #[test]
 fn call_targets_survive_header_agreement_and_sqlite_round_trip() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let dir = tempfile::tempdir().expect("temp dir");
     let root =
         codehelion_fixtures::copy_cpp("overload-resolution", dir.path()).expect("plant fixture");
@@ -262,9 +258,7 @@ fn call_targets_survive_header_agreement_and_sqlite_round_trip() {
 /// language's analysis.
 #[test]
 fn a_cpp_tree_with_no_compilation_database_is_reported_rather_than_refused() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let dir = tempfile::tempdir().expect("temp dir");
     let root = dir.path().join("src");
     std::fs::create_dir_all(&root).expect("create the tree");
@@ -289,9 +283,7 @@ fn a_cpp_tree_with_no_compilation_database_is_reported_rather_than_refused() {
 /// partition and remains visible as a structural finding.
 #[test]
 fn a_mixed_tree_without_a_compilation_database_keeps_cpp_findings() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let dir = tempfile::tempdir().expect("temp dir");
     let root = dir.path().join("src");
     std::fs::create_dir_all(&root).expect("create the tree");

@@ -2,7 +2,6 @@ use super::*;
 
 /// Both helpers must answer a real Semantic CLI scan and persist their IR.
 #[test]
-#[ignore = "requires codehelion-backend-rust, codehelion-backend-clang, and libclang"]
 fn semantic_helpers_store_compiler_ir_for_rust_and_cpp() {
     let rust_dir = rust_fixture();
     let rust_root = rust_dir.path();
@@ -28,7 +27,6 @@ fn semantic_helpers_store_compiler_ir_for_rust_and_cpp() {
 /// An opt-in comparison keeps the Rust and C++ normal scans independent while
 /// recording a separately justified correspondence with both source graphs.
 #[test]
-#[ignore = "requires codehelion-backend-rust, codehelion-backend-clang, and libclang"]
 #[allow(
     clippy::too_many_lines,
     reason = "the end-to-end assertion fixes output, evidence, persistence, and measurement together"
@@ -164,7 +162,6 @@ fn semantic_cross_language_comparison_records_closed_api_evidence() {
 /// Direct loop correspondence stays cross-language only when both compiler
 /// helpers establish the narrow, untransformed construct form.
 #[test]
-#[ignore = "requires codehelion-backend-rust, codehelion-backend-clang, and libclang"]
 fn semantic_cross_language_direct_loops_have_closed_construct_evidence() {
     let fixture = cross_language_direct_loop_fixture();
     let root = fixture.path();
@@ -212,7 +209,6 @@ fn semantic_cross_language_direct_loops_have_closed_construct_evidence() {
 /// A helper re-run, rather than a reused snapshot, must return the same IR
 /// under an unchanged build variant.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_rust_ir_is_deterministic_across_fresh_scans() {
     let fixture = rust_fixture();
     let root = fixture.path();
@@ -241,7 +237,6 @@ fn semantic_rust_ir_is_deterministic_across_fresh_scans() {
 /// that complete linkage reports as a split pair rather than silently losing
 /// it while the neighbouring exact copies form a group.
 #[test]
-#[ignore = "requires codehelion-backend-rust"]
 fn semantic_rust_corpus_keeps_structural_coverage_and_reports_the_split_type3_pair() {
     let (corpus, labels) = semantic_rust_corpus();
     let structural = scan_mode(corpus.path(), "structural");
@@ -286,7 +281,6 @@ fn semantic_rust_corpus_keeps_structural_coverage_and_reports_the_split_type3_pa
 /// C++ compilation-database partitions are independently re-asked and keep
 /// both their selected build variant and their compiler IR across fresh runs.
 #[test]
-#[ignore = "requires codehelion-backend-clang and libclang"]
 fn semantic_cpp_ir_is_deterministic_across_fresh_scans() {
     let directory = tempfile::tempdir().expect("temporary C++ project");
     let root = codehelion_fixtures::copy_cpp("header-only", directory.path())

@@ -1,9 +1,29 @@
 {
   "anchored_at": "<fixture>",
   "calls": [],
-  "expressions": [],
-  "unexpanded_macros": [],
-  "cfg": null,
+  "cfg": {
+    "blocks": [
+      {
+        "anchor": {
+          "definition": null,
+          "expansion": {
+            "end_byte": 94,
+            "file": "src/counter.cpp",
+            "start_byte": 44,
+            "start_line": 3
+          }
+        },
+        "length": 6
+      }
+    ],
+    "edges": [
+      {
+        "from": 0,
+        "kind": "return",
+        "to": 0
+      }
+    ]
+  },
   "data_flow": {
     "computed": false,
     "flows": []
@@ -13,6 +33,7 @@
     "interactions": [],
     "writes": []
   },
+  "expressions": [],
   "instantiations": [],
   "schema_version": "compiler-ir-v1",
   "semantic_constructs": [],
@@ -160,6 +181,7 @@
       "display": "unsigned int (unsigned int)"
     }
   ],
+  "unexpanded_macros": [],
   "unit": {
     "file": "<fixture>/src/counter.cpp",
     "unit": "<fixture>/src/counter.cpp",

@@ -34,8 +34,6 @@
       }
     }
   ],
-  "expressions": [],
-  "unexpanded_macros": [],
   "cfg": null,
   "data_flow": {
     "computed": true,
@@ -46,6 +44,7 @@
     "interactions": [],
     "writes": []
   },
+  "expressions": [],
   "instantiations": [],
   "schema_version": "compiler-ir-v1",
   "semantic_constructs": [],
@@ -193,6 +192,7 @@
       "display": "handle"
     }
   ],
+  "unexpanded_macros": [],
   "unit": {
     "file": "<fixture>/src/lib.rs",
     "unit": "semantic_fixture",

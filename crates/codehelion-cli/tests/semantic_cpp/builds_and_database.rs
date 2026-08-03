@@ -5,9 +5,7 @@ use super::*;
 /// opt-in comparison names every member's source build variant.
 #[test]
 fn explicit_cross_build_comparison_is_separate_and_origin_aware() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let dir = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant fixture");
 
@@ -87,9 +85,7 @@ fn explicit_cross_build_comparison_is_separate_and_origin_aware() {
 /// from one build variant, but the report must say why it could not run.
 #[test]
 fn one_build_variant_reports_a_cross_comparison_that_did_not_run() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let dir = tempfile::tempdir().expect("temp dir");
     let root =
         codehelion_fixtures::copy_cpp("template-instantiation", dir.path()).expect("plant fixture");
@@ -154,9 +150,7 @@ fn one_build_variant_reports_a_cross_comparison_that_did_not_run() {
 /// coverage result instead of being omitted or borrowed into a real variant.
 #[test]
 fn a_cpp_source_missing_from_the_database_is_recorded_as_no_build_information() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let dir = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
     std::fs::write(
@@ -195,9 +189,7 @@ fn a_cpp_source_missing_from_the_database_is_recorded_as_no_build_information() 
 /// entries survive planning and each Clang request chooses its own `-D`.
 #[test]
 fn a_duplicate_source_command_selects_each_exact_build_entry() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let dir = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
     let database = root.join("compile_commands.json");
@@ -268,9 +260,7 @@ fn a_duplicate_source_command_selects_each_exact_build_entry() {
 /// backfills the header.
 #[test]
 fn template_instantiations_survive_header_agreement_and_storage() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let dir = tempfile::tempdir().expect("temp dir");
     let root =
         codehelion_fixtures::copy_cpp("template-instantiation", dir.path()).expect("plant fixture");

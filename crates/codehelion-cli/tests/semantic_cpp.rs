@@ -22,12 +22,25 @@ fn cmd() -> Command {
     Command::cargo_bin("codehelion").expect("binary should build")
 }
 
-/// Whether the helper that answers about C and C++ is here and usable.
-fn clang_helper_is_usable() -> bool {
+/// Require the helper that answers about C and C++.
+///
+/// This used to return a boolean each test branched on, which made a machine
+/// without the helper report every C++ semantic test as passing. The helper is
+/// a workspace binary and libclang is loaded at run time, so a suite run that
+/// cannot find it has an environment to fix, and saying which is more use than
+/// a silent success.
+fn require_clang_helper() {
     let output = cmd().arg("doctor").output().expect("doctor should run");
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .any(|line| line.contains("clang-helper") && line.contains("available"))
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        report
+            .lines()
+            .any(|line| line.contains("clang-helper") && line.contains("available")),
+        "the C/C++ semantic helper is unavailable, so these tests cannot answer about C++.\n\
+         It is built by a workspace test run and loads libclang at run time; install a libclang \
+         shared library, or run `cargo build -p codehelion-backend-clang` if only the binary is \
+         missing.\n{report}"
+    );
 }
 
 /// A scan of `root` in semantic mode, as the report puts it.
