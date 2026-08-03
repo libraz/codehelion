@@ -8,6 +8,12 @@ yanked = "deny"
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The fixture and evaluation crates are never published, so the crates that
+# test against them carry a bare `path` dev-dependency: a version requirement
+# would send packaging to a registry that cannot have them. Those paths read
+# as wildcards, which is only tolerable because they resolve inside this
+# workspace and never reach a published artifact.
+allow-wildcard-paths = true
 # codehelion is fully local: it never sends source code or results anywhere
 # and has no network access by default. Ban the common network stacks so a
 # transitive dependency cannot quietly pull one in.

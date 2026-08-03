@@ -80,7 +80,7 @@ fn scan_records_distinct_non_utf8_source_paths_without_rolling_back() {
         .expect("recorded run");
     let paths = store.run_tree(run.id).expect("recorded source tree");
     assert_eq!(paths.len(), 2);
-    assert_eq!(paths.keys().collect::<Vec<_>>().len(), 2);
+    assert_eq!(paths.keys().count(), 2);
     assert!(paths.keys().all(|path| path.starts_with('\u{001f}')));
 }
 

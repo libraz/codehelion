@@ -430,7 +430,6 @@ fn untrusted_semantic_requires_an_enforceable_memory_limit() {
 #[test]
 fn untrusted_semantic_requires_a_linux_memory_limit() {
     let args = ScanArgs {
-        helpers: Vec::new(),
         sort: SortAxis::default(),
         min_identifier_jaccard: None,
         path: PathBuf::from("."),
