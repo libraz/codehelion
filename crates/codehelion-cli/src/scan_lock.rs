@@ -97,9 +97,23 @@ pub fn lease_status(database: &Path) -> LeaseStatus {
             drop(FileExt::unlock(&file));
             LeaseStatus::Available
         }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => LeaseStatus::Held,
+        Err(error) if is_contention(&error) => LeaseStatus::Held,
         Err(error) => LeaseStatus::Unreadable(error.to_string()),
     }
+}
+
+/// Whether a refused lock attempt means somebody else holds the lease.
+///
+/// Contention is not one error. A system that refuses an immediate lock
+/// reports it in its own terms, and only one of those terms is the
+/// would-block reading: Windows calls it a lock violation, which carries no
+/// portable kind and would otherwise be read as a sidecar nobody can inspect.
+/// The locking library states which error its own attempt produces under
+/// contention, so ask it rather than enumerate the systems.
+fn is_contention(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error().is_some()
+            && error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
 /// Stable sidecar path used by all commands that coordinate one database.
@@ -128,6 +142,19 @@ mod tests {
         );
         drop(first);
         acquire(&database).expect("released lease can be acquired again");
+    }
+
+    /// The probe reads a refused lock the way the locking library reports it.
+    ///
+    /// Stated here as well as in the probe, because a system whose refusal
+    /// carries a different spelling turns a held lease into an unreadable one,
+    /// and the probe alone only says so where that system runs.
+    #[test]
+    fn a_refused_immediate_lock_reads_as_contention() {
+        assert!(is_contention(&fs2::lock_contended_error()));
+        assert!(!is_contention(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
     }
 
     #[test]

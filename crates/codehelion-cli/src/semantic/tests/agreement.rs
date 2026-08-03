@@ -199,7 +199,7 @@ fn a_file_no_command_compiles_is_answered_by_the_unit_that_read_it() {
     };
     // Filed under the header, and under the unit that read it — which is
     // the program these names were resolved in, and is not the header.
-    assert_eq!(ir.unit.file, "/repo/include/accumulate.hpp");
+    assert_eq!(ir.unit.file, source_path("include/accumulate.hpp"));
     assert_eq!(ir.unit.unit, "/repo/src/narrow.cpp");
     assert_eq!(ir.anchored_at.as_deref(), Some("/repo"));
     assert_eq!(ir.symbols.len(), 1);

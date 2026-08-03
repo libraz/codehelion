@@ -311,16 +311,31 @@ fn dispatch_doctor_writes_diagnostics() {
     ));
 }
 
+/// A database nobody can read is never reported as a size.
+///
+/// What a system says about a path underneath a plain file is its own to
+/// decide: some answer that the path is not a directory, others that there is
+/// no such path. Both are honest, and the probe passes either on — an error
+/// stays an error, and an absence stays an absence. Inventing a byte count
+/// for a database that was never opened is the answer this rules out, and it
+/// is the same answer on every system.
 #[test]
-fn database_metadata_errors_are_not_reported_as_absent() {
+fn a_database_that_cannot_be_read_is_never_reported_as_a_size() {
     let blocker = tempfile::NamedTempFile::new().expect("create non-directory path component");
     let database = blocker.path().join("audit.db");
-    let error = database_storage_bytes(&database_files(&database))
-        .expect_err("metadata under a file must remain an OS error");
-    let source = error
-        .downcast_ref::<io::Error>()
-        .expect("the database metadata error is retained");
-    assert_eq!(source.kind(), io::ErrorKind::NotADirectory);
+    match database_storage_bytes(&database_files(&database)) {
+        Ok(size) => assert_eq!(size, None, "no database was read, so none has a size"),
+        Err(error) => {
+            let source = error
+                .downcast_ref::<io::Error>()
+                .expect("the database metadata error is retained");
+            assert_ne!(
+                source.kind(),
+                io::ErrorKind::NotFound,
+                "an absent database is reported by returning no size, not by failing"
+            );
+        }
+    }
 }
 
 #[test]

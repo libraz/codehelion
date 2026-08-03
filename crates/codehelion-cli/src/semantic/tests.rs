@@ -389,6 +389,15 @@ fn semantic_requests_control_flow_capability() {
     assert!(WANTED.contains(&Capability::MirCfg));
 }
 
+/// Where a fixture source sits, spelled the way this system spells paths.
+///
+/// The assertions below name files through this rather than as literals. A
+/// separator is the system's to choose, and a literal written with one of
+/// them tests the system it was written on instead of the code.
+fn source_path(path: &str) -> String {
+    PathBuf::from("/repo").join(path).display().to_string()
+}
+
 fn source(path: &str, language: Language, crate_name: Option<&str>) -> SourceUnit {
     SourceUnit {
         relative_path: PathBuf::from(path),
@@ -450,7 +459,7 @@ fn every_source_is_accounted_for_in_the_order_it_was_given() {
     ));
     assert_eq!(asked.len(), 1);
     assert_eq!(asked[0].unit, "ledger");
-    assert_eq!(asked[0].file, "/repo/src/lib.rs");
+    assert_eq!(asked[0].file, source_path("src/lib.rs"));
     assert_eq!(asked[0].variant, "host");
 }
 
@@ -482,7 +491,7 @@ fn being_unable_to_answer_is_not_the_same_as_never_being_asked() {
     // The unit is kept: a run records what it asked about, and a reason
     // with nothing attached names no file.
     assert_eq!(unit.unit, "ledger");
-    assert_eq!(unit.file, "/repo/src/lib.rs");
+    assert_eq!(unit.file, source_path("src/lib.rs"));
     assert!(matches!(answers[1], Gathered::NotAsked { .. }));
 }
 
@@ -504,7 +513,7 @@ fn a_file_nobody_was_asked_about_is_named_without_a_unit_being_invented() {
         panic!("nobody was asked about it");
     };
     assert_eq!(*reason, Unavailability::NoBuildInformation);
-    assert_eq!(unit.file, "/repo/build.rs");
+    assert_eq!(unit.file, source_path("build.rs"));
     assert!(unit.unit.is_empty());
 }
 
@@ -545,8 +554,8 @@ fn each_file_is_put_to_the_helper_that_reads_its_language() {
             // A C or C++ file is its own translation unit, named by where
             // it is: no layout says which command compiles it, and the
             // helper reads that from the compilation database itself.
-            (1, "/repo/src/accumulate.cpp".to_string()),
-            (1, "/repo/src/native.c".to_string()),
+            (1, source_path("src/accumulate.cpp")),
+            (1, source_path("src/native.c")),
         ]
     );
 }
