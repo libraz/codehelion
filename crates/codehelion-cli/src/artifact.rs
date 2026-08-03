@@ -12,16 +12,16 @@ use std::path::Path as FilePath;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use codehelion_artifact::archive::ArchiveBackend;
+use codehelion_artifact::elf::ElfBackend;
+use codehelion_artifact::macho::MachOBackend;
+use codehelion_artifact::pe::PeCoffBackend;
+use codehelion_artifact::wasm::WasmBackend;
 use codehelion_artifact::{
     ARTIFACT_IR_SCHEMA_VERSION, ArtifactBackend, ArtifactFormat as BinaryFormat, ArtifactIr,
     detect_format, metrics,
     metrics::{EstimatedRefactorSavingsBytes, EvidenceConfidence, VerifiedSavingsBytes},
 };
-use codehelion_artifact_archive::ArchiveBackend;
-use codehelion_artifact_elf::ElfBackend;
-use codehelion_artifact_macho::MachOBackend;
-use codehelion_artifact_pe::PeCoffBackend;
-use codehelion_artifact_wasm::WasmBackend;
 use codehelion_store::artifact::{
     ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION,
     ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION,

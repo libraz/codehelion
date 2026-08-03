@@ -4,18 +4,29 @@
 //! into [`ArtifactIr`]; common metrics can then operate on that IR without
 //! knowing whether it came from WebAssembly, ELF, or a later format.
 //!
-//! Format support and archive delegation are exposed by the command-line
-//! interface rather than this library's docs.rs API.
+//! Each format backend sits behind a feature of the same name, so a caller
+//! that reads one format does not build the parsers for the others. The
+//! `archive` feature turns on the four backends it delegates members to.
 
 use core::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+#[cfg(feature = "archive")]
+pub mod archive;
 pub mod dwarf;
+#[cfg(feature = "elf")]
+pub mod elf;
+#[cfg(feature = "macho")]
+pub mod macho;
 pub mod metrics;
 pub mod native;
+#[cfg(feature = "pe")]
+pub mod pe;
 pub mod symbols;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 pub mod x86;
 
 /// Version of the artifact IR document.

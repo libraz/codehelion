@@ -394,63 +394,12 @@ dependencies = [
  "gimli",
  "iced-x86",
  "object",
+ "pdb",
  "proptest",
  "rustc-demangle",
  "serde",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "codehelion-artifact-archive"
-version = "0.1.0"
-dependencies = [
- "codehelion-artifact",
- "codehelion-artifact-elf",
- "codehelion-artifact-macho",
- "codehelion-artifact-pe",
- "codehelion-artifact-wasm",
- "object",
- "proptest",
-]
-
-[[package]]
-name = "codehelion-artifact-elf"
-version = "0.1.0"
-dependencies = [
- "codehelion-artifact",
- "iced-x86",
- "object",
- "proptest",
- "serde_json",
-]
-
-[[package]]
-name = "codehelion-artifact-macho"
-version = "0.1.0"
-dependencies = [
- "codehelion-artifact",
- "object",
- "proptest",
-]
-
-[[package]]
-name = "codehelion-artifact-pe"
-version = "0.1.0"
-dependencies = [
- "codehelion-artifact",
- "object",
- "pdb",
- "proptest",
-]
-
-[[package]]
-name = "codehelion-artifact-wasm"
-version = "0.1.0"
-dependencies = [
- "codehelion-artifact",
- "proptest",
- "serde_json",
  "wasmparser",
 ]
 
@@ -491,11 +440,6 @@ dependencies = [
  "boon",
  "clap",
  "codehelion-artifact",
- "codehelion-artifact-archive",
- "codehelion-artifact-elf",
- "codehelion-artifact-macho",
- "codehelion-artifact-pe",
- "codehelion-artifact-wasm",
  "codehelion-core",
  "codehelion-eval",
  "codehelion-fixtures",

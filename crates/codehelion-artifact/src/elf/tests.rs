@@ -1,6 +1,6 @@
 use super::*;
-use codehelion_artifact::symbols::demangle;
-use codehelion_artifact::x86::normalize_x86;
+use crate::symbols::demangle;
+use crate::x86::normalize_x86;
 use object::write::{Object as WriteObject, Relocation, StandardSection, Symbol, SymbolSection};
 use object::{
     Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationFlags, RelocationKind,
@@ -284,7 +284,7 @@ fn parses_sections_and_sized_text_symbols() {
 #[test]
 fn section_sized_native_data_is_not_reported_as_measured_duplicate_data() {
     let artifact = ElfBackend.parse(&fixture()).expect("fixture parses");
-    let sizes = codehelion_artifact::metrics::classify_sizes(&artifact);
+    let sizes = crate::metrics::classify_sizes(&artifact);
 
     assert!(!artifact.capabilities.independent_data_segments);
     assert_eq!(sizes.duplicated_data_bytes, None);
@@ -402,7 +402,7 @@ fn fixture_ir_snapshot_is_current() {
     let rendered = serde_json::to_string_pretty(&artifact).expect("IR serializes");
     assert_eq!(
         rendered,
-        include_str!("../tests/golden/minimal-ir-v2.json").trim_end()
+        include_str!("../../tests/golden/minimal-ir-v2.json").trim_end()
     );
 }
 
@@ -590,27 +590,19 @@ fn demangling_keeps_unknown_names_and_handles_itanium_symbols() {
 #[test]
 fn dwarf_relative_paths_keep_their_declared_directory_context_without_reading_source() {
     assert_eq!(
-        codehelion_artifact::dwarf::resolve_source_path("src/main.cpp", None, Some("/work/tree")),
+        crate::dwarf::resolve_source_path("src/main.cpp", None, Some("/work/tree")),
         "/work/tree/src/main.cpp"
     );
     assert_eq!(
-        codehelion_artifact::dwarf::resolve_source_path(
-            "header.hpp",
-            Some("include"),
-            Some("/work/tree")
-        ),
+        crate::dwarf::resolve_source_path("header.hpp", Some("include"), Some("/work/tree")),
         "/work/tree/include/header.hpp"
     );
     assert_eq!(
-        codehelion_artifact::dwarf::resolve_source_path(
-            "entry.cpp",
-            Some("/other/build"),
-            Some("/work/tree")
-        ),
+        crate::dwarf::resolve_source_path("entry.cpp", Some("/other/build"), Some("/work/tree")),
         "/other/build/entry.cpp"
     );
     assert_eq!(
-        codehelion_artifact::dwarf::resolve_source_path(
+        crate::dwarf::resolve_source_path(
             "/outside/entry.cpp",
             Some("include"),
             Some("/work/tree")
@@ -621,15 +613,11 @@ fn dwarf_relative_paths_keep_their_declared_directory_context_without_reading_so
     // Producers write it both ways, and the same source spelled two ways
     // would be two sources to everything downstream that matches on it.
     assert_eq!(
-        codehelion_artifact::dwarf::resolve_source_path("src/main.cpp", None, Some("/work/tree/")),
+        crate::dwarf::resolve_source_path("src/main.cpp", None, Some("/work/tree/")),
         "/work/tree/src/main.cpp"
     );
     assert_eq!(
-        codehelion_artifact::dwarf::resolve_source_path(
-            "header.hpp",
-            Some("include/"),
-            Some("/work/tree/")
-        ),
+        crate::dwarf::resolve_source_path("header.hpp", Some("include/"), Some("/work/tree/")),
         "/work/tree/include/header.hpp"
     );
 }

@@ -6,14 +6,14 @@
 
 use std::collections::BTreeMap;
 
-use codehelion_artifact::{
+use crate::elf::ElfBackend;
+use crate::macho::MachOBackend;
+use crate::pe::PeCoffBackend;
+use crate::wasm::WasmBackend;
+use crate::{
     ArtifactArchiveMember, ArtifactBackend, ArtifactCapabilities, ArtifactError,
     ArtifactFingerprint, ArtifactFormat, ArtifactIr, detect_format,
 };
-use codehelion_artifact_elf::ElfBackend;
-use codehelion_artifact_macho::MachOBackend;
-use codehelion_artifact_pe::PeCoffBackend;
-use codehelion_artifact_wasm::WasmBackend;
 use object::read::archive::ArchiveFile;
 
 /// Parser backend for static archives containing locally embedded object files.

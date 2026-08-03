@@ -5,8 +5,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use codehelion_artifact::symbols::demangle;
-use codehelion_artifact::{
+use crate::symbols::demangle;
+use crate::{
     ArtifactBackend, ArtifactCall, ArtifactCapabilities, ArtifactDataSegment, ArtifactError,
     ArtifactFingerprint, ArtifactFormat, ArtifactImport, ArtifactImportKind, ArtifactIr,
     ArtifactSection, ArtifactSourceMapping, ArtifactSymbol, NormalizedInstructions, UnresolvedCall,
@@ -438,7 +438,7 @@ const fn malformed(message: String) -> ArtifactError {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use codehelion_artifact::metrics;
+    use crate::metrics;
     use proptest::prelude::*;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 

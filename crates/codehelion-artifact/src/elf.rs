@@ -3,12 +3,12 @@
 //! The backend reads bytes through the safe `object` API and never maps or
 //! executes the artifact.
 
-use codehelion_artifact::dwarf::attach_dwarf_frames;
-use codehelion_artifact::native::{
+use crate::dwarf::attach_dwarf_frames;
+use crate::native::{
     collect_sections, collect_text_symbols, collect_undefined_imports, symbol_fingerprint,
 };
-use codehelion_artifact::x86::X86_NORMALIZATION_VERSION;
-use codehelion_artifact::{
+use crate::x86::X86_NORMALIZATION_VERSION;
+use crate::{
     ArtifactBackend, ArtifactCall, ArtifactCapabilities, ArtifactError, ArtifactFingerprint,
     ArtifactFormat, ArtifactIr, ArtifactSymbol, UnresolvedCall,
 };
@@ -136,9 +136,7 @@ impl ElfBackend {
             call_graph: !ir.calls.is_empty(),
             source_mapping: !ir.source_mappings.is_empty(),
             debug_info_unreadable: ir.capabilities.debug_info_unreadable,
-            normalized_duplicates: codehelion_artifact::x86::supports_normalized_duplicates(
-                file.architecture(),
-            ),
+            normalized_duplicates: crate::x86::supports_normalized_duplicates(file.architecture()),
             independent_data_segments: false,
             relocations: !ir.relocations.is_empty(),
             data_segments: !ir.data_segments.is_empty(),
@@ -256,7 +254,7 @@ fn pointer_value(bytes: &[u8], endianness: Endianness) -> Option<u64> {
 /// Copy section, read-only-data, and relocation facts into format-neutral IR.
 /// Add one explicitly inferred region per executable section of a stripped ELF.
 fn infer_text_regions(file: &object::File<'_>, ir: &mut ArtifactIr) -> Result<(), ArtifactError> {
-    codehelion_artifact::native::infer_text_regions(file, ir, |section, normalized, data| {
+    crate::native::infer_text_regions(file, ir, |section, normalized, data| {
         symbol_fingerprint(None, section, normalized, data)
     })
     .map_err(|error| malformed(error.to_string()))?;

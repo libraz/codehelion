@@ -2,10 +2,10 @@
 
 #![allow(clippy::expect_used)]
 
+use codehelion_artifact::elf::ElfBackend;
+use codehelion_artifact::macho::MachOBackend;
+use codehelion_artifact::pe::PeCoffBackend;
 use codehelion_artifact::{ArtifactBackend, ArtifactImportKind};
-use codehelion_artifact_elf::ElfBackend;
-use codehelion_artifact_macho::MachOBackend;
-use codehelion_artifact_pe::PeCoffBackend;
 use object::write::{Object as WriteObject, StandardSection, Symbol, SymbolSection};
 use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
 

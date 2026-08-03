@@ -6,11 +6,11 @@
 
 use std::collections::HashMap;
 
-use codehelion_artifact::native::{
+use crate::native::{
     collect_sections, collect_text_symbols, collect_undefined_imports, symbol_fingerprint,
 };
-use codehelion_artifact::x86::X86_NORMALIZATION_VERSION;
-use codehelion_artifact::{
+use crate::x86::X86_NORMALIZATION_VERSION;
+use crate::{
     ArtifactBackend, ArtifactCapabilities, ArtifactError, ArtifactFingerprint, ArtifactFormat,
     ArtifactIr,
 };
@@ -18,7 +18,7 @@ use object::Object;
 use object::read::macho::{FatArch, MachOFatFile32, MachOFatFile64};
 
 #[cfg(test)]
-use codehelion_artifact::ArtifactImportKind;
+use crate::ArtifactImportKind;
 
 /// Parser backend for Mach-O executable and relocatable objects.
 #[derive(Debug, Default, Clone, Copy)]
@@ -149,7 +149,7 @@ impl MachOBackend {
         } else {
             collected_addresses
         };
-        codehelion_artifact::dwarf::attach_dwarf_frames(
+        crate::dwarf::attach_dwarf_frames(
             debug_file.as_ref().unwrap_or(&file),
             &symbol_addresses,
             &mut ir,
@@ -160,9 +160,7 @@ impl MachOBackend {
             call_graph: false,
             source_mapping: !ir.source_mappings.is_empty(),
             debug_info_unreadable: ir.capabilities.debug_info_unreadable,
-            normalized_duplicates: codehelion_artifact::x86::supports_normalized_duplicates(
-                file.architecture(),
-            ),
+            normalized_duplicates: crate::x86::supports_normalized_duplicates(file.architecture()),
             independent_data_segments: false,
             relocations: !ir.relocations.is_empty(),
             data_segments: !ir.data_segments.is_empty(),
@@ -344,11 +342,10 @@ fn infer_text_regions(
     file: &object::File<'_>,
     ir: &mut ArtifactIr,
 ) -> Result<HashMap<ArtifactFingerprint, (u64, u64)>, ArtifactError> {
-    let ranges =
-        codehelion_artifact::native::infer_text_regions(file, ir, |section, normalized, data| {
-            symbol_fingerprint(None, section, normalized, data)
-        })
-        .map_err(|error| malformed(error.to_string()))?;
+    let ranges = crate::native::infer_text_regions(file, ir, |section, normalized, data| {
+        symbol_fingerprint(None, section, normalized, data)
+    })
+    .map_err(|error| malformed(error.to_string()))?;
     Ok(ranges
         .into_iter()
         .map(|(fingerprint, address, size)| (fingerprint, (address, size)))

@@ -8,6 +8,18 @@ repository.workspace = true
 homepage.workspace = true
 description = "Format-neutral artifact intermediate representation and analysis boundary for codehelion."
 
+[features]
+# Every format this build can read. A caller that only needs one names it
+# alone and leaves the other parsers out of the binary; `archive` cannot stand
+# alone, because a static archive is read by handing each member to the
+# backend for its own format.
+default = ["archive", "elf", "macho", "pe", "wasm"]
+archive = ["elf", "macho", "pe", "wasm", "object/archive"]
+elf = []
+macho = []
+pe = ["dep:pdb", "object/coff", "object/pe"]
+wasm = ["dep:wasmparser"]
+
 [dependencies]
 blake3 = "1"
 base64 = "0.22"
@@ -15,13 +27,15 @@ cpp_demangle = "0.5"
 gimli = { version = "0.31", default-features = false, features = ["read"] }
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder"] }
 object = { version = "0.39", default-features = false, features = ["read", "elf", "macho", "compression"] }
+pdb = { version = "0.8", optional = true }
 rustc-demangle = "0.1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+wasmparser = { version = "0.254", optional = true }
 
 [dev-dependencies]
 flate2 = "1"
-object = { version = "0.39", default-features = false, features = ["write", "elf"] }
+object = { version = "0.39", default-features = false, features = ["write", "elf", "macho", "coff"] }
 proptest = "1.6"
 serde_json = "1"
 

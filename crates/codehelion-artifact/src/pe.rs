@@ -8,11 +8,11 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io::Cursor;
 
-use codehelion_artifact::native::{
+use crate::native::{
     collect_sections, collect_text_symbols, collect_undefined_imports, symbol_fingerprint,
 };
-use codehelion_artifact::x86::X86_NORMALIZATION_VERSION;
-use codehelion_artifact::{
+use crate::x86::X86_NORMALIZATION_VERSION;
+use crate::{
     ArtifactBackend, ArtifactCapabilities, ArtifactError, ArtifactFingerprint, ArtifactFormat,
     ArtifactIr,
 };
@@ -20,7 +20,7 @@ use object::Object;
 use pdb::{FallibleIterator, PDB};
 
 #[cfg(test)]
-use codehelion_artifact::ArtifactImportKind;
+use crate::ArtifactImportKind;
 
 /// Parser backend for PE images and COFF objects.
 #[derive(Debug, Default, Clone, Copy)]
@@ -104,9 +104,7 @@ impl PeCoffBackend {
             call_graph: false,
             source_mapping: !ir.source_mappings.is_empty(),
             debug_info_unreadable: false,
-            normalized_duplicates: codehelion_artifact::x86::supports_normalized_duplicates(
-                file.architecture(),
-            ),
+            normalized_duplicates: crate::x86::supports_normalized_duplicates(file.architecture()),
             independent_data_segments: false,
             relocations: !ir.relocations.is_empty(),
             data_segments: !ir.data_segments.is_empty(),
@@ -154,7 +152,7 @@ fn collect_symbols(
 /// inferred region per text section says that code was observed while making
 /// clear that no function boundary was available.
 fn infer_text_regions(file: &object::File<'_>, ir: &mut ArtifactIr) -> Result<(), ArtifactError> {
-    codehelion_artifact::native::infer_text_regions(file, ir, |section, normalized, data| {
+    crate::native::infer_text_regions(file, ir, |section, normalized, data| {
         symbol_fingerprint(None, section, normalized, data)
     })
     .map_err(|error| malformed(error.to_string()))?;
@@ -239,8 +237,8 @@ fn collect_pdb_frames(
             };
             frames.push((
                 u64::from(rva.0),
-                codehelion_artifact::ArtifactInlineFrame {
-                    evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Pdb,
+                crate::ArtifactInlineFrame {
+                    evidence_kind: crate::ArtifactSourceLocationEvidenceKind::Pdb,
                     source: source.into_owned(),
                     line: Some(line.line_start),
                     column: line.column_start.filter(|column| *column != 0),
@@ -279,7 +277,7 @@ fn collect_pdb_frames(
         .flat_map(|symbol| symbol.inline_stack.iter().map(|frame| frame.source.clone()))
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .map(|uri| codehelion_artifact::ArtifactSourceMapping { uri })
+        .map(|uri| crate::ArtifactSourceMapping { uri })
         .collect();
     Ok(())
 }
