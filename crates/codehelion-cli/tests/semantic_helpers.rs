@@ -86,6 +86,25 @@ fn scan_comparing_languages(root: &Path) -> Value {
     serde_json::from_slice(&output.stdout).expect("cross-language scan emits JSON")
 }
 
+/// The cross-language comparison a report carries, or why it is not there.
+///
+/// A scan that was asked to compare and could not says so, with the reason and
+/// the compiler coverage behind it. Reading the absent key as "no comparison"
+/// discards exactly the sentence that explains the run, which on a machine
+/// whose standard library or helper answered less than the fixture needs is
+/// the whole of the diagnosis.
+fn cross_language_comparison(report: &Value) -> &serde_json::Map<String, Value> {
+    report["cross_language_comparison"]
+        .as_object()
+        .unwrap_or_else(|| {
+            panic!(
+                "the scan produced no cross-language comparison.\nnot run: {}\ncompiler coverage: {}",
+                report["cross_language_comparison_not_run"],
+                report["summary"]["compiler"],
+            )
+        })
+}
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

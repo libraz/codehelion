@@ -604,9 +604,7 @@ fn semantic_scan_matches_only_direct_result_presence_checks() {
 fn semantic_cross_language_result_expected_uses_closed_propagation_evidence() {
     let fixture = cross_language_result_expected_fixture();
     let report = scan_comparing_languages(fixture.path());
-    let comparison = report["cross_language_comparison"]
-        .as_object()
-        .expect("cross-language comparison");
+    let comparison = cross_language_comparison(&report);
     let group = comparison["groups"]
         .as_array()
         .expect("comparison groups")
@@ -675,9 +673,7 @@ fn semantic_cross_language_result_expected_uses_closed_propagation_evidence() {
 fn semantic_cross_language_result_expected_uses_closed_validation_evidence() {
     let fixture = cross_language_result_expected_fixture();
     let report = scan_comparing_languages(fixture.path());
-    let comparison = report["cross_language_comparison"]
-        .as_object()
-        .expect("cross-language comparison");
+    let comparison = cross_language_comparison(&report);
     let group = comparison["groups"]
         .as_array()
         .expect("comparison groups")
