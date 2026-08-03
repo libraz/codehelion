@@ -105,8 +105,8 @@ fn cross_language_comparison(report: &Value) -> &serde_json::Map<String, Value> 
                         .collect()
                 });
             panic!(
-                "the scan produced no cross-language comparison.\nnot run: {}\ncompiler coverage per partition: {coverage:?}",
-                report["cross_language_comparison_not_run"],
+                "the scan produced no cross-language comparison.\nstatus: {}\ncompiler coverage per partition: {coverage:?}",
+                report["cross_language_comparison_status"],
             )
         })
 }

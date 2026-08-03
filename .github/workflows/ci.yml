@@ -59,6 +59,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang libclang-dev
+      # One cross-language fixture is a C++23 `expected` adapter, and a Clang
+      # that cannot find an `<expected>` still parses the file: every standard
+      # name in it resolves to nothing, the unit is reported as answered, and
+      # the comparison finds no C++ side to compare. Name the standard library
+      # rather than trusting whichever one the image happens to ship.
+      - name: Report the C++ standard library Clang will read
+        run: |
+          echo | clang++ -std=c++2b -x c++ -E -v - 2>&1 | sed -n '/#include <...>/,/End of search/p'
+          printf '#include <expected>\nstd::expected<int, int> f(std::expected<int, int> v) { return v; }\n' \
+            > /tmp/expected-probe.cpp
+          clang++ -std=c++2b -fsyntax-only /tmp/expected-probe.cpp
       # The labelled precision tests refuse to pass on an empty measurement:
       # with no case materialized they report that nothing was measured rather
       # than reporting success. The suite therefore needs the same sources the
