@@ -12,8 +12,24 @@ fn wasm_report_is_versioned_and_does_not_expose_code_bytes() {
 }
 
 #[test]
+fn artifact_output_preserves_existing_files_until_forced() {
+    let directory = tempfile::tempdir().expect("temporary output directory");
+    let path = directory.path().join("report.txt");
+    fs::write(&path, b"old report").expect("seed existing output");
+
+    let error = write_output(&path, b"new report", false).expect_err("overwrite is refused");
+    assert!(error.to_string().contains("pass --force"));
+    assert_eq!(fs::read(&path).unwrap(), b"old report");
+
+    write_output(&path, b"new report", true).expect("forced overwrite succeeds");
+    assert_eq!(fs::read(&path).unwrap(), b"new report");
+}
+
+#[test]
 fn artifact_container_facts_reach_json_text_and_csv_without_raw_data() {
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
+    artifact.architecture = Some("aarch64".to_owned());
+    artifact.skipped_architectures = vec!["x86_64".to_owned()];
     artifact
         .sections
         .push(codehelion_artifact::ArtifactSection {
@@ -47,13 +63,21 @@ fn artifact_container_facts_reach_json_text_and_csv_without_raw_data() {
             bytes: b"0123456789abcdef".to_vec(),
         });
     let report =
-        ArtifactReport::from_ir(std::path::Path::new("fixture.elf"), &artifact, None, None);
+        ArtifactReport::from_ir(std::path::Path::new("fixture.elf"), &artifact, None, None)
+            .with_containment(Some(ArtifactContainment {
+                max_input_bytes: 1024,
+                worker_timeout_seconds: 10,
+                worker_memory_limit_bytes: 4096,
+            }));
 
     let json = serde_json::to_value(&report).unwrap();
     assert_eq!(json["section_details"][0]["size"], 32);
     assert_eq!(json["import_details"][0]["name"], "puts");
     assert_eq!(json["relocation_details"][0]["target"], "puts");
     assert_eq!(json["data_segment_details"][0]["size"], 16);
+    assert_eq!(json["architecture"], "aarch64");
+    assert_eq!(json["skipped_architectures"], serde_json::json!(["x86_64"]));
+    assert_eq!(json["containment"]["worker_memory_limit_bytes"], 4096);
     assert!(json["data_segment_details"][0].get("bytes").is_none());
 
     let mut text = Vec::new();
@@ -63,6 +87,11 @@ fn artifact_container_facts_reach_json_text_and_csv_without_raw_data() {
     assert!(text.contains("import function libc::puts"));
     assert!(text.contains("relocation Relative section 1 offset 24 target puts"));
     assert!(text.contains("section 2 offset 64 size 16"));
+    assert!(text.contains("architecture: aarch64"));
+    assert!(text.contains("skipped architectures: x86_64"));
+    assert!(text.contains(
+        "untrusted containment: input 1024 bytes, worker timeout 10s, worker memory 4096 bytes"
+    ));
 
     let mut csv = Vec::new();
     render_csv(&report, &mut csv).unwrap();
@@ -113,7 +142,7 @@ fn wasm_source_maps_are_read_only_from_the_artifact_directory() {
     fs::write(&artifact_path, b"\0asm\x01\0\0\0").unwrap();
     fs::write(
         directory.path().join("module.wasm.map"),
-        br#"{"version":3,"sources":["src/lib.rs"],"names":[],"mappings":""}"#,
+        br#"{"version":3,"sources":["src/lib.rs"],"names":[],"mappings":"YAIA"}"#,
     )
     .unwrap();
     let mut artifact = ArtifactIr::empty(BinaryFormat::Wasm, b"fixture");
@@ -137,10 +166,33 @@ fn wasm_source_maps_are_read_only_from_the_artifact_directory() {
             if sources == &["src/lib.rs".to_owned()]
     ));
     assert_eq!(
+        source_map_locations(&maps),
+        vec![SourceMapLocation {
+            generated_offset: 12,
+            source_url: "src/lib.rs".to_owned(),
+            source_line: Some(5),
+        }]
+    );
+    assert_eq!(
         maps[1].status,
         SourceMapResolutionStatus::Unavailable {
             reason: "non_local_reference"
         }
+    );
+}
+
+#[test]
+fn text_report_says_when_normalized_duplicates_are_unavailable() {
+    let artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
+    let report = ArtifactReport::from_ir(FilePath::new("fixture.so"), &artifact, None, None);
+    let mut text = Vec::new();
+
+    render_text(&report, false, &mut text).unwrap();
+
+    assert!(
+        String::from_utf8(text)
+            .unwrap()
+            .contains("normalized unavailable (no normalizer for this architecture)")
     );
 }
 
@@ -239,7 +291,7 @@ fn savings_categories_remain_distinct_in_every_artifact_report_format() {
         duplicated_bytes: 80,
         retained_bytes: Some(60),
         shared_dependency_bytes: Some(40),
-        duplicated_data_bytes: 30,
+        duplicated_data_bytes: Some(30),
         upper_bound_savings_bytes: Some(20),
         estimated_refactor_savings_bytes: Some(EstimatedRefactorSavingsBytes(10)),
         verified_savings_bytes: Some(VerifiedSavingsBytes(5)),
@@ -464,6 +516,36 @@ fn comparison_warns_when_build_variant_evidence_differs() {
 }
 
 #[test]
+fn comparison_warns_when_neither_build_variant_is_supplied() {
+    let artifact = WasmBackend.parse(b"\0asm\x01\0\0\0").unwrap();
+    let report = ArtifactComparisonReport::new(
+        std::path::Path::new("before.wasm"),
+        &artifact,
+        None,
+        std::path::Path::new("after.wasm"),
+        &artifact,
+        None,
+    );
+    assert_eq!(
+        report.build_variant_warning.as_deref(),
+        Some("no build variants were supplied; build-condition differences cannot be assessed")
+    );
+    let mut text = Vec::new();
+    render_compare_text(&report, &mut text).unwrap();
+    assert!(
+        String::from_utf8(text)
+            .unwrap()
+            .contains("build variant warning: no build variants were supplied")
+    );
+    let json = serde_json::to_value(&report).unwrap();
+    assert!(
+        json["build_variant_warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("no build variants"))
+    );
+}
+
+#[test]
 fn build_variant_input_must_be_valid_json() {
     let manifest = tempfile::NamedTempFile::new().unwrap();
     fs::write(manifest.path(), b"not JSON").unwrap();
@@ -544,7 +626,7 @@ fn report_keeps_duplicate_group_members_without_emitting_code() {
 fn input_limit_is_checked_before_reading_or_parsing() {
     let file = tempfile::NamedTempFile::new().unwrap();
     fs::write(file.path(), b"more than eight bytes").unwrap();
-    let error = inspect(file.path(), 8, None, None).unwrap_err();
+    let error = inspect(file.path(), 8, None, None, None).unwrap_err();
     assert!(error.to_string().contains("configured maximum of 8 bytes"));
 }
 
@@ -569,6 +651,14 @@ fn csv_quotes_delimiters_and_embedded_quotes() {
     assert_eq!(csv("plain"), "plain");
     assert_eq!(csv("a,b"), "\"a,b\"");
     assert_eq!(csv("a\"b"), "\"a\"\"b\"");
+    assert_eq!(
+        csv("=HYPERLINK(\"https://example.invalid\")"),
+        "\"'=HYPERLINK(\"\"https://example.invalid\"\")\""
+    );
+    assert_eq!(csv("+SUM(1,2)"), "\"'+SUM(1,2)\"");
+    assert_eq!(csv("-1+2"), "'-1+2");
+    assert_eq!(csv("@command"), "'@command");
+    assert_eq!(csv("\tformula"), "'\tformula");
 }
 
 #[test]
@@ -733,8 +823,13 @@ fn calibration_comparison_reports_deltas_without_a_threshold_gate() {
 
 #[test]
 fn input_format_is_an_assertion_on_magic_detection() {
-    let error =
-        parse_input_format(b"\0asm\x01\0\0\0", Some(ArtifactInputFormat::Elf), None).unwrap_err();
+    let error = parse_input_format(
+        b"\0asm\x01\0\0\0",
+        Some(ArtifactInputFormat::Elf),
+        None,
+        None,
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("conflicts"));
 }
 
@@ -749,10 +844,12 @@ fn comparison_applies_the_input_format_assertion_to_both_artifacts() {
         before,
         after,
         input_format: Some(ArtifactInputFormat::Elf),
+        arch: None,
         before_build_variant: None,
         after_build_variant: None,
         format: ArtifactFormat::Text,
         output: None,
+        force: false,
         max_bytes: DEFAULT_ARTIFACT_MAX_BYTES,
         timeout_seconds: DEFAULT_ARTIFACT_TIMEOUT_SECONDS,
         max_memory_bytes: None,
@@ -767,13 +864,19 @@ fn comparison_applies_the_input_format_assertion_to_both_artifacts() {
 
 #[test]
 fn debug_companion_is_rejected_for_wasm() {
-    let error = parse_input_format(b"\0asm\x01\0\0\0", None, Some(b"debug")).unwrap_err();
+    let error = parse_input_format(b"\0asm\x01\0\0\0", None, Some(b"debug"), None).unwrap_err();
     assert!(error.to_string().contains("only supported for ELF"));
 }
 
 #[test]
+fn architecture_selection_is_rejected_for_non_macho_inputs() {
+    let error = parse_input_format(b"\0asm\x01\0\0\0", None, None, Some("wasm32")).unwrap_err();
+    assert!(error.to_string().contains("only supported for Mach-O"));
+}
+
+#[test]
 fn empty_archive_input_is_parsed_without_treating_it_as_unknown() {
-    let archive = parse_input_format(b"!<arch>\n", None, None).expect("parse archive");
+    let archive = parse_input_format(b"!<arch>\n", None, None, None).expect("parse archive");
     assert_eq!(archive.format, BinaryFormat::Archive);
     assert!(archive.archive_members.is_empty());
 }

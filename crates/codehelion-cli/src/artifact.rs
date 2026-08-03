@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use codehelion_artifact::{
-    ArtifactBackend, ArtifactFormat as BinaryFormat, ArtifactIr, detect_format, metrics,
+    ARTIFACT_IR_SCHEMA_VERSION, ArtifactBackend, ArtifactFormat as BinaryFormat, ArtifactIr,
+    detect_format, metrics,
     metrics::{EstimatedRefactorSavingsBytes, EvidenceConfidence, VerifiedSavingsBytes},
 };
 use codehelion_artifact_archive::ArchiveBackend;
@@ -92,7 +93,7 @@ mod worker;
 pub use worker::run_isolated_worker;
 use worker::{IsolatedArtifactRequest, clamp_untrusted_artifact_limits, run_isolated_request};
 #[cfg(test)]
-use worker::{read_worker_stderr, wait_for_worker};
+use worker::{deadline_after, read_worker_stderr, wait_for_worker};
 
 /// Inspect one artifact and render its observed facts and equality groups.
 ///
@@ -107,19 +108,28 @@ pub fn run(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
 
 /// Run the artifact pipeline in the already isolated worker process.
 fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
+    worker::set_stage("persistence setup");
+    let database = crate::resolve_db(args.db.as_deref())?;
+    let _database_lock = crate::scan_lock::acquire(&database)?;
     let started_at = crate::scan::rfc3339_now();
+    worker::set_stage("parsing");
     let artifact = inspect(
         &args.path,
         args.max_bytes,
         args.input_format,
         args.debug_file.as_deref(),
+        args.arch.as_deref(),
     )?;
+    worker::set_stage("source-map correlation");
     let source_maps = resolve_wasm_source_maps(&args.path, &artifact, args.max_bytes);
     let finished_at = crate::scan::rfc3339_now();
     let build_variant = read_build_variant(args.build_variant.as_deref())?;
+    worker::set_stage("persistence and source correlation");
     let (analysis_id, correlation) = record(
         &artifact,
+        &source_maps,
         args,
+        &database,
         build_variant.as_ref(),
         &started_at,
         &finished_at,
@@ -130,8 +140,10 @@ fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
         Some(analysis_id),
         build_variant.as_ref().map(BuildVariantEvidence::for_report),
     )
+    .with_containment(untrusted_containment(args))
     .with_source_maps(source_maps)
     .with_correlation(correlation);
+    worker::set_stage("rendering");
     let mut rendered = Vec::new();
     match args.format {
         ArtifactFormat::Json => serde_json::to_writer_pretty(&mut rendered, &report)?,
@@ -140,11 +152,23 @@ fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
     }
     rendered.push(b'\n');
     if let Some(path) = &args.output {
-        fs::write(path, &rendered).with_context(|| format!("writing {}", path.display()))?;
+        write_output(path, &rendered, args.force)?;
     } else {
         out.write_all(&rendered)?;
     }
     Ok(Outcome::Success)
+}
+
+fn untrusted_containment(args: &ArtifactArgs) -> Option<ArtifactContainment> {
+    if !args.untrusted {
+        return None;
+    }
+    let memory = args.max_memory_bytes?;
+    Some(ArtifactContainment {
+        max_input_bytes: args.max_bytes,
+        worker_timeout_seconds: args.timeout_seconds,
+        worker_memory_limit_bytes: memory,
+    })
 }
 
 mod calibration;
@@ -160,14 +184,34 @@ use calibration::{csv, optional_f64};
 /// Returns an error when the analysis cannot be loaded, decoded, rendered, or
 /// written to the selected destination.
 pub fn report(args: &ArtifactReportArgs, out: &mut impl Write) -> Result<Outcome> {
+    // A report only reads a committed SQLite snapshot. WAL lets this proceed
+    // alongside one writer, so it deliberately does not take the writer lease.
     let db = crate::resolve_db(args.db.as_deref())?;
-    let store =
-        Store::open(&db).with_context(|| format!("opening artifact database {}", db.display()))?;
+    let store = Store::open_existing(&db)
+        .with_context(|| format!("opening artifact database {}", db.display()))?;
+    let analysis_id = args.analysis.map_or_else(
+        || {
+            store
+                .latest_artifact_analysis_id()?
+                .context("no saved artifact analysis; run `codehelion artifact analyze` first")
+        },
+        Ok,
+    )?;
     let analysis = store
-        .artifact_analysis(args.analysis)?
-        .ok_or_else(|| anyhow::anyhow!("artifact analysis {} was not found", args.analysis))?;
+        .artifact_analysis(analysis_id)?
+        .ok_or_else(|| anyhow::anyhow!("artifact analysis {analysis_id} was not found"))?;
     let artifact: ArtifactIr = serde_json::from_str(&analysis.ir_json)
-        .with_context(|| format!("decoding saved artifact analysis {}", args.analysis))?;
+        .with_context(|| format!("decoding saved artifact analysis {analysis_id}"))?;
+    if analysis.schema_version != ARTIFACT_IR_SCHEMA_VERSION
+        || artifact.schema_version != analysis.schema_version
+    {
+        bail!(
+            "saved artifact analysis {} has incompatible IR schema (row {}, document {}; this build supports {ARTIFACT_IR_SCHEMA_VERSION})",
+            analysis_id,
+            analysis.schema_version,
+            artifact.schema_version
+        );
+    }
     let build_variant = analysis
         .build_variant_manifest_path
         .zip(analysis.build_variant_fingerprint)
@@ -189,11 +233,30 @@ pub fn report(args: &ArtifactReportArgs, out: &mut impl Write) -> Result<Outcome
     }
     rendered.push(b'\n');
     if let Some(path) = &args.output {
-        fs::write(path, &rendered).with_context(|| format!("writing {}", path.display()))?;
+        write_output(path, &rendered, args.force)?;
     } else {
         out.write_all(&rendered)?;
     }
     Ok(Outcome::Success)
+}
+
+fn write_output(path: &FilePath, bytes: &[u8], force: bool) -> Result<()> {
+    if force {
+        fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
+        return Ok(());
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "writing {} (refusing to overwrite an existing file; pass --force to replace it)",
+                path.display()
+            )
+        })?;
+    file.write_all(bytes)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Corpus-wide calibration-error summary for one source run.
@@ -264,15 +327,13 @@ struct CalibrationBaselineStratum {
 
 fn record(
     artifact: &ArtifactIr,
+    source_maps: &[SourceMapResolution],
     args: &ArtifactArgs,
+    database: &FilePath,
     build_variant: Option<&BuildVariantEvidence>,
     started_at: &str,
     finished_at: &str,
 ) -> Result<(i64, Option<ArtifactCorrelationReport>)> {
-    let db = crate::resolve_db(args.db.as_deref())?;
-    if let Some(parent) = db.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
     let symbols: Vec<ArtifactAnalysisSymbol> = artifact
         .symbols
         .iter()
@@ -302,15 +363,26 @@ fn record(
             }),
         })
         .collect();
-    let mut store = Store::open(&db)?;
+    let mut store = if args.source_run.is_some() {
+        Store::open_existing(database)?
+    } else {
+        Store::open(database)?
+    };
     let linker_map = read_linker_map(args.linker_map.as_deref())?;
     let correlation = correlate_source_run(
         artifact,
+        &source_map_locations(source_maps),
         args.source_run,
         build_variant,
         &linker_map,
         &store,
     )?;
+    if artifact.schema_version != ARTIFACT_IR_SCHEMA_VERSION {
+        bail!(
+            "refusing to persist artifact IR schema {} (this build supports {ARTIFACT_IR_SCHEMA_VERSION})",
+            artifact.schema_version
+        );
+    }
     let ir_json = serialize_artifact_ir(artifact)?;
     let correlation_report = args
         .source_run
@@ -412,21 +484,43 @@ pub fn compare(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Outco
             &mut args.max_bytes,
             &mut args.timeout_seconds,
             &mut args.max_memory_bytes,
-        );
+        )?;
     }
     let output = args.output.clone();
+    let force = args.force;
     run_isolated_request(
         IsolatedArtifactRequest::Compare(args.clone()),
         args.timeout_seconds,
         output.as_deref(),
+        force,
         out,
     )
 }
 
 /// Run an artifact comparison in the already isolated worker process.
 fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Outcome> {
-    let before = inspect(&args.before, args.max_bytes, args.input_format, None)?;
-    let after = inspect(&args.after, args.max_bytes, args.input_format, None)?;
+    worker::set_stage("persistence setup");
+    let database = calibration_database(args)?;
+    let _database_lock = database
+        .as_deref()
+        .map(crate::scan_lock::acquire)
+        .transpose()?;
+    worker::set_stage("parsing before artifact");
+    let before = inspect(
+        &args.before,
+        args.max_bytes,
+        args.input_format,
+        None,
+        args.arch.as_deref(),
+    )?;
+    worker::set_stage("parsing after artifact");
+    let after = inspect(
+        &args.after,
+        args.max_bytes,
+        args.input_format,
+        None,
+        args.arch.as_deref(),
+    )?;
     let before_variant = read_build_variant(args.before_build_variant.as_deref())?;
     let after_variant = read_build_variant(args.after_build_variant.as_deref())?;
     let mut report = ArtifactComparisonReport::new(
@@ -439,13 +533,16 @@ fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Ou
         &after,
         after_variant.as_ref().map(BuildVariantEvidence::for_report),
     );
+    worker::set_stage("calibration persistence");
     report.calibration = record_comparison_calibration(
         args,
         &before,
         &after,
         before_variant.as_ref(),
         after_variant.as_ref(),
+        database.as_deref(),
     )?;
+    worker::set_stage("rendering");
     let mut rendered = Vec::new();
     match args.format {
         ArtifactFormat::Json => serde_json::to_writer_pretty(&mut rendered, &report)?,
@@ -454,20 +551,17 @@ fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Ou
     }
     rendered.push(b'\n');
     if let Some(path) = &args.output {
-        fs::write(path, &rendered).with_context(|| format!("writing {}", path.display()))?;
+        write_output(path, &rendered, args.force)?;
     } else {
         out.write_all(&rendered)?;
     }
     Ok(Outcome::Success)
 }
 
-fn record_comparison_calibration(
-    args: &ArtifactCompareArgs,
-    before: &ArtifactIr,
-    after: &ArtifactIr,
-    before_variant: Option<&BuildVariantEvidence>,
-    after_variant: Option<&BuildVariantEvidence>,
-) -> Result<Option<CalibrationReport>> {
+/// Resolve the database only for the comparison shape that persists a
+/// calibration measurement. A partial calibration request cannot reach the
+/// artifact readers, and a persisted one holds its lease for the whole run.
+fn calibration_database(args: &ArtifactCompareArgs) -> Result<Option<std::path::PathBuf>> {
     let supplied = [
         args.source_run.is_some(),
         args.clone_group.is_some(),
@@ -476,6 +570,21 @@ fn record_comparison_calibration(
     if supplied.iter().any(|value| *value) && supplied.iter().any(|value| !*value) {
         bail!("calibration requires --source-run, --clone-group, and --db together");
     }
+    if args.source_run.is_some() {
+        Ok(Some(crate::resolve_db(args.db.as_deref())?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn record_comparison_calibration(
+    args: &ArtifactCompareArgs,
+    before: &ArtifactIr,
+    after: &ArtifactIr,
+    before_variant: Option<&BuildVariantEvidence>,
+    after_variant: Option<&BuildVariantEvidence>,
+    database: Option<&FilePath>,
+) -> Result<Option<CalibrationReport>> {
     let Some(source_run) = args.source_run else {
         return Ok(None);
     };
@@ -493,8 +602,8 @@ fn record_comparison_calibration(
     if before_variant.fingerprint != after_variant.fingerprint {
         bail!("calibration requires equal before and after build variants");
     }
-    let db = crate::resolve_db(args.db.as_deref())?;
-    let mut store = Store::open(&db)
+    let db = database.ok_or_else(|| anyhow::anyhow!("calibration database is absent"))?;
+    let mut store = Store::open_existing(db)
         .with_context(|| format!("opening calibration database {}", db.display()))?;
     let candidates = store.clone_group_savings(source_run, clone_group)?;
     let mut matching = Vec::new();
@@ -581,6 +690,7 @@ fn inspect(
     max_bytes: u64,
     required_format: Option<ArtifactInputFormat>,
     debug_file: Option<&std::path::Path>,
+    architecture: Option<&str>,
 ) -> Result<ArtifactIr> {
     let bytes = read_artifact_input(path, max_bytes, "artifact")?;
     let (debug_companion, automatically_discovered) = match debug_file {
@@ -597,13 +707,18 @@ fn inspect(
             None => (None, None),
         },
     };
-    match parse_input_format(&bytes, required_format, debug_companion.as_deref()) {
+    match parse_input_format(
+        &bytes,
+        required_format,
+        debug_companion.as_deref(),
+        architecture,
+    ) {
         Ok(artifact) => Ok(artifact),
         Err(error) if let Some(path) = automatically_discovered => {
             // An automatically discovered bundle is optional evidence. Its
             // malformed bytes or a stale UUID must not make a valid artifact
             // unanalyzable; an explicitly supplied companion remains strict.
-            let artifact = parse_input_format(&bytes, required_format, None)?;
+            let artifact = parse_input_format(&bytes, required_format, None, architecture)?;
             eprintln!(
                 "warning: automatically discovered dSYM {} was ignored: {error}",
                 path.display()
@@ -734,11 +849,23 @@ fn resolve_wasm_source_map(
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
+            let locations = map
+                .tokens()
+                .filter(|token| token.get_dst_line() == 0)
+                .filter_map(|token| {
+                    token.get_source().map(|source_url| SourceMapLocation {
+                        generated_offset: u64::from(token.get_dst_col()),
+                        source_url: source_url.to_owned(),
+                        source_line: token.get_src_line().checked_add(1),
+                    })
+                })
+                .collect();
             SourceMapResolution {
                 uri: uri.to_owned(),
                 status: SourceMapResolutionStatus::Resolved {
                     local_path: path.display().to_string(),
                     sources,
+                    locations,
                 },
             }
         }
@@ -747,10 +874,22 @@ fn resolve_wasm_source_map(
     }
 }
 
+fn source_map_locations(source_maps: &[SourceMapResolution]) -> Vec<SourceMapLocation> {
+    source_maps
+        .iter()
+        .flat_map(|resolution| match &resolution.status {
+            SourceMapResolutionStatus::Resolved { locations, .. } => locations.iter(),
+            SourceMapResolutionStatus::Unavailable { .. } => [].iter(),
+        })
+        .cloned()
+        .collect()
+}
+
 fn parse_input_format(
     bytes: &[u8],
     required_format: Option<ArtifactInputFormat>,
     debug_companion: Option<&[u8]>,
+    architecture: Option<&str>,
 ) -> Result<ArtifactIr> {
     let detected = detect_format(bytes).ok_or_else(|| {
         anyhow::anyhow!("could not recognise input as a supported artifact format")
@@ -759,7 +898,7 @@ fn parse_input_format(
     if format != detected {
         bail!("detected input format {detected} conflicts with requested input format {format}");
     }
-    parse(format, bytes, debug_companion)
+    parse(format, bytes, debug_companion, architecture)
 }
 
 const fn input_format(format: ArtifactInputFormat) -> BinaryFormat {
@@ -772,7 +911,15 @@ const fn input_format(format: ArtifactInputFormat) -> BinaryFormat {
     }
 }
 
-fn parse(format: BinaryFormat, bytes: &[u8], debug_companion: Option<&[u8]>) -> Result<ArtifactIr> {
+fn parse(
+    format: BinaryFormat,
+    bytes: &[u8],
+    debug_companion: Option<&[u8]>,
+    architecture: Option<&str>,
+) -> Result<ArtifactIr> {
+    if architecture.is_some() && format != BinaryFormat::MachO {
+        bail!("--arch is only supported for Mach-O artifacts");
+    }
     match format {
         BinaryFormat::Wasm => {
             if debug_companion.is_some() {
@@ -784,7 +931,7 @@ fn parse(format: BinaryFormat, bytes: &[u8], debug_companion: Option<&[u8]>) -> 
             .parse_with_debug_companion(bytes, debug_companion)
             .map_err(Into::into),
         BinaryFormat::MachO => MachOBackend
-            .parse_with_debug_companion(bytes, debug_companion)
+            .parse_with_architecture(bytes, debug_companion, architecture)
             .map_err(Into::into),
         BinaryFormat::PeCoff => PeCoffBackend
             .parse_with_pdb(bytes, debug_companion)
@@ -801,8 +948,9 @@ fn parse(format: BinaryFormat, bytes: &[u8], debug_companion: Option<&[u8]>) -> 
 mod model;
 
 use model::{
-    ArtifactComparisonReport, ArtifactReport, BuildVariantEvidence, CalibrationReport,
-    ComparisonBuildVariant, SourceMapResolution, SourceMapResolutionStatus,
+    ArtifactComparisonReport, ArtifactContainment, ArtifactReport, BuildVariantEvidence,
+    CalibrationReport, ComparisonBuildVariant, SourceMapLocation, SourceMapResolution,
+    SourceMapResolutionStatus,
 };
 
 mod render;

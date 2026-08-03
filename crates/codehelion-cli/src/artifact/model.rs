@@ -15,9 +15,12 @@ pub(super) struct ArtifactReport {
     pub(super) analysis_id: Option<i64>,
     pub(super) build_variant: Option<ComparisonBuildVariant>,
     pub(super) correlation: Option<ArtifactCorrelationReport>,
+    pub(super) containment: Option<ArtifactContainment>,
     pub(super) format: BinaryFormat,
     pub(super) fingerprint: String,
     pub(super) observed_bytes: u64,
+    pub(super) architecture: Option<String>,
+    pub(super) skipped_architectures: Vec<String>,
     pub(super) code_section_bytes: u64,
     pub(super) data_segment_bytes: u64,
     pub(super) sections: usize,
@@ -40,6 +43,14 @@ pub(super) struct ArtifactReport {
     pub(super) retained_sizes: Option<Vec<metrics::RetainedSize>>,
     pub(super) duplicates: DuplicateSummary,
     pub(super) duplicate_groups: DuplicateGroups,
+}
+
+/// Limits successfully installed for an untrusted artifact operation.
+#[derive(Debug, Serialize)]
+pub(super) struct ArtifactContainment {
+    pub(super) max_input_bytes: u64,
+    pub(super) worker_timeout_seconds: u64,
+    pub(super) worker_memory_limit_bytes: u64,
 }
 
 /// Display-safe section facts, including the size breakdown omitted from the
@@ -105,10 +116,23 @@ pub(super) enum SourceMapResolutionStatus {
     Resolved {
         local_path: String,
         sources: Vec<String>,
+        #[serde(skip)]
+        locations: Vec<SourceMapLocation>,
     },
     Unavailable {
         reason: &'static str,
     },
+}
+
+/// One source-map location used only while correlating the current analysis.
+///
+/// Generated offsets and source-map token positions are parser-local evidence;
+/// persisted mappings retain the stable source and artifact identities instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SourceMapLocation {
+    pub(super) generated_offset: u64,
+    pub(super) source_url: String,
+    pub(super) source_line: Option<u32>,
 }
 
 impl ArtifactReport {
@@ -128,9 +152,12 @@ impl ArtifactReport {
             analysis_id,
             build_variant,
             correlation: None,
+            containment: None,
             format: artifact.format,
             fingerprint: artifact.fingerprint.to_hex(),
             observed_bytes: artifact.observed_bytes,
+            architecture: artifact.architecture.clone(),
+            skipped_architectures: artifact.skipped_architectures.clone(),
             code_section_bytes: artifact
                 .sections
                 .iter()
@@ -210,6 +237,14 @@ impl ArtifactReport {
         correlation: Option<ArtifactCorrelationReport>,
     ) -> Self {
         self.correlation = correlation;
+        self
+    }
+
+    pub(super) const fn with_containment(
+        mut self,
+        containment: Option<ArtifactContainment>,
+    ) -> Self {
+        self.containment = containment;
         self
     }
 
@@ -305,7 +340,7 @@ pub(super) struct ArtifactComparisonReport {
     pub(super) after: ComparisonArtifact,
     pub(super) observed_size_reduction_bytes: ObservedSizeReductionBytes,
     pub(super) duplicated_code_delta_bytes: i128,
-    pub(super) duplicated_data_delta_bytes: i128,
+    pub(super) duplicated_data_delta_bytes: Option<i128>,
     pub(super) calibration: Option<CalibrationReport>,
     pub(super) symbol_changes: SymbolChanges,
     pub(super) symbol_deltas: Vec<SymbolDelta>,
@@ -330,6 +365,8 @@ pub(super) struct ComparisonArtifact {
     pub(super) path: String,
     pub(super) format: BinaryFormat,
     pub(super) fingerprint: String,
+    pub(super) architecture: Option<String>,
+    pub(super) skipped_architectures: Vec<String>,
     pub(super) build_variant: Option<ComparisonBuildVariant>,
     pub(super) sizes: metrics::SizeClassification,
 }
@@ -437,6 +474,8 @@ impl ArtifactComparisonReport {
                 path: before_path.display().to_string(),
                 format: before.format,
                 fingerprint: before.fingerprint.to_hex(),
+                architecture: before.architecture.clone(),
+                skipped_architectures: before.skipped_architectures.clone(),
                 build_variant: before_variant,
                 sizes: before_sizes.clone(),
             },
@@ -444,6 +483,8 @@ impl ArtifactComparisonReport {
                 path: after_path.display().to_string(),
                 format: after.format,
                 fingerprint: after.fingerprint.to_hex(),
+                architecture: after.architecture.clone(),
+                skipped_architectures: after.skipped_architectures.clone(),
                 build_variant: after_variant,
                 sizes: after_sizes.clone(),
             },
@@ -454,10 +495,10 @@ impl ArtifactComparisonReport {
                 after_sizes.duplicated_bytes,
                 before_sizes.duplicated_bytes,
             ),
-            duplicated_data_delta_bytes: difference(
-                after_sizes.duplicated_data_bytes,
-                before_sizes.duplicated_data_bytes,
-            ),
+            duplicated_data_delta_bytes: after_sizes
+                .duplicated_data_bytes
+                .zip(before_sizes.duplicated_data_bytes)
+                .map(|(after, before)| difference(after, before)),
             calibration: None,
             symbol_changes: SymbolChanges {
                 added,
@@ -485,7 +526,11 @@ pub(super) fn build_variant_warning(
             "only one build variant was supplied; build-condition differences cannot be assessed"
                 .to_owned(),
         ),
-        _ => None,
+        (None, None) => Some(
+            "no build variants were supplied; build-condition differences cannot be assessed"
+                .to_owned(),
+        ),
+        (Some(_), Some(_)) => None,
     }
 }
 

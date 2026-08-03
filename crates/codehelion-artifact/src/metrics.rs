@@ -18,6 +18,13 @@ use crate::{ArtifactDataSegment, ArtifactFingerprint, ArtifactIr, ArtifactSymbol
 /// format- or project-specific reason to do so.
 pub const DEFAULT_MIN_DUPLICATE_DATA_BYTES: u64 = 16;
 
+/// Maximum independent root closures considered for shared-dependency bytes.
+///
+/// Each root needs one reachability traversal. Above this limit the value is
+/// unavailable rather than allowing a large export table to monopolize the
+/// artifact worker.
+const MAX_SHARED_DEPENDENCY_ROOTS: usize = 1024;
+
 /// A model-derived estimate of a refactoring's byte impact.
 ///
 /// Estimates may be negative when required call overhead outweighs the
@@ -58,8 +65,9 @@ pub struct SizeClassification {
     pub retained_bytes: Option<u64>,
     /// Bytes shared by several dependency closures, when calculated.
     pub shared_dependency_bytes: Option<u64>,
-    /// Excess bytes in exact duplicate data groups.
-    pub duplicated_data_bytes: u64,
+    /// Excess bytes in exact duplicate data groups, when regions were
+    /// independently established rather than inferred from whole sections.
+    pub duplicated_data_bytes: Option<u64>,
     /// A theoretical maximum from directly observed exact duplication.
     ///
     /// This is explicitly not a claim that a linker or refactoring can remove
@@ -145,13 +153,17 @@ pub fn find_duplicates(artifact: &ArtifactIr) -> DuplicateReport {
     let exact = groups(&artifact.symbols, |symbol| {
         Some(("exact", symbol.code.as_slice()))
     });
-    let normalized = groups(&artifact.symbols, |symbol| {
-        symbol.normalized.as_ref().map(|normalized| {
-            // One byte separator is unambiguous because the version gets a
-            // length prefix in `group_fingerprint` below.
-            (normalized.version.as_str(), normalized.bytes.as_slice())
+    let normalized = if artifact.capabilities.normalized_duplicates {
+        groups(&artifact.symbols, |symbol| {
+            symbol.normalized.as_ref().map(|normalized| {
+                // One byte separator is unambiguous because the version gets a
+                // length prefix in `group_fingerprint` below.
+                (normalized.version.as_str(), normalized.bytes.as_slice())
+            })
         })
-    });
+    } else {
+        Vec::new()
+    };
     DuplicateReport { exact, normalized }
 }
 
@@ -161,6 +173,9 @@ pub fn find_duplicates(artifact: &ArtifactIr) -> DuplicateReport {
 /// itself is equal. Short regions are deliberately excluded before grouping.
 #[must_use]
 pub fn find_duplicate_data(artifact: &ArtifactIr, min_bytes: u64) -> Vec<DuplicateGroup> {
+    if !artifact.capabilities.independent_data_segments {
+        return Vec::new();
+    }
     groups_data(&artifact.data_segments, min_bytes)
 }
 
@@ -185,14 +200,20 @@ pub fn classify_sizes_from_duplicates(
         .iter()
         .map(|group| group.duplicated_bytes)
         .sum();
-    let duplicated_data_bytes = duplicate_data
-        .iter()
-        .map(|group| group.duplicated_bytes)
-        .sum();
+    let duplicated_data_bytes = artifact.capabilities.independent_data_segments.then(|| {
+        duplicate_data
+            .iter()
+            .map(|group| group.duplicated_bytes)
+            .sum()
+    });
     let mut assumptions = vec![
         "upper_bound_savings_bytes is not a guaranteed reduction".to_owned(),
         "estimated_refactor_savings_bytes needs source-artifact mapping".to_owned(),
     ];
+    if duplicated_data_bytes.is_none() {
+        assumptions
+            .push("duplicated_data_bytes needs independently established data regions".to_owned());
+    }
     let graph_sizes = resolved_graph(artifact);
     if graph_sizes.is_none() {
         assumptions
@@ -206,7 +227,7 @@ pub fn classify_sizes_from_duplicates(
             .sum();
         let mut root_reach_counts: BTreeMap<ArtifactFingerprint, u64> = BTreeMap::new();
         for root in &graph.roots {
-            for symbol in reachable_from(BTreeSet::from([*root]), artifact, &graph.sizes) {
+            for symbol in reachable_from(BTreeSet::from([*root]), &graph.successors) {
                 *root_reach_counts.entry(symbol).or_default() += 1;
             }
         }
@@ -308,13 +329,14 @@ pub fn retained_sizes(artifact: &ArtifactIr) -> Option<Vec<RetainedSize>> {
         .collect();
     let mut successors = vec![Vec::new(); symbols.len() + 1];
     successors[0] = graph.roots.iter().map(|root| index[root]).collect();
-    for call in &artifact.calls {
-        if graph.reachable.contains(&call.caller)
-            && let Some(target) = call
-                .target
-                .filter(|target| graph.reachable.contains(target))
-        {
-            successors[index[&call.caller]].push(index[&target]);
+    for (caller, targets) in &graph.successors {
+        if !graph.reachable.contains(caller) {
+            continue;
+        }
+        for target in targets {
+            if graph.reachable.contains(target) {
+                successors[index[caller]].push(index[target]);
+            }
         }
     }
 
@@ -451,17 +473,24 @@ fn lt_eval(
 
 /// Compress the union-find path used by Lengauer--Tarjan evaluation.
 fn lt_compress(node: usize, ancestors: &mut [Option<usize>], labels: &mut [usize], semi: &[usize]) {
-    let Some(parent) = ancestors[node] else {
-        return;
-    };
-    let Some(_) = ancestors[parent] else {
-        return;
-    };
-    lt_compress(parent, ancestors, labels, semi);
-    if semi[labels[parent]] < semi[labels[node]] {
-        labels[node] = labels[parent];
+    let mut path = Vec::new();
+    let mut current = node;
+    while let Some(parent) = ancestors[current] {
+        if ancestors[parent].is_none() {
+            break;
+        }
+        path.push(current);
+        current = parent;
     }
-    ancestors[node] = ancestors[parent];
+    for current in path.into_iter().rev() {
+        let Some(parent) = ancestors[current] else {
+            continue;
+        };
+        if semi[labels[parent]] < semi[labels[current]] {
+            labels[current] = labels[parent];
+        }
+        ancestors[current] = ancestors[parent];
+    }
 }
 
 /// Facts available only when every local graph edge and identity is sound.
@@ -469,6 +498,7 @@ struct ResolvedGraph {
     sizes: BTreeMap<ArtifactFingerprint, u64>,
     roots: BTreeSet<ArtifactFingerprint>,
     reachable: BTreeSet<ArtifactFingerprint>,
+    successors: BTreeMap<ArtifactFingerprint, Vec<ArtifactFingerprint>>,
 }
 
 fn resolved_graph(artifact: &ArtifactIr) -> Option<ResolvedGraph> {
@@ -491,7 +521,10 @@ fn resolved_graph(artifact: &ArtifactIr) -> Option<ResolvedGraph> {
         .chain(artifact.entry_points.iter().copied())
         .chain(artifact.indirect_references.iter().copied())
         .collect();
-    if roots.is_empty() || !roots.iter().all(|root| sizes.contains_key(root)) {
+    if roots.is_empty()
+        || roots.len() > MAX_SHARED_DEPENDENCY_ROOTS
+        || !roots.iter().all(|root| sizes.contains_key(root))
+    {
         return None;
     }
     if artifact.calls.iter().any(|call| {
@@ -502,32 +535,44 @@ fn resolved_graph(artifact: &ArtifactIr) -> Option<ResolvedGraph> {
     }) {
         return None;
     }
-    let reachable = reachable_from(roots.clone(), artifact, &sizes);
+    let mut successors: BTreeMap<_, Vec<_>> = sizes
+        .keys()
+        .copied()
+        .map(|symbol| (symbol, Vec::new()))
+        .collect();
+    for call in &artifact.calls {
+        if let Some(target) = call.target {
+            successors.entry(call.caller).or_default().push(target);
+        }
+    }
+    for targets in successors.values_mut() {
+        targets.sort_unstable();
+        targets.dedup();
+    }
+    let reachable = reachable_from(roots.clone(), &successors);
     Some(ResolvedGraph {
         sizes,
         roots,
         reachable,
+        successors,
     })
 }
 
 fn reachable_from(
     mut reachable: BTreeSet<ArtifactFingerprint>,
-    artifact: &ArtifactIr,
-    sizes: &BTreeMap<ArtifactFingerprint, u64>,
+    successors: &BTreeMap<ArtifactFingerprint, Vec<ArtifactFingerprint>>,
 ) -> BTreeSet<ArtifactFingerprint> {
-    loop {
-        let before = reachable.len();
-        for call in &artifact.calls {
-            if reachable.contains(&call.caller) {
-                if let Some(target) = call.target.filter(|target| sizes.contains_key(target)) {
-                    reachable.insert(target);
+    let mut pending: Vec<_> = reachable.iter().copied().collect();
+    while let Some(symbol) = pending.pop() {
+        if let Some(targets) = successors.get(&symbol) {
+            for target in targets {
+                if reachable.insert(*target) {
+                    pending.push(*target);
                 }
             }
         }
-        if reachable.len() == before {
-            return reachable;
-        }
     }
+    reachable
 }
 
 fn groups<'a>(
@@ -651,6 +696,7 @@ mod tests {
     #[test]
     fn exact_and_normalized_groups_are_reported_separately_and_deterministically() {
         let mut artifact = ArtifactIr::empty(ArtifactFormat::Wasm, b"input");
+        artifact.capabilities.normalized_duplicates = true;
         artifact.symbols = vec![
             symbol(30, &[1, 2], Some(&[9])),
             symbol(10, &[1, 2], Some(&[9])),
@@ -676,8 +722,23 @@ mod tests {
     }
 
     #[test]
+    fn normalized_groups_are_unavailable_without_a_supported_normalizer() {
+        let mut artifact = ArtifactIr::empty(ArtifactFormat::Elf, b"input");
+        artifact.symbols = vec![
+            symbol(10, &[1, 2], Some(&[9])),
+            symbol(20, &[3, 4], Some(&[9])),
+        ];
+
+        let duplicates = find_duplicates(&artifact);
+
+        assert!(duplicates.exact.is_empty());
+        assert!(duplicates.normalized.is_empty());
+    }
+
+    #[test]
     fn size_categories_separate_observed_data_and_unavailable_estimates() {
         let mut artifact = ArtifactIr::empty(ArtifactFormat::Wasm, b"input bytes");
+        artifact.capabilities.independent_data_segments = true;
         artifact.symbols = vec![symbol(10, &[1, 2, 3], None), symbol(20, &[1, 2, 3], None)];
         let bytes = vec![7; 16];
         artifact.data_segments = vec![
@@ -697,7 +758,7 @@ mod tests {
         let sizes = classify_sizes(&artifact);
         assert_eq!(sizes.observed_bytes, 11);
         assert_eq!(sizes.duplicated_bytes, 3);
-        assert_eq!(sizes.duplicated_data_bytes, 16);
+        assert_eq!(sizes.duplicated_data_bytes, Some(16));
         assert_eq!(sizes.upper_bound_savings_bytes, Some(3));
         assert!(sizes.estimated_refactor_savings_bytes.is_none());
         assert!(sizes.verified_savings_bytes.is_none());
@@ -712,6 +773,7 @@ mod tests {
             lengths in prop::collection::vec(16_usize..128, 0..24),
         ) {
             let mut artifact = ArtifactIr::empty(ArtifactFormat::Wasm, b"");
+            artifact.capabilities.independent_data_segments = true;
             let mut offset = 0_u64;
             for (index, length) in lengths.iter().copied().enumerate() {
                 let bytes = vec![u8::try_from(index).unwrap_or(u8::MAX); length];
@@ -737,7 +799,7 @@ mod tests {
             artifact.observed_bytes = offset;
             let sizes = classify_sizes(&artifact);
             prop_assert!(sizes.duplicated_bytes <= sizes.observed_bytes);
-            prop_assert!(sizes.duplicated_data_bytes <= sizes.observed_bytes);
+            prop_assert!(sizes.duplicated_data_bytes.is_some_and(|value| value <= sizes.observed_bytes));
             prop_assert_eq!(
                 sizes.upper_bound_savings_bytes,
                 Some(sizes.duplicated_bytes)
@@ -811,6 +873,23 @@ mod tests {
         assert_eq!(sizes.shared_dependency_bytes, Some(0));
         artifact.calls[1].unresolved = Some(crate::UnresolvedCall::IndirectTable);
         assert!(retained_sizes(&artifact).is_none());
+    }
+
+    #[test]
+    fn path_compression_handles_a_deep_ancestor_chain_iteratively() {
+        let nodes = 100_000_usize;
+        let mut ancestors = (0..nodes)
+            .map(|node| node.checked_sub(1))
+            .collect::<Vec<_>>();
+        let mut labels = (0..nodes).collect::<Vec<_>>();
+        let semi = (0..nodes).collect::<Vec<_>>();
+
+        lt_compress(nodes - 1, &mut ancestors, &mut labels, &semi);
+
+        assert!(ancestors[0].is_none());
+        assert_eq!(ancestors[1], Some(0));
+        assert!(ancestors[2..].iter().all(|ancestor| *ancestor == Some(0)));
+        assert!(labels[1..].iter().all(|label| *label == 1));
     }
 
     #[test]
@@ -912,5 +991,24 @@ mod tests {
         let sizes = classify_sizes(&artifact);
         assert_eq!(sizes.retained_bytes, Some(6));
         assert_eq!(sizes.shared_dependency_bytes, Some(3));
+    }
+
+    #[test]
+    fn excessive_root_count_makes_shared_dependency_sizes_unavailable() {
+        let mut artifact = ArtifactIr::empty(ArtifactFormat::Wasm, b"input");
+        artifact.symbols = (0..=MAX_SHARED_DEPENDENCY_ROOTS)
+            .map(|offset| symbol(u64::try_from(offset).unwrap(), &[1], None))
+            .collect();
+        artifact
+            .symbols
+            .iter_mut()
+            .for_each(|symbol| symbol.exported = true);
+        artifact.capabilities.call_graph = true;
+
+        let sizes = classify_sizes(&artifact);
+
+        assert_eq!(sizes.retained_bytes, None);
+        assert_eq!(sizes.shared_dependency_bytes, None);
+        assert!(retained_sizes(&artifact).is_none());
     }
 }

@@ -4,9 +4,11 @@ use std::collections::{BTreeSet, HashMap};
 use std::hash::BuildHasher;
 
 use gimli::{DwarfSections, EndianSlice, Reader, RunTimeEndian};
-use object::{Endianness, Object, ObjectSection};
+use object::{Endianness, Object, ObjectKind, ObjectSection};
 
 use crate::{ArtifactFingerprint, ArtifactInlineFrame, ArtifactIr, ArtifactSourceMapping};
+
+const MAX_DWARF_DEBUG_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Attach optional DWARF locations to parser-established symbol identities.
 ///
@@ -21,31 +23,67 @@ pub fn attach_dwarf_frames<S: BuildHasher>(
     symbol_addresses: &HashMap<ArtifactFingerprint, (u64, u64), S>,
     ir: &mut ArtifactIr,
 ) {
+    if !supports_address_join(file.kind()) {
+        return;
+    }
     let endian = match file.endianness() {
         Endianness::Little => RunTimeEndian::Little,
         Endianness::Big => RunTimeEndian::Big,
     };
+    let mut remaining_debug_bytes = MAX_DWARF_DEBUG_BYTES;
+    let mut debug_info_unreadable = false;
     let Ok(sections) = DwarfSections::load(|id| {
-        Ok::<_, gimli::Error>(
-            debug_section(file, id.name())
-                .and_then(|section| section.data().ok())
-                .unwrap_or_default()
-                .to_vec(),
-        )
+        let Some(section) = debug_section(file, id.name()) else {
+            return Ok::<_, gimli::Error>(Vec::new());
+        };
+        let Ok(data) = section.compressed_data() else {
+            debug_info_unreadable = true;
+            return Ok(Vec::new());
+        };
+        if data.uncompressed_size > remaining_debug_bytes {
+            debug_info_unreadable = true;
+            return Ok(Vec::new());
+        }
+        let Ok(data) = data.decompress() else {
+            debug_info_unreadable = true;
+            return Ok(Vec::new());
+        };
+        remaining_debug_bytes -= data.len() as u64;
+        Ok(data.into_owned())
     }) else {
         return;
     };
+    ir.capabilities.debug_info_unreadable |= debug_info_unreadable;
     let dwarf = sections.borrow(|section| EndianSlice::new(section, endian));
     let mut frames = Vec::new();
     let mut line_records = Vec::new();
+    let mut line_paths = DwarfPathInterner::default();
     let mut units = dwarf.units();
-    while let Ok(Some(header)) = units.next() {
+    loop {
+        let header = match units.next() {
+            Ok(Some(header)) => header,
+            Ok(None) => break,
+            Err(_) => {
+                ir.capabilities.debug_info_unreadable = true;
+                break;
+            }
+        };
         let Ok(unit) = dwarf.unit(header) else {
+            ir.capabilities.debug_info_unreadable = true;
             continue;
         };
         let mut entries = unit.entries();
         let mut depth = 0isize;
-        while let Ok(Some((delta, entry))) = entries.next_dfs() {
+        loop {
+            let entry = match entries.next_dfs() {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(_) => {
+                    ir.capabilities.debug_info_unreadable = true;
+                    break;
+                }
+            };
+            let (delta, entry) = entry;
             depth += delta;
             if !matches!(
                 entry.tag(),
@@ -57,9 +95,18 @@ pub fn attach_dwarf_frames<S: BuildHasher>(
                 continue;
             };
             let Ok(mut ranges) = dwarf.die_ranges(&unit, entry) else {
+                ir.capabilities.debug_info_unreadable = true;
                 continue;
             };
-            while let Ok(Some(range)) = ranges.next() {
+            loop {
+                let range = match ranges.next() {
+                    Ok(Some(range)) => range,
+                    Ok(None) => break,
+                    Err(_) => {
+                        ir.capabilities.debug_info_unreadable = true;
+                        break;
+                    }
+                };
                 if range.begin < range.end {
                     frames.push(DwarfFrame {
                         begin: range.begin,
@@ -70,7 +117,7 @@ pub fn attach_dwarf_frames<S: BuildHasher>(
                 }
             }
         }
-        line_records.extend(line_frames(&dwarf, &unit));
+        line_records.extend(line_frames(&dwarf, &unit, &mut line_paths));
     }
     if frames.is_empty() && line_records.is_empty() {
         return;
@@ -103,7 +150,7 @@ pub fn attach_dwarf_frames<S: BuildHasher>(
                 .into_iter()
                 .flatten()
                 .take_while(|candidate| candidate.address < symbol_end)
-                .map(|candidate| (isize::MAX, candidate.frame.clone())),
+                .map(|candidate| (isize::MAX, candidate.inline_frame(&line_paths))),
         );
         matching.sort_by(|left, right| {
             (&left.1.source, left.1.line, left.1.column, left.0).cmp(&(
@@ -128,6 +175,10 @@ pub fn attach_dwarf_frames<S: BuildHasher>(
             .into_iter()
             .map(|uri| ArtifactSourceMapping { uri }),
     );
+}
+
+const fn supports_address_join(kind: ObjectKind) -> bool {
+    !matches!(kind, ObjectKind::Relocatable)
 }
 
 fn frames_at_symbol_addresses(
@@ -175,10 +226,54 @@ struct DwarfFrame {
 #[derive(Debug, Clone)]
 struct DwarfLineFrame {
     address: u64,
-    frame: ArtifactInlineFrame,
+    source: u32,
+    line: u32,
+    /// Zero represents DWARF's left-edge position without a numeric column.
+    column: u32,
 }
 
-fn line_frames<R: Reader>(dwarf: &gimli::Dwarf<R>, unit: &gimli::Unit<R>) -> Vec<DwarfLineFrame> {
+impl DwarfLineFrame {
+    fn inline_frame(&self, paths: &DwarfPathInterner) -> ArtifactInlineFrame {
+        ArtifactInlineFrame {
+            evidence_kind: crate::ArtifactSourceLocationEvidenceKind::Dwarf,
+            source: paths.get(self.source).to_owned(),
+            line: Some(self.line),
+            column: (self.column != 0).then_some(self.column),
+        }
+    }
+}
+
+/// Deduplicate resolved source paths while retaining compact line records.
+#[derive(Debug, Default)]
+struct DwarfPathInterner {
+    indexes: HashMap<String, usize>,
+    values: Vec<String>,
+}
+
+impl DwarfPathInterner {
+    fn intern(&mut self, path: String) -> Option<u32> {
+        if let Some(index) = self.indexes.get(&path) {
+            return u32::try_from(*index).ok();
+        }
+        let index = self.values.len();
+        let index = u32::try_from(index).ok()?;
+        self.values.push(path.clone());
+        self.indexes.insert(path, index as usize);
+        Some(index)
+    }
+
+    fn get(&self, index: u32) -> &str {
+        self.values
+            .get(index as usize)
+            .map_or("<invalid-dwarf-path>", String::as_str)
+    }
+}
+
+fn line_frames<R: Reader>(
+    dwarf: &gimli::Dwarf<R>,
+    unit: &gimli::Unit<R>,
+    paths: &mut DwarfPathInterner,
+) -> Vec<DwarfLineFrame> {
     let Some(program) = unit.line_program.clone() else {
         return Vec::new();
     };
@@ -210,18 +305,18 @@ fn line_frames<R: Reader>(dwarf: &gimli::Dwarf<R>, unit: &gimli::Unit<R>) -> Vec
             gimli::ColumnType::LeftEdge => None,
             gimli::ColumnType::Column(value) => u32::try_from(value.get()).ok(),
         };
+        let Some(source) = paths.intern(resolve_source_path(
+            &source,
+            directory.as_deref(),
+            compilation_directory.as_deref(),
+        )) else {
+            continue;
+        };
         frames.push(DwarfLineFrame {
             address: row.address(),
-            frame: ArtifactInlineFrame {
-                evidence_kind: crate::ArtifactSourceLocationEvidenceKind::Dwarf,
-                source: resolve_source_path(
-                    &source,
-                    directory.as_deref(),
-                    compilation_directory.as_deref(),
-                ),
-                line: Some(line),
-                column,
-            },
+            source,
+            line,
+            column: column.unwrap_or(0),
         });
     }
     frames
@@ -318,8 +413,12 @@ pub fn resolve_source_path(
 
 #[cfg(test)]
 mod tests {
-    use super::{DwarfFrame, frames_at_symbol_addresses, resolve_source_path};
+    use super::{
+        DwarfFrame, DwarfLineFrame, DwarfPathInterner, debug_section, frames_at_symbol_addresses,
+        resolve_source_path, supports_address_join,
+    };
     use crate::{ArtifactFingerprint, ArtifactInlineFrame, ArtifactSourceLocationEvidenceKind};
+    use object::ObjectKind;
 
     fn frame(begin: u64, end: u64) -> DwarfFrame {
         DwarfFrame {
@@ -350,6 +449,13 @@ mod tests {
     }
 
     #[test]
+    fn relocatable_objects_reject_address_only_dwarf_joins() {
+        assert!(!supports_address_join(ObjectKind::Relocatable));
+        assert!(supports_address_join(ObjectKind::Executable));
+        assert!(supports_address_join(ObjectKind::Dynamic));
+    }
+
+    #[test]
     fn relative_paths_keep_their_declared_directory_context_without_reading_source() {
         assert_eq!(
             resolve_source_path("src/main.cpp", None, Some("/work/tree")),
@@ -375,5 +481,55 @@ mod tests {
             resolve_source_path("header.hpp", Some("include/"), Some("/work/tree/")),
             "/work/tree/include/header.hpp"
         );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn line_records_intern_repeated_paths_until_they_are_attached_to_symbols() {
+        let mut paths = DwarfPathInterner::default();
+        let first = paths.intern("/work/src/lib.rs".to_owned()).unwrap();
+        let second = paths.intern("/work/src/lib.rs".to_owned()).unwrap();
+        let frame = DwarfLineFrame {
+            address: 12,
+            source: first,
+            line: 5,
+            column: 0,
+        };
+
+        assert_eq!(first, second);
+        assert_eq!(paths.values.len(), 1);
+        assert_eq!(frame.inline_frame(&paths).source, "/work/src/lib.rs");
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn compressed_legacy_debug_sections_are_found_and_decompressed() {
+        use std::io::Write;
+
+        use flate2::{Compression, write::ZlibEncoder};
+        use object::write::{Object as WriteObject, StandardSegment};
+        use object::{Architecture, BinaryFormat, Endianness, ObjectSection, SectionKind};
+
+        let payload = b"compressed dwarf fixture";
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(payload).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut section_data = b"ZLIB".to_vec();
+        section_data.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        section_data.extend_from_slice(&compressed);
+
+        let mut writer =
+            WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+        let section = writer.add_section(
+            writer.segment_name(StandardSegment::Debug).to_vec(),
+            b".zdebug_info".to_vec(),
+            SectionKind::Debug,
+        );
+        writer.append_section_data(section, &section_data, 1);
+        let bytes = writer.write().unwrap();
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        let section = debug_section(&file, ".debug_info").unwrap();
+
+        assert_eq!(section.uncompressed_data().unwrap().as_ref(), payload);
     }
 }

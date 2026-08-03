@@ -26,6 +26,23 @@ fn worker_deadline_terminates_a_nonresponsive_parser_process() {
 }
 
 #[test]
+fn worker_deadline_rejects_an_unrepresentable_timeout_without_panicking() {
+    let error = deadline_after(Duration::from_secs(u64::MAX))
+        .expect_err("an unrepresentable deadline must be an error");
+    assert!(error.to_string().contains("timeout is too large"));
+}
+
+#[test]
+fn worker_stage_marker_reports_the_last_written_phase() {
+    let marker = tempfile::NamedTempFile::new().expect("stage marker");
+    fs::write(marker.path(), "persistence and source correlation").expect("write stage");
+    assert_eq!(
+        worker::current_stage(marker.path()),
+        "persistence and source correlation"
+    );
+}
+
+#[test]
 fn worker_diagnostics_are_fully_drained_but_only_a_bounded_prefix_is_retained() {
     use std::cell::Cell;
     use std::rc::Rc;
@@ -60,20 +77,25 @@ fn untrusted_artifact_limits_clamp_every_enforceable_resource() {
     let mut max_bytes = u64::MAX;
     let mut timeout_seconds = u64::MAX;
     let mut max_memory_bytes = None;
-    clamp_untrusted_artifact_limits(&mut max_bytes, &mut timeout_seconds, &mut max_memory_bytes);
+    let result = clamp_untrusted_artifact_limits(
+        &mut max_bytes,
+        &mut timeout_seconds,
+        &mut max_memory_bytes,
+    );
     assert_eq!(max_bytes, UNTRUSTED_ARTIFACT_MAX_BYTES);
     assert_eq!(timeout_seconds, UNTRUSTED_ARTIFACT_TIMEOUT_SECONDS);
-    assert_eq!(
-        max_memory_bytes,
-        codehelion_helper::availability()
-            .memory_limit
-            .then_some(UNTRUSTED_ARTIFACT_MAX_MEMORY_BYTES)
-    );
+    if !codehelion_helper::availability().memory_limit {
+        assert!(result.is_err());
+        return;
+    }
+    result.expect("supported platform applies the memory ceiling");
+    assert_eq!(max_memory_bytes, Some(UNTRUSTED_ARTIFACT_MAX_MEMORY_BYTES));
 
     let mut lower_bytes = 1024;
     let mut lower_timeout = 1;
     let mut lower_memory = Some(2048);
-    clamp_untrusted_artifact_limits(&mut lower_bytes, &mut lower_timeout, &mut lower_memory);
+    clamp_untrusted_artifact_limits(&mut lower_bytes, &mut lower_timeout, &mut lower_memory)
+        .expect("supported platform applies the lower explicit ceiling");
     assert_eq!(lower_bytes, 1024);
     assert_eq!(lower_timeout, 1);
     assert_eq!(lower_memory, Some(2048));

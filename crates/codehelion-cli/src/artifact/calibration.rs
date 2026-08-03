@@ -14,16 +14,27 @@ use super::{
 /// # Errors
 ///
 /// Returns database and output errors. This command only reads recorded local
-/// measurements; it never opens or executes an artifact.
+/// measurements; it never opens or executes an artifact. `SQLite`'s WAL mode
+/// supplies the concurrent read snapshot, so it deliberately does not take
+/// the writer lease.
 pub fn calibration(args: &ArtifactCalibrationArgs, out: &mut impl Write) -> Result<Outcome> {
     let db = crate::resolve_db(args.db.as_deref())?;
-    let store = Store::open(&db)
+    let store = Store::open_existing(&db)
         .with_context(|| format!("opening calibration database {}", db.display()))?;
-    store.ensure_completed_run(args.source_run)?;
-    let measurements = store.artifact_savings_calibrations_for_run(args.source_run)?;
+    let source_run = args.source_run.map_or_else(
+        || {
+            store
+                .latest_completed_run_any_root()?
+                .map(|run| run.id)
+                .context("no completed scan in this database; run `codehelion scan` first")
+        },
+        Ok,
+    )?;
+    store.ensure_completed_run(source_run)?;
+    let measurements = store.artifact_savings_calibrations_for_run(source_run)?;
     let mut report = CalibrationSummaryReport {
         schema_version: ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION,
-        source_run: args.source_run,
+        source_run,
         statistics: artifact_savings_calibration_statistics(&measurements),
         strata: calibration_strata(&store, &measurements)?,
         comparison: None,
@@ -39,7 +50,7 @@ pub fn calibration(args: &ArtifactCalibrationArgs, out: &mut impl Write) -> Resu
     }
     rendered.push(b'\n');
     if let Some(path) = &args.output {
-        fs::write(path, &rendered).with_context(|| format!("writing {}", path.display()))?;
+        super::write_output(path, &rendered, args.force)?;
     } else {
         out.write_all(&rendered)?;
     }
@@ -403,10 +414,15 @@ fn render_calibration_delta_text(
 }
 
 pub(super) fn csv(value: &str) -> String {
-    if value.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
+    let guarded = if value.starts_with(['=', '+', '-', '@', '\t']) {
+        format!("'{value}")
     } else {
         value.to_owned()
+    };
+    if guarded.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", guarded.replace('"', "\"\""))
+    } else {
+        guarded
     }
 }
 

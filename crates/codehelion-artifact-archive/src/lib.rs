@@ -97,6 +97,10 @@ impl ArtifactBackend for ArchiveBackend {
             symbols: !ir.symbols.is_empty(),
             call_graph: !ir.calls.is_empty(),
             source_mapping: !ir.source_mappings.is_empty(),
+            debug_info_unreadable: ir.capabilities.debug_info_unreadable,
+            normalized_duplicates: !ir.symbols.is_empty()
+                && ir.symbols.iter().all(|symbol| symbol.normalized.is_some()),
+            independent_data_segments: false,
             relocations: !ir.relocations.is_empty(),
             data_segments: !ir.data_segments.is_empty(),
         };
@@ -108,6 +112,9 @@ impl ArtifactBackend for ArchiveBackend {
             symbols: true,
             call_graph: true,
             source_mapping: true,
+            debug_info_unreadable: false,
+            normalized_duplicates: false,
+            independent_data_segments: false,
             relocations: true,
             data_segments: true,
         }
@@ -145,6 +152,7 @@ fn parse_member(format: ArtifactFormat, bytes: &[u8]) -> Result<ArtifactIr, Arti
 
 /// Merge a parsed local object without letting its local offsets act as IDs.
 fn merge_member(archive: &mut ArtifactIr, member: ArtifactIr, provenance: &ArtifactArchiveMember) {
+    archive.capabilities.debug_info_unreadable |= member.capabilities.debug_info_unreadable;
     let prefix = format!("{}:", provenance.name);
     archive
         .sections

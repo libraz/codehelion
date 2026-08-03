@@ -15,12 +15,31 @@ pub(super) fn render_text(
 ) -> Result<()> {
     writeln!(out, "artifact: {}", report.path)?;
     writeln!(out, "format: {}", report.format)?;
+    if let Some(architecture) = &report.architecture {
+        writeln!(out, "architecture: {architecture}")?;
+    }
+    if !report.skipped_architectures.is_empty() {
+        writeln!(
+            out,
+            "skipped architectures: {}",
+            report.skipped_architectures.join(", ")
+        )?;
+    }
     writeln!(out, "fingerprint: {}", report.fingerprint)?;
     if let Some(variant) = &report.build_variant {
         writeln!(
             out,
             "build variant: {} ({})",
             variant.manifest_path, variant.fingerprint
+        )?;
+    }
+    if let Some(containment) = &report.containment {
+        writeln!(
+            out,
+            "untrusted containment: input {} bytes, worker timeout {}s, worker memory {} bytes",
+            containment.max_input_bytes,
+            containment.worker_timeout_seconds,
+            containment.worker_memory_limit_bytes,
         )?;
     }
     writeln!(out, "observed bytes: {}", report.observed_bytes)?;
@@ -210,14 +229,22 @@ pub(super) fn render_text(
         }
     }
     writeln!(out, "data segments: {}", report.data_segments)?;
-    writeln!(
-        out,
-        "duplicates: exact {} groups, {} observed duplicate bytes; normalized {} groups, {} observed duplicate bytes",
-        report.duplicates.exact_groups,
-        report.duplicates.exact_duplicated_bytes,
-        report.duplicates.normalized_groups,
-        report.duplicates.normalized_duplicated_bytes,
-    )?;
+    if report.capabilities.normalized_duplicates {
+        writeln!(
+            out,
+            "duplicates: exact {} groups, {} observed duplicate bytes; normalized {} groups, {} observed duplicate bytes",
+            report.duplicates.exact_groups,
+            report.duplicates.exact_duplicated_bytes,
+            report.duplicates.normalized_groups,
+            report.duplicates.normalized_duplicated_bytes,
+        )?;
+    } else {
+        writeln!(
+            out,
+            "duplicates: exact {} groups, {} observed duplicate bytes; normalized unavailable (no normalizer for this architecture)",
+            report.duplicates.exact_groups, report.duplicates.exact_duplicated_bytes,
+        )?;
+    }
     writeln!(out, "size categories:")?;
     writeln!(out, "  observed_bytes: {}", report.sizes.observed_bytes)?;
     writeln!(out, "  duplicated_bytes: {}", report.sizes.duplicated_bytes)?;
@@ -234,7 +261,7 @@ pub(super) fn render_text(
     writeln!(
         out,
         "  duplicated_data_bytes: {}",
-        report.sizes.duplicated_data_bytes
+        optional_bytes(report.sizes.duplicated_data_bytes)
     )?;
     writeln!(
         out,
@@ -607,7 +634,7 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
             row[2] = report.format.to_string();
             "generic-origin".clone_into(&mut row[3]);
             row[4].clone_from(&origin.origin_fingerprint);
-            row[5].clone_from(&origin.definition);
+            row[5] = csv(&origin.definition);
             row[7] = origin.observed_symbol_bytes.to_string();
             row[8] = origin.normalized_instruction_duplicated_bytes.to_string();
             row[19].clone_from(&origin.origin_build_variant_fingerprint);
@@ -713,7 +740,9 @@ fn compare_csv_row(report: &ArtifactComparisonReport, record_type: &str) -> Vec<
     row[6].clone_from(&report.after.fingerprint);
     row[7] = report.observed_size_reduction_bytes.0.to_string();
     row[8] = report.duplicated_code_delta_bytes.to_string();
-    row[9] = report.duplicated_data_delta_bytes.to_string();
+    row[9] = report
+        .duplicated_data_delta_bytes
+        .map_or_else(|| "unavailable".to_owned(), |value| value.to_string());
     row
 }
 
@@ -731,11 +760,13 @@ pub(super) fn render_compare_text(
         "before: {} ({})",
         report.before.path, report.before.format
     )?;
+    render_selected_architecture("before", &report.before, out)?;
     writeln!(
         out,
         "after: {} ({})",
         report.after.path, report.after.format
     )?;
+    render_selected_architecture("after", &report.after, out)?;
     if let Some(variant) = &report.before.build_variant {
         writeln!(
             out,
@@ -779,8 +810,10 @@ pub(super) fn render_compare_text(
     )?;
     writeln!(
         out,
-        "duplicated_data_delta_bytes: {:+}",
-        report.duplicated_data_delta_bytes
+        "duplicated_data_delta_bytes: {}",
+        report
+            .duplicated_data_delta_bytes
+            .map_or_else(|| "unavailable".to_owned(), |value| format!("{value:+}"))
     )?;
     writeln!(
         out,
@@ -808,6 +841,24 @@ pub(super) fn render_compare_text(
     }
     for assumption in &report.assumptions {
         writeln!(out, "assumption: {assumption}")?;
+    }
+    Ok(())
+}
+
+fn render_selected_architecture(
+    label: &str,
+    artifact: &super::model::ComparisonArtifact,
+    out: &mut impl Write,
+) -> Result<()> {
+    if let Some(architecture) = &artifact.architecture {
+        writeln!(out, "{label} architecture: {architecture}")?;
+    }
+    if !artifact.skipped_architectures.is_empty() {
+        writeln!(
+            out,
+            "{label} skipped architectures: {}",
+            artifact.skipped_architectures.join(", ")
+        )?;
     }
     Ok(())
 }

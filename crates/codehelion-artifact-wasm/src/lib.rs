@@ -236,6 +236,9 @@ impl ArtifactBackend for WasmBackend {
             symbols: true,
             call_graph: true,
             source_mapping: false,
+            debug_info_unreadable: false,
+            normalized_duplicates: true,
+            independent_data_segments: true,
             relocations: false,
             data_segments: true,
         }
@@ -539,7 +542,7 @@ mod tests {
         let rendered = serde_json::to_string_pretty(&artifact).expect("IR serializes");
         assert_eq!(
             rendered,
-            include_str!("../tests/golden/module-ir-v1.json").trim_end()
+            include_str!("../tests/golden/module-ir-v2.json").trim_end()
         );
     }
 

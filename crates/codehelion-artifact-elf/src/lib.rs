@@ -4,17 +4,18 @@
 //! executes the artifact.
 
 use codehelion_artifact::dwarf::attach_dwarf_frames;
-use codehelion_artifact::symbols::demangle;
-use codehelion_artifact::x86::{X86_NORMALIZATION_VERSION, normalize_x86};
+use codehelion_artifact::native::{
+    collect_sections, collect_text_symbols, collect_undefined_imports, symbol_fingerprint,
+};
+use codehelion_artifact::x86::X86_NORMALIZATION_VERSION;
 use codehelion_artifact::{
-    ArtifactBackend, ArtifactCall, ArtifactCapabilities, ArtifactDataSegment, ArtifactError,
-    ArtifactFingerprint, ArtifactFormat, ArtifactImport, ArtifactImportKind, ArtifactIr,
-    ArtifactRelocation, ArtifactSection, ArtifactSymbol, NormalizedInstructions, UnresolvedCall,
+    ArtifactBackend, ArtifactCall, ArtifactCapabilities, ArtifactError, ArtifactFingerprint,
+    ArtifactFormat, ArtifactIr, ArtifactSymbol, UnresolvedCall,
 };
 use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind};
 use object::{
-    Architecture, Endianness, Object, ObjectSection, ObjectSymbol, RelocationKind,
-    RelocationTarget, SectionKind, SymbolKind,
+    Architecture, Endianness, Object, ObjectKind, ObjectSection, RelocationKind, RelocationTarget,
+    SectionKind,
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -43,6 +44,9 @@ impl ArtifactBackend for ElfBackend {
             symbols: true,
             call_graph: true,
             source_mapping: false,
+            debug_info_unreadable: false,
+            normalized_duplicates: false,
+            independent_data_segments: false,
             relocations: false,
             data_segments: true,
         }
@@ -92,90 +96,36 @@ impl ElfBackend {
         let mut ir = ArtifactIr::empty(ArtifactFormat::Elf, bytes);
         let mut symbol_fingerprints = HashMap::new();
         let mut symbol_addresses = HashMap::new();
+        let mut symbol_addresses_by_section = HashMap::new();
         let mut symbol_addresses_by_fingerprint = HashMap::new();
-        collect_sections(&file, &mut ir)?;
-        collect_dynamic_function_imports(&file, &mut ir);
-        for section in file
-            .sections()
-            .filter(|section| section.kind() == SectionKind::Text)
+        collect_sections(&file, &mut ir).map_err(|error| malformed(error.to_string()))?;
+        collect_undefined_imports(file.symbols().chain(file.dynamic_symbols()), &mut ir);
+        let supports_global_address_join = file.kind() != ObjectKind::Relocatable;
+        for symbol in
+            collect_text_symbols(&file, &mut ir).map_err(|error| malformed(error.to_string()))?
         {
-            let section_index = section.index();
-            let data = section
-                .data()
-                .map_err(|error| malformed(error.to_string()))?;
-            let mut symbols: Vec<_> = file
-                .symbols()
-                .filter(|symbol| {
-                    symbol.kind() == SymbolKind::Text
-                        && !symbol.is_undefined()
-                        && symbol.section_index() == Some(section_index)
-                })
-                .collect();
-            symbols.sort_by_key(ObjectSymbol::address);
-            for (index, symbol) in symbols.iter().enumerate() {
-                let Some(relative) = symbol.address().checked_sub(section.address()) else {
-                    continue;
-                };
-                let next_address = symbols[index.saturating_add(1)..]
-                    .iter()
-                    .map(ObjectSymbol::address)
-                    .find(|address| *address > symbol.address())
-                    .unwrap_or_else(|| section.address().saturating_add(data.len() as u64));
-                let size = if symbol.size() == 0 {
-                    next_address.saturating_sub(symbol.address())
-                } else {
-                    symbol.size()
-                };
-                let Ok(start) = usize::try_from(relative) else {
-                    continue;
-                };
-                let Ok(size_usize) = usize::try_from(size) else {
-                    continue;
-                };
-                let Some(code) = data.get(start..start.saturating_add(size_usize)) else {
-                    continue;
-                };
-                if code.is_empty() {
-                    continue;
-                }
-                let (section_offset, _) = section.file_range().unwrap_or((0, 0));
-                let name = symbol
-                    .name()
-                    .ok()
-                    .filter(|name| !name.is_empty())
-                    .map(demangle);
-                let normalized = normalize_x86(code, file.architecture());
-                let fingerprint = symbol_fingerprint(
-                    name.as_deref(),
-                    section.name().ok(),
-                    normalized.as_ref(),
-                    code,
-                );
-                ir.symbols.push(ArtifactSymbol {
-                    fingerprint,
-                    name,
-                    exported: symbol.is_global(),
-                    section: u32::try_from(section_index.0).ok(),
-                    offset: section_offset.saturating_add(relative),
-                    size,
-                    size_inferred: symbol.size() == 0,
-                    code: code.to_vec(),
-                    normalized,
-                    inline_stack: Vec::new(),
-                });
-                symbol_fingerprints.insert(symbol.index(), Some(fingerprint));
+            symbol_fingerprints.insert(symbol.index, Some(symbol.fingerprint));
+            symbol_addresses_by_section
+                .insert((symbol.section, symbol.address), symbol.fingerprint);
+            if supports_global_address_join {
                 symbol_addresses
-                    .entry(symbol.address())
-                    .or_insert(fingerprint);
-                symbol_addresses_by_fingerprint.insert(fingerprint, (symbol.address(), size));
+                    .entry(symbol.address)
+                    .or_insert(symbol.fingerprint);
             }
+            symbol_addresses_by_fingerprint
+                .insert(symbol.fingerprint, (symbol.address, symbol.size));
         }
         if ir.symbols.is_empty() {
             infer_text_regions(&file, &mut ir)?;
         }
         record_entry_point(file.entry(), &symbol_addresses, &mut ir);
         record_init_fini_roots(&file, &symbol_fingerprints, &symbol_addresses, &mut ir);
-        ir.calls = x86_direct_calls(&file, &ir.symbols, &symbol_fingerprints, &symbol_addresses);
+        ir.calls = x86_direct_calls(
+            &file,
+            &ir.symbols,
+            &symbol_fingerprints,
+            &symbol_addresses_by_section,
+        );
         attach_dwarf_frames(
             debug_file.as_ref().unwrap_or(&file),
             &symbol_addresses_by_fingerprint,
@@ -185,6 +135,11 @@ impl ElfBackend {
             symbols: !ir.symbols.is_empty(),
             call_graph: !ir.calls.is_empty(),
             source_mapping: !ir.source_mappings.is_empty(),
+            debug_info_unreadable: ir.capabilities.debug_info_unreadable,
+            normalized_duplicates: codehelion_artifact::x86::supports_normalized_duplicates(
+                file.architecture(),
+            ),
+            independent_data_segments: false,
             relocations: !ir.relocations.is_empty(),
             data_segments: !ir.data_segments.is_empty(),
         };
@@ -204,29 +159,6 @@ fn matching_build_id(artifact: &object::File<'_>, companion: &object::File<'_>) 
         return false;
     };
     artifact_id == companion_id
-}
-
-/// Record dynamic function references without attempting to load their library.
-fn collect_dynamic_function_imports(file: &object::File<'_>, ir: &mut ArtifactIr) {
-    let mut names = BTreeSet::new();
-    for symbol in file.dynamic_symbols() {
-        if symbol.kind() == SymbolKind::Text && symbol.is_undefined() {
-            if let Some(name) = symbol
-                .name()
-                .ok()
-                .filter(|name| !name.is_empty())
-                .map(demangle)
-            {
-                names.insert(name);
-            }
-        }
-    }
-    ir.imports
-        .extend(names.into_iter().map(|name| ArtifactImport {
-            module: None,
-            name: Some(name),
-            kind: ArtifactImportKind::Function,
-        }));
 }
 
 /// Preserve an ELF entry address only after resolving it to a stable symbol ID.
@@ -322,82 +254,12 @@ fn pointer_value(bytes: &[u8], endianness: Endianness) -> Option<u64> {
 }
 
 /// Copy section, read-only-data, and relocation facts into format-neutral IR.
-fn collect_sections(file: &object::File<'_>, ir: &mut ArtifactIr) -> Result<(), ArtifactError> {
-    for section in file.sections() {
-        let (offset, size) = section.file_range().unwrap_or((0, 0));
-        ir.sections.push(ArtifactSection {
-            name: section.name().ok().map(str::to_owned),
-            offset,
-            size,
-            executable: section.kind() == SectionKind::Text,
-        });
-        if section.kind() == SectionKind::ReadOnlyData {
-            let data = section
-                .data()
-                .map_err(|error| malformed(error.to_string()))?;
-            if !data.is_empty() {
-                ir.data_segments.push(ArtifactDataSegment {
-                    fingerprint: data_fingerprint(section.name().ok(), data),
-                    section: u32::try_from(section.index().0).ok(),
-                    offset,
-                    bytes: data.to_vec(),
-                });
-            }
-        }
-        for (relocation_offset, relocation) in section.relocations() {
-            ir.relocations.push(ArtifactRelocation {
-                section: u32::try_from(section.index().0).ok(),
-                offset: offset.saturating_add(relocation_offset),
-                kind: format!("{:?}", relocation.kind()),
-                target: relocation_target_name(file, relocation.target()),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Keep a relocation's parser-supplied target as display evidence only.
-fn relocation_target_name(file: &object::File<'_>, target: RelocationTarget) -> Option<String> {
-    let RelocationTarget::Symbol(index) = target else {
-        return None;
-    };
-    file.symbol_by_index(index)
-        .ok()
-        .and_then(|symbol| symbol.name().ok())
-        .filter(|name| !name.is_empty())
-        .map(demangle)
-}
-
 /// Add one explicitly inferred region per executable section of a stripped ELF.
 fn infer_text_regions(file: &object::File<'_>, ir: &mut ArtifactIr) -> Result<(), ArtifactError> {
-    // A stripped image has no trustworthy function boundaries. Keep each text
-    // section as one inferred region rather than reporting no code or
-    // inventing function names.
-    for section in file
-        .sections()
-        .filter(|section| section.kind() == SectionKind::Text)
-    {
-        let data = section
-            .data()
-            .map_err(|error| malformed(error.to_string()))?;
-        if data.is_empty() {
-            continue;
-        }
-        let (offset, _) = section.file_range().unwrap_or((0, 0));
-        let normalized = normalize_x86(data, file.architecture());
-        ir.symbols.push(ArtifactSymbol {
-            fingerprint: symbol_fingerprint(None, section.name().ok(), normalized.as_ref(), data),
-            name: None,
-            exported: false,
-            section: u32::try_from(section.index().0).ok(),
-            offset,
-            size: data.len() as u64,
-            size_inferred: true,
-            code: data.to_vec(),
-            normalized,
-            inline_stack: Vec::new(),
-        });
-    }
+    codehelion_artifact::native::infer_text_regions(file, ir, |section, normalized, data| {
+        symbol_fingerprint(None, section, normalized, data)
+    })
+    .map_err(|error| malformed(error.to_string()))?;
     Ok(())
 }
 
@@ -405,7 +267,7 @@ fn x86_direct_calls(
     file: &object::File<'_>,
     symbols: &[ArtifactSymbol],
     fingerprints: &HashMap<object::SymbolIndex, Option<ArtifactFingerprint>>,
-    addresses: &HashMap<u64, ArtifactFingerprint>,
+    addresses: &HashMap<(object::SectionIndex, u64), ArtifactFingerprint>,
 ) -> Vec<ArtifactCall> {
     let bitness = match file.architecture() {
         Architecture::I386 => 32,
@@ -463,7 +325,9 @@ fn x86_direct_calls(
                 };
                 let (target, unresolved) = relocation_targets.get(&operand_offset).map_or_else(
                     || {
-                        let target = addresses.get(&instruction.near_branch_target()).copied();
+                        let target = addresses
+                            .get(&(section.index(), instruction.near_branch_target()))
+                            .copied();
                         (
                             target,
                             target
@@ -493,43 +357,6 @@ fn x86_direct_calls(
         }
     }
     calls
-}
-
-fn data_fingerprint(section: Option<&str>, bytes: &[u8]) -> ArtifactFingerprint {
-    let section = section.unwrap_or("");
-    let mut identity = Vec::new();
-    identity.extend((section.len() as u64).to_le_bytes());
-    identity.extend(section.as_bytes());
-    identity.extend(bytes);
-    ArtifactFingerprint::from_content("elf-data", &identity)
-}
-
-fn symbol_fingerprint(
-    name: Option<&str>,
-    section: Option<&str>,
-    normalized: Option<&NormalizedInstructions>,
-    code: &[u8],
-) -> ArtifactFingerprint {
-    let mut identity = Vec::new();
-    let section = section.unwrap_or("");
-    identity.extend((section.len() as u64).to_le_bytes());
-    identity.extend(section.as_bytes());
-    let name = name.unwrap_or("");
-    identity.extend((name.len() as u64).to_le_bytes());
-    identity.extend(name.as_bytes());
-    if let Some(normalized) = normalized {
-        identity.push(1);
-        identity.extend((normalized.version.len() as u64).to_le_bytes());
-        identity.extend(normalized.version.as_bytes());
-        identity.extend(&normalized.bytes);
-    } else {
-        // Unsupported architectures retain exact-code identity rather than
-        // claiming a normalized relationship that the backend did not
-        // establish.
-        identity.push(0);
-        identity.extend(code);
-    }
-    ArtifactFingerprint::from_content("elf-symbol", &identity)
 }
 
 const fn malformed(message: String) -> ArtifactError {

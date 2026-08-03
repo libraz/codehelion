@@ -23,6 +23,21 @@ use crate::cli::{
 
 /// Maximum worker diagnostic text retained after draining its stderr pipe.
 const MAX_ARTIFACT_WORKER_DIAGNOSTIC_BYTES: usize = 64 * 1024;
+const ARTIFACT_WORKER_STAGE_ENV: &str = "CODEHELION_ARTIFACT_WORKER_STAGE";
+
+/// Record the current isolated-worker phase for a timeout diagnostic.
+pub(super) fn set_stage(stage: &str) {
+    if let Some(path) = std::env::var_os(ARTIFACT_WORKER_STAGE_ENV) {
+        let _ = fs::write(path, stage);
+    }
+}
+
+pub(super) fn current_stage(path: &Path) -> String {
+    fs::read_to_string(path)
+        .ok()
+        .filter(|stage| !stage.trim().is_empty())
+        .unwrap_or_else(|| "startup".to_owned())
+}
 
 /// The exact request one parent sends to its private worker.
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,8 +49,14 @@ pub(super) enum IsolatedArtifactRequest {
 impl IsolatedArtifactRequest {
     fn set_output(&mut self, path: std::path::PathBuf) {
         match self {
-            Self::Analyze(args) => args.output = Some(path),
-            Self::Compare(args) => args.output = Some(path),
+            Self::Analyze(args) => {
+                args.output = Some(path);
+                args.force = true;
+            }
+            Self::Compare(args) => {
+                args.output = Some(path);
+                args.force = true;
+            }
         }
     }
 }
@@ -48,13 +69,15 @@ pub(super) fn run_isolated(args: &ArtifactArgs, out: &mut impl Write) -> Result<
             &mut args.max_bytes,
             &mut args.timeout_seconds,
             &mut args.max_memory_bytes,
-        );
+        )?;
     }
     let output = args.output.clone();
+    let force = args.force;
     run_isolated_request(
         IsolatedArtifactRequest::Analyze(args.clone()),
         args.timeout_seconds,
         output.as_deref(),
+        force,
         out,
     )
 }
@@ -63,16 +86,20 @@ pub(super) fn clamp_untrusted_artifact_limits(
     max_bytes: &mut u64,
     timeout_seconds: &mut u64,
     max_memory_bytes: &mut Option<u64>,
-) {
+) -> Result<()> {
     *max_bytes = (*max_bytes).min(UNTRUSTED_ARTIFACT_MAX_BYTES);
     *timeout_seconds = (*timeout_seconds).min(UNTRUSTED_ARTIFACT_TIMEOUT_SECONDS);
-    if codehelion_helper::availability().memory_limit {
-        *max_memory_bytes = Some(
-            max_memory_bytes
-                .unwrap_or(UNTRUSTED_ARTIFACT_MAX_MEMORY_BYTES)
-                .min(UNTRUSTED_ARTIFACT_MAX_MEMORY_BYTES),
+    if !codehelion_helper::availability().memory_limit {
+        bail!(
+            "the untrusted artifact profile requires an enforceable worker memory limit on this platform"
         );
     }
+    *max_memory_bytes = Some(
+        max_memory_bytes
+            .unwrap_or(UNTRUSTED_ARTIFACT_MAX_MEMORY_BYTES)
+            .min(UNTRUSTED_ARTIFACT_MAX_MEMORY_BYTES),
+    );
+    Ok(())
 }
 
 /// Run either public artifact operation under one worker deadline.
@@ -81,14 +108,20 @@ pub(super) fn run_isolated_request(
     mut request: IsolatedArtifactRequest,
     timeout_seconds: u64,
     output: Option<&Path>,
+    force: bool,
     out: &mut impl Write,
 ) -> Result<Outcome> {
+    validate_worker_timeout(timeout_seconds)?;
     let request_path = tempfile::NamedTempFile::new()
         .context("creating artifact worker request")?
         .into_temp_path();
     let report_path = tempfile::NamedTempFile::new()
         .context("creating artifact worker report")?
         .into_temp_path();
+    let stage_path = tempfile::NamedTempFile::new()
+        .context("creating artifact worker stage marker")?
+        .into_temp_path();
+    fs::write(&stage_path, "startup").context("initializing artifact worker stage marker")?;
     request.set_output(report_path.to_path_buf());
     fs::write(&request_path, serde_json::to_vec(&request)?)
         .context("writing artifact worker request")?;
@@ -106,6 +139,7 @@ pub(super) fn run_isolated_request(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .env(ARTIFACT_WORKER_STAGE_ENV, &stage_path)
         .spawn()
         .context("starting isolated artifact worker")?;
     let stderr_reader = child.stderr.take().map(|stream| {
@@ -121,7 +155,15 @@ pub(super) fn run_isolated_request(
                 .context("reading isolated artifact worker diagnostics")
         },
     )?;
-    let status = wait_result?;
+    let status = match wait_result {
+        Ok(status) => status,
+        Err(error) => {
+            return Err(error.context(format!(
+                "artifact worker phase when its deadline expired: {}",
+                current_stage(&stage_path).trim()
+            )));
+        }
+    };
     if !status.success() {
         let detail = stderr
             .trim()
@@ -140,7 +182,7 @@ pub(super) fn run_isolated_request(
     }
     let rendered = fs::read(&report_path).context("reading isolated artifact worker report")?;
     if let Some(path) = output {
-        fs::write(path, &rendered).with_context(|| format!("writing {}", path.display()))?;
+        super::write_output(path, &rendered, force)?;
     } else {
         out.write_all(&rendered)?;
     }
@@ -213,7 +255,7 @@ pub(super) fn wait_for_worker(
     child: &mut std::process::Child,
     timeout: Duration,
 ) -> Result<std::process::ExitStatus> {
-    let deadline = Instant::now() + timeout;
+    let deadline = deadline_after(timeout)?;
     loop {
         if let Some(status) = child
             .try_wait()
@@ -233,4 +275,16 @@ pub(super) fn wait_for_worker(
         }
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Reject a deadline that the host's monotonic clock cannot represent.
+fn validate_worker_timeout(timeout_seconds: u64) -> Result<()> {
+    deadline_after(Duration::from_secs(timeout_seconds)).map(|_| ())
+}
+
+/// Compute a deadline without allowing oversized private requests to panic.
+pub(super) fn deadline_after(timeout: Duration) -> Result<Instant> {
+    Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| anyhow::anyhow!("artifact worker timeout is too large for this platform"))
 }

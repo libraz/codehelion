@@ -14,6 +14,23 @@ use super::{
 };
 
 impl Store {
+    /// The newest saved artifact analysis, if one exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn latest_artifact_analysis_id(&self) -> Result<Option<i64>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT id FROM artifact_analysis
+                 ORDER BY finished_at DESC, id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
     /// Every mapping recorded for one artifact analysis, in stable evidence order.
     ///
     /// The result retains all ambiguous candidates. Callers must not collapse
@@ -96,23 +113,25 @@ impl Store {
     ) -> Result<Option<StoredArtifactAnalysis>, StoreError> {
         self.conn
             .query_row(
-                "SELECT path, ir_json, build_variant_manifest_path, build_variant_fingerprint
+                "SELECT schema_version, path, ir_json, build_variant_manifest_path, build_variant_fingerprint
                  FROM artifact_analysis WHERE id = ?1",
                 [analysis_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<Vec<u8>>>(3)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<Vec<u8>>>(4)?,
                     ))
                 },
             )
             .optional()?
             .map(
-                |(path, ir_json, build_variant_manifest_path, build_variant_fingerprint)| {
+                |(schema_version, path, ir_json, build_variant_manifest_path, build_variant_fingerprint)| {
                     Ok(StoredArtifactAnalysis {
                         analysis_id,
+                        schema_version,
                         path,
                         ir_json,
                         build_variant_manifest_path,

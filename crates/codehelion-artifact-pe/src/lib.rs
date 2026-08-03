@@ -5,18 +5,22 @@
 //! separate correlation input: this parser establishes only facts present in
 //! the PE or COFF container itself.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Cursor;
 
-use codehelion_artifact::symbols::demangle;
-use codehelion_artifact::x86::{X86_NORMALIZATION_VERSION, normalize_x86, trim_inferred_padding};
-use codehelion_artifact::{
-    ArtifactBackend, ArtifactCapabilities, ArtifactDataSegment, ArtifactError, ArtifactFingerprint,
-    ArtifactFormat, ArtifactImport, ArtifactImportKind, ArtifactIr, ArtifactRelocation,
-    ArtifactSection, ArtifactSymbol, NormalizedInstructions,
+use codehelion_artifact::native::{
+    collect_sections, collect_text_symbols, collect_undefined_imports, symbol_fingerprint,
 };
-use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind};
+use codehelion_artifact::x86::X86_NORMALIZATION_VERSION;
+use codehelion_artifact::{
+    ArtifactBackend, ArtifactCapabilities, ArtifactError, ArtifactFingerprint, ArtifactFormat,
+    ArtifactIr,
+};
+use object::Object;
 use pdb::{FallibleIterator, PDB};
+
+#[cfg(test)]
+use codehelion_artifact::ArtifactImportKind;
 
 /// Parser backend for PE images and COFF objects.
 #[derive(Debug, Default, Clone, Copy)]
@@ -46,6 +50,9 @@ impl ArtifactBackend for PeCoffBackend {
             symbols: true,
             call_graph: false,
             source_mapping: false,
+            debug_info_unreadable: false,
+            normalized_duplicates: false,
+            independent_data_segments: false,
             relocations: true,
             data_segments: true,
         }
@@ -83,8 +90,8 @@ impl PeCoffBackend {
             });
         }
         let mut ir = ArtifactIr::empty(ArtifactFormat::PeCoff, bytes);
-        collect_sections(&file, &mut ir)?;
-        collect_imports(&file, &mut ir);
+        collect_sections(&file, &mut ir).map_err(|error| malformed(error.to_string()))?;
+        collect_undefined_imports(file.symbols(), &mut ir);
         let symbol_ranges = collect_symbols(&file, &mut ir)?;
         if ir.symbols.is_empty() {
             infer_text_regions(&file, &mut ir)?;
@@ -96,6 +103,11 @@ impl PeCoffBackend {
             symbols: !ir.symbols.is_empty(),
             call_graph: false,
             source_mapping: !ir.source_mappings.is_empty(),
+            debug_info_unreadable: false,
+            normalized_duplicates: codehelion_artifact::x86::supports_normalized_duplicates(
+                file.architecture(),
+            ),
+            independent_data_segments: false,
             relocations: !ir.relocations.is_empty(),
             data_segments: !ir.data_segments.is_empty(),
         };
@@ -118,149 +130,22 @@ fn is_coff_machine(bytes: &[u8]) -> bool {
     )
 }
 
-fn collect_sections(file: &object::File<'_>, ir: &mut ArtifactIr) -> Result<(), ArtifactError> {
-    for section in file.sections() {
-        let (offset, size) = section.file_range().unwrap_or((0, 0));
-        ir.sections.push(ArtifactSection {
-            name: section.name().ok().map(str::to_owned),
-            offset,
-            size,
-            executable: section.kind() == SectionKind::Text,
-        });
-        if section.kind() == SectionKind::ReadOnlyData {
-            let data = section
-                .data()
-                .map_err(|error| malformed(error.to_string()))?;
-            if !data.is_empty() {
-                ir.data_segments.push(ArtifactDataSegment {
-                    fingerprint: data_fingerprint(section.name().ok(), data),
-                    section: u32::try_from(section.index().0).ok(),
-                    offset,
-                    bytes: data.to_vec(),
-                });
-            }
-        }
-        for (relocation_offset, relocation) in section.relocations() {
-            ir.relocations.push(ArtifactRelocation {
-                section: u32::try_from(section.index().0).ok(),
-                offset: offset.saturating_add(relocation_offset),
-                kind: format!("{:?}", relocation.kind()),
-                target: relocation_target_name(file, relocation.target()),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn collect_imports(file: &object::File<'_>, ir: &mut ArtifactIr) {
-    let mut names = BTreeSet::new();
-    for symbol in file.symbols() {
-        if symbol.is_undefined() {
-            if let Some(name) = symbol
-                .name()
-                .ok()
-                .filter(|name| !name.is_empty())
-                .map(demangle)
-            {
-                names.insert(name);
-            }
-        }
-    }
-    ir.imports
-        .extend(names.into_iter().map(|name| ArtifactImport {
-            module: None,
-            name: Some(name),
-            kind: ArtifactImportKind::Other,
-        }));
-}
-
 fn collect_symbols(
     file: &object::File<'_>,
     ir: &mut ArtifactIr,
 ) -> Result<Vec<SymbolRange>, ArtifactError> {
-    let mut ranges = Vec::new();
-    for section in file
-        .sections()
-        .filter(|section| section.kind() == SectionKind::Text)
-    {
-        let section_index = section.index();
-        let data = section
-            .data()
-            .map_err(|error| malformed(error.to_string()))?;
-        let (section_offset, _) = section.file_range().unwrap_or((0, 0));
-        let mut symbols: Vec<_> = file
-            .symbols()
-            .filter(|symbol| {
-                symbol.section_index() == Some(section_index)
-                    && symbol.kind() == object::SymbolKind::Text
-                    && !symbol.is_undefined()
-            })
-            .collect();
-        symbols.sort_by_key(ObjectSymbol::address);
-        for (index, symbol) in symbols.iter().enumerate() {
-            let Some(relative) = symbol.address().checked_sub(section.address()) else {
-                continue;
-            };
-            let next = symbols.get(index + 1).map_or_else(
-                || section.address().saturating_add(data.len() as u64),
-                ObjectSymbol::address,
-            );
-            let size = if symbol.size() == 0 {
-                next.saturating_sub(symbol.address())
-            } else {
-                symbol.size()
-            };
-            let Ok(start) = usize::try_from(relative) else {
-                continue;
-            };
-            let Ok(size) = usize::try_from(size) else {
-                continue;
-            };
-            let Some(code) = data.get(start..start.saturating_add(size)) else {
-                continue;
-            };
-            let code = if symbol.size() == 0 {
-                trim_inferred_padding(code, file.architecture())
-            } else {
-                code
-            };
-            if code.is_empty() {
-                continue;
-            }
-            let name = symbol
-                .name()
-                .ok()
-                .filter(|name| !name.is_empty())
-                .map(demangle);
-            let normalized = normalize_x86(code, file.architecture());
-            let fingerprint = symbol_fingerprint(
-                name.as_deref(),
-                section.name().ok(),
-                normalized.as_ref(),
-                code,
-            );
-            ir.symbols.push(ArtifactSymbol {
-                fingerprint,
-                name,
-                exported: symbol.is_global(),
-                section: u32::try_from(section_index.0).ok(),
-                offset: section_offset.saturating_add(relative),
-                size: u64::try_from(code.len()).unwrap_or(u64::MAX),
-                size_inferred: symbol.size() == 0,
-                code: code.to_vec(),
-                normalized,
-                inline_stack: Vec::new(),
-            });
-            ranges.push(SymbolRange {
-                fingerprint,
-                start: symbol.address(),
-                end: symbol
-                    .address()
-                    .saturating_add(u64::try_from(code.len()).unwrap_or(u64::MAX)),
-            });
-        }
-    }
-    Ok(ranges)
+    collect_text_symbols(file, ir)
+        .map(|ranges| {
+            ranges
+                .into_iter()
+                .map(|range| SymbolRange {
+                    fingerprint: range.fingerprint,
+                    start: range.address,
+                    end: range.address.saturating_add(range.size),
+                })
+                .collect()
+        })
+        .map_err(|error| malformed(error.to_string()))
 }
 
 /// Preserve executable code in a PE/COFF image that has no COFF symbols.
@@ -269,31 +154,10 @@ fn collect_symbols(
 /// inferred region per text section says that code was observed while making
 /// clear that no function boundary was available.
 fn infer_text_regions(file: &object::File<'_>, ir: &mut ArtifactIr) -> Result<(), ArtifactError> {
-    for section in file
-        .sections()
-        .filter(|section| section.kind() == SectionKind::Text)
-    {
-        let data = section
-            .data()
-            .map_err(|error| malformed(error.to_string()))?;
-        if data.is_empty() {
-            continue;
-        }
-        let (offset, _) = section.file_range().unwrap_or((0, 0));
-        let normalized = normalize_x86(data, file.architecture());
-        ir.symbols.push(ArtifactSymbol {
-            fingerprint: symbol_fingerprint(None, section.name().ok(), normalized.as_ref(), data),
-            name: None,
-            exported: false,
-            section: u32::try_from(section.index().0).ok(),
-            offset,
-            size: u64::try_from(data.len()).unwrap_or(u64::MAX),
-            size_inferred: true,
-            code: data.to_vec(),
-            normalized,
-            inline_stack: Vec::new(),
-        });
-    }
+    codehelion_artifact::native::infer_text_regions(file, ir, |section, normalized, data| {
+        symbol_fingerprint(None, section, normalized, data)
+    })
+    .map_err(|error| malformed(error.to_string()))?;
     Ok(())
 }
 
@@ -384,10 +248,18 @@ fn collect_pdb_frames(
             ));
         }
     }
+    frames.sort_by_key(|(address, _)| *address);
+    let symbol_rows: HashMap<_, _> = ir
+        .symbols
+        .iter()
+        .enumerate()
+        .map(|(index, symbol)| (symbol.fingerprint, index))
+        .collect();
     for range in symbol_ranges {
-        let mut symbol_frames: Vec<_> = frames
+        let frame_start = frames.partition_point(|(address, _)| *address < range.start);
+        let mut symbol_frames: Vec<_> = frames[frame_start..]
             .iter()
-            .filter(|(address, _)| range.start <= *address && *address < range.end)
+            .take_while(|(address, _)| *address < range.end)
             .map(|(_, frame)| frame.clone())
             .collect();
         symbol_frames.sort_by(|left, right| {
@@ -397,12 +269,8 @@ fn collect_pdb_frames(
         if symbol_frames.is_empty() {
             continue;
         }
-        if let Some(symbol) = ir
-            .symbols
-            .iter_mut()
-            .find(|symbol| symbol.fingerprint == range.fingerprint)
-        {
-            symbol.inline_stack = symbol_frames;
+        if let Some(index) = symbol_rows.get(&range.fingerprint) {
+            ir.symbols[*index].inline_stack = symbol_frames;
         }
     }
     ir.source_mappings = ir
@@ -428,46 +296,6 @@ fn pdb_identity_matches(
     image_age: u32,
 ) -> bool {
     pdb_guid == image_guid && pdb_age >= image_age
-}
-
-fn relocation_target_name(file: &object::File<'_>, target: RelocationTarget) -> Option<String> {
-    let RelocationTarget::Symbol(index) = target else {
-        return None;
-    };
-    file.symbol_by_index(index)
-        .ok()
-        .and_then(|symbol| symbol.name().ok())
-        .filter(|name| !name.is_empty())
-        .map(demangle)
-}
-
-fn symbol_fingerprint(
-    name: Option<&str>,
-    section: Option<&str>,
-    normalized: Option<&NormalizedInstructions>,
-    code: &[u8],
-) -> ArtifactFingerprint {
-    let mut bytes = Vec::new();
-    bytes.extend(name.unwrap_or_default().as_bytes());
-    bytes.push(0);
-    bytes.extend(section.unwrap_or_default().as_bytes());
-    bytes.push(0);
-    if let Some(normalized) = normalized {
-        bytes.extend(normalized.version.as_bytes());
-        bytes.push(0);
-        bytes.extend(&normalized.bytes);
-    } else {
-        bytes.extend(code);
-    }
-    ArtifactFingerprint::from_content("pe-coff-symbol", &bytes)
-}
-
-fn data_fingerprint(name: Option<&str>, data: &[u8]) -> ArtifactFingerprint {
-    let mut bytes = Vec::new();
-    bytes.extend(name.unwrap_or_default().as_bytes());
-    bytes.push(0);
-    bytes.extend(data);
-    ArtifactFingerprint::from_content("pe-coff-data", &bytes)
 }
 
 const fn malformed(message: String) -> ArtifactError {
@@ -512,6 +340,26 @@ mod tests {
         object.write().expect("write symbol-free COFF fixture")
     }
 
+    fn coff_zero_sized_alias_fixture() -> Vec<u8> {
+        let mut object =
+            WriteObject::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let text = object.section_id(StandardSection::Text);
+        let offset = object.append_section_data(text, &[0x90, 0xc3], 1);
+        for (name, size) in [(b"implementation".as_slice(), 2), (b"alias", 0)] {
+            object.add_symbol(Symbol {
+                name: name.to_vec(),
+                value: offset,
+                size,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Dynamic,
+                weak: false,
+                section: SymbolSection::Section(text),
+                flags: SymbolFlags::None,
+            });
+        }
+        object.write().expect("write zero-sized COFF alias fixture")
+    }
+
     fn coff_undefined_import_fixture() -> Vec<u8> {
         let mut object =
             WriteObject::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
@@ -526,6 +374,19 @@ mod tests {
             flags: SymbolFlags::None,
         });
         object.write().expect("write COFF undefined import fixture")
+    }
+
+    #[test]
+    fn sorted_pdb_line_addresses_are_sliced_to_each_symbol_range() {
+        let frames = [(2, "before"), (10, "start"), (12, "inside"), (15, "after")];
+        let start = frames.partition_point(|(address, _)| *address < 10);
+        let matched: Vec<_> = frames[start..]
+            .iter()
+            .take_while(|(address, _)| *address < 15)
+            .map(|(_, label)| *label)
+            .collect();
+
+        assert_eq!(matched, ["start", "inside"]);
     }
 
     #[test]
@@ -560,13 +421,34 @@ mod tests {
     }
 
     #[test]
+    fn zero_sized_coff_alias_is_retained_without_claiming_implementation_bytes() {
+        let ir = PeCoffBackend
+            .parse(&coff_zero_sized_alias_fixture())
+            .expect("parse zero-sized COFF alias fixture");
+        let alias = ir
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name.as_deref() == Some("alias"))
+            .expect("alias record");
+        let implementation = ir
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name.as_deref() == Some("implementation"))
+            .expect("implementation record");
+        assert!(alias.size_inferred);
+        assert_eq!(alias.size, 0);
+        assert!(alias.code.is_empty());
+        assert_eq!(implementation.code, vec![0x90, 0xc3]);
+    }
+
+    #[test]
     fn records_undefined_coff_symbols_as_imports() {
         let ir = PeCoffBackend
             .parse(&coff_undefined_import_fixture())
             .expect("parse COFF undefined import fixture");
         assert_eq!(ir.imports.len(), 1, "{ir:#?}");
         assert_eq!(ir.imports[0].name.as_deref(), Some("external_call"));
-        assert_eq!(ir.imports[0].kind, ArtifactImportKind::Other);
+        assert_eq!(ir.imports[0].kind, ArtifactImportKind::Function);
     }
 
     #[test]

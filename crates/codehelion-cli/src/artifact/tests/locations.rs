@@ -159,6 +159,76 @@ fn dwarf_locations_map_only_units_in_the_explicit_source_run() {
 }
 
 #[test]
+fn partial_fragment_attribution_is_proportional_and_not_exact() {
+    let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"partial-attribution");
+    let symbol = codehelion_artifact::ArtifactSymbol {
+        fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("symbol", b"large"),
+        name: Some("large_function".to_owned()),
+        exported: false,
+        section: Some(1),
+        offset: 0,
+        size: 8_000,
+        size_inferred: false,
+        code: Vec::new(),
+        normalized: None,
+        inline_stack: (1..=400)
+            .map(|line| codehelion_artifact::ArtifactInlineFrame {
+                evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
+                source: "/work/src/main.cpp".to_owned(),
+                line: Some(line),
+                column: None,
+            })
+            .collect(),
+    };
+    artifact.symbols.push(symbol.clone());
+    let fragment = SourceFragmentIdentity {
+        fingerprint: [6; 16],
+        finding_id: [16; 16],
+        clone_group_fingerprint: [17; 16],
+        is_canonical: false,
+        clone_confidence: 1.0,
+        build_variant_fingerprint: [4; 16],
+        file_path: "src/main.cpp".to_owned(),
+        start_line: Some(101),
+        end_line: Some(110),
+    };
+    let mut mappings = vec![ArtifactAnalysisMapping {
+        schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
+        artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
+        source_kind: ArtifactAnalysisSourceKind::Fragment,
+        source_fingerprint: fragment.fingerprint,
+        source_instance_fingerprint: fragment.finding_id,
+        source_build_variant_fingerprint: fragment.build_variant_fingerprint,
+        evidence: MappingEvidence::new(
+            vec![MappingEvidenceFact::Dwarf {
+                source_path: "/work/src/main.cpp".to_owned(),
+            }],
+            1,
+            false,
+        ),
+        attributed_bytes: None,
+        build_variant_fingerprint: [5; 16],
+    }];
+
+    assign_unambiguous_fragment_bytes(
+        &artifact,
+        FilePath::new("/work"),
+        &[fragment],
+        &mut mappings,
+    );
+
+    assert_eq!(mappings[0].attributed_bytes, Some(200));
+    assert_eq!(
+        mappings[0].evidence.attribution_is_whole_symbol(),
+        Some(false)
+    );
+    assert_eq!(
+        mappings[0].evidence.confidence(),
+        Some(codehelion_store::artifact::ArtifactAnalysisMappingConfidence::Strong)
+    );
+}
+
+#[test]
 fn pdb_location_maps_with_pdb_evidence() {
     let symbol = codehelion_artifact::ArtifactSymbol {
         fingerprint: codehelion_artifact::ArtifactFingerprint::from_content(

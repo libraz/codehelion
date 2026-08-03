@@ -407,6 +407,7 @@ impl MappingEvidence {
             .facts
             .iter()
             .any(MappingEvidenceFact::is_direct_location)
+            && self.attribution_is_whole_symbol().is_none_or(|whole| whole)
         {
             return Some(ArtifactAnalysisMappingConfidence::Exact);
         }
@@ -433,6 +434,17 @@ impl MappingEvidence {
             });
         }
         Ok(evidence)
+    }
+
+    /// Whether byte attribution covered the entire artifact symbol, when the
+    /// correlation established an attribution split.
+    #[must_use]
+    pub fn attribution_is_whole_symbol(&self) -> Option<bool> {
+        self.facts.iter().rev().find_map(|fact| match fact {
+            MappingEvidenceFact::WholeSymbolAttribution => Some(true),
+            MappingEvidenceFact::ProportionalSymbolAttribution { .. } => Some(false),
+            _ => None,
+        })
     }
 }
 
@@ -501,6 +513,16 @@ pub enum MappingEvidenceFact {
         /// Path of the declarative macro definition.
         definition_path: String,
     },
+    /// The source fragment covers every source line attributed to its symbol.
+    WholeSymbolAttribution,
+    /// The source fragment covers only a bounded share of the symbol's source
+    /// lines, so observed bytes are attributed proportionally.
+    ProportionalSymbolAttribution {
+        /// Number of covered source lines.
+        covered_lines: u32,
+        /// Number of source lines observed for the artifact symbol.
+        symbol_lines: u32,
+    },
 }
 
 impl MappingEvidenceFact {
@@ -517,9 +539,11 @@ impl MappingEvidenceFact {
             Self::SymbolName { .. } => 1,
             Self::LinkerMap { .. } => 2,
             Self::FunctionRecipe { .. } => 3,
-            Self::CallGraphNeighborhood | Self::GenericOrigin { .. } | Self::MacroOrigin { .. } => {
-                4
-            }
+            Self::CallGraphNeighborhood
+            | Self::GenericOrigin { .. }
+            | Self::MacroOrigin { .. }
+            | Self::WholeSymbolAttribution
+            | Self::ProportionalSymbolAttribution { .. } => 4,
         }
     }
 }
@@ -673,6 +697,8 @@ impl ArtifactAnalysisUnmappedSourceReason {
 pub enum ArtifactAnalysisUnmappedReason {
     /// The artifact has no usable debug information.
     DebugInfoMissing,
+    /// Debug information was present but could not be decoded safely.
+    DebugInfoUnreadable,
     /// Symbol boundaries were degraded by stripping.
     Stripped,
     /// No usable demangled name exists.
@@ -687,6 +713,7 @@ impl ArtifactAnalysisUnmappedReason {
     const fn as_sql(self) -> &'static str {
         match self {
             Self::DebugInfoMissing => "debug_info_missing",
+            Self::DebugInfoUnreadable => "debug_info_unreadable",
             Self::Stripped => "stripped",
             Self::DemangleFailed => "demangle_failed",
             Self::OutsideSourceScope => "outside_source_scope",
@@ -697,6 +724,7 @@ impl ArtifactAnalysisUnmappedReason {
     pub(crate) fn from_sql(value: &str) -> Result<Self, StoreError> {
         match value {
             "debug_info_missing" => Ok(Self::DebugInfoMissing),
+            "debug_info_unreadable" => Ok(Self::DebugInfoUnreadable),
             "stripped" => Ok(Self::Stripped),
             "demangle_failed" => Ok(Self::DemangleFailed),
             "outside_source_scope" => Ok(Self::OutsideSourceScope),
@@ -721,6 +749,7 @@ impl Store {
         snapshot: &ArtifactAnalysisSnapshot<'_>,
     ) -> Result<i64, StoreError> {
         validate_artifact_ir_size(snapshot.ir_json.len())?;
+        validate_artifact_ir_schema(snapshot)?;
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT INTO artifact_analysis
@@ -872,6 +901,33 @@ impl Store {
         )?;
         Ok(())
     }
+}
+
+/// Ensure the storage-column schema and the self-describing IR agree before
+/// either can become durable state.
+fn validate_artifact_ir_schema(snapshot: &ArtifactAnalysisSnapshot<'_>) -> Result<(), StoreError> {
+    let value: serde_json::Value = serde_json::from_str(snapshot.ir_json).map_err(|error| {
+        StoreError::InvalidArtifactIrSchema {
+            reason: format!("IR JSON does not parse: {error}"),
+        }
+    })?;
+    let Some(document_schema) = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Err(StoreError::InvalidArtifactIrSchema {
+            reason: "IR JSON has no string schema_version".to_owned(),
+        });
+    };
+    if document_schema != snapshot.schema_version {
+        return Err(StoreError::InvalidArtifactIrSchema {
+            reason: format!(
+                "row declares {}, but IR JSON declares {document_schema}",
+                snapshot.schema_version
+            ),
+        });
+    }
+    Ok(())
 }
 
 const fn validate_artifact_ir_size(size_bytes: usize) -> Result<(), StoreError> {

@@ -867,3 +867,99 @@ fn correlation_report_keeps_unmapped_bytes_and_reasons_visible() {
     assert!(text.contains("debug_info_missing: 1"));
     assert!(text.contains("outside_source_scope: 1"));
 }
+
+#[test]
+fn unreadable_debug_information_has_a_distinct_unmapped_reason() {
+    let symbol = codehelion_artifact::ArtifactSymbol {
+        fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("symbol", b"one"),
+        name: None,
+        exported: false,
+        section: Some(1),
+        offset: 0,
+        size: 5,
+        size_inferred: false,
+        code: Vec::new(),
+        normalized: None,
+        inline_stack: Vec::new(),
+    };
+    let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
+    artifact.capabilities.debug_info_unreadable = true;
+    artifact.symbols.push(symbol);
+
+    let rows = correlate_debug_locations(
+        &artifact,
+        FilePath::new("/work"),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        [5; 16],
+    );
+
+    assert_eq!(rows.unmapped_symbols.len(), 1);
+    assert_eq!(
+        rows.unmapped_symbols[0].reason,
+        ArtifactAnalysisUnmappedReason::DebugInfoUnreadable
+    );
+}
+
+#[test]
+fn resolved_wasm_source_map_token_is_persisted_as_direct_mapping_evidence() {
+    let symbol = codehelion_artifact::ArtifactSymbol {
+        fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("symbol", b"wasm"),
+        name: None,
+        exported: false,
+        section: Some(10),
+        offset: 12,
+        size: 3,
+        size_inferred: false,
+        code: Vec::new(),
+        normalized: None,
+        inline_stack: Vec::new(),
+    };
+    let mut artifact = ArtifactIr::empty(BinaryFormat::Wasm, b"fixture");
+    artifact.symbols.push(symbol);
+    let units = [SourceUnitIdentity {
+        fingerprint: [3; 16],
+        build_variant_fingerprint: [4; 16],
+        unit_kind: "function".to_owned(),
+        occurrence_ordinal: 1,
+        file_path: "src/lib.rs".to_owned(),
+        name: None,
+        start_line: Some(5),
+        end_line: Some(5),
+    }];
+    let mut rows = correlate_debug_locations(
+        &artifact,
+        FilePath::new("/work"),
+        &units,
+        &[],
+        &[],
+        &[],
+        &[],
+        [5; 16],
+    );
+    enrich_source_map_evidence(
+        &artifact,
+        FilePath::new("/work"),
+        &units,
+        &[],
+        &[SourceMapLocation {
+            generated_offset: 12,
+            source_url: "src/lib.rs".to_owned(),
+            source_line: Some(5),
+        }],
+        [5; 16],
+        &mut rows,
+    );
+
+    assert!(rows.unmapped_symbols.is_empty());
+    assert_eq!(rows.mappings.len(), 1);
+    assert_eq!(
+        rows.mappings[0].evidence.facts,
+        vec![MappingEvidenceFact::SourceMap {
+            source_url: "src/lib.rs".to_owned(),
+        }]
+    );
+}

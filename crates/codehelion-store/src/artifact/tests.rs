@@ -1,5 +1,7 @@
 use super::*;
 
+const ARTIFACT_IR_SCHEMA: &str = "artifact-ir-v7";
+
 #[test]
 fn persisted_confidences_display_their_sql_vocabulary() {
     assert_eq!(ArtifactAnalysisSavingsConfidence::High.to_string(), "high");
@@ -178,6 +180,31 @@ fn artifact_ir_storage_ceiling_rejects_oversized_documents() {
 }
 
 #[test]
+fn artifact_ir_storage_requires_the_row_and_document_schemas_to_agree() {
+    let snapshot = ArtifactAnalysisSnapshot {
+        schema_version: ARTIFACT_IR_SCHEMA,
+        path: "fixture.wasm",
+        format: "wasm",
+        content_fingerprint: [0; 16],
+        observed_bytes: 0,
+        ir_json: r#"{"schema_version":"artifact-ir-v1"}"#,
+        build_variant_manifest_path: None,
+        build_variant_fingerprint: None,
+        started_at: "2026-08-03T00:00:00Z",
+        finished_at: "2026-08-03T00:00:01Z",
+        symbols: &[],
+        mappings: &[],
+        unmapped_symbols: &[],
+        unmapped_sources: &[],
+        correlation: None,
+        clone_group_savings: &[],
+    };
+
+    let error = validate_artifact_ir_schema(&snapshot).expect_err("schemas must agree");
+    assert!(matches!(error, StoreError::InvalidArtifactIrSchema { .. }));
+}
+
+#[test]
 fn a_mapping_without_evidence_is_rejected_without_persisting_the_analysis() {
     let mut store = Store::open_in_memory().unwrap();
     let mappings = [ArtifactAnalysisMapping {
@@ -194,12 +221,12 @@ fn a_mapping_without_evidence_is_rejected_without_persisting_the_analysis() {
 
     let error = store
         .record_artifact_analysis(&ArtifactAnalysisSnapshot {
-            schema_version: "artifact-ir-v1",
+            schema_version: ARTIFACT_IR_SCHEMA,
             path: "fixture.so",
             format: "elf",
             content_fingerprint: [1; 16],
             observed_bytes: 0,
-            ir_json: r#"{"schema_version":"artifact-ir-v1"}"#,
+            ir_json: r#"{"schema_version":"artifact-ir-v7"}"#,
             build_variant_manifest_path: None,
             build_variant_fingerprint: None,
             started_at: "2026-07-30T00:00:00Z",
@@ -229,12 +256,12 @@ fn artifact_analyses_with_distinct_build_variants_stay_distinct() {
     {
         store
             .record_artifact_analysis(&ArtifactAnalysisSnapshot {
-                schema_version: "artifact-ir-v1",
+                schema_version: ARTIFACT_IR_SCHEMA,
                 path: "fixture.wasm",
                 format: "wasm",
                 content_fingerprint,
                 observed_bytes: 8,
-                ir_json: r#"{"schema_version":"artifact-ir-v1"}"#,
+                ir_json: r#"{"schema_version":"artifact-ir-v7"}"#,
                 build_variant_manifest_path: Some("build-variant.json"),
                 build_variant_fingerprint: Some(build_variant_fingerprint),
                 started_at: "2026-07-30T00:00:00Z",
@@ -352,12 +379,12 @@ fn standalone_analysis_and_symbols_commit_together() {
     }];
     let id = store
         .record_artifact_analysis(&ArtifactAnalysisSnapshot {
-            schema_version: "artifact-ir-v1",
+            schema_version: ARTIFACT_IR_SCHEMA,
             path: "fixture.wasm",
             format: "wasm",
             content_fingerprint: [1; 16],
             observed_bytes: 12,
-            ir_json: r#"{"schema_version":"artifact-ir-v1"}"#,
+            ir_json: r#"{"schema_version":"artifact-ir-v7"}"#,
             build_variant_manifest_path: Some("build-variant.json"),
             build_variant_fingerprint: Some([5; 16]),
             started_at: "2026-07-30T00:00:00Z",
@@ -395,7 +422,7 @@ fn standalone_analysis_and_symbols_commit_together() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(ir_json, r#"{"schema_version":"artifact-ir-v1"}"#);
+    assert_eq!(ir_json, r#"{"schema_version":"artifact-ir-v7"}"#);
     let variant: (Option<String>, Option<Vec<u8>>) = store
         .conn
         .query_row(

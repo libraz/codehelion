@@ -13,8 +13,14 @@ use super::{
 /// create nor block this fragment-level split.
 pub(in crate::artifact) fn assign_unambiguous_fragment_bytes(
     artifact: &ArtifactIr,
+    scan_root: &FilePath,
+    fragments: &[SourceFragmentIdentity],
     mappings: &mut [ArtifactAnalysisMapping],
 ) {
+    let fragments: BTreeMap<_, _> = fragments
+        .iter()
+        .map(|fragment| (fragment.finding_id, fragment))
+        .collect();
     let mut fragment_mappings: BTreeMap<[u8; 16], Vec<usize>> = BTreeMap::new();
     for (index, mapping) in mappings.iter().enumerate() {
         if mapping.source_kind == ArtifactAnalysisSourceKind::Fragment
@@ -32,9 +38,78 @@ pub(in crate::artifact) fn assign_unambiguous_fragment_bytes(
             continue;
         };
         if let [index] = indices.as_slice() {
-            mappings[*index].attributed_bytes = Some(symbol.size);
+            let mapping = &mut mappings[*index];
+            let Some(fragment) = fragments.get(&mapping.source_instance_fingerprint) else {
+                continue;
+            };
+            let Some((covered_lines, symbol_lines, whole_symbol)) =
+                symbol_line_coverage(symbol, scan_root, fragment)
+            else {
+                continue;
+            };
+            let attributed_bytes = if whole_symbol {
+                symbol.size
+            } else {
+                symbol
+                    .size
+                    .saturating_mul(u64::from(covered_lines))
+                    .div_ceil(u64::from(symbol_lines))
+            };
+            mapping.attributed_bytes = Some(attributed_bytes);
+            mapping.evidence.facts.push(if whole_symbol {
+                MappingEvidenceFact::WholeSymbolAttribution
+            } else {
+                MappingEvidenceFact::ProportionalSymbolAttribution {
+                    covered_lines,
+                    symbol_lines,
+                }
+            });
         }
     }
+}
+
+/// Measure how much of a debug-attributed symbol's source-line extent one
+/// persisted clone fragment covers. Source bytes are deliberately not guessed
+/// from line numbers: the line extent is the only common evidence available
+/// from both the source snapshot and DWARF frames.
+fn symbol_line_coverage(
+    symbol: &codehelion_artifact::ArtifactSymbol,
+    scan_root: &FilePath,
+    fragment: &SourceFragmentIdentity,
+) -> Option<(u32, u32, bool)> {
+    let fragment_start = fragment.start_line?;
+    let fragment_end = fragment.end_line?;
+    let mut lines = symbol
+        .inline_stack
+        .iter()
+        .filter(|frame| frame_path_matches(&frame.source, scan_root, fragment))
+        .filter_map(|frame| frame.line);
+    let symbol_start = lines.next()?;
+    let (symbol_start, symbol_end) = lines.fold((symbol_start, symbol_start), |range, line| {
+        (range.0.min(line), range.1.max(line))
+    });
+    let covered_start = fragment_start.max(symbol_start);
+    let covered_end = fragment_end.min(symbol_end);
+    if covered_start > covered_end {
+        return None;
+    }
+    let covered_lines = covered_end.saturating_sub(covered_start).saturating_add(1);
+    let symbol_lines = symbol_end.saturating_sub(symbol_start).saturating_add(1);
+    Some((
+        covered_lines,
+        symbol_lines,
+        fragment_start <= symbol_start && fragment_end >= symbol_end,
+    ))
+}
+
+fn frame_path_matches(
+    source_path: &str,
+    scan_root: &FilePath,
+    fragment: &SourceFragmentIdentity,
+) -> bool {
+    let source_path = FilePath::new(source_path);
+    let fragment_path = FilePath::new(&fragment.file_path);
+    source_path == fragment_path || source_path == scan_root.join(fragment_path)
 }
 
 pub(in crate::artifact) fn enrich_call_graph_evidence(

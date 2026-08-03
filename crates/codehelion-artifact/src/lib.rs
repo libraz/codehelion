@@ -4,8 +4,8 @@
 //! into [`ArtifactIr`]; common metrics can then operate on that IR without
 //! knowing whether it came from WebAssembly, ELF, or a later format.
 //!
-//! The planned-format boundary and archive delegation policy are recorded in
-//! [`FORMAT_SUPPORT.md`](../FORMAT_SUPPORT.md).
+//! Format support and archive delegation are exposed by the command-line
+//! interface rather than this library's docs.rs API.
 
 use core::fmt;
 
@@ -14,14 +14,50 @@ use thiserror::Error;
 
 pub mod dwarf;
 pub mod metrics;
+pub mod native;
 pub mod symbols;
 pub mod x86;
 
 /// Version of the artifact IR document.
-pub const ARTIFACT_IR_SCHEMA_VERSION: &str = "artifact-ir-v2";
+pub const ARTIFACT_IR_SCHEMA_VERSION: &str = "artifact-ir-v7";
 
 /// Version of the fingerprint recipe for parsed artifact entities.
-pub const ARTIFACT_FINGERPRINT_VERSION: &str = "artifact-fingerprint-v1";
+pub const ARTIFACT_FINGERPRINT_VERSION: &str = "artifact-fingerprint-v2";
+
+/// JSON uses base64 strings for opaque artifact payloads rather than one
+/// number per byte, while binary serde formats retain their usual byte form.
+/// Serde adapter for base64-encoded artifact byte payloads.
+pub mod base64_bytes {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Serialize bytes as one base64 string.
+    ///
+    /// # Errors
+    ///
+    /// Returns the serializer's error when it cannot write the string.
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    /// Deserialize one base64 string to its bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the deserializer's error for a non-string or invalid base64 payload.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 /// A binary container format that codehelion recognises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -96,6 +132,12 @@ pub struct ArtifactCapabilities {
     pub call_graph: bool,
     /// Whether source locations or mappings are available.
     pub source_mapping: bool,
+    /// Whether debug information was present but could not be decoded safely.
+    pub debug_info_unreadable: bool,
+    /// Whether this artifact's instruction architecture has a normalizer.
+    pub normalized_duplicates: bool,
+    /// Whether the parser established independently sized data regions.
+    pub independent_data_segments: bool,
     /// Whether relocations are available.
     pub relocations: bool,
     /// Whether data segments can be independently inspected.
@@ -157,6 +199,16 @@ pub struct ArtifactIr {
     pub fingerprint: ArtifactFingerprint,
     /// Input length measured directly from the byte stream.
     pub observed_bytes: u64,
+    /// Architecture selected from the parsed input, when the format exposes one.
+    ///
+    /// A universal Mach-O records its explicitly selected slice here. Ordinary
+    /// single-architecture inputs also retain their parser-observed architecture.
+    pub architecture: Option<String>,
+    /// Architectures deliberately not parsed from a universal container.
+    ///
+    /// This is display evidence, not a stable identity or a claim that the
+    /// skipped slices are semantically equivalent to the selected one.
+    pub skipped_architectures: Vec<String>,
     /// Parsed sections, when the format exposes them.
     pub sections: Vec<ArtifactSection>,
     /// Object members when this artifact is an archive.
@@ -194,6 +246,8 @@ impl ArtifactIr {
             capabilities: ArtifactCapabilities::default(),
             fingerprint: ArtifactFingerprint::from_content("artifact", bytes),
             observed_bytes: bytes.len() as u64,
+            architecture: None,
+            skipped_architectures: Vec::new(),
             sections: Vec::new(),
             archive_members: Vec::new(),
             imports: Vec::new(),
@@ -290,6 +344,7 @@ pub struct ArtifactSymbol {
     /// Whether `size` was inferred rather than provided by the format.
     pub size_inferred: bool,
     /// Exact code bytes, when a boundary could be established.
+    #[serde(with = "base64_bytes")]
     pub code: Vec<u8>,
     /// Versioned normalized instruction stream, when decoding is supported.
     pub normalized: Option<NormalizedInstructions>,
@@ -389,6 +444,7 @@ pub struct ArtifactDataSegment {
     /// Offset in the artifact.
     pub offset: u64,
     /// Bytes as observed; later storage may deduplicate the payload.
+    #[serde(with = "base64_bytes")]
     pub bytes: Vec<u8>,
 }
 
@@ -517,6 +573,7 @@ mod tests {
 
     #[test]
     fn artifact_identity_is_content_based_and_format_ir_starts_empty() {
+        assert_eq!(ARTIFACT_IR_SCHEMA_VERSION, "artifact-ir-v7");
         let wasm = ArtifactIr::empty(ArtifactFormat::Wasm, b"\0asm\x01\0\0\0");
         let same = ArtifactIr::empty(ArtifactFormat::Wasm, b"\0asm\x01\0\0\0");
         let changed = ArtifactIr::empty(ArtifactFormat::Wasm, b"\0asm\x01\0\0\x01");
@@ -542,5 +599,23 @@ mod tests {
             assert_eq!(decoded, format);
         }
         assert!(serde_json::from_str::<ArtifactFormat>("\"mach-o\"").is_err());
+    }
+
+    #[test]
+    fn artifact_payloads_are_base64_in_json_and_round_trip() {
+        let bytes = vec![0, 1, 2, 250, 255];
+        let mut artifact = ArtifactIr::empty(ArtifactFormat::Wasm, b"input");
+        artifact.data_segments.push(ArtifactDataSegment {
+            fingerprint: ArtifactFingerprint::from_content("data", &bytes),
+            section: Some(1),
+            offset: 0,
+            bytes: bytes.clone(),
+        });
+        let json = serde_json::to_string(&artifact).expect("artifact serializes");
+        assert!(json.contains("\"AAEC+v8=\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<ArtifactIr>(&json).expect("artifact reads"),
+            artifact
+        );
     }
 }

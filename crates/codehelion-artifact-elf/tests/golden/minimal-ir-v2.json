@@ -1,32 +1,37 @@
 {
-  "schema_version": "artifact-ir-v2",
+  "schema_version": "artifact-ir-v7",
   "format": "elf",
   "capabilities": {
     "symbols": true,
     "call_graph": false,
     "source_mapping": false,
+    "debug_info_unreadable": false,
+    "normalized_duplicates": true,
+    "independent_data_segments": false,
     "relocations": false,
     "data_segments": true
   },
   "fingerprint": [
-    119,
-    70,
-    174,
-    179,
-    17,
-    189,
-    191,
-    220,
-    18,
-    235,
+    78,
+    4,
+    89,
+    33,
+    82,
     101,
-    198,
-    10,
-    52,
-    163,
-    49
+    33,
+    219,
+    150,
+    110,
+    95,
+    189,
+    216,
+    63,
+    147,
+    174
   ],
   "observed_bytes": 576,
+  "architecture": null,
+  "skipped_architectures": [],
   "sections": [
     {
       "name": ".text",
@@ -64,22 +69,22 @@
   "symbols": [
     {
       "fingerprint": [
-        9,
-        154,
-        227,
-        185,
-        26,
-        159,
-        97,
-        83,
-        77,
+        56,
+        122,
+        104,
+        142,
         14,
-        190,
-        251,
-        209,
-        252,
-        95,
-        155
+        62,
+        101,
+        244,
+        233,
+        39,
+        2,
+        15,
+        105,
+        177,
+        120,
+        88
       ],
       "name": "returning",
       "exported": true,
@@ -87,10 +92,7 @@
       "offset": 64,
       "size": 2,
       "size_inferred": false,
-      "code": [
-        144,
-        195
-      ],
+      "code": "kMM=",
       "normalized": {
         "version": "x86-operand-shape-v1",
         "bytes": [
@@ -117,44 +119,26 @@
   "data_segments": [
     {
       "fingerprint": [
-        179,
-        97,
-        92,
-        68,
-        81,
-        5,
-        160,
-        132,
-        67,
-        218,
-        12,
-        40,
+        130,
+        33,
+        93,
+        242,
+        15,
+        198,
+        13,
+        133,
+        204,
+        219,
+        39,
+        129,
         253,
-        177,
-        3,
-        242
+        103,
+        23,
+        156
       ],
       "section": 2,
       "offset": 66,
-      "bytes": [
-        114,
-        101,
-        97,
-        100,
-        45,
-        111,
-        110,
-        108,
-        121,
-        32,
-        102,
-        105,
-        120,
-        116,
-        117,
-        114,
-        101
-      ]
+      "bytes": "cmVhZC1vbmx5IGZpeHR1cmU="
     }
   ]
 }

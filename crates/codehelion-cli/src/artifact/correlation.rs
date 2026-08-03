@@ -765,6 +765,7 @@ pub(super) fn generic_type_arguments(instantiation_key: &str) -> Vec<String> {
 const fn unmapped_reason_label(reason: ArtifactAnalysisUnmappedReason) -> &'static str {
     match reason {
         ArtifactAnalysisUnmappedReason::DebugInfoMissing => "debug_info_missing",
+        ArtifactAnalysisUnmappedReason::DebugInfoUnreadable => "debug_info_unreadable",
         ArtifactAnalysisUnmappedReason::Stripped => "stripped",
         ArtifactAnalysisUnmappedReason::DemangleFailed => "demangle_failed",
         ArtifactAnalysisUnmappedReason::OutsideSourceScope => "outside_source_scope",

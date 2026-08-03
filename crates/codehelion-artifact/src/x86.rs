@@ -14,6 +14,12 @@ use crate::NormalizedInstructions;
 /// Version of the x86 instruction-shape normalization representation.
 pub const X86_NORMALIZATION_VERSION: &str = "x86-operand-shape-v1";
 
+/// Whether this architecture has a supported normalized-instruction recipe.
+#[must_use]
+pub const fn supports_normalized_duplicates(architecture: Architecture) -> bool {
+    matches!(architecture, Architecture::I386 | Architecture::X86_64)
+}
+
 /// Normalize an x86 instruction stream without retaining immediate values or
 /// register choices.
 ///
@@ -98,5 +104,11 @@ mod tests {
             trim_inferred_padding(&[0xc3, 0x00], Architecture::Aarch64),
             &[0xc3, 0x00]
         );
+    }
+
+    #[test]
+    fn normalized_duplicate_capability_is_explicit_for_each_architecture() {
+        assert!(supports_normalized_duplicates(Architecture::X86_64));
+        assert!(!supports_normalized_duplicates(Architecture::Aarch64));
     }
 }
