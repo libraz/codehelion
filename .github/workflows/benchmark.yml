@@ -31,7 +31,7 @@ jobs:
         shell: bash
         run: |
           bench_root="$(mktemp -d)"
-          cargo build --release -p codehelion-cli
+          cargo build --release -p codehelion
           cargo run --release -p codehelion-eval --bin codehelion-bench -- \
             corpus --out "$bench_root/corpus" --lines "${{ inputs.lines }}" --seed 42 --clone-percent 5
           for mode in fast structural; do

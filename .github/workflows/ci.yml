@@ -64,7 +64,7 @@ jobs:
       # build compiles the CLI and its library dependencies, never either
       # compiler-helper binary.
       - name: Exercise helper-free modes
-        run: cargo test -p codehelion-cli --test scan fast_and_structural_modes_run_without_compiler_helpers
+        run: cargo test -p codehelion --test scan fast_and_structural_modes_run_without_compiler_helpers
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/codehelion-helperless-target
 

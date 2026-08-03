@@ -1,7 +1,7 @@
 # codehelion
 
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/codehelion/ci.yml?branch=main&label=CI)](https://github.com/libraz/codehelion/actions)
-[![crates.io](https://img.shields.io/crates/v/codehelion-cli.svg)](https://crates.io/crates/codehelion-cli)
+[![crates.io](https://img.shields.io/crates/v/codehelion.svg)](https://crates.io/crates/codehelion)
 [![codecov](https://codecov.io/gh/libraz/codehelion/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/codehelion)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/libraz/codehelion/blob/main/LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange?logo=rust)](https://www.rust-lang.org)
@@ -117,11 +117,15 @@ That is what the stable identifiers and the baseline are for.
 ## Installation
 
 ```sh
-cargo install --path crates/codehelion-cli
+cargo install codehelion
 ```
 
-The result is a single self-contained binary; SQLite is bundled. Installing
-from a checkout is currently the only supported route.
+The result is a single self-contained binary named `codehelion`; SQLite is
+bundled. To build from a checkout instead:
+
+```sh
+cargo install --path crates/codehelion-cli
+```
 
 The CLI and every non-semantic component require Rust 1.85 or newer. The
 optional Rust semantic helper has a separate Rust 1.95-or-newer build
@@ -132,8 +136,8 @@ analyse. Install the helpers onto `PATH`, then use `doctor` to confirm their
 protocol and compiler availability:
 
 ```sh
-cargo install --path crates/codehelion-backend-rust
-cargo install --path crates/codehelion-backend-clang # also needs a system libclang
+cargo install codehelion-backend-rust
+cargo install codehelion-backend-clang # also needs a system libclang
 codehelion doctor
 ```
 

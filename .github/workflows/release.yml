@@ -27,9 +27,9 @@ jobs:
         run: |
           set -euo pipefail
           tag_version="${GITHUB_REF_NAME#v}"
-          crate_version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "codehelion-cli"))')"
+          crate_version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "codehelion"))')"
           if [ "$tag_version" != "$crate_version" ]; then
-            echo "tag $GITHUB_REF_NAME does not match codehelion-cli version $crate_version" >&2
+            echo "tag $GITHUB_REF_NAME does not match codehelion version $crate_version" >&2
             exit 1
           fi
           echo "version=$tag_version" >> "$GITHUB_OUTPUT"
@@ -138,7 +138,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
       - name: Build CLI
         shell: bash
-        run: cargo build --locked --release -p codehelion-cli --target ${{ matrix.target }}
+        run: cargo build --locked --release -p codehelion --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross_linker }}
       - name: Stage Unix CLI archive

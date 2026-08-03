@@ -36,7 +36,7 @@ fn baseline_create_and_update_keep_every_completed_partition_of_one_invocation()
     .expect("parse baseline JSON");
     assert_eq!(
         baseline["schema_version"],
-        u64::from(codehelion_cli::baseline::SCHEMA_VERSION)
+        u64::from(codehelion::baseline::SCHEMA_VERSION)
     );
     let partitions = baseline["partitions"].as_array().expect("partitions");
     assert_eq!(partitions.len(), 2);

@@ -13,7 +13,7 @@ codehelion-core = { version = "0.1.0", path = "../codehelion-core" }
 ra_ap_syntax = "0.0.344"
 
 [dev-dependencies]
-codehelion-eval = { version = "0.1.0", path = "../codehelion-eval" }
+codehelion-eval = { path = "../codehelion-eval" }
 proptest = "1.6"
 
 [lints]

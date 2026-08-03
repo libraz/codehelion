@@ -1,7 +1,7 @@
 # codehelion
 
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/codehelion/ci.yml?branch=main&label=CI)](https://github.com/libraz/codehelion/actions)
-[![crates.io](https://img.shields.io/crates/v/codehelion-cli.svg)](https://crates.io/crates/codehelion-cli)
+[![crates.io](https://img.shields.io/crates/v/codehelion.svg)](https://crates.io/crates/codehelion)
 [![codecov](https://codecov.io/gh/libraz/codehelion/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/codehelion)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/libraz/codehelion/blob/main/LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange?logo=rust)](https://www.rust-lang.org)
@@ -74,18 +74,22 @@ crates/codehelion-cli/src/scan/structural/reporting.rs:701-722  type-1 ×2  188 
 ## インストール
 
 ```sh
-cargo install --path crates/codehelion-cli
+cargo install codehelion
 ```
 
-生成されるのは自己完結の単一バイナリで、SQLite は同梱されています。現時点で対応している導入方法はチェックアウトからのインストールだけです。
+生成されるのは `codehelion` という自己完結の単一バイナリで、SQLite は同梱されています。チェックアウトからビルドする場合は次のとおりです。
+
+```sh
+cargo install --path crates/codehelion-cli
+```
 
 CLI と Semantic 以外のコンポーネントには Rust 1.85 以降が必要です。任意の Rust Semantic helper は別途 Rust 1.95 以降でのビルドを必要としますが、この要件が CLI の MSRV を引き上げることはありません。
 
 Semantic スキャンでは、解析したい言語ごとの helper も必要です。helper を `PATH` に導入し、`doctor` で protocol とコンパイラの利用可否を確認してください。
 
 ```sh
-cargo install --path crates/codehelion-backend-rust
-cargo install --path crates/codehelion-backend-clang # システムの libclang も必要
+cargo install codehelion-backend-rust
+cargo install codehelion-backend-clang # システムの libclang も必要
 codehelion doctor
 ```
 

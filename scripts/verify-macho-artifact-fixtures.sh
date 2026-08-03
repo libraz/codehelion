@@ -44,7 +44,7 @@ dwarfdump --uuid "$fixture_root/libduplicates.dylib" \
     | grep -qE 'UUID:'
 test -f "$fixture_root/libduplicates.dylib.dSYM/Contents/Resources/DWARF/libduplicates.dylib"
 
-cargo run --quiet -p codehelion-cli -- scan \
+cargo run --quiet -p codehelion -- scan \
     "$fixture_root" \
     --mode structural \
     --format json \
@@ -53,7 +53,7 @@ cargo run --quiet -p codehelion-cli -- scan \
 source_run=$(sed -n 's/^[[:space:]]*"run_id": \([0-9][0-9]*\),\{0,1\}$/\1/p' "$temporary_root/source-scan.json")
 test -n "$source_run"
 
-cargo run --quiet -p codehelion-cli -- artifact analyze \
+cargo run --quiet -p codehelion -- artifact analyze \
     "$fixture_root/libduplicates.dylib" \
     --input-format mach-o \
     --format json \

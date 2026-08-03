@@ -83,10 +83,10 @@ jobs:
       - name: Build optional compiler helpers
         run: cargo +${{ matrix.rust }} build -p codehelion-backend-rust -p codehelion-backend-clang
       - name: Exercise Semantic scans
-        run: cargo +${{ matrix.rust }} test -p codehelion-cli --test semantic_helpers -- --ignored --skip compiler_ir_matches_its_golden_snapshot
+        run: cargo +${{ matrix.rust }} test -p codehelion --test semantic_helpers -- --ignored --skip compiler_ir_matches_its_golden_snapshot
       - name: Check versioned compiler IR goldens
         if: matrix.golden
-        run: cargo +${{ matrix.rust }} test -p codehelion-cli --test semantic_helpers compiler_ir_matches_its_golden_snapshot -- --ignored
+        run: cargo +${{ matrix.rust }} test -p codehelion --test semantic_helpers compiler_ir_matches_its_golden_snapshot -- --ignored
 
   artifact-fixtures:
     name: Artifact fixture end-to-end

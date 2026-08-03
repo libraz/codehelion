@@ -64,9 +64,9 @@ doc: ## Build docs, failing on warnings
 
 .PHONY: eval
 eval: ## Show detection accuracy over the committed corpora
-	$(CARGO) test -p codehelion-cli --test corpus_accuracy -- --nocapture
-	$(CARGO) test -p codehelion-cli --test labeled_precision -- --nocapture
-	$(CARGO) test -p codehelion-cli --test candidate_stages -- --nocapture
+	$(CARGO) test -p codehelion --test corpus_accuracy -- --nocapture
+	$(CARGO) test -p codehelion --test labeled_precision -- --nocapture
+	$(CARGO) test -p codehelion --test candidate_stages -- --nocapture
 
 .PHONY: check
 check: format-check lint verify-helper-boundaries verify-artifact-boundaries test doc ## Run every CI check locally
@@ -75,11 +75,11 @@ check: format-check lint verify-helper-boundaries verify-artifact-boundaries tes
 
 .PHONY: build
 build: ## Build the release binary
-	$(CARGO) build --release -p codehelion-cli
+	$(CARGO) build --release -p codehelion
 
 .PHONY: run
 run: ## Run the binary (pass args via ARGS="...")
-	$(CARGO) run -p codehelion-cli -- $(ARGS)
+	$(CARGO) run -p codehelion -- $(ARGS)
 
 .PHONY: audit
 audit: ## Check dependencies for advisories, bans and license issues

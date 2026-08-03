@@ -35,7 +35,7 @@ cp -R fixtures/artifact "$fixture_root"
     sh build.sh release --lto --deduplicated --with-elf
 )
 
-cargo run --quiet -p codehelion-cli -- scan \
+cargo run --quiet -p codehelion -- scan \
     "$fixture_root" \
     --mode structural \
     --format json \
@@ -53,14 +53,14 @@ calibration_group=$(awk '
 ' "$temporary_root/source-scan.json")
 test -n "$calibration_group"
 
-cargo run --quiet -p codehelion-cli -- artifact analyze \
+cargo run --quiet -p codehelion -- artifact analyze \
     "$fixture_root/build/debug/duplicates.wasm" \
     --format json \
     --build-variant "$fixture_root/build/debug/build-variant.json" \
     --source-run "$source_run" \
     --db "$temporary_root/artifact.sqlite" \
     --output "$temporary_root/wasm.json"
-cargo run --quiet -p codehelion-cli -- artifact analyze \
+cargo run --quiet -p codehelion -- artifact analyze \
     "$fixture_root/build/debug/libduplicates.so" \
     --format json \
     --build-variant "$fixture_root/build/debug/build-variant.json" \
@@ -73,7 +73,7 @@ objcopy --only-keep-debug \
     "$temporary_root/libduplicates.debug"
 cp "$fixture_root/build/debug/libduplicates.so" "$temporary_root/libduplicates-split.so"
 objcopy --strip-debug "$temporary_root/libduplicates-split.so"
-cargo run --quiet -p codehelion-cli -- artifact analyze \
+cargo run --quiet -p codehelion -- artifact analyze \
     "$temporary_root/libduplicates-split.so" \
     --format json \
     --build-variant "$fixture_root/build/debug/build-variant.json" \
@@ -81,14 +81,14 @@ cargo run --quiet -p codehelion-cli -- artifact analyze \
     --debug-file "$temporary_root/libduplicates.debug" \
     --db "$temporary_root/artifact.sqlite" \
     --output "$temporary_root/elf-split-debug.json"
-cargo run --quiet -p codehelion-cli -- artifact analyze \
+cargo run --quiet -p codehelion -- artifact analyze \
     "$fixture_root/build/release-lto/libduplicates.so" \
     --format json \
     --build-variant "$fixture_root/build/release-lto/build-variant.json" \
     --source-run "$source_run" \
     --db "$temporary_root/artifact.sqlite" \
     --output "$temporary_root/elf-release-lto.json"
-cargo run --quiet -p codehelion-cli -- artifact analyze \
+cargo run --quiet -p codehelion -- artifact analyze \
     "$fixture_root/build/release-lto-deduplicated/duplicates.wasm" \
     --format json \
     --build-variant "$fixture_root/build/release-lto-deduplicated/build-variant.json" \
@@ -96,33 +96,33 @@ cargo run --quiet -p codehelion-cli -- artifact analyze \
     --output "$temporary_root/wasm-deduplicated.json"
 cp "$fixture_root/build/debug/libduplicates.so" "$temporary_root/libduplicates-stripped.so"
 strip --strip-all "$temporary_root/libduplicates-stripped.so"
-cargo run --quiet -p codehelion-cli -- artifact analyze \
+cargo run --quiet -p codehelion -- artifact analyze \
     "$temporary_root/libduplicates-stripped.so" \
     --format json \
     --db "$temporary_root/artifact.sqlite" \
     --output "$temporary_root/elf-stripped.json"
-cargo run --quiet -p codehelion-cli -- artifact compare \
+cargo run --quiet -p codehelion -- artifact compare \
     "$fixture_root/build/debug/duplicates.wasm" \
     "$fixture_root/build/release-lto/duplicates.wasm" \
     --before-build-variant "$fixture_root/build/debug/build-variant.json" \
     --after-build-variant "$fixture_root/build/release-lto/build-variant.json" \
     --format json \
     --output "$temporary_root/compare.json"
-cargo run --quiet -p codehelion-cli -- artifact compare \
+cargo run --quiet -p codehelion -- artifact compare \
     "$fixture_root/build/debug/libduplicates.so" \
     "$fixture_root/build/release-lto/libduplicates.so" \
     --before-build-variant "$fixture_root/build/debug/build-variant.json" \
     --after-build-variant "$fixture_root/build/release-lto/build-variant.json" \
     --format json \
     --output "$temporary_root/compare-elf.json"
-cargo run --quiet -p codehelion-cli -- artifact compare \
+cargo run --quiet -p codehelion -- artifact compare \
     "$fixture_root/build/release-lto/duplicates.wasm" \
     "$fixture_root/build/release-lto-deduplicated/duplicates.wasm" \
     --before-build-variant "$fixture_root/build/release-lto/build-variant.json" \
     --after-build-variant "$fixture_root/build/release-lto-deduplicated/build-variant.json" \
     --format json \
     --output "$temporary_root/compare-deduplicated.json"
-cargo run --quiet -p codehelion-cli -- artifact compare \
+cargo run --quiet -p codehelion -- artifact compare \
     "$fixture_root/build/debug/libduplicates.so" \
     "$fixture_root/build/debug-deduplicated/libduplicates.so" \
     --before-build-variant "$fixture_root/build/debug/build-variant.json" \
@@ -132,12 +132,12 @@ cargo run --quiet -p codehelion-cli -- artifact compare \
     --db "$temporary_root/artifact.sqlite" \
     --format json \
     --output "$temporary_root/compare-calibration.json"
-cargo run --quiet -p codehelion-cli -- artifact calibration \
+cargo run --quiet -p codehelion -- artifact calibration \
     --source-run "$source_run" \
     --db "$temporary_root/artifact.sqlite" \
     --format json \
     --output "$temporary_root/calibration-baseline.json"
-cargo run --quiet -p codehelion-cli -- artifact compare \
+cargo run --quiet -p codehelion -- artifact compare \
     "$fixture_root/build/release-lto/libduplicates.so" \
     "$fixture_root/build/release-lto-deduplicated/libduplicates.so" \
     --before-build-variant "$fixture_root/build/release-lto/build-variant.json" \
@@ -147,7 +147,7 @@ cargo run --quiet -p codehelion-cli -- artifact compare \
     --db "$temporary_root/artifact.sqlite" \
     --format json \
     --output "$temporary_root/compare-calibration-release-lto.json"
-cargo run --quiet -p codehelion-cli -- artifact calibration \
+cargo run --quiet -p codehelion -- artifact calibration \
     --source-run "$source_run" \
     --baseline "$temporary_root/calibration-baseline.json" \
     --db "$temporary_root/artifact.sqlite" \

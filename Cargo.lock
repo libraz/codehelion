@@ -384,6 +384,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "codehelion"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "boon",
+ "clap",
+ "codehelion-artifact",
+ "codehelion-core",
+ "codehelion-eval",
+ "codehelion-fixtures",
+ "codehelion-frontend-c",
+ "codehelion-frontend-cpp",
+ "codehelion-frontend-rust",
+ "codehelion-helper",
+ "codehelion-store",
+ "fs2",
+ "globset",
+ "ignore",
+ "object",
+ "predicates",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sourcemap",
+ "tempfile",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "codehelion-artifact"
 version = "0.1.0"
 dependencies = [
@@ -429,36 +459,6 @@ dependencies = [
  "ra_ap_toolchain",
  "ra_ap_vfs",
  "tempfile",
-]
-
-[[package]]
-name = "codehelion-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "boon",
- "clap",
- "codehelion-artifact",
- "codehelion-core",
- "codehelion-eval",
- "codehelion-fixtures",
- "codehelion-frontend-c",
- "codehelion-frontend-cpp",
- "codehelion-frontend-rust",
- "codehelion-helper",
- "codehelion-store",
- "fs2",
- "globset",
- "ignore",
- "object",
- "predicates",
- "rusqlite",
- "serde",
- "serde_json",
- "sourcemap",
- "tempfile",
- "toml 0.8.23",
 ]
 
 [[package]]
@@ -550,7 +550,7 @@ name = "codehelion-helper-conformance"
 version = "0.1.0"
 dependencies = [
  "clap",
- "codehelion-cli",
+ "codehelion",
  "codehelion-helper",
  "codehelion-store",
  "serde_json",

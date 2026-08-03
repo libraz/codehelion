@@ -1,5 +1,5 @@
 [package]
-name = "codehelion-cli"
+name = "codehelion"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +16,7 @@ name = "codehelion"
 path = "src/main.rs"
 
 [lib]
-name = "codehelion_cli"
+name = "codehelion"
 path = "src/lib.rs"
 
 [dependencies]
@@ -46,10 +46,10 @@ boon = "0.6"
 # The evaluation harness scores a scan report against the committed corpora.
 # A dev-dependency: it measures the shipped binary from outside and is not
 # part of it, so the released crate pulls in none of it.
-codehelion-eval = { version = "0.1.0", path = "../codehelion-eval" }
+codehelion-eval = { path = "../codehelion-eval" }
 # Plants a C or C++ tree with the compilation database that describes it, so a
 # semantic scan can be run against a project rather than against a snippet.
-codehelion-fixtures = { version = "0.1.0", path = "../codehelion-fixtures" }
+codehelion-fixtures = { path = "../codehelion-fixtures" }
 codehelion-store = { version = "0.1.0", path = "../codehelion-store" }
 object = { version = "0.39", default-features = false, features = ["write", "macho"] }
 predicates = "3"

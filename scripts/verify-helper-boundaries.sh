@@ -33,7 +33,7 @@ is_forbidden_crate() {
     esac
 }
 
-for package in codehelion-core codehelion-cli; do
+for package in codehelion-core codehelion; do
     dependency_file=$(mktemp "${TMPDIR:-/tmp}/codehelion-${package}-deps.XXXXXX")
     temporary_files="$temporary_files $dependency_file"
 

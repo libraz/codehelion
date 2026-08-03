@@ -77,7 +77,7 @@ try {
 
     $database = Join-Path $temporaryRoot 'artifact.sqlite'
     $scan = Join-Path $temporaryRoot 'source-scan.json'
-    & cargo run --quiet -p codehelion-cli -- scan $fixtureRoot --mode structural --format json --db $database --output $scan
+    & cargo run --quiet -p codehelion -- scan $fixtureRoot --mode structural --format json --db $database --output $scan
     if ($LASTEXITCODE -ne 0) {
         throw "Source fixture scan failed with exit code $LASTEXITCODE"
     }
@@ -87,7 +87,7 @@ try {
     }
 
     $report = Join-Path $temporaryRoot 'report.json'
-    & cargo run --quiet -p codehelion-cli -- artifact analyze $dll --input-format pe-coff --format json --build-variant $variant --source-run $sourceRun --debug-file $pdb --db $database --output $report
+    & cargo run --quiet -p codehelion -- artifact analyze $dll --input-format pe-coff --format json --build-variant $variant --source-run $sourceRun --debug-file $pdb --db $database --output $report
     if ($LASTEXITCODE -ne 0) {
         throw "PE/PDB artifact analysis failed with exit code $LASTEXITCODE"
     }
@@ -108,7 +108,7 @@ try {
         throw "Expected PDB correlation to map both exported symbols, got $($reportJson.correlation.mapped_symbols)"
     }
 
-    & cargo run --quiet -p codehelion-cli -- artifact analyze $dll --input-format pe-coff --format json --build-variant $variant --source-run $sourceRun --debug-file $mismatchPdb --db $database
+    & cargo run --quiet -p codehelion -- artifact analyze $dll --input-format pe-coff --format json --build-variant $variant --source-run $sourceRun --debug-file $mismatchPdb --db $database
     if ($LASTEXITCODE -eq 0) {
         throw 'A PDB with a different CodeView identity was accepted'
     }

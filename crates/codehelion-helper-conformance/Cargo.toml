@@ -14,7 +14,7 @@ publish = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-codehelion-cli = { version = "0.1.0", path = "../codehelion-cli" }
+codehelion = { version = "0.1.0", path = "../codehelion-cli" }
 codehelion-helper = { version = "0.1.0", path = "../codehelion-helper" }
 codehelion-store = { version = "0.1.0", path = "../codehelion-store" }
 serde_json = "1"
