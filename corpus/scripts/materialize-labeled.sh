@@ -77,7 +77,12 @@ for name in "${cases[@]}"; do
   origin="$(read_key "$manifest" origin)"
   repo="$(read_key "$manifest" repo)"
   commit="$(read_key "$manifest" commit)"
-  mapfile -t paths < <(read_paths "$manifest")
+  # Read into the array a line at a time rather than with `mapfile`, which
+  # macOS does not have: the bash it ships predates it.
+  paths=()
+  while IFS= read -r path; do
+    paths+=("$path")
+  done < <(read_paths "$manifest")
 
   if [ -n "$origin" ]; then
     repo="$(fetch_origin "$name" "$origin" "$commit")" || {

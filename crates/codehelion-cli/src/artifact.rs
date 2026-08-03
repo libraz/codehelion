@@ -93,7 +93,11 @@ mod worker;
 pub use worker::run_isolated_worker;
 use worker::{IsolatedArtifactRequest, clamp_untrusted_artifact_limits, run_isolated_request};
 #[cfg(test)]
-use worker::{deadline_after, read_worker_stderr, wait_for_worker};
+use worker::{deadline_after, read_worker_stderr};
+// The test that reaches this one kills a process the way only a Unix host
+// does, so Windows builds would carry an import nothing uses.
+#[cfg(all(test, unix))]
+use worker::wait_for_worker;
 
 /// Inspect one artifact and render its observed facts and equality groups.
 ///
