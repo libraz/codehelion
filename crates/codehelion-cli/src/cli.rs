@@ -20,6 +20,18 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// Parse a finite Jaccard threshold that remains meaningful as a percentage.
+fn parse_identifier_jaccard(value: &str) -> Result<f64, String> {
+    let parsed = value
+        .parse::<f64>()
+        .map_err(|_| "must be a finite number in 0.0..=1.0".to_string())?;
+    if parsed.is_finite() && (0.0..=1.0).contains(&parsed) {
+        Ok(parsed)
+    } else {
+        Err("must be a finite number in 0.0..=1.0".to_string())
+    }
+}
+
 /// Supported subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -42,7 +54,7 @@ pub enum Command {
         action: BaselineAction,
     },
     /// Report which analysis components are available on this machine.
-    Doctor,
+    Doctor(DoctorArgs),
     /// Inspect or clear cached scan state.
     Cache {
         /// Cache action.
@@ -213,6 +225,12 @@ pub const DEFAULT_ARTIFACT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 /// Default wall-clock ceiling for one isolated artifact worker.
 pub const DEFAULT_ARTIFACT_TIMEOUT_SECONDS: u64 = 30;
 
+/// Largest deliberate artifact-worker deadline accepted from the command line.
+///
+/// A day is ample for a known artifact while keeping the deadline representable
+/// by [`std::time::Instant`] on every supported platform.
+pub const MAX_ARTIFACT_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
+
 /// Maximum input accepted by the untrusted artifact preset.
 pub const UNTRUSTED_ARTIFACT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -235,23 +253,33 @@ pub struct ArtifactArgs {
     /// This is an assertion, not an override: a mismatch is rejected.
     #[arg(long, value_enum)]
     pub input_format: Option<ArtifactInputFormat>,
+    /// Architecture slice to inspect from a universal Mach-O binary.
+    ///
+    /// Multi-slice Mach-O inputs require this explicit selection. Other
+    /// formats reject the option so it cannot be mistaken for a build target.
+    #[arg(long)]
+    pub arch: Option<String>,
     /// Write the report to this file instead of standard output.
     #[arg(long)]
     pub output: Option<PathBuf>,
+    /// Replace an existing output file.
+    #[arg(long, requires = "output")]
+    pub force: bool,
     /// Include every extracted symbol in a text report.
     #[arg(long)]
     pub verbose: bool,
     /// Reject an artifact larger than this many bytes before parsing it.
     #[arg(long, default_value_t = DEFAULT_ARTIFACT_MAX_BYTES)]
     pub max_bytes: u64,
-    /// Stop the isolated artifact worker after this many seconds.
+    /// Stop the full isolated artifact operation after this many seconds.
     ///
     /// The worker is a separate process, so this remains enforceable when a
-    /// malformed input makes a parser stop making progress.
+    /// malformed input makes a parser stop making progress. Correlation,
+    /// persistence, and rendering run in the same isolated operation.
     #[arg(
         long,
         default_value_t = DEFAULT_ARTIFACT_TIMEOUT_SECONDS,
-        value_parser = clap::value_parser!(u64).range(1..)
+        value_parser = clap::value_parser!(u64).range(1..=MAX_ARTIFACT_TIMEOUT_SECONDS)
     )]
     pub timeout_seconds: u64,
     /// Require the artifact worker to stay within this virtual-memory ceiling.
@@ -311,9 +339,9 @@ pub enum ArtifactAction {
 /// Arguments for `artifact report`.
 #[derive(Debug, clap::Args)]
 pub struct ArtifactReportArgs {
-    /// Saved artifact analysis to re-render.
+    /// Saved artifact analysis to re-render. Defaults to the latest saved analysis.
     #[arg(long)]
-    pub analysis: i64,
+    pub analysis: Option<i64>,
     /// Local database path holding the saved analysis.
     #[arg(long)]
     pub db: Option<PathBuf>,
@@ -323,6 +351,9 @@ pub struct ArtifactReportArgs {
     /// Write the report to this file instead of standard output.
     #[arg(long)]
     pub output: Option<PathBuf>,
+    /// Replace an existing output file.
+    #[arg(long, requires = "output")]
+    pub force: bool,
     /// Include every extracted symbol in a text report.
     #[arg(long)]
     pub verbose: bool,
@@ -339,9 +370,9 @@ pub struct ArtifactIsolatedArgs {
 /// Arguments for `artifact calibration`.
 #[derive(Debug, clap::Args)]
 pub struct ArtifactCalibrationArgs {
-    /// Source scan whose controlled measurements are summarized.
+    /// Source scan whose controlled measurements are summarized. Defaults to the latest completed scan.
     #[arg(long)]
-    pub source_run: i64,
+    pub source_run: Option<i64>,
     /// Earlier local calibration JSON report to compare without enforcing a threshold.
     #[arg(long)]
     pub baseline: Option<PathBuf>,
@@ -354,6 +385,9 @@ pub struct ArtifactCalibrationArgs {
     /// Write the report to this file instead of standard output.
     #[arg(long)]
     pub output: Option<PathBuf>,
+    /// Replace an existing output file.
+    #[arg(long, requires = "output")]
+    pub force: bool,
 }
 
 /// Arguments for `artifact compare`.
@@ -368,6 +402,12 @@ pub struct ArtifactCompareArgs {
     /// This is an assertion, not an override: either mismatch is rejected.
     #[arg(long, value_enum)]
     pub input_format: Option<ArtifactInputFormat>,
+    /// Architecture slice to compare from both universal Mach-O binaries.
+    ///
+    /// One shared selection keeps a comparison from silently pairing different
+    /// architecture slices because their container orders differ.
+    #[arg(long)]
+    pub arch: Option<String>,
     /// JSON manifest describing the earlier artifact's build variant.
     ///
     /// Supplying both manifests lets the comparison report warn when build
@@ -384,14 +424,17 @@ pub struct ArtifactCompareArgs {
     /// Write the report to this file instead of standard output.
     #[arg(long)]
     pub output: Option<PathBuf>,
+    /// Replace an existing output file.
+    #[arg(long, requires = "output")]
+    pub force: bool,
     /// Reject either artifact larger than this many bytes before parsing it.
     #[arg(long, default_value_t = DEFAULT_ARTIFACT_MAX_BYTES)]
     pub max_bytes: u64,
-    /// Stop the isolated artifact worker after this many seconds.
+    /// Stop the full isolated artifact operation after this many seconds.
     #[arg(
         long,
         default_value_t = DEFAULT_ARTIFACT_TIMEOUT_SECONDS,
-        value_parser = clap::value_parser!(u64).range(1..)
+        value_parser = clap::value_parser!(u64).range(1..=MAX_ARTIFACT_TIMEOUT_SECONDS)
     )]
     pub timeout_seconds: u64,
     /// Require the artifact worker to stay within this virtual-memory ceiling.
@@ -418,6 +461,29 @@ pub struct ArtifactCompareArgs {
     pub db: Option<PathBuf>,
 }
 
+/// Arguments for the `doctor` subcommand.
+#[derive(Debug, clap::Args)]
+pub struct DoctorArgs {
+    /// Repository path whose configuration and local database to inspect.
+    #[arg(long, default_value = ".")]
+    pub path: PathBuf,
+    /// Configuration file to use instead of the one discovered from `--path`.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    /// Override one compiler-helper location as `rust=PATH` or `clang=PATH`.
+    #[arg(long = "helper", value_name = "NAME=PATH")]
+    pub helpers: Vec<String>,
+    /// Local database path, overriding the configured location.
+    #[arg(long)]
+    pub db: Option<PathBuf>,
+    /// Treat the selected repository and its configuration as untrusted.
+    ///
+    /// A configured database path must remain inside `--path`; an explicit
+    /// `--db` remains a deliberate operator choice.
+    #[arg(long)]
+    pub untrusted: bool,
+}
+
 /// Arguments for the `scan` subcommand.
 #[derive(Debug, clap::Args)]
 #[allow(clippy::struct_excessive_bools)] // independent CLI switches, not a state machine
@@ -440,9 +506,23 @@ pub struct ScanArgs {
     /// Configuration file to use instead of the discovered `codehelion.toml`.
     #[arg(long)]
     pub config: Option<PathBuf>,
+    /// Override one compiler-helper location as `rust=PATH` or `clang=PATH`.
+    #[arg(long = "helper", value_name = "NAME=PATH")]
+    pub helpers: Vec<String>,
     /// Also scan files that `.gitignore` and related ignore files would hide.
     #[arg(long)]
     pub no_ignore: bool,
+    /// Follow symbolic links while discovering source files.
+    ///
+    /// The walker detects directory cycles; without this flag links are
+    /// excluded and reported by type.
+    #[arg(long)]
+    pub follow_links: bool,
+    /// Use this compilation database instead of automatically selecting one.
+    ///
+    /// Relative paths are resolved from the scan root.
+    #[arg(long, value_name = "PATH")]
+    pub compile_commands: Option<PathBuf>,
     /// Frontend read-and-lex worker threads (default: automatic).
     ///
     /// Clone grouping and report rendering remain serial.
@@ -497,7 +577,7 @@ pub struct ScanArgs {
     ///
     /// A view over the same findings: nothing is recorded, no count moves,
     /// and the JSON and SARIF exports are unaffected.
-    #[arg(long, value_name = "JACCARD")]
+    #[arg(long, value_name = "JACCARD", value_parser = parse_identifier_jaccard)]
     pub min_identifier_jaccard: Option<f64>,
     /// Report duplication inside vendored trees, which is hidden by default.
     ///
@@ -518,6 +598,9 @@ pub struct ScanArgs {
     /// Exit with a non-zero status if any findings are reported.
     #[arg(long)]
     pub fail_on_findings: bool,
+    /// Analyse even when an identical completed run is available locally.
+    #[arg(long)]
+    pub no_reuse: bool,
     /// Read the tree under the ceilings for a repository nobody vouches for.
     ///
     /// Deliberately a flag and not a configuration key. The configuration file
@@ -553,11 +636,11 @@ pub struct ReportArgs {
     /// Configuration file to use instead of the one discovered from `--path`.
     #[arg(long)]
     pub config: Option<PathBuf>,
-    /// Row id of the completed scan to render again, as the scan that recorded
-    /// it reported. The database keeps one scan, so this names that snapshot
-    /// rather than picking one out of a history.
+    /// Row id of the completed scan to render again. Defaults to the latest
+    /// completed scan of `--path`. Every scan format prints this id for later
+    /// replay.
     #[arg(long)]
-    pub run: i64,
+    pub run: Option<i64>,
     /// Report format.
     #[arg(long, value_enum, default_value_t = Format::Text)]
     pub format: Format,
@@ -587,7 +670,7 @@ pub struct ReportArgs {
     ///
     /// A view over the same findings: nothing is recorded, no count moves,
     /// and the JSON and SARIF exports are unaffected.
-    #[arg(long, value_name = "JACCARD")]
+    #[arg(long, value_name = "JACCARD", value_parser = parse_identifier_jaccard)]
     pub min_identifier_jaccard: Option<f64>,
     /// List every group and every member instead of the summarised excerpt.
     #[arg(long)]
@@ -595,6 +678,12 @@ pub struct ReportArgs {
     /// Local database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,
+    /// Treat the selected repository and its configuration as untrusted.
+    ///
+    /// A configured database path must remain inside `--path`; an explicit
+    /// `--db` remains a deliberate operator choice.
+    #[arg(long)]
+    pub untrusted: bool,
 }
 
 /// Arguments for the `explain` subcommand.
@@ -614,6 +703,12 @@ pub struct ExplainArgs {
     /// Local database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,
+    /// Treat the selected repository and its configuration as untrusted.
+    ///
+    /// A configured database path must remain inside `--path`; an explicit
+    /// `--db` remains a deliberate operator choice.
+    #[arg(long)]
+    pub untrusted: bool,
 }
 
 /// Actions for the `config` subcommand.
@@ -647,7 +742,7 @@ pub const BASELINE_FILE_NAME: &str = "codehelion-baseline.json";
 #[derive(Debug, Subcommand)]
 pub enum BaselineAction {
     /// Freeze the last scan's reported findings as a baseline.
-    Create(BaselineArgs),
+    Create(BaselineCreateArgs),
     /// Drop the baseline entries the last scan no longer reports.
     Update(BaselineArgs),
 }
@@ -664,12 +759,20 @@ pub struct BaselineArgs {
     /// Baseline file to write.
     #[arg(long, default_value = BASELINE_FILE_NAME)]
     pub file: PathBuf,
-    /// Overwrite an existing baseline file.
-    #[arg(long)]
-    pub force: bool,
     /// Local database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,
+}
+
+/// Arguments for `baseline create`.
+#[derive(Debug, clap::Args)]
+pub struct BaselineCreateArgs {
+    /// Arguments shared with `baseline update`.
+    #[command(flatten)]
+    pub common: BaselineArgs,
+    /// Overwrite an existing baseline file.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Actions for the `cache` subcommand.
@@ -686,6 +789,33 @@ pub enum CacheAction {
         /// Local database path, overriding the configured location.
         #[arg(long)]
         db: Option<PathBuf>,
+        /// Treat the selected repository and its configuration as untrusted.
+        #[arg(long)]
+        untrusted: bool,
+    },
+    /// Apply retention limits and compact the local database.
+    Prune {
+        /// Repository path whose configuration and local database to use.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Configuration file to use instead of the one discovered from `--path`.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Local database path, overriding the configured location.
+        #[arg(long)]
+        db: Option<PathBuf>,
+        /// Treat the selected repository and its configuration as untrusted.
+        #[arg(long)]
+        untrusted: bool,
+        /// Newest standalone artifact analyses to retain.
+        #[arg(long, default_value_t = 20)]
+        keep_artifacts: usize,
+        /// Newest comparisons of each kind to retain.
+        #[arg(long, default_value_t = 20)]
+        keep_comparisons: usize,
+        /// Confirm deletion of retained local audit history.
+        #[arg(long)]
+        force: bool,
     },
     /// Permanently delete the local database.
     Clear {
@@ -698,6 +828,9 @@ pub enum CacheAction {
         /// Local database path, overriding the configured location.
         #[arg(long)]
         db: Option<PathBuf>,
+        /// Treat the selected repository and its configuration as untrusted.
+        #[arg(long)]
+        untrusted: bool,
         /// Confirm permanent deletion of the local audit database.
         #[arg(long)]
         force: bool,
@@ -736,6 +869,111 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Parsed flag state is the test subject.
+    fn follow_links_is_opt_in_for_source_discovery() {
+        let parsed = Cli::try_parse_from(["codehelion", "scan", "--follow-links"])
+            .expect("the source-discovery flag parses");
+        assert!(matches!(
+            parsed.command,
+            Command::Scan(ScanArgs {
+                follow_links: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Parsed path and override state are the test subject.
+    fn doctor_accepts_the_same_root_and_database_overrides_as_other_local_commands() {
+        let parsed = Cli::try_parse_from([
+            "codehelion",
+            "doctor",
+            "--path",
+            "fixture-repository",
+            "--config",
+            "fixture.toml",
+            "--db",
+            "fixture.db",
+        ])
+        .expect("doctor root and database overrides parse");
+        assert!(matches!(
+            parsed.command,
+            Command::Doctor(DoctorArgs {
+                path,
+                config: Some(config),
+                db: Some(db),
+                ..
+            }) if path == std::path::Path::new("fixture-repository")
+                && config == std::path::Path::new("fixture.toml")
+                && db == std::path::Path::new("fixture.db")
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Expected parse rejection is the test subject.
+    fn artifact_timeout_rejects_values_outside_the_platform_safe_range() {
+        for args in [
+            vec![
+                "codehelion",
+                "artifact",
+                "analyze",
+                "fixture.wasm",
+                "--timeout-seconds",
+                "18446744073709551615",
+            ],
+            vec![
+                "codehelion",
+                "artifact",
+                "compare",
+                "before.wasm",
+                "after.wasm",
+                "--timeout-seconds",
+                "18446744073709551615",
+            ],
+        ] {
+            let error = Cli::try_parse_from(args)
+                .expect_err("an unrepresentable timeout must be rejected at the CLI boundary");
+            assert!(error.to_string().contains("1..=86400"));
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Expected parse rejection is the test subject.
+    fn identifier_jaccard_rejects_non_finite_and_out_of_range_values() {
+        for args in [
+            vec!["codehelion", "scan", "--min-identifier-jaccard", "NaN"],
+            vec!["codehelion", "scan", "--min-identifier-jaccard", "inf"],
+            vec!["codehelion", "scan", "--min-identifier-jaccard=-0.01"],
+            vec!["codehelion", "scan", "--min-identifier-jaccard", "1.01"],
+        ] {
+            let error =
+                Cli::try_parse_from(args).expect_err("invalid Jaccard floor must be rejected");
+            assert!(error.to_string().contains("finite number in 0.0..=1.0"));
+        }
+        let parsed =
+            Cli::try_parse_from(["codehelion", "scan", "--min-identifier-jaccard", "0.75"])
+                .expect("a valid Jaccard floor parses");
+        assert!(matches!(
+            parsed.command,
+            Command::Scan(ScanArgs {
+                min_identifier_jaccard: Some(value),
+                ..
+            }) if (value - 0.75).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Expected parse rejection is the test subject.
+    fn baseline_update_does_not_accept_create_only_force_flag() {
+        let error = Cli::try_parse_from(["codehelion", "baseline", "update", ".", "--force"])
+            .expect_err("baseline update does not overwrite an arbitrary file");
+        assert!(error.to_string().contains("--force"));
+
+        Cli::try_parse_from(["codehelion", "baseline", "create", ".", "--force"])
+            .expect("baseline create retains its explicit overwrite confirmation");
     }
 
     #[test]
@@ -801,5 +1039,160 @@ mod tests {
         };
         assert_eq!(args.source_run, None);
         assert_eq!(args.debug_file, Some(PathBuf::from("fixture.debug")));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Parsed default state is the test subject.
+    fn replay_commands_default_to_the_latest_recorded_item() {
+        let report =
+            Cli::try_parse_from(["codehelion", "report"]).expect("report without a row id parses");
+        assert!(matches!(
+            report.command,
+            Command::Report(ReportArgs { run: None, .. })
+        ));
+
+        let artifact_report = Cli::try_parse_from(["codehelion", "artifact", "report"])
+            .expect("artifact report without an id parses");
+        assert!(matches!(
+            artifact_report.command,
+            Command::Artifact {
+                action: ArtifactAction::Report(ArtifactReportArgs { analysis: None, .. })
+            }
+        ));
+
+        let calibration = Cli::try_parse_from(["codehelion", "artifact", "calibration"])
+            .expect("artifact calibration without a source run parses");
+        assert!(matches!(
+            calibration.command,
+            Command::Artifact {
+                action: ArtifactAction::Calibration(ArtifactCalibrationArgs {
+                    source_run: None,
+                    ..
+                })
+            }
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Parsed architecture selections are the test subject.
+    fn artifact_architecture_selection_reaches_analyze_and_compare() {
+        let analyze = Cli::try_parse_from([
+            "codehelion",
+            "artifact",
+            "analyze",
+            "universal",
+            "--arch",
+            "aarch64",
+        ])
+        .expect("analysis architecture selection parses");
+        assert!(matches!(
+            analyze.command,
+            Command::Artifact {
+                action: ArtifactAction::Analyze(ArtifactArgs { arch: Some(ref arch), .. }),
+            } if arch == "aarch64"
+        ));
+
+        let compare = Cli::try_parse_from([
+            "codehelion",
+            "artifact",
+            "compare",
+            "before-universal",
+            "after-universal",
+            "--arch",
+            "x86_64",
+        ])
+        .expect("comparison architecture selection parses");
+        assert!(matches!(
+            compare.command,
+            Command::Artifact {
+                action: ArtifactAction::Compare(ArtifactCompareArgs { arch: Some(ref arch), .. }),
+            } if arch == "x86_64"
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Expected parse outcomes are the test subject.
+    fn every_artifact_output_surface_requires_a_destination_for_force() {
+        let valid = [
+            vec![
+                "codehelion",
+                "artifact",
+                "analyze",
+                "fixture.wasm",
+                "--output",
+                "report.txt",
+                "--force",
+            ],
+            vec![
+                "codehelion",
+                "artifact",
+                "report",
+                "--analysis",
+                "1",
+                "--output",
+                "report.txt",
+                "--force",
+            ],
+            vec![
+                "codehelion",
+                "artifact",
+                "calibration",
+                "--source-run",
+                "1",
+                "--output",
+                "report.txt",
+                "--force",
+            ],
+            vec![
+                "codehelion",
+                "artifact",
+                "compare",
+                "before.wasm",
+                "after.wasm",
+                "--output",
+                "report.txt",
+                "--force",
+            ],
+        ];
+        for args in valid {
+            Cli::try_parse_from(args).expect("artifact output with force parses");
+        }
+
+        for args in [
+            vec![
+                "codehelion",
+                "artifact",
+                "analyze",
+                "fixture.wasm",
+                "--force",
+            ],
+            vec![
+                "codehelion",
+                "artifact",
+                "report",
+                "--analysis",
+                "1",
+                "--force",
+            ],
+            vec![
+                "codehelion",
+                "artifact",
+                "calibration",
+                "--source-run",
+                "1",
+                "--force",
+            ],
+            vec![
+                "codehelion",
+                "artifact",
+                "compare",
+                "before.wasm",
+                "after.wasm",
+                "--force",
+            ],
+        ] {
+            let error = Cli::try_parse_from(args).expect_err("force without output is rejected");
+            assert!(error.to_string().contains("--output"));
+        }
     }
 }

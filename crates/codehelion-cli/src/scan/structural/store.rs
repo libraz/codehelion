@@ -1,26 +1,21 @@
 //! Persistence of structural and semantic scan snapshots.
 
 use super::reporting::{
-    detector_versions, member_hosts, occurrence_hosts, pair_members, ranks_within_host,
-    split_pair_identifier_jaccard, weakest_breakdown,
+    detector_versions, member_hosts, occurrence_hosts, pair_members, ranks_after,
+    ranks_within_host, split_pair_identifier_jaccard, weakest_breakdown,
 };
 use super::{
     BTreeMap, CloneScope, CompilerHelperRow, CompilerOutcome, Config, ContentHash, Context,
-    FeatureRow, FileRow, GroupDetail, GroupRow, MemberRow, NearMissRow, PriorityRow,
-    REGION_SIMILARITY, ReportInputs, Result, SemanticEvidenceRow, SemanticNodeMappingRow,
-    SemanticOperationGraphRow, SemanticUnitGraph, SiblingGroupRow, SiblingRow,
-    SimilarityBreakdownRow, Snapshot, StructuralGroup, SummaryRow, UnitRow, WEIGHT_VERSION,
-    aggregate_test_code_evidence, bail, engine, features, literal_norm, local_unit_indices,
-    open_store, region_identifier_jaccard, region_test_code_evidence, report, semantic,
+    FileRow, GroupDetail, GroupRow, MemberRow, NearMissRow, PriorityRow, REGION_SIMILARITY,
+    ReportInputs, Result, SemanticEvidenceRow, SemanticNodeMappingRow, SemanticOperationGraphRow,
+    SemanticUnitGraph, SiblingGroupRow, SiblingRow, SimilarityBreakdownRow, Snapshot,
+    StructuralGroup, SummaryRow, UnitRow, WEIGHT_VERSION, aggregate_test_code_evidence, bail,
+    engine, literal_norm, open_store, path_key, region_identifier_jaccard,
+    region_test_code_evidence, report, semantic, semantic_group_member_fingerprints,
     semantic_member_ranks, semantic_scope, shared, stable_id, store_compiler,
 };
 
-type SnapshotRows = (
-    Vec<UnitRow>,
-    Vec<GroupRow>,
-    Vec<FeatureRow>,
-    BTreeMap<usize, usize>,
-);
+type SnapshotRows = (Vec<UnitRow>, Vec<GroupRow>, BTreeMap<usize, usize>);
 
 pub(super) fn record(
     cfg: &Config,
@@ -30,15 +25,51 @@ pub(super) fn record(
     summary: &SummaryRow,
     asked: Option<&semantic::Answers>,
     completed: bool,
-) -> Result<i64> {
-    let (units, groups, features, host_index) = snapshot_rows(inputs, ranked)?;
+) -> Result<(i64, bool)> {
+    let (units, groups, host_index) = snapshot_rows(inputs, ranked)?;
     let mut store = open_store(inputs.db_path)?;
-    let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
-    let mut detector_versions = detector_versions(literal_norm(cfg.literal_normalization));
+    let config_text = format!(
+        "{}\nreuse-profile-v1:untrusted={}",
+        cfg.to_toml()?,
+        inputs.untrusted
+    );
+    let config_hash = ContentHash::of(config_text.as_bytes());
+    let mut detector_versions = detector_versions(
+        literal_norm(cfg.literal_normalization),
+        cfg.entropy_ratio_floor,
+    );
     // Kept for historical report rendering only; baseline compatibility and
     // the public detector list deliberately exclude presentation weights.
     detector_versions.push(("ranking".to_string(), cfg.priority.weights().recipe()));
-    let root_path = inputs.root.to_string_lossy();
+    let root_path = path_key(inputs.root);
+    let compatible = store.latest_compatible_run(
+        &root_path,
+        config_hash.as_str(),
+        &inputs.variant.fingerprint(),
+    )?;
+    let compatible = compatible.map(|run| run.id);
+    let compatible = if compatible.is_none() && inputs.variant.mode.name() == "semantic" {
+        store
+            .latest_completed_run(&root_path)?
+            .filter(|run| {
+                store
+                    .run_origin(run.id)
+                    .is_ok_and(|origin| origin.variant_fingerprint == inputs.variant.fingerprint())
+            })
+            .map(|run| run.id)
+    } else {
+        compatible
+    };
+    if completed
+        && inputs.reuse_allowed
+        && let Some(previous_id) = compatible
+        && store
+            .run_summary_row(previous_id)?
+            .is_some_and(|stored| stored.baseline_digest == summary.baseline_digest)
+        && store.run_tree(previous_id)? == file_tree(&files)
+    {
+        return Ok((previous_id, true));
+    }
     let (compiler_helpers, compiler_units) = asked.map_or_else(
         // No compiler was asked anything: this mode reads source and nothing
         // else, and an empty list is the whole truth about it.
@@ -62,16 +93,26 @@ pub(super) fn record(
         groups,
         sibling_groups: sibling_rows(inputs, &host_index)?,
         near_misses: near_miss_rows(inputs, &host_index)?,
-        features,
         compiler_helpers,
         compiler_units,
         summary: summary.clone(),
     };
-    if completed {
-        store.record_snapshot(&snapshot).map_err(Into::into)
+    let run_id = if completed {
+        store.record_snapshot(&snapshot)?
     } else {
-        store.record_snapshot_part(&snapshot).map_err(Into::into)
+        store.record_snapshot_part(&snapshot)?
+    };
+    if completed && let Some(predecessor_run) = compatible {
+        store.adopt_matching_lineages(run_id, predecessor_run)?;
     }
+    Ok((run_id, false))
+}
+
+fn file_tree(files: &[FileRow]) -> BTreeMap<String, String> {
+    files
+        .iter()
+        .map(|file| (file.relative_path.clone(), file.content_hash.clone()))
+        .collect()
 }
 
 /// Convert bounded LSH diagnostics to the store's run-scoped representation.
@@ -84,7 +125,8 @@ fn near_miss_rows(
         .analysis
         .near_misses
         .iter()
-        .map(|near_miss| {
+        .enumerate()
+        .map(|(index, near_miss)| {
             let left = *host_index.get(&near_miss.a).with_context(|| {
                 format!(
                     "near-miss source unit {} is missing from the snapshot",
@@ -101,6 +143,7 @@ fn near_miss_rows(
                 left,
                 right,
                 estimated_jaccard: near_miss.estimated_jaccard,
+                suppressed_by: inputs.near_miss_suppressed[index],
             })
         })
         .collect()
@@ -116,16 +159,34 @@ fn sibling_rows(
         .analysis
         .siblings
         .iter()
-        .map(|siblings| {
+        .enumerate()
+        .map(|(owner_index, siblings)| {
             let detail = inputs
                 .analysis
                 .details
                 .get(siblings.group)
                 .with_context(|| format!("missing detail for sibling group {}", siblings.group))?;
+            let group = inputs
+                .analysis
+                .groups
+                .groups
+                .get(siblings.group)
+                .with_context(|| {
+                    format!("missing primary group for siblings {}", siblings.group)
+                })?;
+            let ranks = ranks_after(
+                member_hosts(&inputs.analysis.units, &group.members),
+                siblings
+                    .siblings
+                    .iter()
+                    .map(|sibling| inputs.analysis.units[sibling.unit].fingerprint),
+            );
             let siblings = siblings
                 .siblings
                 .iter()
-                .map(|sibling| {
+                .zip(ranks)
+                .enumerate()
+                .map(|(sibling_index, (sibling, rank))| {
                     let unit = &inputs.analysis.units[sibling.unit];
                     let snapshot_unit = host_index.get(&sibling.unit).with_context(|| {
                         format!(
@@ -139,7 +200,7 @@ fn sibling_rows(
                         finding: stable_id::finding_id(
                             &detail.fingerprint,
                             Some(&unit.fingerprint),
-                            0,
+                            rank,
                         ),
                         clone_type: sibling.clone_type,
                         confidence: sibling.confidence,
@@ -155,6 +216,7 @@ fn sibling_rows(
                             confidence_band: sibling.confidence,
                         },
                         boilerplate: unit.boilerplate,
+                        suppressed_by: inputs.sibling_suppressed[owner_index][sibling_index],
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -198,11 +260,13 @@ fn compiler_rows(
                 helper,
                 unit,
                 reason,
+                diagnostics,
             } => store_compiler::CompilerUnitRow {
                 helper: *helper,
                 outcome: CompilerOutcome::Unavailable {
                     unit: unit.clone(),
                     reason: *reason,
+                    diagnostic: (!diagnostics.is_empty()).then(|| diagnostics.join(" / ")),
                 },
             },
             semantic::Answer::NotAsked { unit, reason } => store_compiler::CompilerUnitRow {
@@ -210,6 +274,7 @@ fn compiler_rows(
                 outcome: CompilerOutcome::Unavailable {
                     unit: unit.clone(),
                     reason: *reason,
+                    diagnostic: None,
                 },
             },
         })
@@ -222,13 +287,25 @@ fn compiler_rows(
 /// member's host is the unit it *is*; a duplicated run's host is the unit it
 /// sits inside, which is a different unit for each occurrence and usually not
 /// a clone of the others.
+#[allow(
+    clippy::too_many_lines,
+    reason = "all persisted structural finding families share one host-index transaction boundary"
+)]
 fn snapshot_rows(inputs: &ReportInputs<'_>, ranked: &[report::Group]) -> Result<SnapshotRows> {
     // The ranking is looked up by fingerprint rather than by position: the
     // report interleaves duplicated units, duplicated runs and the pairs no
     // group could hold into one order, and the store keeps them apart.
-    let ranking: BTreeMap<&str, &report::Priority> = ranked
+    let ranking: BTreeMap<&str, (&report::Priority, bool)> = ranked
         .iter()
-        .map(|group| (group.fingerprint.as_str(), &group.priority))
+        .map(|group| {
+            (
+                group.fingerprint.as_str(),
+                (
+                    &group.priority,
+                    report::ranks_down(group, inputs.suppression),
+                ),
+            )
+        })
         .collect();
     let mut host_index: BTreeMap<usize, usize> = BTreeMap::new();
     for group in &inputs.analysis.groups.groups {
@@ -307,26 +384,7 @@ fn snapshot_rows(inputs: &ReportInputs<'_>, ranked: &[report::Group]) -> Result<
         .chain(semantic_groups.into_iter().map(Ok))
         .chain(semantic_pairs.into_iter().map(Ok))
         .collect::<Result<Vec<_>>>()?;
-    let feature_files = inputs.irs.iter().map(features::extract).collect::<Vec<_>>();
-    let local_units = local_unit_indices(inputs.analysis);
-    let features = host_index
-        .iter()
-        .map(|(&unit_index, &host_unit)| {
-            let unit = &inputs.analysis.units[unit_index];
-            let local_index = local_units[unit_index];
-            let file_features = feature_files.get(unit.file).with_context(|| {
-                format!("missing candidate features for source file {}", unit.file)
-            })?;
-            let unit_features = file_features.units.get(local_index).with_context(|| {
-                format!(
-                    "candidate features and structural units diverged for source file {} at unit {local_index}",
-                    unit.file
-                )
-            })?;
-            Ok(FeatureRow::from_unit(host_unit, unit_features))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok((units, groups, features, host_index))
+    Ok((units, groups, host_index))
 }
 
 /// Store one restricted semantic pair with its normalized graphs and rule
@@ -336,16 +394,16 @@ fn semantic_pair_row(
     inputs: &ReportInputs<'_>,
     index: usize,
     host_index: &BTreeMap<usize, usize>,
-    ranking: &BTreeMap<&str, &report::Priority>,
+    ranking: &BTreeMap<&str, (&report::Priority, bool)>,
 ) -> Result<GroupRow> {
     let pair = &inputs.semantic_pairs[index];
+    let members = [&pair.canonical, &pair.corresponding];
     let fingerprint = stable_id::semantic_clone_group_fingerprint(
         inputs.variant,
         pair.rule.id,
         pair.rule.version,
-        &[pair.canonical.content, pair.corresponding.content],
+        &semantic_group_member_fingerprints(members, inputs.analysis),
     );
-    let members = [&pair.canonical, &pair.corresponding];
     let test_code_evidence =
         aggregate_test_code_evidence(inputs.analysis, members.iter().map(|member| member.unit));
     let member_ranks = semantic_member_ranks(members.iter().copied());
@@ -371,17 +429,16 @@ fn semantic_pair_row(
         })
         .collect();
     let canonical_unit = &inputs.analysis.units[pair.canonical.unit];
+    let canonical_tokens = inputs.unit_tokens(canonical_unit);
     let mut row = shared::stored_group(shared::StoredGroupCore {
         fingerprint,
         clone_type: codehelion_core::clone_class::CloneClass::RestrictedSemantic,
         scope: semantic_scope(members.iter().copied(), inputs.analysis),
         statements: None,
         score: pair.semantic_confidence,
-        entropy_bits: engine::content_entropy_bits(
-            inputs.unit_tokens(canonical_unit),
-            inputs.literals,
-        ),
+        entropy_bits: engine::content_entropy_bits(canonical_tokens, inputs.literals),
         suppressed_by: inputs.semantic_pair_suppressed[index],
+        ranked_down: recorded_ranked_down(ranking, &fingerprint.to_hex())?,
         priority: recorded_ranking(ranking, &fingerprint.to_hex())?,
         members: members
             .iter()
@@ -410,13 +467,12 @@ fn semantic_pair_row(
     row.test_code = test_code_evidence.is_some();
     row.test_code_evidence = test_code_evidence;
     row.split_pair = true;
-    row.suppress_reason =
-        inputs.semantic_pair_suppressed[index].map(|rule| inputs.rules.rows[rule].pattern.clone());
+    row.suppress_reason = inputs.entropy_suppress_reason(row.entropy_bits, canonical_tokens.len());
     row.semantic = Some(SemanticEvidenceRow {
         schema_version: pair.canonical.graph.schema_version.clone(),
         rule_id: pair.rule.id.to_string(),
         rule_version: pair.rule.version,
-        rule_confidence: pair.semantic_confidence,
+        rule_confidence: pair.rule.confidence,
         graphs: graph_json
             .into_iter()
             .map(|graph_json| SemanticOperationGraphRow {
@@ -435,18 +491,14 @@ fn semantic_group_row(
     inputs: &ReportInputs<'_>,
     index: usize,
     host_index: &BTreeMap<usize, usize>,
-    ranking: &BTreeMap<&str, &report::Priority>,
+    ranking: &BTreeMap<&str, (&report::Priority, bool)>,
 ) -> Result<GroupRow> {
     let group = &inputs.semantic_groups[index];
     let fingerprint = stable_id::semantic_clone_group_fingerprint(
         inputs.variant,
         group.rule.id,
         group.rule.version,
-        &group
-            .members
-            .iter()
-            .map(|member| member.content)
-            .collect::<Vec<_>>(),
+        &semantic_group_member_fingerprints(group.members.iter(), inputs.analysis),
     );
     let test_code_evidence = aggregate_test_code_evidence(
         inputs.analysis,
@@ -467,17 +519,16 @@ fn semantic_group_row(
     let node_mappings = semantic_store_node_mappings(&group.canonical, &group.members);
     let member_ranks = semantic_member_ranks(group.members.iter());
     let canonical_unit = &inputs.analysis.units[group.canonical.unit];
+    let canonical_tokens = inputs.unit_tokens(canonical_unit);
     let mut row = shared::stored_group(shared::StoredGroupCore {
         fingerprint,
         clone_type: codehelion_core::clone_class::CloneClass::RestrictedSemantic,
         scope: semantic_scope(group.members.iter(), inputs.analysis),
         statements: None,
         score: group.semantic_confidence,
-        entropy_bits: engine::content_entropy_bits(
-            inputs.unit_tokens(canonical_unit),
-            inputs.literals,
-        ),
+        entropy_bits: engine::content_entropy_bits(canonical_tokens, inputs.literals),
         suppressed_by: inputs.semantic_group_suppressed[index],
+        ranked_down: recorded_ranked_down(ranking, &fingerprint.to_hex())?,
         priority: recorded_ranking(ranking, &fingerprint.to_hex())?,
         members: group
             .members
@@ -506,13 +557,12 @@ fn semantic_group_row(
     });
     row.test_code = test_code_evidence.is_some();
     row.test_code_evidence = test_code_evidence;
-    row.suppress_reason =
-        inputs.semantic_group_suppressed[index].map(|rule| inputs.rules.rows[rule].pattern.clone());
+    row.suppress_reason = inputs.entropy_suppress_reason(row.entropy_bits, canonical_tokens.len());
     row.semantic = Some(SemanticEvidenceRow {
         schema_version: group.canonical.graph.schema_version.clone(),
         rule_id: group.rule.id.to_string(),
         rule_version: group.rule.version,
-        rule_confidence: group.semantic_confidence,
+        rule_confidence: group.rule.confidence,
         graphs: graph_json
             .into_iter()
             .map(|graph_json| SemanticOperationGraphRow {
@@ -562,19 +612,21 @@ fn unit_group_row(
     inputs: &ReportInputs<'_>,
     index: usize,
     host_index: &BTreeMap<usize, usize>,
-    ranking: &BTreeMap<&str, &report::Priority>,
+    ranking: &BTreeMap<&str, (&report::Priority, bool)>,
 ) -> Result<GroupRow> {
     let group = &inputs.analysis.groups.groups[index];
     let detail = &inputs.analysis.details[index];
     let medoid = &inputs.analysis.units[group.canonical];
+    let medoid_tokens = inputs.unit_tokens(medoid);
     let mut row = shared::stored_group(shared::StoredGroupCore {
         fingerprint: detail.fingerprint,
         clone_type: group.clone_type,
         scope: CloneScope::Unit,
         statements: None,
         score: group.min_pairwise,
-        entropy_bits: engine::content_entropy_bits(inputs.unit_tokens(medoid), inputs.literals),
+        entropy_bits: engine::content_entropy_bits(medoid_tokens, inputs.literals),
         suppressed_by: inputs.group_suppressed[index],
+        ranked_down: recorded_ranked_down(ranking, &detail.fingerprint.to_hex())?,
         priority: recorded_ranking(ranking, &detail.fingerprint.to_hex())?,
         members: group
             .members
@@ -613,6 +665,7 @@ fn unit_group_row(
     row.has_loop = Some(detail.body_materiality.has_loop);
     row.has_dynamic_allocation = Some(detail.body_materiality.has_dynamic_allocation);
     row.call_count = Some(detail.body_materiality.call_count);
+    row.suppress_reason = inputs.entropy_suppress_reason(row.entropy_bits, medoid_tokens.len());
     Ok(row)
 }
 
@@ -623,12 +676,22 @@ fn unit_group_row(
 /// prevent — so it fails the scan rather than storing a placeholder that would
 /// read as a finding nobody thought was worth anything.
 fn recorded_ranking(
-    ranking: &BTreeMap<&str, &report::Priority>,
+    ranking: &BTreeMap<&str, (&report::Priority, bool)>,
     fingerprint: &str,
 ) -> Result<PriorityRow> {
     ranking.get(fingerprint).map_or_else(
         || bail!("group {fingerprint} was recorded without being ranked"),
-        |priority| Ok(crate::scan::priority_row(priority)),
+        |(priority, _)| Ok(crate::scan::priority_row(priority)),
+    )
+}
+
+fn recorded_ranked_down(
+    ranking: &BTreeMap<&str, (&report::Priority, bool)>,
+    fingerprint: &str,
+) -> Result<bool> {
+    ranking.get(fingerprint).map_or_else(
+        || bail!("group {fingerprint} was recorded without a presentation policy"),
+        |(_, ranked_down)| Ok(*ranked_down),
     )
 }
 
@@ -640,10 +703,11 @@ fn split_pair_row(
     inputs: &ReportInputs<'_>,
     index: usize,
     host_index: &BTreeMap<usize, usize>,
-    ranking: &BTreeMap<&str, &report::Priority>,
+    ranking: &BTreeMap<&str, (&report::Priority, bool)>,
 ) -> Result<GroupRow> {
     let pair = &inputs.analysis.unrepresented[index];
     let canonical = &inputs.analysis.units[pair.canonical];
+    let canonical_tokens = inputs.unit_tokens(canonical);
     let test_code_evidence =
         aggregate_test_code_evidence(inputs.analysis, pair.members.iter().copied());
     let mut row = shared::stored_group(shared::StoredGroupCore {
@@ -652,8 +716,9 @@ fn split_pair_row(
         scope: CloneScope::Unit,
         statements: None,
         score: pair.similarity,
-        entropy_bits: engine::content_entropy_bits(inputs.unit_tokens(canonical), inputs.literals),
+        entropy_bits: engine::content_entropy_bits(canonical_tokens, inputs.literals),
         suppressed_by: inputs.pair_suppressed[index],
+        ranked_down: recorded_ranked_down(ranking, &pair.fingerprint.to_hex())?,
         priority: recorded_ranking(ranking, &pair.fingerprint.to_hex())?,
         members: pair_members(pair)
             .iter()
@@ -686,8 +751,20 @@ fn split_pair_row(
     row.test_code_evidence = test_code_evidence;
     row.split_pair = true;
     row.boilerplate = pair.boilerplate;
+    row.similarity = pair.breakdown.map(|breakdown| SimilarityBreakdownRow {
+        weight_version: WEIGHT_VERSION.to_string(),
+        lexical: breakdown.lexical,
+        structural: breakdown.structural,
+        control_flow: breakdown.control_flow,
+        type_similarity: breakdown.type_similarity,
+        api: breakdown.api,
+        composite: breakdown.composite,
+        min_pairwise: pair.similarity,
+        confidence_band: pair.confidence,
+    });
     row.identifier_jaccard = Some(split_pair_identifier_jaccard(inputs, pair));
     row.width_family = pair.width_family;
+    row.suppress_reason = inputs.entropy_suppress_reason(row.entropy_bits, canonical_tokens.len());
     Ok(row)
 }
 
@@ -695,7 +772,7 @@ fn region_row(
     inputs: &ReportInputs<'_>,
     index: usize,
     host_index: &BTreeMap<usize, usize>,
-    ranking: &BTreeMap<&str, &report::Priority>,
+    ranking: &BTreeMap<&str, (&report::Priority, bool)>,
 ) -> Result<GroupRow> {
     let region = &inputs.analysis.regions[inputs.regions.reported[index]];
     let ranks = ranks_within_host(occurrence_hosts(&inputs.analysis.units, region));
@@ -714,6 +791,7 @@ fn region_row(
         score: REGION_SIMILARITY,
         entropy_bits: engine::content_entropy_bits(&canonical, inputs.literals),
         suppressed_by: inputs.region_suppressed[index],
+        ranked_down: recorded_ranked_down(ranking, &region.fingerprint.to_hex())?,
         priority: recorded_ranking(ranking, &region.fingerprint.to_hex())?,
         members: region
             .occurrences
@@ -742,6 +820,7 @@ fn region_row(
     });
     row.test_code = test_code_evidence.is_some();
     row.test_code_evidence = test_code_evidence;
+    row.suppress_reason = inputs.entropy_suppress_reason(row.entropy_bits, canonical.len());
     row.identifier_jaccard = Some(region_identifier_jaccard(inputs, region));
     Ok(row)
 }

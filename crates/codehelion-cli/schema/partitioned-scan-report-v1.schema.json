@@ -37,6 +37,20 @@
     "cross_language_comparison": {
       "type": "object",
       "description": "Optional restricted semantic comparison between language-specific partitions. It never merges the partition findings."
+    },
+    "cross_language_comparison_status": {
+      "type": "object",
+      "description": "Why an explicitly requested Rust-to-C++ semantic comparison did not run. This is distinct from a completed comparison with zero groups.",
+      "required": ["status", "comparison_kind", "reason", "origin_variants"],
+      "properties": {
+        "status": { "const": "not_run" },
+        "comparison_kind": { "const": "registered-rust-cpp-semantic" },
+        "reason": { "type": "string" },
+        "origin_variants": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
     }
   }
 }

@@ -137,10 +137,19 @@ impl Compilers {
     /// that is dropped for that helper rather than sent and ignored, because
     /// the answer that comes back from ignoring it is thinner than the one that
     /// was asked for and looks exactly like the project's own.
-    pub(super) fn found(permitted: &ExecutionPolicy, sandbox: SandboxRequest) -> Result<Self> {
+    pub(super) fn found(
+        permitted: &ExecutionPolicy,
+        sandbox: SandboxRequest,
+        paths: &crate::config::Helpers,
+    ) -> Result<Self> {
         let mut installed = Vec::new();
         for component in doctor::OPTIONAL_HELPERS {
-            let Some(facts) = crate::interrogate(component.binary, None, sandbox) else {
+            let configured = match component.binary {
+                "codehelion-backend-rust" => paths.rust.as_deref(),
+                "codehelion-backend-clang" => paths.clang.as_deref(),
+                _ => None,
+            };
+            let Some(facts) = crate::interrogate(component.binary, configured, sandbox) else {
                 continue;
             };
             if let Some(helper) = installed_helper(component, facts, permitted, sandbox) {

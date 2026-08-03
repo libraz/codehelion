@@ -34,7 +34,10 @@ fn baseline_create_and_update_keep_every_completed_partition_of_one_invocation()
         &std::fs::read(root.join("baseline.json")).expect("read written baseline"),
     )
     .expect("parse baseline JSON");
-    assert_eq!(baseline["schema_version"], 1);
+    assert_eq!(
+        baseline["schema_version"],
+        u64::from(codehelion_cli::baseline::SCHEMA_VERSION)
+    );
     let partitions = baseline["partitions"].as_array().expect("partitions");
     assert_eq!(partitions.len(), 2);
     let fingerprints: std::collections::BTreeSet<_> = partitions

@@ -61,7 +61,7 @@ impl Report {
         }
         self.render_groups(opts, &palette, out)?;
         if opts.show_near_misses {
-            self.render_near_misses(&palette, out)?;
+            self.render_near_misses(opts, &palette, out)?;
         }
         Ok(())
     }
@@ -115,16 +115,19 @@ impl Report {
         }
         writeln!(
             out,
-            "  excluded: {} generated, {} by glob, {} too large, {} binary, {} unreadable, {} symlinks, {} walk errors, {} timed out ({} total)",
+            "  excluded: {} generated, {} by glob, {} too large, {} binary, {} unreadable, {} language-disabled, {} symlinks ({} files, {} directories), {} walk errors, {} timed out ({} total)",
             summary.excluded.generated,
             summary.excluded.by_glob,
             summary.excluded.too_large,
             summary.excluded.binary,
             summary.excluded.unreadable,
+            summary.excluded.language_excluded,
             summary.excluded.symlinks,
+            summary.excluded.symlink_files,
+            summary.excluded.symlink_directories,
             summary.excluded.walk_errors,
             summary.excluded.timed_out,
-            summary.excluded.skipped,
+            summary.excluded.total(),
         )?;
         writeln!(
             out,
@@ -136,14 +139,26 @@ impl Report {
         if let Some(guardrails) = &summary.guardrails {
             writeln!(
                 out,
-                "  {} profile: files over {} bytes skipped, {} ms per file, {} ms helper deadline, posting lists up to {}, {} candidate pairs per pass, {} units per group",
+                "  {} profile: files over {} bytes skipped, parse work capped at min(file ceiling, {} ms × {} bytes), {} ms helper deadline, posting lists up to {}, {} candidate pairs per pass, {} verification pairs, {} cells per alignment, {} units per group",
                 guardrails.profile,
                 guardrails.max_file_bytes,
                 guardrails.parse_timeout_ms,
+                crate::scan::runtime::PARSE_BYTES_PER_MILLISECOND,
                 guardrails.helper_timeout_ms,
                 guardrails.posting_cap,
                 guardrails.pair_budget,
+                guardrails.verification_budget,
+                guardrails.max_alignment_cells,
                 guardrails.max_component,
+            )?;
+            writeln!(
+                out,
+                "  diagnostics: near-match band {}, at most {} near misses; sibling sweep {} comparisons, {} per group, {} total",
+                guardrails.near_miss_delta,
+                guardrails.near_miss_cap,
+                guardrails.sibling_candidate_budget,
+                guardrails.sibling_per_group_cap,
+                guardrails.sibling_total_cap,
             )?;
         }
         // Beside the ceilings, and for the same reason: it says how much of
@@ -164,6 +179,7 @@ impl Report {
             for (reason, count) in &compiler.unavailable {
                 writeln!(out, "    {count} {reason}")?;
             }
+            render_helper_diagnostics(out, &compiler.diagnostics)?;
             for refusal in &compiler.execution_refusals {
                 writeln!(out, "    {} file(s): {}", refusal.files, refusal.message)?;
             }
@@ -257,13 +273,10 @@ impl Report {
                 summary.groups.test_code,
             )?;
         }
-        // The database keeps one scan, so printing a run number would advertise
-        // a history that is not there. What a reader needs instead is where the
-        // snapshot went and how to compare it with an earlier one.
         writeln!(
             out,
-            "  snapshot: {} (one scan at a time; compare with an earlier scan through a baseline)",
-            self.run.database
+            "  snapshot: {} (run {}; replay with `codehelion report --run {}`)",
+            self.run.database, self.run.run_id, self.run.run_id,
         )?;
         if !summary.unused_suppressions.is_empty() {
             let names: Vec<String> = summary
@@ -357,7 +370,7 @@ impl Report {
             for group in visible.iter().take(limit) {
                 render_group(group, opts, palette, out)?;
                 if opts.show_siblings {
-                    self.render_siblings(group, out)?;
+                    self.render_siblings(group, opts, out)?;
                 }
             }
             if visible.len() > limit {
@@ -396,7 +409,7 @@ impl Report {
                 for group in suppressed.iter().take(limit) {
                     render_group(group, opts, palette, out)?;
                     if opts.show_siblings {
-                        self.render_siblings(group, out)?;
+                        self.render_siblings(group, opts, out)?;
                     }
                 }
                 if suppressed.len() > limit {
@@ -414,13 +427,23 @@ impl Report {
     /// Render run-scoped diagnostics only when the text caller requested
     /// them. They are not grouped or ranked because the primary detector
     /// deliberately rejected them before verification.
-    fn render_near_misses(&self, palette: &Palette, out: &mut impl Write) -> io::Result<()> {
-        if self.near_misses.is_empty() {
+    fn render_near_misses(
+        &self,
+        opts: TextOptions,
+        palette: &Palette,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        let visible: Vec<_> = self
+            .near_misses
+            .iter()
+            .filter(|near_miss| opts.show_suppressed || near_miss.suppressed.is_none())
+            .collect();
+        if visible.is_empty() {
             return Ok(());
         }
         writeln!(out)?;
         writeln!(out, "{}", palette.bold("near-match near misses:"))?;
-        for near_miss in self.near_misses.iter().take(TEXT_GROUP_LIMIT) {
+        for near_miss in visible.iter().take(TEXT_GROUP_LIMIT) {
             writeln!(
                 out,
                 "  estimated Jaccard {:.2}: {}:{}{} ↔ {}:{}{}",
@@ -443,11 +466,11 @@ impl Report {
                     .unwrap_or_default(),
             )?;
         }
-        if self.near_misses.len() > TEXT_GROUP_LIMIT {
+        if visible.len() > TEXT_GROUP_LIMIT {
             writeln!(
                 out,
                 "  ... and {} more near misses",
-                self.near_misses.len() - TEXT_GROUP_LIMIT
+                visible.len() - TEXT_GROUP_LIMIT
             )?;
         }
         Ok(())
@@ -455,7 +478,12 @@ impl Report {
 
     /// Render local incomplete mirrors only when the text caller requested
     /// them. JSON and SARIF retain the data unconditionally.
-    fn render_siblings(&self, group: &Group, out: &mut impl Write) -> io::Result<()> {
+    fn render_siblings(
+        &self,
+        group: &Group,
+        opts: TextOptions,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
         let Some(siblings) = self
             .siblings
             .iter()
@@ -463,7 +491,11 @@ impl Report {
         else {
             return Ok(());
         };
-        for sibling in &siblings.siblings {
+        for sibling in siblings
+            .siblings
+            .iter()
+            .filter(|sibling| opts.show_suppressed || sibling.suppressed.is_none())
+        {
             let member = &sibling.member;
             writeln!(
                 out,
@@ -482,6 +514,16 @@ impl Report {
         }
         Ok(())
     }
+}
+
+fn render_helper_diagnostics(
+    out: &mut impl Write,
+    diagnostics: &std::collections::BTreeMap<String, u64>,
+) -> io::Result<()> {
+    for (diagnostic, count) in diagnostics {
+        writeln!(out, "    {count} helper diagnostic: {diagnostic}")?;
+    }
+    Ok(())
 }
 
 /// Explain that a Fast report did not classify policy categories rather than

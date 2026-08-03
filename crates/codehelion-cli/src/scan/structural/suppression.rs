@@ -4,8 +4,8 @@ use super::{
     BTreeMap, BTreeSet, Boilerplate, BoilerplatePolicy, BuildVariant, CategoryAction, Config,
     Context, Path, RegionOccurrence, ReportInputs, Result, SemanticGroup, SemanticPair,
     SemanticUnitGraph, SourceMeta, SourceTokenSpan, StructuralConfig, StructuralRegion,
-    StructuralReport, StructuralUnit, SyntaxIrFile, TestCodeEvidence, VerifiedPair, as_u64, config,
-    literal_norm, shared, stable_id, structural, suppress, test_code,
+    StructuralReport, StructuralUnit, SyntaxIrFile, TestCodeEvidence, as_u64, config, literal_norm,
+    semantic_group_member_fingerprints, shared, stable_id, structural, suppress, test_code,
 };
 
 pub(super) fn mark_test_modules(files: &[SourceMeta], irs: &mut [SyntaxIrFile]) {
@@ -72,6 +72,12 @@ pub(super) fn structural_config(cfg: &Config) -> StructuralConfig {
         config.near_match.near_miss_cap = cap;
     }
     config.grouping.max_component = cfg.limits.max_component;
+    if let Some(budget) = cfg.limits.verification_budget {
+        config.verification_budget = budget;
+    }
+    if let Some(cells) = cfg.limits.max_alignment_cells {
+        config.verify.max_alignment_cells = cells;
+    }
     if let Some(budget) = cfg.limits.sibling_candidate_budget {
         config.siblings.candidate_budget = budget;
     }
@@ -211,6 +217,10 @@ pub(super) struct SuppressionVerdicts {
     pub(super) semantic_pairs: Vec<Option<usize>>,
     /// Parallel to cohesive registered restricted-semantic groups.
     pub(super) semantic_groups: Vec<Option<usize>>,
+    /// Parallel to each owning group's supplemental siblings.
+    pub(super) siblings: Vec<Vec<Option<usize>>>,
+    /// Parallel to bounded near-match diagnostics.
+    pub(super) near_misses: Vec<Option<usize>>,
 }
 
 /// The presentation policy for this invocation after explicit CLI intent.
@@ -318,7 +328,18 @@ pub(super) fn evaluate_suppression(
                         .all(|&member| analysis.units[member].test_code)
                 })
             })
-            .or_else(|| pair_shape_suppression(pair, &hidden, hidden_width_family))
+            .or_else(|| {
+                pair_shape_suppression(
+                    unanimous_boilerplate(
+                        pair.members
+                            .iter()
+                            .map(|&member| analysis.units[member].boilerplate),
+                    ),
+                    pair.width_family,
+                    &hidden,
+                    hidden_width_family,
+                )
+            })
             .or_else(|| {
                 rules
                     .rules
@@ -330,13 +351,13 @@ pub(super) fn evaluate_suppression(
     let semantic_pairs = semantic_pairs
         .iter()
         .map(|pair| {
+            let members = [&pair.canonical, &pair.corresponding];
             let fingerprint = stable_id::semantic_clone_group_fingerprint(
                 variant,
                 pair.rule.id,
                 pair.rule.version,
-                &[pair.canonical.content, pair.corresponding.content],
+                &semantic_group_member_fingerprints(members, analysis),
             );
-            let members = [&pair.canonical, &pair.corresponding];
             shared::SuppressionPriority::first(|| rules.rules.clone_id_rule(&fingerprint.to_hex()))
                 .or_else(|| rules.semantic_rule(members.into_iter(), analysis, &local_units))
                 .or_else(|| {
@@ -357,11 +378,7 @@ pub(super) fn evaluate_suppression(
                 variant,
                 group.rule.id,
                 group.rule.version,
-                &group
-                    .members
-                    .iter()
-                    .map(|member| member.content)
-                    .collect::<Vec<_>>(),
+                &semantic_group_member_fingerprints(group.members.iter(), analysis),
             );
             let members = group.members.iter();
             shared::SuppressionPriority::first(|| rules.rules.clone_id_rule(&fingerprint.to_hex()))
@@ -381,12 +398,74 @@ pub(super) fn evaluate_suppression(
                 .finish()
         })
         .collect();
+    let siblings = analysis
+        .siblings
+        .iter()
+        .map(|siblings| {
+            let detail = &analysis.details[siblings.group];
+            let member_count = as_u64(analysis.groups.groups[siblings.group].members.len());
+            siblings
+                .siblings
+                .iter()
+                .map(|sibling| {
+                    let unit = &analysis.units[sibling.unit];
+                    let finding =
+                        stable_id::finding_id(&detail.fingerprint, Some(&unit.fingerprint), 0);
+                    shared::SuppressionPriority::first(|| {
+                        rules.rules.clone_id_rule(&finding.to_hex())
+                    })
+                    .or_else(|| {
+                        rules.group_rule(std::iter::once(sibling.unit), analysis, &local_units)
+                    })
+                    .or_else(|| hidden_test_code.filter(|_| unit.test_code))
+                    .or_else(|| {
+                        unit.boilerplate
+                            .and_then(|category| hidden.get(&category).copied())
+                    })
+                    .or_else(|| {
+                        rules
+                            .rules
+                            .baseline_rule(&detail.fingerprint.to_hex(), member_count)
+                    })
+                    .finish()
+                })
+                .collect()
+        })
+        .collect();
+    let near_misses = analysis
+        .near_misses
+        .iter()
+        .map(|near_miss| {
+            let members = [near_miss.a, near_miss.b];
+            shared::SuppressionPriority::first(|| {
+                rules.group_rule(members.into_iter(), analysis, &local_units)
+            })
+            .or_else(|| {
+                hidden_test_code.filter(|_| {
+                    members
+                        .iter()
+                        .all(|&member| analysis.units[member].test_code)
+                })
+            })
+            .or_else(|| {
+                unanimous_boilerplate(
+                    members
+                        .iter()
+                        .map(|&member| analysis.units[member].boilerplate),
+                )
+                .and_then(|category| hidden.get(&category).copied())
+            })
+            .finish()
+        })
+        .collect();
     SuppressionVerdicts {
         groups,
         regions: region_verdicts,
         pairs,
         semantic_pairs,
         semantic_groups,
+        siblings,
+        near_misses,
     }
 }
 
@@ -394,13 +473,14 @@ pub(super) fn evaluate_suppression(
 /// as a normal group: a concrete boilerplate shape is more specific than the
 /// relation-level width-family observation.
 pub(super) fn pair_shape_suppression(
-    pair: &VerifiedPair,
+    boilerplate: Option<Boilerplate>,
+    width_family: bool,
     hidden_boilerplate: &BTreeMap<Boilerplate, usize>,
     hidden_width_family: Option<usize>,
 ) -> Option<usize> {
-    pair.boilerplate
+    boilerplate
         .and_then(|category| hidden_boilerplate.get(&category).copied())
-        .or_else(|| hidden_width_family.filter(|_| pair.width_family))
+        .or_else(|| hidden_width_family.filter(|_| width_family))
 }
 
 /// Register a suppression rule for every boilerplate category the policy
@@ -426,11 +506,24 @@ pub(super) fn hidden_boilerplate(
                     .iter()
                     .map(|&member| analysis.units[member].boilerplate),
             ) == Some(category)
-        }) && !analysis
-            .unrepresented
-            .iter()
-            .any(|pair| pair.boilerplate == Some(category))
-        {
+        }) && !analysis.unrepresented.iter().any(|pair| {
+            unanimous_boilerplate(
+                pair.members
+                    .iter()
+                    .map(|&member| analysis.units[member].boilerplate),
+            ) == Some(category)
+        }) && !analysis.siblings.iter().any(|siblings| {
+            siblings
+                .siblings
+                .iter()
+                .any(|sibling| analysis.units[sibling.unit].boilerplate == Some(category))
+        }) && !analysis.near_misses.iter().any(|near_miss| {
+            unanimous_boilerplate(
+                [near_miss.a, near_miss.b]
+                    .into_iter()
+                    .map(|member| analysis.units[member].boilerplate),
+            ) == Some(category)
+        }) {
             continue;
         }
         let index = rules.add_shape_rule(category.name(), "boilerplate shape");
@@ -494,7 +587,19 @@ pub(super) fn hidden_test_code(
         .reported
         .iter()
         .any(|&index| region_test_code(analysis, &analysis.regions[index]));
-    (any_group || any_run).then(|| rules.add_attribute_rule("test", "test code"))
+    let any_sibling = analysis.siblings.iter().any(|siblings| {
+        siblings
+            .siblings
+            .iter()
+            .any(|sibling| analysis.units[sibling.unit].test_code)
+    });
+    let any_near_miss = analysis.near_misses.iter().any(|near_miss| {
+        [near_miss.a, near_miss.b]
+            .into_iter()
+            .all(|member| analysis.units[member].test_code)
+    });
+    (any_group || any_run || any_sibling || any_near_miss)
+        .then(|| rules.add_attribute_rule("test", "test code"))
 }
 
 /// Which duplicated runs the report lists, and how many it folded away.

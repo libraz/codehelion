@@ -162,6 +162,24 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
         let ruled = adjudicate(&result, &labels, DEFAULT_MATCH_THRESHOLD);
         row(expected.name, &ruled, &mut table);
         compare_verdicts(expected, &ruled, &mut complaints);
+        for finding in result.findings.iter().filter(|finding| {
+            verdict(finding, &labels, DEFAULT_MATCH_THRESHOLD) == Verdict::Unjudged
+        }) {
+            writeln!(
+                complaints,
+                "{} unjudged {} ({:?}, actionable={}):",
+                expected.name, finding.id, finding.clone_type, finding.actionable,
+            )
+            .expect("writing to a string cannot fail");
+            for fragment in &finding.fragments {
+                writeln!(
+                    complaints,
+                    "  {}:{}-{} ({} tokens)",
+                    fragment.file, fragment.start_line, fragment.end_line, fragment.tokens,
+                )
+                .expect("writing to a string cannot fail");
+            }
+        }
         if expected.has_origin {
             sizes.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
             axes.record(&result, &labels, DEFAULT_MATCH_THRESHOLD);
@@ -211,6 +229,7 @@ fn every_labelled_group_still_gets_the_verdict_it_was_given() {
     print_measures(&sizes, &axes, &widths, &every_width, &bands, &reasons);
     if whole {
         compare_bands(&bands, &mut complaints);
+        compare_reasons(&reasons, &mut complaints);
         compare_sizes(&sizes, &mut complaints);
         compare_floors(&axes, &mut complaints);
     } else {

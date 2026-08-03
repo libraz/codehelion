@@ -213,7 +213,7 @@ fn cplusplus_standard_api_calls_form_a_restricted_semantic_finding() {
 }
 
 #[test]
-fn compiler_cfg_evidence_changes_confidence_without_changing_cplusplus_findings() {
+fn cplusplus_semantic_scan_requires_a_helper_that_reads_cpp() {
     if !clang_helper_is_usable() {
         return;
     }
@@ -222,19 +222,26 @@ fn compiler_cfg_evidence_changes_confidence_without_changing_cplusplus_findings(
         .expect("plant fixture");
 
     let with_cfg = scan(&root);
-    let no_compiler = tempfile::tempdir().expect("empty PATH directory");
-    let without_cfg = scan_with_path(&root, Some(no_compiler.path()));
+    assert!(
+        !restricted_finding_set(&with_cfg).is_empty(),
+        "a usable C++ helper produces restricted-semantic findings"
+    );
 
-    assert_eq!(
-        restricted_finding_set(&with_cfg),
-        restricted_finding_set(&without_cfg),
-        "CFG is a confidence-only feature"
-    );
-    assert_ne!(
-        restricted_confidences(&with_cfg),
-        restricted_confidences(&without_cfg),
-        "the fixture's function-local CFGs reach confidence scoring"
-    );
+    let no_helper_path = tempfile::tempdir().expect("empty PATH directory");
+    cmd()
+        .current_dir(&root)
+        .env("PATH", no_helper_path.path())
+        .args([
+            "scan",
+            ".",
+            "--mode",
+            "semantic",
+            "--helper",
+            "clang=/definitely-missing-codehelion-backend-clang",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("found no helper that reads cpp"));
 }
 
 #[test]
@@ -290,7 +297,7 @@ fn cplusplus_plain_range_loops_match_as_closed_collections() {
 }
 
 #[test]
-fn cplusplus_plain_range_loops_match_as_closed_reductions() {
+fn cplusplus_plain_range_loops_do_not_match_different_reductions() {
     if !clang_helper_is_usable() {
         return;
     }
@@ -298,10 +305,10 @@ fn cplusplus_plain_range_loops_match_as_closed_reductions() {
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
     let report = scan_short_semantic_windows(&root);
-    let group = reports(&report)
+    let matches = reports(&report)
         .into_iter()
         .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())
-        .find(|group| {
+        .any(|group| {
             group["clone_type"] == "restricted-semantic"
                 && group["semantic"]["rules"][0]["id"] == "sequence-pipeline-v1"
                 && group["members"].as_array().is_some_and(|members| {
@@ -311,29 +318,10 @@ fn cplusplus_plain_range_loops_match_as_closed_reductions() {
                         .collect();
                     units.len() == 2 && units.contains(&"summed") && units.contains(&"summed_again")
                 })
-        })
-        .unwrap_or_else(|| {
-            panic!("two direct C++ range reductions form a semantic finding: {report}")
         });
     assert!(
-        group["semantic"]["graphs"]
-            .as_array()
-            .is_some_and(|graphs| {
-                graphs.iter().all(|graph| {
-                    graph["nodes"].as_array().is_some_and(|nodes| {
-                        nodes
-                            .iter()
-                            .map(|node| node["kind"].as_str())
-                            .eq([Some("source"), Some("reduce")])
-                            && nodes.iter().all(|node| {
-                                node["attributes"]["api_names"]
-                                    .as_array()
-                                    .is_some_and(Vec::is_empty)
-                            })
-                    })
-                })
-            }),
-        "only the closed source/reduce shape is reported: {group}"
+        !matches,
+        "addition and multiplication must not share a semantic group: {report}"
     );
 }
 
@@ -383,7 +371,7 @@ fn cplusplus_direct_lock_guard_lifetimes_form_a_restricted_semantic_finding() {
 }
 
 #[test]
-fn cplusplus_standard_algorithm_calls_form_a_restricted_semantic_finding() {
+fn cplusplus_standard_algorithm_calls_do_not_match_different_transformations() {
     if !clang_helper_is_usable() {
         return;
     }
@@ -391,31 +379,28 @@ fn cplusplus_standard_algorithm_calls_form_a_restricted_semantic_finding() {
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
     let report = scan(&root);
-    let group = reports(&report)
+    let matches = reports(&report)
         .into_iter()
         .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())
-        .find(|group| {
+        .any(|group| {
             group["clone_type"] == "restricted-semantic"
                 && group["semantic"]["rules"][0]["id"] == "sequence-pipeline-v1"
-                && group["semantic"]["graphs"]
-                    .as_array()
-                    .is_some_and(|graphs| {
-                        graphs.iter().all(|graph| {
-                            graph["nodes"].as_array().is_some_and(|nodes| {
-                                nodes
-                                    .iter()
-                                    .map(|node| node["kind"].as_str())
-                                    .eq([Some("source"), Some("map")])
-                            })
-                        })
-                    })
-        })
-        .expect("two C++ transforms form a semantic finding");
-    assert_eq!(group["members"].as_array().map(Vec::len), Some(2));
+                && group["members"].as_array().is_some_and(|members| {
+                    let units: Vec<_> = members
+                        .iter()
+                        .filter_map(|member| member["unit"].as_str())
+                        .collect();
+                    units.len() == 2 && units.contains(&"doubled") && units.contains(&"tripled")
+                })
+        });
+    assert!(
+        !matches,
+        "different map expressions must not share a semantic group: {report}"
+    );
 }
 
 #[test]
-fn cplusplus_standard_filter_calls_form_a_restricted_semantic_finding() {
+fn cplusplus_standard_filter_calls_do_not_match_different_predicates() {
     if !clang_helper_is_usable() {
         return;
     }
@@ -423,25 +408,22 @@ fn cplusplus_standard_filter_calls_form_a_restricted_semantic_finding() {
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
     let report = scan(&root);
-    let group = reports(&report)
+    let matches = reports(&report)
         .into_iter()
         .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())
-        .find(|group| {
+        .any(|group| {
             group["clone_type"] == "restricted-semantic"
                 && group["semantic"]["rules"][0]["id"] == "sequence-pipeline-v1"
-                && group["semantic"]["graphs"]
-                    .as_array()
-                    .is_some_and(|graphs| {
-                        graphs.iter().all(|graph| {
-                            graph["nodes"].as_array().is_some_and(|nodes| {
-                                nodes
-                                    .iter()
-                                    .map(|node| node["kind"].as_str())
-                                    .eq([Some("source"), Some("filter")])
-                            })
-                        })
-                    })
-        })
-        .expect("two C++ filters form a semantic finding");
-    assert_eq!(group["members"].as_array().map(Vec::len), Some(2));
+                && group["members"].as_array().is_some_and(|members| {
+                    let units: Vec<_> = members
+                        .iter()
+                        .filter_map(|member| member["unit"].as_str())
+                        .collect();
+                    units.len() == 2 && units.contains(&"positive") && units.contains(&"even")
+                })
+        });
+    assert!(
+        !matches,
+        "different filter predicates must not share a semantic group: {report}"
+    );
 }

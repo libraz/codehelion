@@ -46,7 +46,7 @@ use codehelion_eval::detected;
 use codehelion_eval::labels::LabelSet;
 use codehelion_eval::metrics::{
     Adjudication, AxisSplit, BandSplit, DEFAULT_MATCH_THRESHOLD, RankedVerdicts, ReasonSplit,
-    SizeSplit, WidthFamily, adjudicate,
+    SizeSplit, Verdict, WidthFamily, adjudicate, verdict,
 };
 use codehelion_eval::schema::{DetectionResult, Finding, Fragment};
 
@@ -99,16 +99,16 @@ const CORPORA: &[Expected] = &[
     Expected {
         name: "fast-yaml-cpp",
         has_origin: false,
-        confirmed: 20,
+        confirmed: 16,
         refuted: 2,
-        forward_confirmed: 19,
+        forward_confirmed: 15,
         forward_refuted: 2,
         fast: Verdicts {
-            confirmed: 14,
+            confirmed: 11,
             refuted: 1,
-            forward_confirmed: 14,
+            forward_confirmed: 11,
             forward_refuted: 1,
-            unjudged: 146,
+            unjudged: 138,
             conflicting: 0,
         },
     },
@@ -124,7 +124,7 @@ const CORPORA: &[Expected] = &[
             refuted: 0,
             forward_confirmed: 1,
             forward_refuted: 0,
-            unjudged: 20,
+            unjudged: 19,
             conflicting: 0,
         },
     },
@@ -147,48 +147,48 @@ const CORPORA: &[Expected] = &[
     Expected {
         name: "cjson",
         has_origin: true,
-        confirmed: 14,
+        confirmed: 13,
         refuted: 6,
-        forward_confirmed: 14,
+        forward_confirmed: 13,
         forward_refuted: 6,
         fast: Verdicts {
-            confirmed: 13,
+            confirmed: 12,
             refuted: 6,
-            forward_confirmed: 13,
+            forward_confirmed: 12,
             forward_refuted: 6,
-            unjudged: 86,
+            unjudged: 82,
             conflicting: 0,
         },
     },
     Expected {
         name: "lz4",
         has_origin: true,
-        confirmed: 17,
-        refuted: 15,
-        forward_confirmed: 17,
-        forward_refuted: 15,
+        confirmed: 15,
+        refuted: 14,
+        forward_confirmed: 15,
+        forward_refuted: 14,
         fast: Verdicts {
-            confirmed: 16,
+            confirmed: 12,
             refuted: 9,
-            forward_confirmed: 16,
+            forward_confirmed: 12,
             forward_refuted: 9,
-            unjudged: 231,
+            unjudged: 219,
             conflicting: 0,
         },
     },
     Expected {
         name: "serde-json",
         has_origin: true,
-        confirmed: 44,
-        refuted: 21,
-        forward_confirmed: 39,
-        forward_refuted: 21,
+        confirmed: 46,
+        refuted: 39,
+        forward_confirmed: 41,
+        forward_refuted: 20,
         fast: Verdicts {
-            confirmed: 32,
-            refuted: 29,
-            forward_confirmed: 32,
-            forward_refuted: 29,
-            unjudged: 618,
+            confirmed: 30,
+            refuted: 27,
+            forward_confirmed: 30,
+            forward_refuted: 27,
+            unjudged: 552,
             conflicting: 1,
         },
     },
@@ -196,23 +196,23 @@ const CORPORA: &[Expected] = &[
         name: "spdlog",
         has_origin: true,
         confirmed: 21,
-        refuted: 17,
+        refuted: 18,
         forward_confirmed: 21,
-        forward_refuted: 17,
+        forward_refuted: 16,
         fast: Verdicts {
-            confirmed: 25,
+            confirmed: 23,
             refuted: 1,
-            forward_confirmed: 25,
+            forward_confirmed: 23,
             forward_refuted: 1,
-            unjudged: 159,
+            unjudged: 160,
             conflicting: 0,
         },
     },
     Expected {
         name: "bitflags",
         has_origin: true,
-        confirmed: 14,
-        refuted: 9,
+        confirmed: 11,
+        refuted: 3,
         forward_confirmed: 3,
         forward_refuted: 1,
         fast: Verdicts {
@@ -220,17 +220,17 @@ const CORPORA: &[Expected] = &[
             refuted: 2,
             forward_confirmed: 3,
             forward_refuted: 2,
-            unjudged: 233,
+            unjudged: 227,
             conflicting: 0,
         },
     },
     Expected {
         name: "tinyxml2",
         has_origin: true,
-        confirmed: 11,
-        refuted: 12,
-        forward_confirmed: 10,
-        forward_refuted: 12,
+        confirmed: 10,
+        refuted: 11,
+        forward_confirmed: 9,
+        forward_refuted: 11,
         fast: Verdicts {
             confirmed: 3,
             refuted: 8,
@@ -270,14 +270,14 @@ const ORDERINGS: &[Ordering] = &[
     Ordering {
         name: "priority",
         at_10: 1.0,
-        at_50: 0.98,
-        map: 0.9230,
+        at_50: 0.96,
+        map: 0.9229,
     },
     Ordering {
         name: "size",
-        at_10: 0.90,
-        at_50: 0.88,
-        map: 0.8179,
+        at_10: 1.0,
+        at_50: 0.94,
+        map: 0.8723,
     },
 ];
 
@@ -288,10 +288,41 @@ const ORDERINGS: &[Ordering] = &[
 /// one silently redistributes every finding here. What the numbers say about
 /// the bands themselves is argued from the table, not from this assertion.
 const BANDS: &[(&str, usize, usize)] = &[
-    ("high", 67, 67),
-    ("medium", 15, 3),
-    ("low", 10, 5),
-    ("(unscored)", 32, 5),
+    ("high", 43, 22),
+    ("medium", 44, 42),
+    ("low", 14, 22),
+    ("(unscored)", 18, 5),
+];
+
+/// The lookalike classes reached by the report, as last measured.
+///
+/// Each tuple records labels put forward, labels reached anywhere in the
+/// report, and labels in the reproducible corpus.  Pinning the table makes a
+/// change in the kinds of false positives a regression, rather than merely
+/// diagnostic output for a reviewer to notice.
+const REASONS: &[(&str, usize, usize, usize)] = &[
+    ("assertion-run", 0, 10, 32),
+    ("const-overload-pair", 0, 0, 1),
+    ("declaration-run", 5, 5, 5),
+    ("dispatch-table-entry", 1, 1, 1),
+    ("exhaustive-match-table", 1, 1, 3),
+    ("field-mapping-boilerplate", 0, 0, 1),
+    ("forwarding-wrapper", 10, 13, 24),
+    ("getter-boilerplate", 4, 4, 5),
+    ("guarded-forwarding", 3, 3, 5),
+    ("lifecycle-teardown", 2, 2, 6),
+    ("list-walk-idiom", 1, 1, 1),
+    ("member-call-run", 1, 1, 2),
+    ("mirrored-operation", 4, 4, 4),
+    ("nested-inside-copy", 0, 0, 6),
+    ("parameterised-dispatch", 2, 2, 2),
+    ("single-expression-return", 0, 0, 1),
+    ("trivial-accessor-pair", 1, 1, 1),
+    ("trivial-factory", 10, 10, 10),
+    ("type-dispatch-accessor", 6, 25, 27),
+    ("type-specialised-variant", 16, 18, 35),
+    ("unrolled-repetition", 0, 0, 4),
+    ("validated-setter", 1, 1, 1),
 ];
 
 /// The length spans of the two verdict populations, as last measured: the
@@ -301,7 +332,7 @@ const BANDS: &[(&str, usize, usize)] = &[
 /// The last number is the one with an argument attached — it is the price of a
 /// length floor, and it is why there is not one — so it is pinned rather than
 /// printed and re-argued from memory.
-const SIZES: (u32, u32, u32, u32, usize) = (4, 96, 3, 26, 101);
+const SIZES: (u32, u32, u32, u32, usize) = (4, 47, 3, 26, 99);
 
 /// What a floor on each similarity axis could remove without hiding a real
 /// clone, as last measured.
@@ -312,14 +343,9 @@ const SIZES: (u32, u32, u32, u32, usize) = (4, 96, 3, 26, 101);
 /// lowest confirmed finding on that axis sits at or below every refuted one, so
 /// no floor can cut a lookalike without cutting a real clone first.
 ///
-/// Four of the five are zero. The composite is not, and it is the reason to
-/// record these rather than assert a rule about them: nine refuted findings sit
-/// below the lowest confirmed one, in a band three hundredths wide. That is a
-/// gap in this sample, not a separation — held out of the training set,
-/// serde-json contributes both the finding that sets the floor and two more the
-/// floor learned without it would hide, which is the same shape the length
-/// floor turned out to have. Leave-one-case-out is what says so, and it is not
-/// something a pin can run.
+/// All five are zero: no similarity dimension separates the two populations
+/// without removing a confirmed finding. The pin records that result instead
+/// of turning a sample-specific gap into a detector rule.
 ///
 /// A move here is a change to explain. A rise means the populations are pulling
 /// apart on that axis and somebody should re-run leave-one-case-out; a fall
@@ -329,7 +355,7 @@ const FLOORS: &[(&str, usize)] = &[
     ("structural", 0),
     ("control flow", 0),
     ("api", 0),
-    ("composite", 10),
+    ("composite", 0),
 ];
 
 /// Whether two measurements differ once rounded the way they are printed,
@@ -377,7 +403,15 @@ fn report_ranking(
         );
     }
     if pinned {
-        for (expected, (_, verdicts)) in ORDERINGS.iter().zip(measured) {
+        for (name, verdicts) in measured {
+            let Some(expected) = ORDERINGS.iter().find(|expected| expected.name == name) else {
+                writeln!(
+                    complaints,
+                    "ordering {name} is not one of the recorded orderings"
+                )
+                .expect("writing to a string cannot fail");
+                continue;
+            };
             for (what, actual, was) in [
                 ("precision@10", verdicts.precision_at(10), expected.at_10),
                 ("precision@50", verdicts.precision_at(50), expected.at_50),
@@ -403,6 +437,16 @@ fn report_ranking(
                     )
                     .expect("writing to a string cannot fail");
                 }
+            }
+        }
+        for expected in ORDERINGS {
+            if !measured.iter().any(|(name, _)| *name == expected.name) {
+                writeln!(
+                    complaints,
+                    "recorded ordering {} was unmeasured",
+                    expected.name
+                )
+                .expect("writing to a string cannot fail");
             }
         }
     }
@@ -749,6 +793,29 @@ fn compare_bands(bands: &BandSplit, complaints: &mut String) {
         if !BANDS.iter().any(|&(recorded, _, _)| recorded == name) {
             writeln!(complaints, "band {name} is not one of the recorded bands")
                 .expect("writing to a string cannot fail");
+        }
+    }
+}
+
+/// Complain when a recorded lookalike class changes or a new class appears.
+fn compare_reasons(reasons: &ReasonSplit, complaints: &mut String) {
+    for &(name, forward, shown, labelled) in REASONS {
+        let measured = reasons.reasons.get(name).copied().unwrap_or((0, 0, 0));
+        if measured != (forward, shown, labelled) {
+            writeln!(
+                complaints,
+                "lookalike class {name} has {measured:?}, recorded as ({forward}, {shown}, {labelled})",
+            )
+            .expect("writing to a string cannot fail");
+        }
+    }
+    for name in reasons.reasons.keys() {
+        if !REASONS.iter().any(|&(recorded, ..)| recorded == name) {
+            writeln!(
+                complaints,
+                "lookalike class {name} is not one of the recorded classes"
+            )
+            .expect("writing to a string cannot fail");
         }
     }
 }

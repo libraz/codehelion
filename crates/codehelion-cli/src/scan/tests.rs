@@ -3,6 +3,7 @@ use super::runtime::*;
 use super::*;
 use crate::cli::SortAxis;
 use boon::{Compiler, Schemas};
+use codehelion_core::discovery::{BuildConfiguration, CppBuild};
 
 fn assert_valid_partitioned_schema(value: &Value) {
     let mut schemas = Schemas::new();
@@ -45,7 +46,7 @@ fn cross_language_comparison_stays_in_its_own_report_domain() {
         groups: Vec::new(),
     };
     let json: Value = serde_json::from_str(
-        &partitioned_json(&[], None, None, Some(&comparison)).expect("JSON report"),
+        &partitioned_json(&[], None, None, Some(&comparison), None).expect("JSON report"),
     )
     .expect("valid JSON");
     assert_eq!(json["schema_version"], PARTITIONED_REPORT_SCHEMA_VERSION);
@@ -59,7 +60,7 @@ fn cross_language_comparison_stays_in_its_own_report_domain() {
     assert_eq!(json["cross_language_comparison"]["search_truncated"], true);
 
     let sarif: Value = serde_json::from_str(
-        &partitioned_sarif(&[], None, None, Some(&comparison)).expect("SARIF report"),
+        &partitioned_sarif(&[], None, None, Some(&comparison), None).expect("SARIF report"),
     )
     .expect("valid SARIF JSON");
     assert_eq!(
@@ -67,7 +68,7 @@ fn cross_language_comparison_stays_in_its_own_report_domain() {
         "codehelion/cross-language"
     );
 
-    let text = partitioned_text(&scan_args(false), &[], None, None, Some(&comparison))
+    let text = partitioned_text(&scan_args(false), &[], None, None, Some(&comparison), None)
         .expect("text report");
     assert!(text.contains("candidate search was truncated"));
 }
@@ -103,7 +104,7 @@ fn comparison_sarif_runs_share_escaped_source_locations_and_schema() {
     assert_eq!(location["uriBaseId"], report::sarif::SRCROOT);
 
     let log: Value = serde_json::from_str(
-        &partitioned_sarif(&[], Some(&comparison), None, None).expect("SARIF report"),
+        &partitioned_sarif(&[], Some(&comparison), None, None, None).expect("SARIF report"),
     )
     .expect("valid SARIF JSON");
     assert_eq!(log["$schema"], report::sarif::SARIF_SCHEMA_URI);
@@ -118,26 +119,113 @@ fn requested_cross_variant_comparison_that_cannot_run_is_explicit_in_every_forma
         origin_variants: vec!["aabb".to_string()],
     };
     let json: Value = serde_json::from_str(
-        &partitioned_json(&[], None, Some(&status), None).expect("JSON report"),
+        &partitioned_json(&[], None, Some(&status), None, None).expect("JSON report"),
     )
     .expect("valid JSON");
     assert_valid_partitioned_schema(&json);
     assert_eq!(json["cross_variant_comparison_status"]["status"], "not_run");
     assert!(json.get("cross_variant_comparison").is_none());
 
-    let text =
-        partitioned_text(&scan_args(false), &[], None, Some(&status), None).expect("text report");
+    let text = partitioned_text(&scan_args(false), &[], None, Some(&status), None, None)
+        .expect("text report");
     assert!(text.contains("Cross-build-variant comparison was not run"));
     assert!(text.contains("fewer than two build-variant partitions"));
 
     let sarif: Value = serde_json::from_str(
-        &partitioned_sarif(&[], None, Some(&status), None).expect("SARIF report"),
+        &partitioned_sarif(&[], None, Some(&status), None, None).expect("SARIF report"),
     )
     .expect("valid SARIF JSON");
     assert_eq!(
         sarif["runs"][0]["properties"]["crossVariantComparisonStatus"]["status"],
         "not_run"
     );
+}
+
+#[test]
+fn requested_cross_language_comparison_that_cannot_run_is_explicit_in_every_format() {
+    let status = report::CrossLanguageComparisonNotRun {
+        status: "not_run".to_string(),
+        comparison_kind: "registered-rust-cpp-semantic".to_string(),
+        reason: "no eligible C++ semantic windows were available".to_string(),
+        origin_variants: vec!["rust".to_string()],
+    };
+    let json: Value = serde_json::from_str(
+        &partitioned_json(&[], None, None, None, Some(&status)).expect("JSON report"),
+    )
+    .expect("valid JSON");
+    assert_valid_partitioned_schema(&json);
+    assert_eq!(
+        json["cross_language_comparison_status"]["status"],
+        "not_run"
+    );
+    assert!(json.get("cross_language_comparison").is_none());
+
+    let text = partitioned_text(&scan_args(false), &[], None, None, None, Some(&status))
+        .expect("text report");
+    assert!(text.contains("Cross-language comparison was not run"));
+    assert!(text.contains("no eligible C++ semantic windows"));
+
+    let sarif: Value = serde_json::from_str(
+        &partitioned_sarif(&[], None, None, None, Some(&status)).expect("SARIF report"),
+    )
+    .expect("valid SARIF JSON");
+    assert_eq!(
+        sarif["runs"][0]["properties"]["crossLanguageComparisonStatus"]["status"],
+        "not_run"
+    );
+}
+
+#[test]
+fn partitioned_machine_reports_reject_text_only_flags() {
+    for flag in ["--show-suppressed", "--show-siblings", "--show-near-misses"] {
+        for format in [Format::Json, Format::Sarif] {
+            let mut args = scan_args(false);
+            args.format = format;
+            match flag {
+                "--show-suppressed" => args.show_suppressed = true,
+                "--show-siblings" => args.show_siblings = true,
+                "--show-near-misses" => args.show_near_misses = true,
+                _ => unreachable!("the fixture uses only known text-only flags"),
+            }
+            let error =
+                write_partitioned_reports(&args, &mut Vec::new(), &[], None, None, None, None)
+                    .expect_err("machine reports reject text-only flags");
+            assert!(format!("{error:#}").contains(flag));
+        }
+    }
+}
+
+#[test]
+fn partitioned_reports_refuse_to_overwrite_every_format_without_force() {
+    let status = report::CrossVariantComparisonNotRun {
+        status: "not_run".to_string(),
+        comparison_kind: "exact-type-1-whole-units".to_string(),
+        reason: "fixture has one partition".to_string(),
+        origin_variants: vec!["aabb".to_string()],
+    };
+    let directory = tempfile::tempdir().expect("temporary output directory");
+
+    for (format, extension) in [
+        (Format::Text, "txt"),
+        (Format::Json, "json"),
+        (Format::Sarif, "sarif"),
+    ] {
+        let path = directory.path().join(format!("report.{extension}"));
+        std::fs::write(&path, "preserve this report").expect("write existing output");
+        let mut args = scan_args(false);
+        args.format = format;
+        args.output = Some(path.clone());
+        let mut out = Vec::new();
+
+        let error =
+            write_partitioned_reports(&args, &mut out, &[], None, Some(&status), None, None)
+                .expect_err("partitioned output must not overwrite without --force");
+        assert!(error.to_string().contains("refusing to overwrite"));
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read existing output"),
+            "preserve this report"
+        );
+    }
 }
 
 #[test]
@@ -148,10 +236,46 @@ fn partition_heading_carries_the_stable_build_variant_identity() {
         headers: Some("cpp".to_string()),
         normalization_version: 1,
         fingerprint: "aabb".to_string(),
+        settings: BTreeMap::new(),
     });
     assert_eq!(
         heading,
         "Build variant aabb (mode: semantic; languages: c, cpp)"
+    );
+}
+
+#[test]
+fn fresh_variant_settings_expose_the_compiler_inputs_that_define_identity() {
+    let variant = BuildVariant::semantic(
+        LanguageSelection {
+            rust: false,
+            c: false,
+            cpp: true,
+        },
+        Language::Cpp,
+        vec![BuildConfiguration::Cpp(Box::new(CppBuild {
+            compiler: "clang++".to_string(),
+            macros: vec!["-DENABLED=1".to_string()],
+            include_paths: vec!["include".to_string(), "generated".to_string()],
+            flags: vec!["-std=c++20".to_string()],
+            ..CppBuild::default()
+        }))],
+    );
+
+    assert_eq!(
+        build_variant_settings(&variant),
+        BTreeMap::from([(
+            String::from("cpp"),
+            BTreeMap::from([
+                (String::from("compiler"), vec![String::from("clang++")]),
+                (String::from("flags"), vec![String::from("-std=c++20")]),
+                (
+                    String::from("includes"),
+                    vec![String::from("include"), String::from("generated")]
+                ),
+                (String::from("macros"), vec![String::from("-DENABLED=1")]),
+            ])
+        )])
     );
 }
 
@@ -174,6 +298,7 @@ fn timestamps_are_fixed_width_rfc3339() {
 
 fn scan_args(untrusted: bool) -> ScanArgs {
     ScanArgs {
+        helpers: Vec::new(),
         sort: SortAxis::default(),
         min_identifier_jaccard: None,
         path: PathBuf::from("."),
@@ -183,6 +308,8 @@ fn scan_args(untrusted: bool) -> ScanArgs {
         force: false,
         config: None,
         no_ignore: false,
+        follow_links: false,
+        compile_commands: None,
         jobs: None,
         db: None,
         baseline: None,
@@ -196,6 +323,7 @@ fn scan_args(untrusted: bool) -> ScanArgs {
         include_trivial: false,
         include_vendored: false,
         verbose: false,
+        no_reuse: false,
         fail_on_findings: false,
         untrusted,
     }
@@ -227,6 +355,8 @@ fn distrusting_the_tree_lowers_every_ceiling_and_says_which() {
             sibling_candidate_budget: Some(usize::MAX),
             sibling_per_group_cap: Some(usize::MAX),
             sibling_total_cap: Some(usize::MAX),
+            verification_budget: Some(usize::MAX),
+            max_alignment_cells: Some(usize::MAX),
             max_component: usize::MAX,
         },
         ..Config::default()
@@ -245,6 +375,14 @@ fn distrusting_the_tree_lowers_every_ceiling_and_says_which() {
     );
     assert_eq!(tightened.limits.posting_cap, Some(profile.posting_cap));
     assert_eq!(tightened.limits.pair_budget, Some(profile.max_candidates));
+    assert_eq!(
+        tightened.limits.verification_budget,
+        Some(profile.verification_budget)
+    );
+    assert_eq!(
+        tightened.limits.max_alignment_cells,
+        Some(profile.max_alignment_cells)
+    );
     assert_eq!(tightened.limits.max_component, profile.max_component);
 
     // `Limits` is serialized with every ceiling as a named key. The
@@ -315,17 +453,67 @@ fn source_mapping_rejects_zero_workers_before_chunking() {
 }
 
 #[test]
-fn parse_budget_is_a_fixed_function_of_input_bytes() {
+fn source_mapping_keeps_discovery_order_after_workers_claim_work_dynamically() {
+    let sources = [
+        "src/first.rs",
+        "src/missing.rs",
+        "src/third.rs",
+        "src/slow.rs",
+    ]
+    .iter()
+    .map(|path| SourceUnit {
+        relative_path: PathBuf::from(path),
+        absolute_path: PathBuf::from(path),
+        language: Language::Rust,
+        is_header: false,
+        content_hash: ContentHash::of(b""),
+        source_bytes: Vec::new().into(),
+        byte_len: 0,
+        package: None,
+        crate_name: None,
+        target_kind: discovery::TargetKind::Library,
+    })
+    .collect::<Vec<_>>();
+
+    let (analysed, unreadable, timed_out) =
+        map_sources(&sources, 3, |source| match source.relative_path.to_str() {
+            Some("src/missing.rs") | None => FileOutcome::Unreadable,
+            Some("src/slow.rs") => FileOutcome::TimedOut,
+            Some(path) => FileOutcome::Done(Box::new(path.to_string())),
+        })
+        .unwrap();
+
+    assert_eq!(analysed, ["src/first.rs", "src/third.rs"]);
+    assert_eq!(unreadable, 1);
+    assert_eq!(timed_out, 1);
+}
+
+#[test]
+fn parse_work_budget_is_a_fixed_function_of_input_bytes_and_the_file_ceiling() {
     let one_millisecond = std::time::Duration::from_millis(1);
-    assert!(!exceeds_parse_budget(
-        &vec![0; usize::try_from(PARSE_BYTES_PER_MILLISECOND).unwrap()],
-        one_millisecond
-    ));
-    assert!(exceeds_parse_budget(
-        &vec![0; usize::try_from(PARSE_BYTES_PER_MILLISECOND + 1).unwrap()],
-        one_millisecond
-    ));
-    assert!(exceeds_parse_budget(&[0], std::time::Duration::ZERO));
+    assert_eq!(parse_work_byte_limit(1024, one_millisecond), 256);
+    assert_eq!(parse_work_byte_limit(128, one_millisecond), 128);
+    assert_eq!(parse_work_byte_limit(1024, std::time::Duration::ZERO), 0);
+}
+
+#[test]
+fn bounded_source_read_stops_after_the_first_byte_over_the_limit() {
+    let directory = tempfile::tempdir().expect("temporary source directory");
+    let source = directory.path().join("grown.rs");
+    std::fs::write(&source, vec![b'x'; 257]).expect("write source larger than the read budget");
+
+    assert!(
+        read_bounded_source(&source, 256)
+            .expect("read source")
+            .is_none(),
+        "a file that grew after discovery is excluded before frontend allocation"
+    );
+    assert_eq!(
+        read_bounded_source(&source, 257)
+            .expect("read source at its exact limit")
+            .as_deref(),
+        Some(&[b'x'; 257][..])
+    );
 }
 
 #[test]
@@ -384,6 +572,7 @@ fn glob_filter_applies_include_then_exclude() {
             language: Language::Rust,
             is_header: false,
             content_hash: ContentHash::of(b""),
+            source_bytes: Vec::new().into(),
             byte_len: 0,
             package: None,
             crate_name: None,
@@ -409,6 +598,8 @@ fn non_utf8_path_keys_stay_distinct_from_each_other_and_utf8_names() {
     assert_ne!(first_key, second_key);
     assert_ne!(first_key, "src/\u{fffd}.rs");
     assert!(first_key.starts_with('\u{001f}'));
+    assert!(display_path(&first_key).starts_with("<non-UTF-8 path: "));
+    assert!(!display_path(&first_key).contains("codehelion-path-bytes"));
     assert_eq!(path_key(Path::new("src/plain.rs")), "src/plain.rs");
 }
 

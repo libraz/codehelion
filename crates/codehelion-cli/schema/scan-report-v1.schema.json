@@ -158,6 +158,19 @@
         },
         "fingerprint": {
           "$ref": "#/$defs/hex"
+        },
+        "settings": {
+          "type": "object",
+          "description": "Resolved compiler settings grouped by build language and stable setting name.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
         }
       }
     },
@@ -260,7 +273,10 @@
             "unreadable",
             "walk_errors",
             "timed_out",
-            "symlinks"
+            "symlinks",
+            "language_excluded",
+            "symlink_files",
+            "symlink_directories"
           ],
           "properties": {
             "generated": {
@@ -301,6 +317,21 @@
               "type": "integer",
               "minimum": 0,
               "description": "Symbolic links deliberately left unresolved by the source walker."
+            },
+            "language_excluded": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Source files excluded because their language was disabled for the scan."
+            },
+            "symlink_files": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Symbolic-link files deliberately left unresolved by the source walker."
+            },
+            "symlink_directories": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Symbolic-link directories deliberately left unresolved by the source walker."
             }
           }
         },
@@ -396,14 +427,6 @@
                   }
                 }
               }
-            },
-            "mismatch": {
-              "type": "string",
-              "description": "Why the baseline covers nothing in this run, present only when it does not describe it: its ids were computed under conditions this run does not share, so none of them can match."
-            },
-            "caveat": {
-              "type": "string",
-              "description": "A difference between this run and the one the baseline was recorded against that leaves its entries matching but explains some of what went stale, such as a change to how occurrences are grouped."
             }
           }
         },
@@ -569,6 +592,13 @@
             "helper_timeout_ms",
             "posting_cap",
             "pair_budget",
+            "near_miss_delta",
+            "near_miss_cap",
+            "verification_budget",
+            "max_alignment_cells",
+            "sibling_candidate_budget",
+            "sibling_per_group_cap",
+            "sibling_total_cap",
             "max_component"
           ],
           "properties": {
@@ -605,6 +635,25 @@
               "type": "integer",
               "minimum": 0,
               "description": "Largest related unit component refined as one group."
+            },
+            "near_miss_delta": { "type": "number", "minimum": 0 },
+            "near_miss_cap": { "type": "integer", "minimum": 0 },
+            "verification_budget": { "type": "integer", "minimum": 0 },
+            "max_alignment_cells": { "type": "integer", "minimum": 0 },
+            "sibling_candidate_budget": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Largest number of sibling-sweep comparisons."
+            },
+            "sibling_per_group_cap": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Maximum siblings retained by one primary group."
+            },
+            "sibling_total_cap": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Maximum siblings retained by the whole run."
             }
           }
         },
@@ -634,6 +683,14 @@
               "additionalProperties": {
                 "type": "integer",
                 "minimum": 0
+              }
+            },
+            "diagnostics": {
+              "type": "object",
+              "description": "Bounded helper diagnostics, counted by exact message.",
+              "additionalProperties": {
+                "type": "integer",
+                "minimum": 1
               }
             },
             "restarts": {
@@ -697,6 +754,7 @@
         "test_code_evidence",
         "width_family",
         "split_pair",
+        "ranked_down",
         "suppressed",
         "members",
         "artifact_savings"
@@ -792,6 +850,10 @@
         "split_pair": {
           "type": "boolean",
           "description": "Whether this is a verified pair reported on its own because no group could hold both members. Being a clone is not transitive, so a unit can be a copy of two units that are not copies of each other, and only one such relation fits in a group. These are the only findings whose members also appear in other findings."
+        },
+        "ranked_down": {
+          "type": "boolean",
+          "description": "Whether the effective policy placed this finding after ordinary findings."
         },
         "suppressed": {
           "oneOf": [
@@ -915,11 +977,17 @@
     },
     "near_miss": {
       "type": "object",
-      "required": ["estimated_jaccard", "left", "right"],
+      "required": ["estimated_jaccard", "left", "right", "suppressed"],
       "properties": {
         "estimated_jaccard": { "type": "number", "minimum": 0, "maximum": 1 },
         "left": { "$ref": "#/$defs/near_miss_unit" },
-        "right": { "$ref": "#/$defs/near_miss_unit" }
+        "right": { "$ref": "#/$defs/near_miss_unit" },
+        "suppressed": {
+          "oneOf": [
+            { "$ref": "#/$defs/suppression" },
+            { "type": "null" }
+          ]
+        }
       }
     },
     "near_miss_unit": {
@@ -937,12 +1005,18 @@
     },
     "sibling": {
       "type": "object",
-      "required": ["clone_type", "confidence_band", "similarity", "member"],
+      "required": ["clone_type", "confidence_band", "similarity", "member", "suppressed"],
       "properties": {
         "clone_type": { "enum": ["type-1", "type-2", "type-3"] },
         "confidence_band": { "enum": ["high", "medium", "low"] },
         "similarity": { "$ref": "#/$defs/sibling_similarity" },
-        "member": { "$ref": "#/$defs/member" }
+        "member": { "$ref": "#/$defs/member" },
+        "suppressed": {
+          "oneOf": [
+            { "$ref": "#/$defs/suppression" },
+            { "type": "null" }
+          ]
+        }
       }
     },
     "sibling_similarity": {
@@ -1149,17 +1223,19 @@
               },
               "attributes": {
                 "type": "object",
-                "required": ["type_tag", "structure_fingerprint", "api_names", "resource_kind"],
+                "required": ["type_tag", "api_names", "resource_kind", "fallible_kind", "direct_propagation", "structure_fingerprint"],
                 "properties": {
                   "type_tag": { "type": ["string", "null"] },
+                  "api_names": { "type": "array", "items": { "type": "string" } },
+                  "resource_kind": { "type": ["string", "null"] },
+                  "fallible_kind": { "enum": ["option", "result", null] },
+                  "direct_propagation": { "enum": ["result_adapter", "option_adapter", null] },
                   "structure_fingerprint": {
                     "type": ["array", "null"],
                     "minItems": 16,
                     "maxItems": 16,
                     "items": { "type": "integer", "minimum": 0, "maximum": 255 }
-                  },
-                  "api_names": { "type": "array", "items": { "type": "string" } },
-                  "resource_kind": { "type": ["string", "null"] }
+                  }
                 }
               }
             }

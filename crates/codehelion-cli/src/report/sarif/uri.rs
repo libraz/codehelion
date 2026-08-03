@@ -14,7 +14,7 @@ pub(crate) fn uri_reference(path: &str) -> String {
     let mut uri = String::with_capacity(path.len());
     for byte in path.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
                 uri.push(char::from(byte));
             }
             b'\\' => uri.push('/'),
@@ -32,7 +32,17 @@ pub(crate) fn uri_reference(path: &str) -> String {
 /// Absolute `file:` URI for the scan root, with the trailing slash that marks
 /// it as a directory the result URIs are resolved against.
 pub(crate) fn root_uri(root: &str) -> String {
-    let encoded = uri_reference(root);
+    let normalized = root.replace('\\', "/");
+    let bytes = normalized.as_bytes();
+    let encoded = if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        format!(
+            "{}:{}",
+            char::from(bytes[0]),
+            uri_reference(&normalized[2..])
+        )
+    } else {
+        uri_reference(&normalized)
+    };
     let mut uri = String::from("file://");
     if !encoded.starts_with('/') {
         uri.push('/');

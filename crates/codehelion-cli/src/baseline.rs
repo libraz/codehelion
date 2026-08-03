@@ -65,6 +65,7 @@ use codehelion_store::query::{RunOrigin, StoredGroup};
 use serde::{Deserialize, Serialize};
 
 use crate::report::DetectorVersion;
+use crate::scan::display_path;
 
 /// Version of the baseline file schema.
 ///
@@ -72,7 +73,7 @@ use crate::report::DetectorVersion;
 /// the facts it does not carry guessed at. Recreating the baseline from the
 /// current scan is the fix, and is cheap: a baseline is a record of a
 /// judgement about the tree as it stands, not an archive.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// A baseline file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +104,8 @@ pub struct BaselinePartition {
     pub build_variant: Provenance,
     /// The detection component versions they were computed under.
     pub detector_versions: Vec<DetectorVersion>,
+    /// Minimum token window used to decide which clones could be detected.
+    pub min_clone_tokens: i64,
     /// The frozen findings, ordered by group id.
     pub entries: Vec<Entry>,
 }
@@ -350,6 +353,7 @@ impl BaselinePartition {
                     version: version.clone(),
                 })
                 .collect(),
+            min_clone_tokens: origin.min_clone_tokens,
             entries,
         }
     }
@@ -373,7 +377,11 @@ impl BaselinePartition {
     /// detector rule onto its replacement, so two runs scored under different
     /// rules are not compared.
     #[must_use]
-    pub fn compatibility(&self, detectors: &[(String, String)]) -> Compatibility {
+    pub fn compatibility(
+        &self,
+        detectors: &[(String, String)],
+        min_clone_tokens: i64,
+    ) -> Compatibility {
         let mut recorded: Vec<(String, String)> = self
             .detector_versions
             .iter()
@@ -387,12 +395,18 @@ impl BaselinePartition {
             .collect();
         recorded.sort_unstable();
         current.sort_unstable();
-        Compatibility {
-            mismatch: (recorded != current).then_some(
+        let mismatch = if self.min_clone_tokens == min_clone_tokens {
+            (recorded != current).then_some(
                 "recorded under different detector versions; recreate the baseline from this scan before using it"
                     .to_string(),
-            ),
-        }
+            )
+        } else {
+            Some(format!(
+                "recorded with min-clone-tokens {}, but this scan uses {}; recreate the baseline from this scan before using it",
+                self.min_clone_tokens, min_clone_tokens
+            ))
+        };
+        Compatibility { mismatch }
     }
 }
 
@@ -615,12 +629,12 @@ impl Entry {
                 .iter()
                 .map(|member| Occurrence {
                     finding: member.finding_hex.clone(),
-                    file: member.file_path.clone(),
+                    file: display_path(&member.file_path),
                     unit: member.unit_name.clone(),
                 })
                 .collect(),
             anchor: canonical.map(|member| Anchor {
-                file: member.file_path.clone(),
+                file: display_path(&member.file_path),
                 start_line: member.start_line.unwrap_or(0),
                 end_line: member.end_line.unwrap_or(0),
                 unit: member.unit_name.clone(),

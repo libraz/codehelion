@@ -86,7 +86,15 @@ fn open_store(root: &Path) -> Store {
 fn scan_json(root: &Path) -> serde_json::Value {
     let output = cmd()
         .current_dir(root)
-        .args(["scan", ".", "--mode", "structural", "--format", "json"])
+        .args([
+            "scan",
+            ".",
+            "--mode",
+            "structural",
+            "--no-reuse",
+            "--format",
+            "json",
+        ])
         .output()
         .expect("run scan");
     assert!(output.status.success(), "{output:?}");

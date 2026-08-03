@@ -9,7 +9,7 @@ use super::{
     SemanticCandidateConfig, SemanticDetection, SemanticPartition, SourceMeta, SourceUnit,
     StructuralReport, SyntaxIrFile, as_u64, build_groups, build_report, compile_rules, coverage,
     detector_versions, evaluate_suppression, extract_cross_language_candidates, literal_norm,
-    map_sources, mark_test_modules, mark_test_paths, open_store, parse_one,
+    map_sources, mark_test_modules, mark_test_paths, open_store, parse_one, path_key,
     presentation_suppression, record, registered_semantic_pairs, report, reportable_regions,
     resolve, rfc3339_now, semantic_confidence, stable_id, structural, structural_config,
     summary_row, suppress, verify_cross_language_candidates,
@@ -62,8 +62,9 @@ pub(super) fn run_semantic_partition(
     partition: &SemanticPartition,
 ) -> Result<PartitionOutcome> {
     let timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
-    let (parsed, unreadable, timed_out) =
-        map_sources(sources, jobs, |source| parse_one(source, timeout))?;
+    let (parsed, unreadable, timed_out) = map_sources(sources, jobs, |source| {
+        parse_one(source, cfg.limits.max_file_bytes, timeout)
+    })?;
     let (files, mut irs): (Vec<SourceMeta>, Vec<SyntaxIrFile>) = parsed
         .into_iter()
         .map(|source| (source.meta, source.ir))
@@ -76,6 +77,7 @@ pub(super) fn run_semantic_partition(
         &files,
         &partition.variant,
         &partition.commands,
+        args.untrusted.then_some(root),
         std::time::Duration::from_millis(cfg.limits.helper_timeout_ms),
     );
     let mut analysis =
@@ -101,7 +103,11 @@ pub(super) fn run_semantic_partition(
         args.baseline_mode,
         &mut rules.rules,
         &partition.variant,
-        &detector_versions(literal_norm(cfg.literal_normalization)),
+        &detector_versions(
+            literal_norm(cfg.literal_normalization),
+            cfg.entropy_ratio_floor,
+        ),
+        cfg.min_clone_tokens,
     )?;
     let regions = reportable_regions(&analysis);
     let mut presentation_cfg = cfg.clone();
@@ -138,6 +144,9 @@ pub(super) fn run_semantic_partition(
         pair_suppressed: &suppressed.pairs,
         semantic_pair_suppressed: &suppressed.semantic_pairs,
         semantic_group_suppressed: &suppressed.semantic_groups,
+        sibling_suppressed: &suppressed.siblings,
+        near_miss_suppressed: &suppressed.near_misses,
+        entropy_ratio_floor: cfg.entropy_ratio_floor,
         literals: literal_norm(cfg.literal_normalization),
         glob_excluded,
         unreadable,
@@ -145,6 +154,8 @@ pub(super) fn run_semantic_partition(
         weights: cfg.priority.weights(),
         min_clone_tokens: u64::from(cfg.min_clone_tokens),
         sort: args.sort.axis(),
+        reuse_allowed: false,
+        untrusted: args.untrusted,
     };
     let groups = build_groups(&inputs);
     let stored = summary_row(
@@ -153,7 +164,7 @@ pub(super) fn run_semantic_partition(
         baseline.as_ref().map(ScanBaseline::digest),
         guardrails,
     );
-    let run_id = record(
+    let (run_id, reused) = record(
         cfg,
         &inputs,
         &groups,
@@ -163,6 +174,7 @@ pub(super) fn run_semantic_partition(
         false,
     )?;
     let mut model = build_report(&inputs, run_id, &stored, groups);
+    model.run.reused = reused;
     model.summary.guardrails = guardrails.map(copy_guardrails);
     model.summary.compiler = asked.as_ref().map(coverage);
     model.summary.baseline = baseline
@@ -226,7 +238,11 @@ pub(super) fn maybe_cross_language_comparison_units(
                 end_line: semantic_unit.end_line,
                 name: unit.name.as_ref().map(ToString::to_string),
                 graph: semantic_unit.graph.clone(),
-                content: semantic_unit.content,
+                occurrence: stable_id::semantic_occurrence_fingerprint(
+                    semantic_unit.content,
+                    &unit.fingerprint,
+                    semantic_unit.occurrence_rank,
+                ),
                 normalization_confidence: semantic_unit.normalization_confidence,
                 interactions: semantic_unit.interactions.clone(),
                 data_flows: semantic_unit.data_flows.clone(),
@@ -244,6 +260,8 @@ pub(super) fn copy_guardrails(guardrails: &report::Guardrails) -> report::Guardr
         helper_timeout_ms: guardrails.helper_timeout_ms,
         posting_cap: guardrails.posting_cap,
         pair_budget: guardrails.pair_budget,
+        verification_budget: guardrails.verification_budget,
+        max_alignment_cells: guardrails.max_alignment_cells,
         near_miss_delta: guardrails.near_miss_delta,
         near_miss_cap: guardrails.near_miss_cap,
         sibling_candidate_budget: guardrails.sibling_candidate_budget,
@@ -319,6 +337,7 @@ pub(super) fn record_cross_variant_comparison(
                 .members
                 .iter()
                 .map(|member| CrossVariantMemberRow {
+                    member_id: member.id,
                     origin_variant: member.origin_variant.clone(),
                     language: member.language,
                     file_path: member.file_path.clone(),
@@ -331,7 +350,7 @@ pub(super) fn record_cross_variant_comparison(
         })
         .collect();
     let finished_at = rfc3339_now();
-    let root_path = root.to_string_lossy();
+    let root_path = path_key(root);
     let snapshot = CrossVariantComparisonSnapshot {
         root_path: &root_path,
         comparison_id: comparison.id,
@@ -360,7 +379,7 @@ pub(super) fn record_cross_variant_comparison(
                     .map(|member| report::CrossVariantMember {
                         origin_variant: member.origin_variant,
                         language: member.language.name().to_string(),
-                        file: member.file_path,
+                        file: crate::scan::display_path(&member.file_path),
                         start_line: member.start_line,
                         end_line: member.end_line,
                         name: member.name,
@@ -430,7 +449,7 @@ pub(super) fn record_cross_language_comparison(
             &comparison_id,
             matched.rule.id,
             matched.rule.version,
-            &[left.content, right.content],
+            &[left.occurrence, right.occurrence],
         );
         let semantic_confidence = semantic_confidence(
             matched.rule.confidence,
@@ -447,6 +466,11 @@ pub(super) fn record_cross_language_comparison(
             .iter()
             .map(|unit| {
                 Ok(CrossLanguageSemanticMemberRow {
+                    member_id: stable_id::cross_language_member_id(
+                        &group_id,
+                        &unit.origin_variant,
+                        &unit.occurrence,
+                    ),
                     origin_variant: unit.origin_variant.clone(),
                     language: unit.language,
                     file_path: unit.file_path.clone(),
@@ -478,7 +502,7 @@ pub(super) fn record_cross_language_comparison(
                 .map(|unit| report::CrossLanguageMember {
                     origin_variant: unit.origin_variant.clone(),
                     language: unit.language.name().to_string(),
-                    file: unit.file_path.clone(),
+                    file: crate::scan::display_path(&unit.file_path),
                     start_line: unit.start_line,
                     end_line: unit.end_line,
                     name: unit.name.clone(),
@@ -488,7 +512,7 @@ pub(super) fn record_cross_language_comparison(
         });
     }
     let finished_at = rfc3339_now();
-    let root_path = root.to_string_lossy();
+    let root_path = path_key(root);
     let snapshot = CrossLanguageComparisonSnapshot {
         root_path: &root_path,
         comparison_id,
@@ -510,6 +534,34 @@ pub(super) fn record_cross_language_comparison(
             || candidates.stats.pairs_budget_dropped > 0,
         groups: report_groups,
     }))
+}
+
+/// Describe an explicitly requested Rust-to-C++ comparison that lacked one
+/// of its required source-language inputs.
+pub(super) fn cross_language_comparison_not_run(
+    reports: &[Report],
+    units: &[CrossLanguageComparisonUnit],
+) -> report::CrossLanguageComparisonNotRun {
+    let mut origin_variants: Vec<_> = reports
+        .iter()
+        .map(|report| report.run.build_variant.fingerprint.clone())
+        .collect();
+    origin_variants.sort_unstable();
+    origin_variants.dedup();
+    let has_rust = units.iter().any(|unit| unit.language == Language::Rust);
+    let has_cpp = units.iter().any(|unit| unit.language == Language::Cpp);
+    let reason = match (has_rust, has_cpp) {
+        (false, false) => "no eligible Rust or C++ semantic windows were available".to_string(),
+        (false, true) => "no eligible Rust semantic windows were available".to_string(),
+        (true, false) => "no eligible C++ semantic windows were available".to_string(),
+        (true, true) => "fewer than two origin build variants were available".to_string(),
+    };
+    report::CrossLanguageComparisonNotRun {
+        status: "not_run".to_string(),
+        comparison_kind: "registered-rust-cpp-semantic".to_string(),
+        reason,
+        origin_variants,
+    }
 }
 
 /// Candidate accounting for an opt-in cross-language comparison.

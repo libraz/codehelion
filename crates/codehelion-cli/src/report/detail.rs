@@ -2,9 +2,10 @@
 
 use super::{
     EXPLAIN_RESPONSE_CLONE_GROUP, EXPLAIN_RESPONSE_CROSS_LANGUAGE_GROUP,
-    EXPLAIN_RESPONSE_OCCURRENCE, FINDING_DETAIL_SCHEMA_VERSION, Group, MappingEvidence, Member,
-    Palette, SCOPE_FRAGMENT, SemanticEvidence, SemanticOperationGraph, Serialize, Similarity,
-    Suppression, TestCodeEvidence, TextOptions, Write, detail_json, io, render_group,
+    EXPLAIN_RESPONSE_CROSS_VARIANT_GROUP, EXPLAIN_RESPONSE_OCCURRENCE, EXPLAIN_RESPONSE_SIBLING,
+    FINDING_DETAIL_SCHEMA_VERSION, Group, MappingEvidence, Member, Palette, SCOPE_FRAGMENT,
+    SemanticEvidence, SemanticOperationGraph, Serialize, Sibling, Similarity, Suppression,
+    TestCodeEvidence, TextOptions, Write, detail_json, io, render_group,
 };
 
 /// Where a stored run ranked a finding, as it was recorded.
@@ -74,6 +75,17 @@ pub struct FindingDetail {
     pub clone_group_savings: Vec<CloneGroupSavingsDetail>,
 }
 
+/// Standalone explain view of one supplemental sibling finding.
+#[derive(Debug, Serialize)]
+pub struct SiblingDetail {
+    /// Row id of the scan run that recorded the sibling.
+    pub scan_run: i64,
+    /// Primary clone group the supplemental finding belongs to.
+    pub group_fingerprint: String,
+    /// Sibling member and canonical-to-sibling verifier evidence.
+    pub sibling: Sibling,
+}
+
 /// The standalone explain view of one explicitly requested Rust-to-C++
 /// semantic comparison group.
 #[derive(Debug, Serialize)]
@@ -100,6 +112,44 @@ pub struct CrossLanguageGroupDetail {
     pub members: Vec<CrossLanguageGroupMemberDetail>,
 }
 
+/// Standalone explain view of one explicit cross-build-variant clone group.
+#[derive(Debug, Serialize)]
+pub struct CrossVariantGroupDetail {
+    /// Stable comparison-domain group identity.
+    pub group_id: String,
+    /// Stable identity of the comparison that recorded this group.
+    pub comparison_id: String,
+    /// Version of the comparison policy.
+    pub policy_version: String,
+    /// Root shared by the compared partitions.
+    pub root_path: String,
+    /// Origin build variants kept separate by the comparison.
+    pub origin_variants: Vec<String>,
+    /// Exact clone classification under the comparison policy.
+    pub clone_type: String,
+    /// Origin-aware exact-clone members.
+    pub members: Vec<CrossVariantGroupMemberDetail>,
+}
+
+/// One origin-aware member of a cross-build-variant explain result.
+#[derive(Debug, Serialize)]
+pub struct CrossVariantGroupMemberDetail {
+    /// Origin build variant of this member's normal partition.
+    pub origin_variant: String,
+    /// Source language.
+    pub language: String,
+    /// Source location relative to the comparison root.
+    pub file: String,
+    /// One-based source range start.
+    pub start_line: u32,
+    /// One-based source range end.
+    pub end_line: u32,
+    /// Best-effort enclosing unit name.
+    pub unit: Option<String>,
+    /// Matched token count.
+    pub token_count: usize,
+}
+
 /// One clone group looked up on its own.
 ///
 /// The group itself is the same [`Group`] a report carries, rendered by the
@@ -109,6 +159,12 @@ pub struct CrossLanguageGroupDetail {
 pub struct CloneGroupDetail {
     /// Local database the group was read from.
     pub database: String,
+    /// Row id of the scan run that recorded the group.
+    pub scan_run: i64,
+    /// Analysis mode that computed the group's stable identity.
+    pub analysis_mode: String,
+    /// Build variant fingerprint that qualifies the group.
+    pub build_variant: String,
     /// The group, with its members and the inputs its ranking read.
     pub group: Group,
 }
@@ -134,6 +190,11 @@ impl CloneGroupDetail {
     pub fn render_text(&self, out: &mut impl Write) -> io::Result<()> {
         writeln!(out, "clone group {}", self.group.fingerprint)?;
         writeln!(out, "  database: {}", self.database)?;
+        writeln!(
+            out,
+            "  run: {} ({}; build variant {})",
+            self.scan_run, self.analysis_mode, self.build_variant
+        )?;
         render_group(
             &self.group,
             TextOptions {
@@ -144,6 +205,43 @@ impl CloneGroupDetail {
             &Palette { enabled: false },
             out,
         )
+    }
+}
+
+impl SiblingDetail {
+    /// The detail as pretty-printed JSON, newline-terminated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when serialization fails.
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        detail_json(EXPLAIN_RESPONSE_SIBLING, self)
+    }
+
+    /// Render the supplemental finding and its verifier evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error from the writer.
+    pub fn render_text(&self, out: &mut impl Write) -> io::Result<()> {
+        writeln!(out, "sibling finding {}", self.sibling.member.finding_id)?;
+        writeln!(out, "  scan run: {}", self.scan_run)?;
+        writeln!(out, "  primary group: {}", self.group_fingerprint)?;
+        writeln!(
+            out,
+            "  {} {}:{}-{} ({}, confidence {}, similarity {:.3})",
+            self.sibling.member.language,
+            self.sibling.member.file,
+            self.sibling.member.start_line,
+            self.sibling.member.end_line,
+            self.sibling.clone_type,
+            self.sibling.confidence_band,
+            self.sibling.similarity.composite,
+        )?;
+        if let Some(unit) = &self.sibling.member.unit {
+            writeln!(out, "    unit: {unit}")?;
+        }
+        Ok(())
     }
 }
 
@@ -556,6 +654,51 @@ impl CrossLanguageGroupDetail {
                 "    graph {}: {operations}",
                 member.graph.schema_version
             )?;
+        }
+        Ok(())
+    }
+}
+
+impl CrossVariantGroupDetail {
+    /// The detail as pretty-printed JSON, newline-terminated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when serialization fails.
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        detail_json(EXPLAIN_RESPONSE_CROSS_VARIANT_GROUP, self)
+    }
+
+    /// Render every origin-aware exact-clone member.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error from the writer.
+    pub fn render_text(&self, out: &mut impl Write) -> io::Result<()> {
+        writeln!(out, "cross-build-variant clone group {}", self.group_id)?;
+        writeln!(out, "  comparison: {}", self.comparison_id)?;
+        writeln!(out, "  policy: {}", self.policy_version)?;
+        writeln!(out, "  root: {}", self.root_path)?;
+        writeln!(
+            out,
+            "  origin variants: {}",
+            self.origin_variants.join(", ")
+        )?;
+        writeln!(out, "  clone type: {}", self.clone_type)?;
+        for member in &self.members {
+            writeln!(
+                out,
+                "  {} {}:{}-{} ({}, {} tokens)",
+                member.language,
+                member.file,
+                member.start_line,
+                member.end_line,
+                member.origin_variant,
+                member.token_count,
+            )?;
+            if let Some(unit) = &member.unit {
+                writeln!(out, "    unit: {unit}")?;
+            }
         }
         Ok(())
     }

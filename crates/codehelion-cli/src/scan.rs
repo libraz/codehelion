@@ -41,7 +41,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde_json::Value;
 
 use crate::Outcome;
-use crate::cli::{BaselineMode, Format, Mode, ScanArgs};
+use crate::cli::{BaselineMode, Format, Mode, ScanArgs, SortAxis};
 use crate::config::{self, Config, ConfigSource, LiteralNormalization, ResolvedConfig};
 use crate::report::{self, Report};
 use crate::suppress;
@@ -77,8 +77,8 @@ struct LexedSource {
     language: Language,
     frontend_version: &'static str,
     tokens: Vec<Token>,
-    /// Preprocessor arm at each token; Rust carries the empty path.
-    arm_paths: Vec<ArmPath>,
+    /// Preprocessor arms for C-family tokens; Rust has none.
+    arm_paths: Option<Vec<ArmPath>>,
     units: Vec<Unit>,
     /// `(start, end)` line range of each unit, parallel to `units`.
     unit_lines: Vec<(u32, u32)>,
@@ -97,6 +97,10 @@ struct LexedSource {
 /// when the audit database cannot be opened or written, or when report
 /// output fails. Per-file problems (unreadable or malformed sources) are
 /// counted and reported instead of failing the scan.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the Fast scan orchestration intentionally keeps its stage order visible"
+)]
 pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     validate_fast_args(args)?;
     let started_at = rfc3339_now();
@@ -117,12 +121,19 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let (cfg, guardrails) = guarded(resolved_config.config, args);
     let jobs = effective_jobs(args.jobs, cfg.jobs)?;
 
-    let mut discovered = discover_sources(&root, &cfg, args.no_ignore)?;
+    let mut discovered = discover_sources(
+        &root,
+        &cfg,
+        args.no_ignore,
+        args.follow_links,
+        args.compile_commands.as_deref(),
+    )?;
     let sources = std::mem::take(&mut discovered.units);
     let (sources, glob_excluded) = filter_globs(&cfg, sources)?;
 
     let lex_timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
-    let (lexed, unreadable, timed_out) = lex_sources(&sources, jobs, lex_timeout)?;
+    let (lexed, unreadable, timed_out) =
+        lex_sources(&sources, jobs, cfg.limits.max_file_bytes, lex_timeout)?;
 
     let engine_config = engine_config(&cfg)?;
     let input: Vec<InputFile<'_>> = lexed
@@ -132,7 +143,8 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
             units: &file.units,
         })
         .collect();
-    let arm_paths: Vec<&[ArmPath]> = lexed.iter().map(|file| file.arm_paths.as_slice()).collect();
+    let arm_paths: Vec<Option<&[ArmPath]>> =
+        lexed.iter().map(|file| file.arm_paths.as_deref()).collect();
     let contexts: Vec<FileContext<'_>> = lexed
         .iter()
         .map(|file| FileContext {
@@ -184,6 +196,10 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         literals: engine_config.literals,
         entropy_ratio_floor: engine_config.entropy_ratio_floor,
         sort: args.sort.axis(),
+        reuse_allowed: !args.no_reuse,
+        untrusted: args.untrusted,
+        reused: false,
+        changes: None,
     };
     let stored = summary_row(
         &inputs,
@@ -192,6 +208,8 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     );
     let groups = rank_and_record(&mut inputs, &cfg, &contexts, file_rows(&sources), &stored)?;
     let mut model = build_report(&inputs, &stored, groups);
+    model.run.reused = inputs.reused;
+    model.summary.changes.clone_from(&inputs.changes);
     model.summary.guardrails = guardrails;
     // Counted against the assembled report rather than the raw analysis: a
     // stale entry is one whose duplication this run does not list.
@@ -211,6 +229,18 @@ fn validate_fast_args(args: &ScanArgs) -> Result<()> {
     }
     if args.include_trivial {
         bail!("--include-trivial requires --mode structural or --mode semantic");
+    }
+    if args.show_siblings {
+        bail!("--show-siblings requires --mode structural or --mode semantic");
+    }
+    if args.show_near_misses {
+        bail!("--show-near-misses requires --mode structural or --mode semantic");
+    }
+    if args.sort == SortAxis::IdentifierJaccard {
+        bail!("--sort identifier-jaccard requires --mode structural or --mode semantic");
+    }
+    if args.min_identifier_jaccard.is_some() {
+        bail!("--min-identifier-jaccard requires --mode structural or --mode semantic");
     }
     Ok(())
 }
@@ -296,6 +326,7 @@ fn evaluate_suppression(
             literal_norm(cfg.literal_normalization),
             cfg.entropy_ratio_floor,
         ),
+        cfg.min_clone_tokens,
     )?;
     let file_suppressions: Vec<suppress::FileSuppression> = lexed
         .iter()
@@ -364,6 +395,10 @@ struct BuildInputs<'a> {
     entropy_ratio_floor: f64,
     /// The axis the run puts its entries in order on.
     sort: report::Sort,
+    reuse_allowed: bool,
+    untrusted: bool,
+    reused: bool,
+    changes: Option<report::TreeChanges>,
 }
 
 /// The configured suppression rules whose selectors matched no scanned source
@@ -408,6 +443,10 @@ pub(crate) fn guardrails_row(guardrails: &report::Guardrails) -> GuardrailsRow {
         helper_timeout_ms: guardrails.helper_timeout_ms,
         posting_cap: u64::try_from(guardrails.posting_cap).unwrap_or(u64::MAX),
         pair_budget: u64::try_from(guardrails.pair_budget).unwrap_or(u64::MAX),
+        near_miss_delta_bits: guardrails.near_miss_delta.to_bits(),
+        near_miss_cap: u64::try_from(guardrails.near_miss_cap).unwrap_or(u64::MAX),
+        verification_budget: u64::try_from(guardrails.verification_budget).unwrap_or(u64::MAX),
+        max_alignment_cells: u64::try_from(guardrails.max_alignment_cells).unwrap_or(u64::MAX),
         sibling_candidate_budget: u64::try_from(guardrails.sibling_candidate_budget)
             .unwrap_or(u64::MAX),
         sibling_per_group_cap: u64::try_from(guardrails.sibling_per_group_cap).unwrap_or(u64::MAX),
@@ -467,6 +506,7 @@ pub(crate) fn common_run_info(mut inputs: RunInfoInputs<'_>) -> report::RunInfo 
             headers: variant.headers.map(|language| language.name().to_string()),
             normalization_version: variant.normalization_version,
             fingerprint: variant.fingerprint(),
+            settings: build_variant_settings(variant),
         },
         detector_versions: inputs.detector_versions,
         ranking: report::RankingInfo {
@@ -476,7 +516,36 @@ pub(crate) fn common_run_info(mut inputs: RunInfoInputs<'_>) -> report::RunInfo 
         },
         database: inputs.db_path.display().to_string(),
         run_id: inputs.run_id,
+        reused: false,
     }
+}
+
+/// Renderable settings that explain the identity of a resolved build variant.
+///
+/// The map's ordering matches the persisted query order, so a fresh report and
+/// a `report --run` replay serialize the same evidence.
+pub(crate) fn build_variant_settings(
+    variant: &BuildVariant,
+) -> BTreeMap<String, BTreeMap<String, Vec<String>>> {
+    let mut settings = BTreeMap::new();
+    for build in &variant.builds {
+        let language = build.language().to_string();
+        for setting in build.settings() {
+            let values = setting
+                .shape
+                .values()
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            if !values.is_empty() {
+                settings
+                    .entry(language.clone())
+                    .or_insert_with(BTreeMap::new)
+                    .insert(setting.name.to_string(), values);
+            }
+        }
+    }
+    settings
 }
 
 /// The Fast pipeline's pass counts, stage by stage: a winnowed fingerprint
@@ -486,7 +555,7 @@ pub(crate) fn common_run_info(mut inputs: RunInfoInputs<'_>) -> report::RunInfo 
 ///
 /// Both pairing stages carry their own budget accounting, because both hold
 /// their own allowance.
-fn funnel(stats: &engine::EngineStats) -> Vec<report::FunnelStage> {
+fn funnel(stats: &engine::EngineStats, groups: usize) -> Vec<report::FunnelStage> {
     vec![
         report::FunnelStage::new("tokens", as_u64(stats.tokens)),
         report::FunnelStage::new("fingerprints", as_u64(stats.raw_fingerprints)),
@@ -504,7 +573,10 @@ fn funnel(stats: &engine::EngineStats) -> Vec<report::FunnelStage> {
                     .saturating_sub(stats.seed_candidates),
             ),
         ),
-        report::FunnelStage::new("fragments", as_u64(stats.fragments)),
+        report::FunnelStage::new("fragments", as_u64(stats.fragments)).dropping(
+            "control_header_limit",
+            as_u64(stats.control_headers_over_limit),
+        ),
         report::FunnelStage::new("fragment classes", as_u64(stats.fragment_classes))
             .dropping("class_cap", as_u64(stats.class_cap_dropped))
             .dropping("hash_collision", as_u64(stats.hash_collisions)),
@@ -521,6 +593,8 @@ fn funnel(stats: &engine::EngineStats) -> Vec<report::FunnelStage> {
         ),
         report::FunnelStage::new("verified pairs", as_u64(stats.pairs))
             .dropping("conditional_arms", as_u64(stats.conditional_pairs)),
+        report::FunnelStage::new("clone groups", as_u64(groups))
+            .dropping("subsumed", as_u64(stats.subsumed_groups)),
     ]
 }
 
@@ -551,6 +625,9 @@ fn summary_row(
         excluded_symlinks: inputs.discovered.skipped.symlinks,
         excluded_walk_errors: inputs.discovered.skipped.walk_errors,
         excluded_timed_out: inputs.timed_out,
+        excluded_language: inputs.discovered.skipped.language_excluded,
+        excluded_symlink_files: inputs.discovered.skipped.symlink_files,
+        excluded_symlink_directories: inputs.discovered.skipped.symlink_directories,
         guardrails: guardrails.map(guardrails_row),
         excluded_skipped: inputs.discovered.skipped.total() + inputs.unreadable + inputs.timed_out,
         // The Fast engine compares whole units, so it folds and subsumes no
@@ -560,7 +637,7 @@ fn summary_row(
         split_components: 0,
         pair_budget_exhausted: inputs.report.stats.pair_budget_exhausted,
         baseline_digest,
-        funnel: funnel(&inputs.report.stats),
+        funnel: funnel(&inputs.report.stats, inputs.report.groups.len()),
         unused_suppressions: unused_suppressions(inputs),
     })
 }
@@ -614,7 +691,7 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
             let mut report_group = shared::report_group(shared::ReportGroupCore {
                 fingerprint: inputs.ids[index].fingerprint.to_hex(),
                 clone_type: group.clone_type,
-                scope: CloneScope::Unit,
+                scope: fast_group_scope(group, inputs.lexed),
                 statements: None,
                 confidence: group.score,
                 entropy_bits: group.entropy_bits,
@@ -628,7 +705,7 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
                         report::Member {
                             finding_id: member_ids.finding.to_hex(),
                             content: member_ids.content.to_hex(),
-                            file: source.relative_path.clone(),
+                            file: display_path(&source.relative_path),
                             language: source.language.name().to_string(),
                             start_line: instance.start_line,
                             end_line: instance.end_line,
@@ -649,6 +726,24 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
         &inputs.weights,
         inputs.min_clone_tokens,
     )
+}
+
+/// Classify a Fast finding by what its matched spans actually cover.
+///
+/// The lexer can anchor a token-window clone inside a unit, but that anchor
+/// does not make the window a whole-unit finding. Every occurrence must cover
+/// its host exactly before the group can use unit scope.
+fn fast_group_scope(group: &CloneGroup, lexed: &[LexedSource]) -> CloneScope {
+    if group.members.iter().all(|member| {
+        member.unit.is_some_and(|unit| {
+            let host = &lexed[member.file].units[unit];
+            member.token_start == host.token_start && member.token_end == host.token_end
+        })
+    }) {
+        CloneScope::Unit
+    } else {
+        CloneScope::Fragment
+    }
 }
 
 pub(crate) mod output;
@@ -713,8 +808,8 @@ pub(crate) const fn priority_row(priority: &report::Priority) -> PriorityRow {
 pub(crate) mod runtime;
 
 pub(crate) use runtime::{
-    FileOutcome, build_globset, database_path, discover_sources, effective_jobs,
-    exceeds_parse_budget, filter_globs, guarded, literal_norm, map_sources,
+    FileOutcome, build_globset, database_path, discover_sources, effective_jobs, filter_globs,
+    guarded, literal_norm, map_sources, parse_work_byte_limit,
 };
 use runtime::{engine_config, lex_sources};
 
@@ -725,7 +820,7 @@ pub(crate) use baseline::{ScanBaseline, apply_baseline, load_baseline};
 pub(crate) mod store;
 
 use store::{detector_versions, rank_and_record};
-pub(crate) use store::{file_rows, open_store, path_key};
+pub(crate) use store::{display_path, file_rows, open_store, path_key};
 
 /// The current time as fixed-width RFC 3339 UTC with microsecond precision.
 ///

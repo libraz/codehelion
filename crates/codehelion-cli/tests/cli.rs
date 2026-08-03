@@ -2,9 +2,11 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use assert_cmd::Command;
+use fs2::FileExt;
 use object::write::{Object as WriteObject, StandardSection, Symbol, SymbolSection};
 use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
 use predicates::prelude::*;
+use std::fs::OpenOptions;
 
 fn cmd() -> Command {
     Command::cargo_bin("codehelion").expect("binary should build")
@@ -47,13 +49,99 @@ fn doctor_reports_own_version() {
 }
 
 #[test]
+fn doctor_reports_an_incompatible_database_without_replacing_it() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let cache = directory.path().join(".codehelion");
+    let database = cache.join("audit.db");
+    std::fs::create_dir_all(&cache).expect("create cache directory");
+    codehelion_store::Store::open(&database).expect("create database");
+    let connection = rusqlite::Connection::open(&database).expect("open database");
+    connection
+        .execute("UPDATE schema_meta SET version = 999", [])
+        .expect("change schema version");
+
+    cmd()
+        .current_dir(directory.path())
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "database health: unreadable (database schema version 999",
+        ));
+
+    let version: i64 = connection
+        .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+        .expect("read schema version");
+    assert_eq!(version, 999, "doctor must not replace the database");
+}
+
+#[test]
+fn doctor_and_cache_status_report_a_live_database_lease() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let cache = directory.path().join(".codehelion");
+    let database = cache.join("audit.db");
+    std::fs::create_dir_all(&cache).expect("create cache directory");
+    codehelion_store::Store::open(&database).expect("create database");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(cache.join("audit.db.lock"))
+        .expect("open database lease");
+    FileExt::try_lock_exclusive(&lock).expect("test holds database lease");
+
+    for arguments in [["doctor"].as_slice(), ["cache", "status"].as_slice()] {
+        cmd()
+            .current_dir(directory.path())
+            .args(arguments)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "database lease: held by another codehelion scan or cache command",
+            ));
+    }
+}
+
+#[test]
+fn scan_recreates_an_incompatible_pre_release_database() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let database = directory.path().join("audit.db");
+    let source = directory.path().join("lib.rs");
+    std::fs::write(&source, "pub fn tiny() {}\n").expect("write source");
+    codehelion_store::Store::open(&database).expect("create database");
+    let connection = rusqlite::Connection::open(&database).expect("open database");
+    connection
+        .execute("UPDATE schema_meta SET version = 999", [])
+        .expect("change schema version");
+    drop(connection);
+
+    cmd()
+        .args([
+            "scan",
+            directory.path().to_str().expect("scan path"),
+            "--db",
+            database.to_str().expect("database path"),
+        ])
+        .assert()
+        .success();
+
+    let store = codehelion_store::Store::open_existing(&database).expect("recreated database");
+    assert_eq!(
+        store.schema_version().expect("schema version"),
+        codehelion_store::schema::SCHEMA_VERSION
+    );
+    assert_eq!(store.table_count("scan_run").expect("scan runs"), 1);
+}
+
+#[test]
 fn doctor_reports_the_restricted_semantic_rule_registry() {
     cmd()
         .arg("doctor")
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "restricted semantic rules: 12 enabled",
+            "restricted semantic rules: 8 enabled; 4 cross-language rules require --compare-languages",
         ))
         .stdout(predicate::str::contains("semantic-rule-registry-v1"));
 }
@@ -112,7 +200,9 @@ fn artifact_compare_help_exposes_the_input_format_assertion() {
 
 #[test]
 fn artifact_calibration_rejects_a_source_run_that_does_not_exist() {
-    let database = tempfile::NamedTempFile::new().expect("database path");
+    let directory = tempfile::tempdir().expect("database directory");
+    let database = directory.path().join("audit.db");
+    codehelion_store::Store::open(&database).expect("create empty database");
     cmd()
         .args([
             "artifact",
@@ -120,13 +210,52 @@ fn artifact_calibration_rejects_a_source_run_that_does_not_exist() {
             "--source-run",
             "999",
             "--db",
-            database.path().to_str().expect("database path"),
+            database.to_str().expect("database path"),
         ])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
             "scan run 999 was not found in this database",
         ));
+}
+
+#[test]
+fn artifact_read_commands_do_not_create_an_absent_database() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let database = dir.path().join("missing.db");
+    let database_arg = database.to_str().expect("database path");
+
+    cmd()
+        .args([
+            "artifact",
+            "report",
+            "--analysis",
+            "1",
+            "--db",
+            database_arg,
+        ])
+        .assert()
+        .failure();
+    assert!(
+        !database.exists(),
+        "artifact report created its input database"
+    );
+
+    cmd()
+        .args([
+            "artifact",
+            "calibration",
+            "--source-run",
+            "1",
+            "--db",
+            database_arg,
+        ])
+        .assert()
+        .failure();
+    assert!(
+        !database.exists(),
+        "artifact calibration created its input database"
+    );
 }
 
 #[test]
@@ -149,6 +278,58 @@ fn corrupted_database_error_is_not_repeated_in_the_cli_context_chain() {
         stderr.matches("file is not a database").count(),
         1,
         "{stderr}"
+    );
+}
+
+#[test]
+fn semantic_scan_rejects_an_invalid_compilation_database() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(directory.path().join("compile_commands.json"), b"[{")
+        .expect("write truncated compilation database");
+
+    cmd()
+        .current_dir(directory.path())
+        .args(["scan", ".", "--mode", "semantic"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot read compile_commands.json for semantic analysis",
+        ));
+}
+
+#[test]
+fn structural_scan_does_not_report_different_binary_operators_as_type2() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::create_dir_all(directory.path().join("src")).expect("create source directory");
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        "pub fn add(values: &[u64]) -> u64 {\n    let mut total = 0;\n    for value in values {\n        total = total + *value;\n    }\n    total\n}\n\npub fn divide(values: &[u64]) -> u64 {\n    let mut total = 1;\n    for value in values {\n        total = total / (*value).max(1);\n    }\n    total\n}\n",
+    )
+    .expect("write source");
+    std::fs::write(
+        directory.path().join("codehelion.toml"),
+        "min-clone-tokens = 1\n",
+    )
+    .expect("write configuration");
+
+    let output = cmd()
+        .current_dir(directory.path())
+        .args(["scan", ".", "--mode", "structural", "--format", "json"])
+        .output()
+        .expect("run structural scan");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON report");
+    assert!(
+        report["groups"]
+            .as_array()
+            .expect("groups")
+            .iter()
+            .all(|group| group["clone_type"] != "type-2"),
+        "{report}"
     );
 }
 
@@ -444,7 +625,6 @@ fn artifact_reports_a_minimal_wasm_without_executing_it() {
             "json",
             "--db",
             db.to_str().expect("utf-8 database path"),
-            "--untrusted",
         ])
         .assert()
         .success()
@@ -452,6 +632,79 @@ fn artifact_reports_a_minimal_wasm_without_executing_it() {
         .stdout(predicate::str::contains("\"format\": \"wasm\""))
         .stdout(predicate::str::contains("\"analysis_id\": 1"));
     assert!(db.is_file());
+}
+
+#[test]
+fn artifact_analysis_refuses_a_database_held_by_another_writer() {
+    let artifact = tempfile::NamedTempFile::new().expect("artifact fixture");
+    let database_directory = tempfile::tempdir().expect("database directory");
+    let database = database_directory.path().join("artifact.db");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(database_directory.path().join("artifact.db.lock"))
+        .expect("open database lease");
+    FileExt::try_lock_exclusive(&lock).expect("test holds database lease");
+    std::fs::write(artifact.path(), b"\0asm\x01\0\0\0").expect("write WASM fixture");
+
+    cmd()
+        .args([
+            "artifact",
+            "analyze",
+            artifact.path().to_str().expect("UTF-8 artifact path"),
+            "--db",
+            database.to_str().expect("UTF-8 database path"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "another codehelion scan or cache clear",
+        ));
+}
+
+#[test]
+fn artifact_calibration_write_refuses_a_database_held_by_another_writer() {
+    let before = tempfile::NamedTempFile::new().expect("before artifact fixture");
+    let after = tempfile::NamedTempFile::new().expect("after artifact fixture");
+    let variant = tempfile::NamedTempFile::new().expect("build variant fixture");
+    let database_directory = tempfile::tempdir().expect("database directory");
+    let database = database_directory.path().join("artifact.db");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(database_directory.path().join("artifact.db.lock"))
+        .expect("open database lease");
+    FileExt::try_lock_exclusive(&lock).expect("test holds database lease");
+    std::fs::write(before.path(), b"\0asm\x01\0\0\0").expect("write before WASM fixture");
+    std::fs::write(after.path(), b"\0asm\x01\0\0\0").expect("write after WASM fixture");
+    std::fs::write(variant.path(), "{}\n").expect("write build variant");
+
+    cmd()
+        .args([
+            "artifact",
+            "compare",
+            before.path().to_str().expect("UTF-8 before path"),
+            after.path().to_str().expect("UTF-8 after path"),
+            "--source-run",
+            "1",
+            "--clone-group",
+            "deadbeef",
+            "--db",
+            database.to_str().expect("UTF-8 database path"),
+            "--before-build-variant",
+            variant.path().to_str().expect("UTF-8 variant path"),
+            "--after-build-variant",
+            variant.path().to_str().expect("UTF-8 variant path"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "another codehelion scan or cache clear",
+        ));
 }
 
 #[test]
@@ -666,4 +919,77 @@ fn cache_clear_requires_confirmation_even_when_the_database_is_absent() {
         .assert()
         .success()
         .stdout(predicate::str::contains("nothing to remove"));
+    assert!(
+        !dir.path().join(".codehelion").exists(),
+        "clearing an unscanned tree must not create cache state"
+    );
+}
+
+#[test]
+fn cache_clear_removes_wal_sidecars_and_status_counts_them() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let database = dir.path().join("audit.db");
+    let wal = dir.path().join("audit.db-wal");
+    let shm = dir.path().join("audit.db-shm");
+    std::fs::write(&database, [0_u8]).expect("write database");
+    std::fs::write(&wal, [0_u8; 2]).expect("write WAL sidecar");
+    std::fs::write(&shm, [0_u8; 3]).expect("write shared-memory sidecar");
+    let database_arg = database.to_str().expect("temporary database path is UTF-8");
+
+    cmd()
+        .current_dir(dir.path())
+        .args(["cache", "status", "--db", database_arg])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(6 bytes)"));
+    cmd()
+        .current_dir(dir.path())
+        .args(["cache", "clear", "--force", "--db", database_arg])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("removed"));
+
+    assert!(!database.exists(), "main database was removed");
+    assert!(!wal.exists(), "WAL sidecar was removed");
+    assert!(!shm.exists(), "shared-memory sidecar was removed");
+}
+
+#[test]
+fn cache_status_breaks_down_valid_storage_and_prune_compacts_it() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let database = directory.path().join("audit.db");
+    let source = directory.path().join("lib.rs");
+    std::fs::write(&source, "pub fn tiny() {}\n").expect("write source");
+    let database_arg = database.to_str().expect("database path");
+
+    cmd()
+        .args([
+            "scan",
+            directory.path().to_str().expect("scan path"),
+            "--db",
+            database_arg,
+        ])
+        .assert()
+        .success();
+    cmd()
+        .args(["cache", "status", "--db", database_arg])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("table storage:"))
+        .stdout(predicate::str::contains("scan_run:"));
+    cmd()
+        .args([
+            "cache",
+            "prune",
+            "--db",
+            database_arg,
+            "--keep-artifacts",
+            "0",
+            "--keep-comparisons",
+            "0",
+            "--force",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pruned"));
 }

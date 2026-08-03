@@ -29,6 +29,41 @@ const AXES: [(&str, Measure); 4] = [
     }),
 ];
 
+#[test]
+fn fast_mode_refuses_unmeasured_identifier_jaccard_options() {
+    let dir = fixture();
+
+    for arguments in [
+        vec!["scan", ".", "--sort", "identifier-jaccard"],
+        vec!["scan", ".", "--min-identifier-jaccard", "0.7"],
+    ] {
+        cmd()
+            .current_dir(dir.path())
+            .args(arguments)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "requires --mode structural or --mode semantic",
+            ));
+    }
+}
+
+#[test]
+fn fast_mode_refuses_structural_only_diagnostic_flags() {
+    let dir = fixture();
+
+    for flag in ["--show-siblings", "--show-near-misses"] {
+        cmd()
+            .current_dir(dir.path())
+            .args(["scan", ".", flag])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(format!(
+                "{flag} requires --mode structural or --mode semantic"
+            )));
+    }
+}
+
 /// What a group measures on one axis, in the order the report listed them.
 ///
 /// Structural mode, because raw identifier agreement is measured on whole
@@ -172,13 +207,33 @@ fn an_identifier_floor_narrows_the_listing_without_moving_a_count() {
         floored.contains("group(s) are not listed: raw identifier agreement below 0.90"),
         "what a floor left out has to be said: {floored}"
     );
+    let structural = scan_json_with(root, &["--mode", "structural"]);
+    let low_agreement: Vec<&str> = structural["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .filter_map(|group| {
+            group["identifier_jaccard"]
+                .as_f64()
+                .filter(|agreement| *agreement < 0.9)
+                .and_then(|_| group["fingerprint"].as_str())
+        })
+        .collect();
     assert!(
-        floored
-            .lines()
-            .filter(|line| line.contains("type-2"))
-            .count()
-            < full.lines().filter(|line| line.contains("type-2")).count(),
-        "the renamed copies sit under the floor and should have gone"
+        !low_agreement.is_empty(),
+        "the renamed copies supply low-agreement structural evidence"
+    );
+    assert!(
+        low_agreement
+            .iter()
+            .any(|fingerprint| full.contains(fingerprint)),
+        "the unfloored view lists low-agreement groups"
+    );
+    assert!(
+        low_agreement
+            .iter()
+            .all(|fingerprint| !floored.contains(fingerprint)),
+        "the renamed copies sit under the floor and should have gone: {floored}"
     );
 
     // Exports carry the findings rather than a reading of them.

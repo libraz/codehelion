@@ -99,6 +99,8 @@ pub(crate) enum Answer {
         unit: UnitRef,
         /// Why there is no analysis of it.
         reason: Unavailability,
+        /// Bounded diagnostic output from the helper that failed this unit.
+        diagnostics: Vec<String>,
     },
     /// Nobody was asked, and why not: no helper here analyses this file's
     /// language, or nothing says which unit it is compiled as.
@@ -144,6 +146,8 @@ pub(crate) struct Backend<'a> {
     pub(crate) permitted: &'a [Execution],
     /// The containment policy every process for this backend must satisfy.
     pub(crate) sandbox: SandboxRequest,
+    /// Boundary for paths the helper may read from a compilation command.
+    pub(crate) read_boundary: Option<&'a Path>,
 }
 
 /// One helper that took part, as it described itself.
@@ -196,11 +200,16 @@ pub(crate) fn ask_with_commands(
         variant,
         commands,
         &mut |backend, unit, command| {
-            supervisors
-                .get_mut(backend)
-                .map_or(Analysis::Missing(Unavailability::NotSupported), |helper| {
-                    helper.analyze_with_command(unit, command, &WANTED)
-                })
+            let Some(helper) = supervisors.get_mut(backend) else {
+                return (Analysis::Missing(Unavailability::NotSupported), Vec::new());
+            };
+            let analysis = helper.analyze_with_command_and_boundary(
+                unit,
+                command,
+                backends[backend].read_boundary,
+                &WANTED,
+            );
+            (analysis, helper.take_diagnostics())
         },
     );
     read_by_other_units(&mut gathered, sources);
@@ -240,12 +249,16 @@ enum Gathered {
         backend: usize,
         unit: UnitRef,
         reason: Unavailability,
+        diagnostics: Vec<String>,
     },
     NotAsked {
         unit: UnitRef,
         reason: Unavailability,
     },
 }
+
+type AskOne<'a> =
+    dyn FnMut(usize, &UnitRef, Option<&CompileCommandSelector>) -> (Analysis, Vec<String>) + 'a;
 
 impl Gathered {
     /// The same answer, naming the row `row` puts this backend at.
@@ -263,10 +276,12 @@ impl Gathered {
                 backend,
                 unit,
                 reason,
+                diagnostics,
             } => Answer::Unavailable {
                 helper: at(backend),
                 unit,
                 reason,
+                diagnostics,
             },
             Self::NotAsked { unit, reason } => Answer::NotAsked { unit, reason },
         }
@@ -286,7 +301,7 @@ fn gather(
     sources: &[SourceUnit],
     variant: &str,
     commands: &BTreeMap<PathBuf, CompileCommandSelector>,
-    ask_one: &mut dyn FnMut(usize, &UnitRef, Option<&CompileCommandSelector>) -> Analysis,
+    ask_one: &mut AskOne<'_>,
 ) -> Vec<Gathered> {
     sources
         .iter()
@@ -308,12 +323,14 @@ fn gather(
                     reason: Unavailability::NoBuildInformation,
                 };
             }
-            match ask_one(backend, &unit, command) {
+            let (analysis, diagnostics) = ask_one(backend, &unit, command);
+            match analysis {
                 Analysis::Done(ir) => Gathered::Analyzed { backend, ir },
                 Analysis::Missing(reason) => Gathered::Unavailable {
                     backend,
                     unit,
                     reason,
+                    diagnostics,
                 },
             }
         })

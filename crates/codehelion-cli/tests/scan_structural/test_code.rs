@@ -287,6 +287,14 @@ fn a_recorded_run_reapplies_suppression_ordering() {
         .as_i64()
         .expect("scan JSON carries the recorded run id");
 
+    // Replay must not reinterpret the historical ordering through whatever
+    // policy happens to be on disk now.
+    std::fs::write(
+        root.join("codehelion.toml"),
+        "[suppression]\ntest-code = \"report\"\n",
+    )
+    .unwrap();
+
     let output = cmd()
         .current_dir(root)
         .args(["report", "--run", &run_id.to_string(), "--format", "json"])
@@ -297,6 +305,6 @@ fn a_recorded_run_reapplies_suppression_ordering() {
         serde_json::from_slice(&output.stdout).expect("recorded report is JSON");
     assert_eq!(
         recorded["groups"], scanned["groups"],
-        "scan and report apply the same suppression-aware ordering"
+        "report preserves the recorded suppression-aware ordering after the current policy changes"
     );
 }

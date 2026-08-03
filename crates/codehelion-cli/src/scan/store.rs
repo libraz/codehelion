@@ -6,11 +6,13 @@
 )]
 
 use super::{
-    BTreeMap, BuildInputs, BuildVariant, CloneScope, Config, ContentHash, ContentNorm, Context,
-    EngineReport, FP_SCHEMA_VERSION, FileContext, FileRow, GroupIds, GroupRow, LexedSource,
-    LiteralNorm, MemberRow, NORMALIZATION_VERSION, Path, Result, Snapshot, SourceUnit, Store,
-    SummaryRow, UnitRow, build_group, literal_norm, priority_row, report, shared, stable_id,
+    BTreeMap, BuildInputs, BuildVariant, Config, ContentHash, ContentNorm, Context, EngineReport,
+    FP_SCHEMA_VERSION, FileContext, FileRow, GroupIds, GroupRow, LexedSource, LiteralNorm,
+    MemberRow, NORMALIZATION_VERSION, Path, Result, Snapshot, SourceUnit, Store, SummaryRow,
+    UnitRow, build_group, engine, fast_group_scope, literal_norm, priority_row, report, shared,
+    stable_id,
 };
+use std::ffi::OsString;
 
 /// The tree a scan read, as rows to record beside its findings.
 ///
@@ -29,7 +31,7 @@ pub(crate) fn file_rows(units: &[SourceUnit]) -> Vec<FileRow> {
         .collect()
 }
 
-/// Render a filesystem path as a unique database and report key.
+/// Render a filesystem path as a unique database key.
 ///
 /// Ordinary UTF-8 paths stay unchanged. A non-UTF-8 path is represented by
 /// its native encoded bytes, rather than by `to_string_lossy`, so two distinct
@@ -43,7 +45,14 @@ pub(crate) fn path_key(path: &Path) -> String {
     if let Ok(text) = std::str::from_utf8(bytes)
         && !text.starts_with(ESCAPED_PATH_PREFIX)
     {
-        return text.to_string();
+        #[cfg(windows)]
+        {
+            return text.replace('\\', "/");
+        }
+        #[cfg(not(windows))]
+        {
+            return text.to_string();
+        }
     }
     let mut encoded = ESCAPED_PATH_PREFIX.to_string();
     for byte in bytes {
@@ -51,6 +60,35 @@ pub(crate) fn path_key(path: &Path) -> String {
         encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     encoded
+}
+
+/// Turn a stored path key into a safe human-facing path label.
+///
+/// The reversible storage encoding is deliberately not a public path format:
+/// leaking it would expose an internal sentinel and, in SARIF, turn its colon
+/// into a malformed path component. Valid UTF-8 escaped solely because it
+/// begins with the sentinel is restored verbatim. Invalid native bytes remain
+/// distinguishable without pretending they are a filesystem path.
+#[must_use]
+pub(crate) fn display_path(key: &str) -> String {
+    const ESCAPED_PATH_PREFIX: &str = "\u{001f}codehelion-path-bytes:";
+    let Some(hex) = key.strip_prefix(ESCAPED_PATH_PREFIX) else {
+        return key.to_string();
+    };
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.as_bytes().chunks_exact(2) {
+        let Some(high) = char::from(pair[0]).to_digit(16) else {
+            return "<invalid stored path key>".to_string();
+        };
+        let Some(low) = char::from(pair[1]).to_digit(16) else {
+            return "<invalid stored path key>".to_string();
+        };
+        bytes.push(u8::try_from((high << 4) | low).unwrap_or(u8::MAX));
+    }
+    if hex.len() % 2 != 0 {
+        return "<invalid stored path key>".to_string();
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| format!("<non-UTF-8 path: {hex}>"))
 }
 
 /// Rank every entry, persist the snapshot, and fill in what the recording
@@ -79,9 +117,15 @@ pub(super) fn rank_and_record(
         inputs.ids,
         inputs.group_suppressed,
         &ranked,
+        &cfg.suppression,
     );
     let mut store = open_store(inputs.db_path)?;
-    let config_hash = ContentHash::of(cfg.to_toml()?.as_bytes());
+    let config_text = format!(
+        "{}\nreuse-profile-v1:untrusted={}",
+        cfg.to_toml()?,
+        inputs.untrusted
+    );
+    let config_hash = ContentHash::of(config_text.as_bytes());
     let mut detector_versions = detector_versions(
         literal_norm(cfg.literal_normalization),
         cfg.entropy_ratio_floor,
@@ -91,7 +135,24 @@ pub(super) fn rank_and_record(
     // detector contract and baseline compatibility: changing presentation
     // cannot invalidate a judgement about detected duplication.
     detector_versions.push(("ranking".to_string(), cfg.priority.weights().recipe()));
-    let root_path = inputs.root.to_string_lossy();
+    let root_path = path_key(inputs.root);
+    let current_tree = file_tree(&files);
+    let predecessor =
+        store.latest_compatible_run(&root_path, config_hash.as_str(), &variant.fingerprint())?;
+    if let Some(previous) = predecessor.as_ref() {
+        let previous_tree = store.run_tree(previous.id)?;
+        inputs.changes = Some(tree_changes(previous.id, &previous_tree, &current_tree));
+        if inputs.reuse_allowed
+            && store
+                .run_summary_row(previous.id)?
+                .is_some_and(|stored| stored.baseline_digest == summary.baseline_digest)
+            && previous_tree == current_tree
+        {
+            inputs.run_id = previous.id;
+            inputs.reused = true;
+            return Ok(ranked);
+        }
+    }
     let snapshot = Snapshot {
         root_path: &root_path,
         tool_version: env!("CARGO_PKG_VERSION"),
@@ -108,7 +169,6 @@ pub(super) fn rank_and_record(
         groups,
         sibling_groups: Vec::new(),
         near_misses: Vec::new(),
-        features: Vec::new(),
         files,
         // No compiler was asked anything: this mode reads source and nothing
         // else, and an empty list is the whole truth about it.
@@ -117,7 +177,47 @@ pub(super) fn rank_and_record(
         summary: summary.clone(),
     };
     inputs.run_id = store.record_snapshot(&snapshot)?;
+    if let Some(previous) = predecessor {
+        store.adopt_matching_lineages(inputs.run_id, previous.id)?;
+    }
     Ok(ranked)
+}
+
+fn file_tree(files: &[FileRow]) -> BTreeMap<String, String> {
+    files
+        .iter()
+        .map(|file| (file.relative_path.clone(), file.content_hash.clone()))
+        .collect()
+}
+
+fn tree_changes(
+    since_run_id: i64,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> report::TreeChanges {
+    let modified = after
+        .iter()
+        .filter(|(path, hash)| before.get(*path).is_some_and(|old| old != *hash))
+        .count();
+    let added = after
+        .keys()
+        .filter(|path| !before.contains_key(*path))
+        .count();
+    let removed = before
+        .keys()
+        .filter(|path| !after.contains_key(*path))
+        .count();
+    let unchanged = after
+        .iter()
+        .filter(|(path, hash)| before.get(*path) == Some(*hash))
+        .count();
+    report::TreeChanges {
+        since_run_id,
+        modified: u64::try_from(modified).unwrap_or(u64::MAX),
+        added: u64::try_from(added).unwrap_or(u64::MAX),
+        removed: u64::try_from(removed).unwrap_or(u64::MAX),
+        unchanged: u64::try_from(unchanged).unwrap_or(u64::MAX),
+    }
 }
 
 /// Open the v1 store, creating its parent directory when needed.
@@ -128,7 +228,38 @@ pub(crate) fn open_store(path: &Path) -> Result<Store> {
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
     }
-    Store::open(path).with_context(|| format!("opening audit database {}", path.display()))
+    match Store::open(path) {
+        Ok(store) => Ok(store),
+        Err(codehelion_store::StoreError::UnsupportedSchema { .. }) => {
+            remove_incompatible_database(path)?;
+            Store::open(path)
+                .with_context(|| format!("recreating audit database {}", path.display()))
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("opening audit database {}", path.display()))
+        }
+    }
+}
+
+/// Remove one incompatible pre-release baseline and its WAL sidecars.
+///
+/// This is called only from scan persistence after the command acquired the
+/// database lease. Read paths use `Store::open_existing` and never reach it.
+fn remove_incompatible_database(path: &Path) -> Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut candidate: OsString = path.as_os_str().to_owned();
+        candidate.push(suffix);
+        let candidate = std::path::PathBuf::from(candidate);
+        match std::fs::remove_file(&candidate) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("removing incompatible {}", candidate.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The `(component, version)` pairs recorded with every snapshot.
@@ -141,6 +272,10 @@ pub(super) fn detector_versions(
     entropy_ratio_floor: f64,
 ) -> Vec<(String, String)> {
     vec![
+        (
+            "fast-engine".to_string(),
+            engine::ENGINE_VERSION.to_string(),
+        ),
         ("fp-schema".to_string(), FP_SCHEMA_VERSION.to_string()),
         (
             "literals".to_string(),
@@ -179,6 +314,10 @@ pub(super) fn detector_versions(
 /// `ranked` is the report's own entries in the engine's order, which is where
 /// the recorded ranking comes from: the audit database and the report are two
 /// views of one verdict, not two verdicts that happen to agree.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "parallel detector, identity, suppression, and presentation rows are joined here"
+)]
 fn snapshot_rows(
     lexed: &[LexedSource],
     contexts: &[FileContext<'_>],
@@ -187,6 +326,7 @@ fn snapshot_rows(
     ids: &[GroupIds],
     group_suppressed: &[Option<usize>],
     ranked: &[report::Group],
+    suppression: &crate::config::Suppression,
 ) -> (Vec<UnitRow>, Vec<GroupRow>) {
     let mut host_index: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     for group in &report.groups {
@@ -231,11 +371,12 @@ fn snapshot_rows(
             let mut row = shared::stored_group(shared::StoredGroupCore {
                 fingerprint: group_ids.fingerprint,
                 clone_type: group.clone_type,
-                scope: CloneScope::Unit,
+                scope: fast_group_scope(group, lexed),
                 statements: None,
                 score: group.score,
                 entropy_bits: group.entropy_bits,
                 suppressed_by: *suppressed_by,
+                ranked_down: report::ranks_down(&ranked[index], suppression),
                 priority: priority_row(&ranked[index].priority),
                 members: group
                     .members

@@ -153,6 +153,7 @@ fn near_miss_diagnostic_band_and_cap_are_configurable_and_bounded() {
     let error = Config::from_toml("[limits]\nnear-miss-delta = 0.31")
         .expect_err("the default estimate threshold bounds the diagnostic band");
     assert!(format!("{error:#}").contains("limits.near-miss-delta"));
+    assert!(format!("{error:#}").contains("(0.0, 0.3]"));
 }
 
 #[test]
@@ -267,6 +268,42 @@ fn template_parses_as_defaults() {
     // empty table and resolves to the defaults.
     let config = Config::from_toml(TEMPLATE).unwrap();
     assert_eq!(config, Config::default());
+}
+
+#[test]
+fn helper_paths_are_read_from_their_own_configuration_section() {
+    let config = Config::from_toml(
+        "[helpers]\nrust = \"/tools/codehelion-backend-rust\"\nclang = \"/tools/codehelion-backend-clang\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        config.helpers.rust,
+        Some(PathBuf::from("/tools/codehelion-backend-rust"))
+    );
+    assert_eq!(
+        config.helpers.clang,
+        Some(PathBuf::from("/tools/codehelion-backend-clang"))
+    );
+}
+
+#[test]
+fn command_line_helper_paths_override_configuration_and_validate_names() {
+    let configured = Helpers {
+        rust: Some(PathBuf::from("/configured/rust")),
+        clang: None,
+    };
+    let paths = helper_paths(
+        &configured,
+        &[
+            "rust=/command/rust".to_string(),
+            "clang=/command/clang".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(paths.rust, Some(PathBuf::from("/command/rust")));
+    assert_eq!(paths.clang, Some(PathBuf::from("/command/clang")));
+    assert!(helper_paths(&configured, &["other=/tool".to_string()]).is_err());
+    assert!(helper_paths(&configured, &["rust=".to_string()]).is_err());
 }
 
 #[test]

@@ -24,7 +24,7 @@ fn the_log_names_its_version_and_the_tool_that_produced_it() {
     assert_eq!(rules[3]["id"], "clone/restricted-semantic");
 
     let run = &value["runs"][0];
-    assert_eq!(run["automationDetails"]["id"], "codehelion/fast");
+    assert_eq!(run["automationDetails"]["id"], "codehelion/fast/1");
     assert_eq!(
         run["originalUriBaseIds"]["SRCROOT"]["uri"],
         "file:///work/project/"
@@ -40,7 +40,8 @@ fn the_log_names_its_version_and_the_tool_that_produced_it() {
 
 #[test]
 fn a_group_becomes_one_result_pointing_at_its_canonical_instance() {
-    let value = sarif(&sample_report());
+    let report = sample_report();
+    let value = sarif(&report);
     let result = &value["runs"][0]["results"][0];
     assert_eq!(result["ruleId"], "clone/type-1");
     assert_eq!(result["ruleIndex"], 0);
@@ -66,6 +67,18 @@ fn a_group_becomes_one_result_pointing_at_its_canonical_instance() {
     assert_eq!(primary["physicalLocation"]["region"]["endLine"], 9);
     assert_eq!(primary["logicalLocations"][0]["name"], "checksum");
     assert_eq!(primary["properties"]["canonical"], true);
+    assert_eq!(
+        primary["properties"]["content"],
+        report.groups[0].members[0].content
+    );
+    assert_eq!(
+        primary["properties"]["language"],
+        report.groups[0].members[0].language
+    );
+    assert_eq!(
+        result["properties"]["entropy_bits"],
+        serde_json::json!(report.groups[0].entropy_bits)
+    );
 
     // Every member is reachable, the canonical one included.
     let related = result["relatedLocations"].as_array().unwrap();
@@ -85,6 +98,26 @@ fn a_group_becomes_one_result_pointing_at_its_canonical_instance() {
     assert_eq!(
         result["partialFingerprints"][FINGERPRINT_KEY],
         "0b".repeat(16)
+    );
+}
+
+#[test]
+fn baseline_status_reaches_the_result_properties() {
+    let mut report = sample_report();
+    report.groups[0].baseline = Some(super::super::GroupBaseline {
+        state: "expanded".to_string(),
+        added_instances: Some(2),
+        derived_from: None,
+    });
+
+    let value = sarif(&report);
+    assert_eq!(
+        value["runs"][0]["results"][0]["properties"]["baseline"]["state"],
+        "expanded"
+    );
+    assert_eq!(
+        value["runs"][0]["results"][0]["properties"]["baseline"]["added_instances"],
+        2
     );
 }
 
@@ -134,7 +167,7 @@ fn restricted_semantic_group_uses_its_own_rule_and_preserves_evidence() {
     let group = &mut report.groups[0];
     group.clone_type = "restricted-semantic".to_string();
     group.semantic = Some(super::super::SemanticEvidence {
-        schema_version: "sog-v1".to_string(),
+        schema_version: "sog-v4".to_string(),
         rules: vec![super::super::SemanticRuleEvidence {
             id: "sequence-pipeline-v1".to_string(),
             version: 1,
@@ -299,6 +332,7 @@ fn coverage(not_asked: u64, unavailable: &[(&str, u64)]) -> CompilerCoverage {
             .iter()
             .map(|(reason, count)| ((*reason).to_string(), *count))
             .collect(),
+        diagnostics: BTreeMap::new(),
         execution_refusals: Vec::new(),
         restarts: 2,
     }
@@ -463,10 +497,12 @@ fn a_run_with_nothing_to_report_about_itself_reports_nothing() {
 fn paths_are_escaped_into_valid_uri_references() {
     assert_eq!(uri_reference("src/lib.rs"), "src/lib.rs");
     assert_eq!(uri_reference("src/a b.rs"), "src/a%20b.rs");
+    assert_eq!(uri_reference("src:generated/a.rs"), "src%3Agenerated/a.rs");
     assert_eq!(uri_reference("src\\win.rs"), "src/win.rs");
     assert_eq!(uri_reference("src/日本.rs"), "src/%E6%97%A5%E6%9C%AC.rs");
     assert_eq!(root_uri("/work/my project"), "file:///work/my%20project/");
     assert_eq!(root_uri("C:\\work"), "file:///C:/work/");
+    assert_eq!(root_uri("/work:tree"), "file:///work%3Atree/");
 }
 
 #[test]

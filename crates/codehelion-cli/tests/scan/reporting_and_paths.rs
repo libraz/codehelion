@@ -5,7 +5,7 @@ use super::*;
 fn comparable_report(root: &Path, extra: &[&str]) -> serde_json::Value {
     let mut value = scan_json_with(root, extra);
     let run = value["run"].as_object_mut().expect("run object");
-    for key in ["started_at", "finished_at", "run_id"] {
+    for key in ["started_at", "finished_at", "run_id", "reused"] {
         run.insert(key.to_string(), serde_json::Value::Null);
     }
     // A later run has an earlier one to compare itself with; what it found in
@@ -24,6 +24,106 @@ fn json_reports_are_deterministic_across_reruns() {
     let first = comparable_report(dir.path(), &[]);
     let second = comparable_report(dir.path(), &[]);
     assert_eq!(first, second);
+}
+
+#[test]
+fn report_without_a_run_replays_the_latest_completed_scan() {
+    let dir = fixture();
+    let first = scan_json(dir.path());
+    let second = scan_json(dir.path());
+    assert_eq!(first["run"]["run_id"], second["run"]["run_id"]);
+
+    let output = cmd()
+        .current_dir(dir.path())
+        .args(["report", "--format", "json"])
+        .output()
+        .expect("replay the latest scan");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let replayed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("report is JSON");
+    assert_eq!(replayed["run"]["run_id"], second["run"]["run_id"]);
+}
+
+#[test]
+fn fast_partial_unit_matches_are_reported_and_replayed_as_fragments() {
+    const LEFT: &str = r"pub fn left(values: &[u64]) -> u64 {
+    let prefix = values.len() as u64;
+    let mut acc = 17_u64;
+    for value in values {
+        acc = acc.wrapping_mul(31).wrapping_add(*value);
+    }
+    acc ^= 0x5a5a;
+    acc + prefix
+}
+";
+    const RIGHT: &str = r"pub fn right(values: &[u64]) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    let mut acc = 17_u64;
+    for value in values {
+        acc = acc.wrapping_mul(31).wrapping_add(*value);
+    }
+    acc ^= 0x5a5a;
+    acc.rotate_left(3)
+}
+";
+    let dir = tempfile::tempdir().expect("temporary Fast fixture");
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/left.rs"), LEFT).unwrap();
+    std::fs::write(dir.path().join("src/right.rs"), RIGHT).unwrap();
+    std::fs::write(dir.path().join("src/exact_a.rs"), FORMAT_RS).unwrap();
+    std::fs::write(dir.path().join("src/exact_b.rs"), FORMAT_RS).unwrap();
+
+    let report = scan_json_with(dir.path(), &["--mode", "fast"]);
+    let group = report["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .find(|group| {
+            group["members"]
+                .as_array()
+                .is_some_and(|members| members.iter().any(|member| member["file"] == "src/left.rs"))
+        })
+        .expect("the shared body is detected");
+    assert_eq!(group["scope"], "fragment");
+    assert!(
+        group["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|member| member["unit"].is_string())
+    );
+    let exact_group = report["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .find(|group| {
+            group["members"].as_array().is_some_and(|members| {
+                members
+                    .iter()
+                    .any(|member| member["file"] == "src/exact_a.rs")
+                    && members
+                        .iter()
+                        .any(|member| member["file"] == "src/exact_b.rs")
+            })
+        })
+        .expect("the whole-unit copies are detected");
+    assert_eq!(exact_group["scope"], "unit");
+
+    let store = Store::open_existing(&dir.path().join(".codehelion/audit.db")).unwrap();
+    let run = store.latest_run().unwrap().expect("recorded run");
+    let stored = store
+        .run_groups(run.id)
+        .unwrap()
+        .into_iter()
+        .find(|stored| stored.fingerprint_hex == group["fingerprint"])
+        .expect("the reported group is stored");
+    assert_eq!(stored.member_scope, "fragment");
 }
 
 /// A tree wide enough that the work actually spreads: one file per worker and
@@ -158,7 +258,8 @@ fn explain_preserves_an_engine_noise_suppression() {
 #[test]
 fn default_reports_truncate_members_and_verbose_lists_them_all() {
     let dir = fixture();
-    // Grow the verbatim Rust group to 9 members (a.rs, b.rs + 7 copies).
+    // Grow the Rust body-fragment group to 10 members (a.rs, b.rs, the
+    // renamed c.rs copy, and 7 verbatim copies).
     for index in 0..7 {
         std::fs::write(dir.path().join(format!("src/copy{index}.rs")), CHECKSUM_RS).unwrap();
     }
@@ -167,7 +268,7 @@ fn default_reports_truncate_members_and_verbose_lists_them_all() {
         .args(["scan", "."])
         .assert()
         .success()
-        .stdout(predicate::str::contains("... and 4 more occurrences"));
+        .stdout(predicate::str::contains("... and 5 more occurrences"));
     cmd()
         .current_dir(dir.path())
         .args(["scan", ".", "--verbose"])
@@ -448,7 +549,7 @@ fn explain_looks_up_a_recorded_finding() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "no finding, clone group or cross-language comparison group",
+            "no finding or clone/comparison group",
         ));
 }
 
@@ -560,7 +661,6 @@ fn doctor_hints_until_the_database_is_gitignored() {
         .stdout(predicate::str::contains("hint:").not());
 }
 
-#[cfg(any())]
 #[test]
 fn a_scan_says_what_moved_since_the_previous_scan_of_the_tree() {
     let dir = fixture();
@@ -621,15 +721,15 @@ fn a_scan_under_different_settings_has_nothing_to_compare_with() {
 }
 
 #[test]
-fn a_second_scan_replaces_the_first_instead_of_stacking_up() {
+fn an_identical_second_scan_reuses_the_recorded_history() {
     let dir = fixture();
     let root = dir.path();
 
     let first = scan_json(root);
     let second = scan_json(root);
-    assert_ne!(
+    assert_eq!(
         first["run"]["run_id"], second["run"]["run_id"],
-        "a replacement scan receives its own stable run id"
+        "an identical scan is answered by its existing local run"
     );
     let store = open_store(root);
     assert_eq!(store.table_count("scan_run").unwrap(), 1);
@@ -638,16 +738,16 @@ fn a_second_scan_replaces_the_first_instead_of_stacking_up() {
         second["run"]["run_id"].as_i64().expect("a run id")
     );
 
-    // Printing a run number invites reading it as a growing history, and the
-    // reader who wants a before and after needs pointing at what does that.
+    // The persisted run stays addressable for replay and the reused scan
+    // creates no additional history row.
     cmd()
         .current_dir(root)
         .args(["scan", "."])
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("one scan at a time")
-                .and(predicate::str::contains("baseline"))
-                .and(predicate::str::contains("snapshot: run ").not()),
+            predicate::str::contains("snapshot:").and(predicate::str::contains(
+                "replay with `codehelion report --run ",
+            )),
         );
 }

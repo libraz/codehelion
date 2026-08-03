@@ -25,7 +25,6 @@ use codehelion_core::discovery::{
     LanguageSelection, RustBuild, SourceUnit, content_hash,
 };
 use codehelion_core::engine::{self, LiteralNorm};
-use codehelion_core::features;
 use codehelion_core::frontend::Token;
 use codehelion_core::grouping::{GroupingConfig, StructuralGroup};
 use codehelion_core::ir::{ByteRange, StructuralFrontend, SyntaxIrFile};
@@ -47,15 +46,15 @@ use codehelion_core::verify::WEIGHT_VERSION;
 use codehelion_store::compiler::{self as store_compiler, CompilerHelperRow, CompilerOutcome};
 use codehelion_store::snapshot::{
     CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow, CrossLanguageSemanticMemberRow,
-    CrossVariantComparisonSnapshot, CrossVariantGroupRow, CrossVariantMemberRow, FeatureRow,
-    FileRow, GroupRow, MemberRow, NearMissRow, PriorityRow, SemanticEvidenceRow,
-    SemanticNodeMappingRow, SemanticOperationGraphRow, SiblingGroupRow, SiblingRow,
-    SimilarityBreakdownRow, Snapshot, SummaryRow, UnitRow,
+    CrossVariantComparisonSnapshot, CrossVariantGroupRow, CrossVariantMemberRow, FileRow, GroupRow,
+    MemberRow, NearMissRow, PriorityRow, SemanticEvidenceRow, SemanticNodeMappingRow,
+    SemanticOperationGraphRow, SiblingGroupRow, SiblingRow, SimilarityBreakdownRow, Snapshot,
+    SummaryRow, UnitRow,
 };
 
 use super::{
     FileOutcome, ScanBaseline, as_u64, database_path, discover_sources, effective_jobs,
-    exceeds_parse_budget, filter_globs, literal_norm, map_sources, open_store, path_key,
+    filter_globs, literal_norm, map_sources, open_store, parse_work_byte_limit, path_key,
     rfc3339_now, shared, write_partitioned_reports,
 };
 
@@ -98,6 +97,10 @@ struct ParsedSource {
 #[derive(Debug, Clone)]
 struct SemanticUnitGraph {
     unit: usize,
+    /// Deterministic rank of this window among the semantic windows hosted by
+    /// the same stable source unit. It distinguishes identical occurrences
+    /// without making a source position part of a stable identifier.
+    occurrence_rank: u32,
     /// Exact source bytes for this semantic window, used only for reporting.
     range: ByteRange,
     /// First source line covered by this semantic window.
@@ -231,7 +234,7 @@ struct CrossLanguageComparisonUnit {
     end_line: u32,
     name: Option<String>,
     graph: SemanticOperationGraph,
-    content: stable_id::FragmentFingerprint,
+    occurrence: stable_id::FragmentFingerprint,
     normalization_confidence: f64,
     interactions: BTreeSet<String>,
     data_flows: BTreeSet<(String, String)>,
@@ -255,6 +258,29 @@ struct PartitionOutcome {
     report: Report,
     comparison_units: Vec<CrossComparisonUnit>,
     cross_language_units: Vec<CrossLanguageComparisonUnit>,
+}
+
+fn reuse_semantic_partition(
+    report: &mut Report,
+    db_path: &Path,
+    root: &Path,
+    _cfg: &Config,
+    _args: &ScanArgs,
+) -> Result<()> {
+    let new_run_id = report.run.run_id;
+    let mut store = open_store(db_path)?;
+    let Some(previous) =
+        store.latest_run_for_variant(&path_key(root), &report.run.build_variant.fingerprint)?
+    else {
+        return Ok(());
+    };
+    if store.run_tree(previous.id)? != store.run_tree(new_run_id)? {
+        return Ok(());
+    }
+    store.discard_run(new_run_id)?;
+    report.run.run_id = previous.id;
+    report.run.reused = true;
+    Ok(())
 }
 
 /// Execute `codehelion scan` in Structural mode.
@@ -284,7 +310,13 @@ pub fn semantic(
     out: &mut impl Write,
 ) -> Result<Outcome> {
     let sandbox = semantic_sandbox(args)?;
-    let compilers = Compilers::found(permitted, sandbox)?;
+    let root = args
+        .path
+        .canonicalize()
+        .with_context(|| format!("resolving scan path {}", args.path.display()))?;
+    let resolved = config::load(args.config.as_deref(), &root)?;
+    let helper_paths = config::helper_paths(&resolved.config.helpers, &args.helpers)?;
+    let compilers = Compilers::found(permitted, sandbox, &helper_paths)?;
     run_with(args, out, Some(&compilers))
 }
 
@@ -330,7 +362,22 @@ fn run_with(
     let (cfg, guardrails) = crate::scan::guarded(resolved_config.config, args);
     let jobs = effective_jobs(args.jobs, cfg.jobs)?;
 
-    let mut discovered = discover_sources(&root, &cfg, args.no_ignore)?;
+    let mut discovered = discover_sources(
+        &root,
+        &cfg,
+        args.no_ignore,
+        args.follow_links,
+        args.compile_commands.as_deref(),
+    )?;
+    if compilers.is_some()
+        && let Some(diagnostic) = &discovered.compile_commands_error
+    {
+        bail!(
+            "cannot read compile_commands.json for semantic analysis ({}): {}",
+            diagnostic.path.display(),
+            diagnostic.message
+        );
+    }
     let sources = std::mem::take(&mut discovered.units);
     let (sources, glob_excluded) = filter_globs(&cfg, sources)?;
 
@@ -356,6 +403,8 @@ fn run_with(
             let mut reports = Vec::with_capacity(partitions.len());
             let mut comparison_units = Vec::new();
             let mut cross_language_units = Vec::new();
+            let mut new_run_ids = Vec::with_capacity(partitions.len());
+            let mut lineage_predecessors = Vec::with_capacity(partitions.len());
             let mut outcome = Outcome::Success;
             for (index, partition) in partitions.into_iter().enumerate() {
                 // Discovery happens before a source can belong to a build
@@ -364,7 +413,7 @@ fn run_with(
                 // partition list is fingerprint-sorted above, so this owner
                 // is deterministic.
                 let shared_discovery = (index == 0).then_some(&discovered);
-                let partition = run_semantic_partition(
+                let mut partition = run_semantic_partition(
                     args,
                     &cfg,
                     guardrails.as_ref(),
@@ -379,6 +428,23 @@ fn run_with(
                     asking.as_deref(),
                     &partition,
                 )?;
+                let new_run_id = partition.report.run.run_id;
+                // The newly written semantic partition remains incomplete
+                // until every partition has finished, so this query can only
+                // return an older completed run. Preserve that predecessor
+                // now: after completion the new run would be its own latest
+                // candidate.
+                let predecessor = open_store(&db_path)?
+                    .latest_run_for_variant(
+                        &path_key(&root),
+                        &partition.report.run.build_variant.fingerprint,
+                    )?
+                    .map(|run| run.id);
+                new_run_ids.push(new_run_id);
+                lineage_predecessors.push((new_run_id, predecessor));
+                if !args.no_reuse && !args.compare_build_variants && !args.compare_languages {
+                    reuse_semantic_partition(&mut partition.report, &db_path, &root, &cfg, args)?;
+                }
                 if partition.outcome == Outcome::FindingsPresent {
                     outcome = Outcome::FindingsPresent;
                 }
@@ -407,8 +473,31 @@ fn run_with(
             } else {
                 None
             };
-            let run_ids: Vec<i64> = reports.iter().map(|report| report.run.run_id).collect();
-            open_store(&db_path)?.complete_snapshot_parts(&run_ids)?;
+            let cross_language_not_run = args
+                .compare_languages
+                .then(|| cross_language_comparison.is_none())
+                .filter(|not_run| *not_run)
+                .map(|_| cross_language_comparison_not_run(&reports, &cross_language_units));
+            let pending_run_ids: Vec<i64> = new_run_ids
+                .into_iter()
+                .filter(|run_id| {
+                    reports
+                        .iter()
+                        .any(|report| report.run.run_id == *run_id && !report.run.reused)
+                })
+                .collect();
+            if !pending_run_ids.is_empty() {
+                open_store(&db_path)?.complete_snapshot_parts(&pending_run_ids)?;
+                let pending: BTreeSet<i64> = pending_run_ids.iter().copied().collect();
+                let mut store = open_store(&db_path)?;
+                for (newer_run, predecessor) in lineage_predecessors {
+                    if pending.contains(&newer_run)
+                        && let Some(predecessor) = predecessor
+                    {
+                        store.adopt_matching_lineages(newer_run, predecessor)?;
+                    }
+                }
+            }
             write_partitioned_reports(
                 args,
                 out,
@@ -416,14 +505,16 @@ fn run_with(
                 comparison.as_ref(),
                 comparison_not_run.as_ref(),
                 cross_language_comparison.as_ref(),
+                cross_language_not_run.as_ref(),
             )?;
             return Ok(outcome);
         }
     }
     let variant = variant_of(asking.as_deref(), &cfg, discovered.header_language, &root)?;
     let timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
-    let (parsed, unreadable, timed_out) =
-        map_sources(&sources, jobs, |source| parse_one(source, timeout))?;
+    let (parsed, unreadable, timed_out) = map_sources(&sources, jobs, |source| {
+        parse_one(source, cfg.limits.max_file_bytes, timeout)
+    })?;
     let (files, mut irs): (Vec<SourceMeta>, Vec<SyntaxIrFile>) = parsed
         .into_iter()
         .map(|source| (source.meta, source.ir))
@@ -436,6 +527,7 @@ fn run_with(
         &files,
         &variant,
         &BTreeMap::new(),
+        args.untrusted.then_some(root.as_path()),
         std::time::Duration::from_millis(cfg.limits.helper_timeout_ms),
     );
     let mut analysis =
@@ -462,7 +554,11 @@ fn run_with(
         args.baseline_mode,
         &mut rules.rules,
         &variant,
-        &detector_versions(literal_norm(cfg.literal_normalization)),
+        &detector_versions(
+            literal_norm(cfg.literal_normalization),
+            cfg.entropy_ratio_floor,
+        ),
+        cfg.min_clone_tokens,
     )?;
     let regions = reportable_regions(&analysis);
     let mut presentation_cfg = cfg.clone();
@@ -500,6 +596,9 @@ fn run_with(
         pair_suppressed: &suppressed.pairs,
         semantic_pair_suppressed: &suppressed.semantic_pairs,
         semantic_group_suppressed: &suppressed.semantic_groups,
+        sibling_suppressed: &suppressed.siblings,
+        near_miss_suppressed: &suppressed.near_misses,
+        entropy_ratio_floor: cfg.entropy_ratio_floor,
         literals: literal_norm(cfg.literal_normalization),
         glob_excluded,
         unreadable,
@@ -507,6 +606,8 @@ fn run_with(
         weights: cfg.priority.weights(),
         min_clone_tokens: u64::from(cfg.min_clone_tokens),
         sort: args.sort.axis(),
+        reuse_allowed: !args.no_reuse,
+        untrusted: args.untrusted,
     };
     // Ranked before recorded: the audit database and the report are two views
     // of one verdict about where each finding belongs, not two derivations of
@@ -518,7 +619,7 @@ fn run_with(
         baseline.as_ref().map(ScanBaseline::digest),
         guardrails.as_ref(),
     );
-    let run_id = record(
+    let (run_id, reused) = record(
         &cfg,
         &inputs,
         &groups,
@@ -528,6 +629,7 @@ fn run_with(
         true,
     )?;
     let mut model = build_report(&inputs, run_id, &stored, groups);
+    model.run.reused = reused;
     model.summary.guardrails = guardrails;
     model.summary.compiler = asked.as_ref().map(coverage);
     // Counted against the assembled report rather than the raw analysis: a
@@ -540,15 +642,23 @@ fn run_with(
     let comparison_not_run = args
         .compare_build_variants
         .then(|| cross_variant_comparison_not_run(&models));
-    write_partitioned_reports(args, out, &models, None, comparison_not_run.as_ref(), None)?;
+    write_partitioned_reports(
+        args,
+        out,
+        &models,
+        None,
+        comparison_not_run.as_ref(),
+        None,
+        None,
+    )?;
     Ok(outcome)
 }
 
 mod comparison;
 
 use comparison::{
-    cross_variant_comparison_not_run, record_cross_language_comparison,
-    record_cross_variant_comparison,
+    cross_language_comparison_not_run, cross_variant_comparison_not_run,
+    record_cross_language_comparison, record_cross_variant_comparison,
 };
 
 #[cfg(test)]
@@ -589,8 +699,8 @@ mod semantic_analysis;
 use comparison::run_semantic_partition;
 use semantic_analysis::{
     SemanticPartition, clang_toolchain, cpp_partitions, registered_semantic_pairs, resolve,
-    rust_partition, semantic_confidence, semantic_member_ranks, semantic_scope,
-    unconfigured_cpp_partition,
+    rust_partition, semantic_confidence, semantic_group_member_fingerprints, semantic_member_ranks,
+    semantic_scope, unconfigured_cpp_partition,
 };
 
 #[cfg(test)]
@@ -606,6 +716,7 @@ use semantic_analysis::{
 /// number is decide whether a thin result was the tree's fault.
 fn coverage(asked: &semantic::Answers) -> report::CompilerCoverage {
     let mut unavailable: BTreeMap<String, u64> = BTreeMap::new();
+    let mut diagnostics: BTreeMap<String, u64> = BTreeMap::new();
     let mut answered = 0;
     let mut not_asked = 0;
     let mut build_script_refused = 0_u64;
@@ -613,8 +724,15 @@ fn coverage(asked: &semantic::Answers) -> report::CompilerCoverage {
         match answer {
             semantic::Answer::Analyzed { .. } => answered += 1,
             semantic::Answer::NotAsked { .. } => not_asked += 1,
-            semantic::Answer::Unavailable { reason, .. } => {
+            semantic::Answer::Unavailable {
+                reason,
+                diagnostics: unit_diagnostics,
+                ..
+            } => {
                 *unavailable.entry(reason.name().to_string()).or_default() += 1;
+                for diagnostic in unit_diagnostics {
+                    *diagnostics.entry(diagnostic.clone()).or_default() += 1;
+                }
                 // The only whole-unit `RequiresExecution` outcome the shipped
                 // helper emits is a Cargo build script. Procedural macros are
                 // recorded as individual unexpanded invocations instead, so
@@ -645,6 +763,7 @@ fn coverage(asked: &semantic::Answers) -> report::CompilerCoverage {
         answered,
         not_asked,
         unavailable,
+        diagnostics,
         execution_refusals,
         restarts: asked
             .helpers
@@ -656,14 +775,17 @@ fn coverage(asked: &semantic::Answers) -> report::CompilerCoverage {
 
 /// Read and parse one source file, enforcing the deterministic parse-work
 /// budget before frontend work begins.
-fn parse_one(source: &SourceUnit, budget: std::time::Duration) -> FileOutcome<ParsedSource> {
-    let Ok(bytes) = std::fs::read(&source.absolute_path) else {
-        return FileOutcome::Unreadable;
-    };
-    if exceeds_parse_budget(&bytes, budget) {
+fn parse_one(
+    source: &SourceUnit,
+    max_file_bytes: u64,
+    budget: std::time::Duration,
+) -> FileOutcome<ParsedSource> {
+    let limit = parse_work_byte_limit(max_file_bytes, budget);
+    if u64::try_from(source.source_bytes.len()).unwrap_or(u64::MAX) > limit {
         return FileOutcome::TimedOut;
     }
-    let text = String::from_utf8_lossy(&bytes);
+    let bytes = &source.source_bytes;
+    let text = String::from_utf8_lossy(bytes);
     let ir = match source.language {
         Language::Rust => codehelion_frontend_rust::ir::RustStructuralFrontend.parse(&text),
         Language::C => codehelion_frontend_c::ir::CStructuralFrontend.parse(&text),
@@ -694,9 +816,8 @@ mod suppression;
 
 use suppression::{
     ReportableRegions, aggregate_test_code_evidence, compile_rules, evaluate_suppression,
-    local_unit_indices, mark_test_modules, mark_test_paths, presentation_suppression,
-    region_identifier_jaccard, region_test_code_evidence, reportable_regions, structural_config,
-    unit_token_span,
+    mark_test_modules, mark_test_paths, presentation_suppression, region_identifier_jaccard,
+    region_test_code_evidence, reportable_regions, structural_config, unit_token_span,
 };
 
 #[cfg(test)]
@@ -742,6 +863,12 @@ struct ReportInputs<'a> {
     /// The rule hiding each cohesive semantic group, parallel to
     /// [`Self::semantic_groups`].
     semantic_group_suppressed: &'a [Option<usize>],
+    /// Rules hiding supplemental siblings, parallel to the nested sibling lists.
+    sibling_suppressed: &'a [Vec<Option<usize>>],
+    /// Rules hiding bounded near-match diagnostics.
+    near_miss_suppressed: &'a [Option<usize>],
+    /// Lowest normalized content-entropy ratio before a finding is noise.
+    entropy_ratio_floor: f64,
     /// Literal strategy the group content is scored under.
     literals: LiteralNorm,
     glob_excluded: usize,
@@ -753,9 +880,39 @@ struct ReportInputs<'a> {
     min_clone_tokens: u64,
     /// The axis the run puts its entries in order on.
     sort: report::Sort,
+    reuse_allowed: bool,
+    untrusted: bool,
 }
 
 impl ReportInputs<'_> {
+    fn low_entropy(&self, entropy_bits: f64, token_count: usize) -> bool {
+        engine::entropy_ratio(entropy_bits, token_count) < self.entropy_ratio_floor
+    }
+
+    fn finding_suppression(
+        &self,
+        entropy_bits: f64,
+        token_count: usize,
+        rule: Option<usize>,
+    ) -> Option<report::Suppression> {
+        if self.low_entropy(entropy_bits, token_count) {
+            Some(report::Suppression {
+                kind: report::SuppressionKind::Noise,
+                reason: Some("low-entropy".to_string()),
+                scope: None,
+                pattern: None,
+                active: None,
+            })
+        } else {
+            rule.map(|rule| self.suppression(rule))
+        }
+    }
+
+    fn entropy_suppress_reason(&self, entropy_bits: f64, token_count: usize) -> Option<String> {
+        self.low_entropy(entropy_bits, token_count)
+            .then(|| "low-entropy".to_string())
+    }
+
     /// The tokens one analysed unit covers, in its own file.
     fn unit_tokens(&self, unit: &StructuralUnit) -> &[Token] {
         let tokens = &self.irs[unit.file].tokens;
@@ -776,6 +933,8 @@ impl ReportInputs<'_> {
                     .chain(self.pair_suppressed)
                     .chain(self.semantic_pair_suppressed)
                     .chain(self.semantic_group_suppressed)
+                    .chain(self.sibling_suppressed.iter().flatten())
+                    .chain(self.near_miss_suppressed)
                     .filter_map(|rule| *rule),
             ),
         )

@@ -39,7 +39,7 @@ pub(super) fn cpp_partitions(
         .into_values()
         .filter_map(|entries| {
             let first = entries.first()?;
-            let mut command_build = first.build(database.content_hash.clone());
+            let mut command_build = first.build();
             command_build.compiler_version = compiler_version.map(ToString::to_string);
             let build = BuildConfiguration::Cpp(Box::new(command_build));
             let mut commands = BTreeMap::new();
@@ -91,17 +91,22 @@ pub(super) fn unconfigured_cpp_partition(
     discovered: &DiscoveryReport,
     sources: &[SourceUnit],
 ) -> Option<SemanticPartition> {
-    let database = discovered.compile_commands.as_ref()?;
-    let configured: BTreeSet<PathBuf> = database
-        .entries
-        .iter()
-        .map(|entry| {
-            entry
-                .file
-                .canonicalize()
-                .unwrap_or_else(|_| entry.file.clone())
-        })
-        .collect();
+    let configured: BTreeSet<PathBuf> =
+        discovered
+            .compile_commands
+            .as_ref()
+            .map_or_else(BTreeSet::new, |database| {
+                database
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        entry
+                            .file
+                            .canonicalize()
+                            .unwrap_or_else(|_| entry.file.clone())
+                    })
+                    .collect()
+            });
     let selected: Vec<SourceUnit> = sources
         .iter()
         .filter(|source| {
@@ -197,6 +202,7 @@ pub(super) fn ask_about(
     sources: &[SourceUnit],
     variant: &BuildVariant,
     commands: &BTreeMap<PathBuf, CompileCommandSelector>,
+    read_boundary: Option<&Path>,
     timeout: std::time::Duration,
 ) -> semantic::Answers {
     let backends: Vec<semantic::Backend<'_>> = asking
@@ -206,6 +212,7 @@ pub(super) fn ask_about(
             analyzes: helper.component.analyses,
             permitted: &helper.permitted,
             sandbox: helper.sandbox,
+            read_boundary,
         })
         .collect();
     semantic::ask_with_commands(
@@ -231,9 +238,11 @@ pub(super) fn resolve(
     files: &[SourceMeta],
     variant: &BuildVariant,
     commands: &BTreeMap<PathBuf, CompileCommandSelector>,
+    read_boundary: Option<&Path>,
     timeout: std::time::Duration,
 ) -> (Option<semantic::Answers>, structural::ResolvedTypes) {
-    let asked = asking.map(|asking| ask_about(asking, sources, variant, commands, timeout));
+    let asked =
+        asking.map(|asking| ask_about(asking, sources, variant, commands, read_boundary, timeout));
     let resolved = asked
         .as_ref()
         .map_or_else(structural::ResolvedTypes::default, |asked| {
@@ -276,14 +285,16 @@ pub(super) fn resolved_types(
                     Some((
                         semantic::resolved_types_for(ir, &spelling),
                         semantic::resolved_api_for(ir, &spelling),
+                        semantic::resolution_for(ir, &spelling),
                     ))
                 })
                 .unwrap_or_default()
         })
         .collect();
-    structural::ResolvedTypes::per_file_with_apis(
-        resolved.iter().map(|(types, _)| types.clone()).collect(),
-        resolved.into_iter().map(|(_, apis)| apis).collect(),
+    structural::ResolvedTypes::per_file_with_semantic_normalization(
+        resolved.iter().map(|(types, _, _)| types.clone()).collect(),
+        resolved.iter().map(|(_, apis, _)| apis.clone()).collect(),
+        resolved.into_iter().map(|(_, _, names)| names).collect(),
     )
 }
 
@@ -372,7 +383,7 @@ pub(super) fn registered_semantic_pairs(
         let Some(syntax_ir) = irs.get(unit.file) else {
             continue;
         };
-        for window in windows {
+        for mut window in windows {
             let range = ByteRange {
                 start: usize::try_from(window.source_range.start)
                     .context("semantic source range start exceeds this platform")?,
@@ -381,6 +392,13 @@ pub(super) fn registered_semantic_pairs(
             };
             let (start_line, end_line, token_count) =
                 semantic_window_location(syntax_ir, unit, range);
+            if let Some(structure_fingerprint) =
+                semantic_window_structure_fingerprint(variant, syntax_ir, unit, range)
+            {
+                for node in &mut window.graph.nodes {
+                    node.attributes.structure_fingerprint = Some(structure_fingerprint);
+                }
+            }
             let content = stable_id::semantic_fragment_fingerprint(variant, &window.graph);
             let interactions = semantic_window_interactions(&window.graph);
             let data_flows =
@@ -392,6 +410,7 @@ pub(super) fn registered_semantic_pairs(
             );
             units.push(SemanticUnitGraph {
                 unit: unit_index,
+                occurrence_rank: 0,
                 range,
                 start_line,
                 end_line,
@@ -405,6 +424,7 @@ pub(super) fn registered_semantic_pairs(
             });
         }
     }
+    assign_semantic_occurrence_ranks(&mut units);
     // Keep every normalized window for explicit cross-language comparison,
     // but admit only windows meeting the scan's floor to ordinary semantic
     // clone detection. Candidate indices are translated back before grouping,
@@ -413,7 +433,9 @@ pub(super) fn registered_semantic_pairs(
         .iter()
         .enumerate()
         .filter_map(|(index, unit)| {
-            token_count_meets_minimum(unit.token_count, cfg.min_clone_tokens).then_some(index)
+            (compiler_construct_window(&unit.graph)
+                || token_count_meets_minimum(unit.token_count, cfg.min_clone_tokens))
+            .then_some(index)
         })
         .collect();
     let below_min_clone_tokens = units.len().saturating_sub(eligible.len());
@@ -557,6 +579,43 @@ pub(super) fn normalization_confidence(registered: usize, excluded: usize) -> f6
     }
 }
 
+/// Produce conservative source-structure evidence for one semantic window.
+///
+/// Byte ranges locate the already parsed tokens but do not enter the digest;
+/// the resulting value is stable when the same window moves in its file.
+fn semantic_window_structure_fingerprint(
+    variant: &BuildVariant,
+    ir: &SyntaxIrFile,
+    host: &StructuralUnit,
+    range: ByteRange,
+) -> Option<[u8; 16]> {
+    let tokens = semantic_window_tokens(ir, host, range);
+    (!tokens.is_empty()).then(|| {
+        stable_id::semantic_structure_fingerprint(
+            variant,
+            &stable_id::FileContext {
+                frontend_version: ir.frontend_version,
+                language: ir.language,
+            },
+            tokens,
+        )
+    })
+}
+
+/// Return the contiguous parsed tokens covered by a semantic source window.
+fn semantic_window_tokens<'a>(
+    ir: &'a SyntaxIrFile,
+    host: &StructuralUnit,
+    range: ByteRange,
+) -> &'a [codehelion_core::frontend::Token] {
+    let end = host.token_end.min(ir.tokens.len());
+    let start = host.token_start.min(end);
+    let tokens = &ir.tokens[start..end];
+    let first = tokens.partition_point(|token| token.span.end_byte <= range.start);
+    let last = tokens.partition_point(|token| token.span.start_byte < range.end);
+    &tokens[first.min(last)..last]
+}
+
 /// Translate one semantic byte window into report coordinates using the
 /// already-parsed token stream. Empty point spans retain their host unit's
 /// location, which is the compatibility path for adapters without full
@@ -566,13 +625,7 @@ pub(super) fn semantic_window_location(
     host: &StructuralUnit,
     range: ByteRange,
 ) -> (u32, u32, usize) {
-    let tokens = ir
-        .tokens
-        .get(host.token_start..host.token_end)
-        .unwrap_or_default();
-    let mut matching = tokens
-        .iter()
-        .filter(|token| token.span.start_byte < range.end && range.start < token.span.end_byte);
+    let mut matching = semantic_window_tokens(ir, host, range).iter();
     let Some(first) = matching.next() else {
         return (host.start_line, host.end_line, 0);
     };
@@ -592,6 +645,21 @@ pub(super) fn semantic_window_location(
 /// short window.
 pub(super) fn token_count_meets_minimum(token_count: usize, minimum: u32) -> bool {
     u32::try_from(token_count).map_or(true, |count| count >= minimum)
+}
+
+/// Compiler-confirmed, single-operation constructs are closed semantic claims
+/// rather than source fragments, so the general clone-size floor does not
+/// decide whether they may be compared.
+fn compiler_construct_window(graph: &SemanticOperationGraph) -> bool {
+    matches!(
+        graph.nodes.as_slice(),
+        [node]
+            if matches!(
+                node.kind,
+                codehelion_core::semantic::OperationKind::PropagateError
+                    | codehelion_core::semantic::OperationKind::Validate
+            ) && node.attributes.fallible_kind.is_some()
+    )
 }
 
 /// Combine a rule's measured base confidence with non-authoritative coverage
@@ -795,17 +863,44 @@ pub(super) fn semantic_scope<'a>(
 pub(super) fn semantic_member_ranks<'a>(
     members: impl IntoIterator<Item = &'a SemanticUnitGraph>,
 ) -> Vec<u32> {
-    let members: Vec<_> = members.into_iter().collect();
-    let mut ordered: Vec<_> = members.iter().enumerate().collect();
-    ordered.sort_by_key(|(_, member)| (member.unit, member.range, member.content));
-    let mut ranks = vec![0_u32; members.len()];
+    members
+        .into_iter()
+        .map(|member| member.occurrence_rank)
+        .collect()
+}
+
+/// Derive one host-local occurrence rank before grouping so every consumer
+/// uses the same position-independent identity for the same semantic window.
+fn assign_semantic_occurrence_ranks(units: &mut [SemanticUnitGraph]) {
+    let mut ordered: Vec<_> = units
+        .iter()
+        .enumerate()
+        .map(|(index, member)| (index, member.unit, member.range, member.content))
+        .collect();
+    ordered.sort_by_key(|(_, unit, range, content)| (*unit, *range, *content));
     let mut next_by_unit = BTreeMap::new();
-    for (position, member) in ordered {
-        let rank = next_by_unit.entry(member.unit).or_insert(0_u32);
-        ranks[position] = *rank;
+    for (index, unit, _, _) in ordered {
+        let rank = next_by_unit.entry(unit).or_insert(0_u32);
+        units[index].occurrence_rank = *rank;
         *rank = rank.saturating_add(1);
     }
-    ranks
+}
+
+/// Convert semantic windows into occurrence-qualified inputs for a group ID.
+pub(super) fn semantic_group_member_fingerprints<'a>(
+    members: impl IntoIterator<Item = &'a SemanticUnitGraph>,
+    analysis: &StructuralReport,
+) -> Vec<stable_id::FragmentFingerprint> {
+    members
+        .into_iter()
+        .map(|member| {
+            stable_id::semantic_occurrence_fingerprint(
+                member.content,
+                &analysis.units[member.unit].fingerprint,
+                member.occurrence_rank,
+            )
+        })
+        .collect()
 }
 
 /// Decode the full 256-bit `BuildVariant` identity that SOG stores as bytes.

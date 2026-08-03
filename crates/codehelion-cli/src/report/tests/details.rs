@@ -18,7 +18,7 @@ fn semantic_finding_detail_keeps_graphs_and_mappings_readable() {
             split_pair: true,
             similarity: None,
             semantic: Some(SemanticEvidence {
-                schema_version: "sog-v1".to_string(),
+                schema_version: "sog-v4".to_string(),
                 rules: vec![SemanticRuleEvidence {
                     id: "sequence-pipeline-v1".to_string(),
                     version: 1,
@@ -46,7 +46,7 @@ fn semantic_finding_detail_keeps_graphs_and_mappings_readable() {
     let mut text = Vec::new();
     detail.render_text(&mut text).unwrap();
     let text = String::from_utf8(text).unwrap();
-    assert!(text.contains("semantic evidence: sog-v1"));
+    assert!(text.contains("semantic evidence: sog-v4"));
     assert!(text.contains("rule sequence-pipeline-v1@1"));
     assert!(text.contains("graph 1: source -> collect"));
     assert!(text.contains("node mapping: 0→0"));
@@ -80,14 +80,66 @@ fn cross_language_group_detail_keeps_closed_evidence_and_origins_readable() {
     assert_eq!(json["response_kind"], EXPLAIN_RESPONSE_CROSS_LANGUAGE_GROUP);
     assert_valid_finding_detail_schema(&json);
     assert_eq!(json["correspondence_ids"][0], "sequence-map-v1");
-    assert_eq!(json["members"][0]["graph"]["schema_version"], "sog-v1");
+    assert_eq!(json["members"][0]["graph"]["schema_version"], "sog-v4");
     let mut text = Vec::new();
     detail.render_text(&mut text).unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains("cross-language semantic group"));
     assert!(text.contains("sequence-map-v1"));
     assert!(text.contains("rust rust/src/lib.rs:3-6 (rust-variant)"));
-    assert!(text.contains("graph sog-v1: source -> collect"));
+    assert!(text.contains("graph sog-v4: source -> collect"));
+}
+
+#[test]
+fn cross_variant_group_detail_keeps_origins_and_members_readable() {
+    let detail = CrossVariantGroupDetail {
+        group_id: "50".repeat(16),
+        comparison_id: "4f".repeat(16),
+        policy_version: "cross-variant-exact-v1".to_string(),
+        root_path: "/work/project".to_string(),
+        origin_variants: vec!["debug".to_string(), "release".to_string()],
+        clone_type: "type-1".to_string(),
+        members: vec![CrossVariantGroupMemberDetail {
+            origin_variant: "release".to_string(),
+            language: "cpp".to_string(),
+            file: "src/shared.cpp".to_string(),
+            start_line: 3,
+            end_line: 8,
+            unit: Some("shared".to_string()),
+            token_count: 24,
+        }],
+    };
+
+    let json: serde_json::Value = serde_json::from_str(&detail.to_json().unwrap()).unwrap();
+    assert_eq!(json["response_kind"], EXPLAIN_RESPONSE_CROSS_VARIANT_GROUP);
+    assert_valid_finding_detail_schema(&json);
+    assert_eq!(json["members"][0]["origin_variant"], "release");
+    let mut text = Vec::new();
+    detail.render_text(&mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("cross-build-variant clone group"));
+    assert!(text.contains("cpp src/shared.cpp:3-8 (release, 24 tokens)"));
+}
+
+#[test]
+fn sibling_detail_preserves_its_separate_finding_namespace() {
+    let sibling = sample_siblings().siblings.remove(0);
+    let finding_id = sibling.member.finding_id.clone();
+    let detail = SiblingDetail {
+        scan_run: 17,
+        group_fingerprint: "19".repeat(16),
+        sibling,
+    };
+
+    let json: serde_json::Value = serde_json::from_str(&detail.to_json().unwrap()).unwrap();
+    assert_eq!(json["response_kind"], EXPLAIN_RESPONSE_SIBLING);
+    assert_eq!(json["sibling"]["member"]["finding_id"], finding_id);
+    assert_valid_finding_detail_schema(&json);
+    let mut text = Vec::new();
+    detail.render_text(&mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("sibling finding"));
+    assert!(text.contains("primary group"));
 }
 
 #[test]
@@ -239,7 +291,6 @@ fn a_comparison_says_how_much_went_as_well_as_how_many() {
                 unit: Some("validate".to_string()),
             }),
         }],
-        mismatch: None,
     });
 
     let mut buffer = Vec::new();
@@ -306,7 +357,6 @@ fn json_field_names_appear_in_the_shipped_schema() {
                 unit: Some("validate".to_string()),
             }),
         }],
-        mismatch: Some("recorded under another build variant".to_string()),
     });
     report.groups[0].baseline = Some(GroupBaseline {
         state: GROUP_NEW.to_string(),
@@ -320,6 +370,8 @@ fn json_field_names_appear_in_the_shipped_schema() {
     assert!(value["groups"][0]["artifact_savings"].is_array());
     assert!(value["summary"]["search_truncated"].is_boolean());
     let baseline_schema = &schema["$defs"]["summary"]["properties"]["baseline"]["properties"];
+    assert!(baseline_schema.get("mismatch").is_none());
+    assert!(baseline_schema.get("caveat").is_none());
     let group_baseline_schema = &schema["$defs"]["group"]["properties"]["baseline"]["properties"];
     let run_schema = &schema["$defs"]["run"]["properties"];
     let run_configuration_schema =
@@ -400,7 +452,6 @@ fn a_baseline_with_only_stale_entries_reports_its_actual_counts() {
         appeared_tokens: 0,
         expanded_tokens: 0,
         gone: Vec::new(),
-        mismatch: None,
     });
     let mut buffer = Vec::new();
     report
@@ -424,7 +475,6 @@ fn a_baseline_with_only_stale_entries_reports_its_actual_counts() {
         appeared_tokens: 0,
         expanded_tokens: 0,
         gone: Vec::new(),
-        mismatch: None,
     });
     let mut buffer = Vec::new();
     report
@@ -637,12 +687,25 @@ fn finding_detail_shares_the_member_shape_across_views() {
 fn clone_group_detail_has_a_discriminated_schema_envelope() {
     let detail = CloneGroupDetail {
         database: ".codehelion/audit.db".to_string(),
+        scan_run: 17,
+        analysis_mode: "structural".to_string(),
+        build_variant: "ab".repeat(32),
         group: visible_group(),
     };
     let value: serde_json::Value = serde_json::from_str(&detail.to_json().unwrap()).unwrap();
     assert_eq!(value["schema_version"], CloneGroupDetail::SCHEMA_VERSION);
     assert_eq!(value["response_kind"], EXPLAIN_RESPONSE_CLONE_GROUP);
+    assert_eq!(value["scan_run"], 17);
+    assert_eq!(value["analysis_mode"], "structural");
+    assert_eq!(value["build_variant"], "ab".repeat(32));
     assert_valid_finding_detail_schema(&value);
+    let mut text = Vec::new();
+    detail.render_text(&mut text).unwrap();
+    assert!(
+        String::from_utf8(text)
+            .unwrap()
+            .contains("run: 17 (structural; build variant")
+    );
 }
 
 #[test]

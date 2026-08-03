@@ -83,7 +83,6 @@ fn a_scan_below_the_workspace_root_still_gets_what_the_compiler_resolved() {
 /// run that took its identity from the tree alone would report the first
 /// reading's findings as this one's, and the types the compiler resolved
 /// differently would go unremarked.
-#[cfg(any())]
 #[test]
 fn one_tree_read_with_different_features_is_not_reported_as_the_other() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -139,7 +138,6 @@ fn one_tree_read_with_different_features_is_not_reported_as_the_other() {
 /// lockfile stays byte-for-byte identical. The semantic variant must carry the
 /// helper's resolved dependency feature set, or it would reuse findings for a
 /// different program.
-#[cfg(any())]
 #[test]
 fn a_direct_dependency_feature_change_gets_its_own_semantic_variant() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -257,7 +255,6 @@ fn a_permission_that_could_not_take_effect_is_refused_rather_than_dropped() {
 /// run's findings from being handed back as this one's — nothing in the source
 /// text differs between the two, so the identity is the only thing that can
 /// tell them apart.
-#[cfg(any())]
 #[test]
 fn a_run_allowed_to_build_reads_more_and_is_filed_apart_from_one_that_was_not() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -319,7 +316,6 @@ fn a_run_allowed_to_build_reads_more_and_is_filed_apart_from_one_that_was_not() 
 /// come back with the sentence that makes it semantic. Restored short — no
 /// compiler line, or one claiming files nobody asked about were failures — a
 /// thin run would read as a clean tree the second time it was reported.
-#[cfg(any())]
 #[test]
 fn a_semantic_run_reported_again_still_says_what_the_compiler_answered() {
     let dir = fixture();
@@ -339,19 +335,28 @@ fn a_semantic_run_reported_again_still_says_what_the_compiler_answered() {
         return;
     };
     let second = scan().expect("the helper answered once, so it answers again");
-    assert_eq!(second["run"]["reused"], serde_json::json!(true));
-    assert_eq!(second["run"]["run_id"], first["run"]["run_id"]);
-    assert_eq!(second["summary"]["compiler"], first["summary"]["compiler"]);
-    assert!(
-        second["summary"]["compiler"].is_object(),
-        "a semantic run says what a compiler answered: {second}"
-    );
+    let first_partitions = first["partitions"].as_array().expect("semantic partitions");
+    let second_partitions = second["partitions"]
+        .as_array()
+        .expect("semantic partitions");
+    assert_eq!(second_partitions.len(), first_partitions.len());
+    for (again, original) in second_partitions.iter().zip(first_partitions) {
+        assert_eq!(again["run"]["reused"], serde_json::json!(true), "{again}");
+        assert_eq!(again["run"]["run_id"], original["run"]["run_id"]);
+        assert_eq!(
+            again["summary"]["compiler"],
+            original["summary"]["compiler"]
+        );
+        assert!(
+            again["summary"]["compiler"].is_object(),
+            "a semantic run says what a compiler answered: {again}"
+        );
+    }
 }
 
 /// The reuse path's own tests: a tree nobody touched is reported from the
 /// recorded run rather than analysed again, and every input that could change
 /// the answer defeats that.
-#[cfg(any())]
 mod reuse {
     use super::{cmd, fixture};
     use std::path::Path;

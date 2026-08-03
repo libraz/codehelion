@@ -149,7 +149,6 @@ fn empty_snapshot<'a>(root: &'a str, variant: &'a BuildVariant) -> Snapshot<'a> 
         groups: Vec::new(),
         sibling_groups: Vec::new(),
         near_misses: Vec::new(),
-        features: Vec::new(),
         files: Vec::new(),
         compiler_helpers: Vec::new(),
         compiler_units: Vec::new(),

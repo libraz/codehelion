@@ -19,8 +19,6 @@ pub(crate) struct ScanBaseline {
     entries: crate::baseline::BaselinePartition,
     /// The group ids it froze and the largest occurrence count each covers.
     covered: BTreeMap<String, u64>,
-    /// Why it does not describe this run, when it does not.
-    mismatch: Option<String>,
 }
 
 impl ScanBaseline {
@@ -61,6 +59,7 @@ pub(crate) fn load_baseline(
     rules: &mut suppress::Rules,
     variant: &BuildVariant,
     detectors: &[(String, String)],
+    min_clone_tokens: u32,
 ) -> Result<Option<ScanBaseline>> {
     let Some(path) = path else {
         return Ok(None);
@@ -74,7 +73,7 @@ pub(crate) fn load_baseline(
             variant_fingerprint
         );
     };
-    let fit = entries.compatibility(detectors);
+    let fit = entries.compatibility(detectors, i64::from(min_clone_tokens));
     if let Some(reason) = fit.mismatch {
         bail!(
             "baseline {} does not describe this scan: {reason}",
@@ -97,7 +96,6 @@ pub(crate) fn load_baseline(
         mode,
         entries: entries.clone(),
         covered,
-        mismatch: None,
     }))
 }
 
@@ -200,6 +198,5 @@ pub(crate) fn apply_baseline(
                 }),
             })
             .collect(),
-        mismatch: baseline.mismatch.clone(),
     }
 }

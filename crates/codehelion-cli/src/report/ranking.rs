@@ -6,6 +6,7 @@ use super::{
     Serialize, Similarity, Summary, SummaryRow, SuppressedCounts, SuppressionConfig,
     UnparsedCounts, UnusedRuleRow, VENDORED_SCOPE, Weights, priority,
 };
+use codehelion_store::directory_of;
 
 impl Guardrails {
     /// Record the concrete resource ceilings an untrusted invocation used.
@@ -25,6 +26,12 @@ impl Guardrails {
             helper_timeout_ms: limits.helper_timeout_ms,
             posting_cap: limits.posting_cap.unwrap_or(profile.posting_cap),
             pair_budget: limits.pair_budget.unwrap_or(profile.max_candidates),
+            verification_budget: limits
+                .verification_budget
+                .unwrap_or(profile.verification_budget),
+            max_alignment_cells: limits
+                .max_alignment_cells
+                .unwrap_or(profile.max_alignment_cells),
             near_miss_delta: limits.near_miss_delta.unwrap_or_else(|| {
                 codehelion_core::near_match::NearMatchConfig::default().near_miss_delta
             }),
@@ -54,9 +61,10 @@ impl From<&GuardrailsRow> for Guardrails {
             helper_timeout_ms: row.helper_timeout_ms,
             posting_cap: usize::try_from(row.posting_cap).unwrap_or(usize::MAX),
             pair_budget: usize::try_from(row.pair_budget).unwrap_or(usize::MAX),
-            near_miss_delta: codehelion_core::near_match::NearMatchConfig::default()
-                .near_miss_delta,
-            near_miss_cap: codehelion_core::near_match::NearMatchConfig::default().near_miss_cap,
+            verification_budget: usize::try_from(row.verification_budget).unwrap_or(usize::MAX),
+            max_alignment_cells: usize::try_from(row.max_alignment_cells).unwrap_or(usize::MAX),
+            near_miss_delta: f64::from_bits(row.near_miss_delta_bits),
+            near_miss_cap: usize::try_from(row.near_miss_cap).unwrap_or(usize::MAX),
             sibling_candidate_budget: usize::try_from(row.sibling_candidate_budget)
                 .unwrap_or(usize::MAX),
             sibling_per_group_cap: usize::try_from(row.sibling_per_group_cap).unwrap_or(usize::MAX),
@@ -256,20 +264,46 @@ pub fn duplicated_tokens(group: &Group) -> u64 {
 /// report, and a scan that assembled its entries and a run rebuilt from the
 /// database have to agree about it.
 pub fn order(groups: &mut [Group], suppression: &SuppressionConfig, sort: Sort) {
-    let ranked_down = |group: &Group| {
-        suppression.ranks_down(
-            group
-                .boilerplate
-                .as_deref()
-                .and_then(Boilerplate::from_name),
-            group.test_code,
-            group.width_family,
-            group.split_pair,
-        )
-    };
+    for group in groups.iter_mut() {
+        group.ranked_down = ranks_down(group, suppression);
+    }
     groups.sort_by(|a, b| {
-        ranked_down(a)
-            .cmp(&ranked_down(b))
+        a.ranked_down
+            .cmp(&b.ranked_down)
+            .then_with(|| compare_on(a, b, sort))
+    });
+}
+
+/// Whether one finding is placed after ordinary findings by presentation
+/// policy, independently of its numeric priority.
+#[must_use]
+pub fn ranks_down(group: &Group, suppression: &SuppressionConfig) -> bool {
+    suppression.ranks_down(
+        group
+            .boilerplate
+            .as_deref()
+            .and_then(Boilerplate::from_name),
+        group.test_code,
+        group.width_family,
+        group.split_pair,
+    )
+}
+
+/// Replay ordering using the rank-down verdict persisted with the run.
+pub fn order_recorded(
+    groups: &mut [Group],
+    ranked_down: &std::collections::BTreeMap<String, bool>,
+    sort: Sort,
+) {
+    for group in groups.iter_mut() {
+        group.ranked_down = ranked_down
+            .get(&group.fingerprint)
+            .copied()
+            .unwrap_or(false);
+    }
+    groups.sort_by(|a, b| {
+        a.ranked_down
+            .cmp(&b.ranked_down)
             .then_with(|| compare_on(a, b, sort))
     });
 }
@@ -366,8 +400,12 @@ pub fn restored(stored: &SummaryRow, groups: &[Group], analysis_mode: &str) -> S
             symlinks: stored.excluded_symlinks,
             walk_errors: stored.excluded_walk_errors,
             timed_out: stored.excluded_timed_out,
+            language_excluded: stored.excluded_language,
+            symlink_files: stored.excluded_symlink_files,
+            symlink_directories: stored.excluded_symlink_directories,
         },
         baseline: None,
+        changes: None,
         guardrails: stored.guardrails.as_ref().map(Guardrails::from),
         // Nor this: what a compiler answered belongs to the run that asked
         // it, and this report is a recorded run read back.
@@ -568,11 +606,6 @@ impl Group {
     }
 }
 
-/// The directory part of a report-relative path, `""` for a file at the root.
-fn directory_of(path: &str) -> &str {
-    path.rfind('/').map_or("", |cut| &path[..cut])
-}
-
 /// Rank one assembled group.
 ///
 /// Every construction site hands its group through here, which is what keeps
@@ -621,7 +654,7 @@ pub enum SuppressionKind {
 }
 
 /// Why a group is hidden from default reports.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Suppression {
     /// The suppressing mechanism.
     pub kind: SuppressionKind,

@@ -299,7 +299,7 @@ impl<'a> From<&'a Report> for Run<'a> {
                 },
             },
             automation_details: AutomationDetails {
-                id: format!("codehelion/{}", run.mode),
+                id: format!("codehelion/{}/{}", run.mode, run.run_id),
             },
             original_uri_base_ids: std::iter::once((
                 SRCROOT,
@@ -772,6 +772,7 @@ impl<'a> ResultEntry<'a> {
                 scope: &group.scope,
                 statements: group.statements,
                 confidence: group.confidence,
+                entropy_bits: group.entropy_bits,
                 priority: &group.priority,
                 similarity: group.similarity.as_ref(),
                 identifier_jaccard: group.identifier_jaccard,
@@ -782,6 +783,7 @@ impl<'a> ResultEntry<'a> {
                 width_family: group.width_family,
                 split_pair: group.split_pair,
                 suppressed: group.suppressed.as_ref(),
+                baseline: group.baseline.as_ref(),
                 semantic: group.semantic.as_ref(),
                 artifact_savings: &group.artifact_savings,
                 siblings,
@@ -867,6 +869,8 @@ impl<'a> Location<'a> {
             message: message.map(|text| Message { text }),
             properties: LocationProperties {
                 finding_id: &member.finding_id,
+                content: &member.content,
+                language: &member.language,
                 tokens: member.tokens,
                 canonical: member.canonical,
             },
@@ -916,6 +920,8 @@ struct LogicalLocation<'a> {
 #[derive(Debug, Serialize)]
 struct LocationProperties<'a> {
     finding_id: &'a str,
+    content: &'a str,
+    language: &'a str,
     tokens: u64,
     canonical: bool,
 }
@@ -948,6 +954,7 @@ struct ResultProperties<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     statements: Option<u64>,
     confidence: f64,
+    entropy_bits: f64,
     priority: &'a Priority,
     #[serde(skip_serializing_if = "Option::is_none")]
     similarity: Option<&'a Similarity>,
@@ -963,6 +970,8 @@ struct ResultProperties<'a> {
     split_pair: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     suppressed: Option<&'a Suppression>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    baseline: Option<&'a super::GroupBaseline>,
     #[serde(skip_serializing_if = "Option::is_none")]
     semantic: Option<&'a super::SemanticEvidence>,
     artifact_savings: &'a [ArtifactSavings],

@@ -175,6 +175,7 @@ fn unanswerable(source: &SourceUnit) -> Gathered {
         backend: 0,
         unit: unit_ref(source, "host"),
         reason: Unavailability::NoBuildInformation,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -577,6 +578,7 @@ fn an_answer_names_the_helper_that_produced_it_rather_than_a_position() {
         backend: 0,
         unit: unit.clone(),
         reason: Unavailability::HelperDied,
+        diagnostics: Vec::new(),
     }
     .pointing_at(&row);
     assert!(matches!(silent, Answer::Unavailable { helper: None, .. }));

@@ -107,6 +107,30 @@ fn one_relation_seen_in_many_places_is_reported_once() {
         split[0]["identifier_jaccard"].is_number(),
         "a split pair carries raw-identifier triage evidence"
     );
+    let similarity = split[0]["similarity"]
+        .as_object()
+        .expect("a split pair preserves its per-dimension verifier evidence");
+    for dimension in ["lexical", "structural", "composite", "min_pairwise"] {
+        assert!(
+            similarity[dimension].is_number(),
+            "split-pair similarity includes {dimension}: {similarity:#?}"
+        );
+    }
+    let run_id = value["run"]["run_id"].as_i64().expect("recorded run id");
+    let output = cmd()
+        .current_dir(dir.path())
+        .args(["report", "--run", &run_id.to_string(), "--format", "json"])
+        .output()
+        .expect("replay structural report");
+    assert!(output.status.success(), "{output:?}");
+    let replayed: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+    let replayed_pair = replayed["groups"]
+        .as_array()
+        .expect("replayed groups")
+        .iter()
+        .find(|group| group["fingerprint"] == split[0]["fingerprint"])
+        .expect("replayed split pair");
+    assert_eq!(replayed_pair["similarity"], split[0]["similarity"]);
     assert_eq!(
         members
             .iter()
@@ -404,10 +428,10 @@ fn a_set_the_ceiling_cut_is_not_reported_as_the_pairs_it_severed() {
     let cut = scan_json(dir.path());
     assert_eq!(cut["summary"]["split_components"], 1, "{cut:#?}");
 
-    // Three pieces, so three groups: the coarser partition is what the ceiling
-    // charges. Anything beyond that would be the severed relations coming back
-    // as rows, and twenty-one of the twenty-eight verified pairs are severed.
-    assert_eq!(units(&cut), 3, "{cut:#?}");
+    // The ceiling may not split one normalized-content equivalence class. The
+    // members are therefore retained as one primary group rather than three
+    // position-dependent groups with the same stable clone fingerprint.
+    assert_eq!(units(&cut), 1, "{cut:#?}");
     assert!(
         cut["groups"]
             .as_array()
@@ -417,18 +441,21 @@ fn a_set_the_ceiling_cut_is_not_reported_as_the_pairs_it_severed() {
         "{cut:#?}"
     );
 
-    // And the count is stated rather than left to be noticed.
+    // No relation was actually severed: the normalized-content equivalence
+    // class stayed atomic even though the component itself exceeded the
+    // configured ceiling.
     let verified = cut["summary"]["funnel"]
         .as_array()
         .expect("a funnel")
         .iter()
         .find(|stage| stage["stage"] == "verified pairs")
         .expect("the funnel names the verification stage");
-    let severed = verified["dropped"]
-        .as_array()
-        .expect("the stage accounts for what it dropped")
-        .iter()
-        .find(|drop| drop["cause"] == "the_ceiling_cut_the_set")
-        .expect("the cut is named as a cause");
-    assert!(severed["count"].as_u64().expect("a count") > 0, "{cut:#?}");
+    assert!(
+        verified["dropped"]
+            .as_array()
+            .expect("the stage accounts for what it dropped")
+            .iter()
+            .all(|drop| drop["cause"] != "the_ceiling_cut_the_set"),
+        "an atomic equivalence class did not lose relations to the ceiling: {cut:#?}"
+    );
 }

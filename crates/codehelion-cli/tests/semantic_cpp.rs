@@ -32,27 +32,8 @@ fn clang_helper_is_usable() -> bool {
 
 /// A scan of `root` in semantic mode, as the report puts it.
 fn scan(root: &std::path::Path) -> Value {
-    scan_with_path(root, None)
-}
-
-/// Run the semantic fixture at a floor suitable for checking short, closed
-/// compiler-recognized operation windows.
-fn scan_short_semantic_windows(root: &std::path::Path) -> Value {
-    std::fs::write(root.join("codehelion.toml"), "min-clone-tokens = 1\n")
-        .expect("configure the semantic window floor");
-    scan(root)
-}
-
-/// The same scan with an optional helper process `PATH`. Keeping the compile
-/// command unchanged lets this compare optional helper capability rather than
-/// two different build variants.
-fn scan_with_path(root: &std::path::Path, path: Option<&std::path::Path>) -> Value {
-    let mut command = cmd();
-    command.current_dir(root);
-    if let Some(path) = path {
-        command.env("PATH", path);
-    }
-    let output = command
+    let output = cmd()
+        .current_dir(root)
         .args(["scan", ".", "--mode", "semantic", "--format", "json"])
         .output()
         .expect("run scan");
@@ -62,6 +43,14 @@ fn scan_with_path(root: &std::path::Path, path: Option<&std::path::Path>) -> Val
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("stdout is one JSON document")
+}
+
+/// Run the semantic fixture at a floor suitable for checking short, closed
+/// compiler-recognized operation windows.
+fn scan_short_semantic_windows(root: &std::path::Path) -> Value {
+    std::fs::write(root.join("codehelion.toml"), "min-clone-tokens = 1\n")
+        .expect("configure the semantic window floor");
+    scan(root)
 }
 
 fn scan_comparing(root: &std::path::Path, format: &str) -> std::process::Output {
@@ -131,20 +120,6 @@ fn restricted_finding_set(report: &Value) -> Vec<Value> {
         .collect();
     findings.sort_by_key(ToString::to_string);
     findings
-}
-
-/// Per-group confidence is reported independently of the group identity so a
-/// test can establish that CFG availability reaches the intended score layer.
-fn restricted_confidences(report: &Value) -> Vec<f64> {
-    let mut confidences: Vec<_> = reports(report)
-        .into_iter()
-        .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())
-        .filter(|group| group["clone_type"] == "restricted-semantic")
-        .flat_map(|group| group["semantic"]["rules"].as_array().into_iter().flatten())
-        .filter_map(|rule| rule["confidence"].as_f64())
-        .collect();
-    confidences.sort_by(f64::total_cmp);
-    confidences
 }
 
 /// The scan and the helper have to agree about how a file is named, and nothing

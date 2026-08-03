@@ -361,6 +361,12 @@ pub struct Limits {
     /// Maximum incomplete local mirrors retained in one structural report.
     /// Unset selects the structural default.
     pub sibling_total_cap: Option<usize>,
+    /// Upper bound on Structural pairs passed to precise verification.
+    /// Unset selects the structural default.
+    pub verification_budget: Option<usize>,
+    /// Maximum dynamic-programming cells used by one Structural alignment.
+    /// Unset selects the verifier default.
+    pub max_alignment_cells: Option<usize>,
     /// Largest set of related units compared as one piece when forming
     /// groups; a larger set is cut, and the cut is reported. Comparing a set
     /// costs time quadratic in its size, so without a ceiling a codebase of
@@ -378,6 +384,16 @@ pub struct Limits {
 pub struct SemanticRules {
     /// Registered rule identifiers disabled for this project.
     pub disabled: Vec<String>,
+}
+
+/// Explicit compiler-helper locations for environments without a usable PATH.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Helpers {
+    /// Path to the Rust compiler helper.
+    pub rust: Option<PathBuf>,
+    /// Path to the Clang compiler helper.
+    pub clang: Option<PathBuf>,
 }
 
 impl SemanticRules {
@@ -422,6 +438,8 @@ impl Default for Limits {
             sibling_candidate_budget: None,
             sibling_per_group_cap: None,
             sibling_total_cap: None,
+            verification_budget: None,
+            max_alignment_cells: None,
             max_component: codehelion_core::grouping::GroupingConfig::default().max_component,
         }
     }
@@ -456,7 +474,7 @@ impl Limits {
                 || delta == 0.0
         }) {
             bail!(
-                "limits.near-miss-delta must be finite and in 0.0..={} when set",
+                "limits.near-miss-delta must be finite and in (0.0, {}] when set",
                 codehelion_core::near_match::DEFAULT_MIN_ESTIMATED_JACCARD
             );
         }
@@ -471,6 +489,12 @@ impl Limits {
         }
         if self.sibling_total_cap == Some(0) {
             bail!("limits.sibling-total-cap must be at least 1 when set");
+        }
+        if self.verification_budget == Some(0) {
+            bail!("limits.verification-budget must be at least 1 when set");
+        }
+        if self.max_alignment_cells == Some(0) {
+            bail!("limits.max-alignment-cells must be at least 1 when set");
         }
         if self.max_component < 2 {
             bail!("limits.max-component must be at least 2");
@@ -526,6 +550,18 @@ impl Limits {
                 }),
         );
         self.max_component = self.max_component.min(profile.max_component);
+        self.verification_budget = Some(
+            self.verification_budget
+                .map_or(profile.verification_budget, |budget| {
+                    budget.min(profile.verification_budget)
+                }),
+        );
+        self.max_alignment_cells = Some(
+            self.max_alignment_cells
+                .map_or(profile.max_alignment_cells, |cells| {
+                    cells.min(profile.max_alignment_cells)
+                }),
+        );
     }
 }
 
@@ -600,6 +636,8 @@ pub struct Config {
     pub limits: Limits,
     /// Restricted-semantic rule selection.
     pub semantic: SemanticRules,
+    /// Explicit compiler-helper locations.
+    pub helpers: Helpers,
     /// Audit-database location, relative to the repository root unless absolute.
     pub database: PathBuf,
     /// Frontend read-and-lex worker count; `None` selects it automatically.
@@ -626,6 +664,7 @@ impl Default for Config {
             priority: Priority::default(),
             limits: Limits::default(),
             semantic: SemanticRules::default(),
+            helpers: Helpers::default(),
             database: PathBuf::from(".codehelion/audit.db"),
             jobs: None,
         }
@@ -722,6 +761,35 @@ impl Config {
         }
         Ok(text)
     }
+}
+
+/// Resolve configured helper paths with command-line overrides taking priority.
+///
+/// # Errors
+///
+/// Returns an error for an unknown helper name, an empty path, a malformed
+/// assignment, or a duplicate command-line setting.
+pub fn helper_paths(configured: &Helpers, overrides: &[String]) -> Result<Helpers> {
+    let mut paths = configured.clone();
+    let mut seen = std::collections::BTreeSet::new();
+    for override_ in overrides {
+        let Some((name, path)) = override_.split_once('=') else {
+            bail!("--helper must be NAME=PATH (rust or clang)");
+        };
+        if path.is_empty() {
+            bail!("--helper {name} has an empty path");
+        }
+        let slot = match name {
+            "rust" => &mut paths.rust,
+            "clang" => &mut paths.clang,
+            _ => bail!("unknown helper {name:?}; expected rust or clang"),
+        };
+        if !seen.insert(name) {
+            bail!("--helper {name} was specified more than once");
+        }
+        *slot = Some(PathBuf::from(path));
+    }
+    Ok(paths)
 }
 
 /// Where the resolved configuration came from.
@@ -907,6 +975,12 @@ pub const TEMPLATE: &str = "\
 # [semantic]
 # disabled = [\"sequence-pipeline-v1\"]
 
+# Explicit compiler-helper locations, useful for hermetic CI or a package
+# manager installation outside PATH. Command-line --helper overrides these.
+# [helpers]
+# rust = \"/opt/codehelion/codehelion-backend-rust\"
+# clang = \"/opt/codehelion/codehelion-backend-clang\"
+
 # Resource ceilings; every ceiling that fires is accounted for in the report.
 # There is deliberately no trust setting here. `codehelion scan --untrusted`
 # lowers every ceiling below at once, and it is a command-line flag because this
@@ -931,6 +1005,20 @@ pub const TEMPLATE: &str = "\
 # posting-cap = 64
 # Upper bound on candidate pairs each pairing pass examines.
 # pair-budget = 1000000
+# Width of Structural's diagnostic near-miss band below its primary gate.
+# near-miss-delta = 0.05
+# Maximum diagnostic near misses retained in one Structural report.
+# near-miss-cap = 1000
+# Maximum post-grouping Structural sibling comparisons.
+# sibling-candidate-budget = 50000
+# Maximum incomplete local mirrors retained for one primary group.
+# sibling-per-group-cap = 8
+# Maximum incomplete local mirrors retained in one Structural report.
+# sibling-total-cap = 1000
+# Maximum Structural candidate pairs that enter precise verification.
+# verification-budget = 1000000
+# Maximum dynamic-programming cells used by one Structural alignment.
+# max-alignment-cells = 4000000
 # Largest set of related units compared as one piece when forming groups.
 # max-component = 1024
 ";

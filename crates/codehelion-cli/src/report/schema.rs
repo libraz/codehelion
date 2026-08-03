@@ -48,6 +48,8 @@ pub const GROUP_EXPANDED: &str = "expanded";
 pub(super) const EXPLAIN_RESPONSE_OCCURRENCE: &str = "occurrence";
 pub(super) const EXPLAIN_RESPONSE_CLONE_GROUP: &str = "clone_group";
 pub(super) const EXPLAIN_RESPONSE_CROSS_LANGUAGE_GROUP: &str = "cross_language_group";
+pub(super) const EXPLAIN_RESPONSE_CROSS_VARIANT_GROUP: &str = "cross_variant_group";
+pub(super) const EXPLAIN_RESPONSE_SIBLING: &str = "sibling";
 
 #[derive(Serialize)]
 struct FindingDetailEnvelope<'a, T: ?Sized> {

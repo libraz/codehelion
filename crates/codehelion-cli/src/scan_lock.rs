@@ -19,6 +19,17 @@ pub struct DatabaseLock {
     file: File,
 }
 
+/// What a non-mutating probe found for one database lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseStatus {
+    /// No process currently holds the lease.
+    Available,
+    /// Another process currently holds the lease.
+    Held,
+    /// The lease sidecar could not be inspected.
+    Unreadable(String),
+}
+
 impl Drop for DatabaseLock {
     fn drop(&mut self) {
         // A failed unlock cannot be recovered during destruction. Closing the
@@ -61,6 +72,36 @@ pub fn acquire(database: &Path) -> Result<DatabaseLock> {
     Ok(DatabaseLock { file })
 }
 
+/// Inspect a database lease without creating its sidecar or retaining a lock.
+///
+/// # Safety of the result
+///
+/// The result is a point-in-time diagnostic. A writer can acquire the lease
+/// immediately after this function returns, so callers must still call
+/// [`acquire`] before any mutation.
+#[must_use]
+pub fn lease_status(database: &Path) -> LeaseStatus {
+    let path = lock_path(database);
+    let file = match OpenOptions::new().read(true).write(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return LeaseStatus::Available;
+        }
+        Err(error) => return LeaseStatus::Unreadable(error.to_string()),
+    };
+    match FileExt::try_lock_exclusive(&file) {
+        Ok(()) => {
+            // Closing the descriptor releases the advisory lock even if an
+            // explicit unlock reports an OS error, so this probe never holds
+            // the lease past its return.
+            drop(FileExt::unlock(&file));
+            LeaseStatus::Available
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => LeaseStatus::Held,
+        Err(error) => LeaseStatus::Unreadable(error.to_string()),
+    }
+}
+
 /// Stable sidecar path used by all commands that coordinate one database.
 #[must_use]
 fn lock_path(database: &Path) -> PathBuf {
@@ -87,5 +128,16 @@ mod tests {
         );
         drop(first);
         acquire(&database).expect("released lease can be acquired again");
+    }
+
+    #[test]
+    fn a_status_probe_reports_a_live_lease_without_retaining_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("audit.db");
+        assert_eq!(lease_status(&database), LeaseStatus::Available);
+        let held = acquire(&database).unwrap();
+        assert_eq!(lease_status(&database), LeaseStatus::Held);
+        drop(held);
+        assert_eq!(lease_status(&database), LeaseStatus::Available);
     }
 }

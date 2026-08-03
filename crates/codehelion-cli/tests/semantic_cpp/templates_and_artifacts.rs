@@ -283,3 +283,55 @@ fn a_cpp_tree_with_no_compilation_database_is_reported_rather_than_refused() {
         "{coverage}"
     );
 }
+
+/// A Rust partition must not hide C/C++ sources just because no compilation
+/// database exists. The C++ pair still belongs to its own explicit no-build
+/// partition and remains visible as a structural finding.
+#[test]
+fn a_mixed_tree_without_a_compilation_database_keeps_cpp_findings() {
+    if !clang_helper_is_usable() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().join("src");
+    std::fs::create_dir_all(&root).expect("create the tree");
+    let cpp = r"
+int total(const int *values, int count) {
+    int sum = 0;
+    for (int index = 0; index < count; ++index) {
+        if (values[index] % 2 == 0) {
+            sum += values[index];
+        } else {
+            sum -= values[index];
+        }
+    }
+    return sum;
+}
+";
+    std::fs::write(root.join("first.cpp"), cpp).expect("write first C++ source");
+    std::fs::write(root.join("second.cpp"), cpp).expect("write second C++ source");
+    std::fs::write(root.join("lib.rs"), "pub fn marker() {}\n").expect("write Rust source");
+
+    let report = scan_short_semantic_windows(dir.path());
+    let no_build_sources: u64 = reports(&report)
+        .into_iter()
+        .filter_map(|partition| {
+            partition["summary"]["compiler"]["unavailable"]["no_build_information"].as_u64()
+        })
+        .sum();
+    assert_eq!(no_build_sources, 2, "{report}");
+
+    let cpp_members = reports(&report)
+        .into_iter()
+        .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())
+        .flat_map(|group| group["members"].as_array().into_iter().flatten())
+        .filter(|member| {
+            member["file"].as_str().is_some_and(|file| {
+                std::path::Path::new(file)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("cpp"))
+            })
+        })
+        .count();
+    assert!(cpp_members >= 2, "{report}");
+}

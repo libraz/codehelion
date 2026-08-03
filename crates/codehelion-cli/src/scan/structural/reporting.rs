@@ -4,8 +4,9 @@ use super::{
     BTreeMap, CloneScope, DiscoveryReport, GroupDetail, LiteralNorm, REGION_SIMILARITY, Report,
     ReportInputs, SemanticDetection, SemanticUnitGraph, StructuralGroup, StructuralRegion,
     StructuralUnit, SummaryRow, VerifiedPair, WEIGHT_VERSION, aggregate_test_code_evidence, as_u64,
-    engine, region_identifier_jaccard, region_test_code_evidence, report, semantic_member_ranks,
-    semantic_scope, shared, stable_id, structural, unit_token_span,
+    engine, region_identifier_jaccard, region_test_code_evidence, report,
+    semantic_group_member_fingerprints, semantic_member_ranks, semantic_scope, shared, stable_id,
+    structural, unit_token_span,
 };
 use codehelion_core::boilerplate::BOILERPLATE_VERSION;
 use codehelion_core::discovery::NORMALIZATION_VERSION;
@@ -22,7 +23,7 @@ use codehelion_core::test_code::TEST_CODE_VERSION;
 use codehelion_core::verify::SimilarityBreakdown;
 use codehelion_store::snapshot::UnparsedRow;
 
-use crate::scan::{RunInfoInputs, common_run_info, file_counts, guardrails_row};
+use crate::scan::{RunInfoInputs, common_run_info, display_path, file_counts, guardrails_row};
 
 pub(super) fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
     let mut entries: Vec<report::Group> = (0..inputs.analysis.groups.groups.len())
@@ -50,19 +51,19 @@ pub(super) fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
 /// a split-pair restricted semantic finding.
 fn build_semantic_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
     let pair = &inputs.semantic_pairs[index];
+    let members = [&pair.canonical, &pair.corresponding];
     let fingerprint = stable_id::semantic_clone_group_fingerprint(
         inputs.variant,
         pair.rule.id,
         pair.rule.version,
-        &[pair.canonical.content, pair.corresponding.content],
+        &semantic_group_member_fingerprints(members, inputs.analysis),
     );
-    let members = [&pair.canonical, &pair.corresponding];
     let test_code_evidence =
         aggregate_test_code_evidence(inputs.analysis, members.iter().map(|member| member.unit));
     let member_ranks = semantic_member_ranks(members.iter().copied());
     let canonical_unit = &inputs.analysis.units[pair.canonical.unit];
-    let entropy_bits =
-        engine::content_entropy_bits(inputs.unit_tokens(canonical_unit), inputs.literals);
+    let canonical_tokens = inputs.unit_tokens(canonical_unit);
+    let entropy_bits = engine::content_entropy_bits(canonical_tokens, inputs.literals);
     let node_mappings = (0..pair.canonical.graph.nodes.len())
         .filter_map(|index| {
             let index = u32::try_from(index).ok()?;
@@ -94,7 +95,7 @@ fn build_semantic_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group
                     )
                     .to_hex(),
                     content: member.content.to_hex(),
-                    file: file.relative_path.clone(),
+                    file: display_path(&file.relative_path),
                     language: file.language.name().to_string(),
                     start_line: member.start_line,
                     end_line: member.end_line,
@@ -109,14 +110,17 @@ fn build_semantic_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group
     assembled.test_code = test_code_evidence.is_some();
     assembled.test_code_evidence = test_code_evidence;
     assembled.split_pair = true;
-    assembled.suppressed =
-        inputs.semantic_pair_suppressed[index].map(|rule| inputs.suppression(rule));
+    assembled.suppressed = inputs.finding_suppression(
+        entropy_bits,
+        canonical_tokens.len(),
+        inputs.semantic_pair_suppressed[index],
+    );
     assembled.semantic = Some(report::SemanticEvidence {
         schema_version: pair.canonical.graph.schema_version.clone(),
         rules: vec![report::SemanticRuleEvidence {
             id: pair.rule.id.to_string(),
             version: pair.rule.version,
-            confidence: pair.semantic_confidence,
+            confidence: pair.rule.confidence,
         }],
         graphs: vec![
             pair.canonical.graph.clone(),
@@ -138,11 +142,7 @@ fn build_semantic_group(inputs: &ReportInputs<'_>, index: usize) -> report::Grou
         inputs.variant,
         semantic_group.rule.id,
         semantic_group.rule.version,
-        &semantic_group
-            .members
-            .iter()
-            .map(|member| member.content)
-            .collect::<Vec<_>>(),
+        &semantic_group_member_fingerprints(semantic_group.members.iter(), inputs.analysis),
     );
     let test_code_evidence = aggregate_test_code_evidence(
         inputs.analysis,
@@ -151,8 +151,8 @@ fn build_semantic_group(inputs: &ReportInputs<'_>, index: usize) -> report::Grou
     let node_mappings = semantic_node_mappings(&semantic_group.canonical, &semantic_group.members);
     let member_ranks = semantic_member_ranks(semantic_group.members.iter());
     let canonical_unit = &inputs.analysis.units[semantic_group.canonical.unit];
-    let entropy_bits =
-        engine::content_entropy_bits(inputs.unit_tokens(canonical_unit), inputs.literals);
+    let canonical_tokens = inputs.unit_tokens(canonical_unit);
+    let entropy_bits = engine::content_entropy_bits(canonical_tokens, inputs.literals);
     let mut assembled = shared::report_group(shared::ReportGroupCore {
         fingerprint: fingerprint.to_hex(),
         clone_type: codehelion_core::clone_class::CloneClass::RestrictedSemantic,
@@ -175,7 +175,7 @@ fn build_semantic_group(inputs: &ReportInputs<'_>, index: usize) -> report::Grou
                     )
                     .to_hex(),
                     content: member.content.to_hex(),
-                    file: file.relative_path.clone(),
+                    file: display_path(&file.relative_path),
                     language: file.language.name().to_string(),
                     start_line: member.start_line,
                     end_line: member.end_line,
@@ -189,14 +189,17 @@ fn build_semantic_group(inputs: &ReportInputs<'_>, index: usize) -> report::Grou
     });
     assembled.test_code = test_code_evidence.is_some();
     assembled.test_code_evidence = test_code_evidence;
-    assembled.suppressed =
-        inputs.semantic_group_suppressed[index].map(|rule| inputs.suppression(rule));
+    assembled.suppressed = inputs.finding_suppression(
+        entropy_bits,
+        canonical_tokens.len(),
+        inputs.semantic_group_suppressed[index],
+    );
     assembled.semantic = Some(report::SemanticEvidence {
         schema_version: semantic_group.canonical.graph.schema_version.clone(),
         rules: vec![report::SemanticRuleEvidence {
             id: semantic_group.rule.id.to_string(),
             version: semantic_group.rule.version,
-            confidence: semantic_group.semantic_confidence,
+            confidence: semantic_group.rule.confidence,
         }],
         graphs: semantic_group
             .members
@@ -283,6 +286,7 @@ pub(super) fn funnel(
             ),
         report::FunnelStage::new("near-match pairs", as_u64(near.candidate_pairs))
             .dropping("too_few_shingles", as_u64(near.skipped_small))
+            .dropping("signed_unit_limit", as_u64(near.signed_limit_dropped))
             .dropping("crowded_bucket", as_u64(near.stop_buckets))
             .dropping("pair_budget", as_u64(near.budget_dropped))
             .dropping("length_ratio", as_u64(near.filtered_by_size))
@@ -365,18 +369,42 @@ pub(super) fn funnel(
             "outside_registered_vocabulary",
             as_u64(semantic.excluded_observations),
         ),
-        report::FunnelStage::new("semantic graphs", as_u64(candidates.graphs))
-            .dropping("ineligible", as_u64(candidates.ineligible_graphs))
-            .dropping(
-                "no_registered_operations",
-                as_u64(semantic.unrepresentable_units),
-            )
-            .dropping(
-                "below_min_clone_tokens",
-                as_u64(semantic.below_min_clone_tokens),
+        // `candidates.graphs` already excludes short windows, while
+        // `unrepresentable_units` never produced a graph at all. The stage
+        // starts from the parser-owned inputs so its drops share one
+        // denominator instead of subtracting unrelated populations.
+        report::FunnelStage::new(
+            "semantic graphs",
+            as_u64(
+                semantic
+                    .units
+                    .len()
+                    .saturating_add(semantic.unrepresentable_units),
             ),
+        )
+        .dropping("ineligible", as_u64(candidates.ineligible_graphs))
+        .dropping(
+            "no_registered_operations",
+            as_u64(semantic.unrepresentable_units),
+        )
+        .dropping(
+            "below_min_clone_tokens",
+            as_u64(semantic.below_min_clone_tokens),
+        ),
+        // A member ceiling discards buckets, not a known number of pairs:
+        // omitted oversized buckets never enumerate their quadratic pair set.
+        // Keep that unit explicit so a bucket count cannot read as a pair
+        // count in the next stage.
+        report::FunnelStage::new(
+            "semantic candidate buckets",
+            as_u64(
+                candidates
+                    .buckets
+                    .saturating_sub(candidates.oversized_buckets),
+            ),
+        )
+        .dropping("bucket_member_cap", as_u64(candidates.oversized_buckets)),
         report::FunnelStage::new("semantic candidate pairs", as_u64(candidates.pairs_emitted))
-            .dropping("high_frequency", as_u64(candidates.oversized_buckets))
             .dropping("pair_budget", as_u64(candidates.pairs_budget_dropped)),
         report::FunnelStage::new("semantic verified pairs", as_u64(semantic.verified_pairs))
             .dropping("rule_disabled", as_u64(semantic.disabled_pairs)),
@@ -418,7 +446,7 @@ pub(super) fn build_report(
             started_at: inputs.started_at,
             finished_at: inputs.finished_at,
             variant: inputs.variant,
-            detector_versions: detector_versions(inputs.literals)
+            detector_versions: detector_versions(inputs.literals, inputs.entropy_ratio_floor)
                 .into_iter()
                 .map(|(component, version)| report::DetectorVersion { component, version })
                 .collect(),
@@ -440,10 +468,12 @@ fn build_near_misses(inputs: &ReportInputs<'_>) -> Vec<report::NearMiss> {
         .analysis
         .near_misses
         .iter()
-        .map(|near_miss| report::NearMiss {
+        .enumerate()
+        .map(|(index, near_miss)| report::NearMiss {
             estimated_jaccard: near_miss.estimated_jaccard,
             left: near_miss_unit(inputs, near_miss.a),
             right: near_miss_unit(inputs, near_miss.b),
+            suppressed: inputs.near_miss_suppressed[index].map(|rule| inputs.suppression(rule)),
         })
         .collect()
 }
@@ -455,7 +485,7 @@ fn near_miss_unit(inputs: &ReportInputs<'_>, index: usize) -> report::NearMissUn
     report::NearMissUnit {
         unit_fingerprint: unit.fingerprint.to_hex(),
         language: file.language.name().to_string(),
-        file: file.relative_path.clone(),
+        file: display_path(&file.relative_path),
         start_line: unit.start_line,
         end_line: unit.end_line,
         unit: unit.name.as_deref().map(ToString::to_string),
@@ -471,14 +501,25 @@ fn build_siblings(inputs: &ReportInputs<'_>) -> Vec<report::GroupSiblings> {
         .analysis
         .siblings
         .iter()
-        .filter_map(|siblings| {
+        .enumerate()
+        .filter_map(|(owner_index, siblings)| {
             let detail = inputs.analysis.details.get(siblings.group)?;
+            let group = inputs.analysis.groups.groups.get(siblings.group)?;
+            let ranks = ranks_after(
+                member_hosts(&inputs.analysis.units, &group.members),
+                siblings
+                    .siblings
+                    .iter()
+                    .map(|sibling| inputs.analysis.units[sibling.unit].fingerprint),
+            );
             Some(report::GroupSiblings {
                 group_fingerprint: detail.fingerprint.to_hex(),
                 siblings: siblings
                     .siblings
                     .iter()
-                    .map(|sibling| {
+                    .zip(ranks)
+                    .enumerate()
+                    .map(|(sibling_index, (sibling, rank))| {
                         let unit = &inputs.analysis.units[sibling.unit];
                         let file = &inputs.files[unit.file];
                         report::Sibling {
@@ -497,11 +538,11 @@ fn build_siblings(inputs: &ReportInputs<'_>) -> Vec<report::GroupSiblings> {
                                 finding_id: stable_id::finding_id(
                                     &detail.fingerprint,
                                     Some(&unit.fingerprint),
-                                    0,
+                                    rank,
                                 )
                                 .to_hex(),
                                 content: unit.content.to_hex(),
-                                file: file.relative_path.clone(),
+                                file: display_path(&file.relative_path),
                                 language: file.language.name().to_string(),
                                 start_line: unit.start_line,
                                 end_line: unit.end_line,
@@ -513,6 +554,8 @@ fn build_siblings(inputs: &ReportInputs<'_>) -> Vec<report::GroupSiblings> {
                                 .unwrap_or(u64::MAX),
                                 canonical: false,
                             },
+                            suppressed: inputs.sibling_suppressed[owner_index][sibling_index]
+                                .map(|rule| inputs.suppression(rule)),
                         }
                     })
                     .collect(),
@@ -557,6 +600,9 @@ pub(super) fn summary_row(
         excluded_symlinks: exclusions.symlinks,
         excluded_walk_errors: exclusions.walk_errors,
         excluded_timed_out: inputs.timed_out,
+        excluded_language: exclusions.language_excluded,
+        excluded_symlink_files: exclusions.symlink_files,
+        excluded_symlink_directories: exclusions.symlink_directories,
         guardrails: guardrails.map(guardrails_row),
         excluded_skipped: exclusions.skipped + inputs.unreadable + inputs.timed_out,
         folded_runs: as_u64(inputs.regions.folded),
@@ -597,6 +643,9 @@ pub(super) struct DiscoveryExclusions {
     pub(super) unreadable: u64,
     pub(super) symlinks: u64,
     pub(super) walk_errors: u64,
+    pub(super) language_excluded: u64,
+    pub(super) symlink_files: u64,
+    pub(super) symlink_directories: u64,
     pub(super) skipped: u64,
 }
 
@@ -618,6 +667,9 @@ pub(super) fn discovery_exclusions(
             unreadable: discovery.skipped.unreadable,
             symlinks: discovery.skipped.symlinks,
             walk_errors: discovery.skipped.walk_errors,
+            language_excluded: discovery.skipped.language_excluded,
+            symlink_files: discovery.skipped.symlink_files,
+            symlink_directories: discovery.skipped.symlink_directories,
             skipped: discovery.skipped.total(),
         }
     })
@@ -628,10 +680,9 @@ pub(super) fn discovery_exclusions(
 fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
     let group = &inputs.analysis.groups.groups[index];
     let detail = &inputs.analysis.details[index];
-    let suppressed = inputs.group_suppressed[index].map(|rule| inputs.suppression(rule));
     let canonical_unit = &inputs.analysis.units[group.canonical];
-    let entropy_bits =
-        engine::content_entropy_bits(inputs.unit_tokens(canonical_unit), inputs.literals);
+    let canonical_tokens = inputs.unit_tokens(canonical_unit);
+    let entropy_bits = engine::content_entropy_bits(canonical_tokens, inputs.literals);
     let mut assembled = shared::report_group(shared::ReportGroupCore {
         fingerprint: detail.fingerprint.to_hex(),
         clone_type: group.clone_type,
@@ -658,7 +709,7 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                     )
                     .to_hex(),
                     content: unit.content.to_hex(),
-                    file: file.relative_path.clone(),
+                    file: display_path(&file.relative_path),
                     language: file.language.name().to_string(),
                     start_line: unit.start_line,
                     end_line: unit.end_line,
@@ -684,7 +735,11 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
     assembled.test_code = detail.test_code;
     assembled.test_code_evidence = detail.test_code_evidence;
     assembled.width_family = detail.width_family;
-    assembled.suppressed = suppressed;
+    assembled.suppressed = inputs.finding_suppression(
+        entropy_bits,
+        canonical_tokens.len(),
+        inputs.group_suppressed[index],
+    );
     report::ranked(assembled, &inputs.weights, inputs.min_clone_tokens)
 }
 
@@ -728,12 +783,11 @@ pub(super) fn split_pair_identifier_jaccard(inputs: &ReportInputs<'_>, pair: &Ve
 /// than many relations.
 fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
     let pair = &inputs.analysis.unrepresented[index];
-    let suppressed = inputs.pair_suppressed[index].map(|rule| inputs.suppression(rule));
     let members = &pair_members(pair);
     let test_code_evidence = aggregate_test_code_evidence(inputs.analysis, members.iter().copied());
     let canonical_unit = &inputs.analysis.units[pair.canonical];
-    let entropy_bits =
-        engine::content_entropy_bits(inputs.unit_tokens(canonical_unit), inputs.literals);
+    let canonical_tokens = inputs.unit_tokens(canonical_unit);
+    let entropy_bits = engine::content_entropy_bits(canonical_tokens, inputs.literals);
     let mut assembled = shared::report_group(shared::ReportGroupCore {
         fingerprint: pair.fingerprint.to_hex(),
         clone_type: pair.class,
@@ -759,7 +813,7 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                     )
                     .to_hex(),
                     content: unit.content.to_hex(),
-                    file: file.relative_path.clone(),
+                    file: display_path(&file.relative_path),
                     language: file.language.name().to_string(),
                     start_line: unit.start_line,
                     end_line: unit.end_line,
@@ -773,11 +827,26 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             .collect(),
     });
     assembled.identifier_jaccard = Some(split_pair_identifier_jaccard(inputs, pair));
+    assembled.similarity = pair.breakdown.map(|breakdown| report::Similarity {
+        weight_version: WEIGHT_VERSION.to_string(),
+        lexical: breakdown.lexical,
+        structural: breakdown.structural,
+        control_flow: breakdown.control_flow,
+        type_similarity: breakdown.type_similarity,
+        api: breakdown.api,
+        composite: breakdown.composite,
+        min_pairwise: pair.similarity,
+        confidence_band: Some(pair.confidence.name().to_string()),
+    });
     assembled.boilerplate = pair.boilerplate.map(|shape| shape.name().to_string());
     assembled.test_code = test_code_evidence.is_some();
     assembled.test_code_evidence = test_code_evidence;
     assembled.width_family = pair.width_family;
-    assembled.suppressed = suppressed;
+    assembled.suppressed = inputs.finding_suppression(
+        entropy_bits,
+        canonical_tokens.len(),
+        inputs.pair_suppressed[index],
+    );
     assembled.split_pair = true;
     report::ranked(assembled, &inputs.weights, inputs.min_clone_tokens)
 }
@@ -819,7 +888,7 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                     )
                     .to_hex(),
                     content: occurrence.content.to_hex(),
-                    file: file.relative_path.clone(),
+                    file: display_path(&file.relative_path),
                     language: file.language.name().to_string(),
                     start_line: occurrence.start_line,
                     end_line: occurrence.end_line,
@@ -837,7 +906,11 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
     assembled.identifier_jaccard = Some(region_identifier_jaccard(inputs, region));
     assembled.test_code = test_code_evidence.is_some();
     assembled.test_code_evidence = test_code_evidence;
-    assembled.suppressed = inputs.region_suppressed[index].map(|rule| inputs.suppression(rule));
+    assembled.suppressed = inputs.finding_suppression(
+        entropy_bits,
+        end.saturating_sub(canonical.token_start),
+        inputs.region_suppressed[index],
+    );
     report::ranked(assembled, &inputs.weights, inputs.min_clone_tokens)
 }
 
@@ -852,8 +925,26 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
 /// rank was introduced for — one run duplicated twice inside a single unit —
 /// since those two share a host and therefore a fingerprint.
 pub(super) fn ranks_within_host(hosts: impl IntoIterator<Item = UnitFingerprint>) -> Vec<u32> {
+    ranks_after(std::iter::empty(), hosts)
+}
+
+/// Rank later occurrences after the ones already emitted for the same group.
+///
+/// A sibling can have byte-identical content to a primary member when a
+/// candidate ceiling leaves that otherwise matching unit out of the primary
+/// group. Its host fingerprint then matches a primary member's fingerprint,
+/// so its rank must continue after the primary occurrences to keep the
+/// group's finding identifiers unique.
+pub(super) fn ranks_after(
+    existing: impl IntoIterator<Item = UnitFingerprint>,
+    later: impl IntoIterator<Item = UnitFingerprint>,
+) -> Vec<u32> {
     let mut next: BTreeMap<UnitFingerprint, u32> = BTreeMap::new();
-    hosts
+    for host in existing {
+        let slot = next.entry(host).or_insert(0);
+        *slot = slot.saturating_add(1);
+    }
+    later
         .into_iter()
         .map(|host| {
             let slot = next.entry(host).or_insert(0);
@@ -887,17 +978,13 @@ pub(super) fn occurrence_hosts<'a>(
 /// A group's reported similarity: the medoid-to-member breakdown of its
 /// *weakest* member, paired with the group's cohesion.
 ///
-/// One breakdown is reported rather than an average so that every number
-/// stays a real measurement of a real pair. The weakest member is the
-/// conservative choice: it is the evidence a reader should judge the group
-/// by.
-pub(super) fn weakest_breakdown(detail: &GroupDetail) -> &SimilarityBreakdown {
-    detail
-        .member_breakdowns
-        .iter()
-        .skip(1)
-        .min_by(|a, b| a.composite.total_cmp(&b.composite))
-        .unwrap_or(&detail.member_breakdowns[0])
+/// The breakdown of the pair that establishes the group's cohesion.
+///
+/// Every value remains a real measurement of a real pair. In particular this
+/// is not necessarily the medoid-to-member comparison with the lowest score:
+/// complete linkage can be constrained by two non-canonical members.
+pub(super) const fn weakest_breakdown(detail: &GroupDetail) -> &SimilarityBreakdown {
+    &detail.cohesion_breakdown
 }
 
 fn similarity(group: &StructuralGroup, detail: &GroupDetail) -> report::Similarity {
@@ -923,7 +1010,10 @@ fn similarity(group: &StructuralGroup, detail: &GroupDetail) -> report::Similari
 /// [`codehelion_core::compat`] rather than assumed from being listed: the
 /// grouping rules and the ranking recipe are here because they can be seen in
 /// a result, not because they move an identifier.
-pub(super) fn detector_versions(literals: LiteralNorm) -> Vec<(String, String)> {
+pub(super) fn detector_versions(
+    literals: LiteralNorm,
+    entropy_ratio_floor: f64,
+) -> Vec<(String, String)> {
     vec![
         ("fp-schema".to_string(), FP_SCHEMA_VERSION.to_string()),
         (
@@ -941,6 +1031,10 @@ pub(super) fn detector_versions(literals: LiteralNorm) -> Vec<(String, String)> 
         ("verify-weights".to_string(), WEIGHT_VERSION.to_string()),
         ("boilerplate".to_string(), BOILERPLATE_VERSION.to_string()),
         ("test-code".to_string(), TEST_CODE_VERSION.to_string()),
+        (
+            "entropy-ratio".to_string(),
+            format!("entropy-ratio-v1:{entropy_ratio_floor:.6}"),
+        ),
         ("sog-schema".to_string(), SOG_SCHEMA_VERSION.to_string()),
         (
             "semantic-candidate-index".to_string(),

@@ -396,6 +396,7 @@ fn source(path: &str, language: Language, crate_name: Option<&str>) -> SourceUni
         language,
         is_header: false,
         content_hash: codehelion_core::discovery::ContentHash::of(b""),
+        source_bytes: Vec::new().into(),
         byte_len: 0,
         package: crate_name.map(ToString::to_string),
         crate_name: crate_name.map(ToString::to_string),
@@ -424,7 +425,10 @@ fn every_source_is_accounted_for_in_the_order_it_was_given() {
         &BTreeMap::new(),
         &mut |_, unit, _| {
             asked.push(unit.clone());
-            Analysis::Done(Box::new(CompilerIr::empty(unit.clone())))
+            (
+                Analysis::Done(Box::new(CompilerIr::empty(unit.clone()))),
+                Vec::new(),
+            )
         },
     );
     assert!(matches!(answers[0], Gathered::Analyzed { .. }));
@@ -464,7 +468,12 @@ fn being_unable_to_answer_is_not_the_same_as_never_being_asked() {
         &sources,
         "host",
         &BTreeMap::new(),
-        &mut |_, _, _| Analysis::Missing(Unavailability::RequiresExecution),
+        &mut |_, _, _| {
+            (
+                Analysis::Missing(Unavailability::RequiresExecution),
+                vec!["the compiler declined this unit".to_string()],
+            )
+        },
     );
     let Gathered::Unavailable { unit, reason, .. } = &answers[0] else {
         panic!("the helper was asked and could not answer");
@@ -518,7 +527,10 @@ fn each_file_is_put_to_the_helper_that_reads_its_language() {
         &BTreeMap::new(),
         &mut |backend, unit, _| {
             asked.push((backend, unit.unit.clone()));
-            Analysis::Done(Box::new(CompilerIr::empty(unit.clone())))
+            (
+                Analysis::Done(Box::new(CompilerIr::empty(unit.clone()))),
+                Vec::new(),
+            )
         },
     );
     assert!(
@@ -552,7 +564,12 @@ fn a_cpp_file_is_not_ruled_out_for_belonging_to_no_crate() {
         &sources,
         "host",
         &BTreeMap::new(),
-        &mut |_, unit, _| Analysis::Done(Box::new(CompilerIr::empty(unit.clone()))),
+        &mut |_, unit, _| {
+            (
+                Analysis::Done(Box::new(CompilerIr::empty(unit.clone()))),
+                Vec::new(),
+            )
+        },
     );
     assert!(matches!(answers[0], Gathered::Analyzed { .. }));
 }

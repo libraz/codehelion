@@ -44,8 +44,8 @@ pub use schema::{
 };
 use schema::{
     EXPLAIN_RESPONSE_CLONE_GROUP, EXPLAIN_RESPONSE_CROSS_LANGUAGE_GROUP,
-    EXPLAIN_RESPONSE_OCCURRENCE, GONE_LISTED, SCOPE_FRAGMENT, TEXT_GROUP_LIMIT, TEXT_MEMBER_LIMIT,
-    detail_json,
+    EXPLAIN_RESPONSE_CROSS_VARIANT_GROUP, EXPLAIN_RESPONSE_OCCURRENCE, EXPLAIN_RESPONSE_SIBLING,
+    GONE_LISTED, SCOPE_FRAGMENT, TEXT_GROUP_LIMIT, TEXT_MEMBER_LIMIT, detail_json,
 };
 
 /// A complete scan result: run metadata, summary counts and every group.
@@ -79,6 +79,8 @@ pub struct NearMiss {
     pub left: NearMissUnit,
     /// Higher side of the canonical proposal pair.
     pub right: NearMissUnit,
+    /// Why this diagnostic is hidden from default reports; `None` when visible.
+    pub suppressed: Option<Suppression>,
 }
 
 /// A source-unit anchor for a diagnostic near-match proposal.
@@ -122,6 +124,8 @@ pub struct Sibling {
     /// The ungrouped unit. It is intentionally not repeated in the owning
     /// group's `members` collection.
     pub member: Member,
+    /// Why this supplemental finding is hidden from default reports.
+    pub suppressed: Option<Suppression>,
 }
 
 /// Per-dimension evidence for one sibling comparison.
@@ -234,6 +238,24 @@ pub struct CrossLanguageComparison {
     pub groups: Vec<CrossLanguageGroup>,
 }
 
+/// An explicitly requested Rust-to-C++ comparison that could not run.
+///
+/// This is distinct from an empty completed comparison: the latter searched
+/// both languages and found no registered correspondence, while this record
+/// names the missing input required to start the comparison.
+#[derive(Debug, Serialize)]
+pub struct CrossLanguageComparisonNotRun {
+    /// Stable spelling for consumers that distinguish this from a completed
+    /// comparison.
+    pub status: String,
+    /// The comparison operation that was requested.
+    pub comparison_kind: String,
+    /// Why the requested operation was not run.
+    pub reason: String,
+    /// Distinct normal scan partitions that were available to compare.
+    pub origin_variants: Vec<String>,
+}
+
 /// One verified cross-language restricted-semantic group.
 #[derive(Debug, Serialize)]
 pub struct CrossLanguageGroup {
@@ -300,6 +322,9 @@ pub struct RunInfo {
     /// it, so the database holds one run at a time. The id exists to name the
     /// recorded run to `report --run`, not to place it in a sequence.
     pub run_id: i64,
+    /// Whether this invocation reused a matching completed local run.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub reused: bool,
 }
 
 /// Effective configuration provenance recorded with a scan.
@@ -329,6 +354,14 @@ pub struct BuildVariantInfo {
     pub normalization_version: u32,
     /// Stable fingerprint of the variant.
     pub fingerprint: String,
+    /// Compiler settings that define the variant, grouped first by the
+    /// language whose build supplied them and then by stable setting name.
+    ///
+    /// Empty for Fast and Structural mode, which resolve no compiler build.
+    /// An unresolved optional setting is absent rather than represented as an
+    /// empty value, preserving the distinction recorded in the audit store.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, BTreeMap<String, Vec<String>>>,
 }
 
 /// Version of one detection component.
@@ -363,6 +396,9 @@ pub struct Summary {
     /// What the baseline hid, when the scan was given one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline: Option<BaselineStatus>,
+    /// File-tree delta from the preceding compatible completed run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changes: Option<TreeChanges>,
     /// Clone-group counts by type.
     pub groups: GroupCounts,
     /// Suppressed-group counts by mechanism.
@@ -423,6 +459,21 @@ pub struct Summary {
     pub compiler: Option<CompilerCoverage>,
 }
 
+/// File-content changes since one compatible scan.
+#[derive(Debug, Clone, Serialize)]
+pub struct TreeChanges {
+    /// Completed run used as the comparison point.
+    pub since_run_id: i64,
+    /// Paths present in both runs with changed contents.
+    pub modified: u64,
+    /// Paths absent from the earlier run.
+    pub added: u64,
+    /// Paths absent from this run.
+    pub removed: u64,
+    /// Paths present with identical contents in both runs.
+    pub unchanged: u64,
+}
+
 /// How much of the tree a compiler answered about.
 #[derive(Debug, Serialize)]
 pub struct CompilerCoverage {
@@ -437,6 +488,9 @@ pub struct CompilerCoverage {
     /// one is a project that needs something (a build script allowed to run, a
     /// compilation database), the other a helper nobody installed.
     pub unavailable: BTreeMap<String, u64>,
+    /// Helper diagnostics grouped by their exact bounded text.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub diagnostics: BTreeMap<String, u64>,
     /// Execution classes that stopped a compiler from supplying an answer.
     ///
     /// Unlike [`Self::unavailable`], this keeps the precise permission and
@@ -483,6 +537,10 @@ pub struct Guardrails {
     pub posting_cap: usize,
     /// Largest number of candidate pairs any pairing pass examined.
     pub pair_budget: usize,
+    /// Largest Structural pairs passed to precise verification.
+    pub verification_budget: usize,
+    /// Largest dynamic-programming cell count for one Structural alignment.
+    pub max_alignment_cells: usize,
     /// Width of the estimated-Jaccard diagnostic band below the candidate threshold.
     pub near_miss_delta: f64,
     /// Maximum near-miss diagnostics retained by one run.
@@ -501,8 +559,8 @@ mod ranking;
 
 pub use ranking::{
     FunnelDrop, FunnelStage, Member, RankingInfo, Sort, Suppression, SuppressionKind, UnusedRule,
-    compare_on, duplicated_tokens, is_search_truncation, order, ranked, restored, search_truncated,
-    stored_funnel, stored_rules, unapplied_suppression_policies,
+    compare_on, duplicated_tokens, is_search_truncation, order, order_recorded, ranked, ranks_down,
+    restored, search_truncated, stored_funnel, stored_rules, unapplied_suppression_policies,
 };
 
 /// Analysed-file counts by language.
@@ -525,10 +583,6 @@ pub struct FileCounts {
 /// duplication that got fixed. The number is what tells the reader that
 /// `baseline update` has something to drop.
 ///
-/// `mismatch` is the other case entirely — the baseline is intact but was
-/// recorded under conditions that give every id a different value, so it
-/// covers nothing at all. That is stated outright, because a suppression
-/// silently covering nothing looks exactly like one that worked.
 #[derive(Debug, Clone, Serialize)]
 pub struct BaselineStatus {
     /// The baseline file, as it was given on the command line.
@@ -563,9 +617,6 @@ pub struct BaselineStatus {
     /// Every stale entry, so that what was removed can be read rather than
     /// only counted.
     pub gone: Vec<GoneGroup>,
-    /// Why the baseline does not describe this run, when it does not.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mismatch: Option<String>,
 }
 
 /// A baseline entry whose duplication this run no longer reports.
@@ -643,6 +694,26 @@ pub struct ExcludedCounts {
     pub walk_errors: u64,
     /// Files that exceeded the parse-time allowance.
     pub timed_out: u64,
+    /// Files excluded because their language was disabled for the scan.
+    pub language_excluded: u64,
+    /// Symbolic-link files deliberately left unresolved by the source walker.
+    pub symlink_files: u64,
+    /// Symbolic-link directories deliberately left unresolved by the source walker.
+    pub symlink_directories: u64,
+}
+
+impl ExcludedCounts {
+    const fn total(&self) -> u64 {
+        self.generated
+            .saturating_add(self.by_glob)
+            .saturating_add(self.too_large)
+            .saturating_add(self.binary)
+            .saturating_add(self.unreadable)
+            .saturating_add(self.language_excluded)
+            .saturating_add(self.symlinks)
+            .saturating_add(self.walk_errors)
+            .saturating_add(self.timed_out)
+    }
 }
 
 /// How much of the source the parser could not follow.
@@ -758,6 +829,10 @@ pub struct SuppressedCounts {
 
 /// One clone group.
 #[derive(Debug, Serialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each boolean is an independently established finding classification"
+)]
 pub struct Group {
     /// Stable clone-group fingerprint, hex-encoded.
     pub fingerprint: String,
@@ -829,6 +904,10 @@ pub struct Group {
     /// means its members also appear elsewhere: these are the only findings
     /// that overlap.
     pub split_pair: bool,
+    /// Whether the effective suppression policy places this group after
+    /// ordinary findings. Persisted in the report so consumers need not
+    /// reconstruct policy from classifications.
+    pub ranked_down: bool,
     /// Why the group is hidden from default reports; `None` when visible.
     pub suppressed: Option<Suppression>,
     /// What the baseline the run was given says about this group; `None` when
@@ -1085,7 +1164,8 @@ mod detail;
 
 pub use detail::{
     CloneGroupDetail, CloneGroupSavingsDetail, CrossLanguageGroupDetail,
-    CrossLanguageGroupMemberDetail, FindingDetail, GroupRef, RecordedInputs, RecordedPriority,
+    CrossLanguageGroupMemberDetail, CrossVariantGroupDetail, CrossVariantGroupMemberDetail,
+    FindingDetail, GroupRef, RecordedInputs, RecordedPriority, SiblingDetail,
     SourceArtifactMappingDetail,
 };
 

@@ -2,7 +2,8 @@
 
 #![allow(
     clippy::redundant_pub_crate,
-    reason = "the implementation module exposes command helpers to crate-local tests"
+    clippy::too_many_lines,
+    reason = "the implementation module exposes command helpers to crate-local tests and reconstructs one persisted report schema in one place"
 )]
 
 use super::{
@@ -12,17 +13,18 @@ use super::{
 };
 
 pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<Outcome> {
-    let (resolved_config, path) = report_database(args)?;
+    let (root, _resolved_config, path) = report_database(args)?;
     if !path.is_file() {
         bail!(
             "no local database at {}; run `codehelion scan` first",
             path.display()
         );
     }
-    let store = Store::open(&path)?;
+    let store = Store::open_existing(&path)?;
+    let run_id = selected_run_id(&store, args.run, &root)?;
     let run = store
-        .run_summary(args.run)?
-        .with_context(|| format!("no recorded run {} in {}", args.run, path.display()))?;
+        .run_summary(run_id)?
+        .with_context(|| format!("no recorded run {run_id} in {}", path.display()))?;
     store.ensure_completed_run(run.id)?;
     let finished_at = run
         .finished_at
@@ -39,7 +41,8 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
     let siblings = recorded_siblings(&store.run_groups(run.id)?);
     let near_misses = recorded_near_misses(&store.run_near_misses(run.id)?);
     let sort = args.sort.axis();
-    report::order(&mut groups, &resolved_config.config.suppression, sort);
+    let ranked_down = store.run_group_ranked_down(run.id)?;
+    report::order_recorded(&mut groups, &ranked_down, sort);
     let compiler = store
         .run_compiler_coverage(run.id)?
         .map(restored_compiler_coverage);
@@ -70,6 +73,7 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
                 normalization_version: u32::try_from(origin.normalization_version)
                     .context("stored normalization version does not fit the report")?,
                 fingerprint: variant.fingerprint,
+                settings: recorded_build_variant_settings(&variant.settings),
             },
             detector_versions: origin
                 .detector_versions
@@ -83,6 +87,7 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
             ranking,
             database: path.display().to_string(),
             run_id: run.id,
+            reused: false,
         },
         summary: report::Summary {
             compiler,
@@ -111,6 +116,45 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
     Ok(Outcome::Success)
 }
 
+fn selected_run_id(store: &Store, explicit: Option<i64>, root: &Path) -> Result<i64> {
+    explicit.map_or_else(
+        || {
+            store
+                .latest_completed_run(&scan::path_key(root))?
+                .map(|origin| origin.id)
+                .context("no completed scan for this path; run `codehelion scan` first")
+        },
+        Ok,
+    )
+}
+
+fn recorded_build_variant_settings(
+    settings: &[codehelion_store::query::StoredSetting],
+) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, Vec<String>>> {
+    let mut grouped = std::collections::BTreeMap::new();
+    for setting in settings {
+        grouped
+            .entry(setting.language.clone())
+            .or_insert_with(std::collections::BTreeMap::new)
+            .entry(setting.name.clone())
+            .or_insert_with(Vec::new)
+            .push((setting.position, setting.value.clone()));
+    }
+    grouped
+        .into_iter()
+        .map(|(language, names)| {
+            let names = names
+                .into_iter()
+                .map(|(name, mut values)| {
+                    values.sort_unstable_by_key(|(position, _)| *position);
+                    (name, values.into_iter().map(|(_, value)| value).collect())
+                })
+                .collect();
+            (language, names)
+        })
+        .collect()
+}
+
 /// Restore supplemental sibling evidence from the dedicated `SQLite` table.
 /// It remains outside the ranked group list, exactly as a fresh scan presents
 /// it, so re-rendering cannot promote a sibling into primary membership.
@@ -122,38 +166,38 @@ fn recorded_siblings(
         .filter(|group| !group.siblings.is_empty())
         .map(|group| report::GroupSiblings {
             group_fingerprint: group.fingerprint_hex.clone(),
-            siblings: group
-                .siblings
-                .iter()
-                .map(|sibling| report::Sibling {
-                    clone_type: sibling.clone_type.clone(),
-                    confidence_band: sibling.confidence_band.clone(),
-                    similarity: report::SiblingSimilarity {
-                        weight_version: sibling.weight_version.clone(),
-                        lexical: sibling.lexical,
-                        structural: sibling.structural,
-                        control_flow: sibling.control_flow,
-                        type_similarity: sibling.type_similarity,
-                        api: sibling.api,
-                        composite: sibling.composite,
-                    },
-                    member: report::Member {
-                        finding_id: sibling.member.finding_hex.clone(),
-                        content: sibling.member.content_hex.clone(),
-                        file: sibling.member.file_path.clone(),
-                        language: sibling.member.language.clone(),
-                        start_line: u32::try_from(sibling.member.start_line.unwrap_or(0))
-                            .unwrap_or(0),
-                        end_line: u32::try_from(sibling.member.end_line.unwrap_or(0)).unwrap_or(0),
-                        unit: sibling.member.unit_name.clone(),
-                        boilerplate: sibling.member.boilerplate.clone(),
-                        tokens: u64::try_from(sibling.member.token_count).unwrap_or(0),
-                        canonical: false,
-                    },
-                })
-                .collect(),
+            siblings: group.siblings.iter().map(recorded_sibling).collect(),
         })
         .collect()
+}
+
+fn recorded_sibling(sibling: &codehelion_store::query::StoredSibling) -> report::Sibling {
+    report::Sibling {
+        clone_type: sibling.clone_type.clone(),
+        confidence_band: sibling.confidence_band.clone(),
+        similarity: report::SiblingSimilarity {
+            weight_version: sibling.weight_version.clone(),
+            lexical: sibling.lexical,
+            structural: sibling.structural,
+            control_flow: sibling.control_flow,
+            type_similarity: sibling.type_similarity,
+            api: sibling.api,
+            composite: sibling.composite,
+        },
+        member: report::Member {
+            finding_id: sibling.member.finding_hex.clone(),
+            content: sibling.member.content_hex.clone(),
+            file: scan::display_path(&sibling.member.file_path),
+            language: sibling.member.language.clone(),
+            start_line: u32::try_from(sibling.member.start_line.unwrap_or(0)).unwrap_or(0),
+            end_line: u32::try_from(sibling.member.end_line.unwrap_or(0)).unwrap_or(0),
+            unit: sibling.member.unit_name.clone(),
+            boilerplate: sibling.member.boilerplate.clone(),
+            tokens: u64::try_from(sibling.member.token_count).unwrap_or(0),
+            canonical: false,
+        },
+        suppressed: recorded_suppression(None, sibling.suppressed_by.clone()),
+    }
 }
 
 /// Restore run-scoped near-match diagnostics without reinterpreting them as
@@ -167,6 +211,7 @@ fn recorded_near_misses(
             estimated_jaccard: near_miss.estimated_jaccard,
             left: recorded_near_miss_unit(&near_miss.left),
             right: recorded_near_miss_unit(&near_miss.right),
+            suppressed: recorded_suppression(None, near_miss.suppressed_by.clone()),
         })
         .collect()
 }
@@ -178,7 +223,7 @@ fn recorded_near_miss_unit(
     report::NearMissUnit {
         unit_fingerprint: unit.fingerprint_hex.clone(),
         language: unit.language.clone(),
-        file: unit.file_path.clone(),
+        file: scan::display_path(&unit.file_path),
         start_line: u32::try_from(unit.start_line.unwrap_or(0)).unwrap_or(0),
         end_line: u32::try_from(unit.end_line.unwrap_or(0)).unwrap_or(0),
         unit: unit.unit_name.clone(),
@@ -226,6 +271,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stored_variant_settings_restore_the_language_and_sequence_order() {
+        let stored = vec![
+            codehelion_store::query::StoredSetting {
+                language: "cpp".to_string(),
+                name: "includes".to_string(),
+                position: 1,
+                value: "generated".to_string(),
+            },
+            codehelion_store::query::StoredSetting {
+                language: "cpp".to_string(),
+                name: "includes".to_string(),
+                position: 0,
+                value: "include".to_string(),
+            },
+            codehelion_store::query::StoredSetting {
+                language: "cpp".to_string(),
+                name: "compiler".to_string(),
+                position: 0,
+                value: "clang++".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            recorded_build_variant_settings(&stored),
+            std::collections::BTreeMap::from([(
+                String::from("cpp"),
+                std::collections::BTreeMap::from([
+                    (String::from("compiler"), vec![String::from("clang++")]),
+                    (
+                        String::from("includes"),
+                        vec![String::from("include"), String::from("generated")],
+                    ),
+                ]),
+            )])
+        );
+    }
+
+    #[test]
     fn recorded_near_misses_reconstruct_as_run_scoped_diagnostics() {
         let stored = codehelion_store::query::StoredNearMiss {
             estimated_jaccard: 0.28,
@@ -247,6 +330,12 @@ mod tests {
                 token_count: 51,
                 unit_name: Some("right_candidate".to_string()),
             },
+            suppressed_by: Some(codehelion_store::query::StoredSuppressionRef {
+                scope: "path_glob".to_string(),
+                pattern: "vendor/**".to_string(),
+                reason: Some("vendored sources".to_string()),
+                active: Some(true),
+            }),
         };
 
         let restored = recorded_near_misses(&[stored]);
@@ -255,19 +344,26 @@ mod tests {
         assert_eq!(restored[0].left.file, "src/left.rs");
         assert_eq!(restored[0].right.file, "src/right.rs");
         assert_eq!(restored[0].left.unit.as_deref(), Some("left_candidate"));
+        let suppression = restored[0]
+            .suppressed
+            .as_ref()
+            .expect("stored suppression is replayed");
+        assert_eq!(suppression.pattern.as_deref(), Some("vendor/**"));
     }
 }
 
 /// Resolve the configuration that also supplies a recorded report's view
 /// policy, together with its local database path.
-pub(crate) fn report_database(args: &ReportArgs) -> Result<(config::ResolvedConfig, PathBuf)> {
+pub(crate) fn report_database(
+    args: &ReportArgs,
+) -> Result<(PathBuf, config::ResolvedConfig, PathBuf)> {
     let root = args
         .path
         .canonicalize()
         .with_context(|| format!("resolving path {}", args.path.display()))?;
     let resolved_config = config::load(args.config.as_deref(), &root)?;
     let path = scan::database_path(&root, args.db.as_deref(), &resolved_config, false)?;
-    Ok((resolved_config, path))
+    Ok((root, resolved_config, path))
 }
 
 /// Turn the normalised compiler rows' aggregate back into report metadata.
@@ -303,6 +399,7 @@ pub(crate) fn restored_compiler_coverage(
         answered: coverage.answered,
         not_asked: coverage.not_asked,
         unavailable: coverage.unavailable,
+        diagnostics: coverage.diagnostics,
         execution_refusals,
         restarts: coverage.restarts.unwrap_or(0),
     }
@@ -368,6 +465,7 @@ pub(crate) fn recorded_group(
         test_code_evidence: group.test_code_evidence,
         width_family: group.width_family,
         split_pair: group.split_pair,
+        ranked_down: false,
         suppressed: recorded_suppression(suppress_reason, stored_suppression),
         // A recorded run is re-rendered on its own; a baseline is something a
         // scan is given, and nothing about it is stored with the snapshot.
@@ -397,7 +495,7 @@ pub(crate) fn recorded_group(
             .map(|member| report::Member {
                 finding_id: member.finding_hex,
                 content: member.content_hex,
-                file: member.file_path,
+                file: scan::display_path(&member.file_path),
                 language: member.language,
                 start_line: line(member.start_line),
                 end_line: line(member.end_line),
@@ -508,27 +606,56 @@ pub(crate) fn recorded_ranking(detectors: &[(String, String)]) -> Result<report:
 
 /// Look up one recorded id and print what it identifies.
 ///
-/// An id names one of three things: an occurrence of a clone group, a clone
-/// group itself, or a group from an explicit cross-language comparison. The
-/// kind is decided by looking the id up rather than by its shape, and an
+/// An id names an occurrence, an ordinary clone group, or a group from an
+/// explicit cross-language or cross-build-variant comparison. The kind is
+/// decided by looking the id up rather than by its shape, and an
 /// abbreviation is accepted wherever it names exactly one of them — the
 /// report prints group ids in full, and retyping thirty-two hex digits to ask
 /// about what is on the screen is a break in the trail the ids exist to keep.
 pub(crate) fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
-    let path = resolve_db_at(&args.path, args.db.as_deref(), args.config.as_deref())?;
+    let path = resolve_db_at(
+        &args.path,
+        args.db.as_deref(),
+        args.config.as_deref(),
+        args.untrusted,
+    )?;
     if !path.is_file() {
         bail!(
             "no local database at {}; run `codehelion scan` first",
             path.display()
         );
     }
-    let store = Store::open(&path)?;
+    let store = Store::open_existing(&path)?;
     let found = resolve_id(&store, &args.finding_id, &path)?;
     match found.kind {
         IdKind::Occurrence => explain_occurrence(&store, &found.id, args, out),
         IdKind::CloneGroup => explain_clone_group(&store, &found.id, &path, args, out),
+        IdKind::Sibling => explain_sibling(&store, &found.id, args, out),
         IdKind::CrossLanguageGroup => explain_cross_language_group(&store, &found.id, args, out),
+        IdKind::CrossVariantGroup => explain_cross_variant_group(&store, &found.id, args, out),
     }
+}
+
+/// Print one supplemental sibling finding without promoting it to membership.
+pub(crate) fn explain_sibling(
+    store: &Store,
+    finding_id: &str,
+    args: &ExplainArgs,
+    out: &mut impl Write,
+) -> Result<Outcome> {
+    let found = store
+        .sibling(finding_id)?
+        .with_context(|| format!("sibling finding {finding_id} went missing"))?;
+    let detail = report::SiblingDetail {
+        scan_run: found.run_id,
+        group_fingerprint: found.group_fingerprint_hex,
+        sibling: recorded_sibling(&found.sibling),
+    };
+    match args.format {
+        DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
+        DetailFormat::Text => detail.render_text(out)?,
+    }
+    Ok(Outcome::Success)
 }
 
 /// Turn what the caller typed into the one recorded id it names.
@@ -561,7 +688,7 @@ pub(crate) fn the_one(typed: &str, mut matches: Vec<IdMatch>, path: &Path) -> Re
     match matches.len() {
         1 => Ok(matches.remove(0)),
         0 => bail!(
-            "no finding, clone group or cross-language comparison group with id {typed} in {}",
+            "no finding or clone/comparison group with id {typed} in {}",
             path.display()
         ),
         _ => {
@@ -578,6 +705,44 @@ pub(crate) fn the_one(typed: &str, mut matches: Vec<IdMatch>, path: &Path) -> Re
     }
 }
 
+/// Print one group from an explicit cross-build-variant comparison.
+pub(crate) fn explain_cross_variant_group(
+    store: &Store,
+    group_id: &str,
+    args: &ExplainArgs,
+    out: &mut impl Write,
+) -> Result<Outcome> {
+    let group = store
+        .cross_variant_group(group_id)?
+        .with_context(|| format!("cross-build-variant comparison group {group_id} went missing"))?;
+    let detail = report::CrossVariantGroupDetail {
+        group_id: group.group_id_hex,
+        comparison_id: group.comparison_id_hex,
+        policy_version: group.policy_version,
+        root_path: group.root_path,
+        origin_variants: group.origin_variants,
+        clone_type: group.clone_type,
+        members: group
+            .members
+            .into_iter()
+            .map(|member| report::CrossVariantGroupMemberDetail {
+                origin_variant: member.origin_variant,
+                language: member.language,
+                file: scan::display_path(&member.file_path),
+                start_line: member.start_line,
+                end_line: member.end_line,
+                unit: member.unit_name,
+                token_count: member.token_count,
+            })
+            .collect(),
+    };
+    match args.format {
+        DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
+        DetailFormat::Text => detail.render_text(out)?,
+    }
+    Ok(Outcome::Success)
+}
+
 /// Print one clone group as the report lists it, with every member.
 pub(crate) fn explain_clone_group(
     store: &Store,
@@ -592,9 +757,15 @@ pub(crate) fn explain_clone_group(
     let priority = store
         .run_group_priority(found.run_id, fingerprint)?
         .with_context(|| format!("clone group {fingerprint} was recorded without a ranking"))?;
+    let origin = store.run_origin(found.run_id)?;
+    let mut group = recorded_group(found.group, &priority)?;
+    scan::hydrate_artifact_savings(store, found.run_id, std::slice::from_mut(&mut group))?;
     let detail = report::CloneGroupDetail {
         database: path.display().to_string(),
-        group: recorded_group(found.group, &priority)?,
+        scan_run: origin.id,
+        analysis_mode: origin.analysis_mode,
+        build_variant: origin.variant_fingerprint,
+        group,
     };
     match args.format {
         DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
@@ -632,7 +803,7 @@ pub(crate) fn explain_cross_language_group(
             .map(|member| report::CrossLanguageGroupMemberDetail {
                 origin_variant: member.origin_variant,
                 language: member.language,
-                file: member.file_path,
+                file: scan::display_path(&member.file_path),
                 start_line: member.start_line,
                 end_line: member.end_line,
                 unit: member.unit_name,
@@ -706,7 +877,7 @@ pub(crate) fn explain_occurrence(
         member: report::Member {
             finding_id: occurrence.member.finding_hex,
             content: occurrence.member.content_hex,
-            file: occurrence.member.file_path,
+            file: scan::display_path(&occurrence.member.file_path),
             language: occurrence.member.language,
             start_line: line(occurrence.member.start_line),
             end_line: line(occurrence.member.end_line),

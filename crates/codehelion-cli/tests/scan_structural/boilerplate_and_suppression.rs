@@ -1,5 +1,42 @@
 use super::*;
 
+#[test]
+fn structural_entropy_floor_marks_and_persists_low_entropy_noise() {
+    let dir = fixture();
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "entropy-ratio-floor = 1.0\n",
+    )
+    .unwrap();
+
+    let report = scan_json(dir.path());
+    let groups = report["groups"].as_array().expect("groups");
+    assert!(!groups.is_empty());
+    assert!(groups.iter().all(|group| {
+        group["suppressed"]["kind"] == "noise" && group["suppressed"]["reason"] == "low-entropy"
+    }));
+    assert!(
+        report["run"]["detector_versions"]
+            .as_array()
+            .expect("detector versions")
+            .iter()
+            .any(|version| {
+                version["component"] == "entropy-ratio"
+                    && version["version"] == "entropy-ratio-v1:1.000000"
+            })
+    );
+
+    let store = open_store(dir.path());
+    let run = store.latest_run().unwrap().expect("recorded run");
+    let stored = store.run_groups(run.id).unwrap();
+    assert!(!stored.is_empty());
+    assert!(
+        stored
+            .iter()
+            .all(|group| group.suppress_reason.as_deref() == Some("low-entropy"))
+    );
+}
+
 /// Two routines that are nothing but macro invocations: a duplicate a reader
 /// would not act on, and larger than the real clone above so ranking, not
 /// size, decides where it lands.

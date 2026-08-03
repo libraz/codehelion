@@ -5,12 +5,16 @@
     reason = "the implementation module shares runtime helpers across scan modes"
 )]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use super::{
-    ArmPath, Config, ConfigSource, Context, DEFAULT_SCAN_LINES, DiscoveryConfig, DiscoveryReport,
+    Config, ConfigSource, Context, DEFAULT_SCAN_LINES, DiscoveryConfig, DiscoveryReport,
     EngineConfig, Frontend, GeneratedMarkers, Glob, GlobSet, GlobSetBuilder, Language,
     LanguageSelection, LexedSource, LiteralNorm, LiteralNormalization, Path, PathBuf,
     ResolvedConfig, Result, ScanArgs, SourceUnit, bail, discovery, path_key, report, suppress,
 };
+#[cfg(test)]
+use std::io::Read;
 
 /// Maximum parser workers accepted from either the command line or config.
 ///
@@ -88,6 +92,8 @@ pub(crate) fn discover_sources(
     root: &Path,
     cfg: &Config,
     no_ignore: bool,
+    follow_links: bool,
+    compile_commands: Option<&Path>,
 ) -> Result<DiscoveryReport> {
     let discovery_config = DiscoveryConfig {
         respect_gitignore: !no_ignore,
@@ -102,6 +108,8 @@ pub(crate) fn discover_sources(
             &cfg.suppression.generated_markers,
             DEFAULT_SCAN_LINES,
         ),
+        compile_commands: compile_commands.map(Path::to_path_buf),
+        follow_links,
     };
     Ok(discovery::discover(root, &discovery_config)?)
 }
@@ -143,6 +151,7 @@ pub(crate) enum FileOutcome<T> {
     /// Read and analysed within the deterministic parse-work budget.
     Done(Box<T>),
     /// The file could not be read.
+    #[cfg(test)]
     Unreadable,
     /// The file exceeded the configured parse-work budget; the file is
     /// excluded.
@@ -152,21 +161,38 @@ pub(crate) enum FileOutcome<T> {
 /// Parse-work capacity represented by one configured millisecond. The public
 /// setting keeps its established unit for configuration compatibility, but the
 /// decision is a pure function of input bytes rather than wall-clock load.
-pub(super) const PARSE_BYTES_PER_MILLISECOND: u64 = 256;
+pub(crate) const PARSE_BYTES_PER_MILLISECOND: u64 = 256;
 
-/// Whether an input must be excluded before lexing or parsing.
+/// The effective byte ceiling for one frontend's deterministic parse work.
 ///
-/// A deterministic byte budget makes `--jobs` and host load unable to change
-/// which files enter a scan. The discovery file-size ceiling remains the
-/// primary bound; this is the tighter configurable per-frontend work budget.
-pub(crate) fn exceeds_parse_budget(bytes: &[u8], budget: std::time::Duration) -> bool {
+/// `parse-timeout-ms` is a compatibility spelling for a work budget, not a
+/// wall-clock deadline. It can tighten the discovery ceiling but never loosen
+/// it, so the report's two limits describe the exact enforced bound.
+#[must_use]
+pub(crate) fn parse_work_byte_limit(max_file_bytes: u64, budget: std::time::Duration) -> u64 {
     let milliseconds = u64::try_from(budget.as_millis()).unwrap_or(u64::MAX);
-    let allowed = milliseconds.saturating_mul(PARSE_BYTES_PER_MILLISECOND);
-    u64::try_from(bytes.len()).unwrap_or(u64::MAX) > allowed
+    max_file_bytes.min(milliseconds.saturating_mul(PARSE_BYTES_PER_MILLISECOND))
 }
 
-/// Run `frontend` over every source, spreading contiguous chunks across
-/// `jobs` worker threads.
+/// Read no more than one byte beyond `maximum_bytes`, so a file that grew
+/// after discovery cannot make a frontend retain unbounded input.
+///
+/// `Ok(None)` means the file exceeded the limit; I/O failures remain distinct
+/// so callers can account for unreadable files separately.
+#[cfg(test)]
+pub(crate) fn read_bounded_source(
+    path: &Path,
+    maximum_bytes: u64,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(maximum_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok((u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= maximum_bytes).then_some(bytes))
+}
+
+/// Run `frontend` over every source, letting `jobs` worker threads claim the
+/// next available source as soon as they finish their prior one.
 ///
 /// Chunks are joined in order, so the result order equals the (deterministic)
 /// discovery order regardless of thread scheduling. Files that vanished since
@@ -183,24 +209,32 @@ pub(crate) fn map_sources<T: Send>(
     if sources.is_empty() {
         return Ok((Vec::new(), 0, 0));
     }
-    let chunk_size = sources.len().div_ceil(jobs);
-    let mut chunk_results: Vec<Vec<FileOutcome<T>>> = Vec::new();
+    let next_source = AtomicUsize::new(0);
+    let mut indexed_results: Vec<(usize, FileOutcome<T>)> = Vec::with_capacity(sources.len());
     let mut worker_panicked = false;
     let frontend = &frontend;
+    let next_source = &next_source;
     std::thread::scope(|scope| -> Result<()> {
-        let handles: Result<Vec<_>> = sources
-            .chunks(chunk_size)
-            .map(|chunk| {
+        let handles: Result<Vec<_>> = (0..jobs.min(sources.len()))
+            .map(|_| {
                 std::thread::Builder::new()
                     .spawn_scoped(scope, move || {
-                        chunk.iter().map(frontend).collect::<Vec<_>>()
+                        let mut results = Vec::new();
+                        loop {
+                            let index = next_source.fetch_add(1, Ordering::Relaxed);
+                            let Some(source) = sources.get(index) else {
+                                break;
+                            };
+                            results.push((index, frontend(source)));
+                        }
+                        results
                     })
                     .context("starting frontend worker thread")
             })
             .collect();
         for handle in handles? {
             match handle.join() {
-                Ok(results) => chunk_results.push(results),
+                Ok(results) => indexed_results.extend(results),
                 Err(_) => worker_panicked = true,
             }
         }
@@ -209,12 +243,17 @@ pub(crate) fn map_sources<T: Send>(
     if worker_panicked {
         bail!("a frontend worker thread panicked");
     }
+    indexed_results.sort_unstable_by_key(|(index, _)| *index);
     let mut analysed = Vec::with_capacity(sources.len());
+    #[cfg(test)]
     let mut unreadable = 0u64;
+    #[cfg(not(test))]
+    let unreadable = 0u64;
     let mut timed_out = 0u64;
-    for result in chunk_results.into_iter().flatten() {
+    for (_, result) in indexed_results {
         match result {
             FileOutcome::Done(file) => analysed.push(*file),
+            #[cfg(test)]
             FileOutcome::Unreadable => unreadable += 1,
             FileOutcome::TimedOut => timed_out += 1,
         }
@@ -226,38 +265,52 @@ pub(crate) fn map_sources<T: Send>(
 pub(super) fn lex_sources(
     sources: &[SourceUnit],
     jobs: usize,
+    max_file_bytes: u64,
     timeout: std::time::Duration,
 ) -> Result<(Vec<LexedSource>, u64, u64)> {
-    map_sources(sources, jobs, |source| lex_one(source, timeout))
+    map_sources(sources, jobs, |source| {
+        lex_one(source, max_file_bytes, timeout)
+    })
 }
 
 /// Read and lex one source file, enforcing the deterministic parse-work
 /// budget before frontend work begins.
-fn lex_one(source: &SourceUnit, budget: std::time::Duration) -> FileOutcome<LexedSource> {
-    let Ok(bytes) = std::fs::read(&source.absolute_path) else {
-        return FileOutcome::Unreadable;
-    };
-    if exceeds_parse_budget(&bytes, budget) {
+fn lex_one(
+    source: &SourceUnit,
+    max_file_bytes: u64,
+    budget: std::time::Duration,
+) -> FileOutcome<LexedSource> {
+    let limit = parse_work_byte_limit(max_file_bytes, budget);
+    if u64::try_from(source.source_bytes.len()).unwrap_or(u64::MAX) > limit {
         return FileOutcome::TimedOut;
     }
-    let text = String::from_utf8_lossy(&bytes);
+    let bytes = &source.source_bytes;
+    let text = String::from_utf8_lossy(bytes);
     let file = match source.language {
         Language::Rust => codehelion_frontend_rust::RustFrontend.lex(&text),
         Language::C => codehelion_frontend_c::CFrontend.lex(&text),
         Language::Cpp => codehelion_frontend_cpp::CppFrontend.lex(&text),
     };
     let arm_paths = match source.language {
-        Language::Rust => vec![ArmPath::default(); file.tokens.len()],
-        Language::C | Language::Cpp => {
-            codehelion_frontend_c::lexer::conditional_paths(&text, &file.tokens)
-        }
+        Language::Rust => None,
+        Language::C => Some(codehelion_frontend_c::lexer::conditional_paths(
+            &text,
+            &file.tokens,
+            &codehelion_frontend_c::dialect::C,
+        )),
+        Language::Cpp => Some(codehelion_frontend_c::lexer::conditional_paths(
+            &text,
+            &file.tokens,
+            &codehelion_frontend_cpp::CPP,
+        )),
     };
     let unit_lines = file
         .units
         .iter()
         .map(|unit| {
-            let end = unit.token_end.min(file.tokens.len());
-            let end_line = file.tokens[unit.token_start..end]
+            let start = unit.token_start.min(file.tokens.len());
+            let end = unit.token_end.min(file.tokens.len()).max(start);
+            let end_line = file.tokens[start..end]
                 .last()
                 .map_or(unit.span.start_line, |token| token.span.start_line);
             (unit.span.start_line, end_line)

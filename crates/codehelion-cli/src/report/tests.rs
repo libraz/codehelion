@@ -75,6 +75,7 @@ pub(super) fn sample_report() -> Report {
                 headers: Some("c".to_string()),
                 normalization_version: 1,
                 fingerprint: "aa".repeat(32),
+                settings: BTreeMap::new(),
             },
             detector_versions: vec![DetectorVersion {
                 component: "fp-schema".to_string(),
@@ -87,6 +88,7 @@ pub(super) fn sample_report() -> Report {
             },
             database: ".codehelion/audit.db".to_string(),
             run_id: 1,
+            reused: false,
         },
         summary: Summary {
             files: FileCounts {
@@ -109,8 +111,12 @@ pub(super) fn sample_report() -> Report {
                 symlinks: 0,
                 walk_errors: 0,
                 timed_out: 0,
+                language_excluded: 0,
+                symlink_files: 0,
+                symlink_directories: 0,
             },
             baseline: None,
+            changes: None,
             groups: GroupCounts {
                 total: 2,
                 type_1: 2,
@@ -148,6 +154,34 @@ pub(super) fn sample_report() -> Report {
     }
 }
 
+#[test]
+fn text_exclusion_total_counts_each_cause_once() {
+    let mut report = sample_report();
+    report.summary.excluded = ExcludedCounts {
+        generated: 1,
+        by_glob: 2,
+        skipped: 42,
+        too_large: 3,
+        binary: 4,
+        unreadable: 5,
+        symlinks: 7,
+        walk_errors: 8,
+        timed_out: 9,
+        language_excluded: 6,
+        symlink_files: 3,
+        symlink_directories: 4,
+    };
+    let mut rendered = Vec::new();
+    report
+        .render_text(TextOptions::default(), &mut rendered)
+        .expect("render report with exclusions");
+    let text = String::from_utf8(rendered).expect("UTF-8 report");
+    assert!(
+        text.contains("7 symlinks (3 files, 4 directories), 8 walk errors, 9 timed out (45 total)"),
+        "{text}"
+    );
+}
+
 /// One supplemental local mirror for the sample report's first primary group.
 pub(super) fn sample_siblings() -> GroupSiblings {
     GroupSiblings {
@@ -176,6 +210,7 @@ pub(super) fn sample_siblings() -> GroupSiblings {
                 tokens: 31,
                 canonical: false,
             },
+            suppressed: None,
         }],
     }
 }
@@ -202,6 +237,7 @@ pub(super) fn sample_near_miss() -> NearMiss {
             unit: Some("right_candidate".to_string()),
             tokens: 51,
         },
+        suppressed: None,
     }
 }
 
@@ -226,6 +262,7 @@ fn visible_group() -> Group {
             suppressed: None,
             baseline: None,
             split_pair: false,
+            ranked_down: false,
             semantic: None,
             artifact_savings: Vec::new(),
             members: (0..7)
@@ -275,6 +312,7 @@ fn suppressed_group() -> Group {
             }),
             baseline: None,
             split_pair: false,
+            ranked_down: false,
             semantic: None,
             artifact_savings: Vec::new(),
             members: vec![
@@ -345,6 +383,7 @@ pub(super) fn structural_group() -> Group {
             suppressed: None,
             baseline: None,
             split_pair: false,
+            ranked_down: false,
             semantic: None,
             artifact_savings: Vec::new(),
             members: vec![
@@ -401,6 +440,7 @@ pub(super) fn fragment_group() -> Group {
             suppressed: None,
             baseline: None,
             split_pair: false,
+            ranked_down: false,
             semantic: None,
             artifact_savings: Vec::new(),
             members: vec![
@@ -463,6 +503,37 @@ fn a_duplicated_run_states_its_extent_in_every_view() {
         "1 of them are runs duplicated inside units that are not clones of each other; \
          4 more were folded into the groups that already cover them and 2 into longer runs"
     ));
+}
+
+#[test]
+fn text_names_the_run_required_for_replay() {
+    let report = sample_report();
+    let mut buffer = Vec::new();
+    report
+        .render_text(TextOptions::default(), &mut buffer)
+        .unwrap();
+    let text = String::from_utf8(buffer).unwrap();
+
+    assert!(
+        text.contains("snapshot: .codehelion/audit.db (run 1;"),
+        "{text}"
+    );
+    assert!(text.contains("codehelion report --run 1"), "{text}");
+}
+
+#[test]
+fn replay_order_uses_the_recorded_rank_down_verdict() {
+    let ordinary = visible_group();
+    let delayed = suppressed_group();
+    let ordinary_id = ordinary.fingerprint.clone();
+    let delayed_id = delayed.fingerprint.clone();
+    let recorded = BTreeMap::from([(delayed_id.clone(), true), (ordinary_id.clone(), false)]);
+    let mut groups = vec![delayed, ordinary];
+
+    order_recorded(&mut groups, &recorded, Sort::Priority);
+
+    assert_eq!(groups[0].fingerprint, ordinary_id);
+    assert_eq!(groups[1].fingerprint, delayed_id);
 }
 
 #[test]
@@ -541,6 +612,55 @@ fn a_near_miss_is_exported_but_text_hides_it_until_requested() {
     assert!(shown_text.contains("near-match near misses:"));
     assert!(shown_text.contains("estimated Jaccard 0.28: src/left.rs:10"));
     assert!(shown_text.contains("src/right.rs:31"));
+}
+
+#[test]
+fn supplemental_diagnostics_respect_show_suppressed_in_text() {
+    let suppression = Suppression {
+        kind: SuppressionKind::Rule,
+        reason: Some("vendored sources".to_string()),
+        scope: Some("path_glob".to_string()),
+        pattern: Some("vendor/**".to_string()),
+        active: Some(true),
+    };
+    let mut report = sample_report();
+    let mut siblings = sample_siblings();
+    siblings.siblings[0].suppressed = Some(suppression.clone());
+    report.siblings = vec![siblings];
+    let mut near_miss = sample_near_miss();
+    near_miss.suppressed = Some(suppression);
+    report.near_misses = vec![near_miss];
+
+    let mut hidden = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                show_siblings: true,
+                show_near_misses: true,
+                ..TextOptions::default()
+            },
+            &mut hidden,
+        )
+        .unwrap();
+    let hidden = String::from_utf8(hidden).unwrap();
+    assert!(!hidden.contains("src/incomplete.rs"));
+    assert!(!hidden.contains("near-match near misses:"));
+
+    let mut shown = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                show_suppressed: true,
+                show_siblings: true,
+                show_near_misses: true,
+                ..TextOptions::default()
+            },
+            &mut shown,
+        )
+        .unwrap();
+    let shown = String::from_utf8(shown).unwrap();
+    assert!(shown.contains("src/incomplete.rs"));
+    assert!(shown.contains("near-match near misses:"));
 }
 
 #[test]
@@ -751,6 +871,7 @@ fn json_view_serializes_the_documented_shape() {
     assert_eq!(value["run"]["configuration"]["source"], "root");
     assert_eq!(value["run"]["configuration"]["min_clone_tokens"], 20);
     assert_eq!(value["run"]["build_variant"]["normalization_version"], 1);
+    assert!(value["run"]["build_variant"].get("settings").is_none());
     assert_eq!(value["summary"]["files"]["total"], 2);
     assert_eq!(value["summary"]["pair_budget_exhausted"], false);
     assert_eq!(value["summary"]["search_truncated"], true);
@@ -858,6 +979,7 @@ fn current_json_report_validates_against_the_shipped_v1_schema() {
         answered: 0,
         not_asked: 0,
         unavailable: BTreeMap::from([("requires_execution".to_string(), 1)]),
+        diagnostics: BTreeMap::new(),
         execution_refusals: vec![ExecutionRefusal {
             execution: "build-script".to_string(),
             files: 1,
@@ -895,6 +1017,7 @@ fn denied_execution_is_actionable_in_json_and_text() {
         answered: 0,
         not_asked: 0,
         unavailable: BTreeMap::from([("requires_execution".to_string(), 2)]),
+        diagnostics: BTreeMap::from([("compiler library unavailable".to_string(), 2)]),
         execution_refusals: vec![ExecutionRefusal {
             execution: "build-script".to_string(),
             files: 2,
@@ -911,6 +1034,10 @@ fn denied_execution_is_actionable_in_json_and_text() {
     let refusal = &json["summary"]["compiler"]["execution_refusals"][0];
     assert_eq!(refusal["execution"], "build-script");
     assert_eq!(refusal["files"], 2);
+    assert_eq!(
+        json["summary"]["compiler"]["diagnostics"]["compiler library unavailable"],
+        2
+    );
     assert!(refusal["cost"].as_str().unwrap().contains("build script"));
     assert_eq!(
         refusal["permission_argument"],
@@ -922,6 +1049,7 @@ fn denied_execution_is_actionable_in_json_and_text() {
         .render_text(TextOptions::default(), &mut text)
         .unwrap();
     let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("2 helper diagnostic: compiler library unavailable"));
     assert!(text.contains("build script has generated them"), "{text}");
     assert!(text.contains("--allow-execution=build-script"), "{text}");
 }
@@ -998,7 +1126,7 @@ fn restricted_semantic_evidence_is_explicit_in_json() {
     let group = &mut report.groups[0];
     group.clone_type = "restricted-semantic".to_string();
     group.semantic = Some(SemanticEvidence {
-        schema_version: "sog-v1".to_string(),
+        schema_version: "sog-v4".to_string(),
         rules: vec![SemanticRuleEvidence {
             id: "sequence-pipeline-v1".to_string(),
             version: 1,

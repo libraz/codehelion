@@ -28,6 +28,7 @@ pub mod scan_lock;
 pub mod semantic;
 pub mod suppress;
 
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -39,7 +40,7 @@ use codehelion_store::{Store, fingerprint_hex};
 
 use crate::cli::{
     ArtifactAction, BaselineAction, CacheAction, Cli, Command, ConfigAction, DetailFormat,
-    ExplainArgs, Mode, ReportArgs, ScanArgs,
+    DoctorArgs, ExplainArgs, Mode, ReportArgs, ScanArgs,
 };
 use crate::config::ConfigSource;
 
@@ -87,7 +88,13 @@ pub fn run(cli: &Cli) -> Result<Outcome> {
 /// Separated from [`run`] so tests can capture output into an in-memory buffer.
 fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
     match command {
-        Command::Doctor => {
+        Command::Doctor(args) => {
+            let root = args
+                .path
+                .canonicalize()
+                .with_context(|| format!("resolving path {}", args.path.display()))?;
+            let resolved = config::load(args.config.as_deref(), &root)?;
+            let helpers = config::helper_paths(&resolved.config.helpers, &args.helpers)?;
             // The lookup is supplied here rather than by the engine: starting
             // a program is this layer's business, and keeping it out of the
             // engine is what stops a compiler helper from becoming something
@@ -96,21 +103,28 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
                 &doctor::diagnose_with(&|name| {
                     interrogate(
                         name,
-                        None,
+                        configured_helper_path(name, &helpers),
                         codehelion_helper::SandboxRequest::unrestricted(),
                     )
                 }),
                 out,
             )?;
             writeln!(out, "  {}", codehelion_helper::doctor_summary())?;
+            let semantic_rules = codehelion_core::semantic::registered_rules();
+            let same_variant_rules = semantic_rules
+                .iter()
+                .filter(|rule| {
+                    rule.scope == codehelion_core::semantic::SemanticRuleScope::SameBuildVariant
+                })
+                .count();
             writeln!(
                 out,
-                "  restricted semantic rules: {} enabled (registry {})",
-                codehelion_core::semantic::registered_rules().len(),
+                "  restricted semantic rules: {same_variant_rules} enabled; {} cross-language rules require --compare-languages (registry {})",
+                semantic_rules.len().saturating_sub(same_variant_rules),
                 codehelion_core::semantic::SEMANTIC_RULE_REGISTRY_VERSION,
             )?;
             doctor_install(out)?;
-            doctor_database(out)?;
+            doctor_database(args, out)?;
             doctor_artifacts(out)?;
             Ok(Outcome::Success)
         }
@@ -127,6 +141,14 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
             ArtifactAction::Compare(args) => artifact::compare(args, out),
             ArtifactAction::Calibration(args) => artifact::calibration(args, out),
         },
+    }
+}
+
+fn configured_helper_path<'a>(name: &str, helpers: &'a config::Helpers) -> Option<&'a Path> {
+    match name {
+        "codehelion-backend-rust" => helpers.rust.as_deref(),
+        "codehelion-backend-clang" => helpers.clang.as_deref(),
+        _ => None,
     }
 }
 
@@ -283,9 +305,17 @@ fn install_channel(exe: &Path) -> &'static str {
 
 /// Append the local database's location to the doctor report, with a hint
 /// when the database would be committed to version control.
-fn doctor_database(out: &mut impl Write) -> Result<()> {
-    let cwd = std::env::current_dir().context("resolving the current directory")?;
-    let db = resolve_db(None)?;
+fn doctor_database(args: &DoctorArgs, out: &mut impl Write) -> Result<()> {
+    let cwd = args
+        .path
+        .canonicalize()
+        .with_context(|| format!("resolving {}", args.path.display()))?;
+    let db = resolve_db_at(
+        &cwd,
+        args.db.as_deref(),
+        args.config.as_deref(),
+        args.untrusted,
+    )?;
     let db_abs = if db.is_absolute() {
         db.clone()
     } else {
@@ -293,14 +323,36 @@ fn doctor_database(out: &mut impl Write) -> Result<()> {
     };
     writeln!(out)?;
     match std::fs::metadata(&db_abs) {
-        Ok(meta) => writeln!(
-            out,
-            "  local database: {} ({} bytes)",
-            db.display(),
-            meta.len()
-        )?,
-        Err(_) => writeln!(out, "  local database: {} (absent)", db.display())?,
+        Ok(meta) => {
+            writeln!(
+                out,
+                "  local database: {} ({} bytes)",
+                db.display(),
+                meta.len()
+            )?;
+            match Store::open_existing(&db_abs) {
+                Ok(store) => writeln!(
+                    out,
+                    "  database health: schema {}, {} scan run(s), {} abandoned",
+                    store.schema_version()?,
+                    store.table_count("scan_run")?,
+                    store.abandoned_runs()?.len()
+                )?,
+                Err(error) => writeln!(out, "  database health: unreadable ({error})")?,
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            writeln!(out, "  local database: {} (absent)", db.display())?;
+        }
+        Err(error) => {
+            writeln!(
+                out,
+                "  local database: {} (metadata unreadable: {error})",
+                db.display()
+            )?;
+        }
     }
+    write_lease_status(&db_abs, out)?;
     if let Some(repo_root) = find_git_root(&cwd) {
         if !is_git_ignored(&repo_root, &db_abs) {
             writeln!(
@@ -308,6 +360,21 @@ fn doctor_database(out: &mut impl Write) -> Result<()> {
                 "  hint: the local database is not matched by .gitignore; \
                  consider ignoring it (for example, add `.codehelion/`)"
             )?;
+        }
+    }
+    Ok(())
+}
+
+/// Append the point-in-time state of the database writer lease.
+fn write_lease_status(database: &Path, out: &mut impl Write) -> Result<()> {
+    match scan_lock::lease_status(database) {
+        scan_lock::LeaseStatus::Available => writeln!(out, "  database lease: available")?,
+        scan_lock::LeaseStatus::Held => writeln!(
+            out,
+            "  database lease: held by another codehelion scan or cache command"
+        )?,
+        scan_lock::LeaseStatus::Unreadable(error) => {
+            writeln!(out, "  database lease: unreadable ({error})")?;
         }
     }
     Ok(())
@@ -350,9 +417,9 @@ fn is_git_ignored(repo_root: &Path, target: &Path) -> bool {
     reason = "create and update share the same invocation and compatibility contract"
 )]
 fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
-    let (args, create) = match action {
-        BaselineAction::Create(args) => (args, true),
-        BaselineAction::Update(args) => (args, false),
+    let (args, create, force) = match action {
+        BaselineAction::Create(args) => (&args.common, true, args.force),
+        BaselineAction::Update(args) => (args, false, false),
     };
     let root = args
         .path
@@ -366,8 +433,8 @@ fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
             db_path.display()
         );
     }
-    let store = Store::open(&db_path)?;
-    let root_path = root.to_string_lossy();
+    let store = Store::open_existing(&db_path)?;
+    let root_path = scan::path_key(&root);
     let invocation = store.latest_completed_invocation(&root_path)?;
     if invocation.is_empty() {
         bail!(
@@ -385,7 +452,7 @@ fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
         .collect::<Result<_>>()?;
 
     if create {
-        if args.file.exists() && !args.force {
+        if args.file.exists() && !force {
             bail!(
                 "{} already exists; pass --force to overwrite",
                 args.file.display()
@@ -420,7 +487,7 @@ fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
                 origin.variant_fingerprint
             );
         };
-        let fit = partition.compatibility(&origin.detector_versions);
+        let fit = partition.compatibility(&origin.detector_versions, origin.min_clone_tokens);
         if let Some(reason) = fit.mismatch {
             bail!(
                 "{} does not describe run {}: {}",
@@ -498,18 +565,73 @@ fn config_command(action: &ConfigAction, out: &mut impl Write) -> Result<Outcome
 
 fn cache_command(action: &CacheAction, out: &mut impl Write) -> Result<Outcome> {
     match action {
-        CacheAction::Status { path, config, db } => {
-            let path = resolve_db_at(path, db.as_deref(), config.as_deref())?;
-            match std::fs::metadata(&path) {
-                Ok(meta) => writeln!(out, "database: {} ({} bytes)", path.display(), meta.len())?,
-                Err(_) => writeln!(out, "database: {} (absent)", path.display())?,
+        CacheAction::Status {
+            path,
+            config,
+            db,
+            untrusted,
+        } => {
+            let path = resolve_db_at(path, db.as_deref(), config.as_deref(), *untrusted)?;
+            let files = database_files(&path);
+            if let Some(size) = database_storage_bytes(&files)? {
+                writeln!(out, "database: {} ({} bytes)", path.display(), size)?;
+                match Store::open_existing(&path) {
+                    Ok(store) => {
+                        writeln!(out, "schema: {}", store.schema_version()?)?;
+                        writeln!(out, "scan runs: {}", store.table_count("scan_run")?)?;
+                        writeln!(out, "abandoned runs: {}", store.abandoned_runs()?.len())?;
+                        writeln!(out, "table storage:")?;
+                        for table in store.table_storage()? {
+                            writeln!(out, "  {}: {} bytes", table.table, table.bytes)?;
+                        }
+                    }
+                    Err(error) => writeln!(out, "database health: unreadable ({error})")?,
+                }
+            } else {
+                writeln!(out, "database: {} (absent)", path.display())?;
             }
+            write_lease_status(&path, out)?;
+            Ok(Outcome::Success)
+        }
+        CacheAction::Prune {
+            path,
+            config,
+            db,
+            untrusted,
+            keep_artifacts,
+            keep_comparisons,
+            force,
+        } => {
+            if !force {
+                bail!("`cache prune` deletes retained local history; pass --force to confirm");
+            }
+            let path = resolve_db_at(path, db.as_deref(), config.as_deref(), *untrusted)?;
+            if !path.is_file() {
+                bail!(
+                    "no local database at {}; run `codehelion scan` first",
+                    path.display()
+                );
+            }
+            let _lock = scan_lock::acquire(&path)?;
+            let mut store = Store::open_existing(&path)
+                .with_context(|| format!("opening audit database {}", path.display()))?;
+            let pruned = store.prune(*keep_artifacts, *keep_comparisons)?;
+            writeln!(
+                out,
+                "pruned {} abandoned run(s), {} artifact analysis(es), {} cross-variant comparison(s), {} cross-language comparison(s), and {} orphaned fingerprint(s)",
+                pruned.abandoned_runs,
+                pruned.artifact_analyses,
+                pruned.cross_variant_comparisons,
+                pruned.cross_language_comparisons,
+                pruned.orphaned_fingerprints
+            )?;
             Ok(Outcome::Success)
         }
         CacheAction::Clear {
             path,
             config,
             db,
+            untrusted,
             force,
         } => {
             if !force {
@@ -517,17 +639,71 @@ fn cache_command(action: &CacheAction, out: &mut impl Write) -> Result<Outcome> 
                     "`cache clear` permanently deletes the local audit database; pass --force to confirm"
                 );
             }
-            let path = resolve_db_at(path, db.as_deref(), config.as_deref())?;
+            let path = resolve_db_at(path, db.as_deref(), config.as_deref(), *untrusted)?;
+            if !database_files(&path).iter().any(|file| file.exists()) {
+                writeln!(out, "nothing to remove at {}", path.display())?;
+                return Ok(Outcome::Success);
+            }
             let _lock = scan_lock::acquire(&path)?;
-            if path.exists() {
-                std::fs::remove_file(&path)
-                    .with_context(|| format!("removing {}", path.display()))?;
+            let removed = database_files(&path)
+                .iter()
+                .map(|file| remove_database_file(file))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|removed| *removed)
+                .count();
+            if removed > 0 {
                 writeln!(out, "removed {}", path.display())?;
             } else {
                 writeln!(out, "nothing to remove at {}", path.display())?;
             }
             Ok(Outcome::Success)
         }
+    }
+}
+
+/// The main `SQLite` database and the two sidecars created by WAL mode.
+fn database_files(database: &Path) -> [PathBuf; 3] {
+    [
+        database.to_path_buf(),
+        database_sidecar_path(database, "-wal"),
+        database_sidecar_path(database, "-shm"),
+    ]
+}
+
+/// Sum the main database and WAL sidecars, distinguishing absent files from
+/// metadata failures that deserve to reach the caller.
+fn database_storage_bytes(files: &[PathBuf; 3]) -> Result<Option<u64>> {
+    let mut size = 0_u64;
+    let mut present = false;
+    for file in files {
+        match std::fs::metadata(file) {
+            Ok(metadata) => {
+                present = true;
+                size = size.saturating_add(metadata.len());
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("reading database metadata {}", file.display()));
+            }
+        }
+    }
+    Ok(present.then_some(size))
+}
+
+fn database_sidecar_path(database: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar: OsString = database.as_os_str().to_owned();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
+}
+
+/// Remove one database file, allowing an absent WAL sidecar.
+fn remove_database_file(path: &Path) -> Result<bool> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("removing {}", path.display())),
     }
 }
 
@@ -538,19 +714,24 @@ fn resolve_db(flag: Option<&Path>) -> Result<PathBuf> {
         .context("resolving the current directory")?
         .canonicalize()
         .context("resolving the current directory")?;
-    resolve_db_at(&root, flag, None)
+    resolve_db_at(&root, flag, None, false)
 }
 
 /// Resolve a local-database path for the repository selected by one command.
 ///
 /// All source-audit commands use this path so an explicit database, a named
 /// configuration, and a discovered configuration receive identical handling.
-fn resolve_db_at(root: &Path, flag: Option<&Path>, config_path: Option<&Path>) -> Result<PathBuf> {
+fn resolve_db_at(
+    root: &Path,
+    flag: Option<&Path>,
+    config_path: Option<&Path>,
+    untrusted: bool,
+) -> Result<PathBuf> {
     let root = root
         .canonicalize()
         .with_context(|| format!("resolving path {}", root.display()))?;
     let resolved_config = config::load(config_path, &root)?;
-    scan::database_path(&root, flag, &resolved_config, false)
+    scan::database_path(&root, flag, &resolved_config, untrusted)
 }
 
 #[cfg(test)]

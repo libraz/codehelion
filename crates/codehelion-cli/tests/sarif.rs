@@ -131,7 +131,7 @@ fn structural_output_satisfies_the_published_schema() {
     assert_eq!(log["version"], "2.1.0");
     let run = &log["runs"][0];
     assert_eq!(run["tool"]["driver"]["name"], "codehelion");
-    assert_eq!(run["automationDetails"]["id"], "codehelion/structural");
+    assert_eq!(run["automationDetails"]["id"], "codehelion/structural/1");
     assert_eq!(run["properties"]["mode"], "structural");
 
     let results = run["results"].as_array().unwrap();
@@ -160,7 +160,7 @@ fn structural_output_satisfies_the_published_schema() {
 
     // The evidence the group was judged on travels with the result.
     let similarity = &gapped["properties"]["similarity"];
-    assert_eq!(similarity["weight_version"], "structural-verify-v2");
+    assert_eq!(similarity["weight_version"], "structural-verify-v3");
     assert!(similarity["composite"].as_f64().unwrap() > 0.6);
     assert_eq!(similarity["type_similarity"], Value::Null);
 }

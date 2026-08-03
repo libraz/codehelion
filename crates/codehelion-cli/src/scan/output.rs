@@ -64,21 +64,12 @@ pub(crate) fn write_report_options(
     out: &mut impl Write,
     model: &Report,
 ) -> Result<()> {
-    if options.show_suppressed && options.format != Format::Text {
-        bail!(
-            "--show-suppressed applies only to text reports; JSON and SARIF always include suppressed groups"
-        );
-    }
-    if options.show_siblings && options.format != Format::Text {
-        bail!(
-            "--show-siblings applies only to text reports; JSON and SARIF always include sibling data"
-        );
-    }
-    if options.show_near_misses && options.format != Format::Text {
-        bail!(
-            "--show-near-misses applies only to text reports; JSON and SARIF always include near-miss data"
-        );
-    }
+    validate_presentation_options(
+        options.format,
+        options.show_suppressed,
+        options.show_siblings,
+        options.show_near_misses,
+    )?;
     let text = match options.format {
         Format::Json => model.to_json().context("serializing the JSON report")?,
         Format::Sarif => model.to_sarif().context("serializing the SARIF report")?,
@@ -103,6 +94,31 @@ pub(crate) fn write_report_options(
             writeln!(out, "wrote {}", path.display())?;
         }
         None => out.write_all(text.as_bytes())?,
+    }
+    Ok(())
+}
+
+/// Validate flags whose meaning exists only in the text presentation.
+fn validate_presentation_options(
+    format: Format,
+    show_suppressed: bool,
+    show_siblings: bool,
+    show_near_misses: bool,
+) -> Result<()> {
+    if show_suppressed && format != Format::Text {
+        bail!(
+            "--show-suppressed applies only to text reports; JSON and SARIF always include suppressed groups"
+        );
+    }
+    if show_siblings && format != Format::Text {
+        bail!(
+            "--show-siblings applies only to text reports; JSON and SARIF always include sibling data"
+        );
+    }
+    if show_near_misses && format != Format::Text {
+        bail!(
+            "--show-near-misses applies only to text reports; JSON and SARIF always include near-miss data"
+        );
     }
     Ok(())
 }
@@ -179,25 +195,45 @@ pub(crate) fn write_partitioned_reports(
     cross_variant: Option<&report::CrossVariantComparison>,
     cross_variant_not_run: Option<&report::CrossVariantComparisonNotRun>,
     cross_language: Option<&report::CrossLanguageComparison>,
+    cross_language_not_run: Option<&report::CrossLanguageComparisonNotRun>,
 ) -> Result<()> {
-    if let ([model], None, None, None) =
-        (models, cross_variant, cross_variant_not_run, cross_language)
-    {
+    validate_presentation_options(
+        args.format,
+        args.show_suppressed,
+        args.show_siblings,
+        args.show_near_misses,
+    )?;
+    if let ([model], None, None, None, None) = (
+        models,
+        cross_variant,
+        cross_variant_not_run,
+        cross_language,
+        cross_language_not_run,
+    ) {
         return write_report(args, out, model);
     }
     let text = match args.format {
-        Format::Json => {
-            partitioned_json(models, cross_variant, cross_variant_not_run, cross_language)?
-        }
-        Format::Sarif => {
-            partitioned_sarif(models, cross_variant, cross_variant_not_run, cross_language)?
-        }
+        Format::Json => partitioned_json(
+            models,
+            cross_variant,
+            cross_variant_not_run,
+            cross_language,
+            cross_language_not_run,
+        )?,
+        Format::Sarif => partitioned_sarif(
+            models,
+            cross_variant,
+            cross_variant_not_run,
+            cross_language,
+            cross_language_not_run,
+        )?,
         Format::Text => partitioned_text(
             args,
             models,
             cross_variant,
             cross_variant_not_run,
             cross_language,
+            cross_language_not_run,
         )?,
     };
     write_partitioned_text(args, out, &text)
@@ -208,6 +244,7 @@ pub(super) fn partitioned_json(
     cross_variant: Option<&report::CrossVariantComparison>,
     cross_variant_not_run: Option<&report::CrossVariantComparisonNotRun>,
     cross_language: Option<&report::CrossLanguageComparison>,
+    cross_language_not_run: Option<&report::CrossLanguageComparisonNotRun>,
 ) -> Result<String> {
     let mut value = serde_json::Map::new();
     value.insert(
@@ -237,6 +274,12 @@ pub(super) fn partitioned_json(
             serde_json::json!(comparison),
         );
     }
+    if let Some(status) = cross_language_not_run {
+        value.insert(
+            "cross_language_comparison_status".to_string(),
+            serde_json::json!(status),
+        );
+    }
     serde_json::to_string_pretty(&Value::Object(value))
         .context("serializing partitioned JSON reports")
 }
@@ -246,6 +289,7 @@ pub(super) fn partitioned_sarif(
     cross_variant: Option<&report::CrossVariantComparison>,
     cross_variant_not_run: Option<&report::CrossVariantComparisonNotRun>,
     cross_language: Option<&report::CrossLanguageComparison>,
+    cross_language_not_run: Option<&report::CrossLanguageComparisonNotRun>,
 ) -> Result<String> {
     let mut runs = Vec::new();
     let root = models.first().map_or(".", |model| model.run.root.as_str());
@@ -268,6 +312,9 @@ pub(super) fn partitioned_sarif(
     }
     if let Some(comparison) = cross_language {
         runs.push(cross_language_sarif_run(comparison, root));
+    }
+    if let Some(status) = cross_language_not_run {
+        runs.push(cross_language_not_run_sarif_run(status, root));
     }
     serde_json::to_string_pretty(&serde_json::json!({
         "version": report::sarif::SARIF_VERSION,
@@ -357,6 +404,26 @@ fn cross_language_sarif_run(comparison: &report::CrossLanguageComparison, root: 
     })
 }
 
+fn cross_language_not_run_sarif_run(
+    status: &report::CrossLanguageComparisonNotRun,
+    root: &str,
+) -> Value {
+    serde_json::json!({
+        "tool": { "driver": {
+            "name": "codehelion", "version": env!("CARGO_PKG_VERSION"),
+            "semanticVersion": env!("CARGO_PKG_VERSION"), "rules": [{
+                "id": "comparison/cross-language-semantic",
+                "name": "CrossLanguageRestrictedSemantic",
+                "shortDescription": { "text": "Registered Rust-to-C++ semantic pipeline" }
+            }]
+        }},
+        "automationDetails": { "id": "codehelion/cross-language" },
+        "originalUriBaseIds": comparison_uri_bases(root),
+        "results": [],
+        "properties": { "crossLanguageComparisonStatus": status }
+    })
+}
+
 fn cross_language_sarif_result(group: &report::CrossLanguageGroup) -> Value {
     serde_json::json!({
         "ruleId": "comparison/cross-language-semantic", "level": "note",
@@ -399,6 +466,7 @@ pub(super) fn partitioned_text(
     cross_variant: Option<&report::CrossVariantComparison>,
     cross_variant_not_run: Option<&report::CrossVariantComparisonNotRun>,
     cross_language: Option<&report::CrossLanguageComparison>,
+    cross_language_not_run: Option<&report::CrossLanguageComparisonNotRun>,
 ) -> Result<String> {
     let options = report::TextOptions {
         verbose: args.verbose,
@@ -431,6 +499,12 @@ pub(super) fn partitioned_text(
             text.push('\n');
         }
         append_cross_language_text(&mut text, comparison)?;
+    }
+    if let Some(status) = cross_language_not_run {
+        if cross_variant.is_some() || cross_variant_not_run.is_some() || cross_language.is_some() {
+            text.push('\n');
+        }
+        append_cross_language_not_run_text(&mut text, status)?;
     }
     Ok(text)
 }
@@ -547,10 +621,29 @@ fn append_cross_language_text(
     Ok(())
 }
 
+fn append_cross_language_not_run_text(
+    text: &mut String,
+    status: &report::CrossLanguageComparisonNotRun,
+) -> Result<()> {
+    use std::fmt::Write as _;
+    writeln!(text, "Cross-language comparison was not run")?;
+    writeln!(text, "reason: {}", status.reason)?;
+    writeln!(
+        text,
+        "origin variants available: {}",
+        if status.origin_variants.is_empty() {
+            "none".to_string()
+        } else {
+            status.origin_variants.join(", ")
+        }
+    )?;
+    Ok(())
+}
+
 fn write_partitioned_text(args: &ScanArgs, out: &mut impl Write, text: &str) -> Result<()> {
     match args.output.as_deref() {
         Some(path) => {
-            std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+            write_output(path, text.as_bytes(), args.force)?;
             writeln!(out, "wrote {}", path.display())?;
         }
         None => out.write_all(text.as_bytes())?,

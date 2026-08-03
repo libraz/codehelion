@@ -162,6 +162,13 @@ fn distrusting_the_tree_lowers_the_ceilings_and_reports_them() {
     assert_eq!(guardrails["helper_timeout_ms"], 30_000);
     assert_eq!(guardrails["posting_cap"], 32);
     assert_eq!(guardrails["pair_budget"], 500_000);
+    assert_eq!(guardrails["verification_budget"], 100_000);
+    assert_eq!(guardrails["max_alignment_cells"], 250_000);
+    assert_eq!(guardrails["near_miss_delta"], 0.05);
+    assert_eq!(guardrails["near_miss_cap"], 1_000);
+    assert_eq!(guardrails["sibling_candidate_budget"], 50_000);
+    assert_eq!(guardrails["sibling_per_group_cap"], 8);
+    assert_eq!(guardrails["sibling_total_cap"], 1_000);
     assert_eq!(guardrails["max_component"], 128);
 }
 
@@ -182,6 +189,11 @@ fn the_text_report_says_the_run_was_told_to_distrust_the_tree() {
     for ceiling in [
         "30000 ms helper deadline",
         "posting lists up to 32",
+        "500000 candidate pairs per pass",
+        "100000 verification pairs",
+        "250000 cells per alignment",
+        "near-match band 0.05, at most 1000 near misses",
+        "sibling sweep 50000 comparisons, 8 per group, 1000 total",
         "128 units per group",
     ] {
         assert!(text.contains(ceiling), "{text}");
@@ -191,7 +203,6 @@ fn the_text_report_says_the_run_was_told_to_distrust_the_tree() {
 /// The ceilings are part of what a reused run is matched on, so a distrusting
 /// scan cannot be answered with a recording made under the default ones — that
 /// recording read files this run would not have opened.
-#[cfg(any())]
 #[test]
 fn a_distrusting_scan_does_not_reuse_a_run_that_trusted_the_tree() {
     let dir = fixture();

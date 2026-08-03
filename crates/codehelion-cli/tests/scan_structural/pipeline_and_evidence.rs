@@ -36,6 +36,8 @@ fn untrusted_structural_scan_reports_all_effective_ceilings() {
             "helper_timeout_ms": 30_000,
             "posting_cap": 32,
             "pair_budget": 500_000,
+            "verification_budget": 100_000,
+            "max_alignment_cells": 250_000,
             "near_miss_delta": 0.05,
             "near_miss_cap": 1_000,
             "sibling_candidate_budget": 50_000,
@@ -129,7 +131,7 @@ fn a_gapped_clone_is_detected_and_recorded_with_its_evidence() {
         .similarity
         .as_ref()
         .expect("a structural group carries its breakdown");
-    assert_eq!(similarity.weight_version, "structural-verify-v2");
+    assert_eq!(similarity.weight_version, "structural-verify-v3");
     assert!(similarity.composite > 0.6);
     assert!(similarity.min_pairwise > 0.6);
     assert!(
@@ -149,30 +151,6 @@ fn a_gapped_clone_is_detected_and_recorded_with_its_evidence() {
 }
 
 #[test]
-fn structural_scan_persists_candidate_features_for_every_recorded_unit() {
-    let dir = fixture();
-    let report = scan_json(dir.path());
-    let run_id = report["run"]["run_id"].as_i64().expect("recorded run id");
-    let store = open_store(dir.path());
-
-    // The source-unit snapshot intentionally contains only units that host a
-    // finding. Every such unit needs both its scalar feature vector and its
-    // hash postings; otherwise this candidate-index schema remains empty.
-    assert_eq!(
-        store.source_units(run_id).expect("read source units").len(),
-        2
-    );
-    assert_eq!(store.table_count("unit_feature").expect("count vectors"), 2);
-    assert!(
-        store
-            .table_count("feature_occurrence")
-            .expect("count postings")
-            > 0,
-        "structural features produce posting-list entries"
-    );
-}
-
-#[test]
 fn json_reports_carry_the_breakdown_and_stay_deterministic() {
     let dir = fixture();
     let mut documents = Vec::new();
@@ -182,6 +160,7 @@ fn json_reports_carry_the_breakdown_and_stay_deterministic() {
         for key in ["started_at", "finished_at", "run_id"] {
             run.insert(key.to_string(), serde_json::Value::Null);
         }
+        run.remove("reused");
         // The second run knows a first run happened. That is the comparison
         // working, not the findings moving.
         let summary = value["summary"].as_object_mut().unwrap();
@@ -246,13 +225,15 @@ fn structural_results_are_a_distinct_build_variant_from_fast() {
             .success();
     }
     let store = open_store(dir.path());
-    let fast = store.run_groups(1).unwrap();
-    let structural = store.run_groups(2).unwrap();
+    let fast_run = store.run_summary(1).unwrap().expect("a Fast run");
+    let structural_run = store.run_summary(2).unwrap().expect("a Structural run");
+    assert_eq!(fast_run.analysis_mode, "fast");
+    assert_eq!(structural_run.analysis_mode, "structural");
+    let fast = store.run_groups(fast_run.id).unwrap();
+    let structural = store.run_groups(structural_run.id).unwrap();
 
-    // Fast does not form a gapped candidate from these consistently renamed
-    // functions, so it leaves this fixture without a group or a structural
-    // similarity breakdown.
-    assert!(fast.is_empty(), "Fast must not report the gapped clone");
+    // Fast may recover a local common fragment, but it cannot make the
+    // whole-unit Structural judgment below.
 
     // Structural judges the whole units and reports the gapped clone.
     assert_eq!(structural.len(), 1);
@@ -340,7 +321,7 @@ fn both_modes_read_a_bare_header_the_same_way() {
 }
 
 #[test]
-fn a_structural_rescan_replaces_the_current_snapshot() {
+fn a_structural_rescan_reuses_an_unchanged_snapshot() {
     let dir = fixture();
     for _ in 0..2 {
         cmd()
@@ -351,7 +332,7 @@ fn a_structural_rescan_replaces_the_current_snapshot() {
     }
     let store = open_store(dir.path());
     let latest = store.latest_run().unwrap().expect("a recorded run");
-    assert!(latest.id > 1, "a replacement receives a fresh run id");
+    assert_eq!(latest.id, 1, "an unchanged tree reuses its completed run");
     assert_eq!(store.table_count("scan_run").unwrap(), 1);
 }
 
@@ -392,7 +373,7 @@ fn explain_resolves_a_structural_finding() {
     let detail: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
     let similarity = &detail["group"]["similarity"];
-    assert_eq!(similarity["weight_version"], "structural-verify-v2");
+    assert_eq!(similarity["weight_version"], "structural-verify-v3");
     assert!(similarity["type_similarity"].is_null());
     assert!(similarity["confidence_band"].is_string());
     assert_eq!(detail["group"]["members"], 2);

@@ -6,6 +6,7 @@ use super::{
     presentation_suppression, report, run_with, semantic_sandbox, structural_config,
     unanimous_boilerplate, unavailable_execution_message, verify_cross_language_candidates,
 };
+use super::{SourceMeta, compile_rules, evaluate_suppression, reportable_regions};
 use crate::cli::{Format, Mode, SortAxis};
 use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::CloneClass;
@@ -13,7 +14,17 @@ use codehelion_core::discovery::{BuildVariant, DiscoveryReport, SkipReport};
 use codehelion_core::doctor::{CLANG_HELPER, Greeting, HelperFacts, HelperState, RUST_HELPER};
 use codehelion_core::semantic::{OperationAttributes, OperationKind, OperationNode};
 use codehelion_core::stable_id::CloneGroupFingerprint;
-use codehelion_core::verify::Confidence;
+use codehelion_core::stable_id::{FragmentFingerprint, UnitFingerprint};
+use codehelion_core::structural::{
+    BodyMateriality, GroupDetail, GroupSiblings, StructuralNearMiss, StructuralReport,
+    StructuralSibling, StructuralUnit,
+};
+use codehelion_core::verify::{Confidence, SimilarityBreakdown};
+use codehelion_core::{
+    frontend::UnitKind,
+    grouping::{GroupingConfig, GroupingUnit, SimilarityEdge, group as group_units},
+    ir::ByteRange,
+};
 use codehelion_helper::ir::{Unavailability, UnitRef};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -30,10 +41,14 @@ fn shared_discovery_exclusions_belong_to_one_semantic_partition() {
             too_large: 2,
             binary: 3,
             unreadable: 5,
+            language_excluded: 0,
             symlinks: 7,
+            symlink_files: 0,
+            symlink_directories: 0,
             walk_errors: 11,
         },
         compile_commands: None,
+        compile_commands_error: None,
     };
 
     let first = super::discovery_exclusions(Some(&discovery), 13);
@@ -79,6 +94,140 @@ fn hiding_boilerplate_requires_every_member_to_share_its_category() {
 }
 
 #[test]
+fn sibling_ranks_continue_after_primary_members_with_the_same_fingerprint() {
+    let repeated = UnitFingerprint::from_bytes([1; 16]);
+    let distinct = UnitFingerprint::from_bytes([2; 16]);
+
+    assert_eq!(
+        super::reporting::ranks_after(
+            [repeated, repeated, distinct],
+            [repeated, repeated, distinct],
+        ),
+        vec![2, 3, 1]
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the closed primary, sibling, and near-miss fixture keeps every suppression input visible"
+)]
+fn supplemental_diagnostics_apply_path_suppression_like_primary_findings() {
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::Rust);
+    let units = (0..5)
+        .map(|index| StructuralUnit {
+            file: index,
+            kind: UnitKind::Function,
+            range: ByteRange { start: 0, end: 1 },
+            start_line: 1,
+            end_line: 1,
+            token_start: 0,
+            token_end: 1,
+            name: Some(format!("unit_{index}").as_str().into()),
+            boilerplate: None,
+            test_code: false,
+            test_code_evidence: None,
+            fingerprint: UnitFingerprint::from_bytes([u8::try_from(index + 1).unwrap(); 16]),
+            content: FragmentFingerprint::from_bytes([u8::try_from(index + 11).unwrap(); 16]),
+            normalized_content: FragmentFingerprint::from_bytes(
+                [u8::try_from(index + 21).unwrap(); 16],
+            ),
+        })
+        .collect::<Vec<_>>();
+    let grouping_units = units
+        .iter()
+        .map(|unit| GroupingUnit {
+            key: *unit.fingerprint.as_bytes(),
+        })
+        .collect::<Vec<_>>();
+    let groups = group_units(
+        &grouping_units,
+        &[SimilarityEdge {
+            a: 0,
+            b: 1,
+            similarity: 1.0,
+            breakdown: None,
+            class: CloneClass::Type1,
+            confidence: Confidence::High,
+        }],
+        &GroupingConfig::default(),
+    );
+    let perfect = SimilarityBreakdown {
+        lexical: 1.0,
+        structural: 1.0,
+        control_flow: None,
+        type_similarity: None,
+        api: None,
+        composite: 1.0,
+    };
+    let analysis = StructuralReport {
+        units,
+        groups,
+        regions: Vec::new(),
+        details: vec![GroupDetail {
+            fingerprint: CloneGroupFingerprint::from_bytes([42; 16]),
+            member_breakdowns: vec![perfect, perfect],
+            cohesion_breakdown: perfect,
+            identifier_jaccard: 1.0,
+            body_materiality: BodyMateriality {
+                has_loop: false,
+                has_dynamic_allocation: false,
+                call_count: 0,
+            },
+            boilerplate: None,
+            test_code: false,
+            test_code_evidence: None,
+            width_family: false,
+        }],
+        unrepresented: Vec::new(),
+        siblings: vec![GroupSiblings {
+            group: 0,
+            siblings: vec![StructuralSibling {
+                unit: 2,
+                clone_type: CloneClass::Type3,
+                confidence: Confidence::Low,
+                breakdown: perfect,
+            }],
+        }],
+        near_misses: vec![StructuralNearMiss {
+            a: 3,
+            b: 4,
+            estimated_jaccard: 0.25,
+        }],
+        stats: codehelion_core::structural::StructuralStats::default(),
+    };
+    let files = [
+        "src/a.rs",
+        "src/b.rs",
+        "vendor/sibling.rs",
+        "vendor/left.rs",
+        "vendor/right.rs",
+    ]
+    .into_iter()
+    .map(|relative_path| SourceMeta {
+        relative_path: relative_path.to_string(),
+        language: Language::Rust,
+        marker_lines: Vec::new(),
+        lines: 1,
+        diagnostics: 0,
+        unaccounted_tokens: 0,
+        depth_truncated: false,
+    })
+    .collect::<Vec<_>>();
+    let mut config = Config::default();
+    config.suppression.paths = vec!["vendor/**".to_string()];
+    config.suppression.vendored_paths.clear();
+    let mut rules = compile_rules(&config, &files, &analysis).expect("compile path rule");
+    let regions = reportable_regions(&analysis);
+    let verdicts =
+        evaluate_suppression(&config, &mut rules, &analysis, &regions, &[], &[], &variant);
+
+    assert_eq!(verdicts.groups, vec![None]);
+    assert!(verdicts.siblings[0][0].is_some());
+    assert!(verdicts.near_misses[0].is_some());
+}
+
+#[test]
 fn build_description_uses_the_configured_helper_timeout() {
     let mut config = Config::default();
     config.limits.helper_timeout_ms = 17;
@@ -95,22 +244,47 @@ fn split_pair_shape_suppression_keeps_group_precedence() {
         canonical: 0,
         fingerprint: CloneGroupFingerprint::from_bytes([7; 16]),
         similarity: 0.9,
+        breakdown: None,
         class: CloneClass::Type2,
         confidence: Confidence::High,
         boilerplate: Some(Boilerplate::MacroRepetition),
         width_family: true,
     };
     let hidden = BTreeMap::from([(Boilerplate::MacroRepetition, 3)]);
-    assert_eq!(pair_shape_suppression(&pair, &hidden, Some(4)), Some(3));
+    assert_eq!(
+        pair_shape_suppression(pair.boilerplate, pair.width_family, &hidden, Some(4)),
+        Some(3)
+    );
 
     let only_width = VerifiedPair {
         boilerplate: None,
         ..pair
     };
     assert_eq!(
-        pair_shape_suppression(&only_width, &hidden, Some(4)),
+        pair_shape_suppression(
+            only_width.boilerplate,
+            only_width.width_family,
+            &hidden,
+            Some(4)
+        ),
         Some(4)
     );
+}
+
+#[test]
+fn a_dominant_split_pair_shape_is_ranked_but_not_hidden() {
+    let category = Boilerplate::MacroRepetition;
+    let dominant = unanimous_boilerplate([
+        Some(category),
+        Some(category),
+        Some(category),
+        Some(category),
+        None,
+    ]);
+    let hidden = BTreeMap::from([(category, 3)]);
+
+    assert_eq!(dominant, None);
+    assert_eq!(pair_shape_suppression(dominant, false, &hidden, None), None);
 }
 
 /// Whether a helper is installed is a property of the machine, so what is
@@ -119,7 +293,11 @@ fn split_pair_shape_suppression_keeps_group_precedence() {
 /// knows which compiler answered.
 #[test]
 fn a_run_that_needs_a_compiler_says_which_program_supplies_it() {
-    match Compilers::found(&ExecutionPolicy::deny_all(), SandboxRequest::unrestricted()) {
+    match Compilers::found(
+        &ExecutionPolicy::deny_all(),
+        SandboxRequest::unrestricted(),
+        &crate::config::Helpers::default(),
+    ) {
         Err(error) => {
             let text = format!("{error:#}");
             assert!(text.contains(RUST_HELPER.binary), "{text}");
@@ -145,7 +323,7 @@ fn a_silent_optional_helper_does_not_block_an_answering_helper() {
             path: PathBuf::from("/tool/codehelion-backend-rust"),
             state: HelperState::Answered(Greeting {
                 version: "1.0.0".to_owned(),
-                protocol: 1,
+                protocol: 2,
                 toolchains: vec!["rust-analyzer".to_owned()],
                 capabilities: vec!["types".to_owned()],
                 executes: Vec::new(),
@@ -189,6 +367,7 @@ fn denied_build_scripts_keep_their_cost_and_exact_permission() {
                 variant: "host".to_string(),
             },
             reason: Unavailability::RequiresExecution,
+            diagnostics: Vec::new(),
         }],
     };
 
@@ -219,7 +398,10 @@ fn untrusted_semantic_requires_an_enforceable_memory_limit() {
         output: None,
         force: false,
         config: None,
+        helpers: Vec::new(),
         no_ignore: false,
+        follow_links: false,
+        compile_commands: None,
         jobs: None,
         db: None,
         baseline: None,
@@ -231,6 +413,7 @@ fn untrusted_semantic_requires_an_enforceable_memory_limit() {
         show_siblings: false,
         show_near_misses: false,
         include_trivial: false,
+        no_reuse: false,
         include_vendored: false,
         verbose: false,
         fail_on_findings: false,
@@ -247,6 +430,7 @@ fn untrusted_semantic_requires_an_enforceable_memory_limit() {
 #[test]
 fn untrusted_semantic_requires_a_linux_memory_limit() {
     let args = ScanArgs {
+        helpers: Vec::new(),
         sort: SortAxis::default(),
         min_identifier_jaccard: None,
         path: PathBuf::from("."),
@@ -255,7 +439,10 @@ fn untrusted_semantic_requires_a_linux_memory_limit() {
         output: None,
         force: false,
         config: None,
+        helpers: Vec::new(),
         no_ignore: false,
+        follow_links: false,
+        compile_commands: None,
         jobs: None,
         db: None,
         baseline: None,
@@ -267,6 +454,7 @@ fn untrusted_semantic_requires_a_linux_memory_limit() {
         show_siblings: false,
         show_near_misses: false,
         include_trivial: false,
+        no_reuse: false,
         include_vendored: false,
         verbose: false,
         fail_on_findings: false,
@@ -285,9 +473,11 @@ fn untrusted_semantic_requires_a_linux_memory_limit() {
 /// depending on what happens to be installed beside the scanner.
 #[test]
 fn a_helper_that_reads_nothing_in_this_tree_is_not_part_of_the_run() {
-    let Ok(compilers) =
-        Compilers::found(&ExecutionPolicy::deny_all(), SandboxRequest::unrestricted())
-    else {
+    let Ok(compilers) = Compilers::found(
+        &ExecutionPolicy::deny_all(),
+        SandboxRequest::unrestricted(),
+        &crate::config::Helpers::default(),
+    ) else {
         return;
     };
     let rust_only = LanguageSelection {
@@ -319,7 +509,10 @@ fn an_empty_tree_is_not_reported_as_a_missing_compiler() {
         output: None,
         force: false,
         config: None,
+        helpers: Vec::new(),
         no_ignore: false,
+        follow_links: false,
+        compile_commands: None,
         jobs: None,
         db: Some(dir.path().join("audit.db")),
         baseline: None,
@@ -333,12 +526,15 @@ fn an_empty_tree_is_not_reported_as_a_missing_compiler() {
         include_trivial: false,
         include_vendored: false,
         verbose: false,
+        no_reuse: false,
         fail_on_findings: false,
         untrusted: false,
     };
-    let Ok(compilers) =
-        Compilers::found(&ExecutionPolicy::deny_all(), SandboxRequest::unrestricted())
-    else {
+    let Ok(compilers) = Compilers::found(
+        &ExecutionPolicy::deny_all(),
+        SandboxRequest::unrestricted(),
+        &crate::config::Helpers::default(),
+    ) else {
         return;
     };
     let mut out = Vec::new();
@@ -374,6 +570,8 @@ fn a_configured_ceiling_reaches_every_candidate_stage() {
         limits: crate::config::Limits {
             posting_cap: Some(9),
             pair_budget: Some(11),
+            verification_budget: Some(13),
+            max_alignment_cells: Some(17),
             ..crate::config::Limits::default()
         },
         ..Config::default()
@@ -394,6 +592,8 @@ fn a_configured_ceiling_reaches_every_candidate_stage() {
     ] {
         assert_eq!(budget, 11);
     }
+    assert_eq!(config.verification_budget, 13);
+    assert_eq!(config.verify.max_alignment_cells, 17);
 }
 
 #[test]
@@ -448,6 +648,24 @@ fn semantic_candidate_cuts_are_visible_in_the_shared_funnel() {
             .iter()
             .any(|drop| drop.cause == "pair_budget" && drop.count == 4)
     );
+    let buckets = funnel
+        .iter()
+        .find(|stage| stage.stage == "semantic candidate buckets")
+        .expect("semantic bucket stage");
+    assert_eq!(buckets.passed, 2);
+    assert!(
+        buckets
+            .dropped
+            .iter()
+            .any(|drop| drop.cause == "bucket_member_cap" && drop.count == 1)
+    );
+    assert!(
+        candidate
+            .dropped
+            .iter()
+            .all(|drop| drop.cause != "high_frequency"),
+        "the pair stage does not mislabel omitted buckets as pairs"
+    );
     let observations = funnel
         .iter()
         .find(|stage| stage.stage == "semantic API observations")
@@ -463,6 +681,10 @@ fn semantic_candidate_cuts_are_visible_in_the_shared_funnel() {
         .iter()
         .find(|stage| stage.stage == "semantic graphs")
         .expect("semantic graph stage");
+    assert_eq!(
+        graphs.passed, 2,
+        "unrepresentable parser units share the graph-stage denominator"
+    );
     assert!(
         graphs
             .dropped

@@ -6,11 +6,17 @@
   "oneOf": [
     {
       "type": "object",
-      "required": ["schema_version", "response_kind", "database", "group"],
+      "required": [
+        "schema_version", "response_kind", "database", "scan_run", "analysis_mode",
+        "build_variant", "group"
+      ],
       "properties": {
         "schema_version": { "const": "finding-detail-v1" },
         "response_kind": { "const": "clone_group" },
         "database": { "type": "string" },
+        "scan_run": { "type": "integer" },
+        "analysis_mode": { "enum": ["fast", "structural", "semantic"] },
+        "build_variant": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "group": {
           "$ref": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v1.schema.json#/$defs/group"
         }
@@ -46,6 +52,37 @@
         "rule_version": { "type": "integer", "minimum": 0 },
         "semantic_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
         "correspondence_ids": { "type": "array", "items": { "type": "string" } },
+        "members": { "type": "array" }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "schema_version", "response_kind", "scan_run", "group_fingerprint", "sibling"
+      ],
+      "properties": {
+        "schema_version": { "const": "finding-detail-v1" },
+        "response_kind": { "const": "sibling" },
+        "scan_run": { "type": "integer" },
+        "group_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "sibling": { "type": "object" }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "schema_version", "response_kind", "group_id", "comparison_id",
+        "policy_version", "root_path", "origin_variants", "clone_type", "members"
+      ],
+      "properties": {
+        "schema_version": { "const": "finding-detail-v1" },
+        "response_kind": { "const": "cross_variant_group" },
+        "group_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "comparison_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "policy_version": { "type": "string" },
+        "root_path": { "type": "string" },
+        "origin_variants": { "type": "array", "items": { "type": "string" } },
+        "clone_type": { "const": "type-1" },
         "members": { "type": "array" }
       }
     }

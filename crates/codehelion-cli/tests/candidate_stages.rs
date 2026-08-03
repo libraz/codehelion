@@ -131,15 +131,15 @@ const CORPORA: &[Expected] = &[
     },
     Expected {
         path: "labeled/lz4/snapshot",
-        groups: 28,
-        without_near_match: 28,
-        without_shape_gate: 28,
+        groups: 29,
+        without_near_match: 29,
+        without_shape_gate: 29,
     },
     Expected {
         path: "labeled/serde-json/snapshot",
-        groups: 75,
-        without_near_match: 75,
-        without_shape_gate: 75,
+        groups: 80,
+        without_near_match: 80,
+        without_shape_gate: 80,
     },
     Expected {
         path: "labeled/spdlog/snapshot",
@@ -149,15 +149,15 @@ const CORPORA: &[Expected] = &[
     },
     Expected {
         path: "labeled/bitflags/snapshot",
-        groups: 18,
-        without_near_match: 18,
-        without_shape_gate: 18,
+        groups: 15,
+        without_near_match: 15,
+        without_shape_gate: 15,
     },
     Expected {
         path: "labeled/tinyxml2/snapshot",
-        groups: 28,
-        without_near_match: 28,
-        without_shape_gate: 28,
+        groups: 27,
+        without_near_match: 27,
+        without_shape_gate: 27,
     },
 ];
 

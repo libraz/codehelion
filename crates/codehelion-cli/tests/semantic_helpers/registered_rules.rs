@@ -36,8 +36,14 @@ fn semantic_scan_records_registered_pipeline_evidence() {
         .as_f64()
         .expect("semantic confidence");
     assert!(
-        (confidence - 0.735).abs() < f64::EPSILON,
-        "matching compiler-confirmed filter/map flow should corroborate the rule: {confidence}"
+        (confidence - 0.7).abs() < f64::EPSILON,
+        "semantic evidence names the registered rule confidence: {confidence}"
+    );
+    assert!(
+        group["confidence"]
+            .as_f64()
+            .is_some_and(|confidence| (confidence - 0.735).abs() < f64::EPSILON),
+        "the group separately retains its corroborated composite confidence: {group:#}"
     );
 
     let run_id = report["run"]["run_id"].as_i64().expect("run id");
@@ -320,8 +326,14 @@ fn semantic_scan_matches_direct_standard_file_lifetimes() {
     assert!(
         group["semantic"]["rules"][0]["confidence"]
             .as_f64()
-            .is_some_and(|confidence| (confidence - 0.4725).abs() < f64::EPSILON),
+            .is_some_and(|confidence| (confidence - 0.9).abs() < f64::EPSILON),
         "{group:#}"
+    );
+    assert!(
+        group["confidence"]
+            .as_f64()
+            .is_some_and(|confidence| (confidence - 0.4725).abs() < f64::EPSILON),
+        "the group separately retains its corroborated composite confidence: {group:#}"
     );
     assert_eq!(
         group["semantic"]["node_mappings"].as_array().map(Vec::len),

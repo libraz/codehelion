@@ -14,7 +14,7 @@ fn origin() -> RunOrigin {
         finished_at: "2026-07-27T00:00:05Z".to_string(),
         variant_fingerprint: "abcdef0123456789".to_string(),
         normalization_version: 1,
-        detector_versions: vec![("fp-schema".to_string(), "fp-schema-v1".to_string())],
+        detector_versions: vec![("fp-schema".to_string(), "fp-schema-v2".to_string())],
     }
 }
 
@@ -77,6 +77,7 @@ fn freezing_a_run_records_what_it_reported_and_what_it_was() {
 
     assert_eq!(baseline.schema_version, SCHEMA_VERSION);
     assert_eq!(partition.from_run, 7);
+    assert_eq!(partition.min_clone_tokens, 20);
     assert_eq!(partition.build_variant.fingerprint, "abcdef0123456789");
     assert_eq!(partition.entries.len(), 2);
     assert_eq!(partition.entries[0].group, "aa11");
@@ -334,12 +335,12 @@ fn a_file_from_a_schema_this_build_does_not_read_is_an_error() {
 #[test]
 fn a_baseline_says_when_it_describes_a_different_run() {
     let baseline = Baseline::from_run(&origin(), &[group("aa11")], "2026-07-27T01:00:00Z");
-    let detectors = vec![("fp-schema".to_string(), "fp-schema-v1".to_string())];
+    let detectors = vec![("fp-schema".to_string(), "fp-schema-v2".to_string())];
 
     let fit = baseline
         .partition("abcdef0123456789")
         .expect("the expected partition")
-        .compatibility(&detectors);
+        .compatibility(&detectors, 20);
     assert_eq!(fit.mismatch, None);
 
     assert!(baseline.partition("999999999999").is_none());
@@ -351,9 +352,18 @@ fn a_baseline_says_when_it_describes_a_different_run() {
     let other_detector = baseline
         .partition("abcdef0123456789")
         .expect("the expected partition")
-        .compatibility(&bumped)
+        .compatibility(&bumped, 20)
         .mismatch
         .expect("a moved fingerprint schema is a mismatch");
     assert!(other_detector.contains("different detector versions"));
     assert!(other_detector.contains("recreate the baseline"));
+
+    let other_window = baseline
+        .partition("abcdef0123456789")
+        .expect("the expected partition")
+        .compatibility(&detectors, 25)
+        .mismatch
+        .expect("a changed detection window is a mismatch");
+    assert!(other_window.contains("min-clone-tokens 20"));
+    assert!(other_window.contains("uses 25"));
 }

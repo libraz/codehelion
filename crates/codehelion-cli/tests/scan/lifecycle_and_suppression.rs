@@ -21,32 +21,35 @@ fn scan_detects_clones_and_records_a_snapshot() {
     let groups = store.run_groups(run.id).unwrap();
     assert!(!groups.is_empty());
 
-    // The verbatim Rust pair lands in a Type-1 group anchored to both files.
-    let rust_type1 = groups
+    // The Rust copies share a body fragment; the renamed copy joins the same
+    // Type-2 finding without turning that partial match into a whole-unit one.
+    let rust_group = groups
         .iter()
         .find(|group| {
-            group.clone_type == "type-1" && group.members.iter().any(|m| m.file_path == "src/a.rs")
+            group.clone_type == "type-2" && group.members.iter().any(|m| m.file_path == "src/a.rs")
         })
-        .expect("a Type-1 group for the Rust pair");
-    assert!(rust_type1.members.iter().any(|m| m.file_path == "src/b.rs"));
+        .expect("a Type-2 body-fragment group for the Rust copies");
+    assert_eq!(rust_group.member_scope, "fragment");
+    assert!(rust_group.members.iter().any(|m| m.file_path == "src/b.rs"));
     assert!(
-        rust_type1
+        rust_group
             .members
             .iter()
             .any(|m| m.unit_name.as_deref() == Some("checksum_block"))
     );
 
     // The C pair lands in its own Type-1 group.
-    assert!(groups.iter().any(|group| {
-        group.clone_type == "type-1"
-            && group.members.iter().any(|m| m.file_path == "src/one.c")
-            && group.members.iter().any(|m| m.file_path == "src/two.c")
-    }));
+    let c_group = groups
+        .iter()
+        .find(|group| {
+            group.clone_type == "type-1"
+                && group.members.iter().any(|m| m.file_path == "src/one.c")
+                && group.members.iter().any(|m| m.file_path == "src/two.c")
+        })
+        .expect("the complete C copies form a group");
+    assert_eq!(c_group.member_scope, "unit");
 
-    // The renamed copy is recovered as a Type-2 member.
-    assert!(groups.iter().any(|group| {
-        group.clone_type == "type-2" && group.members.iter().any(|m| m.file_path == "src/c.rs")
-    }));
+    assert!(rust_group.members.iter().any(|m| m.file_path == "src/c.rs"));
 
     let findings = store.run_findings(run.id).unwrap();
     assert!(!findings.is_empty());
@@ -171,6 +174,21 @@ fn recorded_artifact_savings_reach_json_text_and_sarif_reports() {
         .expect("reported group")["artifact_savings"]
         .clone();
     assert_eq!(expected[0]["estimated_refactor_savings_bytes"], 9);
+
+    let explained = cmd()
+        .current_dir(dir.path())
+        .args([
+            "explain",
+            group["fingerprint"].as_str().expect("group fingerprint"),
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("explain clone group as JSON");
+    assert!(explained.status.success(), "{explained:?}");
+    let explained: serde_json::Value =
+        serde_json::from_slice(&explained.stdout).expect("explain JSON");
+    assert_eq!(explained["group"]["artifact_savings"], expected);
 
     let text = cmd()
         .current_dir(dir.path())
@@ -436,7 +454,7 @@ fn fast_mode_does_not_report_copies_from_alternative_c_preprocessor_arms() {
 }
 
 #[test]
-fn a_rescan_replaces_the_current_snapshot() {
+fn an_identical_rescan_reuses_the_current_snapshot() {
     let dir = fixture();
     for _ in 0..2 {
         cmd()
@@ -447,7 +465,7 @@ fn a_rescan_replaces_the_current_snapshot() {
     }
     let store = open_store(dir.path());
     let latest = store.latest_run().unwrap().expect("a recorded run");
-    assert!(latest.id > 1, "a replacement receives a fresh run id");
+    assert_eq!(latest.id, 1, "a reused scan records no second run");
     assert_eq!(store.table_count("scan_run").unwrap(), 1);
 }
 
@@ -589,16 +607,16 @@ fn a_path_selector_matching_part_of_a_group_is_not_stale() {
 #[test]
 fn an_inline_marker_suppresses_the_next_unit() {
     let dir = fixture();
-    let marked = format!("// codehelion:ignore\n{CHECKSUM_RS}");
-    std::fs::write(dir.path().join("src/a.rs"), &marked).unwrap();
-    std::fs::write(dir.path().join("src/b.rs"), &marked).unwrap();
+    let marked = format!("// codehelion:ignore\n{MIX_C}");
+    std::fs::write(dir.path().join("src/one.c"), &marked).unwrap();
+    std::fs::write(dir.path().join("src/two.c"), &marked).unwrap();
     cmd()
         .current_dir(dir.path())
         .args(["scan", "."])
         .assert()
         .success()
-        // The verbatim Rust pair (both instances marked) is suppressed; the
-        // Type-2 group still holds the unmarked src/c.rs and stays visible.
+        // The complete C units are both marked and therefore suppressed; the
+        // unrelated Rust fragment group stays visible.
         .stdout(predicate::str::contains("1 by rule"));
 
     let store = open_store(dir.path());
