@@ -26,6 +26,41 @@ use serde_json::Value;
 const MOCK: &str = env!("CARGO_BIN_EXE_mock-helper");
 const CLI: &str = env!("CARGO_BIN_EXE_mock-semantic-cli");
 
+/// Copying an executable and starting one never overlap.
+///
+/// A copy holds its destination open for writing. A process started while it
+/// is open inherits that descriptor and keeps it for as long as it runs, and
+/// a system will not execute a file somebody may still be writing. These
+/// cases run at the same time and each copies its own binaries, so the
+/// refusal lands on whichever one started at the wrong moment — which is a
+/// property of when the machine got round to each case, not of the code
+/// under test.
+static EXECUTABLE_HANDOFF: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run a prepared command with no executable copy in flight.
+#[allow(clippy::disallowed_types)]
+fn run(command: &mut Command, description: &str) -> std::process::Output {
+    let child = {
+        let _handoff = EXECUTABLE_HANDOFF
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect(description)
+    };
+    child.wait_with_output().expect(description)
+}
+
+/// Copy an executable with nothing being started meanwhile.
+fn copy_executable(source: &str, destination: &Path, description: &str) {
+    let _handoff = EXECUTABLE_HANDOFF
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::fs::copy(source, destination).expect(description);
+}
+
 /// Copy the mock under the Rust helper's production name and make only the
 /// child CLI find it. The test process itself never changes `PATH`, so cases
 /// remain independent when the harness runs them concurrently.
@@ -34,7 +69,7 @@ fn helper_path(bin: &Path) -> PathBuf {
         "codehelion-backend-rust{}",
         std::env::consts::EXE_SUFFIX
     ));
-    std::fs::copy(MOCK, &destination).expect("copy mock under helper name");
+    copy_executable(MOCK, &destination, "copy mock under helper name");
     destination
 }
 
@@ -44,7 +79,7 @@ fn helper_path(bin: &Path) -> PathBuf {
 /// test build left in Cargo's target directory.
 fn cli_path(bin: &Path) -> PathBuf {
     let destination = bin.join(format!("codehelion{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(CLI, &destination).expect("copy semantic CLI wrapper");
+    copy_executable(CLI, &destination, "copy semantic CLI wrapper");
     destination
 }
 
@@ -74,12 +109,12 @@ fn fixture() -> tempfile::TempDir {
 
 #[allow(clippy::disallowed_types)]
 fn scan(root: &Path, behaviour: &str, bin: &Path) -> Value {
-    let output = Command::new(cli_path(bin))
+    let mut command = Command::new(cli_path(bin));
+    command
         .current_dir(root)
         .env("CODEHELION_MOCK_HELPER_BEHAVIOUR", behaviour)
-        .args(["scan", ".", "--mode", "semantic", "--format", "json"])
-        .output()
-        .expect("run the semantic CLI wrapper");
+        .args(["scan", ".", "--mode", "semantic", "--format", "json"]);
+    let output = run(&mut command, "run the semantic CLI wrapper");
     assert!(
         output.status.success(),
         "{}",
@@ -90,7 +125,8 @@ fn scan(root: &Path, behaviour: &str, bin: &Path) -> Value {
 
 #[allow(clippy::disallowed_types)]
 fn scan_with_explicit_helper(root: &Path, behaviour: &str, helper: &Path) -> Value {
-    let output = Command::new(CLI)
+    let mut command = Command::new(CLI);
+    command
         .current_dir(root)
         .env("CODEHELION_MOCK_HELPER_BEHAVIOUR", behaviour)
         .args([
@@ -102,9 +138,11 @@ fn scan_with_explicit_helper(root: &Path, behaviour: &str, helper: &Path) -> Val
             "json",
             "--helper",
             &format!("rust={}", helper.display()),
-        ])
-        .output()
-        .expect("run the semantic CLI wrapper with an explicit helper");
+        ]);
+    let output = run(
+        &mut command,
+        "run the semantic CLI wrapper with an explicit helper",
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -180,7 +218,7 @@ fn assert_fault_is_partial(behaviour: &str, reason: Unavailability, timeout_ms: 
 fn an_explicit_helper_path_is_used_without_a_sibling_or_path_lookup() {
     let fixture = fixture();
     let helper = fixture.path().join("named-anything");
-    std::fs::copy(MOCK, &helper).expect("copy the mock to the explicit path");
+    copy_executable(MOCK, &helper, "copy the mock to the explicit path");
     let report = scan_with_explicit_helper(fixture.path(), "well-behaved", &helper);
     assert!(
         report["summary"]["compiler"]["answered"]
