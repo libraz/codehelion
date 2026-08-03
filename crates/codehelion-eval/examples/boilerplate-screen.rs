@@ -21,7 +21,7 @@
 
 use std::path::{Path, PathBuf};
 
-use codehelion_core::boilerplate::{self, Boilerplate};
+use codehelion_core::boilerplate::{self, Boilerplate, BoilerplateCounts};
 use codehelion_core::discovery::Language;
 use codehelion_core::ir::{IrNode, Shape, StructuralFrontend, SyntaxIrFile};
 use codehelion_eval::labels::LabelSet;
@@ -34,23 +34,6 @@ struct Case {
     language: Language,
 }
 
-/// What a unit's body contains, tallied the way the classifier tallies it.
-///
-/// Kept here rather than borrowed from the classifier so a candidate rule can
-/// be tried without changing the classifier first. The two must agree; the
-/// `classify` column is printed beside the counts so a disagreement shows.
-#[derive(Debug, Clone, Copy, Default)]
-struct Counts {
-    control: usize,
-    calls: usize,
-    macros: usize,
-    statements: usize,
-    work: usize,
-    branches: usize,
-    declarations: usize,
-    returns: usize,
-}
-
 /// The innermost unit containing a fragment, and what it counts.
 struct Located {
     name: String,
@@ -58,7 +41,7 @@ struct Located {
     last: usize,
     tokens: usize,
     verdict: Option<Boilerplate>,
-    counts: Counts,
+    counts: BoilerplateCounts,
 }
 
 fn main() {
@@ -185,7 +168,7 @@ fn locate(language: Language, source: &str, fragment: &Fragment) -> Option<Locat
                     last,
                     tokens: node.token_len(),
                     verdict: boilerplate::classify(node),
-                    counts: count(node),
+                    counts: boilerplate::counts(node),
                 });
             }
         });
@@ -227,56 +210,4 @@ fn line_starts(source: &str) -> Vec<usize> {
 
 fn line_of(starts: &[usize], offset: usize) -> usize {
     starts.partition_point(|&start| start <= offset)
-}
-
-fn count(unit: &IrNode) -> Counts {
-    let mut counts = Counts::default();
-    for child in &unit.children {
-        descend(child, false, &mut counts);
-    }
-    counts
-}
-
-fn descend(node: &IrNode, in_call: bool, counts: &mut Counts) {
-    match node.shape {
-        Shape::Branch => {
-            counts.control += 1;
-            counts.branches += 1;
-        }
-        Shape::Loop | Shape::Match | Shape::MatchArm | Shape::Break | Shape::Continue => {
-            counts.control += 1;
-        }
-        Shape::Try => {
-            if node.children.iter().any(|c| c.shape == Shape::Block) {
-                counts.control += 1;
-            }
-        }
-        Shape::Call => {
-            if !in_call {
-                counts.calls += 1;
-            }
-        }
-        Shape::MacroCall => {
-            if !in_call {
-                counts.macros += 1;
-            }
-        }
-        Shape::Return => {
-            counts.statements += 1;
-            counts.returns += 1;
-        }
-        Shape::VarDecl => {
-            counts.statements += 1;
-            counts.declarations += 1;
-        }
-        Shape::Assign | Shape::ExprStmt => {
-            counts.statements += 1;
-            counts.work += 1;
-        }
-        _ => {}
-    }
-    let nested = in_call || node.shape == Shape::Call;
-    for child in &node.children {
-        descend(child, nested, counts);
-    }
 }

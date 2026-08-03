@@ -31,7 +31,9 @@ use codehelion_core::stable_id::{
     CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint,
 };
 use codehelion_store::Store;
-use codehelion_store::snapshot::{GroupRow, MemberRow, PriorityRow, Snapshot, SummaryRow, UnitRow};
+use codehelion_store::snapshot::{
+    GroupOrigin, GroupRow, MemberRow, PriorityRow, Snapshot, SummaryRow, UnitRow,
+};
 
 mod generation;
 
@@ -488,6 +490,7 @@ pub fn measure_store_insert(
     let group_rows: Vec<GroupRow> = (0..groups)
         .map(|group| GroupRow {
             fingerprint: CloneGroupFingerprint::from_bytes(fp(2, group)),
+            history: GroupOrigin::unconnected(&CloneGroupFingerprint::from_bytes(fp(2, group))),
             clone_type: CloneClass::Type1,
             split_pair: false,
             member_scope: CloneScope::Unit,
@@ -503,6 +506,7 @@ pub fn measure_store_insert(
             has_dynamic_allocation: None,
             call_count: None,
             width_family: false,
+            ranked_down: false,
             suppressed_by: None,
             priority: PriorityRow {
                 clone_confidence: 0.9,
@@ -551,7 +555,6 @@ pub fn measure_store_insert(
         groups: group_rows,
         sibling_groups: Vec::new(),
         near_misses: Vec::new(),
-        features: Vec::new(),
         files: Vec::new(),
         compiler_helpers: Vec::new(),
         compiler_units: Vec::new(),

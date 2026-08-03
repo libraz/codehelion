@@ -25,7 +25,7 @@
   "non_clones": [
     {
       "id": "rust-cpp-transformed-collection",
-      "reason": "the changed collection operand is outside the direct loop correspondence",
+      "reason": "semantic-rule-boundary",
       "rule_id": "cross-language-sequence-pipeline-v1",
       "fragments": [
         {"file": "src/lib.rs", "start_line": 3, "end_line": 4},
@@ -34,7 +34,7 @@
     },
     {
       "id": "rust-cpp-transformed-reduction",
-      "reason": "the changed accumulation operand is outside the direct loop correspondence",
+      "reason": "semantic-rule-boundary",
       "rule_id": "cross-language-sequence-pipeline-v1",
       "fragments": [
         {"file": "src/lib.rs", "start_line": 11, "end_line": 12},

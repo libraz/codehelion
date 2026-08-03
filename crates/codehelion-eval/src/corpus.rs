@@ -37,7 +37,7 @@ pub const SPEC_SCHEMA_VERSION: u32 = 1;
 
 /// Schema version written into generated label documents. Tracks the current
 /// [`LabelSet`](crate::labels::LabelSet) format.
-pub const LABEL_SCHEMA_VERSION: u32 = 1;
+pub use crate::labels::LABEL_SCHEMA_VERSION;
 
 /// File name of the generated label document.
 pub const LABELS_FILE: &str = "labels.json";

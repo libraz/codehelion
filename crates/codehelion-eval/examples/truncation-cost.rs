@@ -186,6 +186,10 @@ fn scan(
         .arg("scan")
         .arg(snapshot)
         .args(["--mode", mode, "--format", "json"])
+        // The corpus labels cover vendored paths too. Omitting them makes a
+        // run incomparable with the pinned labels and with another run whose
+        // directory layout happens not to trigger the default exclusion.
+        .arg("--include-vendored")
         .arg("--db")
         .arg(scratch.join(format!("{name}.db")));
     if let Some(value) = setting {
@@ -198,7 +202,7 @@ fn scan(
     }
     // A fresh database per run: a scan that reuses a previous one answers with
     // what it stored rather than with what this ceiling let it find.
-    let _ = std::fs::remove_file(scratch.join(format!("{name}.db")));
+    remove_database_artifacts(&scratch.join(format!("{name}.db")));
     match command.output() {
         Ok(output) if output.status.success() => String::from_utf8(output.stdout).ok(),
         Ok(output) => {
@@ -212,5 +216,45 @@ fn scan(
             eprintln!("{name}: cannot run {}: {error}", binary.display());
             None
         }
+    }
+}
+
+/// Remove a `SQLite` database and the WAL sidecars left by a previous run.
+fn remove_database_artifacts(database: &Path) {
+    let base = database.as_os_str().to_string_lossy();
+    for path in [
+        database.to_path_buf(),
+        PathBuf::from(format!("{base}-wal")),
+        PathBuf::from(format!("{base}-shm")),
+    ] {
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("removing {}: {error}", path.display());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn database_cleanup_removes_the_wal_sidecars_with_the_database() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = directory.path().join("audit.db");
+        for path in [
+            database.clone(),
+            PathBuf::from(format!("{}-wal", database.display())),
+            PathBuf::from(format!("{}-shm", database.display())),
+        ] {
+            std::fs::write(&path, "stale").expect("stale database artifact");
+        }
+
+        remove_database_artifacts(&database);
+
+        assert!(!database.exists());
+        assert!(!PathBuf::from(format!("{}-wal", database.display())).exists());
+        assert!(!PathBuf::from(format!("{}-shm", database.display())).exists());
     }
 }

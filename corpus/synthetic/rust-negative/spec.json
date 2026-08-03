@@ -17,37 +17,37 @@
   ],
   "non_clones": [
     {
-      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "reason": "different-computation-skeleton",
       "function": "fn sum_positive",
       "counterpart": "fn longest_run",
       "variant": "copies.rs"
     },
     {
-      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "reason": "different-computation-skeleton",
       "function": "fn sum_positive",
       "counterpart": "fn count_transitions",
       "variant": "copies.rs"
     },
     {
-      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "reason": "different-computation-skeleton",
       "function": "fn longest_run",
       "counterpart": "fn count_transitions",
       "variant": "copies.rs"
     },
     {
-      "reason": "carry-the-previous-value skeleton, different computation",
+      "reason": "different-computation-skeleton",
       "function": "fn count_transitions",
       "counterpart": "fn narrowest_gap",
       "variant": "copies.rs"
     },
     {
-      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "reason": "different-computation-skeleton",
       "function": "fn longest_run",
       "counterpart": "fn narrowest_gap",
       "variant": "copies.rs"
     },
     {
-      "reason": "accumulate-under-a-branch skeleton, different computation",
+      "reason": "different-computation-skeleton",
       "function": "fn sum_positive",
       "counterpart": "fn narrowest_gap",
       "variant": "copies.rs"

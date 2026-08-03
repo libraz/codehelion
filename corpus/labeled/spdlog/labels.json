@@ -671,6 +671,54 @@
           "end_line": 121
         }
       ]
+    },
+    {
+      "id": "nc-020",
+      "reason": "forwarding-wrapper",
+      "fragments": [
+        {
+          "file": "include/spdlog/details/os-inl.h",
+          "start_line": 98,
+          "end_line": 101
+        },
+        {
+          "file": "include/spdlog/details/os-inl.h",
+          "start_line": 114,
+          "end_line": 117
+        }
+      ]
+    },
+    {
+      "id": "nc-021",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/ansicolor_sink-inl.h",
+          "start_line": 78,
+          "end_line": 82
+        },
+        {
+          "file": "include/spdlog/details/registry-inl.h",
+          "start_line": 113,
+          "end_line": 116
+        }
+      ]
+    },
+    {
+      "id": "nc-022",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "include/spdlog/sinks/stdout_sinks-inl.h",
+          "start_line": 89,
+          "end_line": 93
+        },
+        {
+          "file": "include/spdlog/details/registry-inl.h",
+          "start_line": 113,
+          "end_line": 116
+        }
+      ]
     }
   ]
 }

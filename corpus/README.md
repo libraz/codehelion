@@ -141,6 +141,9 @@ be counted rather than merely described. The ones in use:
 | `member-call-run` | a short run of calls on the object's own members, alike in shape while the calls have nothing to do with one another |
 | `assertion-run` | a test body that is nothing but a run of checks — assertion macros, or calls into the suite's own case helper — alike because listing checks is all it does |
 | `single-expression-return` | a body that is one `return` of a compound expression, alike in having that shape while the expressions compute unrelated things |
+| `parse-error-boilerplate` | parser recovery fragments that share error-handling scaffolding but not source logic |
+| `semantic-rule-boundary` | a near miss outside the deliberately closed form of a restricted semantic rule |
+| `different-computation-skeleton` | the same control-flow skeleton performing a different computation |
 
 Extend the table when a case needs a class it does not have; do not reach for
 the nearest existing word.

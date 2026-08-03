@@ -25,7 +25,7 @@
   "non_clones": [
     {
       "id": "rust-cpp-unregistered-sequence",
-      "reason": "different closed operation sequence",
+      "reason": "semantic-rule-boundary",
       "rule_id": "cross-language-sequence-pipeline-v1",
       "fragments": [
         {"file": "src/lib.rs", "start_line": 1, "end_line": 4},

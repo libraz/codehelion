@@ -12,11 +12,11 @@
     {"id":"serialization-round-trip","type":"restricted-semantic","rule_id":"rust-serialization-round-trip-v1","fragments":[{"file":"src/lib.rs","start_line":74,"end_line":74},{"file":"src/lib.rs","start_line":78,"end_line":78}]}
   ],
   "non_clones": [
-    {"id":"different-sequence","reason":"map-only is outside the closed source-filter-map-collect sequence","rule_id":"sequence-pipeline-v1","fragments":[{"file":"src/lib.rs","start_line":2,"end_line":2},{"file":"src/lib.rs","start_line":10,"end_line":10}]},
-    {"id":"result-transformed","reason":"changes the success value instead of preserving the direct adapter","rule_id":"result-direct-propagation-v1","fragments":[{"file":"src/lib.rs","start_line":14,"end_line":14},{"file":"src/lib.rs","start_line":22,"end_line":22}]},
-    {"id":"option-transformed","reason":"changes the optional value instead of preserving the direct adapter","rule_id":"option-direct-propagation-v1","fragments":[{"file":"src/lib.rs","start_line":26,"end_line":26},{"file":"src/lib.rs","start_line":34,"end_line":34}]},
-    {"id":"optional-compound","reason":"compound conditions are outside the closed validation rule","rule_id":"optional-validation-v1","fragments":[{"file":"src/lib.rs","start_line":38,"end_line":38},{"file":"src/lib.rs","start_line":46,"end_line":46}]},
-    {"id":"result-compound","reason":"compound conditions are outside the closed validation rule","rule_id":"result-validation-v1","fragments":[{"file":"src/lib.rs","start_line":50,"end_line":50},{"file":"src/lib.rs","start_line":58,"end_line":58}]},
-    {"id":"serialization-wrong-second-step","reason":"two format operations are not the closed ToString then str::parse round trip","rule_id":"rust-serialization-round-trip-v1","fragments":[{"file":"src/lib.rs","start_line":74,"end_line":74},{"file":"src/lib.rs","start_line":82,"end_line":82}]}
+    {"id":"different-sequence","reason":"semantic-rule-boundary","rule_id":"sequence-pipeline-v1","fragments":[{"file":"src/lib.rs","start_line":2,"end_line":2},{"file":"src/lib.rs","start_line":10,"end_line":10}]},
+    {"id":"result-transformed","reason":"semantic-rule-boundary","rule_id":"result-direct-propagation-v1","fragments":[{"file":"src/lib.rs","start_line":14,"end_line":14},{"file":"src/lib.rs","start_line":22,"end_line":22}]},
+    {"id":"option-transformed","reason":"semantic-rule-boundary","rule_id":"option-direct-propagation-v1","fragments":[{"file":"src/lib.rs","start_line":26,"end_line":26},{"file":"src/lib.rs","start_line":34,"end_line":34}]},
+    {"id":"optional-compound","reason":"semantic-rule-boundary","rule_id":"optional-validation-v1","fragments":[{"file":"src/lib.rs","start_line":38,"end_line":38},{"file":"src/lib.rs","start_line":46,"end_line":46}]},
+    {"id":"result-compound","reason":"semantic-rule-boundary","rule_id":"result-validation-v1","fragments":[{"file":"src/lib.rs","start_line":50,"end_line":50},{"file":"src/lib.rs","start_line":58,"end_line":58}]},
+    {"id":"serialization-wrong-second-step","reason":"semantic-rule-boundary","rule_id":"rust-serialization-round-trip-v1","fragments":[{"file":"src/lib.rs","start_line":74,"end_line":74},{"file":"src/lib.rs","start_line":82,"end_line":82}]}
   ]
 }

@@ -705,6 +705,54 @@
           "end_line": 1661
         }
       ]
+    },
+    {
+      "id": "cp-044",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "src/value/ser.rs",
+          "start_line": 271,
+          "end_line": 279
+        },
+        {
+          "file": "src/ser.rs",
+          "start_line": 371,
+          "end_line": 380
+        }
+      ]
+    },
+    {
+      "id": "cp-045",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 482,
+          "end_line": 496
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 1009,
+          "end_line": 1023
+        }
+      ]
+    },
+    {
+      "id": "cp-046",
+      "type": "type-3",
+      "fragments": [
+        {
+          "file": "src/value/de.rs",
+          "start_line": 316,
+          "end_line": 325
+        },
+        {
+          "file": "src/value/de.rs",
+          "start_line": 847,
+          "end_line": 855
+        }
+      ]
     }
   ],
   "non_clones": [
@@ -1281,6 +1329,342 @@
           "file": "src/raw.rs",
           "start_line": 418,
           "end_line": 445
+        }
+      ]
+    },
+    {
+      "id": "nc-037",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 746,
+          "end_line": 751
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 708,
+          "end_line": 713
+        }
+      ]
+    },
+    {
+      "id": "nc-038",
+      "reason": "type-specialised-variant",
+      "fragments": [
+        {
+          "file": "src/value/partial_eq.rs",
+          "start_line": 8,
+          "end_line": 10
+        },
+        {
+          "file": "src/value/partial_eq.rs",
+          "start_line": 19,
+          "end_line": 21
+        }
+      ]
+    },
+    {
+      "id": "nc-039",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 384,
+          "end_line": 389
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 492,
+          "end_line": 497
+        }
+      ]
+    },
+    {
+      "id": "nc-040",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 708,
+          "end_line": 713
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 384,
+          "end_line": 389
+        }
+      ]
+    },
+    {
+      "id": "nc-041",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 708,
+          "end_line": 713
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 443,
+          "end_line": 448
+        }
+      ]
+    },
+    {
+      "id": "nc-042",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 708,
+          "end_line": 713
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 425,
+          "end_line": 430
+        }
+      ]
+    },
+    {
+      "id": "nc-043",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 533,
+          "end_line": 538
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 708,
+          "end_line": 713
+        }
+      ]
+    },
+    {
+      "id": "nc-044",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 492,
+          "end_line": 497
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 708,
+          "end_line": 713
+        }
+      ]
+    },
+    {
+      "id": "nc-045",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 443,
+          "end_line": 448
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 746,
+          "end_line": 751
+        }
+      ]
+    },
+    {
+      "id": "nc-046",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 746,
+          "end_line": 751
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 384,
+          "end_line": 389
+        }
+      ]
+    },
+    {
+      "id": "nc-047",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 533,
+          "end_line": 538
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 746,
+          "end_line": 751
+        }
+      ]
+    },
+    {
+      "id": "nc-048",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 746,
+          "end_line": 751
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 425,
+          "end_line": 430
+        }
+      ]
+    },
+    {
+      "id": "nc-049",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 366,
+          "end_line": 371
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 746,
+          "end_line": 751
+        }
+      ]
+    },
+    {
+      "id": "nc-050",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 492,
+          "end_line": 497
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 746,
+          "end_line": 751
+        }
+      ]
+    },
+    {
+      "id": "nc-051",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/map.rs",
+          "start_line": 659,
+          "end_line": 664
+        },
+        {
+          "file": "src/map.rs",
+          "start_line": 679,
+          "end_line": 684
+        }
+      ]
+    },
+    {
+      "id": "nc-052",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 631,
+          "end_line": 636
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 708,
+          "end_line": 713
+        }
+      ]
+    },
+    {
+      "id": "nc-053",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 669,
+          "end_line": 674
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 708,
+          "end_line": 713
+        }
+      ]
+    },
+    {
+      "id": "nc-054",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 708,
+          "end_line": 713
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 650,
+          "end_line": 655
+        }
+      ]
+    },
+    {
+      "id": "nc-055",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 708,
+          "end_line": 713
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 585,
+          "end_line": 590
+        }
+      ]
+    },
+    {
+      "id": "nc-056",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 708,
+          "end_line": 713
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 560,
+          "end_line": 565
+        }
+      ]
+    },
+    {
+      "id": "nc-057",
+      "reason": "type-dispatch-accessor",
+      "fragments": [
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 708,
+          "end_line": 713
+        },
+        {
+          "file": "src/value/mod.rs",
+          "start_line": 611,
+          "end_line": 616
         }
       ]
     }

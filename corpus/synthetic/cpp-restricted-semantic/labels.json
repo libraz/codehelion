@@ -16,7 +16,7 @@
   "non_clones": [
     {
       "id": "serialization-wrong-second-step",
-      "reason": "two format operations are not the closed std::to_string then std::stoull round trip",
+      "reason": "semantic-rule-boundary",
       "rule_id": "cpp-serialization-round-trip-v1",
       "fragments": [
         {"file": "cpp/direct.cpp", "start_line": 4, "end_line": 5},

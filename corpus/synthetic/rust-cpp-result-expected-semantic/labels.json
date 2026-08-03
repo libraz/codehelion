@@ -25,7 +25,7 @@
   "non_clones": [
     {
       "id": "rust-cpp-result-transformed",
-      "reason": "changes the success value instead of preserving both alternatives",
+      "reason": "semantic-rule-boundary",
       "rule_id": "cross-language-result-direct-propagation-v1",
       "fragments": [
         {"file": "src/lib.rs", "start_line": 5, "end_line": 7},
@@ -34,7 +34,7 @@
     },
     {
       "id": "rust-cpp-result-compound-validation",
-      "reason": "compound conditions are outside the closed validation rule",
+      "reason": "semantic-rule-boundary",
       "rule_id": "cross-language-result-validation-v1",
       "fragments": [
         {"file": "src/lib.rs", "start_line": 13, "end_line": 15},

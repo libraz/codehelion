@@ -4,6 +4,7 @@
 //! serde and scores it against corpus labels. Keeping this contract stable lets
 //! prototypes evolve independently while remaining comparable.
 
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
 /// Schema version of the [`DetectionResult`] documents this crate produces.
@@ -244,9 +245,16 @@ impl DetectionResult {
     /// # Errors
     ///
     /// Returns the underlying serde error if `json` is not a valid
-    /// [`DetectionResult`] document.
+    /// [`DetectionResult`] document or its schema version is unsupported.
     pub fn from_json(json: &str) -> serde_json::Result<Self> {
-        serde_json::from_str(json)
+        let result: Self = serde_json::from_str(json)?;
+        if result.schema_version != SCHEMA_VERSION {
+            return Err(serde_json::Error::custom(format!(
+                "unsupported detection-result schema_version {} (expected {SCHEMA_VERSION})",
+                result.schema_version
+            )));
+        }
+        Ok(result)
     }
 
     /// Serialize this [`DetectionResult`] to a pretty-printed JSON string.
@@ -290,6 +298,17 @@ mod tests {
         assert_eq!(finding.clone_type, CloneType::Type2);
         assert!((finding.score - 0.95).abs() < 1e-9);
         assert_eq!(finding.fragments.len(), 2);
+    }
+
+    #[test]
+    fn unsupported_schema_version_is_rejected() {
+        let json = EXAMPLE.replace("\"schema_version\": 1", "\"schema_version\": 2");
+        let error = DetectionResult::from_json(&json).expect_err("later schema must not parse");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported detection-result schema_version 2")
+        );
     }
 
     #[test]

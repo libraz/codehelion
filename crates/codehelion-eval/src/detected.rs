@@ -108,11 +108,9 @@ struct Group {
     suppressed: Option<Value>,
     /// `null` for a group whose similarity was never scored.
     similarity: Option<Similarity>,
-    /// The three report fields the default policy ranks a group down for. See
-    /// [`put_forward`].
-    split_pair: bool,
-    test_code: bool,
-    boilerplate: Option<String>,
+    /// The report's effective policy decision, persisted beside each group so
+    /// consumers do not need to reconstruct configuration defaults.
+    ranked_down: bool,
     /// Whether the detector read the group as one routine written once per
     /// integer width.
     width_family: bool,
@@ -133,25 +131,10 @@ struct SemanticRuleEvidence {
     id: String,
 }
 
-/// Boilerplate category the default policy ranks down rather than hides.
-const RANKED_DOWN_BOILERPLATE: &str = "macro-repetition";
-
 /// Whether the report puts a group forward or files it below the findings
 /// that carry behaviour.
-///
-/// The report sorts by this and does not state it, so it is read back from the
-/// three fields the decision is made of. That leaves the default policy
-/// written down twice, which is why the answer is checked against the order
-/// the report actually emitted — everything it puts forward comes first, so a
-/// policy change that moves the fold moves the order with it and the
-/// disagreement is the signal.
-///
-/// A configured run can rank other things down, and this will not know. The
-/// harness scans with the defaults, which is the run the figure describes.
-fn put_forward(group: &Group) -> bool {
-    !(group.split_pair
-        || group.test_code
-        || group.boilerplate.as_deref() == Some(RANKED_DOWN_BOILERPLATE))
+const fn put_forward(group: &Group) -> bool {
+    !group.ranked_down
 }
 
 #[derive(Debug, Deserialize)]
@@ -357,6 +340,7 @@ fn validate_current_report_contract(value: &Value) -> Result<(), Error> {
                 "test_code_evidence",
                 "width_family",
                 "split_pair",
+                "ranked_down",
                 "suppressed",
                 "members",
             ],
@@ -558,6 +542,7 @@ mod tests {
           "test_code_evidence": null,
           "width_family": false,
           "split_pair": false,
+          "ranked_down": false,
           "suppressed": null,
           "members": [
             {"finding_id": "m1", "file": "a.rs", "start_line": 10, "end_line": 24, "tokens": 12},
@@ -575,6 +560,7 @@ mod tests {
           "test_code_evidence": null,
           "width_family": false,
           "split_pair": false,
+          "ranked_down": true,
           "suppressed": {"kind": "rule", "detail": "path"},
           "members": [
             {"finding_id": "m3", "file": "c.rs", "start_line": 1, "end_line": 4, "tokens": 4}
@@ -663,39 +649,22 @@ mod tests {
 
     #[test]
     fn a_group_the_report_files_below_the_rest_is_read_as_one() {
-        for (field, value) in [
-            ("\"split_pair\": false,", "\"split_pair\": true,"),
-            ("\"test_code\": false,", "\"test_code\": true,"),
-            (
-                "\"boilerplate\": null,",
-                "\"boilerplate\": \"macro-repetition\",",
-            ),
-        ] {
-            let filed = REPORT.replacen(field, value, 1);
-            let (result, _lines) = from_report_json(&filed).expect("report reads");
-            assert!(
-                !result.findings[0].actionable,
-                "a group carrying {value} was read as one the report puts forward"
-            );
-        }
-        // And a group carrying none of the three is put forward. Without this
-        // the three above would pass on a reader that always answered no.
+        let filed = REPORT.replacen("\"ranked_down\": false", "\"ranked_down\": true", 1);
+        let (result, _lines) = from_report_json(&filed).expect("report reads");
+        assert!(!result.findings[0].actionable);
+
+        // Without this, the assertion above would pass on a reader that
+        // always answered no.
         let (result, _lines) = from_report_json(REPORT).expect("report reads");
         assert!(result.findings[0].actionable);
     }
 
-    /// The fold this module reads is the one the report drew.
-    ///
-    /// [`put_forward`] restates the default policy, so it can disagree with
-    /// the report that applied it. The report cannot be asked where its fold
-    /// is, but it sorts by it — everything it puts forward comes first — so a
-    /// disagreement shows up as a finding read as filed-below sitting above
-    /// one read as put-forward.
+    /// The fold this module reads is the explicit decision the report drew.
     #[test]
     fn the_fold_this_reads_is_where_the_report_put_it() {
         let ordered = REPORT.replacen(
-            "\"split_pair\": false,\n          \"suppressed\": {\"kind\": \"rule\", \"detail\": \"path\"},",
-            "\"split_pair\": true,\n          \"suppressed\": null,",
+            "\"ranked_down\": true,\n          \"suppressed\": {\"kind\": \"rule\", \"detail\": \"path\"},",
+            "\"ranked_down\": true,\n          \"suppressed\": null,",
             1,
         );
         let (result, _lines) = from_report_json(&ordered).expect("report reads");

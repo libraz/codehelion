@@ -14,6 +14,42 @@ use serde::{Deserialize, Serialize};
 
 use crate::schema::{CloneType, Fragment};
 
+/// Schema version of [`LabelSet`] documents this crate accepts.
+pub const LABEL_SCHEMA_VERSION: u32 = 1;
+
+/// Accepted `non_clones.reason` values.
+///
+/// These names are a measurement dimension, not free-form annotations: a
+/// typo would otherwise silently create a new row in [`crate::metrics::ReasonSplit`].
+/// Add a value here and document it in `corpus/README.md` in the same change.
+pub const NON_CLONE_REASONS: &[&str] = &[
+    "assertion-run",
+    "const-overload-pair",
+    "declaration-run",
+    "different-computation-skeleton",
+    "dispatch-table-entry",
+    "exhaustive-match-table",
+    "field-mapping-boilerplate",
+    "forwarding-wrapper",
+    "getter-boilerplate",
+    "guarded-forwarding",
+    "lifecycle-teardown",
+    "list-walk-idiom",
+    "member-call-run",
+    "mirrored-operation",
+    "nested-inside-copy",
+    "parameterised-dispatch",
+    "parse-error-boilerplate",
+    "semantic-rule-boundary",
+    "single-expression-return",
+    "trivial-accessor-pair",
+    "trivial-factory",
+    "type-dispatch-accessor",
+    "type-specialised-variant",
+    "unrolled-repetition",
+    "validated-setter",
+];
+
 /// A positive example: fragments that should be reported as clones.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LabelPair {
@@ -41,6 +77,7 @@ pub struct NonClone {
     /// Stable label identifier within the corpus (e.g. `nc-001`).
     pub id: String,
     /// Why these fragments look similar yet must not count as a clone.
+    #[serde(deserialize_with = "non_clone_reason")]
     pub reason: String,
     /// Registered semantic rule this deliberate lookalike is intended to
     /// challenge, when it is part of a per-rule measurement.
@@ -49,6 +86,21 @@ pub struct NonClone {
     /// The two fragments that must not be reported together.
     #[serde(deserialize_with = "pair_fragments")]
     pub fragments: Vec<Fragment>,
+}
+
+/// Deserialize a controlled-vocabulary negative-label reason.
+fn non_clone_reason<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let reason = String::deserialize(deserializer)?;
+    if NON_CLONE_REASONS.contains(&reason.as_str()) {
+        Ok(reason)
+    } else {
+        Err(D::Error::custom(format!(
+            "unsupported non_clone reason `{reason}`"
+        )))
+    }
 }
 
 /// Ground truth for a set of source files.
@@ -73,9 +125,16 @@ impl LabelSet {
     /// # Errors
     ///
     /// Returns the underlying serde error if `json` is not a valid
-    /// [`LabelSet`] document.
+    /// [`LabelSet`] document or its schema version is unsupported.
     pub fn from_json(json: &str) -> serde_json::Result<Self> {
-        serde_json::from_str(json)
+        let labels: Self = serde_json::from_str(json)?;
+        if labels.schema_version != LABEL_SCHEMA_VERSION {
+            return Err(serde_json::Error::custom(format!(
+                "unsupported label schema_version {} (expected {LABEL_SCHEMA_VERSION})",
+                labels.schema_version
+            )));
+        }
+        Ok(labels)
     }
 }
 
@@ -136,6 +195,46 @@ mod tests {
         }"#;
         let labels = LabelSet::from_json(json).expect("parses without non_clones");
         assert!(labels.non_clones.is_empty());
+    }
+
+    #[test]
+    fn unknown_non_clone_reason_is_rejected_at_import() {
+        let json = EXAMPLE.replace("getter-boilerplate", "not-a-controlled-reason");
+        let error = LabelSet::from_json(&json).expect_err("unknown reason must not parse");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported non_clone reason `not-a-controlled-reason`")
+        );
+    }
+
+    #[test]
+    fn parse_error_boilerplate_is_a_registered_reason() {
+        let json = EXAMPLE.replace("getter-boilerplate", "parse-error-boilerplate");
+        let labels = LabelSet::from_json(&json).expect("registered reason parses");
+        assert_eq!(labels.non_clones[0].reason, "parse-error-boilerplate");
+    }
+
+    #[test]
+    fn every_registered_reason_is_documented_in_the_corpus_guide() {
+        let guide = include_str!("../../../corpus/README.md");
+        for reason in NON_CLONE_REASONS {
+            assert!(
+                guide.contains(&format!("| `{reason}` |")),
+                "{reason} is accepted but absent from corpus/README.md"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_schema_version_is_rejected() {
+        let json = EXAMPLE.replace("\"schema_version\": 1", "\"schema_version\": 2");
+        let error = LabelSet::from_json(&json).expect_err("later schema must not parse");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported label schema_version 2")
+        );
     }
 
     #[test]
