@@ -47,7 +47,11 @@ jobs:
         run: |
           "LIBCLANG_PATH=$env:ProgramFiles\LLVM\bin" >> $env:GITHUB_ENV
           "$env:ProgramFiles\LLVM\bin" >> $env:GITHUB_PATH
+      # Named, because the default shell is the platform's own and one of
+      # these platforms answers a shell script by doing nothing at all and
+      # reporting success. The suite then measures an empty corpus.
       - name: Materialize the labelled corpora
+        shell: bash
         run: corpus/scripts/materialize-labeled.sh
       - name: Test
         run: cargo test --workspace --all-targets --all-features
