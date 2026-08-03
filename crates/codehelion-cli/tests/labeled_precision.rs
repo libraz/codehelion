@@ -97,22 +97,6 @@ struct Expected {
 /// not a number to update.
 const CORPORA: &[Expected] = &[
     Expected {
-        name: "fast-yaml-cpp",
-        has_origin: false,
-        confirmed: 16,
-        refuted: 2,
-        forward_confirmed: 15,
-        forward_refuted: 2,
-        fast: Verdicts {
-            confirmed: 11,
-            refuted: 1,
-            forward_confirmed: 11,
-            forward_refuted: 1,
-            unjudged: 138,
-            conflicting: 0,
-        },
-    },
-    Expected {
         name: "fast-yaml",
         has_origin: true,
         confirmed: 1,

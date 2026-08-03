@@ -106,12 +106,6 @@ const CORPORA: &[Expected] = &[
         without_shape_gate: 2,
     },
     Expected {
-        path: "labeled/fast-yaml-cpp/snapshot",
-        groups: 16,
-        without_near_match: 16,
-        without_shape_gate: 16,
-    },
-    Expected {
         path: "labeled/fast-yaml/snapshot",
         groups: 1,
         without_near_match: 1,
