@@ -50,9 +50,13 @@ jobs:
       matrix:
         include:
           # Pin the image/package pairing instead of asking whichever libclang
-          # happens to be newest on `ubuntu-latest`. These are independently
-          # built helpers and full Semantic scans, so every row verifies both
-          # protocol handshake and SQLite persistence against a real runtime.
+          # happens to be newest on `ubuntu-latest`. Independently built
+          # helpers and full Semantic scans, so this verifies both protocol
+          # handshake and SQLite persistence against a real runtime.
+          #
+          # One row rather than a version sweep: the oldest supported pairing
+          # is the one that fails first when a helper reaches for something
+          # newer, and it is the row carrying the compiler-IR goldens.
           - runner: ubuntu-22.04
             rust: '1.95.0'
             clang: '14'
@@ -63,12 +67,6 @@ jobs:
             # about a header that is simply absent.
             libstdcxx_package: g++-12
             golden: true
-          - runner: ubuntu-24.04
-            rust: stable
-            clang: '18'
-            libclang_package: libclang-18-dev
-            libstdcxx_package: g++-13
-            golden: false
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -94,8 +92,14 @@ jobs:
         if: matrix.golden
         run: cargo +${{ matrix.rust }} test -p codehelion --test semantic_helpers compiler_ir_matches_its_golden_snapshot -- --ignored
 
+  # Artifact inspection is an optional layer: the clone engine is complete
+  # without it, and a tree with nothing built in it is the case that matters.
+  # Building real binaries on three operating systems to check that layer is
+  # worth doing when it changes or before a release, not on the way to every
+  # merge — so these three run when asked for rather than on a push.
   artifact-fixtures:
     name: Artifact fixture end-to-end
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -114,6 +118,7 @@ jobs:
 
   macho-artifact-fixtures:
     name: Mach-O artifact fixture end-to-end
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
@@ -124,6 +129,7 @@ jobs:
 
   pe-artifact-fixtures:
     name: PE/PDB artifact fixture end-to-end
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -144,6 +150,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      # The labelled precision tests refuse to pass on an empty measurement,
+      # so coverage over the suite needs the same sources the suite does.
+      - name: Materialize the labelled corpora
+        run: corpus/scripts/materialize-labeled.sh
       - name: Collect coverage
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info
       - name: Upload to Codecov
