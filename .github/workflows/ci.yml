@@ -47,14 +47,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      # The Rust semantic helper resolves standard-library names by reading the
-      # sysroot sources, so the suite needs `rust-src` present. Without it the
-      # helper answers about a project's own code and reports everything from
-      # outside it as unresolved, which the fixtures read as a wrong answer.
+      # `rust-toolchain.toml` names the components, `rust-src` among them.
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rust-src
       - uses: Swatinem/rust-cache@v2
+      # The suite includes the Semantic-mode tests, which ask the C/C++ helper
+      # about real translation units. It loads libclang at run time and reads a
+      # control-flow graph by invoking `clang` separately, so both the library
+      # and the unversioned driver have to be here. Neither is a CI-only extra:
+      # they are what running this suite needs anywhere.
+      - name: Install Clang and libclang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libclang-dev
       # The labelled precision tests refuse to pass on an empty measurement:
       # with no case materialized they report that nothing was measured rather
       # than reporting success. The suite therefore needs the same sources the
