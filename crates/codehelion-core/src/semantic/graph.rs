@@ -1,7 +1,7 @@
 use super::{BTreeSet, Deserialize, Error, Language, Serialize, TypeTag};
 
 /// Version of the closed SOG vocabulary and normalization contract.
-pub const SOG_SCHEMA_VERSION: &str = "sog-v1";
+pub const SOG_SCHEMA_VERSION: &str = "sog-v4";
 
 /// Version of the coarse index used to bound registered SOG comparisons.
 ///
@@ -15,7 +15,7 @@ pub const SEMANTIC_CANDIDATE_INDEX_VERSION: &str = "sog-candidate-index-v1";
 ///
 /// Source ranges are deliberately sidecar evidence: they select the reported
 /// fragment but never enter a SOG fingerprint or a stable finding identity.
-pub const SEMANTIC_WINDOWING_VERSION: &str = "sog-windowing-v1";
+pub const SEMANTIC_WINDOWING_VERSION: &str = "sog-windowing-v2";
 
 /// Version of the opt-in Rust-to-C++ candidate index.
 ///
@@ -124,8 +124,6 @@ impl OperationKind {
 pub struct OperationAttributes {
     /// Resolved type category of the operated value, when available.
     pub type_tag: Option<TypeTag>,
-    /// Stable structural fingerprint of a predicate or transformation.
-    pub structure_fingerprint: Option<[u8; 16]>,
     /// Compiler-resolved API names used by this operation.
     pub api_names: BTreeSet<String>,
     /// Registered resource category for acquire/release operations.
@@ -135,6 +133,13 @@ pub struct OperationAttributes {
     pub fallible_kind: Option<FallibleKind>,
     /// Closed direct-propagation spelling the compiler confirmed, when any.
     pub direct_propagation: Option<DirectPropagation>,
+    /// Position-free source structure retained by the Structural frontend.
+    ///
+    /// This keeps same-variant rules from treating different predicates or
+    /// transformations as interchangeable when their compiler-resolved API
+    /// sequence is otherwise identical. It is absent for graphs assembled by
+    /// adapters that cannot provide a source window.
+    pub structure_fingerprint: Option<[u8; 16]>,
 }
 
 /// One operation in source order; its position is a graph-local reference.

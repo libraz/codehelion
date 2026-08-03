@@ -205,6 +205,47 @@ fn one_source_operation_is_not_duplicated_by_construct_and_api_evidence() {
 }
 
 #[test]
+fn coincident_macro_calls_keep_expansion_order_and_repeated_operations() {
+    let range = SemanticSourceRange { start: 10, end: 14 };
+    let observations = [
+        "rust::Iterator::map",
+        "rust::Iterator::filter",
+        "rust::Iterator::map",
+    ]
+    .into_iter()
+    .map(|api_name| {
+        (
+            OperationObservation {
+                source_offset: 10,
+                api_name: api_name.to_owned(),
+                type_tag: Some(TypeTag::Sequence),
+            },
+            range,
+        )
+    })
+    .collect();
+
+    let normalized = normalize_registered_observations_with_ranges(
+        Language::Rust,
+        [45; 32],
+        observations,
+        Vec::new(),
+    )
+    .expect("macro expansion calls form a graph");
+    let graph = normalized.graph.expect("three registered operations");
+
+    assert_eq!(
+        graph.nodes.iter().map(|node| node.kind).collect::<Vec<_>>(),
+        vec![
+            OperationKind::Map,
+            OperationKind::Filter,
+            OperationKind::Map
+        ]
+    );
+    assert_eq!(normalized.node_source_ranges, vec![range; 3]);
+}
+
+#[test]
 fn registered_windows_keep_maximal_pipeline_ranges_outside_other_operations() {
     let normalized = normalize_registered_observations_with_ranges(
         Language::Rust,
@@ -283,6 +324,49 @@ fn registered_windows_keep_maximal_pipeline_ranges_outside_other_operations() {
             .iter()
             .all(|window| { match_registered_rule(&window.graph, &window.graph).is_some() })
     );
+}
+
+#[test]
+fn exact_api_windows_survive_an_adjacent_map_operation() {
+    let normalized = normalize_registered_observations_with_ranges(
+        Language::Rust,
+        [46; 32],
+        vec![
+            (
+                OperationObservation {
+                    source_offset: 10,
+                    api_name: "rust::ToString::to_string".to_owned(),
+                    type_tag: None,
+                },
+                SemanticSourceRange { start: 10, end: 20 },
+            ),
+            (
+                OperationObservation {
+                    source_offset: 20,
+                    api_name: "rust::str::parse".to_owned(),
+                    type_tag: None,
+                },
+                SemanticSourceRange { start: 20, end: 30 },
+            ),
+            (
+                OperationObservation {
+                    source_offset: 30,
+                    api_name: "rust::Iterator::map".to_owned(),
+                    type_tag: None,
+                },
+                SemanticSourceRange { start: 30, end: 40 },
+            ),
+        ],
+        Vec::new(),
+    )
+    .expect("observations form a graph");
+
+    let windows = registered_semantic_windows(&normalized).expect("windows rebase safely");
+    assert!(windows.iter().any(|window| {
+        window.source_range == SemanticSourceRange { start: 10, end: 30 }
+            && match_registered_rule(&window.graph, &window.graph)
+                .is_some_and(|matched| matched.rule.id == "rust-serialization-round-trip-v1")
+    }));
 }
 
 #[test]

@@ -27,23 +27,24 @@
 //! Candidate-explosion control matches the seed layer (AGENTS.md invariant
 //! 10): an LSH bucket larger than the posting cap is high-frequency structure
 //! and is dropped whole and counted, and a global pair budget bounds the
-//! distinct pairs examined, spent smallest-bucket-first so exhaustion drops
-//! the lowest-signal candidates. The ceiling is checked from the bucket's
-//! pair count before materialising or deduplicating its pairs; once it fires,
+//! distinct pairs examined. Buckets are processed smallest-first within each
+//! deterministic band; a pair colliding in multiple LSH bands is charged once,
+//! when it first enters the distinct candidate set. Once the ceiling fires,
 //! later buckets are not walked. Everything dropped is counted in
 //! [`NearMatchStats`].
 //!
 //! As in [`crate::candidate`], the budget is spent a bucket at a time: a bucket
 //! it cannot hold entirely is left alone rather than sampled, because a set of
 //! units compared to each other only in part is what grouping reads as a set
-//! that disagrees. A bucket is charged by its full pair count before its pairs
-//! are materialised, which keeps the ceiling itself from incurring quadratic
-//! work.
+//! that disagrees. The posting cap bounds the one bucket that must be
+//! materialised to identify its previously unseen pairs.
 //!
 //! This design deliberately subsumes the separate size-bucket and
 //! prefix-filtering prefilters: LSH banding partitions the search, and the
 //! length-ratio gate bounds size divergence, which together already bound the
-//! candidate set without a second size index.
+//! candidate set without a second size index. Signatures are held in one flat
+//! buffer and capped before indexing; each LSH band builds and discards its own
+//! posting map, so the index itself cannot grow with every band at once.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -84,6 +85,9 @@ pub const DEFAULT_POSTING_CAP: usize = 256;
 /// Default global candidate-pair upper bound.
 pub const DEFAULT_PAIR_BUDGET: usize = 2_000_000;
 
+/// Default maximum number of units admitted to the near-match signature stage.
+pub const DEFAULT_MAX_SIGNED_UNITS: usize = 100_000;
+
 /// Default width of the diagnostic band directly below the candidate gate.
 ///
 /// Near misses are deliberately a small inspection window, not a second
@@ -115,6 +119,10 @@ pub struct NearMatchConfig {
     pub posting_cap: usize,
     /// Upper bound on distinct candidate pairs examined.
     pub pair_budget: usize,
+    /// Largest number of units admitted to the signature stage. Later eligible
+    /// units are skipped deterministically and reported rather than causing
+    /// the flat signature buffer to grow without bound.
+    pub max_signed_units: usize,
     /// Width of the diagnostic estimate band immediately below
     /// [`Self::min_estimated_jaccard`].
     pub near_miss_delta: f64,
@@ -133,6 +141,7 @@ impl Default for NearMatchConfig {
             min_estimated_jaccard: DEFAULT_MIN_ESTIMATED_JACCARD,
             posting_cap: DEFAULT_POSTING_CAP,
             pair_budget: DEFAULT_PAIR_BUDGET,
+            max_signed_units: DEFAULT_MAX_SIGNED_UNITS,
             near_miss_delta: DEFAULT_NEAR_MISS_DELTA,
             near_miss_cap: DEFAULT_NEAR_MISS_CAP,
         }
@@ -197,6 +206,8 @@ pub struct NearMatchStats {
     pub signed_units: usize,
     /// Units skipped for having too few shingles.
     pub skipped_small: usize,
+    /// Eligible units skipped after the signature-stage ceiling was reached.
+    pub signed_limit_dropped: usize,
     /// LSH buckets with at least two members.
     pub buckets: usize,
     /// Buckets dropped for exceeding the posting cap.
@@ -220,9 +231,9 @@ pub struct NearMatchStats {
     pub candidate_pairs: usize,
     /// Whether the pair budget ran out before all buckets were paired.
     pub budget_exhausted: bool,
-    /// Candidate-pair work left in eligible buckets after the budget stopped
-    /// the pass. This counts the work the budget governs, before pairs from
-    /// separate LSH bands are deduplicated.
+    /// Previously unseen pairs in the first eligible bucket the budget could
+    /// not admit. Later buckets are deliberately not materialised, so this is
+    /// a lower bound on the distinct candidate-pair work left.
     pub budget_dropped: usize,
 }
 
@@ -248,8 +259,11 @@ pub fn generate(files: &[FileFeatures], config: &NearMatchConfig) -> NearMatchSe
     let seeds = permutation_seeds(config.num_hashes);
     let mut stats = NearMatchStats::default();
 
-    // Sign every unit large enough to trust; carry its reference and signature.
-    let mut signed: Vec<(UnitRef, Vec<u64>)> = Vec::new();
+    // Keep unit references beside one flat signature buffer. A nested `Vec`
+    // per unit amplifies allocator metadata on large trees without helping the
+    // fixed-width MinHash representation.
+    let mut signed = Vec::new();
+    let mut signatures = Vec::new();
     for (file, features) in files.iter().enumerate() {
         stats.units += features.units.len();
         for (unit, unit_features) in features.units.iter().enumerate() {
@@ -258,17 +272,22 @@ pub fn generate(files: &[FileFeatures], config: &NearMatchConfig) -> NearMatchSe
                 stats.skipped_small += 1;
                 continue;
             }
+            if signed.len() >= config.max_signed_units {
+                stats.signed_limit_dropped += 1;
+                continue;
+            }
             let unit_ref = UnitRef {
                 file,
                 unit,
                 node_count: unit_features.vector.node_count,
             };
-            signed.push((unit_ref, signature(&shingles, &seeds)));
+            signed.push(unit_ref);
+            signatures.extend(signature(&shingles, &seeds));
         }
     }
     stats.signed_units = signed.len();
 
-    let proposed = propose_pairs(&signed, config, &mut stats);
+    let proposed = propose_pairs(&signed, &signatures, config, &mut stats);
     stats.proposed_pairs = proposed.len();
 
     // Apply the deterministic gates. `proposed` is already sorted, so output
@@ -276,21 +295,24 @@ pub fn generate(files: &[FileFeatures], config: &NearMatchConfig) -> NearMatchSe
     let mut pairs = Vec::new();
     let mut near_misses = Vec::new();
     for (ai, bi) in proposed {
-        let (ref_a, sig_a) = &signed[ai];
-        let (ref_b, sig_b) = &signed[bi];
-        if !ref_a.within_length_ratio(*ref_b, config.max_length_ratio) {
+        let ref_a = signed[ai];
+        let ref_b = signed[bi];
+        if !ref_a.within_length_ratio(ref_b, config.max_length_ratio) {
             stats.filtered_by_size += 1;
             continue;
         }
-        let estimated = estimated_jaccard(sig_a, sig_b);
+        let estimated = estimated_jaccard(
+            signature_at(&signatures, ai, config.num_hashes),
+            signature_at(&signatures, bi, config.num_hashes),
+        );
         if estimated < config.min_estimated_jaccard {
             stats.filtered_by_jaccard += 1;
             if config.is_near_miss(estimated) {
                 stats.near_miss_band_pairs += 1;
                 if near_misses.len() < config.near_miss_cap {
                     near_misses.push(NearMatchNearMiss {
-                        a: *ref_a,
-                        b: *ref_b,
+                        a: ref_a,
+                        b: ref_b,
                         estimated_jaccard: estimated,
                     });
                 } else {
@@ -300,8 +322,8 @@ pub fn generate(files: &[FileFeatures], config: &NearMatchConfig) -> NearMatchSe
             continue;
         }
         pairs.push(NearMatchPair {
-            a: *ref_a,
-            b: *ref_b,
+            a: ref_a,
+            b: ref_b,
             estimated_jaccard: estimated,
         });
     }
@@ -318,76 +340,69 @@ pub fn generate(files: &[FileFeatures], config: &NearMatchConfig) -> NearMatchSe
 /// bucket cap and pair budget. Returns distinct `(a, b)` index pairs with
 /// `a < b`, sorted.
 fn propose_pairs(
-    signed: &[(UnitRef, Vec<u64>)],
+    signed: &[UnitRef],
+    signatures: &[u64],
     config: &NearMatchConfig,
     stats: &mut NearMatchStats,
 ) -> Vec<(usize, usize)> {
     let rows = config.rows();
     let bands = config.num_hashes / rows;
 
-    // band key -> member unit indices. The band index is folded into the key,
-    // so two units collide here only when they share the same rows of the same
-    // band.
-    let mut buckets: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
-    for (index, (_, sig)) in signed.iter().enumerate() {
-        for band in 0..bands {
-            let start = band * rows;
-            let key = band_key(band, &sig[start..start + rows]);
-            buckets.entry(key).or_default().push(index);
-        }
-    }
-
-    // Bucket lists, smallest first: rarest buckets carry the highest signal, so
-    // budget exhaustion drops the largest (lowest-signal) buckets.
-    let mut lists: Vec<&Vec<usize>> = buckets
-        .values()
-        .filter(|members| members.len() >= 2)
-        .collect();
-    lists.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
-
     let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut remaining = config.pair_budget;
-    for (index, members) in lists.iter().enumerate() {
-        stats.buckets += 1;
-        if members.len() > config.posting_cap {
-            stats.stop_buckets += 1;
-            stats.stop_bucket_members += members.len();
-            continue;
+    for band in 0..bands {
+        // This map exists for one band only. Releasing it before the next
+        // bounds posting-list memory independently of the number of bands.
+        let mut buckets: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+        for index in 0..signed.len() {
+            let signature = signature_at(signatures, index, config.num_hashes);
+            let start = band * rows;
+            let key = band_key(band, &signature[start..start + rows]);
+            buckets.entry(key).or_default().push(index);
         }
-        // The pair count is known from the bucket size. Check it before
-        // allocating or probing every pair: doing the O(k²) de-duplication to
-        // discover that the resource ceiling had already ruled the bucket out
-        // defeats the ceiling. Once a low-signal bucket cannot fit, the
-        // remaining sorted buckets are no smaller and are deliberately left
-        // unexamined too.
-        let possible = members
-            .len()
-            .saturating_mul(members.len().saturating_sub(1))
-            / 2;
-        if possible > remaining {
-            stats.budget_exhausted = true;
-            stats.budget_dropped = lists[index..]
-                .iter()
-                .filter(|remaining| remaining.len() <= config.posting_cap)
-                .fold(0_usize, |total, remaining| {
-                    let pairs = remaining
-                        .len()
-                        .saturating_mul(remaining.len().saturating_sub(1))
-                        / 2;
-                    total.saturating_add(pairs)
-                });
-            break;
-        }
-        remaining -= possible;
-        for (i, &a) in members.iter().enumerate() {
-            for &b in &members[i + 1..] {
-                let pair = if a <= b { (a, b) } else { (b, a) };
-                seen.insert(pair);
+        let mut lists: Vec<Vec<usize>> = buckets
+            .into_values()
+            .filter(|members| members.len() >= 2)
+            .collect();
+        lists.sort();
+        lists.sort_by_key(Vec::len);
+
+        for members in lists {
+            stats.buckets += 1;
+            if members.len() > config.posting_cap {
+                stats.stop_buckets += 1;
+                stats.stop_bucket_members += members.len();
+                continue;
             }
+            // A physical pair commonly collides in many LSH bands. Charge the
+            // work that will actually reach verification — distinct pairs — not
+            // every occurrence. The posting cap bounds this materialisation.
+            let mut unseen = Vec::new();
+            for (offset, &a) in members.iter().enumerate() {
+                for &b in &members[offset + 1..] {
+                    let pair = if a <= b { (a, b) } else { (b, a) };
+                    if !seen.contains(&pair) {
+                        unseen.push(pair);
+                    }
+                }
+            }
+            if unseen.len() > remaining {
+                stats.budget_exhausted = true;
+                stats.budget_dropped = unseen.len();
+                return seen.into_iter().collect();
+            }
+            remaining -= unseen.len();
+            seen.extend(unseen);
         }
     }
 
     seen.into_iter().collect()
+}
+
+/// Borrow one fixed-width signature from the flat signature buffer.
+fn signature_at(signatures: &[u64], index: usize, width: usize) -> &[u64] {
+    let start = index.saturating_mul(width);
+    &signatures[start..start.saturating_add(width)]
 }
 
 /// The union of a unit's window and subtree feature hashes, folded to `u64`
@@ -564,6 +579,26 @@ mod tests {
     }
 
     #[test]
+    fn signature_stage_stops_at_its_explicit_unit_ceiling() {
+        let files = vec![file(vec![
+            unit(&[1, 2, 3, 4], &[5, 6], 20),
+            unit(&[1, 2, 3, 4], &[5, 6], 20),
+            unit(&[1, 2, 3, 4], &[5, 6], 20),
+        ])];
+        let set = generate(
+            &files,
+            &NearMatchConfig {
+                max_signed_units: 2,
+                ..NearMatchConfig::default()
+            },
+        );
+
+        assert_eq!(set.stats.signed_units, 2);
+        assert_eq!(set.stats.signed_limit_dropped, 1);
+        assert_eq!(set.pairs.len(), 1);
+    }
+
+    #[test]
     fn a_high_overlap_pair_is_proposed_and_its_estimate_is_accurate() {
         // Sets share five of seven shingles: true Jaccard = 5/9.
         let a = unit(&[1, 2, 3, 4, 5], &[6, 7], 20);
@@ -693,6 +728,28 @@ mod tests {
     }
 
     #[test]
+    fn pair_budget_charges_each_distinct_pair_once_across_lsh_bands() {
+        // Identical signatures collide in every band, but the three physical
+        // pairs are still only three verification candidates. Charging the
+        // same three pairs once per band spuriously exhausts this budget.
+        let files = vec![file(vec![
+            unit(&[1, 2, 3, 4], &[5, 6], 20),
+            unit(&[1, 2, 3, 4], &[5, 6], 20),
+            unit(&[1, 2, 3, 4], &[5, 6], 20),
+        ])];
+        let set = generate(
+            &files,
+            &NearMatchConfig {
+                pair_budget: 3,
+                ..NearMatchConfig::default()
+            },
+        );
+
+        assert_eq!(set.stats.proposed_pairs, 3);
+        assert!(!set.stats.budget_exhausted);
+    }
+
+    #[test]
     fn the_pair_budget_refuses_a_bucket_it_cannot_hold_whole() {
         // Three units band together, so the bucket is worth three pairs and
         // the allowance is worth one. Taking one of the three would leave the
@@ -710,15 +767,15 @@ mod tests {
         let set = generate(&files, &config);
         assert_eq!(set.stats.proposed_pairs, 0);
         assert!(set.stats.budget_exhausted);
-        assert_eq!(set.stats.budget_dropped, 192);
+        assert_eq!(set.stats.budget_dropped, 3);
     }
 
     #[test]
     fn a_refused_bucket_stops_before_quadratic_deduplication() {
         // Lists are visited smallest first. The two-unit bucket fits, then the
         // three-unit bucket exceeds the remaining allowance. The latter and
-        // every larger bucket are left untouched: a resource ceiling must not
-        // spend quadratic work discovering it should have stopped.
+        // every larger bucket are left untouched. The one refused bucket is
+        // materialised only up to the posting cap to identify distinct work.
         let units = vec![
             unit(&[1, 2, 3, 4], &[5, 6], 20),
             unit(&[1, 2, 3, 4], &[5, 6], 20),

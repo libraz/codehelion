@@ -52,6 +52,75 @@ fn a_plain_compiler_confirmed_loop_matches_a_registered_collection_pipeline() {
 }
 
 #[test]
+fn same_variant_rules_never_join_different_languages() {
+    let rust = normalize_registered_apis(
+        Language::Rust,
+        [13; 32],
+        vec![
+            OperationObservation {
+                source_offset: 10,
+                api_name: "rust::IntoIterator::into_iter".to_owned(),
+                type_tag: None,
+            },
+            OperationObservation {
+                source_offset: 20,
+                api_name: "rust::Iterator::collect".to_owned(),
+                type_tag: None,
+            },
+        ],
+    )
+    .expect("registered pipeline constructs form a graph")
+    .graph
+    .expect("registered APIs produce a graph");
+    let cpp = SemanticOperationGraph {
+        language: Language::Cpp,
+        ..rust.clone()
+    };
+
+    assert!(match_registered_pipeline(&rust, &cpp).is_none());
+    let candidates =
+        extract_registered_candidates(&[rust, cpp], SemanticCandidateConfig::default());
+    assert!(candidates.pairs.is_empty());
+    assert_eq!(candidates.stats.buckets, 2);
+}
+
+#[test]
+fn same_variant_pipelines_require_matching_source_structure_when_available() {
+    let graph = |structure_fingerprint| {
+        let mut graph = normalize_registered_apis(
+            Language::Rust,
+            [13; 32],
+            vec![
+                OperationObservation {
+                    source_offset: 10,
+                    api_name: "rust::Iterator::filter".to_owned(),
+                    type_tag: None,
+                },
+                OperationObservation {
+                    source_offset: 20,
+                    api_name: "rust::Iterator::map".to_owned(),
+                    type_tag: None,
+                },
+            ],
+        )
+        .expect("registered pipeline constructs form a graph")
+        .graph
+        .expect("registered APIs produce a graph");
+        for node in &mut graph.nodes {
+            node.attributes.structure_fingerprint = Some(structure_fingerprint);
+        }
+        graph
+    };
+    let even_then_square = graph([1; 16]);
+    let prime_then_cube = graph([2; 16]);
+    assert_eq!(
+        match_registered_pipeline(&even_then_square, &prime_then_cube),
+        None
+    );
+    assert!(match_registered_pipeline(&even_then_square, &even_then_square).is_some());
+}
+
+#[test]
 fn resource_lifecycle_requires_one_matching_acquire_release_pair() {
     let graph = |release_kind: &str| {
         normalize_registered_observations(
@@ -172,7 +241,7 @@ fn optional_validation_requires_compiler_confirmed_option_evidence() {
         .expect("validation construct produces a graph")
     };
     let rust = graph(Language::Rust, [24; 32], Some(FallibleKind::Option));
-    let same_variant = graph(Language::Cpp, [24; 32], Some(FallibleKind::Option));
+    let same_variant = graph(Language::Rust, [24; 32], Some(FallibleKind::Option));
     let result = graph(Language::Rust, [24; 32], Some(FallibleKind::Result));
     assert_eq!(
         match_registered_rule(&rust, &same_variant).map(|matched| matched.rule.id),
@@ -228,11 +297,11 @@ fn result_validation_crosses_languages_only_as_a_presence_check() {
         .expect("result construct produces a graph")
     };
     let rust = graph(Language::Rust, [27; 32], OperationKind::Validate);
-    let same_variant_cpp = graph(Language::Cpp, [27; 32], OperationKind::Validate);
+    let same_variant = graph(Language::Rust, [27; 32], OperationKind::Validate);
     let cpp = graph(Language::Cpp, [28; 32], OperationKind::Validate);
     let propagation = graph(Language::Cpp, [28; 32], OperationKind::PropagateError);
     assert_eq!(
-        match_registered_rule(&rust, &same_variant_cpp).map(|matched| matched.rule.id),
+        match_registered_rule(&rust, &same_variant).map(|matched| matched.rule.id),
         Some("result-validation-v1")
     );
     assert_eq!(match_registered_rule(&rust, &propagation), None);

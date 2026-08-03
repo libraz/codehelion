@@ -165,6 +165,9 @@ pub struct StructuralUnit {
     /// fragment spanning the unit; keeping this as a fragment fingerprint keeps
     /// the group id forward-compatible with sub-unit members).
     pub content: FragmentFingerprint,
+    /// Identifier-normalized content used only for non-Type-1 group identity.
+    /// Unit identity remains raw so distinct renamed occurrences never merge.
+    pub normalized_content: FragmentFingerprint,
 }
 
 /// A verified clone relation between two contents that no reported group
@@ -200,6 +203,10 @@ pub struct VerifiedPair {
     pub fingerprint: CloneGroupFingerprint,
     /// The strongest composite similarity among the folded verdicts.
     pub similarity: f64,
+    /// Per-dimension evidence for the weakest accepted crossing represented
+    /// by this pair. It is absent only for callers that constructed a scalar
+    /// edge without verifier evidence.
+    pub breakdown: Option<SimilarityBreakdown>,
     /// What the judge classified the relation as.
     pub class: CloneClass,
     /// The judge's confidence in that classification.
@@ -228,6 +235,9 @@ pub struct GroupDetail {
     /// The similarity breakdown of the medoid against each member, parallel to
     /// the group's `members` (the medoid's own entry is a perfect self-match).
     pub member_breakdowns: Vec<SimilarityBreakdown>,
+    /// The verifier breakdown for the actual weakest pair in the cohesive
+    /// group. This is the evidence that establishes `min_pairwise`.
+    pub cohesion_breakdown: SimilarityBreakdown,
     /// Smallest raw-identifier Jaccard agreement against the canonical unit.
     /// It is evidence only: detection, clone class, and priority ignore it.
     pub identifier_jaccard: f64,
@@ -415,7 +425,8 @@ pub struct StructuralStats {
 pub struct SiblingSweepStats {
     /// Established primary groups considered for local siblings.
     pub groups_considered: usize,
-    /// Canonical-to-ungrouped comparisons eligible under the file rule.
+    /// Canonical-to-ungrouped comparisons eligible under the file, minimum,
+    /// nesting, conditional-arm, and shape-divergence rules.
     pub eligible_candidates: usize,
     /// Candidates handed to the verifier.
     pub candidates_examined: usize,
@@ -436,7 +447,8 @@ pub struct StructuralSibling {
     pub unit: usize,
     /// The verifier's clone classification, or Type-3 for a relaxed-only hit.
     pub clone_type: CloneClass,
-    /// The verifier confidence; relaxed-only hits remain low confidence.
+    /// The verifier confidence, clamped to low below the normal Type-3
+    /// threshold even when an exact-structure shortcut classified the pair.
     pub confidence: verify::Confidence,
     /// The canonical-to-sibling similarity breakdown.
     pub breakdown: SimilarityBreakdown,
@@ -551,6 +563,8 @@ pub struct CrossVariantUnit<'a> {
 /// A member of a cross-build-variant exact clone group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrossVariantMember {
+    /// Stable occurrence identity; source anchors are reporting only.
+    pub id: stable_id::CrossVariantMemberId,
     /// The normal partition that produced this member; never synthesized.
     pub origin_variant: String,
     /// Language of the source unit.
@@ -626,7 +640,7 @@ pub fn compare_build_variants(units: &[CrossVariantUnit<'_>]) -> Option<CrossVar
             .push(unit);
     }
     let mut groups = Vec::new();
-    for ((_, content), members) in classes {
+    for ((language, content), members) in classes {
         let origins_in_group: BTreeSet<&str> =
             members.iter().map(|member| member.origin_variant).collect();
         if origins_in_group.len() < 2 {
@@ -635,6 +649,7 @@ pub fn compare_build_variants(units: &[CrossVariantUnit<'_>]) -> Option<CrossVar
         let mut members: Vec<CrossVariantMember> = members
             .into_iter()
             .map(|member| CrossVariantMember {
+                id: stable_id::CrossVariantMemberId::from_bytes([0; 16]),
                 origin_variant: member.origin_variant.to_string(),
                 language: member.language,
                 file_path: member.file_path.to_string(),
@@ -652,8 +667,28 @@ pub fn compare_build_variants(units: &[CrossVariantUnit<'_>]) -> Option<CrossVar
                 .then_with(|| left.end_line.cmp(&right.end_line))
                 .then_with(|| left.name.cmp(&right.name))
         });
+        let language = match language.as_str() {
+            "c" => Language::C,
+            "cpp" => Language::Cpp,
+            _ => Language::Rust,
+        };
+        let group_id =
+            stable_id::cross_variant_group_id(&id, CloneClass::Type1, language, &content);
+        let mut origin_ranks = BTreeMap::<(&str, &str), u32>::new();
+        for member in &mut members {
+            let rank = origin_ranks
+                .entry((&member.origin_variant, member.language.name()))
+                .or_default();
+            member.id = stable_id::cross_variant_member_id(
+                &group_id,
+                &member.origin_variant,
+                member.language,
+                *rank,
+            );
+            *rank = rank.saturating_add(1);
+        }
         groups.push(CrossVariantGroup {
-            id: stable_id::cross_variant_group_id(&id, CloneClass::Type1, &content),
+            id: group_id,
             clone_type: CloneClass::Type1,
             members,
         });

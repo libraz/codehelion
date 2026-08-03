@@ -365,7 +365,7 @@ mod tests {
     fn greeting() -> Greeting {
         Greeting {
             version: "0.1.0".to_string(),
-            protocol: 1,
+            protocol: 2,
             toolchains: vec!["rust-analyzer 0.0.344".to_string()],
             capabilities: vec!["types".to_string(), "name_resolution".to_string()],
             executes: vec!["build-script".to_string()],
@@ -402,7 +402,7 @@ mod tests {
             diagnose_with(&|name| (name == OPTIONAL_HELPERS[0].binary).then(|| answered(name)));
         let notes = reports[1].notes.join("\n");
         assert!(notes.contains("version 0.1.0"), "{notes}");
-        assert!(notes.contains("protocol 1"), "{notes}");
+        assert!(notes.contains("protocol 2"), "{notes}");
         assert!(notes.contains("rust-analyzer 0.0.344"), "{notes}");
         assert!(notes.contains("types, name_resolution"), "{notes}");
         // And what permitting something would actually get, which is the fact
@@ -457,7 +457,7 @@ mod tests {
             OPTIONAL_HELPERS[0],
             Some(HelperFacts {
                 path: PathBuf::from("/opt/bin/helper"),
-                state: HelperState::Silent("speaks protocol 2, this build speaks 1".to_string()),
+                state: HelperState::Silent("speaks protocol 3, this build speaks 2".to_string()),
             }),
         );
         assert_eq!(report.status, ComponentStatus::Unusable);
@@ -467,7 +467,7 @@ mod tests {
             report.detail
         );
         assert!(
-            report.notes.iter().any(|note| note.contains("protocol 2")),
+            report.notes.iter().any(|note| note.contains("protocol 3")),
             "{:?}",
             report.notes
         );

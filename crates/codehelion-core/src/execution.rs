@@ -260,6 +260,10 @@ pub struct Limits {
     /// distinct ceiling keeps an adversarially large related set bounded even
     /// after candidate generation has stopped.
     pub max_component: usize,
+    /// Largest distinct Structural pairs admitted to precise verification.
+    pub verification_budget: usize,
+    /// Largest dynamic-programming cell count for one Structural alignment.
+    pub max_alignment_cells: usize,
     /// Longest a compiler helper may spend answering for one source unit.
     pub helper_timeout: Duration,
     /// What may run.
@@ -278,6 +282,8 @@ impl Default for Limits {
             // than both it and the Fast pipeline's smaller default.
             posting_cap: 256,
             max_component: 1024,
+            verification_budget: 1_000_000,
+            max_alignment_cells: 4_000_000,
             helper_timeout: Duration::from_secs(300),
             execution: ExecutionPolicy::deny_all(),
         }
@@ -305,6 +311,8 @@ impl Limits {
             // contained piece small enough for the profile while preserving a
             // useful amount of context for ordinary duplicate families.
             max_component: 128,
+            verification_budget: 100_000,
+            max_alignment_cells: 250_000,
             // Compiler helpers may legitimately take longer than a lexer,
             // but five minutes makes a stalled helper an unbounded wait for an
             // untrusted tree. Thirty seconds is deliberately conservative.
@@ -324,6 +332,8 @@ impl Limits {
             && self.parse_timeout <= other.parse_timeout
             && self.max_candidates <= other.max_candidates
             && self.posting_cap <= other.posting_cap
+            && self.verification_budget <= other.verification_budget
+            && self.max_alignment_cells <= other.max_alignment_cells
             && self.max_component <= other.max_component
             && self.helper_timeout <= other.helper_timeout
             && option_ceiling_at_most(self.max_subprocess_bytes, other.max_subprocess_bytes)

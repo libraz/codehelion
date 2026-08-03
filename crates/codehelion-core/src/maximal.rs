@@ -304,16 +304,6 @@ pub fn consolidate(pairs: &[CandidatePair], config: &MaximalConfig) -> RegionSet
     }
     stats.folded = folded.len();
 
-    // Order by coverage first so containment is decided by the larger region,
-    // then by position so the choice among equals is deterministic.
-    folded.sort_by_key(|region| {
-        (
-            std::cmp::Reverse(u64::from(region.a.run.length)),
-            region.a,
-            region.b,
-        )
-    });
-
     // Containment can only hold between regions over the same two files. Keep
     // those candidates together, then answer each two-span containment query
     // through an offline index rather than scanning a generated-code bucket.

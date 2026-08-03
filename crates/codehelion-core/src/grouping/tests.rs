@@ -14,6 +14,7 @@ fn edge(a: usize, b: usize, similarity: f64) -> SimilarityEdge {
         a,
         b,
         similarity,
+        breakdown: None,
         class: CloneClass::Type3,
         confidence: Confidence::Medium,
     }
@@ -55,6 +56,32 @@ fn a_clique_is_one_group_with_a_deterministic_medoid() {
     assert_eq!(only.members.len(), 3);
     assert_eq!(only.canonical, 0);
     assert_eq!(only.members[0], 0, "medoid comes first");
+}
+
+#[test]
+fn medoid_sampling_covers_distinct_content_across_the_component() {
+    let mut units = vec![GroupingUnit { key: [0; 16] }; 32];
+    units.extend((32_u8..40).map(|key| GroupingUnit { key: [key; 16] }));
+    let mut edges = clique(units.len());
+    for edge in &mut edges {
+        if edge.a == 39 || edge.b == 39 {
+            edge.similarity = 0.99;
+        } else {
+            edge.similarity = 0.61;
+        }
+    }
+    let config = GroupingConfig {
+        sampling_threshold: 8,
+        sample_size: 4,
+        max_component: 64,
+        ..GroupingConfig::default()
+    };
+
+    let set = group(&units, &edges, &config);
+
+    assert_eq!(set.groups[0].canonical, 39);
+    assert_eq!(set.stats.sampled_medoids, 1);
+    assert_eq!(set.stats.sampled_medoid_candidates, 4);
 }
 
 /// Every pair among `count` units, all similar enough to group: one
@@ -272,6 +299,12 @@ fn a_lone_unit_is_not_a_group() {
 }
 
 #[test]
+fn component_collection_omits_isolated_units_before_bucket_allocation() {
+    let components = connected_components(1_000, &[edge(17, 843, 0.9)]);
+    assert_eq!(components, vec![vec![17, 843]]);
+}
+
+#[test]
 fn the_group_takes_the_weakest_class_and_confidence() {
     let units = units(3);
     let edges = vec![
@@ -279,6 +312,7 @@ fn the_group_takes_the_weakest_class_and_confidence() {
             a: 0,
             b: 1,
             similarity: 0.95,
+            breakdown: None,
             class: CloneClass::Type1,
             confidence: Confidence::High,
         },
@@ -286,6 +320,7 @@ fn the_group_takes_the_weakest_class_and_confidence() {
             a: 1,
             b: 2,
             similarity: 0.9,
+            breakdown: None,
             class: CloneClass::Type3,
             confidence: Confidence::Low,
         },
@@ -293,6 +328,7 @@ fn the_group_takes_the_weakest_class_and_confidence() {
             a: 0,
             b: 2,
             similarity: 0.9,
+            breakdown: None,
             class: CloneClass::Type2,
             confidence: Confidence::Medium,
         },

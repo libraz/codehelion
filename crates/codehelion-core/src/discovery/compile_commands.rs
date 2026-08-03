@@ -23,6 +23,14 @@ use super::{BuildConfiguration, CppBuild};
 /// A failure while reading the compilation database.
 #[derive(Debug, thiserror::Error)]
 pub enum CompileCommandsError {
+    /// The file exceeds the configured input-size ceiling.
+    #[error("compile_commands.json is {actual_bytes} bytes, exceeding the {max_bytes}-byte limit")]
+    TooLarge {
+        /// The observed byte length.
+        actual_bytes: u64,
+        /// The configured byte limit.
+        max_bytes: u64,
+    },
     /// The file could not be read.
     #[error("reading compile_commands.json: {0}")]
     Read(#[source] std::io::Error),
@@ -63,14 +71,12 @@ pub struct CompileEntry {
 impl CompileEntry {
     /// The semantic build configuration this exact command describes.
     ///
-    /// The database digest belongs to every entry because editing a database
-    /// changes what project build was observed even when a selected command's
-    /// flags happen to stay the same.
+    /// Database-wide text does not participate: unrelated commands and
+    /// generator reformatting must not change this translation unit's build
+    /// identity when its normalized compiler settings did not change.
     #[must_use]
-    pub fn build(&self, database_hash: Option<String>) -> CppBuild {
-        let mut build = CppBuild::from_command(&self.arguments, &self.file);
-        build.database_hash = database_hash;
-        build
+    pub fn build(&self) -> CppBuild {
+        CppBuild::from_command_in_directory(&self.arguments, &self.file, self.directory.as_deref())
     }
 
     /// The stable fields a helper uses to select this exact command.
@@ -99,12 +105,11 @@ impl CompileEntry {
 pub struct CompileCommands {
     /// Distinct translation units, in the order first seen.
     pub entries: Vec<CompileEntry>,
-    /// A hash of the document this was read from.
+    /// A hash of the document this was read from, retained as provenance.
     ///
-    /// Part of a build variant's identity: the database is where every
-    /// translation unit's arguments come from, so two runs that read different
-    /// databases were describing different builds even where their commands
-    /// happen to agree.
+    /// Per-entry build identities use normalized compiler settings instead;
+    /// this database-wide value would make an unrelated added translation
+    /// unit invalidate every existing partition.
     pub content_hash: Option<String>,
 }
 
@@ -117,8 +122,36 @@ impl CompileCommands {
     /// JSON array of `{ "file": ..., "directory": ... }` objects.
     pub fn read(path: &Path) -> Result<Self, CompileCommandsError> {
         let text = std::fs::read_to_string(path).map_err(CompileCommandsError::Read)?;
-        let raw: Vec<RawEntry> =
-            serde_json::from_str(&text).map_err(CompileCommandsError::Parse)?;
+        Self::parse(&text)
+    }
+
+    /// Read and parse a compilation database after enforcing `max_bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompileCommandsError::TooLarge`] before reading an oversized
+    /// file, or the same failures as [`Self::read`] for an otherwise readable
+    /// file.
+    pub fn read_with_limit(path: &Path, max_bytes: u64) -> Result<Self, CompileCommandsError> {
+        let metadata = std::fs::metadata(path).map_err(CompileCommandsError::Read)?;
+        if metadata.len() > max_bytes {
+            return Err(CompileCommandsError::TooLarge {
+                actual_bytes: metadata.len(),
+                max_bytes,
+            });
+        }
+        let text = std::fs::read_to_string(path).map_err(CompileCommandsError::Read)?;
+        if text.len() as u64 > max_bytes {
+            return Err(CompileCommandsError::TooLarge {
+                actual_bytes: text.len() as u64,
+                max_bytes,
+            });
+        }
+        Self::parse(&text)
+    }
+
+    fn parse(text: &str) -> Result<Self, CompileCommandsError> {
+        let raw: Vec<RawEntry> = serde_json::from_str(text).map_err(CompileCommandsError::Parse)?;
         let mut seen = BTreeSet::new();
         let mut entries = Vec::new();
         for entry in raw {
@@ -145,7 +178,7 @@ impl CompileCommands {
         }
         Ok(Self {
             entries,
-            content_hash: Some(super::build_config::content_hash(&text)),
+            content_hash: Some(super::build_config::content_hash(text)),
         })
     }
 
@@ -179,7 +212,7 @@ impl CompileCommands {
     pub fn build_partitions(&self) -> std::collections::BTreeMap<String, Vec<&CompileEntry>> {
         let mut partitions = std::collections::BTreeMap::new();
         for entry in &self.entries {
-            let build = BuildConfiguration::Cpp(Box::new(entry.build(self.content_hash.clone())));
+            let build = BuildConfiguration::Cpp(Box::new(entry.build()));
             partitions
                 .entry(build.fingerprint())
                 .or_insert_with(Vec::new)
@@ -312,13 +345,45 @@ mod tests {
         assert!(partitions.values().any(|entries| {
             entries
                 .iter()
-                .all(|entry| entry.build(db.content_hash.clone()).defines() == ["NARROW"])
+                .all(|entry| entry.build().defines() == ["NARROW"])
         }));
         assert!(partitions.values().any(|entries| {
             entries
                 .iter()
-                .all(|entry| entry.build(db.content_hash.clone()).defines() == ["WIDE"])
+                .all(|entry| entry.build().defines() == ["WIDE"])
         }));
+    }
+
+    /// Compilation databases normally spell each input relative to the command
+    /// directory. Those input paths identify translation units, not builds.
+    #[test]
+    fn relative_source_arguments_do_not_split_an_otherwise_shared_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_dir = dir.path().join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("first.cpp"), "int first() { return 1; }\n").unwrap();
+        std::fs::write(
+            source_dir.join("second.cpp"),
+            "int second() { return 2; }\n",
+        )
+        .unwrap();
+        let path = dir.path().join("compile_commands.json");
+        let directory = source_dir.display();
+        std::fs::write(
+            &path,
+            format!(
+                r#"[
+                    {{"directory": "{directory}", "file": "first.cpp", "arguments": ["clang++", "-std=c++20", "-c", "first.cpp"]}},
+                    {{"directory": "{directory}", "file": "second.cpp", "arguments": ["clang++", "-std=c++20", "-c", "second.cpp"]}}
+                ]"#
+            ),
+        )
+        .unwrap();
+
+        let db = CompileCommands::read(&path).unwrap();
+        let partitions = db.build_partitions();
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions.values().next().map(Vec::len), Some(2));
     }
 
     #[test]
@@ -354,6 +419,27 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_database_entries_do_not_change_an_existing_partition_identity() {
+        let one = CompileCommands::parse(
+            r#"[{"directory":"/w","file":"/w/a.c","arguments":["cc","-DVALUE=1","-c","/w/a.c"]}]"#,
+        )
+        .unwrap();
+        let expanded = CompileCommands::parse(
+            r#"[
+                {"directory":"/w","file":"/w/a.c","arguments":["cc","-DVALUE=1","-c","/w/a.c"]},
+                {"directory":"/w","file":"/w/unrelated.c","arguments":["cc","-DVALUE=2","-c","/w/unrelated.c"]}
+            ]"#,
+        )
+        .unwrap();
+
+        let original = BuildConfiguration::Cpp(Box::new(one.entries[0].build())).fingerprint();
+        let unchanged =
+            BuildConfiguration::Cpp(Box::new(expanded.entries[0].build())).fingerprint();
+        assert_eq!(original, unchanged);
+        assert_ne!(one.content_hash, expanded.content_hash);
+    }
+
+    #[test]
     fn malformed_json_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("compile_commands.json");
@@ -361,6 +447,21 @@ mod tests {
         assert!(matches!(
             CompileCommands::read(&path),
             Err(CompileCommandsError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn a_database_over_the_size_limit_is_rejected_before_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("compile_commands.json");
+        std::fs::write(&path, "[{}]").unwrap();
+
+        assert!(matches!(
+            CompileCommands::read_with_limit(&path, 2),
+            Err(CompileCommandsError::TooLarge {
+                actual_bytes: 4,
+                max_bytes: 2,
+            })
         ));
     }
 }

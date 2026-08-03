@@ -1,4 +1,4 @@
-use super::{ApiEvidence, ByteRange, TypeEvidence, TypeTag, Unit};
+use super::{ApiEvidence, ByteRange, Resolution, TypeEvidence, TypeTag, Unit};
 
 /// Whether a parsed token count reaches the configured report floor.
 ///
@@ -23,8 +23,9 @@ pub(super) fn unit_meets_minimum(unit: &Unit, minimum: u32) -> bool {
 /// a caller cannot attribute a type to a unit this crate never saw.
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedTypes {
-    per_file: Vec<Vec<(ByteRange, TypeTag)>>,
-    apis_per_file: Vec<Vec<(ByteRange, String)>>,
+    types: Vec<Vec<(ByteRange, TypeTag)>>,
+    apis: Vec<Vec<(ByteRange, String)>>,
+    names: Vec<Resolution>,
 }
 
 impl ResolvedTypes {
@@ -39,8 +40,9 @@ impl ResolvedTypes {
             file.sort_by_key(|(range, _)| (range.start, range.end));
         }
         Self {
-            per_file,
-            apis_per_file: Vec::new(),
+            types: per_file,
+            apis: Vec::new(),
+            names: Vec::new(),
         }
     }
 
@@ -61,15 +63,39 @@ impl ResolvedTypes {
             file.sort_by_key(|(range, _)| (range.start, range.end));
         }
         Self {
-            per_file,
-            apis_per_file,
+            types: per_file,
+            apis: apis_per_file,
+            names: Vec::new(),
         }
+    }
+
+    /// Collect types, call targets, and compiler name-resolution answers.
+    ///
+    /// The resolutions are kept as core-owned byte-position data rather than
+    /// compiler types, preserving the helper-process boundary.
+    #[must_use]
+    pub fn per_file_with_semantic_normalization(
+        per_file: Vec<Vec<(ByteRange, TypeTag)>>,
+        apis_per_file: Vec<Vec<(ByteRange, String)>>,
+        names_per_file: Vec<Resolution>,
+    ) -> Self {
+        let mut resolved = Self::per_file_with_apis(per_file, apis_per_file);
+        resolved.names = names_per_file;
+        resolved
     }
 
     /// Whether no type or call target was resolved anywhere.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.per_file.iter().all(Vec::is_empty) && self.apis_per_file.iter().all(Vec::is_empty)
+        self.types.iter().all(Vec::is_empty)
+            && self.apis.iter().all(Vec::is_empty)
+            && self.names.iter().all(Resolution::is_empty)
+    }
+
+    /// Name-resolution answers for a parser input file, if the helper was
+    /// asked about that file.
+    pub(super) fn names_for(&self, file: usize) -> Option<&Resolution> {
+        self.names.get(file).filter(|names| !names.is_empty())
     }
 
     /// The evidence for one unit: everything resolved within its bytes.
@@ -78,7 +104,7 @@ impl ResolvedTypes {
     /// compared as one nobody measured rather than as one measured to hold no
     /// types.
     pub(super) fn within(&self, unit: &Unit) -> Option<TypeEvidence> {
-        let file = self.per_file.get(unit.file)?;
+        let file = self.types.get(unit.file)?;
         let from = file.partition_point(|(range, _)| range.start < unit.range.start);
         let tags = file[from..]
             .iter()
@@ -91,7 +117,7 @@ impl ResolvedTypes {
 
     /// Compiler-resolved call targets whose source anchors sit within `unit`.
     pub(super) fn apis_within(&self, unit: &Unit) -> Option<ApiEvidence> {
-        let file = self.apis_per_file.get(unit.file)?;
+        let file = self.apis.get(unit.file)?;
         let from = file.partition_point(|(range, _)| range.start < unit.range.start);
         let targets = file[from..]
             .iter()

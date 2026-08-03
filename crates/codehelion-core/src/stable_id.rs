@@ -27,14 +27,14 @@ use core::fmt;
 
 use crate::clone_class::CloneClass;
 use crate::discovery::{BuildVariant, Language};
-use crate::engine::normalize::{self, LiteralNorm, NormAtom};
+use crate::engine::normalize::{self, LiteralNorm, NormAtom, Resolution};
 use crate::engine::{EngineReport, InputFile};
 use crate::frontend::Token;
 use crate::semantic::{SOG_SCHEMA_VERSION, SemanticOperationGraph};
 
 /// Version of the identifier-hashing recipe. Bump on any change to the hash
 /// inputs, their encoding or their order.
-pub const FP_SCHEMA_VERSION: &str = "fp-schema-v1";
+pub const FP_SCHEMA_VERSION: &str = "fp-schema-v2";
 
 /// The hash algorithm behind every identifier, recorded so a future
 /// algorithm change is an explicit versioned event rather than a silent one.
@@ -95,6 +95,13 @@ stable_id!(
     CloneGroupFingerprint
 );
 stable_id!(
+    /// Stable identity of a clone group's history across fingerprint changes.
+    ///
+    /// A lineage begins from a group fingerprint but has its own hash domain;
+    /// later runs may adopt it through explicit, recorded overlap evidence.
+    GroupLineageId
+);
+stable_id!(
     /// Identifier of one finding: a specific occurrence of a group's content,
     /// discriminated by its host unit and an in-host occurrence rank rather
     /// than by any source position.
@@ -112,6 +119,10 @@ stable_id!(
     CrossVariantGroupId
 );
 stable_id!(
+    /// Position-free identity of one cross-variant group occurrence.
+    CrossVariantMemberId
+);
+stable_id!(
     /// Identity of an explicitly requested Rust-to-C++ semantic comparison.
     ///
     /// It lives outside normal snapshots and cross-build exact comparisons:
@@ -123,9 +134,13 @@ stable_id!(
     /// Stable identity of one group found by a Rust-to-C++ semantic comparison.
     CrossLanguageGroupId
 );
+stable_id!(
+    /// Position-free identity of one cross-language group occurrence.
+    CrossLanguageMemberId
+);
 
 /// Version of the policy that defines cross-build-variant comparisons.
-pub const CROSS_VARIANT_POLICY_VERSION: &str = "cross-variant-exact-v1";
+pub const CROSS_VARIANT_POLICY_VERSION: &str = "cross-variant-exact-v2";
 
 /// Version of the explicit Rust-to-C++ semantic comparison policy.
 pub const CROSS_LANGUAGE_POLICY_VERSION: &str = "cross-language-semantic-v1";
@@ -138,6 +153,13 @@ pub enum ContentNorm {
     /// Scope-local alpha renaming with the given literal strategy: Type-2
     /// identity (see [`normalize`]).
     Normalized(LiteralNorm),
+    /// Scope-local alpha renaming corrected by compiler name resolution.
+    ///
+    /// The compiler answer is optional at each token: when it has no answer,
+    /// the lexical fallback remains in force.  This nevertheless has a
+    /// distinct fingerprint domain because a semantic run must not share
+    /// stored identity with a purely lexical one.
+    ResolvedNormalized(LiteralNorm),
 }
 
 impl ContentNorm {
@@ -150,6 +172,9 @@ impl ContentNorm {
             Self::Normalized(LiteralNorm::Preserve) => "alpha-lit-preserve",
             Self::Normalized(LiteralNorm::Category) => "alpha-lit-category",
             Self::Normalized(LiteralNorm::Full) => "alpha-lit-full",
+            Self::ResolvedNormalized(LiteralNorm::Preserve) => "alpha-resolved-lit-preserve",
+            Self::ResolvedNormalized(LiteralNorm::Category) => "alpha-resolved-lit-category",
+            Self::ResolvedNormalized(LiteralNorm::Full) => "alpha-resolved-lit-full",
         }
     }
 }
@@ -214,7 +239,12 @@ impl IdHasher {
 
     /// Token content under the chosen normalization. Only kind tags and
     /// (normalized) text enter the hash; spans never do.
-    fn write_content(&mut self, tokens: &[Token], norm: ContentNorm) {
+    fn write_content(
+        &mut self,
+        tokens: &[Token],
+        norm: ContentNorm,
+        resolution: Option<&Resolution>,
+    ) {
         match norm {
             ContentNorm::Raw => {
                 for token in tokens {
@@ -222,8 +252,17 @@ impl IdHasher {
                     self.write_bytes(token.text.as_bytes());
                 }
             }
-            ContentNorm::Normalized(literals) => {
-                for norm_token in normalize::normalize(tokens, literals) {
+            ContentNorm::Normalized(literals) | ContentNorm::ResolvedNormalized(literals) => {
+                let mut normalized = Vec::new();
+                normalize::normalize_resolved_into(
+                    tokens,
+                    literals,
+                    matches!(norm, ContentNorm::ResolvedNormalized(_))
+                        .then_some(resolution)
+                        .flatten(),
+                    &mut normalized,
+                );
+                for norm_token in normalized {
                     self.write_u8(norm_token.tag);
                     match norm_token.atom {
                         NormAtom::Renamed(n) => {
@@ -265,7 +304,7 @@ pub fn unit_fingerprint(
 ) -> UnitFingerprint {
     let mut hasher = IdHasher::new("unit");
     hasher.write_context(variant, file, norm);
-    hasher.write_content(tokens, norm);
+    hasher.write_content(tokens, norm, None);
     UnitFingerprint(hasher.finish())
 }
 
@@ -286,7 +325,29 @@ pub fn fragment_fingerprint(
     let mut hasher = IdHasher::new("fragment");
     hasher.write_context(variant, file, norm);
     hasher.write_str(kind);
-    hasher.write_content(tokens, norm);
+    hasher.write_content(tokens, norm, None);
+    FragmentFingerprint(hasher.finish())
+}
+
+/// Fingerprint a fragment with compiler-derived name-resolution evidence.
+///
+/// Only [`ContentNorm::ResolvedNormalized`] consumes `resolution`; callers
+/// selecting a raw or lexical domain get the same digest as
+/// [`fragment_fingerprint`].  This keeps the compiler boundary in the caller
+/// while making the semantic normalization rule explicit in the ID context.
+#[must_use]
+pub fn resolved_fragment_fingerprint(
+    variant: &BuildVariant,
+    file: &FileContext<'_>,
+    kind: &str,
+    tokens: &[Token],
+    norm: ContentNorm,
+    resolution: Option<&Resolution>,
+) -> FragmentFingerprint {
+    let mut hasher = IdHasher::new("fragment");
+    hasher.write_context(variant, file, norm);
+    hasher.write_str(kind);
+    hasher.write_content(tokens, norm, resolution);
     FragmentFingerprint(hasher.finish())
 }
 
@@ -322,13 +383,6 @@ pub fn semantic_fragment_fingerprint(
             }
             None => hasher.write_u8(0),
         }
-        match node.attributes.structure_fingerprint {
-            Some(fingerprint) => {
-                hasher.write_u8(1);
-                hasher.write_bytes(&fingerprint);
-            }
-            None => hasher.write_u8(0),
-        }
         hasher.write_u32(u32::try_from(node.attributes.api_names.len()).unwrap_or(u32::MAX));
         for api_name in &node.attributes.api_names {
             hasher.write_str(api_name);
@@ -340,6 +394,27 @@ pub fn semantic_fragment_fingerprint(
             }
             None => hasher.write_u8(0),
         }
+        match node.attributes.fallible_kind {
+            Some(kind) => {
+                hasher.write_u8(1);
+                hasher.write_str(kind.name());
+            }
+            None => hasher.write_u8(0),
+        }
+        match node.attributes.direct_propagation {
+            Some(kind) => {
+                hasher.write_u8(1);
+                hasher.write_str(kind.name());
+            }
+            None => hasher.write_u8(0),
+        }
+        match node.attributes.structure_fingerprint {
+            Some(fingerprint) => {
+                hasher.write_u8(1);
+                hasher.write_bytes(&fingerprint);
+            }
+            None => hasher.write_u8(0),
+        }
     }
     hasher.write_u32(u32::try_from(graph.edges.len()).unwrap_or(u32::MAX));
     for edge in &graph.edges {
@@ -347,6 +422,45 @@ pub fn semantic_fragment_fingerprint(
         hasher.write_u32(edge.to);
         hasher.write_str(edge.kind.name());
     }
+    FragmentFingerprint(hasher.finish())
+}
+
+/// Fingerprint source structure attached to a bounded semantic window.
+///
+/// The Structural frontend selects the token slice with source spans, but
+/// only token kind and text enter the digest. Consequently, moving an
+/// unchanged window does not change the value. The signature is deliberately
+/// separate from normal clone content: it is conservative same-variant
+/// evidence used to distinguish the expressions supplied to registered APIs.
+#[must_use]
+pub fn semantic_structure_fingerprint(
+    variant: &BuildVariant,
+    file: &FileContext<'_>,
+    tokens: &[Token],
+) -> [u8; 16] {
+    let mut hasher = IdHasher::new("semantic-source-structure-v1");
+    hasher.write_context(variant, file, ContentNorm::Raw);
+    hasher.write_content(tokens, ContentNorm::Raw, None);
+    hasher.finish()
+}
+
+/// Identify one semantic fragment occurrence inside its stable host unit.
+///
+/// Semantic content intentionally excludes source position, so identical
+/// windows in distinct hosts need this separate identity before they can form
+/// a group without collapsing. The rank is assigned once per host by the scan
+/// after deterministic window extraction; it is not a source offset.
+#[must_use]
+pub fn semantic_occurrence_fingerprint(
+    content: FragmentFingerprint,
+    host: &UnitFingerprint,
+    occurrence_rank: u32,
+) -> FragmentFingerprint {
+    let mut hasher = IdHasher::new("semantic-occurrence-v1");
+    hasher.write_str(FP_SCHEMA_VERSION);
+    hasher.write_bytes(content.as_bytes());
+    hasher.write_bytes(host.as_bytes());
+    hasher.write_u32(occurrence_rank);
     FragmentFingerprint(hasher.finish())
 }
 
@@ -379,6 +493,19 @@ pub fn clone_group_fingerprint(
     CloneGroupFingerprint(hasher.finish())
 }
 
+/// Start a clone-group history from the fingerprint that first identified it.
+///
+/// The separate domain ensures a lineage identifier cannot be mistaken for a
+/// current finding identifier even when both are rendered as hexadecimal.
+#[must_use]
+pub fn group_lineage_id(group: &CloneGroupFingerprint) -> GroupLineageId {
+    let mut hasher = IdHasher::new("group-lineage");
+    hasher.write_str(FP_SCHEMA_VERSION);
+    hasher.write_str(HASH_ALGORITHM);
+    hasher.write_bytes(group.as_bytes());
+    GroupLineageId(hasher.finish())
+}
+
 /// Fingerprint a restricted-semantic group after a registered rule matched.
 ///
 /// This keeps rule identity and revision separate from the normalized graph
@@ -391,9 +518,8 @@ pub fn semantic_clone_group_fingerprint(
     rule_version: u32,
     members: &[FragmentFingerprint],
 ) -> CloneGroupFingerprint {
-    let mut distinct: Vec<[u8; 16]> = members.iter().map(|member| member.0).collect();
-    distinct.sort_unstable();
-    distinct.dedup();
+    let mut occurrences: Vec<[u8; 16]> = members.iter().map(|member| member.0).collect();
+    occurrences.sort_unstable();
 
     let mut hasher = IdHasher::new("group-semantic");
     hasher.write_str(FP_SCHEMA_VERSION);
@@ -404,8 +530,8 @@ pub fn semantic_clone_group_fingerprint(
     hasher.write_str(SOG_SCHEMA_VERSION);
     hasher.write_str(rule_id);
     hasher.write_u32(rule_version);
-    hasher.write_u32(u32::try_from(distinct.len()).unwrap_or(u32::MAX));
-    for bytes in &distinct {
+    hasher.write_u32(u32::try_from(occurrences.len()).unwrap_or(u32::MAX));
+    for bytes in &occurrences {
         hasher.write_bytes(bytes);
     }
     CloneGroupFingerprint(hasher.finish())
@@ -536,7 +662,6 @@ pub fn cross_language_group_id(
 ) -> CrossLanguageGroupId {
     let mut members = members.to_vec();
     members.sort_unstable();
-    members.dedup();
     let mut hasher = IdHasher::new("cross-language-group");
     hasher.write_str(FP_SCHEMA_VERSION);
     hasher.write_str(CROSS_LANGUAGE_POLICY_VERSION);
@@ -559,6 +684,7 @@ pub fn cross_language_group_id(
 pub fn cross_variant_group_id(
     comparison: &CrossVariantComparisonId,
     class: CloneClass,
+    language: Language,
     content: &[u8; 16],
 ) -> CrossVariantGroupId {
     let mut hasher = IdHasher::new("cross-variant-group");
@@ -566,8 +692,46 @@ pub fn cross_variant_group_id(
     hasher.write_str(CROSS_VARIANT_POLICY_VERSION);
     hasher.write_bytes(comparison.as_bytes());
     hasher.write_str(class.name());
+    hasher.write_str(language.name());
     hasher.write_bytes(content);
     CrossVariantGroupId(hasher.finish())
+}
+
+/// Identify one occurrence inside a cross-build-variant group.
+///
+/// Exact duplicates inside one origin are distinguished by a deterministic
+/// occurrence rank, never by their path or line anchor.
+#[must_use]
+pub fn cross_variant_member_id(
+    group: &CrossVariantGroupId,
+    origin_variant: &str,
+    language: Language,
+    occurrence_rank: u32,
+) -> CrossVariantMemberId {
+    let mut hasher = IdHasher::new("cross-variant-member");
+    hasher.write_str(FP_SCHEMA_VERSION);
+    hasher.write_str(CROSS_VARIANT_POLICY_VERSION);
+    hasher.write_bytes(group.as_bytes());
+    hasher.write_str(origin_variant);
+    hasher.write_str(language.name());
+    hasher.write_u32(occurrence_rank);
+    CrossVariantMemberId(hasher.finish())
+}
+
+/// Identify one occurrence inside a cross-language semantic group.
+#[must_use]
+pub fn cross_language_member_id(
+    group: &CrossLanguageGroupId,
+    origin_variant: &str,
+    occurrence: &FragmentFingerprint,
+) -> CrossLanguageMemberId {
+    let mut hasher = IdHasher::new("cross-language-member");
+    hasher.write_str(FP_SCHEMA_VERSION);
+    hasher.write_str(CROSS_LANGUAGE_POLICY_VERSION);
+    hasher.write_bytes(group.as_bytes());
+    hasher.write_str(origin_variant);
+    hasher.write_bytes(occurrence.as_bytes());
+    CrossLanguageMemberId(hasher.finish())
 }
 
 /// Stable identifiers of one group member, parallel to
@@ -621,7 +785,10 @@ pub fn report_ids(
                 .members
                 .iter()
                 .map(|member| {
-                    let tokens = &files[member.file].tokens[member.token_start..member.token_end];
+                    let file = &files[member.file];
+                    let start = member.token_start.min(file.tokens.len());
+                    let end = member.token_end.min(file.tokens.len()).max(start);
+                    let tokens = &file.tokens[start..end];
                     fragment_fingerprint(variant, &contexts[member.file], "member", tokens, norm)
                 })
                 .collect();
@@ -635,8 +802,10 @@ pub fn report_ids(
                 .map(|member| {
                     member.unit.map(|unit_idx| {
                         let unit = &files[member.file].units[unit_idx];
-                        let tokens = &files[member.file].tokens
-                            [unit.token_start..unit.token_end.min(files[member.file].tokens.len())];
+                        let file = &files[member.file];
+                        let start = unit.token_start.min(file.tokens.len());
+                        let end = unit.token_end.min(file.tokens.len()).max(start);
+                        let tokens = &file.tokens[start..end];
                         unit_fingerprint(variant, &contexts[member.file], tokens, ContentNorm::Raw)
                     })
                 })

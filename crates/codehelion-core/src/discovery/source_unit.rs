@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use super::language::Language;
 
@@ -100,6 +101,12 @@ pub struct SourceUnit {
     pub is_header: bool,
     /// Content fingerprint.
     pub content_hash: ContentHash,
+    /// Exact bytes whose hash was recorded and which frontends must analyse.
+    ///
+    /// Keeping this shared allocation prevents a second filesystem read after
+    /// discovery, so a source edit cannot make the stored hash describe
+    /// different bytes from the parsed program.
+    pub source_bytes: Arc<[u8]>,
     /// File size in bytes.
     pub byte_len: u64,
     /// Owning Cargo package, when the file sits inside one.

@@ -32,6 +32,9 @@ use crate::clone_class::CloneClass;
 use crate::conditional::ArmPath;
 use crate::frontend::{Token, Unit};
 
+/// Version of Fast-mode detection and cross-pass consolidation rules.
+pub const ENGINE_VERSION: &str = "fast-engine-v1";
+
 /// One lexed file, as the engine consumes it.
 ///
 /// The `file` index of every [`Instance`] in the report refers to the position
@@ -180,6 +183,9 @@ pub struct EngineStats {
     pub stop_postings: usize,
     /// Candidate fragments cut for the Type-2 pass.
     pub fragments: usize,
+    /// Malformed or excessively long control headers that did not become
+    /// Type-2 body fragments.
+    pub control_headers_over_limit: usize,
     /// Fragment classes (≥ 2 members) that entered pairing.
     pub fragment_classes: usize,
     /// Fragment classes dropped for exceeding the posting cap.
@@ -206,6 +212,8 @@ pub struct EngineStats {
     /// Candidate pairs that cannot coexist because they occupy alternative
     /// preprocessor arms, or an arm known to be unreachable.
     pub conditional_pairs: usize,
+    /// Type-1 groups absorbed by a containing Type-2 group after both passes.
+    pub subsumed_groups: usize,
 }
 
 /// The engine's output: clone groups plus run statistics.
@@ -236,14 +244,14 @@ pub fn detect(files: &[InputFile<'_>], config: &EngineConfig) -> EngineReport {
 #[must_use]
 pub fn detect_with_arm_paths(
     files: &[InputFile<'_>],
-    arm_paths: &[&[ArmPath]],
+    arm_paths: &[Option<&[ArmPath]>],
     config: &EngineConfig,
 ) -> EngineReport {
     let arm_paths = (arm_paths.len() == files.len()
         && arm_paths
             .iter()
             .zip(files)
-            .all(|(paths, file)| paths.len() == file.tokens.len()))
+            .all(|(paths, file)| paths.is_none_or(|paths| paths.len() == file.tokens.len())))
     .then_some(arm_paths);
     detect_inner(files, arm_paths, config)
 }
@@ -251,7 +259,7 @@ pub fn detect_with_arm_paths(
 /// Shared Fast detection implementation, with optional preprocessor context.
 fn detect_inner(
     files: &[InputFile<'_>],
-    arm_paths: Option<&[&[ArmPath]]>,
+    arm_paths: Option<&[Option<&[ArmPath]>]>,
     config: &EngineConfig,
 ) -> EngineReport {
     let mut stats = EngineStats {
@@ -300,28 +308,66 @@ fn detect_inner(
     stats.pairs = pairs.len();
     stats.pair_budget_exhausted = raw_budget.exhausted() || fragment_budget.exhausted();
 
-    let groups = group_pairs(&pairs, files, config);
+    let mut groups = group_pairs(&pairs, files, config);
+    stats.subsumed_groups = drop_subsumed_type1_groups(&mut groups);
     EngineReport { groups, stats }
 }
 
+/// Remove an exact group already represented by a broader renamed class.
+///
+/// The fragment pass can connect two verbatim instances through a third,
+/// renamed instance even though it correctly leaves their direct exact pair
+/// to the raw pass. Once grouped, that produces one Type-1 group whose every
+/// member occupies the same or a containing/contained range as one member of
+/// the Type-2 group. Retaining both would count the shared instances twice.
+fn drop_subsumed_type1_groups(groups: &mut Vec<CloneGroup>) -> usize {
+    let mut dropped = vec![false; groups.len()];
+    for (index, group) in groups.iter().enumerate() {
+        if group.clone_type != CloneClass::Type1 {
+            continue;
+        }
+        dropped[index] = groups.iter().any(|outer| {
+            outer.clone_type == CloneClass::Type2
+                && group.members.iter().all(|member| {
+                    outer.members.iter().any(|candidate| {
+                        candidate.file == member.file
+                            && ((candidate.token_start <= member.token_start
+                                && member.token_end <= candidate.token_end)
+                                || (member.token_start <= candidate.token_start
+                                    && candidate.token_end <= member.token_end))
+                    })
+                })
+        });
+    }
+    let count = dropped.iter().filter(|&&drop| drop).count();
+    let mut position = 0;
+    groups.retain(|_| {
+        let keep = !dropped[position];
+        position += 1;
+        keep
+    });
+    count
+}
+
 /// Whether a reported pair can be present in one C-family build.
-fn pair_can_coexist(paths: &[&[ArmPath]], pair: &ClonePair) -> bool {
-    let Some(left) = instance_arm_path(paths, &pair.a) else {
-        return false;
-    };
-    let Some(right) = instance_arm_path(paths, &pair.b) else {
-        return false;
-    };
-    !left.is_unreachable()
-        && !right.is_unreachable()
-        && (pair.a.file != pair.b.file || !left.excludes(right))
+fn pair_can_coexist(paths: &[Option<&[ArmPath]>], pair: &ClonePair) -> bool {
+    let left = paths.get(pair.a.file).and_then(|paths| *paths);
+    let right = paths.get(pair.b.file).and_then(|paths| *paths);
+    match (left, right) {
+        (Some(left), Some(right)) => instance_arm_path(left, &pair.a)
+            .zip(instance_arm_path(right, &pair.b))
+            .is_none_or(|(left, right)| {
+                !left.is_unreachable()
+                    && !right.is_unreachable()
+                    && (pair.a.file != pair.b.file || !left.excludes(right))
+            }),
+        _ => true,
+    }
 }
 
 /// Return a common conditional path only when a match remains in one arm.
-fn instance_arm_path<'a>(paths: &'a [&[ArmPath]], instance: &Instance) -> Option<&'a ArmPath> {
-    let range = paths
-        .get(instance.file)?
-        .get(instance.token_start..instance.token_end)?;
+fn instance_arm_path<'a>(paths: &'a [ArmPath], instance: &Instance) -> Option<&'a ArmPath> {
+    let range = paths.get(instance.token_start..instance.token_end)?;
     let first = range.first()?;
     range.iter().all(|path| path == first).then_some(first)
 }
@@ -451,7 +497,7 @@ mod tests {
         tracker.next_arm(StaticCondition::Unknown);
         paths.extend(vec![tracker.current(); tokens.len() - split]);
 
-        let report = detect_with_arm_paths(&files, &[&paths], &EngineConfig::default());
+        let report = detect_with_arm_paths(&files, &[Some(&paths)], &EngineConfig::default());
         assert!(report.groups.is_empty(), "groups: {:?}", report.groups);
         assert!(report.stats.conditional_pairs > 0);
     }
@@ -475,7 +521,7 @@ mod tests {
         tracker.end();
         paths.extend(vec![tracker.current(); tokens.len() - split]);
 
-        let report = detect_with_arm_paths(&files, &[&paths], &EngineConfig::default());
+        let report = detect_with_arm_paths(&files, &[Some(&paths)], &EngineConfig::default());
         assert!(report.groups.is_empty(), "groups: {:?}", report.groups);
         assert!(report.stats.conditional_pairs > 0);
     }
@@ -513,6 +559,37 @@ mod tests {
                 .iter()
                 .all(|g| g.clone_type != CloneClass::Type1)
         );
+    }
+
+    #[test]
+    fn a_type2_group_absorbs_its_exact_type1_subset() {
+        let first = quick(FN_A);
+        let second = quick(FN_A);
+        let renamed = quick(FN_A_RENAMED);
+        let first_units = [function_unit(0, first.len())];
+        let second_units = [function_unit(0, second.len())];
+        let renamed_units = [function_unit(0, renamed.len())];
+        let files = [
+            InputFile {
+                tokens: &first,
+                units: &first_units,
+            },
+            InputFile {
+                tokens: &second,
+                units: &second_units,
+            },
+            InputFile {
+                tokens: &renamed,
+                units: &renamed_units,
+            },
+        ];
+
+        let report = detect(&files, &EngineConfig::default());
+
+        assert_eq!(report.groups.len(), 1, "groups: {:#?}", report.groups);
+        assert_eq!(report.groups[0].clone_type, CloneClass::Type2);
+        assert_eq!(report.groups[0].members.len(), 3);
+        assert_eq!(report.stats.subsumed_groups, 1);
     }
 
     #[test]

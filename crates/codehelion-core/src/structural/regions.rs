@@ -32,7 +32,7 @@ pub(super) fn confirm_regions(
                 .or_default()
                 .push((occurrence, side));
         }
-        for class in classes.into_values() {
+        for (normalized_content, class) in classes {
             let class = distinct(class, &mut dropped);
             if class.len() < 2 {
                 dropped.singletons += class.len();
@@ -51,7 +51,15 @@ pub(super) fn confirm_regions(
             };
             regions.push(Confirmed {
                 region: StructuralRegion {
-                    fingerprint: stable_id::clone_group_fingerprint(variant, clone_type, &contents),
+                    fingerprint: stable_id::clone_group_fingerprint(
+                        variant,
+                        clone_type,
+                        if clone_type == CloneClass::Type1 {
+                            &contents
+                        } else {
+                            std::slice::from_ref(&normalized_content)
+                        },
+                    ),
                     clone_type,
                     statements: candidate.statements,
                     occurrences,

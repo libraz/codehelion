@@ -37,7 +37,7 @@ use crate::clone_class::CloneClass;
 use crate::conditional::ArmPath;
 use crate::control_flow::{self, ControlFlowConfig, ControlFlowStats};
 use crate::discovery::{BuildVariant, Language};
-use crate::engine::LiteralNorm;
+use crate::engine::{LiteralNorm, normalize::Resolution};
 use crate::features::{self, FileFeatures};
 use crate::frontend::{Lexeme, Token, TokenKind, UnitKind};
 use crate::grouping::{
@@ -89,6 +89,7 @@ struct Unit {
     statements: Vec<crate::ir::StatementSummary>,
     fingerprint: UnitFingerprint,
     content: FragmentFingerprint,
+    normalized_content: FragmentFingerprint,
     range: ByteRange,
     lines: (u32, u32),
     tokens: (usize, usize),
@@ -98,6 +99,17 @@ struct Unit {
     test_code_evidence: Option<TestCodeEvidence>,
     /// The preprocessor conditionals the unit sits under, if any.
     arms: ArmPath,
+}
+
+impl Unit {
+    /// Content domain used to identify a clone relation of `class`.
+    const fn group_content(&self, class: CloneClass) -> FragmentFingerprint {
+        if matches!(class, CloneClass::Type1) {
+            self.content
+        } else {
+            self.normalized_content
+        }
+    }
 }
 
 #[cfg(test)]

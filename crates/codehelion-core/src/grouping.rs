@@ -57,7 +57,7 @@
 //! distinction is not how much a ceiling removes but whether what it leaves is
 //! a set that was compared with itself.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::clone_class::CloneClass;
 use crate::verify::Confidence;
@@ -71,7 +71,7 @@ use crate::verify::Confidence;
 /// medoid selection, the cohesion floors or the refinement order must bump it,
 /// as must a change to how the verdicts grouping could not place are folded
 /// into findings.
-pub const GROUPING_VERSION: &str = "grouping-v3";
+pub const GROUPING_VERSION: &str = "grouping-v4";
 
 /// Tuning for grouping. Similarities are in `[0, 1]`; the defaults are
 /// provisional and calibrated against the chain corpus.
@@ -85,7 +85,8 @@ pub struct GroupingConfig {
     pub min_pairwise_similarity: f64,
     /// Component size above which medoid selection samples candidates rather
     /// than scoring every member, to avoid quadratic blow-up on huge
-    /// components. The sample is deterministic (smallest keys first).
+    /// components. The sample is deterministic and key-diverse, so repeated
+    /// content cannot occupy every medoid candidate.
     pub sampling_threshold: usize,
     /// Number of candidate medoids scored when a component exceeds
     /// [`Self::sampling_threshold`].
@@ -144,6 +145,10 @@ pub struct SimilarityEdge {
     pub b: usize,
     /// The pair's grouping similarity, in `[0, 1]` (the verdict composite).
     pub similarity: f64,
+    /// Per-dimension evidence behind `similarity`, when the verifier measured
+    /// it. Generic grouping clients that have only a scalar may leave this
+    /// absent; Structural mode always preserves its verifier breakdown.
+    pub breakdown: Option<crate::verify::SimilarityBreakdown>,
     /// The pair's clone classification.
     pub class: CloneClass,
     /// The pair's confidence.
@@ -199,6 +204,11 @@ pub struct GroupingStats {
     pub groups: usize,
     /// Members ejected by the medoid constraint (and regrouped elsewhere).
     pub medoid_ejections: usize,
+    /// Components whose medoid candidates were sampled rather than exhaustively
+    /// scored.
+    pub sampled_medoids: usize,
+    /// Total distinct-content medoid candidates scored in sampled components.
+    pub sampled_medoid_candidates: usize,
     /// Members removed by complete-linkage splitting.
     pub linkage_splits: usize,
     /// Members left ungrouped as singletons after refinement.
@@ -379,18 +389,20 @@ const fn ordered(a: usize, b: usize) -> (usize, usize) {
 /// re-sorts by key.
 fn connected_components(unit_count: usize, edges: &[SimilarityEdge]) -> Vec<Vec<usize>> {
     let mut parent: Vec<usize> = (0..unit_count).collect();
+    let mut connected = BTreeSet::new();
     for edge in edges {
         if edge.a != edge.b {
             union(&mut parent, edge.a, edge.b);
+            connected.insert(edge.a);
+            connected.insert(edge.b);
         }
     }
     let mut buckets: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for node in 0..unit_count {
+    for node in connected {
         let root = find(&mut parent, node);
         buckets.entry(root).or_default().push(node);
     }
-    // Only components with a verified edge (size >= 2) can form a group.
-    buckets.into_values().filter(|c| c.len() >= 2).collect()
+    buckets.into_values().collect()
 }
 
 fn find(parent: &mut [usize], node: usize) -> usize {
@@ -484,7 +496,7 @@ fn refine_component(
         return;
     }
 
-    let medoid = select_medoid(component, units, sim, config);
+    let medoid = select_medoid(component, units, sim, config, stats);
 
     // Medoid constraint: keep members close enough to the medoid, eject the
     // rest for independent regrouping.
@@ -517,18 +529,33 @@ fn refine_component(
 
 /// Choose the medoid: the member with the greatest total similarity to the
 /// others, ties broken by the smallest key. On components past the sampling
-/// threshold only the smallest-key candidates are scored, which keeps the pick
-/// deterministic while bounding the cost.
+/// threshold, candidates are selected evenly from distinct content keys. This
+/// keeps the cost bounded without allowing one repeated content to occupy the
+/// whole sample.
 fn select_medoid(
     component: &[usize],
     units: &[GroupingUnit],
     sim: &SimilarityGraph,
     config: &GroupingConfig,
+    stats: &mut GroupingStats,
 ) -> usize {
     let mut candidates: Vec<usize> = component.to_vec();
     candidates.sort_by_key(|&m| units[m].key);
     if candidates.len() > config.sampling_threshold {
-        candidates.truncate(config.sample_size.max(1));
+        candidates.dedup_by_key(|member| units[*member].key);
+        let sample_size = config.sample_size.max(1).min(candidates.len());
+        if candidates.len() > sample_size {
+            let last = candidates.len() - 1;
+            candidates = if sample_size == 1 {
+                vec![candidates[last / 2]]
+            } else {
+                (0..sample_size)
+                    .map(|index| candidates[index * last / (sample_size - 1)])
+                    .collect()
+            };
+        }
+        stats.sampled_medoids += 1;
+        stats.sampled_medoid_candidates += candidates.len();
     }
 
     let mut best = candidates[0];
@@ -579,19 +606,21 @@ fn complete_linkage_trim(
     config: &GroupingConfig,
     stats: &mut GroupingStats,
 ) {
-    let mut active = vec![false; units.len()];
-    for &member in kept.iter() {
-        active[member] = true;
-    }
-
-    let mut totals = vec![0.0; units.len()];
+    let members = kept.clone();
+    let mut active = vec![true; members.len()];
+    let mut totals = vec![0.0; members.len()];
     let mut pairs = Vec::with_capacity(kept.len().saturating_mul(kept.len().saturating_sub(1)) / 2);
-    for (index, &left) in kept.iter().enumerate() {
-        for &right in &kept[index + 1..] {
+    for (index, &left) in members.iter().enumerate() {
+        for (right_index, &right) in members.iter().enumerate().skip(index + 1) {
             let similarity = sim.similarity(left, right);
-            totals[left] += similarity;
-            totals[right] += similarity;
-            pairs.push((similarity, canonical_pair(left, right, units), left, right));
+            totals[index] += similarity;
+            totals[right_index] += similarity;
+            pairs.push((
+                similarity,
+                canonical_pair(left, right, units),
+                index,
+                right_index,
+            ));
         }
     }
     pairs.sort_by(|left, right| {
@@ -601,7 +630,8 @@ fn complete_linkage_trim(
     });
     let mut next_pair = 0;
 
-    while kept.len() >= 2 {
+    let mut active_count = members.len();
+    while active_count >= 2 {
         while pairs
             .get(next_pair)
             .is_some_and(|(_, _, left, right)| !active[*left] || !active[*right])
@@ -614,47 +644,36 @@ fn complete_linkage_trim(
         if worst_sim >= config.min_pairwise_similarity {
             break;
         }
-        let victim = pick_victim(medoid, (left, right), &totals, units);
+        let victim = if members[left] == medoid {
+            right
+        } else if members[right] == medoid {
+            left
+        } else {
+            match totals[left].total_cmp(&totals[right]) {
+                std::cmp::Ordering::Less => left,
+                std::cmp::Ordering::Equal
+                    if units[members[left]].key >= units[members[right]].key =>
+                {
+                    left
+                }
+                std::cmp::Ordering::Greater | std::cmp::Ordering::Equal => right,
+            }
+        };
         active[victim] = false;
-        for &member in kept.iter().filter(|&&member| member != victim) {
-            totals[member] -= sim.similarity(member, victim);
-        }
-        kept.retain(|&m| m != victim);
-        rest.push(victim);
-        stats.linkage_splits += 1;
-    }
-}
-
-/// From the weakest pair, pick the member to remove: never the medoid,
-/// otherwise the one with the lower total similarity inside `kept`, ties broken
-/// by the larger stable key. Equal keys name interchangeable content, so either
-/// occurrence has the same externally visible group identity.
-fn pick_victim(
-    medoid: usize,
-    (left, right): (usize, usize),
-    totals: &[f64],
-    units: &[GroupingUnit],
-) -> usize {
-    if left == medoid {
-        return right;
-    }
-    if right == medoid {
-        return left;
-    }
-    let left_total = totals[left];
-    let right_total = totals[right];
-    // Remove the lower-total member; on a tie remove the larger content key.
-    match left_total.total_cmp(&right_total) {
-        std::cmp::Ordering::Less => left,
-        std::cmp::Ordering::Greater => right,
-        std::cmp::Ordering::Equal => {
-            if units[left].key >= units[right].key {
-                left
-            } else {
-                right
+        for (index, &member) in members.iter().enumerate() {
+            if active[index] {
+                totals[index] -= sim.similarity(member, members[victim]);
             }
         }
+        active_count -= 1;
+        rest.push(members[victim]);
+        stats.linkage_splits += 1;
     }
+    *kept = members
+        .into_iter()
+        .zip(active)
+        .filter_map(|(member, active)| active.then_some(member))
+        .collect();
 }
 
 /// An endpoint pair ordered by the units' stable keys. This is only used for

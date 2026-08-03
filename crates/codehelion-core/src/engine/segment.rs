@@ -129,6 +129,19 @@ pub(crate) struct Fragment {
     pub end: usize,
 }
 
+/// Fragments extracted from one file and the bounded searches that gave up.
+#[derive(Debug, Default)]
+pub(crate) struct FragmentExtraction {
+    /// Candidate fragments that survived the minimum-size gate.
+    pub(crate) fragments: Vec<Fragment>,
+    /// Control headers too long or malformed to locate a block safely.
+    pub(crate) control_headers_over_limit: usize,
+}
+
+/// Most real control headers are a few tokens. A fixed limit prevents a
+/// malformed file full of keywords from making extraction quadratic.
+const MAX_CONTROL_HEADER_TOKENS: usize = 256;
+
 /// Extract the candidate fragments of one file.
 ///
 /// Only fragments of at least `min_tokens` tokens are kept. Statement runs of
@@ -142,7 +155,7 @@ pub(crate) fn fragments(
     braces: &HashMap<usize, usize>,
     min_tokens: usize,
     max_stmt_window: usize,
-) -> Vec<Fragment> {
+) -> FragmentExtraction {
     let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut out: Vec<Fragment> = Vec::new();
     // Every block body found below, whatever its kind; statement runs are cut
@@ -175,29 +188,42 @@ pub(crate) fn fragments(
     // are forbidden in `if`/`while`/`for` headers) and rare in C/C++ (a
     // compound literal or lambda in the header cuts a small spurious fragment,
     // which the minimum-size gate then usually drops).
+    let mut control_headers_over_limit = 0;
     for (i, token) in tokens.iter().enumerate() {
         match token.kind {
             TokenKind::Keyword
                 if matches!(token.text.as_str(), "for" | "while" | "loop" | "do") =>
             {
-                if let Some((open, close)) = block_after(tokens, braces, i) {
-                    bodies.push((open + 1, close));
-                    push(FragmentKind::Loop, open + 1, close);
+                match block_after(tokens, braces, i) {
+                    BlockAfter::Found(open, close) => {
+                        bodies.push((open + 1, close));
+                        push(FragmentKind::Loop, open + 1, close);
+                    }
+                    BlockAfter::Limit => control_headers_over_limit += 1,
+                    BlockAfter::None => {}
                 }
             }
             TokenKind::Keyword if matches!(token.text.as_str(), "if" | "match" | "switch") => {
-                if let Some((open, close)) = block_after(tokens, braces, i) {
-                    bodies.push((open + 1, close));
-                    push(FragmentKind::Branch, open + 1, close);
+                match block_after(tokens, braces, i) {
+                    BlockAfter::Found(open, close) => {
+                        bodies.push((open + 1, close));
+                        push(FragmentKind::Branch, open + 1, close);
+                    }
+                    BlockAfter::Limit => control_headers_over_limit += 1,
+                    BlockAfter::None => {}
                 }
             }
             // `else {` only; `else if` is handled by the `if`.
             TokenKind::Keyword
                 if token.text == "else" && tokens.get(i + 1).is_some_and(|t| t.text == "{") =>
             {
-                if let Some((open, close)) = block_after(tokens, braces, i) {
-                    bodies.push((open + 1, close));
-                    push(FragmentKind::Branch, open + 1, close);
+                match block_after(tokens, braces, i) {
+                    BlockAfter::Found(open, close) => {
+                        bodies.push((open + 1, close));
+                        push(FragmentKind::Branch, open + 1, close);
+                    }
+                    BlockAfter::Limit => control_headers_over_limit += 1,
+                    BlockAfter::None => {}
                 }
             }
             // A block-bodied match arm.
@@ -227,7 +253,10 @@ pub(crate) fn fragments(
     }
 
     out.sort_by_key(|f| (f.start, f.end));
-    out
+    FragmentExtraction {
+        fragments: out,
+        control_headers_over_limit,
+    }
 }
 
 /// The `{`/`}` token indices delimiting a unit's body.
@@ -244,28 +273,40 @@ fn body_braces(
 
 /// The `{`/`}` indices of the first block after position `i`, stopping at a
 /// top-level `;`. Semicolons in a C/C++ `for` header are not statement ends.
-fn block_after(
-    tokens: &[Token],
-    braces: &HashMap<usize, usize>,
-    i: usize,
-) -> Option<(usize, usize)> {
+enum BlockAfter {
+    Found(usize, usize),
+    None,
+    Limit,
+}
+
+fn block_after(tokens: &[Token], braces: &HashMap<usize, usize>, i: usize) -> BlockAfter {
     let mut paren_depth = 0usize;
-    for (offset, token) in tokens[i..].iter().enumerate() {
+    for (offset, token) in tokens[i..]
+        .iter()
+        .take(MAX_CONTROL_HEADER_TOKENS)
+        .enumerate()
+    {
         if token.kind == TokenKind::Punctuation {
             match token.text.as_str() {
                 "(" => paren_depth += 1,
                 ")" => paren_depth = paren_depth.saturating_sub(1),
                 "{" if paren_depth == 0 => {
                     let open = i + offset;
-                    let close = *braces.get(&open)?;
-                    return Some((open, close));
+                    let Some(&close) = braces.get(&open) else {
+                        return BlockAfter::None;
+                    };
+                    return BlockAfter::Found(open, close);
                 }
-                ";" if paren_depth == 0 => return None,
+                ";" if paren_depth == 0 => return BlockAfter::None,
                 _ => {}
             }
         }
     }
-    None
+    if tokens.len().saturating_sub(i) > MAX_CONTROL_HEADER_TOKENS {
+        BlockAfter::Limit
+    } else {
+        BlockAfter::None
+    }
 }
 
 /// Split the body range `[start, end)` into statement spans.
@@ -422,7 +463,7 @@ mod tests {
         let tokens = quick("fn f ( ) { for x in y { a ; b ; } }");
         let units = vec![unit(UnitKind::Function, 0, tokens.len())];
         let braces = brace_pairs(&tokens);
-        let frags = fragments(&tokens, &units, &braces, 2, 8);
+        let frags = fragments(&tokens, &units, &braces, 2, 8).fragments;
         assert!(frags.iter().any(|f| f.kind == FragmentKind::Body));
         assert!(frags.iter().any(|f| f.kind == FragmentKind::Loop));
         assert!(frags.iter().any(|f| f.kind == FragmentKind::StmtRun));
@@ -434,7 +475,7 @@ mod tests {
         let tokens = quick("fn f ( ) { for ( int i = 0 ; i < n ; i ++ ) { a ; b ; } }");
         let units = vec![unit(UnitKind::Function, 0, tokens.len())];
         let braces = brace_pairs(&tokens);
-        let frags = fragments(&tokens, &units, &braces, 2, 8);
+        let frags = fragments(&tokens, &units, &braces, 2, 8).fragments;
 
         assert!(
             frags
@@ -450,12 +491,27 @@ mod tests {
         let units = vec![unit(UnitKind::Function, 0, tokens.len())];
         let braces = brace_pairs(&tokens);
         // min_tokens larger than everything -> nothing.
-        assert!(fragments(&tokens, &units, &braces, 50, 8).is_empty());
+        assert!(
+            fragments(&tokens, &units, &braces, 50, 8)
+                .fragments
+                .is_empty()
+        );
         // The whole body and the 1-statement window are the same range: once.
-        let frags = fragments(&tokens, &units, &braces, 1, 8);
+        let frags = fragments(&tokens, &units, &braces, 1, 8).fragments;
         let ranges: Vec<(usize, usize)> = frags.iter().map(|f| (f.start, f.end)).collect();
         let mut dedup = ranges.clone();
         dedup.dedup();
         assert_eq!(ranges, dedup);
+    }
+
+    #[test]
+    fn an_unclosed_control_header_has_a_bounded_search_and_is_accounted_for() {
+        let mut tokens = vec![tok(TokenKind::Keyword, "if")];
+        tokens.extend((0..MAX_CONTROL_HEADER_TOKENS).map(|_| tok(TokenKind::Identifier, "x")));
+
+        let extraction = fragments(&tokens, &[], &brace_pairs(&tokens), 1, 1);
+
+        assert!(extraction.fragments.is_empty());
+        assert_eq!(extraction.control_headers_over_limit, 1);
     }
 }

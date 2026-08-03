@@ -69,7 +69,7 @@ use crate::types::{ApiEvidence, TypeEvidence};
 /// Version of the composite-weight recipe and judgment rules. Bump it when any
 /// weight default or classification rule changes, since findings change with
 /// it. Recorded as a detector version.
-pub const WEIGHT_VERSION: &str = "structural-verify-v2";
+pub const WEIGHT_VERSION: &str = "structural-verify-v3";
 
 /// Relative weights of the similarity dimensions in the composite score.
 ///
@@ -122,6 +122,13 @@ pub struct VerifyConfig {
     /// this threshold is therefore weak evidence by construction, which is
     /// what the low confidence band exists to say.
     pub type3_min_composite: f64,
+    /// Smallest lexical agreement required before an otherwise exact
+    /// structural match can be called a safe Type-2 clone.
+    ///
+    /// Below this floor, matching shape alone is insufficient evidence that
+    /// the differing code is a consistent rename or literal substitution.
+    /// Such pairs remain eligible for the ordinary Type-3 decision.
+    pub type2_min_lexical: f64,
     /// Composite at or above which a Type-3 finding is high confidence.
     pub high_confidence: f64,
     /// Composite at or above which a Type-3 finding is medium confidence.
@@ -156,6 +163,7 @@ impl Default for VerifyConfig {
         Self {
             weights: Weights::default(),
             type3_min_composite: 0.70,
+            type2_min_lexical: 0.90,
             high_confidence: 0.85,
             medium_confidence: 0.75,
             exact_epsilon: 1e-9,
@@ -421,11 +429,15 @@ fn classify(
         // surface is the dimension that carries identifier text, and a
         // difference there is evidence of renaming that outranks the silence
         // of the head tokens. Type-2 is then the claim the evidence supports.
-        return if exact(breakdown.lexical) && breakdown.api.is_none_or(exact) {
-            (Some(CloneClass::Type1), Some(Confidence::High))
-        } else {
-            (Some(CloneClass::Type2), Some(Confidence::High))
-        };
+        if exact(breakdown.lexical) && breakdown.api.is_none_or(exact) {
+            return (Some(CloneClass::Type1), Some(Confidence::High));
+        }
+        if breakdown.lexical >= config.type2_min_lexical {
+            return (Some(CloneClass::Type2), Some(Confidence::High));
+        }
+        // Structural agreement does not prove that two low-lexical snippets
+        // differ only by safe mechanical substitutions. Continue to the
+        // Type-3 threshold below.
     }
     if breakdown.composite >= config.type3_min_composite {
         let band = if breakdown.composite >= config.high_confidence {
@@ -500,6 +512,8 @@ impl Band {
         // side gets the length difference on top of the slack.
         let mut back = slack.saturating_add(len_a.saturating_sub(len_b));
         let mut forward = slack.saturating_add(len_b.saturating_sub(len_a));
+        back = back.min(len_a);
+        forward = forward.min(len_b);
         let allowed = (config.max_alignment_cells / (len_a + 1)).max(1);
         if back + forward + 1 > allowed {
             // Keep the diagonals nearest the start corner, where the

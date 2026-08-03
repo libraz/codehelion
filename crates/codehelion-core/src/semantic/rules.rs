@@ -282,6 +282,7 @@ pub(super) fn match_same_variant_rule(
     if rule.scope != SemanticRuleScope::SameBuildVariant
         || left.schema_version != SOG_SCHEMA_VERSION
         || right.schema_version != SOG_SCHEMA_VERSION
+        || left.language != right.language
         || left.build_variant_fingerprint != right.build_variant_fingerprint
         || !rule.pattern.accepts(left)
         || !rule.pattern.accepts(right)
@@ -396,6 +397,17 @@ fn compatible_nodes(left: &OperationNode, right: &OperationNode) -> bool {
             left.attributes.fallible_kind,
             right.attributes.fallible_kind,
         )
+        && compatible_structure_fingerprints(
+            left.attributes.structure_fingerprint,
+            right.attributes.structure_fingerprint,
+        )
+}
+
+fn compatible_structure_fingerprints(left: Option<[u8; 16]>, right: Option<[u8; 16]>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
+    }
 }
 
 pub(super) fn direct_construct_matches(

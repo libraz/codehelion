@@ -8,7 +8,7 @@ fn node(kind: OperationKind) -> OperationNode {
 }
 
 #[test]
-fn registered_pipeline_rule_crosses_languages_but_not_build_variants() {
+fn registered_pipeline_rule_stays_within_one_language_and_build_variant() {
     let rust = normalize_registered_apis(
         Language::Rust,
         [4; 32],
@@ -28,32 +28,14 @@ fn registered_pipeline_rule_crosses_languages_but_not_build_variants() {
     .expect("valid Rust SOG")
     .graph
     .expect("pipeline graph");
-    let cpp = normalize_registered_apis(
-        Language::Cpp,
-        [4; 32],
-        vec![
-            OperationObservation {
-                source_offset: 1,
-                api_name: "std::copy_if".to_owned(),
-                type_tag: Some(TypeTag::Integer),
-            },
-            OperationObservation {
-                source_offset: 2,
-                api_name: "std::push_back".to_owned(),
-                type_tag: Some(TypeTag::Sequence),
-            },
-        ],
-    )
-    .expect("valid C++ SOG")
-    .graph
-    .expect("pipeline graph");
+    let same_language = rust.clone();
     assert_eq!(
-        match_registered_pipeline(&rust, &cpp).map(|matched| matched.rule.id),
+        match_registered_pipeline(&rust, &same_language).map(|matched| matched.rule.id),
         Some("sequence-pipeline-v1")
     );
     let other = SemanticOperationGraph {
         build_variant_fingerprint: [5; 32],
-        ..cpp
+        ..same_language
     };
     assert_eq!(match_registered_pipeline(&rust, &other), None);
 }
@@ -428,7 +410,7 @@ fn candidate_index_partitions_build_variants_and_avoids_other_sequences() {
             &[OperationKind::Filter, OperationKind::Collect],
         ),
         pipeline(
-            Language::Cpp,
+            Language::Rust,
             [8; 32],
             &[OperationKind::Filter, OperationKind::Collect],
         ),
@@ -468,7 +450,7 @@ fn candidate_limits_drop_complete_buckets_and_account_for_them() {
             &[OperationKind::Filter, OperationKind::Collect],
         ),
         pipeline(
-            Language::Cpp,
+            Language::Rust,
             [10; 32],
             &[OperationKind::Filter, OperationKind::Collect],
         ),

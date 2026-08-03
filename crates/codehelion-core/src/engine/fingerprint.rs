@@ -187,8 +187,8 @@ pub fn kgram_hashes(units: &[u64], k: usize) -> Vec<u64> {
 /// tokens produces at least one shared fingerprint.
 #[must_use]
 pub fn winnow(hashes: &[u64], w: usize) -> Vec<(u64, usize)> {
-    use std::collections::BTreeSet;
-    let mut picks: BTreeSet<(usize, u64)> = BTreeSet::new();
+    use std::collections::VecDeque;
+
     if hashes.is_empty() || w == 0 {
         return Vec::new();
     }
@@ -199,19 +199,35 @@ pub fn winnow(hashes: &[u64], w: usize) -> Vec<(u64, usize)> {
                 best = i;
             }
         }
-        picks.insert((best, hashes[best]));
-    } else {
-        for start in 0..=(hashes.len() - w) {
-            let mut best = start;
-            for i in start..start + w {
-                if hashes[i] <= hashes[best] {
-                    best = i;
-                }
-            }
-            picks.insert((best, hashes[best]));
+        return vec![(hashes[best], best)];
+    }
+
+    let mut candidates = VecDeque::with_capacity(w);
+    let mut picks = Vec::with_capacity(hashes.len().div_ceil(w));
+    for (index, &hash) in hashes.iter().enumerate() {
+        // Remove equal values too: a later equal minimum is the required
+        // rightmost representative and outlives every earlier one.
+        while candidates
+            .back()
+            .is_some_and(|&previous| hashes[previous] >= hash)
+        {
+            candidates.pop_back();
+        }
+        candidates.push_back(index);
+
+        if index + 1 < w {
+            continue;
+        }
+        let start = index + 1 - w;
+        while candidates.front().is_some_and(|&previous| previous < start) {
+            candidates.pop_front();
+        }
+        let best = *candidates.front().unwrap_or(&index);
+        if picks.last().is_none_or(|&(_, previous)| previous != best) {
+            picks.push((hashes[best], best));
         }
     }
-    picks.into_iter().map(|(i, h)| (h, i)).collect()
+    picks
 }
 
 #[cfg(test)]
@@ -266,6 +282,34 @@ mod tests {
     fn winnow_is_deterministic() {
         let hashes: Vec<u64> = (0..64u64).map(|i| i ^ (i << 3)).collect();
         assert_eq!(winnow(&hashes, 4), winnow(&hashes, 4));
+    }
+
+    #[test]
+    fn winnow_matches_window_rescanning_for_ties_and_every_window_size() {
+        fn reference(hashes: &[u64], w: usize) -> Vec<(u64, usize)> {
+            use std::collections::BTreeSet;
+
+            if hashes.is_empty() || w == 0 {
+                return Vec::new();
+            }
+            let mut picks = BTreeSet::new();
+            for start in 0..hashes.len().saturating_sub(w).saturating_add(1) {
+                let end = (start + w).min(hashes.len());
+                let best = (start..end).min_by_key(|&index| (hashes[index], usize::MAX - index));
+                if let Some(best) = best {
+                    picks.insert((best, hashes[best]));
+                }
+            }
+            picks
+                .into_iter()
+                .map(|(index, hash)| (hash, index))
+                .collect()
+        }
+
+        let hashes = [9, 4, 4, 7, 2, 2, 2, 5, 1, 1, 8, 3];
+        for w in 0..=hashes.len() + 2 {
+            assert_eq!(winnow(&hashes, w), reference(&hashes, w), "window {w}");
+        }
     }
 
     #[test]

@@ -119,9 +119,9 @@ impl Boilerplate {
 /// Calls are counted apart from statements because the IR models a call as an
 /// expression: `f();` is one call node, not a statement wrapping one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Body {
+pub struct BoilerplateCounts {
     /// Branches, loops, multi-way conditionals and error handling.
-    control: usize,
+    pub control: usize,
     /// Call expressions that are not themselves an argument to a call.
     ///
     /// Nesting is what separates delegation from work. `f(g(x), h(y))` is one
@@ -129,7 +129,7 @@ struct Body {
     /// three calls there would say a wrapper does three things, when what it
     /// does is call `f`. Sibling calls are counted apart, because two calls in
     /// a row are two things done.
-    calls: usize,
+    pub calls: usize,
     /// Macro invocations that are not themselves an argument to a call.
     ///
     /// Counted the way calls are, and for the same reason. `f(tri!(g(x)))` is
@@ -138,9 +138,9 @@ struct Body {
     /// when handing the argument over is all it does. A macro standing on its
     /// own is still counted: nothing here can see what it expands to, so a
     /// statement that is one is a statement whose contents are unknown.
-    macros: usize,
+    pub macros: usize,
     /// Statements other than macro invocations and control flow.
-    statements: usize,
+    pub statements: usize,
     /// Statements that do more than name a value or hand one back.
     ///
     /// A `return` around a delegation is punctuation. So is a local declared
@@ -152,18 +152,18 @@ struct Body {
     /// declaration as one node whether it names a place or fills it with
     /// arithmetic. That is why declarations are punctuation only beside a
     /// delegation, never on their own.
-    work: usize,
+    pub work: usize,
     /// Two-way conditionals, counted apart from the rest of the control flow.
     ///
     /// One of them is a guard. Several are a decision table, which is
     /// something a reader can act on: two copies of one table differing in
     /// their constants is exactly the duplication worth reporting.
-    branches: usize,
+    pub branches: usize,
     /// Local declarations, counted apart so a body can be required to have
     /// none. See `work` for why an initialiser cannot be inspected.
-    declarations: usize,
+    pub declarations: usize,
     /// `return` statements.
-    returns: usize,
+    pub returns: usize,
 }
 
 /// Classify a unit by the shape of its body, or return `None` when it does
@@ -172,7 +172,7 @@ struct Body {
 /// The unit node itself is not counted; only what it contains.
 #[must_use]
 pub fn classify(unit: &IrNode) -> Option<Boilerplate> {
-    let body = count(unit);
+    let body = counts(unit);
     if body.control > 0 {
         return dispatch(&body);
     }
@@ -212,7 +212,7 @@ pub fn classify(unit: &IrNode) -> Option<Boilerplate> {
 /// and no more calls than there are answers, so nothing happens here besides
 /// producing each answer. Anything more and the arms are doing work, which is
 /// work written once per configuration and worth reading.
-const fn configured(body: &Body) -> bool {
+const fn configured(body: &BoilerplateCounts) -> bool {
     body.returns >= 2 && body.work == 0 && body.declarations == 0 && body.calls <= body.returns
 }
 
@@ -234,7 +234,7 @@ const fn configured(body: &Body) -> bool {
 /// What this cannot separate is a guard whose answer is computed — `if (v >
 /// hi) return hi; return v;` reaches here as the same shape as a null check
 /// and a field read, because the IR carries no expression to tell them apart.
-fn dispatch(body: &Body) -> Option<Boilerplate> {
+fn dispatch(body: &BoilerplateCounts) -> Option<Boilerplate> {
     let shaped = body.branches == 1
         && body.control == body.branches
         && body.macros == 0
@@ -247,8 +247,9 @@ fn dispatch(body: &Body) -> Option<Boilerplate> {
 }
 
 /// Count what a unit's subtree contains, excluding the unit node itself.
-fn count(unit: &IrNode) -> Body {
-    let mut body = Body::default();
+#[must_use]
+pub fn counts(unit: &IrNode) -> BoilerplateCounts {
+    let mut body = BoilerplateCounts::default();
     for child in &unit.children {
         descend(child, false, &mut body);
     }
@@ -256,7 +257,7 @@ fn count(unit: &IrNode) -> Body {
 }
 
 /// Tally `node` and its subtree, remembering whether it sits inside a call.
-fn descend(node: &IrNode, in_call: bool, body: &mut Body) {
+fn descend(node: &IrNode, in_call: bool, body: &mut BoilerplateCounts) {
     tally(node, in_call, body);
     let nested = in_call || node.shape == Shape::Call;
     for child in &node.children {
@@ -264,7 +265,7 @@ fn descend(node: &IrNode, in_call: bool, body: &mut Body) {
     }
 }
 
-fn tally(node: &IrNode, in_call: bool, body: &mut Body) {
+fn tally(node: &IrNode, in_call: bool, body: &mut BoilerplateCounts) {
     match node.shape {
         Shape::Branch => {
             body.control += 1;
@@ -370,6 +371,19 @@ mod tests {
         );
         // Two statements are already more than moving one value.
         assert_eq!(classify(&unit(&[Shape::Assign, Shape::Return])), None);
+    }
+
+    #[test]
+    fn exported_counts_are_the_classifier_input() {
+        let measured = counts(&unit(&[Shape::Assign, Shape::Return]));
+        assert_eq!(measured.control, 0);
+        assert_eq!(measured.calls, 0);
+        assert_eq!(measured.macros, 0);
+        assert_eq!(measured.statements, 2);
+        assert_eq!(measured.work, 1);
+        assert_eq!(measured.branches, 0);
+        assert_eq!(measured.declarations, 0);
+        assert_eq!(measured.returns, 1);
     }
 
     #[test]

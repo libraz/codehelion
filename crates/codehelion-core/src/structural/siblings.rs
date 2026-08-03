@@ -8,9 +8,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::pairs::encloses;
 use super::{
-    FileFeatures, GroupSiblings, GroupingSet, SiblingConfig, SiblingSweepStats, StructuralSibling,
-    SyntaxIrFile, Unit, UnitEvidence, VerifyConfig, verify, view,
+    FileFeatures, GroupSiblings, GroupingSet, SiblingSweepStats, StructuralConfig,
+    StructuralSibling, SyntaxIrFile, Unit, UnitEvidence, unit_meets_minimum, verify, view,
 };
 use crate::clone_class::CloneClass;
 use crate::verify::Confidence;
@@ -26,9 +27,10 @@ pub(super) fn sweep_siblings(
     files: &[SyntaxIrFile],
     feature_files: &[FileFeatures],
     evidence: &UnitEvidence,
-    verify_config: &VerifyConfig,
-    config: &SiblingConfig,
+    config: &StructuralConfig,
 ) -> (Vec<GroupSiblings>, SiblingSweepStats) {
+    let verify_config = &config.verify;
+    let sibling_config = &config.siblings;
     let mut stats = SiblingSweepStats::default();
     let grouped: BTreeSet<usize> = groups
         .groups
@@ -64,6 +66,15 @@ pub(super) fn sweep_siblings(
             files
                 .into_iter()
                 .flat_map(|file| ungrouped_by_file.get(&file).into_iter().flatten().copied())
+                .filter(|&candidate| {
+                    sibling_candidate_allowed(
+                        group.canonical,
+                        candidate,
+                        units,
+                        feature_files,
+                        config,
+                    )
+                })
                 .collect()
         })
         .collect();
@@ -71,7 +82,7 @@ pub(super) fn sweep_siblings(
     stats.eligible_candidates = candidate_lists.iter().map(Vec::len).sum();
 
     let relaxed_threshold = (verify_config.type3_min_composite
-        - config
+        - sibling_config
             .similarity_delta
             .clamp(0.0, verify_config.type3_min_composite))
     .max(0.0);
@@ -82,7 +93,7 @@ pub(super) fn sweep_siblings(
     {
         let mut siblings = Vec::new();
         for (position, &unit) in group_candidates.iter().enumerate() {
-            if accepted >= config.total_cap {
+            if accepted >= sibling_config.total_cap {
                 stats.total_cap_dropped = stats.total_cap_dropped.saturating_add(
                     group_candidates.len().saturating_sub(position)
                         + candidate_lists[group_index + 1..]
@@ -92,13 +103,13 @@ pub(super) fn sweep_siblings(
                 );
                 break 'groups;
             }
-            if siblings.len() >= config.per_group_cap {
+            if siblings.len() >= sibling_config.per_group_cap {
                 stats.per_group_cap_dropped = stats
                     .per_group_cap_dropped
                     .saturating_add(group_candidates.len().saturating_sub(position));
                 break;
             }
-            if stats.candidates_examined >= config.candidate_budget {
+            if stats.candidates_examined >= sibling_config.candidate_budget {
                 break 'groups;
             }
             let canonical = view(group.canonical, units, files, feature_files, evidence);
@@ -108,10 +119,12 @@ pub(super) fn sweep_siblings(
             if verdict.breakdown.composite < relaxed_threshold {
                 continue;
             }
-            let (clone_type, confidence) = match (verdict.class, verdict.confidence) {
-                (Some(class), Some(confidence)) => (class, confidence),
-                _ => (CloneClass::Type3, Confidence::Low),
-            };
+            let (clone_type, confidence) = sibling_classification(
+                verdict.class,
+                verdict.confidence,
+                verdict.breakdown.composite,
+                verify_config.type3_min_composite,
+            );
             siblings.push(StructuralSibling {
                 unit,
                 clone_type,
@@ -136,15 +149,60 @@ pub(super) fn sweep_siblings(
     (out, stats)
 }
 
+/// Whether a sibling candidate satisfies every guard used before primary
+/// pair verification.
+fn sibling_candidate_allowed(
+    canonical: usize,
+    candidate: usize,
+    units: &[Unit],
+    feature_files: &[FileFeatures],
+    config: &StructuralConfig,
+) -> bool {
+    let canonical = &units[canonical];
+    let candidate = &units[candidate];
+    if !unit_meets_minimum(canonical, config.min_clone_tokens)
+        || !unit_meets_minimum(candidate, config.min_clone_tokens)
+        || encloses(canonical, candidate)
+        || canonical.arms.excludes(&candidate.arms)
+    {
+        return false;
+    }
+    let canonical_vector = &feature_files[canonical.file].units[canonical.local].vector;
+    let candidate_vector = &feature_files[candidate.file].units[candidate.local].vector;
+    canonical_vector.shape_divergence(candidate_vector) <= config.max_shape_divergence
+}
+
+/// Apply the sibling contract to a verifier result.
+///
+/// Exact structural agreement can classify a pair before the composite
+/// threshold is consulted. That classification remains useful, but below the
+/// ordinary Type-3 floor it cannot carry medium or high confidence.
+fn sibling_classification(
+    class: Option<CloneClass>,
+    confidence: Option<Confidence>,
+    composite: f64,
+    type3_min_composite: f64,
+) -> (CloneClass, Confidence) {
+    let (class, mut confidence) = match (class, confidence) {
+        (Some(class), Some(confidence)) => (class, confidence),
+        _ => (CloneClass::Type3, Confidence::Low),
+    };
+    if composite < type3_min_composite {
+        confidence = Confidence::Low;
+    }
+    (class, confidence)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conditional::{ArmTracker, StaticCondition};
     use crate::discovery::{BuildVariant, Language, LanguageSelection};
     use crate::features;
     use crate::frontend::{SourceSpan, Token, TokenKind};
     use crate::grouping::{self, GroupingConfig, GroupingUnit, SimilarityEdge};
     use crate::ir::{ByteRange, IR_SCHEMA_VERSION, IrNode, Shape};
-    use crate::structural::{ResolvedTypes, flatten_units, unit_evidence};
+    use crate::structural::{ResolvedTypes, SiblingConfig, flatten_units, unit_evidence};
 
     fn variant() -> BuildVariant {
         BuildVariant::structural(
@@ -233,7 +291,12 @@ mod tests {
             file(&["outside"]),
         ];
         let feature_files = files.iter().map(features::extract).collect();
-        let (units, _) = flatten_units(&files, &variant());
+        let (units, _) = flatten_units(
+            &files,
+            &variant(),
+            crate::engine::LiteralNorm::Full,
+            &ResolvedTypes::default(),
+        );
         let evidence = unit_evidence(&units, &ResolvedTypes::default());
         let grouping_units = units
             .iter()
@@ -247,12 +310,78 @@ mod tests {
                 a: 0,
                 b: 4,
                 similarity: 1.0,
+                breakdown: None,
                 class: CloneClass::Type1,
                 confidence: Confidence::High,
             }],
             &GroupingConfig::default(),
         );
         (units, files, feature_files, evidence, groups)
+    }
+
+    fn config() -> StructuralConfig {
+        StructuralConfig {
+            min_clone_tokens: 1,
+            ..StructuralConfig::default()
+        }
+    }
+
+    #[test]
+    fn sibling_candidates_reuse_every_primary_pair_guard() {
+        let (mut units, _files, mut feature_files, _evidence, _groups) = inputs();
+        let default = config();
+        assert!(sibling_candidate_allowed(
+            0,
+            1,
+            &units,
+            &feature_files,
+            &default
+        ));
+
+        units[1].tokens = units[0].tokens;
+        assert!(!sibling_candidate_allowed(
+            0,
+            1,
+            &units,
+            &feature_files,
+            &default
+        ));
+        units[1].tokens = (1, 2);
+
+        let mut minimum = default.clone();
+        minimum.min_clone_tokens = 2;
+        assert!(!sibling_candidate_allowed(
+            0,
+            1,
+            &units,
+            &feature_files,
+            &minimum
+        ));
+
+        let mut tracker = ArmTracker::default();
+        tracker.begin(StaticCondition::Unknown);
+        units[0].arms = tracker.current();
+        tracker.next_arm(StaticCondition::Unknown);
+        units[1].arms = tracker.current();
+        assert!(!sibling_candidate_allowed(
+            0,
+            1,
+            &units,
+            &feature_files,
+            &default
+        ));
+        units[0].arms = crate::conditional::ArmPath::default();
+        units[1].arms = crate::conditional::ArmPath::default();
+
+        feature_files[0].units[1].vector.counts.fill(0);
+        feature_files[0].units[1].vector.node_count = 1;
+        assert!(!sibling_candidate_allowed(
+            0,
+            1,
+            &units,
+            &feature_files,
+            &default
+        ));
     }
 
     #[test]
@@ -264,8 +393,7 @@ mod tests {
             &files,
             &feature_files,
             &evidence,
-            &VerifyConfig::default(),
-            &SiblingConfig::default(),
+            &config(),
         );
 
         let mut expected = vec![1, 2, 3];
@@ -296,8 +424,7 @@ mod tests {
             &files,
             &feature_files,
             &evidence,
-            &VerifyConfig::default(),
-            &SiblingConfig::default(),
+            &config(),
         );
         assert_eq!(again, siblings);
         assert_eq!(again_stats, stats);
@@ -315,56 +442,71 @@ mod tests {
         });
         let expected_first = ordered.remove(0);
 
+        let mut per_group_config = config();
+        per_group_config.siblings = SiblingConfig {
+            similarity_delta: 0.10,
+            candidate_budget: 10,
+            per_group_cap: 1,
+            total_cap: 10,
+        };
         let (per_group, per_group_stats) = sweep_siblings(
             &groups,
             &units,
             &files,
             &feature_files,
             &evidence,
-            &VerifyConfig::default(),
-            &SiblingConfig {
-                similarity_delta: 0.10,
-                candidate_budget: 10,
-                per_group_cap: 1,
-                total_cap: 10,
-            },
+            &per_group_config,
         );
         assert_eq!(per_group[0].siblings[0].unit, expected_first);
         assert_eq!(per_group_stats.candidates_examined, 1);
         assert_eq!(per_group_stats.per_group_cap_dropped, 2);
 
+        let mut total_config = config();
+        total_config.siblings = SiblingConfig {
+            similarity_delta: 0.10,
+            candidate_budget: 10,
+            per_group_cap: 8,
+            total_cap: 1,
+        };
         let (_, total_stats) = sweep_siblings(
             &groups,
             &units,
             &files,
             &feature_files,
             &evidence,
-            &VerifyConfig::default(),
-            &SiblingConfig {
-                similarity_delta: 0.10,
-                candidate_budget: 10,
-                per_group_cap: 8,
-                total_cap: 1,
-            },
+            &total_config,
         );
         assert_eq!(total_stats.candidates_examined, 1);
         assert_eq!(total_stats.total_cap_dropped, 2);
 
+        let mut budget_config = config();
+        budget_config.siblings = SiblingConfig {
+            similarity_delta: 0.10,
+            candidate_budget: 1,
+            per_group_cap: 8,
+            total_cap: 10,
+        };
         let (_, budget_stats) = sweep_siblings(
             &groups,
             &units,
             &files,
             &feature_files,
             &evidence,
-            &VerifyConfig::default(),
-            &SiblingConfig {
-                similarity_delta: 0.10,
-                candidate_budget: 1,
-                per_group_cap: 8,
-                total_cap: 10,
-            },
+            &budget_config,
         );
         assert_eq!(budget_stats.candidates_examined, 1);
         assert_eq!(budget_stats.candidate_budget_dropped, 2);
+    }
+
+    #[test]
+    fn exact_structure_below_the_normal_threshold_is_low_confidence() {
+        assert_eq!(
+            sibling_classification(Some(CloneClass::Type2), Some(Confidence::High), 0.69, 0.70,),
+            (CloneClass::Type2, Confidence::Low)
+        );
+        assert_eq!(
+            sibling_classification(Some(CloneClass::Type2), Some(Confidence::High), 0.70, 0.70,),
+            (CloneClass::Type2, Confidence::High)
+        );
     }
 }

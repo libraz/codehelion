@@ -98,20 +98,6 @@ struct FragmentMatch {
     score: f64,
 }
 
-impl FragmentMatch {
-    /// Whether `self` is nested inside `other` on both sides.
-    fn nested_in(&self, other: &Self) -> bool {
-        if self.a == other.a && self.b == other.b {
-            return false; // the same match is not "nested"
-        }
-        let (fa, sa, ea) = self.a;
-        let (fb, sb, eb) = self.b;
-        let (ofa, osa, oea) = other.a;
-        let (ofb, osb, oeb) = other.b;
-        ofa == fa && ofb == fb && osa <= sa && ea <= oea && osb <= sb && eb <= oeb
-    }
-}
-
 /// A maximal matched run between two files (possibly the same file).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Run {
@@ -200,13 +186,17 @@ struct ContainmentIndex {
 
 impl ContainmentIndex {
     fn for_runs(runs: &[Run]) -> Self {
-        let mut second_starts: Vec<usize> = runs.iter().map(|run| run.b_start).collect();
+        Self::for_rectangles(&runs.iter().map(run_rectangle).collect::<Vec<_>>())
+    }
+
+    fn for_rectangles(rectangles: &[(usize, usize, usize, usize)]) -> Self {
+        let mut second_starts: Vec<usize> =
+            rectangles.iter().map(|&(_, _, start, _)| start).collect();
         second_starts.sort_unstable();
         second_starts.dedup();
         let mut first_ends = vec![Vec::new(); second_starts.len() + 1];
-        for run in runs {
-            let mut node = second_starts.partition_point(|&start| start < run.b_start) + 1;
-            let first_end = run.a_start + run.len;
+        for &(_, first_end, second_start, _) in rectangles {
+            let mut node = second_starts.partition_point(|&start| start < second_start) + 1;
             while node < first_ends.len() {
                 first_ends[node].push(first_end);
                 node += lowbit(node);
@@ -229,12 +219,17 @@ impl ContainmentIndex {
 
     /// Record a possible outer run.
     fn insert(&mut self, run: Run) {
+        self.insert_rectangle(run_rectangle(&run));
+    }
+
+    fn insert_rectangle(
+        &mut self,
+        (_first_start, first_end, second_start, second_end): (usize, usize, usize, usize),
+    ) {
         let mut node = self
             .second_starts
-            .partition_point(|&start| start < run.b_start)
+            .partition_point(|&start| start < second_start)
             + 1;
-        let first_end = run.a_start + run.len;
-        let second_end = run.b_start + run.len;
         while node < self.first_ends.len() {
             let ends = &self.first_ends[node];
             let reversed = ends.len() - ends.partition_point(|&end| end < first_end);
@@ -250,11 +245,16 @@ impl ContainmentIndex {
 
     /// Whether an already inserted run contains `run` on both spans.
     fn contains(&self, run: Run) -> bool {
-        let first_end = run.a_start + run.len;
-        let second_end = run.b_start + run.len;
+        self.contains_rectangle(run_rectangle(&run))
+    }
+
+    fn contains_rectangle(
+        &self,
+        (_first_start, first_end, second_start, second_end): (usize, usize, usize, usize),
+    ) -> bool {
         let mut node = self
             .second_starts
-            .partition_point(|&start| start <= run.b_start);
+            .partition_point(|&start| start <= second_start);
         while node > 0 {
             let ends = &self.first_ends[node];
             let reversed = ends.len() - ends.partition_point(|&end| end < first_end);
@@ -272,6 +272,15 @@ impl ContainmentIndex {
         }
         false
     }
+}
+
+const fn run_rectangle(run: &Run) -> (usize, usize, usize, usize) {
+    (
+        run.a_start,
+        run.a_start + run.len,
+        run.b_start,
+        run.b_start + run.len,
+    )
 }
 
 /// Least significant set bit of a one-based Fenwick index.
@@ -324,14 +333,33 @@ fn drop_nested_matches(matches: Vec<FragmentMatch>) -> Vec<FragmentMatch> {
     }
     let mut kept: Vec<FragmentMatch> = Vec::new();
     for bucket in buckets.values() {
-        kept.extend(
-            bucket
-                .iter()
-                .filter(|m| !bucket.iter().any(|o| m.nested_in(o)))
-                .copied(),
-        );
+        let mut ordered = bucket.clone();
+        ordered.sort_by_key(|matched| {
+            (
+                matched.a.1,
+                std::cmp::Reverse(matched.a.2),
+                matched.b.1,
+                std::cmp::Reverse(matched.b.2),
+            )
+        });
+        let rectangles: Vec<_> = ordered.iter().map(fragment_rectangle).collect();
+        let mut index = ContainmentIndex::for_rectangles(&rectangles);
+        let mut equal = std::collections::BTreeSet::new();
+        for matched in ordered {
+            let rectangle = fragment_rectangle(&matched);
+            if !equal.insert(rectangle) {
+                kept.push(matched);
+            } else if !index.contains_rectangle(rectangle) {
+                index.insert_rectangle(rectangle);
+                kept.push(matched);
+            }
+        }
     }
     kept
+}
+
+const fn fragment_rectangle(matched: &FragmentMatch) -> (usize, usize, usize, usize) {
+    (matched.a.1, matched.a.2, matched.b.1, matched.b.2)
 }
 
 /// The Type-1 pass: raw fingerprints, verified seeds, maximal runs.
@@ -463,13 +491,15 @@ fn fragment_classes(
     let mut norm: Vec<NormToken<'_>> = Vec::new();
     for (fi, file) in files.iter().enumerate() {
         let braces = segment::brace_pairs(file.tokens);
-        for fragment in segment::fragments(
+        let extracted = segment::fragments(
             file.tokens,
             file.units,
             &braces,
             config.min_clone_tokens,
             config.max_statement_window,
-        ) {
+        );
+        stats.control_headers_over_limit += extracted.control_headers_over_limit;
+        for fragment in extracted.fragments {
             stats.fragments += 1;
             let slice = &file.tokens[fragment.start..fragment.end];
             normalize_into(slice, config.literals, &mut norm);
@@ -481,30 +511,27 @@ fn fragment_classes(
     flat
 }
 
-/// Verify a class against hash collisions: every member must normalize
-/// identically to the first. Mismatches are evicted and counted.
-fn verified_members<'a>(
+/// Partition one compact-hash class by collision-resistant normalized content.
+///
+/// A 64-bit candidate-key collision may contain several real clone classes.
+/// Keeping only the members equal to the first occurrence would let an
+/// unrelated first member hide every later class, so all digest subclasses are
+/// returned and independently considered for pairing.
+fn verified_classes<'a>(
     files: &[InputFile<'a>],
     members: &[(u64, FragmentRef)],
     config: &EngineConfig,
-    stats: &mut EngineStats,
-    reference: &mut Vec<NormToken<'a>>,
-    candidate: &mut Vec<NormToken<'a>>,
-) -> Vec<FragmentRef> {
-    let (fi, s, e) = members[0].1;
-    normalize_into(&files[fi].tokens[s..e], config.literals, reference);
-    members
-        .iter()
-        .filter(|&&(_, (fi, s, e))| {
-            normalize_into(&files[fi].tokens[s..e], config.literals, candidate);
-            let same = candidate == reference;
-            if !same {
-                stats.hash_collisions += 1;
-            }
-            same
-        })
-        .map(|&(_, member)| member)
-        .collect()
+    normalized: &mut Vec<NormToken<'a>>,
+) -> Vec<(ContentDigest, Vec<FragmentRef>)> {
+    let mut classes: BTreeMap<ContentDigest, Vec<FragmentRef>> = BTreeMap::new();
+    for &(_, (file, start, end)) in members {
+        normalize_into(&files[file].tokens[start..end], config.literals, normalized);
+        classes
+            .entry(norm_sequence_digest(normalized))
+            .or_default()
+            .push((file, start, end));
+    }
+    classes.into_iter().collect()
 }
 
 /// The Type-2 pass: scope-normalized fragments grouped by content.
@@ -518,30 +545,22 @@ pub(crate) fn fragment_pass(
     // Classes ordered rarest-first, class-size cap applied before pairing.
     let flat = fragment_classes(files, config, stats);
     let mut kept: Vec<FragmentClass> = Vec::new();
-    let mut reference: Vec<NormToken<'_>> = Vec::new();
-    let mut candidate: Vec<NormToken<'_>> = Vec::new();
+    let mut normalized: Vec<NormToken<'_>> = Vec::new();
     for members in flat.chunk_by(|a, b| a.0 == b.0) {
-        let verified = verified_members(
-            files,
-            members,
-            config,
-            stats,
-            &mut reference,
-            &mut candidate,
-        );
-        if verified.len() < 2 {
+        if members.len() < 2 {
             continue;
         }
-        if verified.len() > config.posting_cap {
-            stats.class_cap_dropped += 1;
-            continue;
+        for (digest, verified) in verified_classes(files, members, config, &mut normalized) {
+            if verified.len() < 2 {
+                stats.hash_collisions += verified.len();
+                continue;
+            }
+            if verified.len() > config.posting_cap {
+                stats.class_cap_dropped += 1;
+                continue;
+            }
+            kept.push((verified.len(), members[0].0, digest, verified));
         }
-        kept.push((
-            verified.len(),
-            members[0].0,
-            norm_sequence_digest(&reference),
-            verified,
-        ));
     }
     stats.fragment_classes = kept.len();
     kept.sort_by_key(|&(len, key, digest, _)| (len, key, digest));
@@ -633,9 +652,10 @@ mod tests {
     }
 
     #[test]
-    fn hash_collision_members_do_not_reach_fragment_pairing() {
+    fn hash_collision_bucket_preserves_every_real_clone_class() {
         let first = [token(TokenKind::Punctuation, "+")];
         let second = [token(TokenKind::Punctuation, "-")];
+        let third = second.clone();
         let files = [
             InputFile {
                 tokens: &first,
@@ -645,22 +665,17 @@ mod tests {
                 tokens: &second,
                 units: &[],
             },
+            InputFile {
+                tokens: &third,
+                units: &[],
+            },
         ];
-        let members = [(7, (0, 0, 1)), (7, (1, 0, 1))];
-        let mut stats = EngineStats::default();
-        let mut reference = Vec::new();
-        let mut candidate = Vec::new();
-        let verified = verified_members(
-            &files,
-            &members,
-            &EngineConfig::default(),
-            &mut stats,
-            &mut reference,
-            &mut candidate,
-        );
-        assert_eq!(verified, vec![(0, 0, 1)]);
-        assert_eq!(stats.hash_collisions, 1);
-        assert!(verified.len() < 2, "no pair may consume the pair budget");
+        let members = [(7, (0, 0, 1)), (7, (1, 0, 1)), (7, (2, 0, 1))];
+        let mut normalized = Vec::new();
+        let classes = verified_classes(&files, &members, &EngineConfig::default(), &mut normalized);
+        let members: Vec<_> = classes.into_iter().map(|(_, members)| members).collect();
+        assert!(members.contains(&vec![(0, 0, 1)]));
+        assert!(members.contains(&vec![(1, 0, 1), (2, 0, 1)]));
     }
 
     #[test]

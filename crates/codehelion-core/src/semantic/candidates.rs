@@ -164,6 +164,7 @@ pub fn extract_registered_candidates(
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
     struct CandidateKey {
         variant: [u8; 32],
+        language: &'static str,
         operations: Vec<OperationKind>,
     }
 
@@ -184,6 +185,7 @@ pub fn extract_registered_candidates(
         index
             .entry(CandidateKey {
                 variant: graph.build_variant_fingerprint,
+                language: graph.language.name(),
                 operations: graph.nodes.iter().map(|node| node.kind).collect(),
             })
             .or_default()
@@ -325,6 +327,7 @@ pub fn group_verified_semantic_pairs(
                 a: local_positions[&pair.candidate.left],
                 b: local_positions[&pair.candidate.right],
                 similarity: 1.0,
+                breakdown: None,
                 class: CloneClass::RestrictedSemantic,
                 confidence: Confidence::High,
             })

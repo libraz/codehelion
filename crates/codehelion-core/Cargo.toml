@@ -22,5 +22,9 @@ toml = "0.8"
 codehelion-fixtures = { version = "0.1.0", path = "../codehelion-fixtures" }
 tempfile = "3"
 
+[[bench]]
+name = "guardrail_work"
+harness = false
+
 [lints]
 workspace = true

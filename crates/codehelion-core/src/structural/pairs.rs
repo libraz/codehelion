@@ -200,6 +200,7 @@ pub(super) fn unrepresented_pairs(
             .or_insert_with(|| Folded {
                 members: BTreeSet::new(),
                 similarity: edge.similarity,
+                breakdown: edge.breakdown,
                 confidence: edge.confidence,
                 described: true,
             });
@@ -216,6 +217,7 @@ pub(super) fn unrepresented_pairs(
         // pairwise evidence.
         if edge.similarity < entry.similarity {
             entry.similarity = edge.similarity;
+            entry.breakdown = edge.breakdown;
             entry.confidence = edge.confidence;
         }
     }
@@ -224,7 +226,7 @@ pub(super) fn unrepresented_pairs(
     let mut pairs: Vec<VerifiedPair> = folded
         .into_iter()
         .filter(|(_, entry)| !entry.described)
-        .map(|((canonical_content, other_content, class), entry)| {
+        .map(|((canonical_content, _other_content, class), entry)| {
             let members: Vec<usize> = entry.members.into_iter().collect();
             // Any occurrence of the canonical content stands for it; the first
             // in member order is the deterministic choice.
@@ -235,16 +237,21 @@ pub(super) fn unrepresented_pairs(
                 .unwrap_or(members[0]);
             let boilerplate = dominant_boilerplate_members(&members, units);
             let width_family = written_once_per_width_members(canonical, &members, units, files);
+            let identity_contents = members
+                .iter()
+                .map(|&member| units[member].group_content(class))
+                .collect::<Vec<_>>();
             VerifiedPair {
                 members,
                 canonical,
                 fingerprint: stable_id::structural_clone_group_fingerprint(
                     variant,
                     class,
-                    &canonical_content,
-                    &[canonical_content, other_content],
+                    &units[canonical].group_content(class),
+                    &identity_contents,
                 ),
                 similarity: entry.similarity,
+                breakdown: entry.breakdown,
                 class,
                 confidence: entry.confidence,
                 boilerplate,
@@ -267,6 +274,7 @@ pub(super) fn unrepresented_pairs(
 struct Folded {
     members: BTreeSet<usize>,
     similarity: f64,
+    breakdown: Option<verify::SimilarityBreakdown>,
     confidence: verify::Confidence,
     described: bool,
 }
@@ -312,7 +320,7 @@ fn already_described(
 /// stretch of code here, described at two levels, and reporting the pair
 /// claims a duplicate that nobody can remove. Containment holds within a file
 /// only, so units in different files are never each other's parents.
-const fn encloses(a: &Unit, b: &Unit) -> bool {
+pub(super) const fn encloses(a: &Unit, b: &Unit) -> bool {
     a.file == b.file
         && ((a.tokens.0 <= b.tokens.0 && b.tokens.1 <= a.tokens.1)
             || (b.tokens.0 <= a.tokens.0 && a.tokens.1 <= b.tokens.1))

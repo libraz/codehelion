@@ -1,7 +1,7 @@
 use super::{
-    ArmPath, BuildVariant, ContentNorm, FileContext, FileFeatures, IrNode, Shape, SyntaxIrFile,
-    TestCodeEvidence, Token, Unit, UnitEvidence, UnitKind, UnitView, boilerplate, stable_id,
-    test_code, verify,
+    ArmPath, BuildVariant, ContentNorm, FileContext, FileFeatures, IrNode, Resolution,
+    ResolvedTypes, Shape, SyntaxIrFile, TestCodeEvidence, Token, Unit, UnitEvidence, UnitKind,
+    UnitView, boilerplate, stable_id, test_code, verify,
 };
 
 /// Flatten every file's units into one global list, in IR-walk order, and
@@ -11,6 +11,8 @@ use super::{
 pub(super) fn flatten_units(
     files: &[SyntaxIrFile],
     variant: &BuildVariant,
+    literals: crate::engine::LiteralNorm,
+    resolved: &ResolvedTypes,
 ) -> (Vec<Unit>, Vec<usize>) {
     let mut units = Vec::new();
     let mut offsets = Vec::with_capacity(files.len());
@@ -27,6 +29,8 @@ pub(super) fn flatten_units(
                 language: file.language,
             },
             variant,
+            literals,
+            resolution: resolved.names_for(file_index),
             local: 0,
             next_conditional: &mut next_conditional,
             units: &mut units,
@@ -54,6 +58,8 @@ struct UnitWalk<'a> {
     source: &'a SyntaxIrFile,
     context: FileContext<'a>,
     variant: &'a BuildVariant,
+    literals: crate::engine::LiteralNorm,
+    resolution: Option<&'a Resolution>,
     local: usize,
     /// Hands out conditional identifiers; shared across every file in a run.
     next_conditional: &'a mut u32,
@@ -87,6 +93,14 @@ impl UnitWalk<'_> {
                 tokens,
                 ContentNorm::Raw,
             );
+            let normalized_content = stable_id::resolved_fragment_fingerprint(
+                self.variant,
+                &self.context,
+                "unit",
+                tokens,
+                ContentNorm::ResolvedNormalized(self.literals),
+                self.resolution,
+            );
             self.units.push(Unit {
                 file: self.file,
                 local: self.local,
@@ -94,6 +108,7 @@ impl UnitWalk<'_> {
                 statements: verify::statement_sequence(node, &self.source.tokens),
                 fingerprint,
                 content,
+                normalized_content,
                 range: node.range,
                 lines: line_range(tokens),
                 tokens: (start, end),

@@ -31,6 +31,7 @@ pub use language::{Classification, HeaderEvidence, HeaderPolicy, Language, Langu
 pub use source_unit::{ContentHash, SourceUnit, TargetKind};
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use self::walk::WalkSettings;
 
@@ -57,6 +58,11 @@ pub struct DiscoveryConfig {
     pub languages: LanguageSelection,
     /// Markers that flag a file as generated.
     pub generated_markers: GeneratedMarkers,
+    /// Compilation database to use instead of an automatically discovered
+    /// `compile_commands.json`.
+    pub compile_commands: Option<PathBuf>,
+    /// Whether the source walker follows symbolic links.
+    pub follow_links: bool,
 }
 
 impl Default for DiscoveryConfig {
@@ -67,6 +73,8 @@ impl Default for DiscoveryConfig {
             header_policy: HeaderPolicy::default(),
             languages: LanguageSelection::default(),
             generated_markers: GeneratedMarkers::default(),
+            compile_commands: None,
+            follow_links: false,
         }
     }
 }
@@ -80,8 +88,14 @@ pub struct SkipReport {
     pub binary: u64,
     /// Files that could not be read.
     pub unreadable: u64,
+    /// Source files excluded because their language was disabled.
+    pub language_excluded: u64,
     /// Symbolic links deliberately left unresolved by the walker.
     pub symlinks: u64,
+    /// Symbolic-link files deliberately left unresolved by the walker.
+    pub symlink_files: u64,
+    /// Symbolic-link directories deliberately left unresolved by the walker.
+    pub symlink_directories: u64,
     /// Directory entries the walker could not read.
     pub walk_errors: u64,
 }
@@ -90,7 +104,12 @@ impl SkipReport {
     /// Total number of skipped entries.
     #[must_use]
     pub const fn total(&self) -> u64 {
-        self.too_large + self.binary + self.unreadable + self.symlinks + self.walk_errors
+        self.too_large
+            + self.binary
+            + self.unreadable
+            + self.language_excluded
+            + self.symlinks
+            + self.walk_errors
     }
 }
 
@@ -113,6 +132,18 @@ pub struct DiscoveryReport {
     pub skipped: SkipReport,
     /// Parsed compilation database, if one was found and read successfully.
     pub compile_commands: Option<CompileCommands>,
+    /// A compilation database found during discovery but not usable for
+    /// semantic analysis.
+    pub compile_commands_error: Option<CompileCommandsDiagnostic>,
+}
+
+/// A compilation database that discovery found but could not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompileCommandsDiagnostic {
+    /// The database path selected during discovery.
+    pub path: PathBuf,
+    /// The user-facing reason the database could not be used.
+    pub message: String,
 }
 
 /// A failure that prevents discovery from running at all.
@@ -138,6 +169,10 @@ pub enum DiscoveryError {
 /// # Errors
 ///
 /// Returns [`DiscoveryError`] if `root` cannot be resolved to a directory.
+#[allow(
+    clippy::too_many_lines,
+    reason = "discovery keeps traversal accounting and the single-read source handoff together"
+)]
 pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport, DiscoveryError> {
     let root = root.canonicalize().map_err(|source| DiscoveryError::Root {
         path: root.to_path_buf(),
@@ -149,46 +184,67 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
         max_file_bytes: config.max_file_bytes,
         header_policy: config.header_policy,
         selection: config.languages,
+        follow_links: config.follow_links,
     };
     let walked = walk::collect(&root, &settings);
+    let mut skipped = SkipReport {
+        too_large: walked.too_large,
+        language_excluded: walked.language_excluded,
+        symlinks: walked.symlinks,
+        symlink_files: walked.symlink_files,
+        symlink_directories: walked.symlink_directories,
+        walk_errors: walked.walk_errors,
+        ..SkipReport::default()
+    };
+    let header_evidence = walked.evidence.verdict();
+    let manifests = walked.manifests;
+    let compile_candidates = walked.compile_commands;
     // Settle the bare `.h` headers before anything reads them: the grammar a
     // header is parsed with is part of the build variant, so it is one
     // decision for the whole run rather than a per-file guess. An explicit
     // policy is the answer where there is one; detection only fills the gap.
+    let mut loaded = Vec::new();
+    for candidate in walked.candidates {
+        match std::fs::read(&candidate.absolute_path) {
+            Ok(bytes) => loaded.push((candidate, bytes)),
+            Err(_) => skipped.unreadable += 1,
+        }
+    }
     let header_language = match config.header_policy {
         HeaderPolicy::C => Language::C,
         HeaderPolicy::Cpp => Language::Cpp,
-        HeaderPolicy::Detect => walked
-            .evidence
-            .verdict()
-            .unwrap_or_else(|| headers_read_alone(&walked.candidates)),
+        HeaderPolicy::Detect => header_evidence.unwrap_or_else(|| headers_read_alone(&loaded)),
     };
-    let layout = CargoLayout::from_manifests(&walked.manifests);
-    let compile_commands = walked
-        .compile_commands
-        .as_deref()
-        .and_then(|path| CompileCommands::read(path).ok());
+    let layout = CargoLayout::from_manifests(&manifests);
+    let compile_commands_path = config.compile_commands.as_ref().map_or_else(
+        || select_compile_commands(&root, compile_candidates),
+        |path| Some(resolve_compile_commands_path(&root, path)),
+    );
+    let (compile_commands, compile_commands_error) = compile_commands_path.map_or_else(
+        || (None, None),
+        |path| match CompileCommands::read_with_limit(&path, config.max_file_bytes) {
+            Ok(database) => (Some(database), None),
+            Err(error) => (
+                None,
+                Some(CompileCommandsDiagnostic {
+                    path,
+                    message: error.to_string(),
+                }),
+            ),
+        },
+    );
 
-    let mut skipped = SkipReport {
-        too_large: walked.too_large,
-        symlinks: walked.symlinks,
-        walk_errors: walked.walk_errors,
-        ..SkipReport::default()
-    };
     let mut units = Vec::new();
     let mut suppressed_generated = Vec::new();
 
-    for candidate in walked.candidates {
+    for (candidate, bytes) in loaded {
         let classification = candidate.classification.settled(header_language);
         // The walk let a header through while either C or C++ was enabled,
         // because it did not yet know which one it was.
         if !config.languages.includes(classification.language) {
+            skipped.language_excluded += 1;
             continue;
         }
-        let Ok(bytes) = std::fs::read(&candidate.absolute_path) else {
-            skipped.unreadable += 1;
-            continue;
-        };
         let head = &bytes[..bytes.len().min(HEAD_BYTES)];
         if head.contains(&0) {
             skipped.binary += 1;
@@ -210,7 +266,8 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
             language: classification.language,
             is_header: classification.is_header,
             content_hash,
-            byte_len: candidate.byte_len,
+            byte_len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            source_bytes: Arc::from(bytes),
             package,
             crate_name,
             target_kind,
@@ -228,7 +285,30 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
         suppressed_generated,
         skipped,
         compile_commands,
+        compile_commands_error,
     })
+}
+
+fn resolve_compile_commands_path(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
+fn select_compile_commands(root: &Path, mut candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    candidates.sort_by(|left, right| {
+        compile_commands_depth(root, left)
+            .cmp(&compile_commands_depth(root, right))
+            .then_with(|| left.cmp(right))
+    });
+    candidates.into_iter().next()
+}
+
+fn compile_commands_depth(root: &Path, path: &Path) -> usize {
+    path.strip_prefix(root)
+        .map_or(usize::MAX, |relative| relative.components().count())
 }
 
 /// Settle bare `.h` headers from the headers themselves, for a tree that has
@@ -240,15 +320,12 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
 /// than a detail of it. Each header is read for a C++-only spelling and the
 /// first one that speaks decides — `language::speaks_cpp` says why one is
 /// enough, and why C is the answer when none of them says otherwise.
-fn headers_read_alone(candidates: &[walk::Candidate]) -> Language {
-    for candidate in candidates {
+fn headers_read_alone(candidates: &[(walk::Candidate, Vec<u8>)]) -> Language {
+    for (candidate, bytes) in candidates {
         if !candidate.classification.provisional {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&candidate.absolute_path) else {
-            continue;
-        };
-        if language::speaks_cpp(&String::from_utf8_lossy(&bytes)) {
+        if language::speaks_cpp(&String::from_utf8_lossy(bytes)) {
             return Language::Cpp;
         }
     }
@@ -296,6 +373,15 @@ mod tests {
             .find(|u| u.relative_path == Path::new("src/main.rs"))
             .unwrap();
         assert_eq!(main.target_kind, TargetKind::Binary);
+    }
+
+    #[test]
+    fn source_bytes_are_the_bytes_the_discovery_hash_describes() {
+        let (_guard, root) = fixture();
+        let report = discover(&root, &DiscoveryConfig::default()).unwrap();
+        for unit in &report.units {
+            assert_eq!(unit.content_hash, ContentHash::of(&unit.source_bytes));
+        }
     }
 
     /// Discovery is where the package layout is read, so it is where a file
@@ -388,6 +474,120 @@ mod tests {
         assert_eq!(report.skipped.too_large, 1);
     }
 
+    #[test]
+    fn oversized_metadata_inputs_are_skipped_before_they_are_read() {
+        let (_guard, root) = fixture();
+        fs::write(root.join("Cargo.toml"), "x".repeat(4096)).unwrap();
+        fs::write(root.join("compile_commands.json"), "[{}]".repeat(1024)).unwrap();
+        let config = DiscoveryConfig {
+            max_file_bytes: 1024,
+            ..DiscoveryConfig::default()
+        };
+
+        let report = discover(&root, &config).unwrap();
+
+        assert!(report.packages.is_empty());
+        assert!(report.compile_commands.is_none());
+        assert!(report.compile_commands_error.is_none());
+        assert_eq!(report.skipped.too_large, 2);
+    }
+
+    #[test]
+    fn an_oversized_explicit_compilation_database_is_reported_without_reading_it() {
+        let (_guard, root) = fixture();
+        let database = root.join("commands.json");
+        fs::write(&database, "[{}]".repeat(1024)).unwrap();
+        let config = DiscoveryConfig {
+            max_file_bytes: 1024,
+            compile_commands: Some(PathBuf::from("commands.json")),
+            ..DiscoveryConfig::default()
+        };
+
+        let report = discover(&root, &config).unwrap();
+
+        assert!(report.compile_commands.is_none());
+        assert_eq!(report.skipped.too_large, 1);
+        assert_eq!(
+            report
+                .compile_commands_error
+                .as_ref()
+                .map(|diagnostic| diagnostic.message.as_str()),
+            Some("compile_commands.json is 4096 bytes, exceeding the 1024-byte limit")
+        );
+    }
+
+    /// `CMake` commonly leaves its database in an ignored build directory and
+    /// exposes it through this root-level symlink for editor tooling.
+    #[cfg(unix)]
+    #[test]
+    fn discovers_a_root_compilation_database_symlink_into_an_ignored_build_directory() {
+        let (_guard, root) = fixture();
+        let build = root.join("build");
+        fs::create_dir_all(&build).unwrap();
+        fs::write(root.join(".gitignore"), "build/\n").unwrap();
+        fs::write(
+            build.join("compile_commands.json"),
+            r#"[{"directory":"/work","file":"/work/src/main.cpp","arguments":["clang++","-c","/work/src/main.cpp"]}]"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "build/compile_commands.json",
+            root.join("compile_commands.json"),
+        )
+        .unwrap();
+
+        let report = discover(&root, &DiscoveryConfig::default()).unwrap();
+        assert_eq!(
+            report.compile_commands.as_ref().map(|db| db.entries.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn an_explicit_compilation_database_overrides_automatic_discovery() {
+        let (_guard, root) = fixture();
+        fs::write(
+            root.join("compile_commands.json"),
+            r#"[{"directory":"/work","file":"/work/automatic.cpp"}]"#,
+        )
+        .unwrap();
+        let explicit = root.join("build/commands.json");
+        fs::create_dir_all(explicit.parent().unwrap()).unwrap();
+        fs::write(
+            &explicit,
+            r#"[{"directory":"/work","file":"/work/explicit.cpp"}]"#,
+        )
+        .unwrap();
+        let config = DiscoveryConfig {
+            compile_commands: Some(PathBuf::from("build/commands.json")),
+            ..DiscoveryConfig::default()
+        };
+
+        let report = discover(&root, &config).unwrap();
+        assert_eq!(
+            report
+                .compile_commands
+                .as_ref()
+                .and_then(|db| db.entries.first())
+                .map(|entry| entry.file.as_path()),
+            Some(Path::new("/work/explicit.cpp"))
+        );
+    }
+
+    #[test]
+    fn automatic_compilation_database_selection_is_shallow_then_lexical() {
+        let root = Path::new("/work");
+        let selected = select_compile_commands(
+            root,
+            vec![
+                root.join("z/compile_commands.json"),
+                root.join("a/compile_commands.json"),
+                root.join("nested/a/compile_commands.json"),
+            ],
+        );
+        assert_eq!(selected, Some(root.join("a/compile_commands.json")));
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinks_are_counted_without_reading_or_following_them() {
@@ -399,12 +599,115 @@ mod tests {
 
         let report = discover(&root, &DiscoveryConfig::default()).unwrap();
         assert_eq!(report.skipped.symlinks, 1);
+        assert_eq!(report.skipped.symlink_files, 1);
+        assert_eq!(report.skipped.symlink_directories, 0);
         assert_eq!(report.skipped.total(), 1);
         assert!(
             report
                 .units
                 .iter()
                 .all(|unit| unit.relative_path != Path::new("src/linked.rs"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untracked_link_directories_are_counted_separately_from_linked_files() {
+        use std::os::unix::fs::symlink;
+
+        let (_guard, root) = fixture();
+        symlink(root.join("src"), root.join("linked-src")).unwrap();
+        let report = discover(&root, &DiscoveryConfig::default()).unwrap();
+        assert_eq!(report.skipped.symlinks, 1);
+        assert_eq!(report.skipped.symlink_files, 0);
+        assert_eq!(report.skipped.symlink_directories, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_walked_source_is_accounted_for_by_one_discovery_outcome() {
+        use std::os::unix::fs::symlink;
+
+        let (_guard, root) = fixture();
+        fs::write(root.join("src/util.c"), "int value(void) { return 1; }\n").unwrap();
+        fs::write(
+            root.join("src/generated.rs"),
+            "// @generated\nfn generated() {}\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/binary.rs"), b"fn binary() {}\0").unwrap();
+        symlink(root.join("src/lib.rs"), root.join("src/linked.rs")).unwrap();
+        let report = discover(
+            &root,
+            &DiscoveryConfig {
+                languages: LanguageSelection {
+                    rust: true,
+                    c: false,
+                    cpp: false,
+                },
+                ..DiscoveryConfig::default()
+            },
+        )
+        .unwrap();
+        let accounted = report.units.len()
+            + report.suppressed_generated.len()
+            + usize::try_from(
+                report.skipped.language_excluded + report.skipped.binary + report.skipped.symlinks,
+            )
+            .unwrap();
+        assert_eq!(accounted, 6, "every walked source reached one outcome");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn following_links_includes_a_linked_source_without_losing_the_target() {
+        use std::os::unix::fs::symlink;
+
+        let (_guard, root) = fixture();
+        let target = root.join("src/lib.rs");
+        symlink(&target, root.join("src/linked.rs")).unwrap();
+        let report = discover(
+            &root,
+            &DiscoveryConfig {
+                follow_links: true,
+                ..DiscoveryConfig::default()
+            },
+        )
+        .unwrap();
+        let paths: Vec<_> = report
+            .units
+            .iter()
+            .map(|unit| unit.relative_path.as_path())
+            .collect();
+        assert!(paths.contains(&Path::new("src/lib.rs")));
+        assert!(paths.contains(&Path::new("src/linked.rs")));
+        assert_eq!(report.skipped.symlinks, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn following_a_directory_cycle_terminates_and_accounts_for_the_walk_error() {
+        use std::os::unix::fs::symlink;
+
+        let (_guard, root) = fixture();
+        symlink(&root, root.join("src/cycle")).unwrap();
+        let report = discover(
+            &root,
+            &DiscoveryConfig {
+                follow_links: true,
+                ..DiscoveryConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            report.skipped.walk_errors > 0,
+            "the walker must report a detected symlink cycle"
+        );
+        assert!(
+            report
+                .units
+                .iter()
+                .any(|unit| unit.relative_path == Path::new("src/lib.rs"))
         );
     }
 
@@ -452,6 +755,7 @@ mod tests {
         };
         let report = discover(&root, &config).unwrap();
         assert!(report.units.iter().all(|u| u.language == Language::Rust));
+        assert_eq!(report.skipped.language_excluded, 1);
     }
 
     /// A tree holding `names`, each an empty-but-valid source file.
@@ -556,6 +860,7 @@ mod tests {
             vec![Path::new("plain.c")],
             "the header settled on C++, which this run does not analyse"
         );
+        assert_eq!(report.skipped.language_excluded, 3);
     }
 
     #[test]

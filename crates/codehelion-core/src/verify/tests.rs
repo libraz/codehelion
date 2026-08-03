@@ -168,15 +168,15 @@ fn identical_units_are_a_type1_clone() {
 }
 
 #[test]
-fn same_structure_but_renamed_heads_is_a_type2_clone() {
+fn low_lexical_structural_match_is_not_a_type2_clone() {
     let a = statements(&[(3, &["if", "acc"]), (12, &["let", "count"])]);
     let b = statements(&[(3, &["if", "state"]), (12, &["let", "seen"])]);
     let feats = features(counts(4), &[1, 2, 3], 9, &["push"]);
     let va = a.view(&feats);
     let vb = b.view(&feats);
     let verdict = verify(&va, &vb, &VerifyConfig::default());
-    assert_eq!(verdict.class, Some(CloneClass::Type2));
-    assert!(verdict.breakdown.lexical < 1.0);
+    assert_eq!(verdict.class, Some(CloneClass::Type3));
+    assert!(verdict.breakdown.lexical < VerifyConfig::default().type2_min_lexical);
     assert!((verdict.breakdown.structural - 1.0).abs() < 1e-9);
 }
 
@@ -559,6 +559,19 @@ fn the_cell_ceiling_bounds_a_pair_of_very_different_lengths() {
     let (lcs, alignment) = align(&a, &b, &config);
     assert!(lcs <= a.len());
     assert_eq!(alignment.matched.len() + alignment.only_a.len(), a.len());
+}
+
+#[test]
+fn alignment_band_never_allocates_beyond_either_sequence() {
+    let config = VerifyConfig {
+        alignment_band: 10_000,
+        ..VerifyConfig::default()
+    };
+    let band = Band::new(3, 5, &config);
+
+    assert_eq!(band.back, 3);
+    assert_eq!(band.forward, 5);
+    assert_eq!(band.width(), 9);
 }
 
 #[test]

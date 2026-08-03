@@ -1,18 +1,20 @@
+use super::reporting::{group_detail, group_fingerprint};
 use super::{
     Boilerplate, CloneClass, Confirmed, CrossVariantUnit, RegionOccurrence, RegionSide,
-    ResolvedTypes, StructuralRegion, Unit, compare_build_variants, covers_run,
-    dominant_boilerplate, drop_subsumed, is_allocation_api, merge_adjacent, set_jaccard,
-    unrepresented_pairs,
+    ResolvedTypes, StructuralConfig, StructuralRegion, Unit, compare_build_variants, covers_run,
+    dominant_boilerplate, drop_subsumed, features, flatten_units, is_allocation_api,
+    merge_adjacent, set_jaccard, unit_evidence, unrepresented_pairs, view,
 };
 use crate::candidate::StatementRun;
 use crate::conditional::ArmPath;
 use crate::discovery::{BuildVariant, Language, LanguageSelection};
+use crate::engine::{LiteralNorm, normalize::Resolution};
 use crate::frontend::{SourceSpan, Token, TokenKind, UnitKind};
 use crate::grouping;
-use crate::ir::{ByteRange, IR_SCHEMA_VERSION, SyntaxIrFile};
+use crate::ir::{ByteRange, IR_SCHEMA_VERSION, IrNode, Shape, SyntaxIrFile};
 use crate::stable_id::{CloneGroupFingerprint, FragmentFingerprint, UnitFingerprint};
 use crate::types::TypeTag;
-use crate::verify::Confidence;
+use crate::verify::{Confidence, SimilarityBreakdown};
 use std::collections::BTreeSet;
 
 fn occurrence(file: usize, start: usize, end: usize) -> RegionOccurrence {
@@ -80,6 +82,7 @@ fn unit_at(file: usize, start: usize, end: usize) -> Unit {
         statements: Vec::new(),
         fingerprint: UnitFingerprint::from_bytes([0; 16]),
         content: FragmentFingerprint::from_bytes([0; 16]),
+        normalized_content: FragmentFingerprint::from_bytes([0; 16]),
         range: ByteRange { start, end },
         lines: (1, 2),
         tokens: (0, 0),
@@ -91,6 +94,56 @@ fn unit_at(file: usize, start: usize, end: usize) -> Unit {
     }
 }
 
+#[test]
+fn structural_non_exact_group_ids_survive_consistent_renames() {
+    let variant = BuildVariant::structural(
+        LanguageSelection {
+            rust: true,
+            c: false,
+            cpp: false,
+        },
+        Language::Cpp,
+    );
+    let group = grouping::StructuralGroup {
+        clone_type: CloneClass::Type2,
+        confidence: Confidence::High,
+        canonical: 0,
+        medoid_similarities: vec![1.0, 0.9],
+        min_pairwise: 0.9,
+        members: vec![0, 1],
+    };
+    let corpus = |raw_a, raw_b| {
+        vec![
+            Unit {
+                content: FragmentFingerprint::from_bytes([raw_a; 16]),
+                normalized_content: FragmentFingerprint::from_bytes([7; 16]),
+                ..unit_at(0, 0, 10)
+            },
+            Unit {
+                content: FragmentFingerprint::from_bytes([raw_b; 16]),
+                normalized_content: FragmentFingerprint::from_bytes([8; 16]),
+                ..unit_at(1, 0, 10)
+            },
+        ]
+    };
+    let before = corpus(1, 2);
+    let after = corpus(3, 4);
+
+    assert_eq!(
+        group_fingerprint(&group, &before, &variant),
+        group_fingerprint(&group, &after, &variant),
+    );
+
+    let exact_group = grouping::StructuralGroup {
+        clone_type: CloneClass::Type1,
+        ..group
+    };
+    assert_ne!(
+        group_fingerprint(&exact_group, &before, &variant),
+        group_fingerprint(&exact_group, &after, &variant),
+    );
+}
+
 fn grouped(members: Vec<usize>) -> grouping::StructuralGroup {
     grouping::StructuralGroup {
         clone_type: CloneClass::Type2,
@@ -100,6 +153,165 @@ fn grouped(members: Vec<usize>) -> grouping::StructuralGroup {
         min_pairwise: 0.9,
         members,
     }
+}
+
+fn cohesion_file(words: &[&str]) -> SyntaxIrFile {
+    let tokens = words
+        .iter()
+        .enumerate()
+        .map(|(index, word)| Token {
+            kind: TokenKind::Identifier,
+            text: (*word).into(),
+            span: SourceSpan {
+                start_byte: index * 8,
+                end_byte: index * 8 + word.len(),
+                start_line: 1,
+                start_column: 1,
+            },
+        })
+        .collect();
+    let token_end = words.len();
+    SyntaxIrFile {
+        language: Language::Rust,
+        frontend_version: "test",
+        ir_schema_version: IR_SCHEMA_VERSION,
+        tokens,
+        roots: vec![IrNode {
+            shape: Shape::Function,
+            name: None,
+            token_start: 0,
+            token_end,
+            range: ByteRange {
+                start: 0,
+                end: token_end * 8,
+            },
+            children: vec![IrNode {
+                shape: Shape::Block,
+                name: None,
+                token_start: 0,
+                token_end,
+                range: ByteRange {
+                    start: 0,
+                    end: token_end * 8,
+                },
+                children: vec![IrNode {
+                    shape: Shape::ExprStmt,
+                    name: None,
+                    token_start: 0,
+                    token_end,
+                    range: ByteRange {
+                        start: 0,
+                        end: token_end * 8,
+                    },
+                    children: Vec::new(),
+                }],
+            }],
+        }],
+        diagnostics: Vec::new(),
+        error_ranges: Vec::new(),
+        depth_truncated: false,
+        test_module: false,
+    }
+}
+
+#[test]
+fn group_cohesion_evidence_uses_the_weakest_noncanonical_pair() {
+    let files = vec![
+        cohesion_file(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]),
+        cohesion_file(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "x"]),
+        cohesion_file(&["a", "b", "c", "d", "e", "f", "g", "h", "y", "j"]),
+    ];
+    let variant = BuildVariant::structural(
+        LanguageSelection {
+            rust: true,
+            c: false,
+            cpp: false,
+        },
+        Language::Rust,
+    );
+    let config = StructuralConfig::default();
+    let feature_files: Vec<_> = files.iter().map(features::extract).collect();
+    let (units, _) = flatten_units(&files, &variant, config.literals, &ResolvedTypes::default());
+    let evidence = unit_evidence(&units, &ResolvedTypes::default());
+    let canonical_to_first = crate::verify::verify(
+        &view(0, &units, &files, &feature_files, &evidence),
+        &view(1, &units, &files, &feature_files, &evidence),
+        &config.verify,
+    )
+    .breakdown;
+    let canonical_to_second = crate::verify::verify(
+        &view(0, &units, &files, &feature_files, &evidence),
+        &view(2, &units, &files, &feature_files, &evidence),
+        &config.verify,
+    )
+    .breakdown;
+    let weakest_pair = crate::verify::verify(
+        &view(1, &units, &files, &feature_files, &evidence),
+        &view(2, &units, &files, &feature_files, &evidence),
+        &config.verify,
+    )
+    .breakdown;
+    assert!(weakest_pair.composite < canonical_to_first.composite);
+    assert!(weakest_pair.composite < canonical_to_second.composite);
+
+    let group = grouping::StructuralGroup {
+        clone_type: CloneClass::Type3,
+        confidence: Confidence::High,
+        canonical: 0,
+        medoid_similarities: vec![
+            1.0,
+            canonical_to_first.composite,
+            canonical_to_second.composite,
+        ],
+        min_pairwise: weakest_pair.composite,
+        members: vec![0, 1, 2],
+    };
+    let detail = group_detail(
+        &group,
+        &units,
+        &files,
+        &feature_files,
+        &evidence,
+        &variant,
+        &config,
+    );
+
+    assert_eq!(detail.cohesion_breakdown, weakest_pair);
+    assert!((detail.cohesion_breakdown.composite - group.min_pairwise).abs() < f64::EPSILON);
+}
+
+#[test]
+fn compiler_name_resolution_changes_semantic_unit_normalization() {
+    let files = vec![cohesion_file(&["external_name"])];
+    let variant = BuildVariant::semantic(
+        LanguageSelection {
+            rust: true,
+            c: false,
+            cpp: false,
+        },
+        Language::Rust,
+        Vec::new(),
+    );
+    let (lexical, _) = flatten_units(
+        &files,
+        &variant,
+        LiteralNorm::Full,
+        &ResolvedTypes::default(),
+    );
+    let mut names = Resolution::new();
+    names.insert(0, true);
+    let resolved = ResolvedTypes::per_file_with_semantic_normalization(
+        vec![Vec::new()],
+        vec![Vec::new()],
+        vec![names],
+    );
+    let (compiler_aware, _) = flatten_units(&files, &variant, LiteralNorm::Full, &resolved);
+
+    assert_ne!(
+        lexical[0].normalized_content,
+        compiler_aware[0].normalized_content
+    );
+    assert_eq!(lexical[0].content, compiler_aware[0].content);
 }
 
 #[test]
@@ -177,6 +389,7 @@ fn an_unrepresented_pair_keeps_the_same_shape_classifications_as_a_group() {
             a: 0,
             b: 1,
             similarity: 0.9,
+            breakdown: None,
             class: CloneClass::Type2,
             confidence: Confidence::High,
         },
@@ -184,6 +397,7 @@ fn an_unrepresented_pair_keeps_the_same_shape_classifications_as_a_group() {
             a: 1,
             b: 2,
             similarity: 0.9,
+            breakdown: None,
             class: CloneClass::Type2,
             confidence: Confidence::High,
         },
@@ -210,6 +424,10 @@ fn an_unrepresented_pair_keeps_the_same_shape_classifications_as_a_group() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the folded-pair fixture keeps both crossings and their evidence together"
+)]
 fn an_unrepresented_pair_keeps_its_weakest_crossing_as_confidence() {
     // The two contents each occur twice. Structural evidence can differ
     // by occurrence (for example because compiler evidence is partial),
@@ -260,6 +478,14 @@ fn an_unrepresented_pair_keeps_its_weakest_crossing_as_confidence() {
             a: 0,
             b: 2,
             similarity: 0.95,
+            breakdown: Some(SimilarityBreakdown {
+                lexical: 0.95,
+                structural: 0.95,
+                control_flow: Some(0.95),
+                type_similarity: None,
+                api: Some(0.95),
+                composite: 0.95,
+            }),
             class: CloneClass::Type3,
             confidence: Confidence::High,
         },
@@ -267,6 +493,14 @@ fn an_unrepresented_pair_keeps_its_weakest_crossing_as_confidence() {
             a: 1,
             b: 3,
             similarity: 0.75,
+            breakdown: Some(SimilarityBreakdown {
+                lexical: 0.70,
+                structural: 0.80,
+                control_flow: Some(0.75),
+                type_similarity: None,
+                api: Some(0.74),
+                composite: 0.75,
+            }),
             class: CloneClass::Type3,
             confidence: Confidence::Low,
         },
@@ -295,6 +529,17 @@ fn an_unrepresented_pair_keeps_its_weakest_crossing_as_confidence() {
     assert_eq!(pairs[0].members.len(), 4);
     assert!((pairs[0].similarity - 0.75).abs() < f64::EPSILON);
     assert_eq!(pairs[0].confidence, Confidence::Low);
+    assert_eq!(
+        pairs[0].breakdown,
+        Some(SimilarityBreakdown {
+            lexical: 0.70,
+            structural: 0.80,
+            control_flow: Some(0.75),
+            type_similarity: None,
+            api: Some(0.74),
+            composite: 0.75,
+        })
+    );
 }
 
 fn at(start: usize, end: usize, tag: TypeTag) -> (ByteRange, TypeTag) {
@@ -696,4 +941,64 @@ fn cross_variant_comparison_keeps_origins_and_is_order_stable() {
     assert_eq!(forward.groups.len(), 1);
     assert_eq!(forward.groups[0].members[0].origin_variant, "a");
     assert!(compare_build_variants(&[left]).is_none());
+
+    let moved_left = CrossVariantUnit {
+        file_path: "moved/left.cpp",
+        start_line: 200,
+        end_line: 204,
+        ..left
+    };
+    let moved_right = CrossVariantUnit {
+        file_path: "moved/right.cpp",
+        start_line: 500,
+        end_line: 507,
+        ..right
+    };
+    let moved = compare_build_variants(&[moved_left, moved_right]).expect("moved comparison");
+    assert_eq!(forward.groups[0].id, moved.groups[0].id);
+    assert_eq!(
+        forward.groups[0]
+            .members
+            .iter()
+            .map(|member| member.id)
+            .collect::<Vec<_>>(),
+        moved.groups[0]
+            .members
+            .iter()
+            .map(|member| member.id)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn cross_variant_group_identity_includes_the_language_class_axis() {
+    let tokens = [Token {
+        kind: TokenKind::Identifier,
+        text: "same".into(),
+        span: SourceSpan {
+            start_byte: 0,
+            end_byte: 4,
+            start_line: 1,
+            start_column: 1,
+        },
+    }];
+    let unit = |origin_variant, language, file_path| CrossVariantUnit {
+        origin_variant,
+        language,
+        file_path,
+        start_line: 1,
+        end_line: 1,
+        name: Some("same"),
+        tokens: &tokens,
+    };
+    let comparison = compare_build_variants(&[
+        unit("a", Language::C, "a.c"),
+        unit("b", Language::C, "b.c"),
+        unit("a", Language::Cpp, "a.cpp"),
+        unit("b", Language::Cpp, "b.cpp"),
+    ])
+    .expect("two origins in both language classes");
+
+    assert_eq!(comparison.groups.len(), 2);
+    assert_ne!(comparison.groups[0].id, comparison.groups[1].id);
 }

@@ -188,40 +188,37 @@ pub fn generate(files: &[FileFeatures], config: &ControlFlowConfig) -> ControlFl
 
     let mut pairs = Vec::new();
     let mut remaining = config.pair_budget;
-    for (&hash, postings) in eligible {
-        // Price the whole list before taking any of it: what it costs is what
-        // survives the length-ratio gate. Counting rather than collecting keeps
-        // the refused lists free — the pass walks every list, and a scan of
-        // millions cannot afford an allocation per list it does not use.
-        let mut wanted = 0usize;
+    for (index, &(hash, postings)) in eligible.iter().enumerate() {
+        // Charge the closed-form upper bound before entering the quadratic
+        // length-ratio loop. Lists are shortest-first, so a later list cannot
+        // fit after this one fails; stopping here makes the budget bound work.
+        let possible = postings
+            .len()
+            .saturating_mul(postings.len().saturating_sub(1))
+            / 2;
+        if possible > remaining {
+            stats.budget_exhausted = true;
+            stats.budget_dropped = eligible[index..].iter().fold(0, |total, (_, list)| {
+                total.saturating_add(list.len().saturating_mul(list.len().saturating_sub(1)) / 2)
+            });
+            break;
+        }
+        remaining -= possible;
         let mut filtered = 0usize;
         for (i, &a) in postings.iter().enumerate() {
             for &b in &postings[i + 1..] {
                 if a.within_length_ratio(b, config.max_length_ratio) {
-                    wanted += 1;
                 } else {
                     filtered += 1;
                 }
             }
         }
-        // Unlike the exact-seed stage, a longer list here can cost less than a
-        // shorter one, because the gate removes more of its pairs. So the first
-        // list that does not fit is not necessarily the last that could:
-        // refusing one list goes on to the next rather than ending the pass.
-        if wanted > remaining {
-            stats.budget_exhausted = true;
-            stats.budget_dropped = stats.budget_dropped.saturating_add(wanted);
-            continue;
-        }
-        remaining -= wanted;
-        // Neither the gate's count nor the pairs are charged for a list that
-        // was refused: a list nobody paired filtered nothing.
         stats.filtered_by_size += filtered;
         for (i, &a) in postings.iter().enumerate() {
             for &b in &postings[i + 1..] {
                 if a.within_length_ratio(b, config.max_length_ratio) {
                     let (a, b) = if a <= b { (a, b) } else { (b, a) };
-                    pairs.push(ControlFlowPair { a, b, hash });
+                    pairs.push(ControlFlowPair { a, b, hash: *hash });
                 }
             }
         }
@@ -362,13 +359,10 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_list_does_not_stop_a_later_one_the_budget_can_hold() {
-        // The gate makes a list's cost independent of its length, so the pass
-        // keeps looking after a refusal. Three same-sized units share the first
-        // skeleton and cost all three of their pairs; four units share the
-        // second, and sizes so far apart that the gate leaves one pair
-        // standing. Rarest-first meets the three-unit list first, an allowance
-        // of one cannot hold it, and the longer list still fits.
+    fn a_refused_list_stops_before_later_quadratic_work() {
+        // Rarest-first meets the three-unit list first. Its C(3,2) work bound
+        // exceeds the allowance, so the longer list is never walked even
+        // though its length-ratio gate would have left one pair.
         let files = vec![file(vec![
             unit(1, 4, 20),
             unit(1, 4, 20),
@@ -383,12 +377,10 @@ mod tests {
             ..ControlFlowConfig::default()
         };
         let set = generate(&files, &config);
-        assert_eq!(set.pairs.len(), 1);
-        assert_eq!(set.pairs[0].hash, hash(2));
+        assert!(set.pairs.is_empty());
         assert!(set.stats.budget_exhausted);
-        // The gate's count is charged for the list that was taken and not for
-        // the one that was refused: a list nobody paired filtered nothing.
-        assert_eq!(set.stats.filtered_by_size, 5);
+        assert_eq!(set.stats.filtered_by_size, 0);
+        assert_eq!(set.stats.budget_dropped, 9);
     }
 
     #[test]

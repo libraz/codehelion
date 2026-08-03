@@ -59,7 +59,7 @@ use crate::frontend::{Token, TokenKind};
 /// Recorded alongside the other detector versions: a change in what counts as
 /// test code changes how a report is ordered, so results from two versions are
 /// not comparable without saying so.
-pub const TEST_CODE_VERSION: &str = "test-code-v2";
+pub const TEST_CODE_VERSION: &str = "test-code-v3";
 
 /// Conventional paths that contain test code.
 ///
@@ -278,11 +278,120 @@ fn closing(body: &[Token], open: &str, close: &str) -> Option<usize> {
     None
 }
 
-/// Whether an attribute body names the test identifier.
+/// Whether an attribute makes its item test-only or declares a test case.
 fn names_test(body: &[Token]) -> bool {
-    body.iter().any(|token| {
-        matches!(token.kind, TokenKind::Identifier | TokenKind::Keyword) && token.text == TEST_IDENT
-    })
+    let Some((head, arguments)) = attribute_parts(body) else {
+        return false;
+    };
+    match (head, arguments) {
+        ("cfg", Some(predicate)) => {
+            predicate_values(predicate, false) & TRUE_VALUE == 0
+                && predicate_values(predicate, true) & TRUE_VALUE != 0
+        }
+        ("cfg_attr", Some(arguments)) => split_arguments(arguments)
+            .into_iter()
+            .skip(1)
+            .any(names_test),
+        (TEST_IDENT, _) => true,
+        _ => false,
+    }
+}
+
+/// Last component of an attribute path and its parenthesized arguments.
+fn attribute_parts(body: &[Token]) -> Option<(&str, Option<&[Token]>)> {
+    let open = body.iter().position(|token| token.text == "(");
+    let path = open.map_or(body, |index| &body[..index]);
+    let head = path
+        .iter()
+        .rev()
+        .find(|token| matches!(token.kind, TokenKind::Identifier | TokenKind::Keyword))?
+        .text
+        .as_str();
+    let arguments = open.and_then(|index| {
+        let tail = &body[index + 1..];
+        closing(tail, "(", ")").map(|end| &tail[..end])
+    });
+    Some((head, arguments))
+}
+
+const FALSE_VALUE: u8 = 1;
+const TRUE_VALUE: u8 = 2;
+const BOTH_VALUES: u8 = FALSE_VALUE | TRUE_VALUE;
+
+/// Possible truth values of one cfg predicate for a fixed value of `test`.
+fn predicate_values(tokens: &[Token], test_enabled: bool) -> u8 {
+    let Some((head, arguments)) = attribute_parts(tokens) else {
+        return BOTH_VALUES;
+    };
+    match (head, arguments) {
+        (TEST_IDENT, None) => {
+            if test_enabled {
+                TRUE_VALUE
+            } else {
+                FALSE_VALUE
+            }
+        }
+        ("not", Some(arguments)) => {
+            let values = predicate_values(arguments, test_enabled);
+            ((values & FALSE_VALUE) << 1) | ((values & TRUE_VALUE) >> 1)
+        }
+        ("all", Some(arguments)) => split_arguments(arguments)
+            .into_iter()
+            .map(|argument| predicate_values(argument, test_enabled))
+            .fold(TRUE_VALUE, possible_and),
+        ("any", Some(arguments)) => split_arguments(arguments)
+            .into_iter()
+            .map(|argument| predicate_values(argument, test_enabled))
+            .fold(FALSE_VALUE, possible_or),
+        _ => BOTH_VALUES,
+    }
+}
+
+fn possible_and(left: u8, right: u8) -> u8 {
+    possible_binary(left, right, |a, b| a && b)
+}
+
+fn possible_or(left: u8, right: u8) -> u8 {
+    possible_binary(left, right, |a, b| a || b)
+}
+
+fn possible_binary(left: u8, right: u8, operation: impl Fn(bool, bool) -> bool) -> u8 {
+    let mut values = 0;
+    for left_value in [false, true] {
+        if left & value_bit(left_value) == 0 {
+            continue;
+        }
+        for right_value in [false, true] {
+            if right & value_bit(right_value) != 0 {
+                values |= value_bit(operation(left_value, right_value));
+            }
+        }
+    }
+    values
+}
+
+const fn value_bit(value: bool) -> u8 {
+    if value { TRUE_VALUE } else { FALSE_VALUE }
+}
+
+/// Split comma-separated predicate or `cfg_attr` arguments at top level.
+fn split_arguments(tokens: &[Token]) -> Vec<&[Token]> {
+    let mut arguments = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        match token.text.as_str() {
+            "(" | "[" | "{" => depth += 1,
+            ")" | "]" | "}" => depth = depth.saturating_sub(1),
+            "," if depth == 0 => {
+                arguments.push(&tokens[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    arguments.push(&tokens[start..]);
+    arguments
 }
 
 /// One file, as module resolution needs to see it.
@@ -549,6 +658,57 @@ mod tests {
             "#", "[", "cfg", "(", "all", "(", "unix", ",", "test", ")", ")", "]", "fn", "check",
         ]);
         assert!(is_marked(Language::Rust, &source));
+    }
+
+    #[test]
+    fn negated_test_cfg_marks_production_code_not_test_code() {
+        let source = tokens(&[
+            "#",
+            "[",
+            "cfg",
+            "(",
+            "not",
+            "(",
+            "test",
+            ")",
+            ")",
+            "]",
+            "fn",
+            "production",
+        ]);
+        assert!(!is_marked(Language::Rust, &source));
+
+        let double_negated = tokens(&[
+            "#", "[", "cfg", "(", "not", "(", "not", "(", "test", ")", ")", ")", "]", "fn", "check",
+        ]);
+        assert!(is_marked(Language::Rust, &double_negated));
+    }
+
+    #[test]
+    fn cfg_attr_condition_is_not_mistaken_for_the_applied_attribute() {
+        let production = tokens(&[
+            "#",
+            "[",
+            "cfg_attr",
+            "(",
+            "test",
+            ",",
+            "allow",
+            "(",
+            "dead_code",
+            ")",
+            ")",
+            "]",
+            "fn",
+            "production",
+        ]);
+        assert!(!is_marked(Language::Rust, &production));
+
+        let test = tokens(&[
+            "#", "[", "cfg_attr", "(", "feature", "=", "runtime", ",", "tokio", ":", ":", "test",
+            ")", "]", "fn", "check",
+        ]);
+        assert!(is_marked(Language::Rust, &test));
     }
 
     #[test]

@@ -1,9 +1,9 @@
 use super::{
-    BTreeSet, BuildVariant, FileFeatures, GroupDetail, GroupingUnit, ResolvedTypes, SimilarityEdge,
-    StructuralConfig, StructuralNearMiss, StructuralRegion, StructuralReport, StructuralStats,
-    StructuralUnit, SyntaxIrFile, Unit, UnitEvidence, VerifyConfig, candidate, confirm_regions,
-    control_flow, drop_subsumed, features, flatten_units, group_detail, grouping, grow_runs,
-    lift_to_unit_pairs, maximal, near_match, sweep_siblings, token_count_meets_minimum,
+    BTreeMap, BTreeSet, BuildVariant, FileFeatures, GroupDetail, GroupingUnit, ResolvedTypes,
+    SimilarityEdge, StructuralConfig, StructuralNearMiss, StructuralRegion, StructuralReport,
+    StructuralStats, StructuralUnit, SyntaxIrFile, Unit, UnitEvidence, VerifyConfig, candidate,
+    confirm_regions, control_flow, drop_subsumed, features, flatten_units, group_detail, grouping,
+    grow_runs, lift_to_unit_pairs, maximal, near_match, sweep_siblings, token_count_meets_minimum,
     unit_evidence, unit_meets_minimum, unrepresented_pairs, verify, view,
 };
 
@@ -38,7 +38,7 @@ pub fn analyze_resolved(
 ) -> StructuralReport {
     let feature_files: Vec<FileFeatures> = files.iter().map(features::extract).collect();
 
-    let (units, offsets) = flatten_units(files, variant);
+    let (units, offsets) = flatten_units(files, variant, config.literals, resolved);
     let evidence = unit_evidence(&units, resolved);
 
     // Stage: candidate extraction (exact seeds, near matches and shared
@@ -114,13 +114,21 @@ pub fn analyze_resolved(
         &config.verify,
         config.verification_budget,
     );
+    // The precise verifier has consumed the lifted candidates. Keeping this
+    // potentially large set alive through grouping and reporting needlessly
+    // raises the scan's peak memory.
+    drop(pairs);
     let edges = verification.edges;
 
     // Stage: medoid grouping over the verified pairs.
     let grouping_units: Vec<GroupingUnit> = units
         .iter()
         .map(|unit| GroupingUnit {
-            key: *unit.fingerprint.as_bytes(),
+            // The component ceiling must not cut a content-equivalence class
+            // into several groups: structural group identity uses normalized
+            // content for non-Type-1 findings, and raw keys would therefore
+            // mint duplicate fingerprints after a cut.
+            key: *unit.normalized_content.as_bytes(),
         })
         .collect();
     let groups = grouping::group(&grouping_units, &edges, &config.grouping);
@@ -148,15 +156,8 @@ pub fn analyze_resolved(
     // This is intentionally after primary grouping and unrepresented-pair
     // carry-out. It only inspects ungrouped units and cannot add an edge or a
     // member to `groups`.
-    let (siblings, sibling_stats) = sweep_siblings(
-        &groups,
-        &units,
-        files,
-        &feature_files,
-        &evidence,
-        &config.verify,
-        &config.siblings,
-    );
+    let (siblings, sibling_stats) =
+        sweep_siblings(&groups, &units, files, &feature_files, &evidence, config);
 
     let stats = StructuralStats {
         files: files.len(),
@@ -176,7 +177,7 @@ pub fn analyze_resolved(
         alternative_pairs: lifted.alternatives,
         divergent_shape_pairs: lifted.divergent,
         below_min_clone_token_pairs,
-        unit_pairs: pairs.len(),
+        unit_pairs: candidate_pairs.saturating_sub(below_min_clone_token_pairs),
         verification_budget_dropped: verification.dropped,
         verified_pairs: edges.len(),
         unrepresented_pairs: unrepresented.len(),
@@ -217,6 +218,7 @@ fn reported(units: &[Unit]) -> Vec<StructuralUnit> {
             test_code_evidence: unit.test_code_evidence,
             fingerprint: unit.fingerprint,
             content: unit.content,
+            normalized_content: unit.normalized_content,
         })
         .collect()
 }
@@ -242,7 +244,8 @@ fn verify_pairs(
     budget: usize,
 ) -> VerificationSet {
     let mut edges: Vec<SimilarityEdge> = Vec::new();
-    for &(a, b) in pairs.iter().take(budget) {
+    let (selected, dropped) = verification_components(pairs, budget);
+    for (a, b) in selected {
         let view_a = view(a, units, files, feature_files, evidence);
         let view_b = view(b, units, files, feature_files, evidence);
         let verdict = verify::verify(&view_a, &view_b, config);
@@ -251,13 +254,68 @@ fn verify_pairs(
                 a,
                 b,
                 similarity: verdict.breakdown.composite,
+                breakdown: Some(verdict.breakdown),
                 class,
                 confidence,
             });
         }
     }
-    VerificationSet {
-        edges,
-        dropped: pairs.len().saturating_sub(budget),
+    VerificationSet { edges, dropped }
+}
+
+/// Select complete candidate components for verification under `budget`.
+fn verification_components(
+    pairs: &BTreeSet<(usize, usize)>,
+    budget: usize,
+) -> (Vec<(usize, usize)>, usize) {
+    let mut adjacent = BTreeMap::<usize, Vec<usize>>::new();
+    for &(a, b) in pairs {
+        adjacent.entry(a).or_default().push(b);
+        adjacent.entry(b).or_default().push(a);
+    }
+    let mut visited = BTreeSet::new();
+    let mut remaining = budget;
+    let mut dropped = 0;
+    let mut selected = Vec::new();
+    for &root in adjacent.keys() {
+        if !visited.insert(root) {
+            continue;
+        }
+        let mut stack = vec![root];
+        let mut members = BTreeSet::from([root]);
+        while let Some(member) = stack.pop() {
+            for &next in &adjacent[&member] {
+                if visited.insert(next) {
+                    members.insert(next);
+                    stack.push(next);
+                }
+            }
+        }
+        let component: Vec<(usize, usize)> = pairs
+            .iter()
+            .copied()
+            .filter(|(a, b)| members.contains(a) && members.contains(b))
+            .collect();
+        if component.len() > remaining {
+            dropped += component.len();
+            continue;
+        }
+        remaining -= component.len();
+        selected.extend(component);
+    }
+    (selected, dropped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verification_budget_never_cuts_through_a_connected_candidate_family() {
+        let pairs = BTreeSet::from([(0, 1), (1, 2), (3, 4)]);
+        let (selected, dropped) = verification_components(&pairs, 1);
+
+        assert_eq!(selected, vec![(3, 4)]);
+        assert_eq!(dropped, 2);
     }
 }

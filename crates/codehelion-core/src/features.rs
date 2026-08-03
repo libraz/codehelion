@@ -556,41 +556,73 @@ fn write_statement(hasher: &mut FeatureHasher, statement: &IrNode, tokens: &[Tok
 /// emitting a [`SubtreeFeature`] for subtrees of qualifying size. Children
 /// are emitted before their ancestors.
 fn subtree_features(node: &IrNode, out: &mut Vec<SubtreeFeature>) -> (FeatureHash, usize) {
-    let mut child_hashes = Vec::with_capacity(node.children.len());
-    let mut node_count = 1usize;
-    for child in &node.children {
-        let (hash, count) = subtree_features(child, out);
-        node_count += count;
-        child_hashes.push(hash);
+    struct Frame<'a> {
+        node: &'a IrNode,
+        next_child: usize,
+        child_hashes: Vec<FeatureHash>,
+        node_count: usize,
     }
 
-    let mut hasher = FeatureHasher::new("subtree");
-    hasher.write_u8(node.shape.tag());
-    hasher.write_str(native_kind(&node.shape));
-    hasher.write_u32(u32::try_from(child_hashes.len()).unwrap_or(u32::MAX));
-    for hash in &child_hashes {
-        hasher.write_bytes(hash.as_bytes());
-    }
-    let hash = hasher.finish();
+    let mut pending = vec![Frame {
+        node,
+        next_child: 0,
+        child_hashes: Vec::with_capacity(node.children.len()),
+        node_count: 1,
+    }];
+    loop {
+        let Some(frame) = pending.last_mut() else {
+            unreachable!("the root frame is retained until its result is returned");
+        };
+        if let Some(child) = frame.node.children.get(frame.next_child) {
+            frame.next_child += 1;
+            pending.push(Frame {
+                node: child,
+                next_child: 0,
+                child_hashes: Vec::with_capacity(child.children.len()),
+                node_count: 1,
+            });
+            continue;
+        }
 
-    if node_count >= MIN_SUBTREE_NODES {
-        out.push(SubtreeFeature {
-            hash,
-            node_count,
-            range: node.range,
-        });
+        let mut hasher = FeatureHasher::new("subtree");
+        hasher.write_u8(frame.node.shape.tag());
+        hasher.write_str(native_kind(&frame.node.shape));
+        hasher.write_u32(u32::try_from(frame.child_hashes.len()).unwrap_or(u32::MAX));
+        for hash in &frame.child_hashes {
+            hasher.write_bytes(hash.as_bytes());
+        }
+        let hash = hasher.finish();
+        if frame.node_count >= MIN_SUBTREE_NODES {
+            out.push(SubtreeFeature {
+                hash,
+                node_count: frame.node_count,
+                range: frame.node.range,
+            });
+        }
+        let result = (hash, frame.node_count);
+        pending.pop();
+        let Some(parent) = pending.last_mut() else {
+            return result;
+        };
+        parent.child_hashes.push(result.0);
+        parent.node_count += result.1;
     }
-    (hash, node_count)
 }
 
 /// Accumulate shape counts, depth and size over one subtree. The subtree
 /// root is at depth 1.
 fn accumulate_vector(node: &IrNode, depth: u32, vector: &mut CharacteristicVector) {
-    vector.node_count += 1;
-    vector.max_depth = vector.max_depth.max(depth);
-    vector.counts[usize::from(node.shape.tag())] += 1;
-    for child in &node.children {
-        accumulate_vector(child, depth + 1, vector);
+    let mut pending = vec![(node, depth)];
+    while let Some((node, depth)) = pending.pop() {
+        vector.node_count += 1;
+        vector.max_depth = vector.max_depth.max(depth);
+        vector.counts[usize::from(node.shape.tag())] += 1;
+        pending.extend(
+            node.children
+                .iter()
+                .rev()
+                .map(|child| (child, depth.saturating_add(1))),
+        );
     }
 }
 
@@ -623,66 +655,89 @@ impl CfgWalk {
         self.skeleton.extend_from_slice(bytes);
     }
 
-    fn visit_children(&mut self, node: &IrNode) {
-        for child in &node.children {
-            self.visit(child);
-        }
-    }
-
     fn visit(&mut self, node: &IrNode) {
-        match &node.shape {
-            Shape::Loop => {
-                self.push_op(OP_LOOP_ENTER);
-                self.loop_depth += 1;
-                self.max_loop_depth = self.max_loop_depth.max(self.loop_depth);
-                self.visit_children(node);
-                self.loop_depth -= 1;
-                self.push_op(OP_LOOP_EXIT);
+        enum Visit<'a> {
+            Enter(&'a IrNode),
+            Exit { op: u8, leaves_loop: bool },
+        }
+
+        let mut pending = vec![Visit::Enter(node)];
+        while let Some(visit) = pending.pop() {
+            match visit {
+                Visit::Exit { op, leaves_loop } => {
+                    if leaves_loop {
+                        self.loop_depth -= 1;
+                    }
+                    self.push_op(op);
+                }
+                Visit::Enter(node) => {
+                    let exit = match &node.shape {
+                        Shape::Loop => {
+                            self.push_op(OP_LOOP_ENTER);
+                            self.loop_depth += 1;
+                            self.max_loop_depth = self.max_loop_depth.max(self.loop_depth);
+                            Some(Visit::Exit {
+                                op: OP_LOOP_EXIT,
+                                leaves_loop: true,
+                            })
+                        }
+                        Shape::Branch => {
+                            self.push_op(OP_BRANCH_ENTER);
+                            self.branch_count += 1;
+                            Some(Visit::Exit {
+                                op: OP_BRANCH_EXIT,
+                                leaves_loop: false,
+                            })
+                        }
+                        Shape::Match => {
+                            self.push_op(OP_MATCH_ENTER);
+                            let arms = node
+                                .children
+                                .iter()
+                                .filter(|child| matches!(child.shape, Shape::MatchArm))
+                                .count();
+                            let arms = u32::try_from(arms).unwrap_or(u32::MAX);
+                            self.push_operand(&arms.to_le_bytes());
+                            Some(Visit::Exit {
+                                op: OP_MATCH_EXIT,
+                                leaves_loop: false,
+                            })
+                        }
+                        Shape::MatchArm => {
+                            self.push_op(OP_ARM_ENTER);
+                            Some(Visit::Exit {
+                                op: OP_ARM_EXIT,
+                                leaves_loop: false,
+                            })
+                        }
+                        Shape::Try => {
+                            self.push_op(OP_TRY);
+                            None
+                        }
+                        Shape::Return => {
+                            self.push_op(OP_RETURN);
+                            None
+                        }
+                        Shape::Break => {
+                            self.push_op(OP_BREAK);
+                            None
+                        }
+                        Shape::Continue => {
+                            self.push_op(OP_CONTINUE);
+                            None
+                        }
+                        Shape::Call => {
+                            self.push_op(OP_CALL);
+                            None
+                        }
+                        _ => None,
+                    };
+                    if let Some(exit) = exit {
+                        pending.push(exit);
+                    }
+                    pending.extend(node.children.iter().rev().map(Visit::Enter));
+                }
             }
-            Shape::Branch => {
-                self.push_op(OP_BRANCH_ENTER);
-                self.branch_count += 1;
-                self.visit_children(node);
-                self.push_op(OP_BRANCH_EXIT);
-            }
-            Shape::Match => {
-                self.push_op(OP_MATCH_ENTER);
-                let arms = node
-                    .children
-                    .iter()
-                    .filter(|child| matches!(child.shape, Shape::MatchArm))
-                    .count();
-                let arms = u32::try_from(arms).unwrap_or(u32::MAX);
-                self.push_operand(&arms.to_le_bytes());
-                self.visit_children(node);
-                self.push_op(OP_MATCH_EXIT);
-            }
-            Shape::MatchArm => {
-                self.push_op(OP_ARM_ENTER);
-                self.visit_children(node);
-                self.push_op(OP_ARM_EXIT);
-            }
-            Shape::Try => {
-                self.push_op(OP_TRY);
-                self.visit_children(node);
-            }
-            Shape::Return => {
-                self.push_op(OP_RETURN);
-                self.visit_children(node);
-            }
-            Shape::Break => {
-                self.push_op(OP_BREAK);
-                self.visit_children(node);
-            }
-            Shape::Continue => {
-                self.push_op(OP_CONTINUE);
-                self.visit_children(node);
-            }
-            Shape::Call => {
-                self.push_op(OP_CALL);
-                self.visit_children(node);
-            }
-            _ => self.visit_children(node),
         }
     }
 }

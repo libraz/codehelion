@@ -1,8 +1,8 @@
 use super::{
-    BTreeMap, BTreeSet, BodyMateriality, Boilerplate, BuildVariant, FileFeatures,
-    FragmentFingerprint, GroupDetail, Lexeme, SourceTokenSpan, StructuralConfig, SyntaxIrFile,
-    Token, TokenKind, Unit, UnitEvidence, features, grouping, stable_id, substitution, test_code,
-    verify, view,
+    BTreeMap, BTreeSet, BodyMateriality, Boilerplate, BuildVariant, CloneGroupFingerprint,
+    FileFeatures, FragmentFingerprint, GroupDetail, Lexeme, SourceTokenSpan, StructuralConfig,
+    SyntaxIrFile, Token, TokenKind, Unit, UnitEvidence, features, grouping, stable_id,
+    substitution, test_code, verify, view,
 };
 
 /// Compute one group's reporting detail: its stable clone fingerprint (anchored
@@ -30,19 +30,31 @@ pub(super) fn group_detail(
             .breakdown
         })
         .collect();
+    let cohesion_breakdown = group
+        .members
+        .iter()
+        .enumerate()
+        .flat_map(|(left, &a)| group.members[left + 1..].iter().map(move |&b| (a, b)))
+        .map(|(a, b)| {
+            verify::verify(
+                &view(a, units, files, feature_files, evidence),
+                &view(b, units, files, feature_files, evidence),
+                &config.verify,
+            )
+            .breakdown
+        })
+        .min_by(|left, right| left.composite.total_cmp(&right.composite))
+        // Grouping emits only multi-member groups. Preserve a total report
+        // function for a malformed externally-constructed group as well:
+        // its medoid's self-comparison is the only available evidence.
+        .unwrap_or_else(|| verify::verify(&medoid_view, &medoid_view, &config.verify).breakdown);
 
-    let member_contents: Vec<FragmentFingerprint> =
-        group.members.iter().map(|&m| units[m].content).collect();
-    let fingerprint = stable_id::structural_clone_group_fingerprint(
-        variant,
-        group.clone_type,
-        &units[group.canonical].content,
-        &member_contents,
-    );
+    let fingerprint = group_fingerprint(group, units, variant);
 
     GroupDetail {
         fingerprint,
         member_breakdowns,
+        cohesion_breakdown,
         identifier_jaccard: group_identifier_jaccard(group, units, files),
         body_materiality: group_body_materiality(group, units, feature_files),
         boilerplate: dominant_boilerplate(group, units),
@@ -55,6 +67,29 @@ pub(super) fn group_detail(
         ),
         width_family: written_once_per_width(group, units, files),
     }
+}
+
+/// Compose a structural group id from the content domain its class promises.
+///
+/// Type-1 identity is exact source content. Type-2 and Type-3 identity is
+/// identifier-normalized content so a consistent rename does not turn an
+/// otherwise unchanged clone relation into a new baseline finding.
+pub(super) fn group_fingerprint(
+    group: &grouping::StructuralGroup,
+    units: &[Unit],
+    variant: &BuildVariant,
+) -> CloneGroupFingerprint {
+    let member_contents: Vec<FragmentFingerprint> = group
+        .members
+        .iter()
+        .map(|&member| units[member].group_content(group.clone_type))
+        .collect();
+    stable_id::structural_clone_group_fingerprint(
+        variant,
+        group.clone_type,
+        &units[group.canonical].group_content(group.clone_type),
+        &member_contents,
+    )
 }
 
 /// Material work that exists in every member rather than just the medoid.

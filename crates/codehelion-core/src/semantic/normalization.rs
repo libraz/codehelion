@@ -149,7 +149,7 @@ pub fn normalize_registered_observations(
 pub fn normalize_registered_observations_with_ranges(
     language: Language,
     build_variant_fingerprint: [u8; 32],
-    mut observations: Vec<(OperationObservation, SemanticSourceRange)>,
+    observations: Vec<(OperationObservation, SemanticSourceRange)>,
     constructs: Vec<(ConstructObservation, SemanticSourceRange)>,
 ) -> Result<ApiNormalization, SemanticGraphError> {
     if observations
@@ -160,57 +160,66 @@ pub fn normalize_registered_observations_with_ranges(
     {
         return Err(SemanticGraphError::InvalidSourceRange);
     }
-    observations.sort_by(|left, right| {
-        left.0
-            .source_offset
-            .cmp(&right.0.source_offset)
-            .then_with(|| left.0.api_name.cmp(&right.0.api_name))
-    });
     let observation_count = observations.len();
     let mut nodes: Vec<_> = observations
         .into_iter()
-        .filter_map(|(observation, source_range)| {
+        .enumerate()
+        .filter_map(|(source_index, (observation, source_range))| {
             let kind = registered_api_kind(language, &observation.api_name)?;
             let order = observation.api_name.clone();
             Some((
                 observation.source_offset,
+                source_index,
                 order,
                 source_range,
                 OperationNode {
                     kind,
                     attributes: OperationAttributes {
                         type_tag: observation.type_tag,
-                        structure_fingerprint: None,
                         api_names: BTreeSet::from([observation.api_name]),
                         resource_kind: None,
                         fallible_kind: None,
                         direct_propagation: None,
+                        structure_fingerprint: None,
                     },
                 },
+                ObservationSource::Api,
             ))
         })
         .collect();
     let recognized_api_count = nodes.len();
-    nodes.extend(constructs.into_iter().map(|(construct, source_range)| {
-        (
-            construct.source_offset,
-            construct.kind.name().to_owned(),
-            source_range,
-            OperationNode {
-                kind: construct.kind,
-                attributes: OperationAttributes {
-                    fallible_kind: construct.fallible_kind,
-                    direct_propagation: construct.direct_propagation,
-                    resource_kind: construct.resource_kind,
-                    ..OperationAttributes::default()
+    nodes.extend(constructs.into_iter().enumerate().map(
+        |(source_index, (construct, source_range))| {
+            (
+                construct.source_offset,
+                source_index,
+                construct.kind.name().to_owned(),
+                source_range,
+                OperationNode {
+                    kind: construct.kind,
+                    attributes: OperationAttributes {
+                        fallible_kind: construct.fallible_kind,
+                        direct_propagation: construct.direct_propagation,
+                        resource_kind: construct.resource_kind,
+                        ..OperationAttributes::default()
+                    },
                 },
-            },
-        )
-    }));
-    nodes.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+                ObservationSource::Construct,
+            )
+        },
+    ));
+    nodes.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
     nodes.dedup_by(coincident_operation);
-    let node_source_ranges = nodes.iter().map(|(_, _, range, _)| *range).collect();
-    let nodes: Vec<_> = nodes.into_iter().map(|(_, _, _, node)| node).collect();
+    let node_source_ranges = nodes.iter().map(|(_, _, _, range, _, _)| *range).collect();
+    let nodes: Vec<_> = nodes
+        .into_iter()
+        .map(|(_, _, _, _, node, _)| node)
+        .collect();
     // The initial registry covers only data-sequence APIs. It never guesses
     // that an unrelated call is a transformation simply because it is nearby.
     let excluded_observations = observation_count.saturating_sub(recognized_api_count);
@@ -264,11 +273,34 @@ fn operation_edges(nodes: &[OperationNode]) -> Result<Vec<OperationEdge>, Semant
 }
 
 /// Whether two construct/API observations describe one source operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObservationSource {
+    Api,
+    Construct,
+}
+
 fn coincident_operation(
-    left: &mut (u64, String, SemanticSourceRange, OperationNode),
-    right: &mut (u64, String, SemanticSourceRange, OperationNode),
+    left: &mut (
+        u64,
+        usize,
+        String,
+        SemanticSourceRange,
+        OperationNode,
+        ObservationSource,
+    ),
+    right: &mut (
+        u64,
+        usize,
+        String,
+        SemanticSourceRange,
+        OperationNode,
+        ObservationSource,
+    ),
 ) -> bool {
-    left.0 == right.0 && left.2 == right.2 && left.3.kind == right.3.kind
+    left.0 == right.0
+        && left.3 == right.3
+        && left.4.kind == right.4.kind
+        && (left.5 != right.5 || left.1 == right.1)
 }
 
 /// Extract the largest source-contiguous windows that a same-variant rule can
@@ -300,8 +332,7 @@ pub fn registered_semantic_windows(
         .filter(|rule| rule.scope == SemanticRuleScope::SameBuildVariant)
     {
         match rule.matcher {
-            SemanticRuleMatcher::EquivalentSequence
-            | SemanticRuleMatcher::ExactApiSequence { .. } => {
+            SemanticRuleMatcher::EquivalentSequence => {
                 let mut start = 0;
                 while start < graph.nodes.len() {
                     while start < graph.nodes.len()
@@ -328,6 +359,24 @@ pub fn registered_semantic_windows(
                         }
                     }
                     start = end.saturating_add(1);
+                }
+            }
+            SemanticRuleMatcher::ExactApiSequence { api_names } => {
+                // Exact API rules prove a fixed-width sequence. A neighbouring
+                // operation of the same kind must not make that sequence
+                // disappear by extending the maximal general-purpose run.
+                if !api_names.is_empty() && api_names.len() <= graph.nodes.len() {
+                    for start in 0..=graph.nodes.len() - api_names.len() {
+                        let window = semantic_graph_window(
+                            graph,
+                            &normalization.node_source_ranges,
+                            start,
+                            start + api_names.len(),
+                        )?;
+                        if match_same_variant_rule(rule, &window.graph, &window.graph).is_some() {
+                            windows.push(window);
+                        }
+                    }
                 }
             }
             SemanticRuleMatcher::DirectConstruct { .. } => {

@@ -178,6 +178,21 @@ impl CppBuild {
     /// which unit this is, not which variant it belongs to.
     #[must_use]
     pub fn from_command(arguments: &[String], file: &Path) -> Self {
+        Self::from_command_in_directory(arguments, file, None)
+    }
+
+    /// The identity of one entry of a compilation database whose command ran
+    /// from `directory`.
+    ///
+    /// Relative input arguments are resolved from that directory before they
+    /// are compared with `file`, so translation-unit paths do not accidentally
+    /// become variant settings.
+    #[must_use]
+    pub fn from_command_in_directory(
+        arguments: &[String],
+        file: &Path,
+        directory: Option<&Path>,
+    ) -> Self {
         let mut build = Self {
             compiler: arguments.first().cloned().unwrap_or_default(),
             ..Self::default()
@@ -187,7 +202,7 @@ impl CppBuild {
         while index < arguments.len() {
             let argument = arguments[index].as_str();
             index += 1;
-            if Path::new(argument) == file {
+            if source_argument_matches(argument, file, directory) {
                 continue;
             }
             if EXCLUDED_WITH_VALUE.contains(&argument) {
@@ -236,6 +251,23 @@ impl CppBuild {
             ordered("post_processing_tools", &self.post_processing_tools),
         ]
     }
+}
+
+fn source_argument_matches(argument: &str, file: &Path, directory: Option<&Path>) -> bool {
+    let argument = Path::new(argument);
+    let resolved = if argument.is_relative() {
+        directory.map_or_else(
+            || argument.to_path_buf(),
+            |directory| directory.join(argument),
+        )
+    } else {
+        argument.to_path_buf()
+    };
+    normalize_path(&resolved) == normalize_path(file)
+}
+
+fn normalize_path(path: &Path) -> std::path::PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// What a Rust crate was built with.

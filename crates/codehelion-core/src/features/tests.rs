@@ -156,6 +156,22 @@ fn chain_unit(last: Shape) -> IrNode {
 }
 
 #[test]
+fn feature_extraction_handles_a_deep_externally_constructed_ir_iteratively() {
+    let mut unit = node(Shape::Return, 0, 0, Vec::new());
+    for _ in 0..50_000 {
+        unit = node(Shape::Block, 0, 0, vec![unit]);
+    }
+    unit = node(Shape::Function, 0, 0, vec![unit]);
+
+    let features = extract(&file_of(vec![unit], Vec::new()));
+
+    assert_eq!(features.units.len(), 1);
+    assert_eq!(features.units[0].vector.node_count, 50_002);
+    assert_eq!(features.units[0].vector.max_depth, 50_002);
+    assert_eq!(features.units[0].cfg.max_loop_depth, 0);
+}
+
+#[test]
 fn subtree_merkle_ignores_names_and_tokens_but_not_shapes() {
     let base = extract(&file_of(
         vec![chain_unit(Shape::Return)],
