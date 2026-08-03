@@ -1,5 +1,22 @@
 use super::*;
 
+/// A format is one word, on the command line and in the report alike.
+///
+/// The assertion a caller writes and the label they then read back have to
+/// be the same string, or the report cannot be checked against the request
+/// that produced it.
+#[test]
+fn a_format_is_named_the_same_way_on_the_command_line_and_in_a_report() {
+    use clap::ValueEnum as _;
+
+    for format in ArtifactInputFormat::value_variants() {
+        let spelling = format
+            .to_possible_value()
+            .expect("every input format is selectable");
+        assert_eq!(spelling.get_name(), input_format(*format).name());
+    }
+}
+
 #[test]
 fn wasm_report_is_versioned_and_does_not_expose_code_bytes() {
     let artifact = WasmBackend.parse(b"\0asm\x01\0\0\0").unwrap();

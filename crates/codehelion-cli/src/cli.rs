@@ -262,6 +262,9 @@ pub enum ArtifactFormat {
 }
 
 /// Input artifact format accepted by the parsers in this build.
+///
+/// Each name is the one the reports print, so an assertion on the command
+/// line and the format a report names are the same word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 pub enum ArtifactInputFormat {
     /// WebAssembly core module.
@@ -269,6 +272,7 @@ pub enum ArtifactInputFormat {
     /// ELF executable, shared object, or relocatable object.
     Elf,
     /// Mach-O executable, dynamic library, or relocatable object.
+    #[value(name = "macho")]
     MachO,
     /// Static archive containing local object members.
     Archive,
