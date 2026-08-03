@@ -92,6 +92,7 @@ fn semantic_rust_corpus() -> (tempfile::TempDir, LabelSet) {
         "[package]\nname = \"semantic-corpus\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write corpus manifest");
+    write_lockfile(root, "semantic-corpus");
     for name in ["type1.rs", "type2.rs", "type3.rs"] {
         std::fs::copy(source.join(name), root.join("src").join(name))
             .unwrap_or_else(|error| panic!("copying corpus {name}: {error}"));
@@ -327,6 +328,7 @@ fn rust_loop_pipeline_fixture() -> tempfile::TempDir {
         "[package]\nname = \"semantic-loop-pipeline-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write Rust manifest");
+    write_lockfile(root, "semantic-loop-pipeline-fixture");
     std::fs::write(
         root.join("src/lib.rs"),
         "pub fn explicit<'a>(values: &'a [u64]) -> Vec<&'a u64> {\n    let mut collected = Vec::new();\n    for value in values {\n        collected.push(value);\n    }\n    collected\n}\n\npub fn iterator<'a>(values: &'a [u64]) -> Vec<&'a u64> {\n    values.iter().collect()\n}\n",
@@ -346,6 +348,7 @@ fn rust_reduce_pipeline_fixture() -> tempfile::TempDir {
         "[package]\nname = \"semantic-reduce-pipeline-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write Rust manifest");
+    write_lockfile(root, "semantic-reduce-pipeline-fixture");
     std::fs::write(
         root.join("src/lib.rs"),
         "pub fn sum(values: &[u64]) -> u64 {\n    values.iter().fold(0, |total, value| total + value)\n}\n\npub fn product(values: &[u64]) -> u64 {\n    values.iter().fold(1, |total, value| total * value)\n}\n",
@@ -366,6 +369,7 @@ fn rust_loop_reduce_fixture() -> tempfile::TempDir {
         "[package]\nname = \"semantic-loop-reduce-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write Rust manifest");
+    write_lockfile(root, "semantic-loop-reduce-fixture");
     std::fs::write(
         root.join("src/lib.rs"),
         "pub fn explicit(values: &[u64]) -> u64 {\n    let mut total = 0;\n    for value in values {\n        total += *value;\n    }\n    total\n}\n\npub fn iterator(values: &[u64]) -> u64 {\n    values.iter().fold(0, |total, value| total + *value)\n}\n\npub fn guarded(values: &[u64]) -> u64 {\n    let mut total = 0;\n    for value in values {\n        if *value > 0 {\n            total += *value;\n        }\n    }\n    total\n}\n",
@@ -386,6 +390,7 @@ fn rust_resource_lifetime_fixture() -> tempfile::TempDir {
         "[package]\nname = \"semantic-resource-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
     )
     .expect("write Rust manifest");
+    write_lockfile(root, "semantic-resource-fixture");
     std::fs::write(
         root.join("src/lib.rs"),
         "pub fn inspect_first(path: &std::path::Path) {\n    let _file = std::fs::File::open(path).unwrap();\n}\n\npub fn inspect_second(path: &std::path::Path) {\n    let _file = std::fs::File::open(path).unwrap();\n}\n\npub fn inspect_third(path: &std::path::Path) {\n    let _file = std::fs::File::open(path).unwrap();\n}\n",
