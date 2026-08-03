@@ -108,10 +108,14 @@ try {
     # so a run says where that stands instead of leaving it unsaid.
     Write-Output "correlation mappings: $($reportJson.correlation.mappings); mapped symbols: $($reportJson.correlation.mapped_symbols)"
 
+    # The refusal this asks for is the last command's exit code, and a script
+    # ends with the last exit code it saw. Cleared here, so a verification that
+    # got what it asked for does not report the refusal as its own failure.
     & cargo run --quiet -p codehelion -- artifact analyze $dll --input-format pe-coff --format json --build-variant $variant --source-run $sourceRun --debug-file $mismatchPdb --db $database
     if ($LASTEXITCODE -eq 0) {
         throw 'A PDB with a different CodeView identity was accepted'
     }
+    $global:LASTEXITCODE = 0
 
     Write-Output 'PE/PDB artifact fixture end-to-end verification passed'
 }
