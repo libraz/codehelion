@@ -5,8 +5,148 @@ use super::{
     NearMissRow, SOG_SCHEMA_VERSION, SemanticEvidenceRow, SemanticOperationGraph, SiblingGroupRow,
     SimilarityBreakdownRow, Snapshot, Store, StoreError, TestCodeEvidence, Transaction, params,
 };
+use rusqlite::OptionalExtension;
+
+use crate::snapshot::{AuditState, LineageAdoption, LineageAdoptionResult};
 
 impl Store {
+    /// Atomically extend new groups with evidence-backed predecessor lineages.
+    ///
+    /// Every identifier is validated before the transaction starts. A failed
+    /// request therefore cannot leave an earlier edge from the same request
+    /// committed while a later edge is rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed identifiers, non-finite overlap, an
+    /// absent or incomplete run, unsupported predecessor evidence, or an
+    /// underlying database failure.
+    pub fn adopt_lineage(
+        &mut self,
+        newer_run: i64,
+        predecessor_run: i64,
+        adoptions: &[LineageAdoption],
+    ) -> Result<LineageAdoptionResult, StoreError> {
+        let parsed = adoptions
+            .iter()
+            .map(ParsedAdoption::parse)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.ensure_completed_run(newer_run)?;
+        self.ensure_completed_run(predecessor_run)?;
+
+        let tx = self.conn.transaction()?;
+        let mut result = LineageAdoptionResult::default();
+        for adoption in parsed {
+            let newer = tx
+                .query_row(
+                    "SELECT id, lineage_state FROM clone_group
+                     WHERE scan_run_id = ?1 AND group_fingerprint_id =
+                           (SELECT id FROM fingerprint WHERE hash = ?2 LIMIT 1)",
+                    params![newer_run, adoption.group.as_slice()],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            let predecessor = tx
+                .query_row(
+                    "SELECT lineage FROM clone_group
+                     WHERE scan_run_id = ?1 AND group_fingerprint_id =
+                           (SELECT id FROM fingerprint WHERE hash = ?2 LIMIT 1)",
+                    params![predecessor_run, adoption.previous_group.as_slice()],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()?;
+            let (Some((newer_group_id, state)), Some(previous_lineage)) = (newer, predecessor)
+            else {
+                result.unknown.push(adoption.group_hex);
+                continue;
+            };
+            if state != "new" {
+                result.already_connected.push(adoption.group_hex);
+                continue;
+            }
+            if previous_lineage.as_slice() != adoption.lineage.as_slice() {
+                return Err(StoreError::InvalidLineageEvidence {
+                    reason: format!(
+                        "predecessor {} does not belong to requested lineage {}",
+                        adoption.previous_group_hex, adoption.lineage_hex
+                    ),
+                });
+            }
+            tx.execute(
+                "UPDATE clone_group SET lineage = ?2, lineage_state = 'expanded' WHERE id = ?1",
+                params![newer_group_id, adoption.lineage.as_slice()],
+            )?;
+            tx.execute(
+                "INSERT INTO clone_group_lineage_parent
+                     (clone_group_id, ordinal, parent_fingerprint, parent_lineage, is_primary,
+                      shared_content, overlap)
+                 VALUES (?1, 0, ?2, ?3, 1, ?4, ?5)",
+                params![
+                    newer_group_id,
+                    adoption.previous_group.as_slice(),
+                    adoption.lineage.as_slice(),
+                    adoption.shared,
+                    adoption.overlap,
+                ],
+            )?;
+            result.taken.push(adoption.group_hex);
+        }
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Connect new clone groups to the strongest predecessor with enough
+    /// shared member content.
+    ///
+    /// One shared content identity alone is often incidental in a large
+    /// group. A predecessor must therefore account for at least half of the
+    /// new group's distinct member content before its lineage is adopted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for absent or incomplete runs, or an underlying
+    /// database failure while reading or atomically recording the evidence.
+    pub fn adopt_matching_lineages(
+        &mut self,
+        newer_run: i64,
+        predecessor_run: i64,
+    ) -> Result<LineageAdoptionResult, StoreError> {
+        self.ensure_completed_run(newer_run)?;
+        self.ensure_completed_run(predecessor_run)?;
+        let newer = lineage_candidates(&self.conn, newer_run)?;
+        let predecessors = lineage_candidates(&self.conn, predecessor_run)?;
+        let mut adoptions = Vec::new();
+        for (group, candidate) in &newer {
+            if candidate.state != "new" || candidate.contents.is_empty() {
+                continue;
+            }
+            let Some((previous_group, previous, _)) = predecessors
+                .iter()
+                .filter_map(|(fingerprint, prior)| {
+                    let shared = candidate.contents.intersection(&prior.contents).count();
+                    (fingerprint != group && shared > 0).then_some((fingerprint, prior, shared))
+                })
+                .filter(|(_, _, shared)| shared.saturating_mul(2) >= candidate.contents.len())
+                .max_by(|(left_id, _, left_shared), (right_id, _, right_shared)| {
+                    left_shared
+                        .cmp(right_shared)
+                        .then_with(|| right_id.cmp(left_id))
+                })
+            else {
+                continue;
+            };
+            let shared = candidate.contents.intersection(&previous.contents).count();
+            adoptions.push(LineageAdoption {
+                group: group.clone(),
+                previous_group: previous_group.clone(),
+                lineage: previous.lineage.clone(),
+                shared: u64::try_from(shared).unwrap_or(u64::MAX),
+                overlap: overlap_fraction(shared, candidate.contents.len()),
+            });
+        }
+        self.adopt_lineage(newer_run, predecessor_run, &adoptions)
+    }
+
     /// Persist one opt-in cross-build-variant comparison.
     ///
     /// Every invocation gets a row even when its comparison identity repeats,
@@ -56,11 +196,12 @@ impl Store {
             for member in &group.members {
                 tx.execute(
                     "INSERT INTO cross_variant_clone_member
-                         (group_id, origin_variant_fingerprint, language, file_path,
+                         (group_id, member_id, origin_variant_fingerprint, language, file_path,
                           start_line, end_line, unit_name, token_count)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![
                         group_row,
+                        member.member_id.as_bytes().as_slice(),
                         member.origin_variant,
                         member.language.name(),
                         member.file_path,
@@ -139,11 +280,12 @@ impl Store {
             for member in &group.members {
                 tx.execute(
                     "INSERT INTO cross_language_semantic_member
-                         (group_id, origin_variant_fingerprint, language, file_path,
+                         (group_id, member_id, origin_variant_fingerprint, language, file_path,
                           start_line, end_line, unit_name, graph_schema_version, graph_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         group_row,
+                        member.member_id.as_bytes().as_slice(),
                         member.origin_variant,
                         member.language.name(),
                         member.file_path,
@@ -159,6 +301,101 @@ impl Store {
         tx.commit()?;
         Ok(comparison_row)
     }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the ratio is report evidence; set cardinalities are bounded by one scan"
+)]
+fn overlap_fraction(shared: usize, total: usize) -> f64 {
+    shared as f64 / total as f64
+}
+
+struct LineageCandidate {
+    state: String,
+    lineage: String,
+    contents: BTreeSet<String>,
+}
+
+fn lineage_candidates(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+) -> Result<BTreeMap<String, LineageCandidate>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT lower(hex(group_fingerprint.hash)), g.lineage_state, lower(hex(g.lineage)),
+                lower(hex(content_fingerprint.hash))
+         FROM clone_group g
+         JOIN fingerprint group_fingerprint ON group_fingerprint.id = g.group_fingerprint_id
+         JOIN clone_group_member member ON member.clone_group_id = g.id
+         JOIN fragment fragment ON fragment.id = member.fragment_id
+         JOIN fingerprint content_fingerprint ON content_fingerprint.id = fragment.fingerprint_id
+         WHERE g.scan_run_id = ?1
+         ORDER BY group_fingerprint.hash ASC, content_fingerprint.hash ASC",
+    )?;
+    let mut candidates = BTreeMap::new();
+    for row in statement.query_map(params![run_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })? {
+        let (group, state, lineage, content) = row?;
+        let candidate = candidates.entry(group).or_insert_with(|| LineageCandidate {
+            state,
+            lineage,
+            contents: BTreeSet::new(),
+        });
+        candidate.contents.insert(content);
+    }
+    Ok(candidates)
+}
+
+struct ParsedAdoption {
+    group_hex: String,
+    group: [u8; 16],
+    previous_group_hex: String,
+    previous_group: [u8; 16],
+    lineage_hex: String,
+    lineage: [u8; 16],
+    shared: i64,
+    overlap: f64,
+}
+
+impl ParsedAdoption {
+    fn parse(adoption: &LineageAdoption) -> Result<Self, StoreError> {
+        if !adoption.overlap.is_finite() || !(0.0..=1.0).contains(&adoption.overlap) {
+            return Err(StoreError::InvalidLineageEvidence {
+                reason: format!("overlap for group {} is outside 0..=1", adoption.group),
+            });
+        }
+        Ok(Self {
+            group_hex: adoption.group.clone(),
+            group: parse_stable_id(&adoption.group)?,
+            previous_group_hex: adoption.previous_group.clone(),
+            previous_group: parse_stable_id(&adoption.previous_group)?,
+            lineage_hex: adoption.lineage.clone(),
+            lineage: parse_stable_id(&adoption.lineage)?,
+            shared: i64::try_from(adoption.shared).unwrap_or(i64::MAX),
+            overlap: adoption.overlap,
+        })
+    }
+}
+
+fn parse_stable_id(hex: &str) -> Result<[u8; 16], StoreError> {
+    let malformed = || StoreError::MalformedId {
+        id: hex.to_string(),
+    };
+    if hex.len() != 32 || !hex.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err(malformed());
+    }
+    let mut bytes = [0_u8; 16];
+    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let digit = core::str::from_utf8(chunk).map_err(|_| malformed())?;
+        bytes[index] = u8::from_str_radix(digit, 16).map_err(|_| malformed())?;
+    }
+    Ok(bytes)
 }
 
 fn validate_cross_language_group(group: &CrossLanguageSemanticGroupRow) -> Result<(), StoreError> {
@@ -261,13 +498,15 @@ pub(super) fn write_sibling_groups(
     sibling_groups: &[SiblingGroupRow],
     unit_row_ids: &[i64],
     group_row_ids: &BTreeMap<[u8; 16], i64>,
+    suppression_row_ids: &[i64],
 ) -> Result<(), StoreError> {
     let mut insert = tx.prepare_cached(
         "INSERT INTO clone_group_sibling
-             (clone_group_id, source_unit_id, fragment_fingerprint, finding_id,
+             (clone_group_id, scan_run_id, source_unit_id, fragment_fingerprint, finding_id,
               clone_type, confidence_band, weight_version, lexical, structural,
-              control_flow, type_similarity, api, composite, boilerplate)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+              control_flow, type_similarity, api, composite, boilerplate, suppression_id)
+         VALUES (?1, (SELECT scan_run_id FROM clone_group WHERE id = ?1),
+                 ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
     )?;
     for siblings in sibling_groups {
         let group_row_id = *group_row_ids
@@ -298,6 +537,7 @@ pub(super) fn write_sibling_groups(
                 sibling.similarity.api,
                 sibling.similarity.composite,
                 sibling.boilerplate.map(Boilerplate::name),
+                suppression_row_id(sibling.suppressed_by, suppression_row_ids)?,
             ])?;
         }
     }
@@ -311,11 +551,13 @@ pub(super) fn write_near_misses(
     run_id: i64,
     near_misses: &[NearMissRow],
     unit_row_ids: &[i64],
+    suppression_row_ids: &[i64],
 ) -> Result<(), StoreError> {
     let mut insert = tx.prepare_cached(
         "INSERT INTO near_match_near_miss
-             (scan_run_id, ordinal, left_source_unit_id, right_source_unit_id, estimated_jaccard)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+             (scan_run_id, ordinal, left_source_unit_id, right_source_unit_id, estimated_jaccard,
+              suppression_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )?;
     for (ordinal, near_miss) in near_misses.iter().enumerate() {
         let left = *unit_row_ids
@@ -336,9 +578,27 @@ pub(super) fn write_near_misses(
             left,
             right,
             near_miss.estimated_jaccard,
+            suppression_row_id(near_miss.suppressed_by, suppression_row_ids)?,
         ])?;
     }
     Ok(())
+}
+
+fn suppression_row_id(
+    index: Option<usize>,
+    suppression_row_ids: &[i64],
+) -> Result<Option<i64>, StoreError> {
+    index
+        .map(|index| {
+            suppression_row_ids
+                .get(index)
+                .copied()
+                .ok_or(StoreError::UnknownSuppressionIndex {
+                    index,
+                    rules: suppression_row_ids.len(),
+                })
+        })
+        .transpose()
 }
 
 pub(super) fn write_group(
@@ -354,14 +614,16 @@ pub(super) fn write_group(
         upsert_group_fingerprint(tx, group.fingerprint.as_bytes(), snapshot, variant_id)?;
     tx.execute(
         "INSERT INTO clone_group
-             (scan_run_id, group_fingerprint_id, clone_type, member_scope,
+             (scan_run_id, group_fingerprint_id, lineage, lineage_state, clone_type, member_scope,
               member_count, score, entropy_bits, suppress_reason, boilerplate,
               test_code, test_code_evidence, split_pair, width_family, statements, identifier_jaccard,
-              has_loop, has_dynamic_allocation, call_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+              has_loop, has_dynamic_allocation, call_count, ranked_down)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             run_id,
             group_fp_id,
+            group.history.lineage.as_bytes().as_slice(),
+            lineage_state_name(group.history.state),
             group.clone_type.name(),
             group.member_scope.name(),
             i64::try_from(group.members.len()).unwrap_or(i64::MAX),
@@ -380,9 +642,11 @@ pub(super) fn write_group(
             group
                 .call_count
                 .map(|count| i64::try_from(count).unwrap_or(i64::MAX)),
+            group.ranked_down,
         ],
     )?;
     let group_row_id = tx.last_insert_rowid();
+    write_lineage_parents(tx, group_row_id, group)?;
 
     write_finding(tx, run_id, group_row_id, group, suppression_row_ids)?;
     write_group_similarity(tx, group_row_id, group.similarity.as_ref())?;
@@ -400,6 +664,38 @@ pub(super) fn write_group(
         write_semantic_evidence(tx, group_row_id, &fragment_row_ids, evidence)?;
     }
     Ok(group_row_id)
+}
+
+const fn lineage_state_name(state: AuditState) -> &'static str {
+    match state {
+        AuditState::New => "new",
+        AuditState::Expanded => "expanded",
+    }
+}
+
+fn write_lineage_parents(
+    tx: &Transaction<'_>,
+    group_row_id: i64,
+    group: &GroupRow,
+) -> Result<(), StoreError> {
+    for (ordinal, parent) in group.history.parents.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO clone_group_lineage_parent
+                 (clone_group_id, ordinal, parent_fingerprint, parent_lineage, is_primary,
+                  shared_content, overlap)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                group_row_id,
+                i64::try_from(ordinal).unwrap_or(i64::MAX),
+                parent.fingerprint.as_bytes().as_slice(),
+                parent.lineage.as_bytes().as_slice(),
+                parent.primary,
+                i64::try_from(parent.shared_content).unwrap_or(i64::MAX),
+                parent.overlap,
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)] // transaction hand-off, one call site
@@ -454,8 +750,8 @@ fn write_fragments(
     )?;
     let mut insert_member = tx.prepare_cached(
         "INSERT INTO clone_group_member
-             (clone_group_id, fragment_id, finding_id, is_canonical, boilerplate)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+             (clone_group_id, scan_run_id, fragment_id, finding_id, is_canonical, boilerplate)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )?;
     for (index, member, host_row_id, fragment_fp_id) in fragments {
         let fragment_row_id = insert_fragment.insert(params![
@@ -470,6 +766,7 @@ fn write_fragments(
         fragment_row_ids.push(fragment_row_id);
         insert_member.execute(params![
             group_row_id,
+            run_id,
             fragment_row_id,
             member.finding.as_bytes().as_slice(),
             i64::from(index == 0),

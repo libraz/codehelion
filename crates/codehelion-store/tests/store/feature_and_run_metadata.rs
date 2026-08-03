@@ -1,120 +1,32 @@
 use super::*;
 
-/// A unit-features fixture with one window, one subtree, a cfg profile and
-/// the two api hashes — five distinct feature hashes in total.
-fn sample_unit_features() -> UnitFeatures {
-    let mut counts = [0u32; 23];
-    counts[1] = 3;
-    counts[11] = 2;
-    UnitFeatures {
-        name: None,
-        shape_tag: 1,
-        range: ByteRange { start: 0, end: 100 },
-        windows: vec![WindowFeature {
-            hash: FeatureHash::from_bytes([7; 16]),
-            length: 4,
-            range: ByteRange { start: 0, end: 40 },
-            block: 0,
-            offset: 0,
-        }],
-        subtrees: vec![SubtreeFeature {
-            hash: FeatureHash::from_bytes([8; 16]),
-            node_count: 6,
-            range: ByteRange { start: 0, end: 50 },
-        }],
-        vector: CharacteristicVector {
-            counts,
-            max_depth: 4,
-            node_count: 12,
-        },
-        cfg: CfgFeature {
-            hash: FeatureHash::from_bytes([9; 16]),
-            skeleton_hash: FeatureHash::from_bytes([11; 16]),
-            op_count: 5,
-            skeleton_ops: 4,
-            max_loop_depth: 2,
-            branch_count: 1,
-        },
-        api: ApiCallFeature {
-            names: Vec::new(),
-            sequence_hash: FeatureHash::from_bytes([10; 16]),
-            multiset_hash: FeatureHash::from_bytes([11; 16]),
-        },
-    }
-}
 #[test]
-fn feature_fingerprints_persist_and_deduplicate_across_scans() {
+fn a_snapshot_with_duplicate_group_fingerprints_is_rejected_before_writing() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
-
-    let unit = sample_unit_features();
-    let mut first = sample_snapshot(&variant, &detectors);
-    first.features = vec![FeatureRow::from_unit(0, &unit)];
-    let run_id = store.record_snapshot(&first).unwrap();
-
-    // One window + one subtree + one cfg + two api hashes = five occurrences,
-    // each a distinct fingerprint; one scalar unit_feature row.
-    assert_eq!(store.table_count("feature_occurrence").unwrap(), 5);
-    assert_eq!(store.table_count("feature_fingerprint").unwrap(), 5);
-    assert_eq!(store.table_count("unit_feature").unwrap(), 1);
-
-    // The subtree hash resolves to its single occurrence with the right anchor
-    // and extent.
-    let posting = store
-        .feature_posting_list(FeatureKind::Subtree, &[8; 16])
-        .unwrap();
-    assert_eq!(posting.len(), 1);
-    assert_eq!(posting[0].scan_run_id, run_id);
-    assert_eq!(posting[0].start_byte, 0);
-    assert_eq!(posting[0].end_byte, 50);
-    assert_eq!(posting[0].extent, 6);
-    assert!(posting[0].source_unit_id.is_some());
-    assert!(
-        store
-            .feature_posting_list(FeatureKind::Subtree, &[99; 16])
-            .unwrap()
-            .is_empty()
-    );
-
-    // A second, identical scan replaces its occurrence rows with the current
-    // snapshot while retaining content-addressed feature fingerprints.
-    let mut second = sample_snapshot(&variant, &detectors);
-    second.started_at = "2026-07-25T00:00:00Z";
-    second.finished_at = "2026-07-25T00:00:04Z";
-    second.features = vec![FeatureRow::from_unit(0, &unit)];
-    store.record_snapshot(&second).unwrap();
-    assert_eq!(store.table_count("feature_fingerprint").unwrap(), 5);
-    assert_eq!(store.table_count("feature_occurrence").unwrap(), 5);
-    assert_eq!(store.table_count("unit_feature").unwrap(), 1);
-    assert_eq!(
-        store
-            .feature_posting_list(FeatureKind::Subtree, &[8; 16])
-            .unwrap()
-            .len(),
-        1
-    );
-}
-
-#[test]
-fn a_feature_referencing_an_unknown_unit_rolls_the_snapshot_back() {
-    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
-    let detectors = detector_versions();
-    let mut store = Store::open_in_memory().unwrap();
-
-    let unit = sample_unit_features();
     let mut snapshot = sample_snapshot(&variant, &detectors);
-    snapshot.features = vec![FeatureRow::from_unit(99, &unit)];
-    let err = store.record_snapshot(&snapshot).unwrap_err();
-    assert!(matches!(
-        err,
-        StoreError::UnknownUnitIndex { index: 99, .. }
-    ));
+    snapshot.groups.push(snapshot.groups[0].clone());
 
+    let err = store.record_snapshot(&snapshot).unwrap_err();
+    assert!(matches!(err, StoreError::DuplicateGroupFingerprint { .. }));
     assert!(store.latest_run().unwrap().is_none(), "no partial run");
-    for table in ["feature_fingerprint", "feature_occurrence", "unit_feature"] {
-        assert_eq!(store.table_count(table).unwrap(), 0, "{table} not empty");
-    }
+}
+
+#[test]
+fn a_snapshot_with_duplicate_finding_ids_is_rejected_before_writing() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    let mut second = snapshot.groups[0].clone();
+    second.fingerprint = group_fp(99);
+    second.members[0].content = frag_fp(99);
+    snapshot.groups.push(second);
+
+    let err = store.record_snapshot(&snapshot).unwrap_err();
+    assert!(matches!(err, StoreError::DuplicateFindingId { .. }));
+    assert!(store.latest_run().unwrap().is_none(), "no partial run");
 }
 
 #[test]
@@ -183,6 +95,56 @@ fn suppressed_findings_reference_a_deduplicated_rule_row() {
     assert_eq!(rule.scope, "path_glob");
     assert_eq!(rule.pattern, "vendor/**");
     assert_eq!(rule.reason.as_deref(), Some("vendored sources"));
+    assert_eq!(rule.active, Some(true));
+}
+
+#[test]
+fn suppression_rules_refresh_their_reason_and_current_active_state() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let mut first = sample_snapshot(&variant, &detectors);
+    first.suppressions = vec![SuppressionRuleRow {
+        scope: "path_glob".to_string(),
+        pattern: "vendor/**".to_string(),
+        reason: Some("initial reason".to_string()),
+    }];
+    first.groups[0].suppressed_by = Some(0);
+    let first_run = store.record_snapshot_part(&first).unwrap();
+
+    // Two partitions are one invocation. The second has no such rule, so the
+    // first partition's still-readable evidence must say that the rule is no
+    // longer active rather than preserving its initial active state.
+    let mut without_rule = sample_snapshot(&variant, &detectors);
+    without_rule.root_path = "/other-repository";
+    let second_run = store.record_snapshot_part(&without_rule).unwrap();
+    store
+        .complete_snapshot_parts(&[first_run, second_run])
+        .unwrap();
+    let inactive = store.run_groups(first_run).unwrap();
+    let rule = inactive[0]
+        .suppressed_by
+        .as_ref()
+        .expect("the finding retains its suppression provenance");
+    assert_eq!(rule.reason.as_deref(), Some("initial reason"));
+    assert_eq!(rule.active, Some(false));
+
+    let mut revised = sample_snapshot(&variant, &detectors);
+    revised.suppressions = vec![SuppressionRuleRow {
+        scope: "path_glob".to_string(),
+        pattern: "vendor/**".to_string(),
+        reason: Some("revised reason".to_string()),
+    }];
+    revised.groups[0].suppressed_by = Some(0);
+    let revised_run = store.record_snapshot(&revised).unwrap();
+    assert_eq!(store.table_count("suppression").unwrap(), 1);
+    let active = store.run_groups(revised_run).unwrap();
+    let rule = active[0]
+        .suppressed_by
+        .as_ref()
+        .expect("the active finding names its rule");
+    assert_eq!(rule.reason.as_deref(), Some("revised reason"));
     assert_eq!(rule.active, Some(true));
 }
 

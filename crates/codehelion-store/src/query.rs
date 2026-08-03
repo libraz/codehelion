@@ -8,8 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use codehelion_core::features::FeatureKind;
 use codehelion_core::semantic::{SOG_SCHEMA_VERSION, SemanticOperationGraph};
+use codehelion_core::stable_id::{CloneGroupFingerprint, GroupLineageId};
 use codehelion_core::test_code::TestCodeEvidence;
 use rusqlite::{OptionalExtension, Row, params};
 
@@ -46,6 +46,15 @@ pub struct RunSummary {
     pub group_count: i64,
 }
 
+/// Durable identity recorded for one group in a completed scan run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredGroupSnapshot {
+    /// The group's current fingerprint.
+    pub fingerprint: CloneGroupFingerprint,
+    /// The lineage the group belongs to.
+    pub lineage: Option<GroupLineageId>,
+}
+
 /// Content and `BuildVariant` identities of one standalone artifact analysis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredArtifactAnalysisIdentity {
@@ -64,6 +73,8 @@ pub struct StoredArtifactAnalysisIdentity {
 pub struct StoredArtifactAnalysis {
     /// Standalone analysis row id.
     pub analysis_id: i64,
+    /// Schema version declared by the persisted artifact IR row.
+    pub schema_version: String,
     /// User-provided artifact path retained when the analysis was recorded.
     pub path: String,
     /// Canonical versioned artifact IR retained by the analysis.
@@ -199,8 +210,12 @@ pub enum IdKind {
     Occurrence,
     /// A clone group, as its report heading names it.
     CloneGroup,
+    /// A supplemental sibling finding attached to a primary clone group.
+    Sibling,
     /// A group from an explicit cross-language comparison.
     CrossLanguageGroup,
+    /// A group from an explicit cross-build-variant comparison.
+    CrossVariantGroup,
 }
 
 impl IdKind {
@@ -210,9 +225,61 @@ impl IdKind {
         match self {
             Self::Occurrence => "finding",
             Self::CloneGroup => "clone group",
+            Self::Sibling => "sibling finding",
             Self::CrossLanguageGroup => "cross-language comparison group",
+            Self::CrossVariantGroup => "cross-build-variant comparison group",
         }
     }
+}
+
+/// One sibling finding looked up by the ID exported in a report.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredSiblingDetail {
+    /// Run that recorded the sibling.
+    pub run_id: i64,
+    /// Primary group that owns the supplemental finding.
+    pub group_fingerprint_hex: String,
+    /// The sibling and its verifier evidence.
+    pub sibling: StoredSibling,
+}
+
+/// One persisted cross-build-variant group, read for its standalone explain
+/// view rather than treated as an ordinary scan finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossVariantGroupDetail {
+    /// Stable identity of the explicit comparison that recorded this group.
+    pub comparison_id_hex: String,
+    /// Version of the comparison policy.
+    pub policy_version: String,
+    /// Scan root shared by the compared partitions.
+    pub root_path: String,
+    /// Origin `BuildVariant` fingerprints retained by the comparison.
+    pub origin_variants: Vec<String>,
+    /// Stable comparison-domain group identity.
+    pub group_id_hex: String,
+    /// Clone classification under the comparison policy.
+    pub clone_type: String,
+    /// Origin-aware exact-clone members.
+    pub members: Vec<CrossVariantGroupMember>,
+}
+
+/// One member of a persisted cross-build-variant clone group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossVariantGroupMember {
+    /// `BuildVariant` fingerprint of the normal partition that produced it.
+    pub origin_variant: String,
+    /// Source language (`c` or `cpp`).
+    pub language: String,
+    /// Source path relative to the comparison root.
+    pub file_path: String,
+    /// One-based source range start.
+    pub start_line: u32,
+    /// One-based source range end.
+    pub end_line: u32,
+    /// Best-effort enclosing unit name.
+    pub unit_name: Option<String>,
+    /// Matched token count.
+    pub token_count: usize,
 }
 
 /// One recorded identifier matching a lookup.
@@ -299,6 +366,8 @@ pub struct StoredSibling {
     pub composite: f64,
     /// The ungrouped sibling occurrence.
     pub member: StoredMember,
+    /// The rule that hid this supplemental finding in its run.
+    pub suppressed_by: Option<StoredSuppressionRef>,
 }
 
 /// One source-unit anchor retained for a run-scoped near-match diagnostic.
@@ -332,6 +401,8 @@ pub struct StoredNearMiss {
     pub left: StoredNearMissUnit,
     /// Higher side of the canonical proposal pair.
     pub right: StoredNearMissUnit,
+    /// The rule that hid this diagnostic in its run.
+    pub suppressed_by: Option<StoredSuppressionRef>,
 }
 
 /// Decode the constrained evidence label stored with a clone group.
@@ -576,21 +647,6 @@ pub struct StoredSuppressionRef {
     pub reason: Option<String>,
     /// Whether the referenced rule was active in the database row.
     pub active: Option<bool>,
-}
-
-/// One posting-list entry: an occurrence of a feature hash at a location.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FeatureOccurrence {
-    /// Run the occurrence was recorded in.
-    pub scan_run_id: i64,
-    /// Enclosing unit row, when anchored to one.
-    pub source_unit_id: Option<i64>,
-    /// Anchor: first byte covered.
-    pub start_byte: i64,
-    /// Anchor: one past the last byte covered.
-    pub end_byte: i64,
-    /// Kind-specific size (window length, subtree node count, ...).
-    pub extent: i64,
 }
 
 /// One source-to-artifact correspondence read from a standalone artifact analysis.

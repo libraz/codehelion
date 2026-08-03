@@ -1,9 +1,120 @@
 use super::{
-    BTreeMap, OptionalExtension, RunOrigin, RunSummary, Store, StoreError, StoredSetting,
-    StoredVariant, params,
+    BTreeMap, CloneGroupFingerprint, GroupLineageId, OptionalExtension, RunOrigin, RunSummary,
+    Store, StoreError, StoredGroupSnapshot, StoredSetting, StoredVariant, params,
 };
 
 impl Store {
+    /// Newest completed run for one root and exact build variant.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn latest_run_for_variant(
+        &self,
+        root_path: &str,
+        variant_fingerprint: &str,
+    ) -> Result<Option<RunSummary>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT r.id, r.root_path, r.tool_version, r.analysis_mode,
+                        r.started_at, r.finished_at,
+                        (SELECT COUNT(*) FROM clone_group g WHERE g.scan_run_id = r.id)
+                 FROM scan_run r
+                 JOIN build_variant v ON v.id = r.build_variant_id
+                 WHERE r.root_path = ?1
+                   AND v.variant_fingerprint = ?2
+                   AND r.status = 'completed'
+                 ORDER BY r.started_at DESC, r.id DESC
+                 LIMIT 1",
+                params![root_path, variant_fingerprint],
+                |row| {
+                    Ok(RunSummary {
+                        id: row.get(0)?,
+                        root_path: row.get(1)?,
+                        tool_version: row.get(2)?,
+                        analysis_mode: row.get(3)?,
+                        started_at: row.get(4)?,
+                        finished_at: row.get(5)?,
+                        group_count: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Newest completed run recorded under the exact analysis configuration.
+    ///
+    /// This deliberately does not compare source files. Callers first choose
+    /// a run whose configuration and build variant agree, then compare the
+    /// recorded tree with the files they just discovered.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn latest_compatible_run(
+        &self,
+        root_path: &str,
+        config_hash: &str,
+        variant_fingerprint: &str,
+    ) -> Result<Option<RunSummary>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT r.id, r.root_path, r.tool_version, r.analysis_mode,
+                        r.started_at, r.finished_at,
+                        (SELECT COUNT(*) FROM clone_group g WHERE g.scan_run_id = r.id)
+                 FROM scan_run r
+                 JOIN build_variant v ON v.id = r.build_variant_id
+                 WHERE r.root_path = ?1
+                   AND r.config_hash = ?2
+                   AND v.variant_fingerprint = ?3
+                   AND r.status = 'completed'
+                 ORDER BY r.started_at DESC, r.id DESC
+                 LIMIT 1",
+                params![root_path, config_hash, variant_fingerprint],
+                |row| {
+                    Ok(RunSummary {
+                        id: row.get(0)?,
+                        root_path: row.get(1)?,
+                        tool_version: row.get(2)?,
+                        analysis_mode: row.get(3)?,
+                        started_at: row.get(4)?,
+                        finished_at: row.get(5)?,
+                        group_count: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Group fingerprints and durable lineage identities for one completed run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an absent or incomplete run, malformed persisted
+    /// identifiers, or an underlying database failure.
+    pub fn run_group_snapshots(&self, run_id: i64) -> Result<Vec<StoredGroupSnapshot>, StoreError> {
+        self.ensure_completed_run(run_id)?;
+        let mut statement = self.conn.prepare(
+            "SELECT f.hash, g.lineage
+             FROM clone_group g
+             JOIN fingerprint f ON f.id = g.group_fingerprint_id
+             WHERE g.scan_run_id = ?1
+             ORDER BY f.hash ASC",
+        )?;
+        statement
+            .query_map(params![run_id], |row| {
+                let fingerprint = bytes16("clone_group.fingerprint", row.get(0)?)?;
+                let lineage = bytes16("clone_group.lineage", row.get(1)?)?;
+                Ok(StoredGroupSnapshot {
+                    fingerprint: CloneGroupFingerprint::from_bytes(fingerprint),
+                    lineage: Some(GroupLineageId::from_bytes(lineage)),
+                })
+            })?
+            .collect::<Result<_, _>>()
+            .map_err(Into::into)
+    }
     /// Refuse a run that is absent or has not completed its scan invocation.
     ///
     /// # Errors
@@ -39,6 +150,41 @@ impl Store {
                         r.started_at, r.finished_at,
                         (SELECT COUNT(*) FROM clone_group g WHERE g.scan_run_id = r.id)
                  FROM scan_run r
+                 ORDER BY r.started_at DESC, r.id DESC
+                 LIMIT 1",
+                [],
+                |row| {
+                    Ok(RunSummary {
+                        id: row.get(0)?,
+                        root_path: row.get(1)?,
+                        tool_version: row.get(2)?,
+                        analysis_mode: row.get(3)?,
+                        started_at: row.get(4)?,
+                        finished_at: row.get(5)?,
+                        group_count: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// The newest completed scan run across all recorded roots.
+    ///
+    /// This is used by database-only commands whose input does not identify a
+    /// repository root, such as artifact calibration.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn latest_completed_run_any_root(&self) -> Result<Option<RunSummary>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT r.id, r.root_path, r.tool_version, r.analysis_mode,
+                        r.started_at, r.finished_at,
+                        (SELECT COUNT(*) FROM clone_group g WHERE g.scan_run_id = r.id)
+                 FROM scan_run r
+                 WHERE r.status = 'completed'
                  ORDER BY r.started_at DESC, r.id DESC
                  LIMIT 1",
                 [],
@@ -318,4 +464,17 @@ impl Store {
             .collect::<Result<_, _>>()?;
         Ok(Some(variant))
     }
+}
+
+fn bytes16(field: &'static str, bytes: Vec<u8>) -> Result<[u8; 16], rusqlite::Error> {
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Blob,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{field} has {} bytes; expected 16", bytes.len()),
+            )),
+        )
+    })
 }

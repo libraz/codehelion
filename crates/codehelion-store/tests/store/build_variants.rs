@@ -161,7 +161,6 @@ fn recording_one_variant_twice_records_its_settings_once() {
 }
 
 /// A run of the same tree under rules that named every group differently.
-#[cfg(any())]
 fn renamed_snapshot<'a>(
     variant: &'a BuildVariant,
     detectors: &'a [(String, String)],
@@ -181,7 +180,6 @@ fn renamed_snapshot<'a>(
 }
 
 #[test]
-#[cfg(any())]
 fn a_history_carries_across_a_change_that_moved_every_identifier() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
@@ -225,7 +223,50 @@ fn a_history_carries_across_a_change_that_moved_every_identifier() {
 }
 
 #[test]
-#[cfg(any())]
+fn matching_member_content_adopts_the_predecessors_lineage() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let before = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+    let mut after_snapshot = sample_snapshot(&variant, &detectors);
+    after_snapshot.started_at = "2026-07-25T00:00:00Z";
+    after_snapshot.finished_at = "2026-07-25T00:00:05Z";
+    after_snapshot.groups[0].fingerprint = group_fp(77);
+    after_snapshot.groups[0].history = GroupOrigin::unconnected(&group_fp(77));
+    let after = store.record_snapshot(&after_snapshot).unwrap();
+
+    let adopted = store.adopt_matching_lineages(after, before).unwrap();
+    assert_eq!(adopted.taken, vec![group_fp(77).to_hex()]);
+    assert_eq!(
+        store.run_group_snapshots(after).unwrap()[0].lineage,
+        Some(group_lineage_id(&group_fp(9)))
+    );
+}
+
+#[test]
+fn an_unchanged_group_needs_no_lineage_adoption() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let before = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+    let mut after_snapshot = sample_snapshot(&variant, &detectors);
+    after_snapshot.started_at = "2026-07-25T00:00:00Z";
+    after_snapshot.finished_at = "2026-07-25T00:00:05Z";
+    let after = store.record_snapshot(&after_snapshot).unwrap();
+
+    let adopted = store.adopt_matching_lineages(after, before).unwrap();
+    assert!(adopted.taken.is_empty());
+    assert_eq!(
+        store.run_group_snapshots(after).unwrap()[0].lineage,
+        Some(group_lineage_id(&group_fp(9)))
+    );
+}
+
+#[test]
 fn a_group_the_comparison_already_connected_is_left_as_it_was() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
@@ -276,7 +317,6 @@ fn a_group_the_comparison_already_connected_is_left_as_it_was() {
 }
 
 #[test]
-#[cfg(any())]
 fn a_group_a_run_does_not_hold_is_named_rather_than_passed_over() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
@@ -307,7 +347,6 @@ fn a_group_a_run_does_not_hold_is_named_rather_than_passed_over() {
 }
 
 #[test]
-#[cfg(any())]
 fn a_malformed_identifier_stops_the_rewrite_rather_than_half_applying_it() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();

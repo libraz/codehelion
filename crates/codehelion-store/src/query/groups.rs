@@ -1,14 +1,95 @@
-use super::common::map_member;
+use super::common::{COMPLETED_CLONE_GROUP_RUN_JOIN, map_member};
 use super::{
-    FileCountsRow, FunnelDropRow, FunnelStageRow, GuardrailsRow, IdKind, IdMatch,
-    OptionalExtension, SOG_SCHEMA_VERSION, SemanticOperationGraph, Store, StoreError,
+    BTreeMap, FileCountsRow, FunnelDropRow, FunnelStageRow, GuardrailsRow, IdKind, IdMatch,
+    OptionalExtension, Row, SOG_SCHEMA_VERSION, SemanticOperationGraph, Store, StoreError,
     StoredFinding, StoredGroup, StoredGroupDetail, StoredMember, StoredNearMiss,
     StoredNearMissUnit, StoredPriority, StoredSemanticEvidence, StoredSemanticNodeMapping,
-    StoredSibling, StoredSimilarity, StoredSuppressionRef, SummaryRow, UnparsedRow, UnusedRuleRow,
-    params, stored_test_code_evidence,
+    StoredSibling, StoredSiblingDetail, StoredSimilarity, StoredSuppressionRef, SummaryRow,
+    UnparsedRow, UnusedRuleRow, params, stored_test_code_evidence,
 };
 
 impl Store {
+    /// Look up one supplemental sibling by the finding id exported in reports.
+    ///
+    /// # Errors
+    ///
+    /// Returns malformed ids and underlying database failures.
+    pub fn sibling(&self, finding_hex: &str) -> Result<Option<StoredSiblingDetail>, StoreError> {
+        let finding_id = super::common::parse_hex_id(finding_hex)?;
+        self.conn
+            .query_row(
+                "SELECT g.scan_run_id, lower(hex(group_fp.hash)),
+                        lower(hex(s.finding_id)), lower(hex(s.fragment_fingerprint)),
+                        u.language, u.file_path, u.start_line, u.end_line, u.token_count,
+                        u.name, s.boilerplate, s.clone_type, s.confidence_band,
+                        s.weight_version, s.lexical, s.structural, s.control_flow,
+                        s.type_similarity, s.api, s.composite,
+                        sup.scope, sup.pattern, sup.reason, sup.active
+                 FROM clone_group_sibling s
+                 JOIN clone_group g ON g.id = s.clone_group_id
+                 JOIN fingerprint group_fp ON group_fp.id = g.group_fingerprint_id
+                 JOIN source_unit u ON u.id = s.source_unit_id
+                 LEFT JOIN suppression sup ON sup.id = s.suppression_id
+                 JOIN scan_run r ON r.id = g.scan_run_id AND r.status = 'completed'
+                 WHERE s.finding_id = ?1
+                 ORDER BY g.scan_run_id DESC
+                 LIMIT 1",
+                params![finding_id.as_slice()],
+                |row| {
+                    Ok(StoredSiblingDetail {
+                        run_id: row.get(0)?,
+                        group_fingerprint_hex: row.get(1)?,
+                        sibling: StoredSibling {
+                            member: StoredMember {
+                                finding_hex: row.get(2)?,
+                                content_hex: row.get(3)?,
+                                language: row.get(4)?,
+                                file_path: row.get(5)?,
+                                start_line: row.get(6)?,
+                                end_line: row.get(7)?,
+                                token_count: row.get(8)?,
+                                unit_name: row.get(9)?,
+                                boilerplate: row.get(10)?,
+                                is_canonical: false,
+                            },
+                            clone_type: row.get(11)?,
+                            confidence_band: row.get(12)?,
+                            weight_version: row.get(13)?,
+                            lexical: row.get(14)?,
+                            structural: row.get(15)?,
+                            control_flow: row.get(16)?,
+                            type_similarity: row.get(17)?,
+                            api: row.get(18)?,
+                            composite: row.get(19)?,
+                            suppressed_by: stored_suppression(row, 20)?,
+                        },
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// The presentation rank-down verdict recorded for every group in a run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an underlying database error, or refuses an incomplete run.
+    pub fn run_group_ranked_down(&self, run_id: i64) -> Result<BTreeMap<String, bool>, StoreError> {
+        self.ensure_completed_run(run_id)?;
+        let mut statement = self.conn.prepare(
+            "SELECT lower(hex(f.hash)), g.ranked_down
+             FROM clone_group g
+             JOIN fingerprint f ON f.id = g.group_fingerprint_id
+             WHERE g.scan_run_id = ?1
+             ORDER BY f.hash ASC",
+        )?;
+        statement
+            .query_map(params![run_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()
+            .map_err(Into::into)
+    }
+
     /// Bounded, run-scoped LSH diagnostics in the order the scan retained
     /// them. They are deliberately read outside `run_groups`: a near miss has
     /// no primary group ownership or finding identity.
@@ -25,12 +106,13 @@ impl Store {
                         left_unit.name,
                         lower(hex(right_fp.hash)), right_unit.language, right_unit.file_path,
                         right_unit.start_line, right_unit.end_line, right_unit.token_count,
-                        right_unit.name
+                        right_unit.name, sup.scope, sup.pattern, sup.reason, sup.active
                  FROM near_match_near_miss n
                  JOIN source_unit left_unit ON left_unit.id = n.left_source_unit_id
                  JOIN fingerprint left_fp ON left_fp.id = left_unit.fingerprint_id
                  JOIN source_unit right_unit ON right_unit.id = n.right_source_unit_id
                  JOIN fingerprint right_fp ON right_fp.id = right_unit.fingerprint_id
+                 LEFT JOIN suppression sup ON sup.id = n.suppression_id
                  WHERE n.scan_run_id = ?1
                  ORDER BY n.ordinal ASC",
             )?
@@ -55,6 +137,7 @@ impl Store {
                         token_count: row.get(13)?,
                         unit_name: row.get(14)?,
                     },
+                    suppressed_by: stored_suppression(row, 15)?,
                 })
             })?
             .collect::<Result<_, _>>()
@@ -84,7 +167,7 @@ impl Store {
     ///
     /// Returns any underlying database error.
     pub fn run_groups(&self, run_id: i64) -> Result<Vec<StoredGroup>, StoreError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT g.id, lower(hex(f.hash)), g.clone_type, g.score, g.entropy_bits,
                     g.suppress_reason, g.boilerplate, g.member_scope, g.test_code,
                     g.test_code_evidence, g.split_pair, s.scope, s.pattern, s.reason, s.active,
@@ -94,9 +177,10 @@ impl Store {
              JOIN fingerprint f ON f.id = g.group_fingerprint_id
              LEFT JOIN finding fi ON fi.clone_group_id = g.id
              LEFT JOIN suppression s ON s.id = fi.suppression_id
+             {COMPLETED_CLONE_GROUP_RUN_JOIN}
              WHERE g.scan_run_id = ?1
              ORDER BY f.hash ASC",
-        )?;
+        ))?;
         let rows: Vec<(i64, StoredGroup)> = stmt
             .query_map(params![run_id], |row| {
                 let scope: Option<String> = row.get(11)?;
@@ -160,9 +244,11 @@ impl Store {
                         u.language, u.file_path, u.start_line, u.end_line, u.token_count,
                         u.name, s.boilerplate, s.clone_type, s.confidence_band,
                         s.weight_version, s.lexical, s.structural, s.control_flow,
-                        s.type_similarity, s.api, s.composite
+                        s.type_similarity, s.api, s.composite,
+                        sup.scope, sup.pattern, sup.reason, sup.active
                  FROM clone_group_sibling s
                  JOIN source_unit u ON u.id = s.source_unit_id
+                 LEFT JOIN suppression sup ON sup.id = s.suppression_id
                  WHERE s.clone_group_id = ?1
                  ORDER BY s.fragment_fingerprint ASC, u.fingerprint_id ASC, u.id ASC",
             )?
@@ -189,6 +275,7 @@ impl Store {
                     type_similarity: row.get(15)?,
                     api: row.get(16)?,
                     composite: row.get(17)?,
+                    suppressed_by: stored_suppression(row, 18)?,
                 })
             })?
             .collect::<Result<_, _>>()
@@ -205,12 +292,15 @@ impl Store {
         let run_id: Option<i64> = self
             .conn
             .query_row(
-                "SELECT g.scan_run_id
+                &format!(
+                    "SELECT g.scan_run_id
                  FROM clone_group g
                  JOIN fingerprint f ON f.id = g.group_fingerprint_id
+                 {COMPLETED_CLONE_GROUP_RUN_JOIN}
                  WHERE lower(hex(f.hash)) = ?1
                  ORDER BY g.scan_run_id DESC
                  LIMIT 1",
+                ),
                 params![fingerprint_hex],
                 |row| row.get(0),
             )
@@ -240,7 +330,7 @@ impl Store {
     /// Returns any underlying database error.
     pub fn ids_starting_with(&self, prefix: &str) -> Result<Vec<IdMatch>, StoreError> {
         let prefix = prefix.to_ascii_lowercase();
-        let pattern = format!("{prefix}%");
+        let pattern = format!("{}%", escape_like_prefix(&prefix));
         let mut matches = Vec::new();
         let mut collect = |sql: &str, kind: IdKind| -> Result<(), StoreError> {
             let mut stmt = self.conn.prepare(sql)?;
@@ -251,23 +341,46 @@ impl Store {
             Ok(())
         };
         collect(
-            "SELECT DISTINCT lower(hex(m.finding_id)) AS hex_id
+            &format!(
+                "SELECT DISTINCT lower(hex(m.finding_id)) AS hex_id
              FROM clone_group_member m
-             WHERE hex_id LIKE ?1 ORDER BY hex_id",
+             JOIN clone_group g ON g.id = m.clone_group_id
+             {COMPLETED_CLONE_GROUP_RUN_JOIN}
+             WHERE hex_id LIKE ?1 ESCAPE '\\' ORDER BY hex_id",
+            ),
             IdKind::Occurrence,
         )?;
         collect(
-            "SELECT DISTINCT lower(hex(f.hash)) AS hex_id
+            &format!(
+                "SELECT DISTINCT lower(hex(s.finding_id)) AS hex_id
+                 FROM clone_group_sibling s
+                 JOIN clone_group g ON g.id = s.clone_group_id
+                 {COMPLETED_CLONE_GROUP_RUN_JOIN}
+                 WHERE hex_id LIKE ?1 ESCAPE '\\' ORDER BY hex_id",
+            ),
+            IdKind::Sibling,
+        )?;
+        collect(
+            &format!(
+                "SELECT DISTINCT lower(hex(f.hash)) AS hex_id
              FROM clone_group g
              JOIN fingerprint f ON f.id = g.group_fingerprint_id
-             WHERE hex_id LIKE ?1 ORDER BY hex_id",
+             {COMPLETED_CLONE_GROUP_RUN_JOIN}
+             WHERE hex_id LIKE ?1 ESCAPE '\\' ORDER BY hex_id",
+            ),
             IdKind::CloneGroup,
         )?;
         collect(
             "SELECT DISTINCT lower(hex(group_id)) AS hex_id
              FROM cross_language_semantic_group
-             WHERE hex_id LIKE ?1 ORDER BY hex_id",
+             WHERE hex_id LIKE ?1 ESCAPE '\\' ORDER BY hex_id",
             IdKind::CrossLanguageGroup,
+        )?;
+        collect(
+            "SELECT DISTINCT lower(hex(group_id)) AS hex_id
+             FROM cross_variant_clone_group
+             WHERE hex_id LIKE ?1 ESCAPE '\\' ORDER BY hex_id",
+            IdKind::CrossVariantGroup,
         )?;
         Ok(matches)
     }
@@ -405,6 +518,10 @@ impl Store {
     /// # Errors
     ///
     /// Returns any underlying database error.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the persisted summary columns and their row offsets remain adjacent"
+    )]
     pub fn run_summary_row(&self, run_id: i64) -> Result<Option<SummaryRow>, StoreError> {
         let summary = self
             .conn
@@ -421,7 +538,11 @@ impl Store {
                         guardrail_sibling_candidate_budget,
                         guardrail_sibling_per_group_cap, guardrail_sibling_total_cap,
                         guardrail_max_component, folded_runs, subsumed_runs,
-                        split_components, pair_budget_exhausted, baseline_digest
+                        split_components, pair_budget_exhausted, baseline_digest,
+                        excluded_language, excluded_symlink_files,
+                        excluded_symlink_directories, guardrail_near_miss_delta,
+                        guardrail_near_miss_cap, guardrail_verification_budget,
+                        guardrail_max_alignment_cells
                  FROM run_summary WHERE scan_run_id = ?1",
                 params![run_id],
                 |row| {
@@ -438,6 +559,10 @@ impl Store {
                     let guardrail_sibling_per_group_cap: Option<i64> = row.get(25)?;
                     let guardrail_sibling_total_cap: Option<i64> = row.get(26)?;
                     let guardrail_max_component: Option<i64> = row.get(27)?;
+                    let guardrail_near_miss_delta: Option<i64> = row.get(36)?;
+                    let guardrail_near_miss_cap: Option<i64> = row.get(37)?;
+                    let guardrail_verification_budget: Option<i64> = row.get(38)?;
+                    let guardrail_max_alignment_cells: Option<i64> = row.get(39)?;
                     Ok(SummaryRow {
                         analyzed_files: FileCountsRow {
                             total: count(row.get(0)?),
@@ -468,6 +593,10 @@ impl Store {
                             helper_timeout_ms: count(guardrail_helper_timeout_ms.unwrap_or(0)),
                             posting_cap: count(guardrail_posting_cap.unwrap_or(0)),
                             pair_budget: count(guardrail_pair_budget.unwrap_or(0)),
+                            near_miss_delta_bits: count(guardrail_near_miss_delta.unwrap_or(0)),
+                            near_miss_cap: count(guardrail_near_miss_cap.unwrap_or(0)),
+                            verification_budget: count(guardrail_verification_budget.unwrap_or(0)),
+                            max_alignment_cells: count(guardrail_max_alignment_cells.unwrap_or(0)),
                             sibling_candidate_budget: count(
                                 guardrail_sibling_candidate_budget.unwrap_or(0),
                             ),
@@ -482,6 +611,9 @@ impl Store {
                         split_components: count(row.get(30)?),
                         pair_budget_exhausted: row.get(31)?,
                         baseline_digest: row.get(32)?,
+                        excluded_language: count(row.get(33)?),
+                        excluded_symlink_files: count(row.get(34)?),
+                        excluded_symlink_directories: count(row.get(35)?),
                         funnel: Vec::new(),
                         unused_suppressions: Vec::new(),
                     })
@@ -642,4 +774,31 @@ impl Store {
             .collect::<Result<_, _>>()?;
         Ok(findings)
     }
+}
+
+/// Escape a literal prefix for `SQLite` `LIKE`, using backslash as the explicit
+/// escape character in every id lookup query above.
+fn escape_like_prefix(prefix: &str) -> String {
+    prefix
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn stored_suppression(
+    row: &Row<'_>,
+    start: usize,
+) -> rusqlite::Result<Option<StoredSuppressionRef>> {
+    let scope: Option<String> = row.get(start)?;
+    let pattern: Option<String> = row.get(start + 1)?;
+    let reason: Option<String> = row.get(start + 2)?;
+    let active: Option<bool> = row.get(start + 3)?;
+    Ok(scope
+        .zip(pattern)
+        .map(|(scope, pattern)| StoredSuppressionRef {
+            scope,
+            pattern,
+            reason,
+            active,
+        }))
 }

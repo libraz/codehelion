@@ -26,7 +26,7 @@ pub mod snapshot;
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 /// Time one local connection waits for another codehelion writer to finish.
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -41,6 +41,15 @@ pub fn fingerprint_hex(fingerprint: [u8; 16]) -> String {
         text.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     text
+}
+
+/// Return the directory component of a stored relative path.
+///
+/// New Windows keys use `/`, but accepting `\\` keeps rankings reproducible
+/// for databases written before path-key normalization.
+#[must_use]
+pub fn directory_of(path: &str) -> &str {
+    path.rfind(['/', '\\']).map_or("", |cut| &path[..cut])
 }
 
 /// Storage errors.
@@ -75,6 +84,18 @@ pub enum StoreError {
     UnknownGroupFingerprint {
         /// Hex form of the missing primary group fingerprint.
         fingerprint: String,
+    },
+    /// A snapshot attempted to emit two primary groups with one stable ID.
+    #[error("snapshot emits duplicate clone-group fingerprint {fingerprint}")]
+    DuplicateGroupFingerprint {
+        /// Hex form of the conflicting stable group fingerprint.
+        fingerprint: String,
+    },
+    /// A snapshot attempted to emit two findings with one stable ID.
+    #[error("snapshot emits duplicate finding id {finding}")]
+    DuplicateFindingId {
+        /// Hex form of the conflicting stable finding id.
+        finding: String,
     },
     /// A snapshot's compiler result named a helper that is not in the
     /// snapshot.
@@ -160,6 +181,12 @@ pub enum StoreError {
         /// Why the evidence cannot be recorded safely.
         reason: String,
     },
+    /// A requested lineage connection was not supported by the two stored runs.
+    #[error("invalid clone-group lineage evidence: {reason}")]
+    InvalidLineageEvidence {
+        /// Why this connection cannot be committed.
+        reason: String,
+    },
     /// A full artifact IR would exceed the bounded local storage budget.
     #[error(
         "artifact analysis IR is {size_bytes} bytes, exceeding the storage limit of {maximum_bytes} bytes"
@@ -169,6 +196,13 @@ pub enum StoreError {
         size_bytes: usize,
         /// Largest document size the local store accepts.
         maximum_bytes: usize,
+    },
+    /// A persisted artifact row and its JSON document disagreed about the IR
+    /// schema that defines how the document may be interpreted.
+    #[error("artifact analysis IR schema is invalid: {reason}")]
+    InvalidArtifactIrSchema {
+        /// Why the schema contract could not be established.
+        reason: String,
     },
     /// Stored mapping evidence was not valid for the version this build knows.
     #[error("invalid stored source-artifact mapping evidence: {source}")]
@@ -193,6 +227,46 @@ pub struct Store {
     pub(crate) conn: Connection,
 }
 
+/// Rows removed by one explicit cache-prune operation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    /// Incomplete scan partitions removed.
+    pub abandoned_runs: usize,
+    /// Standalone artifact analyses removed.
+    pub artifact_analyses: usize,
+    /// Cross-build-variant comparisons removed.
+    pub cross_variant_comparisons: usize,
+    /// Cross-language comparisons removed.
+    pub cross_language_comparisons: usize,
+    /// Content identities no remaining scan row references.
+    pub orphaned_fingerprints: usize,
+}
+
+/// Allocated `SQLite` pages attributed to one logical table and its indexes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableStorage {
+    /// Table name from the current schema.
+    pub table: String,
+    /// Bytes allocated to the table and its indexes.
+    pub bytes: u64,
+}
+
+/// Fingerprints are shared content identities rather than run-owned rows, so
+/// their foreign keys cannot cascade. Retiring runs explicitly removes the
+/// identities no remaining unit, fragment, or group references.
+fn remove_orphaned_fingerprints(tx: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+    tx.execute(
+        "DELETE FROM fingerprint
+         WHERE NOT EXISTS (SELECT 1 FROM source_unit u WHERE u.fingerprint_id = fingerprint.id)
+           AND NOT EXISTS (SELECT 1 FROM fragment f WHERE f.fingerprint_id = fingerprint.id)
+           AND NOT EXISTS (
+               SELECT 1 FROM clone_group g WHERE g.group_fingerprint_id = fingerprint.id
+           )",
+        [],
+    )?;
+    Ok(())
+}
+
 impl Store {
     /// Open (creating if missing) the database at the current baseline.
     ///
@@ -202,8 +276,32 @@ impl Store {
     /// exists at the path; otherwise any underlying database error.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         Self::from_connection(conn)
+    }
+
+    /// Open an existing database without creating or initializing a file.
+    ///
+    /// Read-only commands use this path so a misspelled database argument
+    /// cannot leave behind an empty database that looks like scan history.
+    /// The connection remains read-write because WAL readers may need `SQLite`
+    /// to maintain shared-memory state; codehelion does not mutate the schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::UnsupportedSchema`] for an empty or incompatible
+    /// database, and an underlying database error when the path is absent or
+    /// unreadable.
+    pub fn open_existing(path: &Path) -> Result<Self, StoreError> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        schema::validate_existing(&conn)?;
+        Ok(Self { conn })
     }
 
     /// Open a fresh in-memory database (used by tests and dry runs).
@@ -219,7 +317,9 @@ impl Store {
         conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         schema::initialize(&mut conn)?;
-        Ok(Self { conn })
+        let mut store = Self { conn };
+        store.discard_expired_abandoned_runs()?;
+        Ok(store)
     }
 
     /// The schema version of the open database.
@@ -230,12 +330,114 @@ impl Store {
     pub fn schema_version(&self) -> Result<i64, StoreError> {
         schema::version(&self.conn)
     }
+
+    /// Allocated database pages grouped by logical table.
+    ///
+    /// Index pages are attributed to the table they index. WAL and shared-
+    /// memory sidecars are file-level state and are intentionally reported by
+    /// the CLI beside, rather than inside, this breakdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an underlying database error.
+    pub fn table_storage(&self) -> Result<Vec<TableStorage>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT COALESCE(m.tbl_name, d.name) AS logical_table, SUM(d.pgsize)
+             FROM dbstat d
+             LEFT JOIN sqlite_master m ON m.name = d.name
+             WHERE d.name NOT LIKE 'sqlite_%'
+             GROUP BY logical_table
+             ORDER BY SUM(d.pgsize) DESC, logical_table ASC",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                let bytes = row.get::<_, i64>(1)?;
+                Ok(TableStorage {
+                    table: row.get(0)?,
+                    bytes: u64::try_from(bytes).unwrap_or(0),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Apply explicit retention limits and compact the local database.
+    ///
+    /// The newest artifact analyses and each comparison kind are retained by
+    /// their recorded timestamps. All incomplete partitions are abandoned by
+    /// definition once a user explicitly prunes under the exclusive database
+    /// lease. Completed source scans remain subject to their existing
+    /// replacement and artifact-reference rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns an underlying database error. The row deletion is atomic;
+    /// compaction runs only after it commits.
+    pub fn prune(
+        &mut self,
+        keep_artifact_analyses: usize,
+        keep_comparisons: usize,
+    ) -> Result<PruneReport, StoreError> {
+        let keep_artifacts = i64::try_from(keep_artifact_analyses).unwrap_or(i64::MAX);
+        let keep_comparisons = i64::try_from(keep_comparisons).unwrap_or(i64::MAX);
+        let tx = self.conn.transaction()?;
+        let fingerprints_before: i64 =
+            tx.query_row("SELECT COUNT(*) FROM fingerprint", [], |row| row.get(0))?;
+        let abandoned_runs = tx.execute("DELETE FROM scan_run WHERE status = 'running'", [])?;
+        let artifact_analyses = tx.execute(
+            "DELETE FROM artifact_analysis
+             WHERE id NOT IN (
+                 SELECT id FROM artifact_analysis
+                 ORDER BY started_at DESC, id DESC LIMIT ?1
+             )",
+            [keep_artifacts],
+        )?;
+        let cross_variant_comparisons = tx.execute(
+            "DELETE FROM cross_variant_comparison
+             WHERE id NOT IN (
+                 SELECT id FROM cross_variant_comparison
+                 ORDER BY started_at DESC, id DESC LIMIT ?1
+             )",
+            [keep_comparisons],
+        )?;
+        let cross_language_comparisons = tx.execute(
+            "DELETE FROM cross_language_comparison
+             WHERE id NOT IN (
+                 SELECT id FROM cross_language_comparison
+                 ORDER BY started_at DESC, id DESC LIMIT ?1
+             )",
+            [keep_comparisons],
+        )?;
+        remove_orphaned_fingerprints(&tx)?;
+        let fingerprints_after: i64 =
+            tx.query_row("SELECT COUNT(*) FROM fingerprint", [], |row| row.get(0))?;
+        tx.commit()?;
+        self.conn
+            .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(PruneReport {
+            abandoned_runs,
+            artifact_analyses,
+            cross_variant_comparisons,
+            cross_language_comparisons,
+            orphaned_fingerprints: usize::try_from(
+                fingerprints_before.saturating_sub(fingerprints_after),
+            )
+            .unwrap_or(usize::MAX),
+        })
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_of_accepts_both_stored_path_separators() {
+        assert_eq!(directory_of("source.rs"), "");
+        assert_eq!(directory_of("src/nested/source.rs"), "src/nested");
+        assert_eq!(directory_of("src\\nested\\source.rs"), "src\\nested");
+    }
 
     #[test]
     fn an_in_memory_store_uses_the_current_baseline() {
@@ -258,6 +460,95 @@ mod tests {
 
         assert_eq!(journal_mode, "wal");
         assert_eq!(busy_timeout_ms, 5_000);
+    }
+
+    #[test]
+    fn file_open_waits_for_the_lock_needed_to_confirm_wal_mode() {
+        use std::sync::mpsc;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audit.db");
+        let store = Store::open(&path).unwrap();
+        store.conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let path_for_thread = path;
+        let opener = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            Store::open(&path_for_thread).map(drop)
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        store.conn.execute_batch("COMMIT").unwrap();
+
+        opener.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn existing_open_does_not_initialize_an_empty_file() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let error = Store::open_existing(file.path()).unwrap_err();
+
+        assert!(matches!(error, StoreError::UnsupportedSchema { found: 0 }));
+        assert_eq!(std::fs::metadata(file.path()).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn table_storage_attributes_index_pages_to_their_tables() {
+        let store = Store::open_in_memory().unwrap();
+        let storage = store.table_storage().unwrap();
+
+        assert!(
+            storage
+                .iter()
+                .any(|entry| entry.table == "scan_run" && entry.bytes > 0)
+        );
+        assert!(storage.iter().all(|entry| !entry.table.starts_with("idx_")));
+    }
+
+    #[test]
+    fn prune_retains_only_the_newest_artifacts_and_comparisons() {
+        let mut store = Store::open_in_memory().unwrap();
+        for ordinal in 1_u8..=3 {
+            let timestamp = format!("2026-01-0{ordinal}T00:00:00Z");
+            store
+                .conn
+                .execute(
+                    "INSERT INTO artifact_analysis
+                         (schema_version, path, format, content_fingerprint, observed_bytes,
+                          started_at, finished_at, status, ir_json)
+                     VALUES ('artifact-ir-v1', ?1, 'elf', ?2, 1, ?3, ?3, 'completed', '{}')",
+                    rusqlite::params![format!("artifact-{ordinal}"), [ordinal; 16], timestamp],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO cross_variant_comparison
+                         (comparison_id, policy_version, root_path, started_at, finished_at)
+                     VALUES (?1, 'test', '/repo', ?2, ?2)",
+                    rusqlite::params![[ordinal; 16], timestamp],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO cross_language_comparison
+                         (comparison_id, policy_version, root_path, started_at, finished_at)
+                     VALUES (?1, 'test', '/repo', ?2, ?2)",
+                    rusqlite::params![[ordinal; 16], timestamp],
+                )
+                .unwrap();
+        }
+
+        let report = store.prune(1, 1).unwrap();
+
+        assert_eq!(report.artifact_analyses, 2);
+        assert_eq!(report.cross_variant_comparisons, 2);
+        assert_eq!(report.cross_language_comparisons, 2);
+        assert_eq!(store.table_count("artifact_analysis").unwrap(), 1);
+        assert_eq!(store.table_count("cross_variant_comparison").unwrap(), 1);
+        assert_eq!(store.table_count("cross_language_comparison").unwrap(), 1);
     }
 
     #[test]
@@ -301,9 +592,6 @@ mod tests {
             "artifact_analysis_correlation",
             "source_artifact_mapping",
             "detector_version",
-            "feature_fingerprint",
-            "feature_occurrence",
-            "unit_feature",
             "clone_group_similarity",
             "compiler_helper",
             "compiler_unit",

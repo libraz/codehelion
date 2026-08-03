@@ -1,6 +1,6 @@
 use super::{
-    BTreeSet, BuildConfiguration, BuildVariant, FeatureKind, HASH_ALGORITHM, Language, Snapshot,
-    StoreError, Transaction, params,
+    BTreeSet, BuildConfiguration, BuildVariant, HASH_ALGORITHM, Language, Snapshot, StoreError,
+    Transaction, params,
 };
 
 pub(super) fn upsert_variant(
@@ -144,58 +144,6 @@ pub(super) fn upsert_group_fingerprint(
         "",
         variant_id,
     )
-}
-
-/// Insert (or reuse) a feature-fingerprint row and return its id. Feature
-/// fingerprints deduplicate on their full context, `feature_schema_version`
-/// included, so identical hashes from incompatible recipes stay distinct.
-#[allow(clippy::too_many_arguments)] // one row, one call site per column set
-pub(super) fn upsert_feature_fingerprint(
-    tx: &Transaction<'_>,
-    kind: FeatureKind,
-    hash: &[u8; 16],
-    feature_schema_version: &str,
-    frontend_version: &str,
-    mode: &str,
-    language: &str,
-    variant_id: i64,
-) -> Result<i64, StoreError> {
-    let mut insert = tx.prepare_cached(
-        "INSERT OR IGNORE INTO feature_fingerprint
-             (kind, hash_algo, hash, feature_schema_version, frontend_version,
-              analysis_mode, language, build_variant_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-    )?;
-    insert.execute(params![
-        kind.name(),
-        HASH_ALGORITHM,
-        hash.as_slice(),
-        feature_schema_version,
-        frontend_version,
-        mode,
-        language,
-        variant_id,
-    ])?;
-    drop(insert);
-    let mut select = tx.prepare_cached(
-        "SELECT id FROM feature_fingerprint
-         WHERE kind = ?1 AND hash_algo = ?2 AND hash = ?3
-           AND feature_schema_version = ?4 AND frontend_version = ?5
-           AND analysis_mode = ?6 AND language = ?7 AND build_variant_id = ?8",
-    )?;
-    Ok(select.query_row(
-        params![
-            kind.name(),
-            HASH_ALGORITHM,
-            hash.as_slice(),
-            feature_schema_version,
-            frontend_version,
-            mode,
-            language,
-            variant_id,
-        ],
-        |row| row.get(0),
-    )?)
 }
 
 #[allow(clippy::too_many_arguments)] // one row, one call site per column set

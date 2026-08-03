@@ -21,6 +21,10 @@ fn a_snapshot_round_trips_through_queries() {
     let group = &groups[0];
     assert_eq!(group.fingerprint_hex, group_fp(9).to_hex());
     assert_eq!(group.clone_type, "type-1");
+    assert_eq!(
+        store.run_group_ranked_down(run_id).unwrap(),
+        std::collections::BTreeMap::from([(group_fp(9).to_hex(), true)])
+    );
     assert!(
         group.similarity.is_none(),
         "Fast mode measures no breakdown"
@@ -52,6 +56,11 @@ fn a_sibling_round_trips_without_becoming_a_primary_member() {
     let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.suppressions = vec![SuppressionRuleRow {
+        scope: "path_glob".to_string(),
+        pattern: "vendor/**".to_string(),
+        reason: Some("vendored sources".to_string()),
+    }];
     snapshot.units.push(UnitRow {
         fingerprint: unit_fp(2),
         language: Language::Rust,
@@ -82,6 +91,7 @@ fn a_sibling_round_trips_without_becoming_a_primary_member() {
                 confidence_band: Confidence::Low,
             },
             boilerplate: None,
+            suppressed_by: Some(0),
         }],
     });
     let mut store = Store::open_in_memory().unwrap();
@@ -100,6 +110,27 @@ fn a_sibling_round_trips_without_becoming_a_primary_member() {
     assert_eq!(sibling.clone_type, "type-3");
     assert_eq!(sibling.confidence_band, "low");
     assert!((sibling.composite - 0.76).abs() < f64::EPSILON);
+    let rule = sibling
+        .suppressed_by
+        .as_ref()
+        .expect("the sibling retains its suppression rule");
+    assert_eq!(rule.scope, "path_glob");
+    assert_eq!(rule.pattern, "vendor/**");
+
+    let explained = store
+        .sibling(&finding(203).to_hex())
+        .unwrap()
+        .expect("sibling id resolves");
+    assert_eq!(explained.run_id, run_id);
+    assert_eq!(explained.group_fingerprint_hex, group_fp(9).to_hex());
+    assert_eq!(&explained.sibling, sibling);
+    assert_eq!(
+        store.ids_starting_with(&finding(203).to_hex()).unwrap(),
+        vec![IdMatch {
+            kind: IdKind::Sibling,
+            id: finding(203).to_hex(),
+        }]
+    );
 }
 
 #[test]
@@ -107,10 +138,16 @@ fn a_near_miss_round_trips_without_becoming_a_primary_finding() {
     let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.suppressions = vec![SuppressionRuleRow {
+        scope: "path_glob".to_string(),
+        pattern: "vendor/**".to_string(),
+        reason: Some("vendored sources".to_string()),
+    }];
     snapshot.near_misses.push(NearMissRow {
         left: 0,
         right: 1,
         estimated_jaccard: 0.28,
+        suppressed_by: Some(0),
     });
     let mut store = Store::open_in_memory().unwrap();
     let run_id = store.record_snapshot(&snapshot).unwrap();
@@ -123,6 +160,12 @@ fn a_near_miss_round_trips_without_becoming_a_primary_finding() {
     assert_eq!(near_miss.right.file_path, "src/b.rs");
     assert_eq!(near_miss.left.unit_name.as_deref(), Some("checksum"));
     assert_eq!(near_miss.right.unit_name.as_deref(), Some("checksum"));
+    let rule = near_miss
+        .suppressed_by
+        .as_ref()
+        .expect("the near miss retains its suppression rule");
+    assert_eq!(rule.scope, "path_glob");
+    assert_eq!(rule.pattern, "vendor/**");
 
     let groups = store.run_groups(run_id).unwrap();
     assert_eq!(groups.len(), 1);
@@ -195,6 +238,64 @@ fn source_units_assign_occurrence_ordinals_without_using_line_anchors() {
     assert_eq!(same_declaration[1].occurrence_ordinal, 2);
     assert_eq!(same_declaration[0].start_line, Some(1));
     assert_eq!(same_declaration[1].start_line, Some(40));
+}
+
+#[test]
+fn repeated_snapshot_rows_preserve_every_entry() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.units.push(UnitRow {
+        fingerprint: unit_fp(3),
+        language: Language::C,
+        kind: UnitKind::Function,
+        name: Some("third_checksum".to_string()),
+        file_path: "src/c.c".to_string(),
+        start_line: 50,
+        end_line: 58,
+        token_count: 60,
+    });
+    snapshot.files.push(FileRow {
+        relative_path: "src/c.c".to_string(),
+        content_hash: "cc".repeat(32),
+        language: Language::C,
+        byte_len: 360,
+    });
+    snapshot.summary.funnel.push(FunnelStageRow {
+        name: "verification".to_string(),
+        passed: 3,
+        dropped: vec![
+            FunnelDropRow {
+                cause: "threshold".to_string(),
+                count: 2,
+            },
+            FunnelDropRow {
+                cause: "budget".to_string(),
+                count: 1,
+            },
+        ],
+    });
+    snapshot.summary.unused_suppressions.push(UnusedRuleRow {
+        scope: "fingerprint".to_string(),
+        pattern: "deadbeef".to_string(),
+    });
+    let expected_summary = snapshot.summary.clone();
+    let mut store = Store::open_in_memory().unwrap();
+    let run_id = store.record_snapshot(&snapshot).unwrap();
+
+    assert_eq!(store.source_units(run_id).unwrap().len(), 3);
+    assert_eq!(
+        store.run_tree(run_id).unwrap(),
+        std::collections::BTreeMap::from([
+            ("src/a.rs".to_string(), "aa".repeat(32)),
+            ("src/b.rs".to_string(), "bb".repeat(32)),
+            ("src/c.c".to_string(), "cc".repeat(32)),
+        ])
+    );
+    assert_eq!(
+        store.run_summary_row(run_id).unwrap().as_ref(),
+        Some(&expected_summary)
+    );
 }
 
 #[test]
@@ -285,6 +386,14 @@ fn a_group_can_be_read_by_its_fingerprint_and_found_by_an_abbreviation() {
     assert_eq!(finding_matches[0].id, finding);
 
     assert!(store.ids_starting_with("ffffffffffff").unwrap().is_empty());
+    assert!(
+        store.ids_starting_with("%").unwrap().is_empty(),
+        "a percent is a literal prefix character, not a wildcard"
+    );
+    assert!(
+        store.ids_starting_with("_").unwrap().is_empty(),
+        "an underscore is a literal prefix character, not a wildcard"
+    );
 }
 
 #[test]

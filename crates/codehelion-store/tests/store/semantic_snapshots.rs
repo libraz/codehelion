@@ -15,21 +15,21 @@ fn semantic_evidence_persists_one_graph_per_member_and_rolls_back_on_mismatch() 
         .members
         .push(member_with_finding(2, 3, "src/c.rs", None));
     snapshot.groups[0].semantic = Some(SemanticEvidenceRow {
-        schema_version: "sog-v1".to_string(),
+        schema_version: "sog-v4".to_string(),
         rule_id: "sequence-pipeline-v1".to_string(),
         rule_version: 1,
         rule_confidence: 0.7,
         graphs: vec![
             SemanticOperationGraphRow {
-                schema_version: "sog-v1".to_string(),
+                schema_version: "sog-v4".to_string(),
                 graph_json: semantic_graph_json("filter"),
             },
             SemanticOperationGraphRow {
-                schema_version: "sog-v1".to_string(),
+                schema_version: "sog-v4".to_string(),
                 graph_json: semantic_graph_json("map"),
             },
             SemanticOperationGraphRow {
-                schema_version: "sog-v1".to_string(),
+                schema_version: "sog-v4".to_string(),
                 graph_json: semantic_graph_json("collect"),
             },
         ],
@@ -87,7 +87,7 @@ fn semantic_evidence_persists_one_graph_per_member_and_rolls_back_on_mismatch() 
     let mut malformed = sample_snapshot(&variant, &detectors);
     malformed.groups[0].clone_type = CloneClass::RestrictedSemantic;
     malformed.groups[0].semantic = Some(SemanticEvidenceRow {
-        schema_version: "sog-v1".to_string(),
+        schema_version: "sog-v4".to_string(),
         rule_id: "sequence-pipeline-v1".to_string(),
         rule_version: 1,
         rule_confidence: 0.7,
@@ -111,23 +111,25 @@ fn cross_language_semantic_comparison_is_separate_and_keeps_its_evidence() {
         correspondence_ids: vec!["sequence-map-v1".to_string()],
         members: vec![
             CrossLanguageSemanticMemberRow {
+                member_id: CrossLanguageMemberId::from_bytes([73; 16]),
                 origin_variant: "rust-variant".to_string(),
                 language: Language::Rust,
                 file_path: "rust/src/lib.rs".to_string(),
                 start_line: 3,
                 end_line: 6,
                 unit_name: Some("map_values".to_string()),
-                graph_schema_version: "sog-v1".to_string(),
+                graph_schema_version: "sog-v4".to_string(),
                 graph_json: cross_language_graph_json("rust", "map", "rust::Iterator::map", 1),
             },
             CrossLanguageSemanticMemberRow {
+                member_id: CrossLanguageMemberId::from_bytes([74; 16]),
                 origin_variant: "cpp-variant".to_string(),
                 language: Language::Cpp,
                 file_path: "cpp/src/map.cpp".to_string(),
                 start_line: 3,
                 end_line: 6,
                 unit_name: Some("map_values".to_string()),
-                graph_schema_version: "sog-v1".to_string(),
+                graph_schema_version: "sog-v4".to_string(),
                 graph_json: cross_language_graph_json("cpp", "map", "std::transform", 2),
             },
         ],
@@ -164,7 +166,7 @@ fn cross_language_semantic_comparison_is_separate_and_keeps_its_evidence() {
     assert_eq!(detail.correspondence_ids, vec!["sequence-map-v1"]);
     assert_eq!(detail.members.len(), 2);
     assert_eq!(detail.members[0].language, "cpp");
-    assert_eq!(detail.members[0].graph.schema_version, "sog-v1");
+    assert_eq!(detail.members[0].graph.schema_version, "sog-v4");
     assert!(
         store
             .cross_language_group(&"ff".repeat(16))
@@ -186,7 +188,62 @@ fn cross_language_semantic_comparison_is_separate_and_keeps_its_evidence() {
 }
 
 #[test]
-fn a_new_snapshot_replaces_the_previous_scan() {
+fn cross_variant_members_use_stable_ids_instead_of_source_anchors_as_the_key() {
+    let mut store = Store::open_in_memory().unwrap();
+    let origins = vec!["a".to_string(), "b".to_string()];
+    let members = vec![
+        CrossVariantMemberRow {
+            member_id: CrossVariantMemberId::from_bytes([81; 16]),
+            origin_variant: "a".to_string(),
+            language: Language::Cpp,
+            file_path: "generated.cpp".to_string(),
+            start_line: 1,
+            end_line: 1,
+            unit_name: Some("generated".to_string()),
+            token_count: 4,
+        },
+        CrossVariantMemberRow {
+            member_id: CrossVariantMemberId::from_bytes([82; 16]),
+            origin_variant: "a".to_string(),
+            language: Language::Cpp,
+            file_path: "generated.cpp".to_string(),
+            start_line: 1,
+            end_line: 1,
+            unit_name: Some("generated".to_string()),
+            token_count: 4,
+        },
+        CrossVariantMemberRow {
+            member_id: CrossVariantMemberId::from_bytes([83; 16]),
+            origin_variant: "b".to_string(),
+            language: Language::Cpp,
+            file_path: "generated.cpp".to_string(),
+            start_line: 1,
+            end_line: 1,
+            unit_name: Some("generated".to_string()),
+            token_count: 4,
+        },
+    ];
+    let groups = vec![CrossVariantGroupRow {
+        group_id: CrossVariantGroupId::from_bytes([80; 16]),
+        clone_type: CloneClass::Type1,
+        members,
+    }];
+    let snapshot = CrossVariantComparisonSnapshot {
+        root_path: "/repo",
+        comparison_id: CrossVariantComparisonId::from_bytes([79; 16]),
+        policy_version: "test",
+        started_at: "2026-08-03T00:00:00Z",
+        finished_at: "2026-08-03T00:00:01Z",
+        origins: &origins,
+        groups: &groups,
+    };
+
+    store.record_cross_variant_comparison(&snapshot).unwrap();
+    assert_eq!(store.table_count("cross_variant_clone_member").unwrap(), 3);
+}
+
+#[test]
+fn a_new_snapshot_retains_the_previous_scan_as_history() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
@@ -198,22 +255,23 @@ fn a_new_snapshot_replaces_the_previous_scan() {
     second.finished_at = "2026-07-25T00:00:04Z";
     let second_id = store.record_snapshot(&second).unwrap();
 
-    assert_eq!(store.table_count("scan_run").unwrap(), 1);
+    assert_eq!(store.table_count("scan_run").unwrap(), 2);
     // Identical content under an identical context: one fingerprint row per
     // identity (1 unit + 1 member content + 1 group), not per scan.
     assert_eq!(store.table_count("fingerprint").unwrap(), 3);
     assert_eq!(store.table_count("build_variant").unwrap(), 1);
 
-    // Only the later run remains queryable.
+    // The later run is current, while the predecessor stays readable for
+    // fingerprint changes that need continuity evidence.
     assert!(
         second_id > first_id,
-        "a replacement snapshot must not reuse the removed run ID"
+        "a later snapshot must receive a new history row"
     );
     assert_eq!(store.latest_run().unwrap().unwrap().id, second_id);
 }
 
 #[test]
-fn snapshots_for_distinct_roots_coexist_and_replace_independently() {
+fn snapshots_for_distinct_roots_and_prior_runs_coexist() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
@@ -247,7 +305,7 @@ fn snapshots_for_distinct_roots_coexist_and_replace_independently() {
     replacement.root_path = "/repo/packages/first";
     replacement.started_at = "2026-07-26T00:00:00Z";
     let replacement_id = store.record_snapshot(&replacement).unwrap();
-    assert_eq!(store.table_count("scan_run").unwrap(), 2);
+    assert_eq!(store.table_count("scan_run").unwrap(), 3);
     assert_eq!(
         store
             .latest_completed_run("/repo/packages/first")
@@ -331,6 +389,8 @@ fn an_incomplete_partition_keeps_the_prior_snapshot_readable() {
     let mut partition = sample_snapshot(&variant, &detectors);
     partition.started_at = "2026-07-25T00:00:00Z";
     partition.finished_at = "2026-07-25T00:00:04Z";
+    partition.groups[0].fingerprint = group_fp(77);
+    let group_fingerprint = partition.groups[0].fingerprint.to_hex();
     let incomplete_run = store.record_snapshot_part(&partition).unwrap();
 
     assert!(matches!(
@@ -357,9 +417,16 @@ fn an_incomplete_partition_keeps_the_prior_snapshot_readable() {
             .scan_run_id,
         prior_run
     );
+    assert!(store.group(&group_fingerprint).unwrap().is_none());
+    assert!(
+        store
+            .ids_starting_with(&group_fingerprint[..12])
+            .unwrap()
+            .is_empty()
+    );
 
     store.complete_snapshot_parts(&[incomplete_run]).unwrap();
-    assert_eq!(store.table_count("scan_run").unwrap(), 1);
+    assert_eq!(store.table_count("scan_run").unwrap(), 2);
     assert_eq!(
         store
             .latest_completed_run("/repo")
@@ -376,6 +443,45 @@ fn an_incomplete_partition_keeps_the_prior_snapshot_readable() {
             .scan_run_id,
         incomplete_run
     );
+}
+
+#[test]
+fn writer_open_reaps_expired_incomplete_partitions_and_orphaned_fingerprints() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("audit.db");
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+
+    {
+        let mut store = Store::open(&database).unwrap();
+        let mut partition = sample_snapshot(&variant, &detectors);
+        partition.started_at = "2020-01-01T00:00:00Z";
+        partition.finished_at = "2020-01-01T00:00:04Z";
+        let run_id = store.record_snapshot_part(&partition).unwrap();
+
+        assert_eq!(store.abandoned_runs().unwrap()[0].id, run_id);
+        assert!(store.table_count("fingerprint").unwrap() > 0);
+    }
+
+    let store = Store::open(&database).unwrap();
+    assert!(store.abandoned_runs().unwrap().is_empty());
+    assert_eq!(store.table_count("scan_run").unwrap(), 0);
+    assert_eq!(store.table_count("fingerprint").unwrap(), 0);
+}
+
+#[test]
+fn discard_run_refuses_completed_history() {
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let completed = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+
+    assert!(matches!(
+        store.discard_run(completed),
+        Err(StoreError::RunNotRunning { run_id }) if run_id == completed
+    ));
 }
 
 #[test]

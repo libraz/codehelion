@@ -1,13 +1,83 @@
 use super::groups::{write_group, write_near_misses, write_sibling_groups};
-use super::variant::{
-    frontend_version_for, upsert_feature_fingerprint, upsert_fingerprint, upsert_variant,
-};
+use super::variant::{upsert_fingerprint, upsert_variant};
 use super::{
-    BTreeMap, BTreeSet, FileRow, OptionalExtension, SHAPE_TAG_SLOTS, Snapshot, Store, StoreError,
+    AbandonedRun, BTreeMap, BTreeSet, FileRow, OptionalExtension, Snapshot, Store, StoreError,
     SummaryRow, SuppressionRuleRow, Transaction, params,
 };
 
+/// Incomplete partitions younger than this may belong to a scan still
+/// assembling comparisons. Older ones are safe to reap on the next writer
+/// open, while the command-level database lease prevents concurrent writers.
+const ABANDONED_RUN_GRACE_SECONDS: i64 = 24 * 60 * 60;
+
 impl Store {
+    /// List incomplete multi-partition snapshots in oldest-first order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an underlying database error.
+    pub fn abandoned_runs(&self) -> Result<Vec<AbandonedRun>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, root_path, started_at, finished_at
+             FROM scan_run WHERE status = 'running'
+             ORDER BY finished_at ASC, id ASC",
+        )?;
+        let runs = statement
+            .query_map([], |row| {
+                Ok(AbandonedRun {
+                    id: row.get(0)?,
+                    root_path: row.get(1)?,
+                    started_at: row.get(2)?,
+                    finished_at: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(runs)
+    }
+
+    /// Delete one incomplete partition and its run-owned rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::RunNotFound`] when the row is absent,
+    /// [`StoreError::RunNotRunning`] when it completed, or an underlying
+    /// database error. Completed history is never discarded by this method.
+    pub fn discard_run(&mut self, run_id: i64) -> Result<(), StoreError> {
+        let tx = self.conn.transaction()?;
+        let status = tx
+            .query_row(
+                "SELECT status FROM scan_run WHERE id = ?1",
+                params![run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match status.as_deref() {
+            Some("running") => {}
+            Some(_) => return Err(StoreError::RunNotRunning { run_id }),
+            None => return Err(StoreError::RunNotFound { run_id }),
+        }
+        tx.execute("DELETE FROM scan_run WHERE id = ?1", params![run_id])?;
+        crate::remove_orphaned_fingerprints(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Reap incomplete partitions whose last write is outside the grace
+    /// period. Called only by the creating/writing open path.
+    pub(crate) fn discard_expired_abandoned_runs(&mut self) -> Result<(), StoreError> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM scan_run
+             WHERE status = 'running'
+               AND unixepoch(finished_at) IS NOT NULL
+               AND unixepoch(finished_at) <= unixepoch('now') - ?1",
+            params![ABANDONED_RUN_GRACE_SECONDS],
+        )?;
+        crate::remove_orphaned_fingerprints(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Record one completed single-partition snapshot and return its row id.
     ///
     /// # Errors
@@ -17,6 +87,7 @@ impl Store {
     /// replacement back; the prior completed snapshot remains intact. Older
     /// unreferenced snapshots are removed only after this one is complete.
     pub fn record_snapshot(&mut self, snapshot: &Snapshot<'_>) -> Result<i64, StoreError> {
+        validate_group_fingerprints(snapshot)?;
         let tx = self.conn.transaction()?;
         let run_id = write_snapshot(&tx, snapshot, SnapshotStatus::Completed)?;
         remove_superseded_snapshots(&tx, &[run_id])?;
@@ -35,6 +106,7 @@ impl Store {
     /// Returns any validation or database error while preserving transaction
     /// atomicity for the partition being written.
     pub fn record_snapshot_part(&mut self, snapshot: &Snapshot<'_>) -> Result<i64, StoreError> {
+        validate_group_fingerprints(snapshot)?;
         let tx = self.conn.transaction()?;
         let run_id = write_snapshot(&tx, snapshot, SnapshotStatus::Running)?;
         tx.commit()?;
@@ -68,55 +140,48 @@ impl Store {
     }
 }
 
-/// Retire completed snapshots superseded by the current invocation.
-///
-/// Artifact correlations deliberately retain their source scan. Other
-/// run-owned rows cascade only within a replaced scan root, so one shared
-/// database can retain the current snapshot for every package in a monorepo.
-fn remove_superseded_snapshots(
-    tx: &Transaction<'_>,
-    current_run_ids: &[i64],
-) -> Result<(), StoreError> {
-    let mut current_roots = BTreeSet::new();
-    for run_id in current_run_ids {
-        let root_path = tx
-            .query_row(
-                "SELECT root_path FROM scan_run WHERE id = ?1",
-                params![run_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .ok_or(StoreError::RunNotFound { run_id: *run_id })?;
-        current_roots.insert(root_path);
-    }
-    let mut statement = tx.prepare(
-        "SELECT r.id, r.root_path
-         FROM scan_run r
-         WHERE r.status = 'completed'
-           AND NOT EXISTS (
-               SELECT 1 FROM artifact_analysis_correlation a
-               WHERE a.source_scan_run_id = r.id
-           )
-           AND NOT EXISTS (
-               SELECT 1 FROM artifact_analysis_clone_group_savings s
-               WHERE s.source_scan_run_id = r.id
-           )
-           AND NOT EXISTS (
-               SELECT 1 FROM artifact_analysis_savings_calibration c
-               WHERE c.source_scan_run_id = r.id
-           )",
-    )?;
-    let stale = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(statement);
-    for (run_id, root_path) in stale {
-        if current_roots.contains(&root_path) && !current_run_ids.contains(&run_id) {
-            tx.execute("DELETE FROM scan_run WHERE id = ?1", params![run_id])?;
+/// Reject a silent stable-ID collision before a snapshot starts writing.
+fn validate_group_fingerprints(snapshot: &Snapshot<'_>) -> Result<(), StoreError> {
+    let mut emitted = BTreeSet::new();
+    let mut findings = BTreeSet::new();
+    for group in &snapshot.groups {
+        let fingerprint = *group.fingerprint.as_bytes();
+        if !emitted.insert(fingerprint) {
+            return Err(StoreError::DuplicateGroupFingerprint {
+                fingerprint: group.fingerprint.to_hex(),
+            });
+        }
+        for member in &group.members {
+            if !findings.insert(*member.finding.as_bytes()) {
+                return Err(StoreError::DuplicateFindingId {
+                    finding: member.finding.to_hex(),
+                });
+            }
         }
     }
+    for siblings in &snapshot.sibling_groups {
+        for sibling in &siblings.siblings {
+            if !findings.insert(*sibling.finding.as_bytes()) {
+                return Err(StoreError::DuplicateFindingId {
+                    finding: sibling.finding.to_hex(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Retain completed snapshots needed as lineage predecessors.
+///
+/// A later scan can only explain a changed clone-group fingerprint by reading
+/// the prior group's members and lineage. Completed snapshots are therefore
+/// history, not replaceable cache entries. The cache maintenance surface owns
+/// any explicit retention policy; recording a scan never discards evidence.
+fn remove_superseded_snapshots(
+    tx: &Transaction<'_>,
+    _current_run_ids: &[i64],
+) -> Result<(), StoreError> {
+    crate::remove_orphaned_fingerprints(tx)?;
     Ok(())
 }
 
@@ -183,9 +248,20 @@ fn write_snapshot(
         )?;
         group_row_ids.insert(*group.fingerprint.as_bytes(), group_row_id);
     }
-    write_sibling_groups(tx, &snapshot.sibling_groups, &unit_row_ids, &group_row_ids)?;
-    write_near_misses(tx, run_id, &snapshot.near_misses, &unit_row_ids)?;
-    write_features(tx, snapshot, run_id, variant_id, &unit_row_ids)?;
+    write_sibling_groups(
+        tx,
+        &snapshot.sibling_groups,
+        &unit_row_ids,
+        &group_row_ids,
+        &suppression_row_ids,
+    )?;
+    write_near_misses(
+        tx,
+        run_id,
+        &snapshot.near_misses,
+        &unit_row_ids,
+        &suppression_row_ids,
+    )?;
     write_files(tx, &snapshot.files, run_id)?;
     // The compiler IR names its own schema, and every distinct one a run holds
     // becomes a declared detector version of that run: the per-unit column
@@ -243,10 +319,14 @@ fn write_summary(
               guardrail_pair_budget, guardrail_sibling_candidate_budget,
               guardrail_sibling_per_group_cap, guardrail_sibling_total_cap,
               guardrail_max_component, folded_runs,
-              subsumed_runs, split_components, pair_budget_exhausted, baseline_digest)
+              subsumed_runs, split_components, pair_budget_exhausted, baseline_digest,
+              excluded_language, excluded_symlink_files, excluded_symlink_directories,
+              guardrail_near_miss_delta, guardrail_near_miss_cap,
+              guardrail_verification_budget, guardrail_max_alignment_cells)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
-                 ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)",
+                 ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38,
+                 ?39, ?40, ?41)",
         params![
             run_id,
             count(summary.analyzed_files.total),
@@ -309,139 +389,83 @@ fn write_summary(
             count(summary.split_components),
             summary.pair_budget_exhausted,
             summary.baseline_digest,
+            count(summary.excluded_language),
+            count(summary.excluded_symlink_files),
+            count(summary.excluded_symlink_directories),
+            summary
+                .guardrails
+                .as_ref()
+                .map(|row| count(row.near_miss_delta_bits)),
+            summary
+                .guardrails
+                .as_ref()
+                .map(|row| count(row.near_miss_cap)),
+            summary
+                .guardrails
+                .as_ref()
+                .map(|row| count(row.verification_budget)),
+            summary
+                .guardrails
+                .as_ref()
+                .map(|row| count(row.max_alignment_cells)),
         ],
+    )?;
+    let mut insert_stage = tx.prepare_cached(
+        "INSERT INTO run_funnel_stage (scan_run_id, position, name, passed)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    let mut insert_drop = tx.prepare_cached(
+        "INSERT INTO run_funnel_drop
+             (scan_run_id, position, ordinal, cause, dropped)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
     for (position, stage) in summary.funnel.iter().enumerate() {
         let position = i64::try_from(position).unwrap_or(i64::MAX);
-        tx.execute(
-            "INSERT INTO run_funnel_stage (scan_run_id, position, name, passed)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![run_id, position, stage.name, count(stage.passed)],
-        )?;
+        insert_stage.execute(params![run_id, position, stage.name, count(stage.passed)])?;
         for (ordinal, drop) in stage.dropped.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO run_funnel_drop
-                     (scan_run_id, position, ordinal, cause, dropped)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    run_id,
-                    position,
-                    i64::try_from(ordinal).unwrap_or(i64::MAX),
-                    drop.cause,
-                    count(drop.count),
-                ],
-            )?;
+            insert_drop.execute(params![
+                run_id,
+                position,
+                i64::try_from(ordinal).unwrap_or(i64::MAX),
+                drop.cause,
+                count(drop.count),
+            ])?;
         }
     }
+    drop(insert_drop);
+    drop(insert_stage);
+    let mut insert_unused_suppression = tx.prepare_cached(
+        "INSERT INTO run_unused_suppression (scan_run_id, ordinal, scope, pattern)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
     for (ordinal, rule) in summary.unused_suppressions.iter().enumerate() {
-        tx.execute(
-            "INSERT INTO run_unused_suppression (scan_run_id, ordinal, scope, pattern)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                run_id,
-                i64::try_from(ordinal).unwrap_or(i64::MAX),
-                rule.scope,
-                rule.pattern,
-            ],
-        )?;
+        insert_unused_suppression.execute(params![
+            run_id,
+            i64::try_from(ordinal).unwrap_or(i64::MAX),
+            rule.scope,
+            rule.pattern,
+        ])?;
     }
     Ok(())
 }
 
 /// Record the tree the run read, one row per file.
 fn write_files(tx: &Transaction<'_>, files: &[FileRow], run_id: i64) -> Result<(), StoreError> {
+    let mut insert = tx.prepare_cached(
+        "INSERT INTO scanned_file
+             (scan_run_id, relative_path, content_hash, language, byte_len)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
     for file in files {
-        tx.execute(
-            "INSERT INTO scanned_file
-                 (scan_run_id, relative_path, content_hash, language, byte_len)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                run_id,
-                file.relative_path,
-                file.content_hash,
-                file.language.name(),
-                i64::try_from(file.byte_len).unwrap_or(i64::MAX),
-            ],
-        )?;
+        insert.execute(params![
+            run_id,
+            file.relative_path,
+            file.content_hash,
+            file.language.name(),
+            i64::try_from(file.byte_len).unwrap_or(i64::MAX),
+        ])?;
     }
     Ok(())
-}
-
-/// Persist per-unit candidate-extraction features: the scalar `unit_feature`
-/// row and every hash occurrence, deduplicating feature fingerprints by their
-/// full analysis context.
-fn write_features(
-    tx: &Transaction<'_>,
-    snapshot: &Snapshot<'_>,
-    run_id: i64,
-    variant_id: i64,
-    unit_row_ids: &[i64],
-) -> Result<(), StoreError> {
-    for feature in &snapshot.features {
-        let unit_row_id =
-            *unit_row_ids
-                .get(feature.host_unit)
-                .ok_or(StoreError::UnknownUnitIndex {
-                    index: feature.host_unit,
-                    units: unit_row_ids.len(),
-                })?;
-        let language = snapshot.units[feature.host_unit].language;
-        let frontend_version = frontend_version_for(snapshot, language);
-        tx.execute(
-            "INSERT INTO unit_feature
-                 (source_unit_id, feature_schema_version, vector_counts,
-                  max_depth, node_count, cfg_op_count, cfg_max_loop_depth,
-                  cfg_branch_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                unit_row_id,
-                feature.feature_schema_version,
-                encode_counts(&feature.vector_counts),
-                feature.max_depth,
-                feature.node_count,
-                feature.cfg_op_count,
-                feature.cfg_max_loop_depth,
-                feature.cfg_branch_count,
-            ],
-        )?;
-        for occ in &feature.occurrences {
-            let fp_id = upsert_feature_fingerprint(
-                tx,
-                occ.kind,
-                &occ.hash,
-                feature.feature_schema_version,
-                frontend_version,
-                snapshot.variant.mode.name(),
-                language.name(),
-                variant_id,
-            )?;
-            tx.execute(
-                "INSERT INTO feature_occurrence
-                     (scan_run_id, feature_fingerprint_id, source_unit_id,
-                      start_byte, end_byte, extent)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    run_id,
-                    fp_id,
-                    unit_row_id,
-                    i64::try_from(occ.start_byte).unwrap_or(i64::MAX),
-                    i64::try_from(occ.end_byte).unwrap_or(i64::MAX),
-                    occ.extent,
-                ],
-            )?;
-        }
-    }
-    Ok(())
-}
-
-/// Little-endian encoding of the characteristic-vector counts, one `u32` per
-/// shape-tag slot.
-fn encode_counts(counts: &[u32; SHAPE_TAG_SLOTS]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(SHAPE_TAG_SLOTS * 4);
-    for &count in counts {
-        bytes.extend_from_slice(&count.to_le_bytes());
-    }
-    bytes
 }
 
 /// Record the active suppression rules, reusing existing `(scope, pattern)`
@@ -450,17 +474,25 @@ fn write_suppressions(
     tx: &Transaction<'_>,
     rules: &[SuppressionRuleRow],
 ) -> Result<Vec<i64>, StoreError> {
+    // A rule is active only while the current invocation supplied it. Keep
+    // historic finding references intact, but make a removed rule visibly
+    // inactive instead of leaving its first-seen state frozen forever.
+    tx.execute("UPDATE suppression SET active = 0 WHERE active = 1", [])?;
     let mut row_ids = Vec::with_capacity(rules.len());
     for rule in rules {
         let existing: Option<i64> = tx
             .query_row(
                 "SELECT id FROM suppression
-                 WHERE scope = ?1 AND pattern = ?2 AND active = 1",
+                 WHERE scope = ?1 AND pattern = ?2",
                 params![rule.scope, rule.pattern],
                 |row| row.get(0),
             )
             .optional()?;
         let id = if let Some(id) = existing {
+            tx.execute(
+                "UPDATE suppression SET reason = ?2, active = 1 WHERE id = ?1",
+                params![id, rule.reason],
+            )?;
             id
         } else {
             tx.execute(
@@ -482,6 +514,12 @@ fn write_units(
     variant_id: i64,
 ) -> Result<Vec<i64>, StoreError> {
     let mut unit_row_ids = Vec::with_capacity(snapshot.units.len());
+    let mut insert = tx.prepare_cached(
+        "INSERT INTO source_unit
+             (scan_run_id, fingerprint_id, language, unit_kind, name,
+              file_path, start_line, end_line, token_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )?;
     for unit in &snapshot.units {
         let fp_id = upsert_fingerprint(
             tx,
@@ -491,23 +529,17 @@ fn write_units(
             variant_id,
             unit.language,
         )?;
-        tx.execute(
-            "INSERT INTO source_unit
-                 (scan_run_id, fingerprint_id, language, unit_kind, name,
-                  file_path, start_line, end_line, token_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                run_id,
-                fp_id,
-                unit.language.name(),
-                unit.kind.name(),
-                unit.name,
-                unit.file_path,
-                unit.start_line,
-                unit.end_line,
-                i64::try_from(unit.token_count).unwrap_or(i64::MAX),
-            ],
-        )?;
+        insert.execute(params![
+            run_id,
+            fp_id,
+            unit.language.name(),
+            unit.kind.name(),
+            unit.name,
+            unit.file_path,
+            unit.start_line,
+            unit.end_line,
+            i64::try_from(unit.token_count).unwrap_or(i64::MAX),
+        ])?;
         unit_row_ids.push(tx.last_insert_rowid());
     }
     Ok(unit_row_ids)

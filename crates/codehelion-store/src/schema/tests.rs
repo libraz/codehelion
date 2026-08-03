@@ -20,11 +20,11 @@ INSERT INTO fingerprint (id, kind, hash_algo, hash, normalization_version,
 INSERT INTO fragment (id, scan_run_id, fingerprint_id, fragment_kind, file_path,
                       start_line, end_line, token_count)
     VALUES (1, 1, 2, 'function_body', 'src/lib.rs', 1, 9, 40);
-INSERT INTO clone_group (id, scan_run_id, group_fingerprint_id, clone_type,
-                         member_count, score, entropy_bits)
-    VALUES (1, 1, 1, 'type-2', 1, 0.5, 8.0);
-INSERT INTO clone_group_member (clone_group_id, fragment_id, finding_id, is_canonical)
-    VALUES (1, 1, randomblob(16), 1);
+INSERT INTO clone_group (id, scan_run_id, group_fingerprint_id, lineage, lineage_state,
+                         clone_type, member_count, score, entropy_bits)
+    VALUES (1, 1, 1, randomblob(16), 'new', 'type-2', 1, 0.5, 8.0);
+INSERT INTO clone_group_member (clone_group_id, scan_run_id, fragment_id, finding_id, is_canonical)
+    VALUES (1, 1, 1, randomblob(16), 1);
 ";
 
 /// A current baseline database seeded with a group and its one member.

@@ -10,28 +10,26 @@ use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::discovery::{
     BuildConfiguration, BuildVariant, CppBuild, Language, LanguageSelection, RustBuild,
 };
-use codehelion_core::features::{
-    ApiCallFeature, CfgFeature, CharacteristicVector, FeatureHash, FeatureKind, SubtreeFeature,
-    UnitFeatures, WindowFeature,
-};
 use codehelion_core::frontend::UnitKind;
-use codehelion_core::ir::ByteRange;
 use codehelion_core::stable_id::{
-    CloneGroupFingerprint, CrossLanguageComparisonId, CrossLanguageGroupId, FindingId,
-    FragmentFingerprint, UnitFingerprint,
+    CloneGroupFingerprint, CrossLanguageComparisonId, CrossLanguageGroupId, CrossLanguageMemberId,
+    CrossVariantComparisonId, CrossVariantGroupId, CrossVariantMemberId, FindingId,
+    FragmentFingerprint, UnitFingerprint, group_lineage_id,
 };
 use codehelion_core::verify::Confidence;
 use codehelion_store::artifact::{
     ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION, ArtifactAnalysisCorrelation,
     ArtifactAnalysisSnapshot,
 };
-use codehelion_store::query::{IdKind, StoredVariant};
+use codehelion_store::query::{IdKind, IdMatch, StoredVariant};
 use codehelion_store::snapshot::{
-    CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow, CrossLanguageSemanticMemberRow,
-    FeatureRow, FileRow, FunnelDropRow, FunnelStageRow, GroupRow, MemberRow, NearMissRow,
-    PriorityRow, SemanticEvidenceRow, SemanticNodeMappingRow, SemanticOperationGraphRow,
-    SiblingGroupRow, SiblingRow, SimilarityBreakdownRow, Snapshot, SummaryRow, SuppressionRuleRow,
-    UnitRow, UnparsedRow, UnusedRuleRow,
+    AuditState, CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow,
+    CrossLanguageSemanticMemberRow, CrossVariantComparisonSnapshot, CrossVariantGroupRow,
+    CrossVariantMemberRow, FileRow, FunnelDropRow, FunnelStageRow, GroupOrigin, GroupRow,
+    LineageAdoption, LineageParent, MemberRow, NearMissRow, PriorityRow, SemanticEvidenceRow,
+    SemanticNodeMappingRow, SemanticOperationGraphRow, SiblingGroupRow, SiblingRow,
+    SimilarityBreakdownRow, Snapshot, SummaryRow, SuppressionRuleRow, UnitRow, UnparsedRow,
+    UnusedRuleRow,
 };
 use codehelion_store::{Store, StoreError};
 
@@ -53,14 +51,13 @@ const fn finding(seed: u8) -> FindingId {
 
 fn semantic_graph_json(kind: &str) -> String {
     serde_json::json!({
-        "schema_version": "sog-v1",
+        "schema_version": "sog-v4",
         "language": "c",
         "build_variant_fingerprint": vec![0_u8; 32],
         "nodes": [{
             "kind": kind,
             "attributes": {
                 "type_tag": null,
-                "structure_fingerprint": null,
                 "api_names": [],
                 "resource_kind": null,
                 "fallible_kind": null,
@@ -74,14 +71,13 @@ fn semantic_graph_json(kind: &str) -> String {
 
 fn cross_language_graph_json(language: &str, kind: &str, api_name: &str, variant: u8) -> String {
     serde_json::json!({
-        "schema_version": "sog-v1",
+        "schema_version": "sog-v4",
         "language": language,
         "build_variant_fingerprint": vec![variant; 32],
         "nodes": [{
             "kind": kind,
             "attributes": {
                 "type_tag": null,
-                "structure_fingerprint": null,
                 "api_names": [api_name],
                 "resource_kind": null,
                 "fallible_kind": null,
@@ -97,7 +93,7 @@ fn detector_versions() -> Vec<(String, String)> {
     vec![
         ("normalization".to_string(), "2".to_string()),
         ("frontend.rust".to_string(), "rust-lexer-v1".to_string()),
-        ("fp-schema".to_string(), "fp-schema-v1".to_string()),
+        ("fp-schema".to_string(), "fp-schema-v2".to_string()),
     ]
 }
 
@@ -160,6 +156,7 @@ fn sample_snapshot<'a>(
         suppressions: Vec::new(),
         groups: vec![GroupRow {
             fingerprint: group_fp(9),
+            history: GroupOrigin::unconnected(&group_fp(9)),
             clone_type: CloneClass::Type1,
             split_pair: false,
             member_scope: CloneScope::Unit,
@@ -175,6 +172,7 @@ fn sample_snapshot<'a>(
             suppress_reason: None,
             boilerplate: None,
             width_family: false,
+            ranked_down: true,
             suppressed_by: None,
             priority: PriorityRow {
                 clone_confidence: 0.81,
@@ -194,7 +192,6 @@ fn sample_snapshot<'a>(
         }],
         sibling_groups: Vec::new(),
         near_misses: Vec::new(),
-        features: Vec::new(),
         files: vec![
             FileRow {
                 relative_path: "src/a.rs".to_string(),
@@ -240,6 +237,9 @@ fn sample_summary() -> SummaryRow {
         excluded_symlinks: 2,
         excluded_walk_errors: 1,
         excluded_timed_out: 1,
+        excluded_language: 2,
+        excluded_symlink_files: 1,
+        excluded_symlink_directories: 1,
         guardrails: Some(codehelion_store::snapshot::GuardrailsRow {
             profile: "untrusted".to_string(),
             max_file_bytes: 512,
@@ -247,6 +247,10 @@ fn sample_summary() -> SummaryRow {
             helper_timeout_ms: 30,
             posting_cap: 40,
             pair_budget: 50,
+            near_miss_delta_bits: 0.05_f64.to_bits(),
+            near_miss_cap: 54,
+            verification_budget: 55,
+            max_alignment_cells: 56,
             sibling_candidate_budget: 51,
             sibling_per_group_cap: 52,
             sibling_total_cap: 53,

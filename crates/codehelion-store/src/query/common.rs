@@ -1,10 +1,18 @@
 use super::{
     ArtifactAnalysisMappingConfidence, ArtifactAnalysisSourceKind, ArtifactMappingSqlRow, BTreeSet,
-    CrossLanguageGroupDetail, CrossLanguageGroupMember, MappingEvidence, OccurrenceDetail,
-    OptionalExtension, Row, SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION, Store, StoreError,
-    StoredArtifactMapping, StoredMember, StoredPriority, StoredRankingFacts, StoredSuppressionRef,
-    params, stored_test_code_evidence,
+    CrossLanguageGroupDetail, CrossLanguageGroupMember, CrossVariantGroupDetail,
+    CrossVariantGroupMember, MappingEvidence, OccurrenceDetail, OptionalExtension, Row,
+    SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION, Store, StoreError, StoredArtifactMapping, StoredMember,
+    StoredPriority, StoredRankingFacts, StoredSuppressionRef, params, stored_test_code_evidence,
 };
+
+/// Join a clone group to a completed source scan.
+///
+/// Every query whose answer names a clone group must use this exact fragment;
+/// incomplete snapshots are rolled back or retained only as implementation
+/// state and must never be visible to explain or ID completion.
+pub(super) const COMPLETED_CLONE_GROUP_RUN_JOIN: &str =
+    "JOIN scan_run r ON r.id = g.scan_run_id AND r.status = 'completed'";
 
 impl Store {
     /// Number of rows in `table` — a diagnostic for `doctor`/`cache status`
@@ -135,6 +143,107 @@ impl Store {
         };
         detail.origin_variants = self.cross_language_origins(comparison_row_id)?;
         detail.members = self.cross_language_members(group_row_id)?;
+        Ok(Some(detail))
+    }
+
+    /// Look up one explicit cross-build-variant clone group by its stable id.
+    ///
+    /// The newest persisted comparison wins when the same deterministic group
+    /// identity was recorded more than once.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::MalformedId`] when `group_hex` is not 32 hex digits;
+    /// otherwise any underlying database or stored-vocabulary error.
+    pub fn cross_variant_group(
+        &self,
+        group_hex: &str,
+    ) -> Result<Option<CrossVariantGroupDetail>, StoreError> {
+        let group_id = parse_hex_id(group_hex)?;
+        let Some((group_row_id, comparison_row_id, mut detail)) = self
+            .conn
+            .query_row(
+                "SELECT g.id, c.id, lower(hex(c.comparison_id)), c.policy_version, c.root_path,
+                        lower(hex(g.group_id)), g.clone_type
+                 FROM cross_variant_clone_group g
+                 JOIN cross_variant_comparison c ON c.id = g.comparison_id
+                 WHERE g.group_id = ?1
+                 ORDER BY c.started_at DESC, c.id DESC
+                 LIMIT 1",
+                params![group_id.as_slice()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        CrossVariantGroupDetail {
+                            comparison_id_hex: row.get(2)?,
+                            policy_version: row.get(3)?,
+                            root_path: row.get(4)?,
+                            origin_variants: Vec::new(),
+                            group_id_hex: row.get(5)?,
+                            clone_type: row.get(6)?,
+                            members: Vec::new(),
+                        },
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        detail.origin_variants = self
+            .conn
+            .prepare(
+                "SELECT build_variant_fingerprint
+                 FROM cross_variant_comparison_origin
+                 WHERE comparison_id = ?1
+                 ORDER BY build_variant_fingerprint ASC",
+            )?
+            .query_map(params![comparison_row_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        let rows = self
+            .conn
+            .prepare(
+                "SELECT origin_variant_fingerprint, language, file_path, start_line, end_line,
+                        unit_name, token_count
+                 FROM cross_variant_clone_member
+                 WHERE group_id = ?1
+                 ORDER BY origin_variant_fingerprint ASC, language ASC, file_path ASC,
+                          start_line ASC, end_line ASC",
+            )?
+            .query_map(params![group_row_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        detail.members = rows
+            .into_iter()
+            .map(
+                |(origin_variant, language, file_path, start_line, end_line, unit_name, tokens)| {
+                    Ok(CrossVariantGroupMember {
+                        origin_variant,
+                        language,
+                        file_path,
+                        start_line: positive_cross_variant_value("start_line", start_line)?,
+                        end_line: positive_cross_variant_value("end_line", end_line)?,
+                        unit_name,
+                        token_count: usize::try_from(tokens).map_err(|_| {
+                            StoreError::UnknownVocabulary {
+                                field: "cross_variant_clone_member.token_count",
+                                value: tokens.to_string(),
+                            }
+                        })?,
+                    })
+                },
+            )
+            .collect::<Result<_, StoreError>>()?;
         Ok(Some(detail))
     }
 
@@ -295,10 +404,7 @@ impl Store {
         for row in rows {
             let (path, token_count, language) = row?;
             tokens.push(token_count);
-            directories.insert(
-                path.rfind('/')
-                    .map_or_else(String::new, |cut| path[..cut].to_string()),
-            );
+            directories.insert(crate::directory_of(&path).to_string());
             files.insert(path);
             languages.insert(language);
         }
@@ -372,6 +478,20 @@ fn positive_cross_language_line(field: &'static str, value: i64) -> Result<u32, 
                 "start_line" => "cross_language_semantic_member.start_line",
                 "end_line" => "cross_language_semantic_member.end_line",
                 _ => "cross_language_semantic_member.line",
+            },
+            value: value.to_string(),
+        })
+}
+
+fn positive_cross_variant_value(field: &'static str, value: i64) -> Result<u32, StoreError> {
+    u32::try_from(value)
+        .ok()
+        .filter(|number| *number > 0)
+        .ok_or_else(|| StoreError::UnknownVocabulary {
+            field: match field {
+                "start_line" => "cross_variant_clone_member.start_line",
+                "end_line" => "cross_variant_clone_member.end_line",
+                _ => "cross_variant_clone_member.value",
             },
             value: value.to_string(),
         })

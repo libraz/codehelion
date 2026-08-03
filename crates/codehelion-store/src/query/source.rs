@@ -1,8 +1,7 @@
 use super::common::{fingerprint_from_blob, parse_build_variant_reference, positive_line};
 use super::{
-    FeatureKind, FeatureOccurrence, SourceFragmentIdentity, SourceInstantiation,
-    SourceMacroDefinition, SourceResolvedCall, SourceResolvedSymbol, SourceUnitIdentity, Store,
-    StoreError, params,
+    SourceFragmentIdentity, SourceInstantiation, SourceMacroDefinition, SourceResolvedCall,
+    SourceResolvedSymbol, SourceUnitIdentity, Store, StoreError,
 };
 
 impl Store {
@@ -363,38 +362,5 @@ impl Store {
                 },
             )
             .collect()
-    }
-
-    /// The posting list of one feature hash: every occurrence of `kind`/`hash`,
-    /// deterministically ordered by run, unit and anchor. This is the read the
-    /// candidate index builds on.
-    ///
-    /// # Errors
-    ///
-    /// Returns any underlying database error.
-    pub fn feature_posting_list(
-        &self,
-        kind: FeatureKind,
-        hash: &[u8; 16],
-    ) -> Result<Vec<FeatureOccurrence>, StoreError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT o.scan_run_id, o.source_unit_id, o.start_byte, o.end_byte, o.extent
-             FROM feature_occurrence o
-             JOIN feature_fingerprint f ON f.id = o.feature_fingerprint_id
-             WHERE f.kind = ?1 AND f.hash = ?2
-             ORDER BY o.scan_run_id ASC, o.source_unit_id ASC, o.start_byte ASC, o.id ASC",
-        )?;
-        let rows = stmt
-            .query_map(params![kind.name(), hash.as_slice()], |row| {
-                Ok(FeatureOccurrence {
-                    scan_run_id: row.get(0)?,
-                    source_unit_id: row.get(1)?,
-                    start_byte: row.get(2)?,
-                    end_byte: row.get(3)?,
-                    extent: row.get(4)?,
-                })
-            })?
-            .collect::<Result<_, _>>()?;
-        Ok(rows)
     }
 }

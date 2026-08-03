@@ -18,15 +18,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::discovery::{BuildConfiguration, BuildVariant, Language};
-use codehelion_core::features::{
-    FEATURE_SCHEMA_VERSION, FeatureKind, SHAPE_TAG_SLOTS, UnitFeatures,
-};
 use codehelion_core::frontend::UnitKind;
 use codehelion_core::semantic::{SOG_SCHEMA_VERSION, SemanticOperationGraph};
 use codehelion_core::stable_id::{
-    CloneGroupFingerprint, CrossLanguageComparisonId, CrossLanguageGroupId,
-    CrossVariantComparisonId, CrossVariantGroupId, FindingId, FragmentFingerprint, HASH_ALGORITHM,
-    UnitFingerprint,
+    CloneGroupFingerprint, CrossLanguageComparisonId, CrossLanguageGroupId, CrossLanguageMemberId,
+    CrossVariantComparisonId, CrossVariantGroupId, CrossVariantMemberId, FindingId,
+    FragmentFingerprint, GroupLineageId, HASH_ALGORITHM, UnitFingerprint, group_lineage_id,
 };
 use codehelion_core::test_code::TestCodeEvidence;
 use codehelion_core::verify::Confidence;
@@ -140,9 +137,17 @@ pub struct SimilarityBreakdownRow {
 
 /// One clone group with its members.
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "persisted independent finding facts map directly to checked SQLite columns"
+)]
 pub struct GroupRow {
     /// The group's stable fingerprint.
     pub fingerprint: CloneGroupFingerprint,
+    /// Durable history identifier for this group, independent of the current
+    /// fingerprint. New groups begin from their fingerprint and later scans
+    /// may adopt a predecessor's lineage with explicit overlap evidence.
+    pub history: GroupOrigin,
     /// Clone classification.
     pub clone_type: CloneClass,
     /// What the members are: whole units, or runs of statements inside them.
@@ -179,6 +184,9 @@ pub struct GroupRow {
     /// apart from it because it describes how the members differ rather than
     /// what any one of them does.
     pub width_family: bool,
+    /// Whether the effective presentation policy placed this finding after
+    /// ordinary findings, independently of its numeric priority.
+    pub ranked_down: bool,
     /// Statements each member covers, for a group whose members are runs
     /// inside units; `None` for a whole-unit group, whose extent is the unit.
     pub statements: Option<u32>,
@@ -196,6 +204,79 @@ pub struct GroupRow {
     pub semantic: Option<SemanticEvidenceRow>,
     /// The occurrences, in deterministic order; the first is canonical.
     pub members: Vec<MemberRow>,
+}
+
+/// Recorded continuity state for one group.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupOrigin {
+    /// How this scan established continuity with prior findings.
+    pub state: AuditState,
+    /// The current lineage identifier.
+    pub lineage: GroupLineageId,
+    /// Evidence-backed predecessors retained for explainability.
+    pub parents: Vec<LineageParent>,
+}
+
+impl GroupOrigin {
+    /// Start a history at a newly observed group.
+    #[must_use]
+    pub fn unconnected(group: &CloneGroupFingerprint) -> Self {
+        Self {
+            state: AuditState::New,
+            lineage: group_lineage_id(group),
+            parents: Vec::new(),
+        }
+    }
+}
+
+/// How a recorded group entered its current lineage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditState {
+    /// No predecessor was established for this group in this scan.
+    New,
+    /// Explicit overlap evidence connected this group to an earlier lineage.
+    Expanded,
+}
+
+/// One predecessor selected when a group adopts prior lineage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineageParent {
+    /// The predecessor's group fingerprint.
+    pub fingerprint: CloneGroupFingerprint,
+    /// The predecessor's durable history identifier.
+    pub lineage: GroupLineageId,
+    /// Whether this predecessor is the canonical continuity edge.
+    pub primary: bool,
+    /// Number of shared content identities.
+    pub shared_content: u64,
+    /// Fraction of the new group represented by the predecessor.
+    pub overlap: f64,
+}
+
+/// A continuity edge selected by a scan comparison before it is committed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineageAdoption {
+    /// Fingerprint of the newer group whose history should be extended.
+    pub group: String,
+    /// Fingerprint of the predecessor group that established the connection.
+    pub previous_group: String,
+    /// Existing lineage that the newer group must adopt.
+    pub lineage: String,
+    /// Number of shared content identities supporting this edge.
+    pub shared: u64,
+    /// Fraction of the new group represented by the predecessor.
+    pub overlap: f64,
+}
+
+/// Outcome of committing a comparison's continuity edges.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineageAdoptionResult {
+    /// Newer groups whose lineage was extended.
+    pub taken: Vec<String>,
+    /// Newer groups that already had explicit continuity evidence.
+    pub already_connected: Vec<String>,
+    /// Requested newer groups or predecessors absent from the named runs.
+    pub unknown: Vec<String>,
 }
 
 /// Siblings attached to one cohesive primary clone group.
@@ -228,6 +309,8 @@ pub struct SiblingRow {
     pub similarity: SimilarityBreakdownRow,
     /// Body classification carried by the sibling's host unit, when any.
     pub boilerplate: Option<Boilerplate>,
+    /// Index into [`Snapshot::suppressions`] of the rule hiding this sibling.
+    pub suppressed_by: Option<usize>,
 }
 
 /// One bounded, run-scoped LSH diagnostic that fell just below the primary
@@ -243,6 +326,8 @@ pub struct NearMissRow {
     pub right: usize,
     /// MinHash-estimated Jaccard similarity that fell below the primary gate.
     pub estimated_jaccard: f64,
+    /// Index into [`Snapshot::suppressions`] of the rule hiding this diagnostic.
+    pub suppressed_by: Option<usize>,
 }
 
 /// Persisted registered-rule evidence for one restricted semantic group.
@@ -298,115 +383,6 @@ pub struct SuppressionRuleRow {
     pub reason: Option<String>,
 }
 
-/// The candidate-extraction features of one unit, ready to persist.
-///
-/// A row pairs a unit (by its index into [`Snapshot::units`]) with the
-/// hash-valued feature occurrences it produced and its scalar features
-/// (characteristic vector and control-flow profile). Feature hashes are
-/// candidate-index keys, not stable identifiers; they are stored apart from
-/// the stable [`fingerprint`](crate::schema) rows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FeatureRow {
-    /// Index into [`Snapshot::units`] of the unit these features describe.
-    pub host_unit: usize,
-    /// The feature recipe version (`FEATURE_SCHEMA_VERSION`) these were
-    /// derived under.
-    pub feature_schema_version: &'static str,
-    /// Characteristic-vector shape-tag counts.
-    pub vector_counts: [u32; SHAPE_TAG_SLOTS],
-    /// Deepest root-to-leaf path in the unit subtree.
-    pub max_depth: u32,
-    /// Total nodes in the unit subtree.
-    pub node_count: u32,
-    /// Control ops emitted for the unit.
-    pub cfg_op_count: u32,
-    /// Deepest loop nesting in the unit subtree.
-    pub cfg_max_loop_depth: u32,
-    /// Two-way conditionals in the unit subtree.
-    pub cfg_branch_count: u32,
-    /// The unit's hash-valued feature occurrences (windows, subtrees, cfg,
-    /// api), each a posting-list entry.
-    pub occurrences: Vec<FeatureOccurrenceRow>,
-}
-
-/// One occurrence of a feature hash at a source location.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FeatureOccurrenceRow {
-    /// Which feature family produced the hash.
-    pub kind: FeatureKind,
-    /// The 16-byte feature hash.
-    pub hash: [u8; 16],
-    /// Anchor: first byte the occurrence covers.
-    pub start_byte: usize,
-    /// Anchor: one past the last byte the occurrence covers.
-    pub end_byte: usize,
-    /// Kind-specific size: window length, subtree node count, cfg op count or
-    /// api-call count.
-    pub extent: u32,
-}
-
-impl FeatureRow {
-    /// Build a persistable row from a unit's extracted features, tagging it
-    /// with its index into [`Snapshot::units`].
-    #[must_use]
-    pub fn from_unit(host_unit: usize, unit: &UnitFeatures) -> Self {
-        let mut occurrences = Vec::new();
-        for window in &unit.windows {
-            occurrences.push(FeatureOccurrenceRow {
-                kind: FeatureKind::StatementWindow,
-                hash: *window.hash.as_bytes(),
-                start_byte: window.range.start,
-                end_byte: window.range.end,
-                extent: clamp_u32(window.length),
-            });
-        }
-        for subtree in &unit.subtrees {
-            occurrences.push(FeatureOccurrenceRow {
-                kind: FeatureKind::Subtree,
-                hash: *subtree.hash.as_bytes(),
-                start_byte: subtree.range.start,
-                end_byte: subtree.range.end,
-                extent: clamp_u32(subtree.node_count),
-            });
-        }
-        occurrences.push(FeatureOccurrenceRow {
-            kind: FeatureKind::Cfg,
-            hash: *unit.cfg.hash.as_bytes(),
-            start_byte: unit.range.start,
-            end_byte: unit.range.end,
-            extent: unit.cfg.op_count,
-        });
-        let api_extent = clamp_u32(unit.api.names.len());
-        for (kind, hash) in [
-            (FeatureKind::ApiCallSequence, unit.api.sequence_hash),
-            (FeatureKind::ApiCallMultiset, unit.api.multiset_hash),
-        ] {
-            occurrences.push(FeatureOccurrenceRow {
-                kind,
-                hash: *hash.as_bytes(),
-                start_byte: unit.range.start,
-                end_byte: unit.range.end,
-                extent: api_extent,
-            });
-        }
-        Self {
-            host_unit,
-            feature_schema_version: FEATURE_SCHEMA_VERSION,
-            vector_counts: unit.vector.counts,
-            max_depth: unit.vector.max_depth,
-            node_count: unit.vector.node_count,
-            cfg_op_count: unit.cfg.op_count,
-            cfg_max_loop_depth: unit.cfg.max_loop_depth,
-            cfg_branch_count: unit.cfg.branch_count,
-            occurrences,
-        }
-    }
-}
-
-fn clamp_u32(value: usize) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
-}
-
 /// Everything one scan run persists.
 #[derive(Debug, Clone)]
 pub struct Snapshot<'a> {
@@ -447,9 +423,6 @@ pub struct Snapshot<'a> {
     pub sibling_groups: Vec<SiblingGroupRow>,
     /// Bounded LSH diagnostics that are not primary findings or group members.
     pub near_misses: Vec<NearMissRow>,
-    /// Per-unit candidate-extraction features, referencing [`Self::units`] by
-    /// index. Empty in Fast mode, which derives no structural features.
-    pub features: Vec<FeatureRow>,
     /// Every source file the scan read, whether or not anything was found in
     /// it. A later scan of the same tree compares against this.
     pub files: Vec<FileRow>,
@@ -503,6 +476,8 @@ pub struct CrossVariantGroupRow {
 /// An origin-aware cross-build-variant member.
 #[derive(Debug, Clone)]
 pub struct CrossVariantMemberRow {
+    /// Stable occurrence identity; source anchors are reporting only.
+    pub member_id: CrossVariantMemberId,
     /// Fingerprint of the normal partition that produced this member.
     pub origin_variant: String,
     /// Source language.
@@ -561,6 +536,8 @@ pub struct CrossLanguageSemanticGroupRow {
 /// One origin-aware member of a cross-language semantic group.
 #[derive(Debug, Clone)]
 pub struct CrossLanguageSemanticMemberRow {
+    /// Stable occurrence identity; source anchors are reporting only.
+    pub member_id: CrossLanguageMemberId,
     /// Fingerprint of the normal partition that produced this graph.
     pub origin_variant: String,
     /// Source language (Rust or C++ only).
@@ -621,6 +598,12 @@ pub struct SummaryRow {
     pub excluded_walk_errors: u64,
     /// Files dropped after exceeding the configured parse-time allowance.
     pub excluded_timed_out: u64,
+    /// Files excluded because their language was disabled for this scan.
+    pub excluded_language: u64,
+    /// Symbolic-link files deliberately left unresolved by the source walker.
+    pub excluded_symlink_files: u64,
+    /// Symbolic-link directories deliberately left unresolved by the source walker.
+    pub excluded_symlink_directories: u64,
     /// The concrete resource profile applied to this run, when one was.
     pub guardrails: Option<GuardrailsRow>,
     /// Files dropped for causes other than generated markers or globs.
@@ -678,6 +661,14 @@ pub struct GuardrailsRow {
     pub posting_cap: u64,
     /// Largest candidate-pair budget per pass.
     pub pair_budget: u64,
+    /// IEEE-754 bits of the Structural near-miss diagnostic band.
+    pub near_miss_delta_bits: u64,
+    /// Maximum Structural near-miss diagnostics retained.
+    pub near_miss_cap: u64,
+    /// Largest Structural pairs passed to precise verification.
+    pub verification_budget: u64,
+    /// Largest dynamic-programming cell count for one Structural alignment.
+    pub max_alignment_cells: u64,
     /// Largest number of post-grouping sibling candidates compared in one run.
     pub sibling_candidate_budget: u64,
     /// Largest number of sibling findings retained for one clone group.
@@ -742,6 +733,19 @@ pub struct FileRow {
     pub language: Language,
     /// Size in bytes.
     pub byte_len: u64,
+}
+
+/// One incomplete multi-partition scan left behind by an interrupted command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbandonedRun {
+    /// Database row id of the incomplete partition.
+    pub id: i64,
+    /// Source root the partition was scanning.
+    pub root_path: String,
+    /// Invocation start time shared by its sibling partitions.
+    pub started_at: String,
+    /// Time this partition finished writing its incomplete snapshot.
+    pub finished_at: String,
 }
 
 mod groups;

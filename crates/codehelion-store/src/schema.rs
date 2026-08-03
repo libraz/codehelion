@@ -3,9 +3,8 @@
 //! The schema covers every scan entity: `ScanRun`, `BuildVariant`,
 //! `SourceUnit`, `Fragment`, `Fingerprint`, `CloneGroup`, `Finding`,
 //! `Suppression`, `Artifact`, `ArtifactSymbol`,
-//! `SourceArtifactMapping` and `DetectorVersion`, plus the candidate-index
-//! feature tables `FeatureFingerprint`, `FeatureOccurrence` and `UnitFeature`,
-//! the per-group `CloneGroupSimilarity` breakdown, and the per-run report
+//! `SourceArtifactMapping` and `DetectorVersion`, plus the per-group
+//! `CloneGroupSimilarity` breakdown and the per-run report
 //! tables `RunSummary`, `RunFunnelStage`, `RunFunnelDrop` and
 //! `RunUnusedSuppression`, which hold what a report says about a run beyond
 //! the findings it lists, and the `compiler_*` tables holding what a compiler
@@ -19,10 +18,6 @@
 //! - Stable identifiers are 16-byte fingerprint BLOBs; file paths, line
 //!   numbers and offsets appear only as non-authoritative anchor columns and
 //!   never in a UNIQUE or key role.
-//! - Feature hashes are candidate-index keys, not stable identifiers, and
-//!   live in their own tables. They carry a `feature_schema_version` (never a
-//!   `normalization_version`) in their dedup key, so hashes from incompatible
-//!   feature recipes never merge, and they never mix into `fingerprint`.
 //! - Every fingerprint row carries its full analysis context (hash
 //!   algorithm, normalization version, frontend version, mode, language,
 //!   build variant) inside its UNIQUE constraint, so equal hashes produced
@@ -58,7 +53,7 @@ use crate::StoreError;
 /// A database recorded under another one is rejected rather than migrated.
 /// Nothing is lost by that: the audit database holds the latest scan, which
 /// re-running the scan reproduces.
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 24;
 
 /// Full pre-release database layout. Existing development databases are not
 /// transformed; create a fresh database when this contract changes.
@@ -226,6 +221,8 @@ CREATE TABLE "clone_group" (
     id                   INTEGER PRIMARY KEY,
     scan_run_id          INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
     group_fingerprint_id INTEGER NOT NULL REFERENCES fingerprint (id),
+    lineage              BLOB NOT NULL CHECK (length(lineage) = 16),
+    lineage_state        TEXT NOT NULL CHECK (lineage_state IN ('new', 'expanded')),
     clone_type           TEXT NOT NULL CHECK (clone_type IN ('type-1', 'type-2', 'type-3', 'restricted-semantic')),
     member_count         INTEGER NOT NULL,
     score                REAL NOT NULL,
@@ -236,17 +233,31 @@ CREATE TABLE "clone_group" (
     test_code            INTEGER NOT NULL DEFAULT 0 CHECK (test_code IN (0, 1)),
     test_code_evidence   TEXT CHECK (test_code_evidence IN ('marker', 'path')),
     split_pair           INTEGER NOT NULL DEFAULT 0 CHECK (split_pair IN (0, 1)),
-    width_family         INTEGER NOT NULL DEFAULT 0 CHECK (width_family IN (0, 1))
+    width_family         INTEGER NOT NULL DEFAULT 0 CHECK (width_family IN (0, 1)),
+    ranked_down          INTEGER NOT NULL DEFAULT 0 CHECK (ranked_down IN (0, 1))
 , statements INTEGER, identifier_jaccard REAL CHECK (identifier_jaccard >= 0 AND identifier_jaccard <= 1)
 , has_loop INTEGER CHECK (has_loop IN (0, 1)), has_dynamic_allocation INTEGER CHECK (has_dynamic_allocation IN (0, 1))
-, call_count INTEGER CHECK (call_count >= 0)) STRICT;
+, call_count INTEGER CHECK (call_count >= 0),
+    UNIQUE (scan_run_id, group_fingerprint_id)) STRICT;
+CREATE TABLE clone_group_lineage_parent (
+    clone_group_id      INTEGER NOT NULL REFERENCES clone_group (id) ON DELETE CASCADE,
+    ordinal             INTEGER NOT NULL CHECK (ordinal >= 0),
+    parent_fingerprint  BLOB NOT NULL CHECK (length(parent_fingerprint) = 16),
+    parent_lineage      BLOB NOT NULL CHECK (length(parent_lineage) = 16),
+    is_primary          INTEGER NOT NULL CHECK (is_primary IN (0, 1)),
+    shared_content      INTEGER NOT NULL CHECK (shared_content >= 0),
+    overlap             REAL NOT NULL CHECK (overlap >= 0 AND overlap <= 1),
+    PRIMARY KEY (clone_group_id, ordinal)
+) STRICT;
 CREATE TABLE clone_group_member (
     clone_group_id INTEGER NOT NULL REFERENCES clone_group (id) ON DELETE CASCADE,
+    scan_run_id    INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
     fragment_id    INTEGER NOT NULL REFERENCES fragment (id) ON DELETE CASCADE,
     finding_id     BLOB NOT NULL CHECK (length(finding_id) = 16),
     is_canonical   INTEGER NOT NULL CHECK (is_canonical IN (0, 1)),
     boilerplate    TEXT CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition', 'guarded-dispatch', 'configured-answer')),
-    PRIMARY KEY (clone_group_id, fragment_id)
+    PRIMARY KEY (clone_group_id, fragment_id),
+    UNIQUE (scan_run_id, finding_id)
 ) STRICT;
 CREATE TABLE "clone_group_similarity" (
     clone_group_id  INTEGER PRIMARY KEY REFERENCES clone_group (id) ON DELETE CASCADE,
@@ -262,6 +273,7 @@ CREATE TABLE "clone_group_similarity" (
 ) STRICT;
 CREATE TABLE clone_group_sibling (
     clone_group_id       INTEGER NOT NULL REFERENCES clone_group (id) ON DELETE CASCADE,
+    scan_run_id          INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
     source_unit_id       INTEGER NOT NULL REFERENCES source_unit (id) ON DELETE CASCADE,
     fragment_fingerprint BLOB NOT NULL CHECK (length(fragment_fingerprint) = 16),
     finding_id           BLOB NOT NULL CHECK (length(finding_id) = 16),
@@ -275,7 +287,9 @@ CREATE TABLE clone_group_sibling (
     api                  REAL,
     composite            REAL NOT NULL,
     boilerplate          TEXT CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition', 'guarded-dispatch', 'configured-answer')),
-    PRIMARY KEY (clone_group_id, source_unit_id)
+    suppression_id       INTEGER REFERENCES suppression (id),
+    PRIMARY KEY (clone_group_id, source_unit_id),
+    UNIQUE (scan_run_id, finding_id)
 ) STRICT;
 CREATE TABLE near_match_near_miss (
     scan_run_id          INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
@@ -283,6 +297,7 @@ CREATE TABLE near_match_near_miss (
     left_source_unit_id  INTEGER NOT NULL REFERENCES source_unit (id) ON DELETE CASCADE,
     right_source_unit_id INTEGER NOT NULL REFERENCES source_unit (id) ON DELETE CASCADE,
     estimated_jaccard    REAL NOT NULL CHECK (estimated_jaccard >= 0 AND estimated_jaccard <= 1),
+    suppression_id       INTEGER REFERENCES suppression (id),
     PRIMARY KEY (scan_run_id, ordinal),
     UNIQUE (scan_run_id, left_source_unit_id, right_source_unit_id),
     CHECK (left_source_unit_id != right_source_unit_id)
@@ -498,6 +513,7 @@ CREATE TABLE compiler_unit (
                            ('requires_execution', 'no_build_information', 'toolchain_mismatch',
                             'helper_timed_out', 'helper_died', 'unreadable_schema',
                             'not_supported')),
+    unavailable_diagnostic TEXT,
     has_cfg            INTEGER NOT NULL CHECK (has_cfg IN (0, 1)),
     effects_computed   INTEGER NOT NULL CHECK (effects_computed IN (0, 1)),
     data_flow_computed INTEGER NOT NULL CHECK (data_flow_computed IN (0, 1)), anchored_at TEXT,
@@ -527,10 +543,12 @@ CREATE TABLE cross_language_semantic_group (
     rule_version             INTEGER NOT NULL,
     semantic_confidence      REAL NOT NULL,
     correspondence_ids_json  TEXT NOT NULL,
-    member_count             INTEGER NOT NULL
+    member_count             INTEGER NOT NULL,
+    UNIQUE (comparison_id, group_id)
 ) STRICT;
 CREATE TABLE cross_language_semantic_member (
     group_id                   INTEGER NOT NULL REFERENCES cross_language_semantic_group (id) ON DELETE CASCADE,
+    member_id                  BLOB NOT NULL CHECK (length(member_id) = 16),
     origin_variant_fingerprint TEXT NOT NULL,
     language                   TEXT NOT NULL CHECK (language IN ('rust', 'cpp')),
     file_path                  TEXT NOT NULL,
@@ -539,17 +557,19 @@ CREATE TABLE cross_language_semantic_member (
     unit_name                  TEXT,
     graph_schema_version       TEXT NOT NULL,
     graph_json                 TEXT NOT NULL,
-    PRIMARY KEY (group_id, origin_variant_fingerprint, file_path, start_line, end_line)
+    PRIMARY KEY (group_id, member_id)
 ) STRICT;
 CREATE TABLE cross_variant_clone_group (
     id                    INTEGER PRIMARY KEY,
     comparison_id         INTEGER NOT NULL REFERENCES cross_variant_comparison (id) ON DELETE CASCADE,
     group_id              BLOB NOT NULL CHECK (length(group_id) = 16),
     clone_type            TEXT NOT NULL CHECK (clone_type IN ('type-1')),
-    member_count          INTEGER NOT NULL
+    member_count          INTEGER NOT NULL,
+    UNIQUE (comparison_id, group_id)
 ) STRICT;
 CREATE TABLE cross_variant_clone_member (
     group_id                  INTEGER NOT NULL REFERENCES cross_variant_clone_group (id) ON DELETE CASCADE,
+    member_id                 BLOB NOT NULL CHECK (length(member_id) = 16),
     origin_variant_fingerprint TEXT NOT NULL,
     language                  TEXT NOT NULL CHECK (language IN ('c', 'cpp')),
     file_path                 TEXT NOT NULL,
@@ -557,7 +577,7 @@ CREATE TABLE cross_variant_clone_member (
     end_line                  INTEGER NOT NULL,
     unit_name                 TEXT,
     token_count               INTEGER NOT NULL,
-    PRIMARY KEY (group_id, origin_variant_fingerprint, file_path, start_line, end_line)
+    PRIMARY KEY (group_id, member_id)
 ) STRICT;
 CREATE TABLE cross_variant_comparison (
     id                    INTEGER PRIMARY KEY,
@@ -577,30 +597,6 @@ CREATE TABLE detector_version (
     component TEXT NOT NULL,
     version   TEXT NOT NULL,
     UNIQUE (component, version)
-) STRICT;
-CREATE TABLE feature_fingerprint (
-    id                     INTEGER PRIMARY KEY,
-    kind                   TEXT NOT NULL CHECK (kind IN
-                               ('statement_window', 'subtree', 'cfg',
-                                'api_call_sequence', 'api_call_multiset')),
-    hash_algo              TEXT NOT NULL,
-    hash                   BLOB NOT NULL CHECK (length(hash) = 16),
-    feature_schema_version TEXT NOT NULL,
-    frontend_version       TEXT NOT NULL,
-    analysis_mode          TEXT NOT NULL CHECK (analysis_mode IN ('fast', 'structural', 'semantic')),
-    language               TEXT NOT NULL CHECK (language IN ('rust', 'c', 'cpp')),
-    build_variant_id       INTEGER NOT NULL REFERENCES build_variant (id),
-    UNIQUE (kind, hash_algo, hash, feature_schema_version, frontend_version,
-            analysis_mode, language, build_variant_id)
-) STRICT;
-CREATE TABLE feature_occurrence (
-    id                     INTEGER PRIMARY KEY,
-    scan_run_id            INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
-    feature_fingerprint_id INTEGER NOT NULL REFERENCES feature_fingerprint (id),
-    source_unit_id         INTEGER REFERENCES source_unit (id),
-    start_byte             INTEGER NOT NULL,
-    end_byte               INTEGER NOT NULL,
-    extent                 INTEGER NOT NULL
 ) STRICT;
 CREATE TABLE finding (
     id                                 INTEGER PRIMARY KEY,
@@ -698,7 +694,14 @@ CREATE TABLE run_summary (
     subsumed_runs         INTEGER NOT NULL,
     split_components      INTEGER NOT NULL,
     pair_budget_exhausted INTEGER NOT NULL CHECK (pair_budget_exhausted IN (0, 1)),
-    baseline_digest       TEXT
+    baseline_digest       TEXT,
+    excluded_language     INTEGER NOT NULL,
+    excluded_symlink_files INTEGER NOT NULL,
+    excluded_symlink_directories INTEGER NOT NULL,
+    guardrail_near_miss_delta INTEGER,
+    guardrail_near_miss_cap INTEGER,
+    guardrail_verification_budget INTEGER,
+    guardrail_max_alignment_cells INTEGER
 ) STRICT;
 CREATE TABLE run_unused_suppression (
     scan_run_id INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
@@ -791,16 +794,6 @@ CREATE TABLE suppression (
     reason  TEXT,
     active  INTEGER NOT NULL CHECK (active IN (0, 1))
 ) STRICT;
-CREATE TABLE unit_feature (
-    source_unit_id         INTEGER PRIMARY KEY REFERENCES source_unit (id) ON DELETE CASCADE,
-    feature_schema_version TEXT NOT NULL,
-    vector_counts          BLOB NOT NULL,
-    max_depth              INTEGER NOT NULL,
-    node_count             INTEGER NOT NULL,
-    cfg_op_count           INTEGER NOT NULL,
-    cfg_max_loop_depth     INTEGER NOT NULL,
-    cfg_branch_count       INTEGER NOT NULL
-) STRICT;
 CREATE INDEX idx_scan_run_started ON scan_run (started_at DESC);
 CREATE INDEX idx_fingerprint_kind_hash ON fingerprint (kind, hash);
 CREATE INDEX idx_source_unit_run ON source_unit (scan_run_id);
@@ -815,10 +808,6 @@ CREATE INDEX idx_artifact_run ON artifact (scan_run_id);
 CREATE INDEX idx_artifact_symbol_artifact ON artifact_symbol (artifact_id);
 CREATE INDEX idx_artifact_symbol_code_hash ON artifact_symbol (code_hash);
 CREATE INDEX idx_sam_symbol ON source_artifact_mapping (artifact_symbol_id);
-CREATE INDEX idx_feature_fingerprint_kind_hash ON feature_fingerprint (kind, hash);
-CREATE INDEX idx_feature_occurrence_run ON feature_occurrence (scan_run_id);
-CREATE INDEX idx_feature_occurrence_fp ON feature_occurrence (feature_fingerprint_id);
-CREATE INDEX idx_feature_occurrence_unit ON feature_occurrence (source_unit_id);
 CREATE INDEX idx_clone_group_run ON clone_group (scan_run_id);
 CREATE INDEX idx_clone_group_fp ON clone_group (group_fingerprint_id);
 CREATE INDEX idx_compiler_unit_run ON compiler_unit (scan_run_id);
@@ -904,6 +893,22 @@ pub(crate) fn initialize(conn: &mut Connection) -> Result<(), StoreError> {
     match version(conn)? {
         SCHEMA_VERSION => Ok(()),
         0 => apply_baseline(conn),
+        found => Err(StoreError::UnsupportedSchema { found }),
+    }
+}
+
+/// Validate an existing database without creating its baseline.
+pub(crate) fn validate_existing(conn: &Connection) -> Result<(), StoreError> {
+    let has_meta: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_meta {
+        return Err(StoreError::UnsupportedSchema { found: 0 });
+    }
+    match version(conn)? {
+        SCHEMA_VERSION => Ok(()),
         found => Err(StoreError::UnsupportedSchema { found }),
     }
 }
