@@ -43,7 +43,7 @@ fn comparison_and_presentation_flags_reject_unsupported_modes() {
         show_near_misses: false,
         include_trivial: false,
         include_vendored: false,
-        verbose: false,
+        view: cli::ViewArgs::default(),
         no_reuse: false,
         fail_on_findings: false,
         untrusted: false,

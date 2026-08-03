@@ -226,8 +226,17 @@ fn descending(a: Option<f64>, b: Option<f64>) -> Ordering {
     }
 }
 
-/// Compare two entries on one axis alone, biggest first, ties broken by
-/// fingerprint so the result is the same on every machine.
+/// Compare two entries on one axis, biggest first, then by the composed
+/// ranking, then by fingerprint so the result is the same on every machine.
+///
+/// A single axis ties often, and the ties are where the reader is left. Raw
+/// identifier agreement is the clearest case: a tree with any repetition in it
+/// has dozens of entries at exactly 1.00, and ordering those by fingerprint
+/// puts the largest and the most trivial of them in hash order, which is the
+/// order of nothing. The composed ranking is the best statement available
+/// about which of two otherwise indistinguishable entries is worth reading
+/// first, so it decides before the identifier does. Fingerprint stays last and
+/// still settles the remainder.
 ///
 /// Separate from [`order`] because a view rebuilt from the database has the
 /// entries but not the configuration that decides what gets ranked down, and
@@ -235,6 +244,7 @@ fn descending(a: Option<f64>, b: Option<f64>) -> Ordering {
 #[must_use]
 pub fn compare_on(a: &Group, b: &Group, sort: Sort) -> Ordering {
     sort.compare(a, b)
+        .then_with(|| Sort::Priority.compare(a, b))
         .then_with(|| a.fingerprint.cmp(&b.fingerprint))
 }
 
@@ -252,11 +262,10 @@ pub fn duplicated_tokens(group: &Group) -> u64 {
 
 /// Put the entries in the order every view of a report shows them in.
 ///
-/// Three keys, in this order: whether the configuration ranks the entry down,
-/// then the chosen axis descending, then fingerprint ascending. The first is
-/// what keeps boilerplate and test-suite repetition below the code under test
-/// without changing what either of them scored; the last makes ties come out
-/// the same on every machine. Changing the axis changes only the middle key —
+/// Whether the configuration ranks the entry down comes first, and then
+/// [`compare_on`] settles the rest. The rank-down key is what keeps
+/// boilerplate and test-suite repetition below the code under test without
+/// changing what either of them scored. Changing the axis does not touch it —
 /// what is ranked down stays ranked down, because that is a statement about
 /// the finding rather than about which measure the reader is following.
 ///

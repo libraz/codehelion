@@ -148,7 +148,7 @@ fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
     match args.format {
         ArtifactFormat::Json => serde_json::to_writer_pretty(&mut rendered, &report)?,
         ArtifactFormat::Csv => render_csv(&report, &mut rendered)?,
-        ArtifactFormat::Text => render_text(&report, args.verbose, &mut rendered)?,
+        ArtifactFormat::Text => render_text(&report, args.verbose > 0, &mut rendered)?,
     }
     rendered.push(b'\n');
     if let Some(path) = &args.output {
@@ -229,7 +229,7 @@ pub fn report(args: &ArtifactReportArgs, out: &mut impl Write) -> Result<Outcome
     match args.format {
         ArtifactFormat::Json => serde_json::to_writer_pretty(&mut rendered, &report)?,
         ArtifactFormat::Csv => render_csv(&report, &mut rendered)?,
-        ArtifactFormat::Text => render_text(&report, args.verbose, &mut rendered)?,
+        ArtifactFormat::Text => render_text(&report, args.verbose > 0, &mut rendered)?,
     }
     rendered.push(b'\n');
     if let Some(path) = &args.output {

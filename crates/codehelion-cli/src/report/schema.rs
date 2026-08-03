@@ -30,6 +30,12 @@ pub(super) const TEXT_MEMBER_LIMIT: usize = 5;
 /// Number of gone baseline entries listed before the omitted count.
 pub(super) const GONE_LISTED: usize = 10;
 
+/// Identifier digits a text report prints before the reader asks for more.
+///
+/// The same prefix length `codehelion explain` accepts, so an abbreviated id
+/// can be typed straight back into the tool.
+pub(super) const SHORT_ID_CHARS: usize = 8;
+
 /// Baseline mode for hiding what the baseline froze.
 pub const BASELINE_SUPPRESS: &str = "suppress";
 

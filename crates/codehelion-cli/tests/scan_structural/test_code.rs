@@ -44,7 +44,7 @@ fn duplication_inside_a_test_suite_is_reported_and_marked() {
     let dir = suite_fixture();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural"])
+        .args(["scan", ".", "--mode", "structural", "-v"])
         .assert()
         .success()
         // Ranked down, not hidden: the count is stated and the entry says why
@@ -83,7 +83,7 @@ fn a_policy_that_hides_test_code_records_the_marker_that_hid_it() {
     .unwrap();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural"])
+        .args(["scan", ".", "--mode", "structural", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains("1 by rule"));

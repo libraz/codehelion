@@ -415,7 +415,7 @@ fn untrusted_semantic_requires_an_enforceable_memory_limit() {
         include_trivial: false,
         no_reuse: false,
         include_vendored: false,
-        verbose: false,
+        view: crate::cli::ViewArgs::default(),
         fail_on_findings: false,
         untrusted: true,
     };
@@ -456,7 +456,7 @@ fn untrusted_semantic_requires_a_linux_memory_limit() {
         include_trivial: false,
         no_reuse: false,
         include_vendored: false,
-        verbose: false,
+        view: crate::cli::ViewArgs::default(),
         fail_on_findings: false,
         untrusted: true,
     };
@@ -525,7 +525,7 @@ fn an_empty_tree_is_not_reported_as_a_missing_compiler() {
         show_near_misses: false,
         include_trivial: false,
         include_vendored: false,
-        verbose: false,
+        view: crate::cli::ViewArgs::default(),
         no_reuse: false,
         fail_on_findings: false,
         untrusted: false,

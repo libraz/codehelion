@@ -15,7 +15,7 @@ mod shared;
 pub mod structural;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -41,7 +41,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde_json::Value;
 
 use crate::Outcome;
-use crate::cli::{BaselineMode, Format, Mode, ScanArgs, SortAxis};
+use crate::cli::{BaselineMode, Format, Mode, ScanArgs, SortAxis, ViewArgs};
 use crate::config::{self, Config, ConfigSource, LiteralNormalization, ResolvedConfig};
 use crate::report::{self, Report};
 use crate::suppress;

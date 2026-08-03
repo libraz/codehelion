@@ -173,11 +173,17 @@ fn text_exclusion_total_counts_each_cause_once() {
     };
     let mut rendered = Vec::new();
     report
-        .render_text(TextOptions::default(), &mut rendered)
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut rendered,
+        )
         .expect("render report with exclusions");
     let text = String::from_utf8(rendered).expect("UTF-8 report");
     assert!(
-        text.contains("7 symlinks (3 files, 4 directories), 8 walk errors, 9 timed out (45 total)"),
+        text.contains("7 symlinks, 8 walk errors, 9 timed out (45 total)"),
         "{text}"
     );
 }
@@ -497,9 +503,24 @@ fn a_duplicated_run_states_its_extent_in_every_view() {
         .render_text(TextOptions::default(), &mut buffer)
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
-    assert!(text.contains("type-1 run of 5 statements priority 0."));
+    // The listing states the extent as a kind; the count of statements is
+    // one of the numbers behind it.
+    assert!(text.contains("type-1 run ×"), "{text}");
+
+    let mut detailed = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut detailed,
+        )
+        .unwrap();
+    let detailed = String::from_utf8(detailed).unwrap();
+    assert!(detailed.contains("run of 5 statements"), "{detailed}");
     // What was folded away is stated rather than silently dropped.
-    assert!(text.contains(
+    assert!(detailed.contains(
         "1 of them are runs duplicated inside units that are not clones of each other; \
          4 more were folded into the groups that already cover them and 2 into longer runs"
     ));
@@ -515,10 +536,25 @@ fn text_names_the_run_required_for_replay() {
     let text = String::from_utf8(buffer).unwrap();
 
     assert!(
-        text.contains("snapshot: .codehelion/audit.db (run 1;"),
+        text.contains("run 1 (replay: codehelion report --run 1)"),
         "{text}"
     );
-    assert!(text.contains("codehelion report --run 1"), "{text}");
+
+    let mut detailed = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut detailed,
+        )
+        .unwrap();
+    let detailed = String::from_utf8(detailed).unwrap();
+    assert!(
+        detailed.contains("snapshot: .codehelion/audit.db"),
+        "{detailed}"
+    );
 }
 
 #[test]
@@ -670,7 +706,7 @@ fn the_near_miss_text_flag_is_rejected_for_machine_formats() {
             format: crate::cli::Format::Json,
             output: None,
             force: false,
-            verbose: false,
+            view: crate::cli::ViewArgs::default(),
             show_suppressed: false,
             show_siblings: false,
             show_near_misses: true,
@@ -710,7 +746,7 @@ fn a_rule_that_matched_nothing_is_named_not_left_to_be_noticed() {
 
     let mut buffer = Vec::new();
     report
-        .render_text(TextOptions::default(), &mut buffer)
+        .render_notes(TextOptions::default(), &mut buffer)
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
     // Named the way a rule that did match is named, so the two read alike.
@@ -756,7 +792,22 @@ fn a_group_inside_the_suite_says_so_in_every_view() {
     let text = String::from_utf8(buffer).unwrap();
     // Shown, not hidden, and its place in the ranking is explained.
     assert!(text.contains("[test code]"));
-    assert!(text.contains("1 of them are duplication inside test code"));
+
+    let mut detailed = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut detailed,
+        )
+        .unwrap();
+    assert!(
+        String::from_utf8(detailed)
+            .unwrap()
+            .contains("1 of them are duplication inside test code")
+    );
 }
 
 #[test]
@@ -924,7 +975,7 @@ fn text_json_and_sarif_keep_group_order_and_suppression_state() {
     report
         .render_text(
             TextOptions {
-                verbose: true,
+                verbosity: 2,
                 show_suppressed: true,
                 ..TextOptions::default()
             },
@@ -1046,7 +1097,13 @@ fn denied_execution_is_actionable_in_json_and_text() {
 
     let mut text = Vec::new();
     report
-        .render_text(TextOptions::default(), &mut text)
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut text,
+        )
         .unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains("2 helper diagnostic: compiler library unavailable"));
@@ -1081,7 +1138,13 @@ fn artifact_savings_use_the_same_group_value_in_every_report_format() {
 
     let mut text = Vec::new();
     report
-        .render_text(TextOptions::default(), &mut text)
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut text,
+        )
         .unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains("artifact refactoring estimates (not guaranteed):"));

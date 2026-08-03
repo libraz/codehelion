@@ -78,7 +78,7 @@ fn depth_limited_structural_parse_is_visible_in_json_and_text_reports() {
         .args(["report", "--run", &run.to_string()])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
+        .stderr(predicate::str::contains(
             "structural parsing reached its depth limit in 1 file(s)",
         ));
 }
@@ -88,11 +88,11 @@ fn a_gapped_clone_is_detected_and_recorded_with_its_evidence() {
     let dir = fixture();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural"])
+        .args(["scan", ".", "--mode", "structural", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "codehelion scan (structural mode)",
+            "codehelion scan · structural mode ·",
         ))
         .stdout(predicate::str::contains("type-3 1"))
         .stdout(predicate::str::contains("similarity: composite"))
@@ -274,7 +274,7 @@ fn a_source_the_parser_could_not_follow_is_reported_as_such() {
         .args(["scan", ".", "--mode", "structural"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("the parser could not follow"));
+        .stderr(predicate::str::contains("the parser could not follow"));
 }
 
 #[test]
@@ -417,7 +417,7 @@ fn path_suppression_hides_but_records_structural_findings() {
     .unwrap();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural"])
+        .args(["scan", ".", "--mode", "structural", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains("1 by rule"))

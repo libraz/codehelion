@@ -11,7 +11,7 @@ fn semantic_mode_either_asks_a_compiler_or_says_which_one_is_missing() {
     let dir = fixture();
     let output = cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "semantic"])
+        .args(["scan", ".", "--mode", "semantic", "-v"])
         .output()
         .expect("the scan should run");
     if output.status.success() {

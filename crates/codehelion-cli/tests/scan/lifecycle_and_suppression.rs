@@ -5,13 +5,13 @@ fn scan_detects_clones_and_records_a_snapshot() {
     let dir = fixture();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", "."])
+        .args(["scan", ".", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
             "files: 5 analysed (rust 3, c 2, cpp 0)",
         ))
-        .stdout(predicate::str::contains("clone groups:"))
+        .stdout(predicate::str::contains("2 groups"))
         .stdout(predicate::str::contains("type-1"))
         .stdout(predicate::str::contains("src/a.rs"));
 
@@ -121,7 +121,14 @@ fn report_reformats_a_recorded_run_without_scanning_again() {
 
     cmd()
         .current_dir(dir.path())
-        .args(["report", "--run", &run_id.to_string(), "--format", "text"])
+        .args([
+            "report",
+            "--run",
+            &run_id.to_string(),
+            "--format",
+            "text",
+            "-v",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("snapshot:"));
@@ -192,7 +199,7 @@ fn recorded_artifact_savings_reach_json_text_and_sarif_reports() {
 
     let text = cmd()
         .current_dir(dir.path())
-        .args(["report", "--run", &run, "--format", "text"])
+        .args(["report", "--run", &run, "--format", "text", "-v"])
         .output()
         .expect("render text report");
     assert!(text.status.success(), "{text:?}");
@@ -413,7 +420,7 @@ fn fast_and_structural_modes_run_without_compiler_helpers() {
         .args(["scan", "."])
         .assert()
         .success()
-        .stdout(predicate::str::contains("codehelion scan (fast mode)"));
+        .stdout(predicate::str::contains("codehelion scan · fast mode ·"));
 
     cmd()
         .current_dir(dir.path())
@@ -421,7 +428,7 @@ fn fast_and_structural_modes_run_without_compiler_helpers() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "codehelion scan (structural mode)",
+            "codehelion scan · structural mode ·",
         ));
 }
 
@@ -493,13 +500,13 @@ fn no_ignore_scans_files_gitignore_hides() {
     std::fs::write(dir.path().join(".hidden/extra.rs"), CHECKSUM_RS).unwrap();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", "."])
+        .args(["scan", ".", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains("files: 4 analysed"));
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--no-ignore"])
+        .args(["scan", ".", "--no-ignore", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains("files: 6 analysed"));
@@ -538,10 +545,10 @@ fn reports_show_the_priority_and_its_inputs() {
     let dir = fixture();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", "."])
+        .args(["scan", ".", "-v"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("top groups by priority:"))
+        .stdout(predicate::str::contains("sorted by priority"))
         .stdout(predicate::str::contains("priority"))
         .stdout(predicate::str::contains("similarity"));
 }
@@ -556,7 +563,7 @@ fn path_suppression_hides_but_records_findings() {
     .unwrap();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", "."])
+        .args(["scan", ".", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains("1 by rule"))
@@ -612,7 +619,7 @@ fn an_inline_marker_suppresses_the_next_unit() {
     std::fs::write(dir.path().join("src/two.c"), &marked).unwrap();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", "."])
+        .args(["scan", ".", "-v"])
         .assert()
         .success()
         // The complete C units are both marked and therefore suppressed; the
@@ -639,7 +646,7 @@ fn a_symbol_glob_suppresses_by_unit_name_wherever_the_unit_lives() {
     .unwrap();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", "."])
+        .args(["scan", ".", "-v"])
         .assert()
         .success()
         // Both C instances are named mix_bytes, so their group is hidden;
@@ -677,7 +684,7 @@ fn a_symbol_glob_matching_only_part_of_a_group_leaves_it_visible() {
     .unwrap();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", "."])
+        .args(["scan", ".", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains("0 by rule"))
@@ -712,9 +719,11 @@ fn fast_mode_reports_suppression_policies_it_cannot_apply() {
         .output()
         .expect("run text scan");
     assert!(text.status.success(), "{text:?}");
+    // A note about the run, not a finding: it goes to the error stream so a
+    // report being piped somewhere still carries it.
     assert!(
-        String::from_utf8(text.stdout)
-            .expect("text report")
+        String::from_utf8(text.stderr)
+            .expect("text report notes")
             .contains("Fast mode did not apply suppression policies")
     );
 

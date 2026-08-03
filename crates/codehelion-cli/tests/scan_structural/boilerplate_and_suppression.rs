@@ -352,7 +352,7 @@ fn a_hidden_boilerplate_category_is_recorded_with_the_rule_that_hid_it() {
     .unwrap();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural"])
+        .args(["scan", ".", "--mode", "structural", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains("1 by rule"))
@@ -397,7 +397,7 @@ fn a_symbol_glob_hides_a_group_only_when_it_names_every_member() {
     .unwrap();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural"])
+        .args(["scan", ".", "--mode", "structural", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains("0 by rule"))
@@ -410,7 +410,7 @@ fn a_symbol_glob_hides_a_group_only_when_it_names_every_member() {
     .unwrap();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural"])
+        .args(["scan", ".", "--mode", "structural", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains("1 by rule"))
@@ -444,7 +444,7 @@ fn a_clone_id_hides_exactly_the_group_it_names() {
     .unwrap();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural"])
+        .args(["scan", ".", "--mode", "structural", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains("0 by rule"));
@@ -458,7 +458,7 @@ fn a_clone_id_hides_exactly_the_group_it_names() {
     .unwrap();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural"])
+        .args(["scan", ".", "--mode", "structural", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains("1 by rule"))

@@ -128,7 +128,7 @@ fn the_chosen_axis_reorders_the_report_and_says_so_in_the_heading() {
         .args(["scan", ".", "--mode", "structural", "--sort", "instances"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("top groups by instances:"));
+        .stdout(predicate::str::contains("sorted by instances"));
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn an_identifier_floor_narrows_the_listing_without_moving_a_count() {
     let listed = |extra: &[&str]| {
         let output = cmd()
             .current_dir(root)
-            .args(["scan", ".", "--mode", "structural"])
+            .args(["scan", ".", "--mode", "structural", "-vv"])
             .args(extra)
             .output()
             .expect("run scan");
@@ -194,7 +194,7 @@ fn an_identifier_floor_narrows_the_listing_without_moving_a_count() {
 
     let counted = |text: &str| {
         text.lines()
-            .find(|line| line.trim_start().starts_with("clone groups:"))
+            .find(|line| line.contains(" groups (type-"))
             .expect("the group count")
             .to_string()
     };
@@ -339,6 +339,7 @@ fn a_comparison_lists_what_went_and_a_suppression_does_not() {
             "baseline.json",
             "--baseline-mode",
             "compare",
+            "-v",
         ])
         .output()
         .expect("run scan");
@@ -353,7 +354,7 @@ fn a_comparison_lists_what_went_and_a_suppression_does_not() {
     // that is no longer there is not what it was asked for.
     let suppressed = cmd()
         .current_dir(root)
-        .args(["scan", ".", "--baseline", "baseline.json"])
+        .args(["scan", ".", "--baseline", "baseline.json", "-v"])
         .output()
         .expect("run scan");
     assert!(suppressed.status.success(), "{suppressed:?}");

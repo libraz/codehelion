@@ -6,8 +6,8 @@
 )]
 
 use super::{
-    Context, Format, IsTerminal, PARTITIONED_REPORT_SCHEMA_URI, PARTITIONED_REPORT_SCHEMA_VERSION,
-    Path, Report, Result, ScanArgs, Store, Value, Write, bail, fingerprint_hex, report,
+    Context, Format, PARTITIONED_REPORT_SCHEMA_URI, PARTITIONED_REPORT_SCHEMA_VERSION, Path,
+    Report, Result, ScanArgs, Store, Value, ViewArgs, Write, bail, fingerprint_hex, report,
 };
 
 /// Render the model in the requested format, to `--output` when given,
@@ -18,7 +18,7 @@ pub(crate) fn write_report(args: &ScanArgs, out: &mut impl Write, model: &Report
             format: args.format,
             output: args.output.as_deref(),
             force: args.force,
-            verbose: args.verbose,
+            view: args.view,
             show_suppressed: args.show_suppressed,
             show_siblings: args.show_siblings,
             show_near_misses: args.show_near_misses,
@@ -43,8 +43,8 @@ pub(crate) struct ReportOutput<'a> {
     pub(crate) output: Option<&'a Path>,
     /// Whether an existing destination may be replaced.
     pub(crate) force: bool,
-    /// Whether text output lists every group and member.
-    pub(crate) verbose: bool,
+    /// How much of the text report to print, and in what colour.
+    pub(crate) view: ViewArgs,
     /// Whether text output includes suppressed groups.
     pub(crate) show_suppressed: bool,
     /// Whether text output includes incomplete local mirrors.
@@ -74,28 +74,43 @@ pub(crate) fn write_report_options(
         Format::Json => model.to_json().context("serializing the JSON report")?,
         Format::Sarif => model.to_sarif().context("serializing the SARIF report")?,
         Format::Text => {
-            let options = report::TextOptions {
-                verbose: options.verbose,
-                color: options.output.is_none() && std::io::stdout().is_terminal(),
-                show_suppressed: options.show_suppressed,
-                show_siblings: options.show_siblings,
-                show_near_misses: options.show_near_misses,
-                sort: options.sort,
-                min_identifier_jaccard: options.min_identifier_jaccard,
-            };
             let mut buffer = Vec::new();
-            model.render_text(options, &mut buffer)?;
+            model.render_text(text_options(&options), &mut buffer)?;
             String::from_utf8(buffer).context("rendering the text report")?
         }
     };
     match options.output {
         Some(path) => {
             write_output(path, text.as_bytes(), options.force)?;
-            writeln!(out, "wrote {}", path.display())?;
+            // Progress, not report: it would otherwise be the one line in a
+            // redirected report's place on standard output.
+            eprintln!("wrote {}", path.display());
         }
         None => out.write_all(text.as_bytes())?,
     }
+    // After the report, and on the error stream: what qualifies a run is read
+    // once the run's own answer has been, and a report being piped somewhere
+    // still carries its warnings to the person who ran it.
+    if options.format == Format::Text {
+        out.flush()?;
+        model.render_notes(text_options(&options), &mut std::io::stderr())?;
+    }
     Ok(())
+}
+
+/// The text view the command-line options describe.
+pub(crate) fn text_options(options: &ReportOutput<'_>) -> report::TextOptions {
+    report::TextOptions {
+        verbosity: options.view.verbose,
+        quiet: options.view.quiet,
+        limit: options.view.limit,
+        color: options.view.color.enabled(options.output.is_none()),
+        show_suppressed: options.show_suppressed,
+        show_siblings: options.show_siblings,
+        show_near_misses: options.show_near_misses,
+        sort: options.sort,
+        min_identifier_jaccard: options.min_identifier_jaccard,
+    }
 }
 
 /// Validate flags whose meaning exists only in the text presentation.
@@ -236,7 +251,32 @@ pub(crate) fn write_partitioned_reports(
             cross_language_not_run,
         )?,
     };
-    write_partitioned_text(args, out, &text)
+    write_partitioned_text(args, out, &text)?;
+    // After the reports, and on the error stream, for the same reason one
+    // report's notes are: they qualify a run rather than answering it.
+    if args.format == Format::Text {
+        out.flush()?;
+        let options = partition_text_options(args);
+        for model in models {
+            model.render_notes(options, &mut std::io::stderr())?;
+        }
+    }
+    Ok(())
+}
+
+/// The text view a partitioned scan renders every partition under.
+fn partition_text_options(args: &ScanArgs) -> report::TextOptions {
+    text_options(&ReportOutput {
+        format: args.format,
+        output: args.output.as_deref(),
+        force: args.force,
+        view: args.view,
+        show_suppressed: args.show_suppressed,
+        show_siblings: args.show_siblings,
+        show_near_misses: args.show_near_misses,
+        sort: args.sort.axis(),
+        min_identifier_jaccard: args.min_identifier_jaccard,
+    })
 }
 
 pub(super) fn partitioned_json(
@@ -468,15 +508,7 @@ pub(super) fn partitioned_text(
     cross_language: Option<&report::CrossLanguageComparison>,
     cross_language_not_run: Option<&report::CrossLanguageComparisonNotRun>,
 ) -> Result<String> {
-    let options = report::TextOptions {
-        verbose: args.verbose,
-        color: args.output.is_none() && std::io::stdout().is_terminal(),
-        show_suppressed: args.show_suppressed,
-        show_siblings: args.show_siblings,
-        show_near_misses: args.show_near_misses,
-        sort: args.sort.axis(),
-        min_identifier_jaccard: args.min_identifier_jaccard,
-    };
+    let options = partition_text_options(args);
     let mut rendered = Vec::new();
     for model in models {
         writeln!(
@@ -644,7 +676,7 @@ fn write_partitioned_text(args: &ScanArgs, out: &mut impl Write, text: &str) -> 
     match args.output.as_deref() {
         Some(path) => {
             write_output(path, text.as_bytes(), args.force)?;
-            writeln!(out, "wrote {}", path.display())?;
+            eprintln!("wrote {}", path.display());
         }
         None => out.write_all(text.as_bytes())?,
     }

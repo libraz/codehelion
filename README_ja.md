@@ -19,27 +19,49 @@ codehelion は 1.0 前です。コマンドラインの形・レポート形式�
 
 ## レポートの見え方
 
-codehelion 自身のツリーに対する Structural モードの実行結果です。
+codehelion 自身のツリーに対する Structural モードの実行結果です（ヘッダの数行は省いています）。
 
 ```text
-codehelion scan (structural mode)
-  root: ~/src/codehelion
-  configuration: defaults; minimum clone length: 20 tokens
-  files: 356 analysed (rust 326, c 4, cpp 26)
-  lines: 127217; tokens: 673647; lexer diagnostics: 0
-  clone groups: 944 (type-1 67, type-2 118, type-3 759, restricted-semantic 0; suppressed: 0 noise, 118 by rule)
-    642 of them are duplication inside test code, which repeats itself by design; a group spanning a test and what it exercises is not counted here
-  note: candidate search was truncated by high frequency, high frequency postings; duplication the tree contains may be missing from this report
+codehelion scan · structural mode · ~/src/codehelion
 
-top groups by priority:
-  eefc3057233358cde7b44e1c33a36844 type-1 priority 0.62 identifiers 0.95 [within one file]
-    confidence 0.82, maintenance risk 0.36, refactoring difficulty 0.17 (2 instances, 188-188 tokens, 188 repeated, 1.00 similarity, 1 file(s))
-    similarity: composite 1.00 (lexical 1.00, structural 1.00, control-flow 1.00, type n/a, api 1.00); cohesion 1.00; confidence high [structural-verify-v3]
-    crates/codehelion-cli/src/scan/structural/reporting.rs:758-779 [no enclosing unit] [canonical] [finding 945224c9097e2c3baab35a706cdc59e7]
-    crates/codehelion-cli/src/scan/structural/reporting.rs:657-678 [no enclosing unit] [finding 7d1268463bd34f9a08ef27fbcda724b0]
+crates/codehelion-cli/src/scan/structural/reporting.rs:701-722  type-1 ×2  188 tokens  priority 0.62  80fecb4e
+  crates/codehelion-cli/src/scan/structural/reporting.rs:805-826
+crates/codehelion-frontend-c/src/ir.rs:435-449 (line_column)  type-1 ×2  128 tokens  priority 0.59  c8641036
+  crates/codehelion-frontend-rust/src/ir.rs:377-391 (line_column)
+crates/codehelion-core/src/engine/segment.rs:20-35 (brace_pairs)  type-1 ×2  115 tokens  priority 0.59  cd0956cb
+  crates/codehelion-frontend-rust/src/units.rs:66-81 (match_braces)
+... and 729 more groups (--limit 0 lists every one)
+
+944 groups (type-1 71, type-2 126, type-3 747) · 205 suppressed · sorted by priority
+356 files, 134,235 lines, 713,877 tokens · run 1 (replay: codehelion report --run 1)
 ```
 
-この出力のうち 3 点がこのツールの要点です。`note:` の行は上限が発火したことを伝えており、レポートは自分が完全だと主張していません。`similarity:` の行は判定を構成した次元を、このモードでは測れない次元も含めて示します。そして各 `finding` の識別子は、そのまま `codehelion explain <ID>`・抑制ルール・baseline に渡せます。
+各見出しの末尾にある識別子は `codehelion explain` が受け付ける最短の prefix なので、一覧からそのままグループを開けます。上限の発火や何にも一致しなかったルールなど、実行そのものを限定する情報は標準エラー出力に回り、標準出力のレポートはパイプに流せる状態を保ちます。
+
+```text
+note: candidate search was truncated by high frequency, high frequency postings; duplication the tree contains may be missing from this report
+```
+
+`-v` は各グループの順位づけの根拠を追加します。このモードでは測れなかった similarity の次元も含みます。
+
+```text
+crates/codehelion-cli/src/scan/structural/reporting.rs:701-722  type-1 ×2  188 tokens  priority 0.62  80fecb4e
+    within one file, identifiers 0.95
+    confidence 0.82, maintenance risk 0.36, refactoring difficulty 0.17 (2 instances, 188-188 tokens, 188 repeated, 1.00 similarity, 1 file(s))
+    similarity: composite 1.00 (lexical 1.00, structural 1.00, control-flow 1.00, type n/a, api 1.00); cohesion 1.00; confidence high [structural-verify-v3]
+    content entropy: 5.02 bits
+    body evidence: loop no, recognised allocation no, at least 15 call site(s)
+  crates/codehelion-cli/src/scan/structural/reporting.rs:701-722 [canonical] [finding e61a2fda]
+  crates/codehelion-cli/src/scan/structural/reporting.rs:805-826 [finding 23402ced]
+```
+
+`-vv` は実行そのものの記録を追加します。候補パイプラインの段階ごとの通過数、適用された上限、そして完全な識別子です。
+
+## 繰り返しスキャンする理由
+
+重複は一度で出そろうものではありません。ある修正を二か所目に写したとき、同じ問題を同じ週に二人が別々に解いたとき、そして既存の実装を探しに行く理由のないコードが生成されたときに、その都度また増えます。厄介なのは重複が存在すること自体ではなく、見失われることです。誰も判断を覚えていないコピーは毎回のスキャンで報告され直し、残すと決めたはずのコピーはまた議論の対象になります。
+
+安定した識別子と baseline は、そのためにあります。
 
 ## 特長
 
@@ -75,7 +97,9 @@ codehelion scan --mode structural           # gapped（Type-3）クローンも�
 codehelion scan --mode semantic             # コンパイラが解決した型で比較（helper が必要）
 codehelion scan --format json --output report.json path/to/repo
 codehelion scan --format sarif --output report.sarif   # SARIF 2.1.0 ログ
-codehelion scan --verbose     # 全クローングループと全メンバーを列挙
+codehelion scan -v            # 各グループの根拠となる数値を追加（-vv で実行診断まで）
+codehelion scan --quiet       # 見出しと要約を省き、グループだけを出力
+codehelion scan --limit 0     # 全クローングループと全メンバーを列挙
 codehelion scan --untrusted   # 素性の分からないツリーを低い上限で読む
 codehelion report             # 最新の完了済みスキャンを再描画
 codehelion report --run 1     # 特定の記録済みスキャンを再描画
@@ -94,6 +118,7 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 - `--config <file>` と `--db <path>` は設定ファイルとローカルデータベースを選びます。
 - `--jobs <n>` は frontend の read/lex worker 数を指定します（host parallelism の 4 倍まで）。clone grouping と report rendering は serial です。`--no-ignore` は無視対象のファイルも読みます。
 - `--baseline <file>` は判断済みの finding と比較します。`--show-suppressed`、`--show-siblings`、`--show-near-misses` は text 出力を展開します。JSON と SARIF には常にこれらのデータが含まれます。
+- `-v` / `-vv` は各グループについて書く量を、`--limit <n>` は列挙するグループ数を決めます。`--quiet` はグループだけを出力します。`--color <auto|always|never>` は端末判定を上書きし、`NO_COLOR` にも従います。
 - `--include-trivial` は Structural / Semantic モードで predicate family を計測済みの priority に戻します。
 - `--fail-on-findings` は visible finding が残ると exit code 3 を返します。
 - `--compare-build-variants` と `--compare-languages` は独立した Semantic comparison を要求し、通常の scan partition を混ぜません。
@@ -129,7 +154,7 @@ codehelion scan --mode structural --sort identifier-jaccard --min-identifier-jac
 
 検出結果はクローングループにまとめられ、グループとメンバーそれぞれが安定 ID を持ちます。既定の text レポートは各メンバーを `[finding <ID>]` と表示するため、そのまま `codehelion explain <ID>` に渡せます。この ID で抑制・baseline 登録・後日の参照ができます。
 
-判断済みの finding は `codehelion baseline create` で凍結でき、以降のスキャンはそれを隠します。データベースが保持するスキャンは常に 1 件なので、前後比較の手段も baseline です。
+判断済みの finding は `codehelion baseline create` で凍結でき、以降のスキャンはそれを隠します。ローカルに残るスキャン履歴とは別に、プロジェクトが明示的に持ち続けられる前後比較が baseline です。
 
 ```sh
 codehelion scan                       # ツリーを読む
@@ -239,7 +264,7 @@ make format        # 自動修正: clippy --fix + cargo fmt
 make format-check  # フォーマット検証
 make lint          # clippy を警告エラー扱いで実行
 make test          # テスト実行
-make check         # format-check + lint + test + doc
+make check         # format-check + lint + 境界検査 + test + doc
 make audit         # cargo-deny（脆弱性・禁止クレート・ライセンス）
 make coverage      # HTML カバレッジレポート（cargo-llvm-cov が必要）
 make hooks         # pre-commit git フックを導入
@@ -249,7 +274,7 @@ make hooks         # pre-commit git フックを導入
 
 検出精度は `corpus/` 配下のコーパスで測ります。コーパスが持つのは実プロジェクトそのものではなく、それに対する手書きの verdict です。それぞれの半分が何を答えられて何を答えられないかは `corpus/README.md` に書いてあります。
 
-helper の protocol handshake は `codehelion-helper-conformance/` で検証します。wire format を auto-generated / autogenerated な実装詳細として扱わず、別々にビルドした helper を実際に通します。
+helper の protocol handshake は `crates/codehelion-helper-conformance/` で検証します。CLI 側が生成した protocol の記述に対して突き合わせるのではなく、別々にビルドした helper のバイナリを実際に通します。
 
 ## 貢献
 

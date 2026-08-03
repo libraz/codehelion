@@ -268,14 +268,68 @@ fn default_reports_truncate_members_and_verbose_lists_them_all() {
         .args(["scan", "."])
         .assert()
         .success()
-        .stdout(predicate::str::contains("... and 5 more occurrences"));
+        // The heading names the canonical occurrence, so five of the other
+        // nine are listed under it.
+        .stdout(predicate::str::contains("... and 4 more occurrences"));
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--verbose"])
+        .args(["scan", ".", "--limit", "0"])
         .assert()
         .success()
         .stdout(predicate::str::contains("more occurrences").not())
         .stdout(predicate::str::contains("src/copy6.rs"));
+}
+
+/// The quiet view is what a script reads: the findings, and nothing that
+/// describes the run around them.
+#[test]
+fn the_quiet_view_leaves_the_heading_and_the_summary_out() {
+    let dir = fixture();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--quiet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("src/a.rs"))
+        .stdout(predicate::str::contains("codehelion scan").not())
+        .stdout(predicate::str::contains("sorted by").not());
+}
+
+/// Colour follows the destination by default and the flag when it is given,
+/// with `NO_COLOR` honoured as every other command-line tool honours it.
+#[test]
+fn colour_follows_the_destination_the_flag_and_no_color() {
+    let dir = fixture();
+    let ansi = predicate::str::contains('\x1b');
+
+    // Captured output is not a terminal, so the default emits none.
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(ansi.clone().not());
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--color", "always"])
+        .assert()
+        .success()
+        .stdout(ansi.clone());
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--color", "always"])
+        .env("NO_COLOR", "1")
+        .assert()
+        .success()
+        // An explicit request outranks the environment: the flag was typed
+        // for this run, the variable was set for every run.
+        .stdout(ansi.clone());
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--color", "never"])
+        .assert()
+        .success()
+        .stdout(ansi.not());
 }
 
 #[test]
@@ -286,10 +340,13 @@ fn output_flag_writes_the_report_to_a_file() {
         .args(["scan", ".", "--output", "report.txt"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("wrote report.txt"));
+        // Progress about a redirected report, so it does not take the
+        // report's place on standard output.
+        .stdout(predicate::str::contains("wrote report.txt").not())
+        .stderr(predicate::str::contains("wrote report.txt"));
     let report = std::fs::read_to_string(dir.path().join("report.txt")).unwrap();
-    assert!(report.contains("codehelion scan (fast mode)"));
-    assert!(report.contains("clone groups:"));
+    assert!(report.contains("codehelion scan · fast mode ·"));
+    assert!(report.contains("groups"));
 }
 
 #[test]
@@ -314,9 +371,9 @@ fn output_flag_preserves_an_existing_file_unless_forced() {
         .args(["scan", ".", "--output", "report.txt", "--force"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("wrote report.txt"));
+        .stderr(predicate::str::contains("wrote report.txt"));
     let report = std::fs::read_to_string(destination).expect("read forced report");
-    assert!(report.contains("codehelion scan (fast mode)"));
+    assert!(report.contains("codehelion scan · fast mode ·"));
 }
 
 #[test]
@@ -506,18 +563,31 @@ fn explain_looks_up_a_recorded_finding() {
         .expect("run scan");
     assert!(scan.status.success(), "{scan:?}");
 
-    let (finding_hex, file_path) = {
+    let (finding_hex, file_path, group_hex) = {
         let store = open_store(dir.path());
         let run = store.latest_run().unwrap().expect("a recorded run");
         let groups = store.run_groups(run.id).unwrap();
         let member = &groups[0].members[0];
-        (member.finding_hex.clone(), member.file_path.clone())
+        (
+            member.finding_hex.clone(),
+            member.file_path.clone(),
+            groups[0].fingerprint_hex.clone(),
+        )
     };
     let scan_text = String::from_utf8(scan.stdout).expect("scan output is UTF-8");
+    // The listing abbreviates, and what it prints is exactly what the lookup
+    // accepts: an id read off the report can be typed straight back in.
+    let abbreviated = &group_hex[..8];
     assert!(
-        scan_text.contains(&format!("[finding {finding_hex}]")),
+        scan_text.contains(abbreviated),
         "the default text report prints an id that explain accepts: {scan_text}"
     );
+    cmd()
+        .current_dir(dir.path())
+        .args(["explain", abbreviated])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(group_hex.as_str()));
 
     cmd()
         .current_dir(dir.path())
@@ -742,12 +812,12 @@ fn an_identical_second_scan_reuses_the_recorded_history() {
     // creates no additional history row.
     cmd()
         .current_dir(root)
-        .args(["scan", "."])
+        .args(["scan", ".", "-v"])
         .assert()
         .success()
         .stdout(
             predicate::str::contains("snapshot:").and(predicate::str::contains(
-                "replay with `codehelion report --run ",
+                "(replay: codehelion report --run ",
             )),
         );
 }

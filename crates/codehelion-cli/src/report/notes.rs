@@ -34,11 +34,11 @@ pub(super) fn budget_note(funnel: &[FunnelStage]) -> String {
     });
     let total = examined.saturating_add(skipped);
     if total == 0 {
-        return "  note: the candidate-pair budget was exhausted; results may be incomplete"
+        return "note: the candidate-pair budget was exhausted; results may be incomplete"
             .to_string();
     }
     format!(
-        "  note: the candidate-pair budget stopped the search after {examined} of {total} \
+        "note: the candidate-pair budget stopped the search after {examined} of {total} \
          candidate pairs; the {skipped} left unexamined may hold duplication this report does \
          not list"
     )
@@ -59,7 +59,7 @@ pub fn search_truncation_note(funnel: &[FunnelStage]) -> String {
         .collect();
     let listed = causes.into_iter().collect::<Vec<_>>().join(", ");
     format!(
-        "  note: candidate search was truncated by {listed}; duplication the tree contains may be missing from this report"
+        "note: candidate search was truncated by {listed}; duplication the tree contains may be missing from this report"
     )
 }
 

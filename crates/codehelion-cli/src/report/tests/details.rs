@@ -173,10 +173,19 @@ fn a_scored_group_reports_every_dimension_and_marks_the_absent_one() {
 
     let mut buffer = Vec::new();
     report
-        .render_text(TextOptions::default(), &mut buffer)
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut buffer,
+        )
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
-    assert!(text.contains("type-1 2, type-2 0, type-3 1"));
+    // A type this mode reported none of is left out rather than printed
+    // as a zero the eye has to dismiss.
+    assert!(text.contains("type-1 2, type-3 1"), "{text}");
+    assert!(!text.contains("type-2 0"), "{text}");
     assert!(text.contains(
         "similarity: composite 0.82 (lexical 0.71, structural 0.88, \
          control-flow 0.90, type n/a, api 0.75); cohesion 0.79; \
@@ -208,7 +217,13 @@ fn unmeasured_control_flow_is_json_null_and_text_na() {
 
     let mut buffer = Vec::new();
     report
-        .render_text(TextOptions::default(), &mut buffer)
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut buffer,
+        )
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
     assert!(text.contains("control-flow n/a"));
@@ -233,7 +248,13 @@ fn a_group_standing_where_a_gone_one_stood_says_so_and_the_rest_stay_quiet() {
 
     let mut buffer = Vec::new();
     report
-        .render_text(TextOptions::default(), &mut buffer)
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut buffer,
+        )
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
     assert!(
@@ -257,6 +278,20 @@ fn an_expanded_group_names_the_uncovered_occurrences() {
     let mut buffer = Vec::new();
     report
         .render_text(TextOptions::default(), &mut buffer)
+        .unwrap();
+    let text = String::from_utf8(buffer).unwrap();
+    // The listing marks it; the sentence is one of the details behind it.
+    assert!(text.contains("[expanded +1]"), "{text}");
+
+    let mut buffer = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut buffer,
+        )
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
     assert!(
@@ -295,7 +330,13 @@ fn a_comparison_says_how_much_went_as_well_as_how_many() {
 
     let mut buffer = Vec::new();
     report
-        .render_text(TextOptions::default(), &mut buffer)
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut buffer,
+        )
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
     // 21 new against 4 gone reads as a regression until the sizes are on
@@ -458,7 +499,10 @@ fn a_baseline_with_only_stale_entries_reports_its_actual_counts() {
         .render_text(TextOptions::default(), &mut buffer)
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
-    assert!(text.contains("baseline codehelion-baseline.json: 0 of 12 entries matched"));
+    assert!(
+        text.contains("baseline codehelion-baseline.json: 0 of 12 matched, 12 gone"),
+        "{text}"
+    );
     assert!(!text.contains("warning:"));
 
     // A baseline that applies says only what it did.
@@ -481,7 +525,7 @@ fn a_baseline_with_only_stale_entries_reports_its_actual_counts() {
         .render_text(TextOptions::default(), &mut buffer)
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
-    assert!(text.contains("11 of 12 entries matched, 1 no longer found"));
+    assert!(text.contains("11 of 12 matched, 1 gone"), "{text}");
     assert!(!text.contains("warning:"));
 }
 
@@ -492,18 +536,20 @@ fn text_view_truncates_with_an_explicit_count() {
         .render_text(TextOptions::default(), &mut buffer)
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
-    assert!(text.contains("lines: 40; tokens: 200"));
-    assert!(text.contains("... and 2 more occurrences"));
+    assert!(text.contains("2 files, 40 lines, 200 tokens"), "{text}");
+    // The heading already named the canonical occurrence, so the list under
+    // it holds the other six and stops at five.
+    assert!(text.contains("... and 1 more occurrence"), "{text}");
     assert!(!text.contains("src/file6.rs"));
     assert!(!text.contains("vendor/a.rs")); // suppressed and not requested
     assert!(!text.contains('\x1b'));
 }
 
 #[test]
-fn a_candidate_search_cut_is_stated_without_verbose_output() {
+fn a_candidate_search_cut_is_stated_as_a_note() {
     let mut buffer = Vec::new();
     sample_report()
-        .render_text(TextOptions::default(), &mut buffer)
+        .render_notes(TextOptions::default(), &mut buffer)
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
     assert!(text.contains("candidate search was truncated by high frequency"));
@@ -524,18 +570,24 @@ fn text_view_states_each_groups_file_spread() {
 
     let mut buffer = Vec::new();
     report
-        .render_text(TextOptions::default(), &mut buffer)
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut buffer,
+        )
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
-    assert!(text.contains("[within one file]"));
-    assert!(text.contains("[within one directory]"));
-    assert!(text.contains("[across directories]"));
+    assert!(text.contains("within one file,"), "{text}");
+    assert!(text.contains("within one directory,"), "{text}");
+    assert!(text.contains("across directories,"), "{text}");
 }
 
 #[test]
 fn verbose_text_lists_every_member_and_suppressed_section_is_opt_in() {
     let opts = TextOptions {
-        verbose: true,
+        limit: Some(0),
         show_suppressed: true,
         ..TextOptions::default()
     };
@@ -557,12 +609,12 @@ fn suppressed_text_listing_has_the_same_default_cap_as_visible_groups() {
         report.groups.push(group);
     }
 
-    let render = |verbose| {
+    let render = |limit| {
         let mut buffer = Vec::new();
         report
             .render_text(
                 TextOptions {
-                    verbose,
+                    limit,
                     show_suppressed: true,
                     ..TextOptions::default()
                 },
@@ -571,32 +623,33 @@ fn suppressed_text_listing_has_the_same_default_cap_as_visible_groups() {
             .unwrap();
         String::from_utf8(buffer).unwrap()
     };
-    assert!(render(false).contains("... and 1 more suppressed groups"));
-    assert!(!render(true).contains("more suppressed groups"));
+    assert!(render(None).contains("... and 1 more suppressed group"));
+    assert!(!render(Some(0)).contains("more suppressed groups"));
 }
 
 #[test]
 fn the_pipeline_counts_are_detail_the_verbose_view_asks_for() {
-    let render = |verbose| {
+    let render = |verbosity| {
         let opts = TextOptions {
-            verbose,
+            verbosity,
             ..TextOptions::default()
         };
         let mut buffer = Vec::new();
         sample_report().render_text(opts, &mut buffer).unwrap();
         String::from_utf8(buffer).unwrap()
     };
-    let verbose = render(true);
+    let verbose = render(2);
     assert!(verbose.contains("candidate pipeline:"));
     assert!(verbose.contains("tokens"));
     assert!(verbose.contains("(dropped: high frequency 3)"));
     // A cause that dropped nothing says nothing.
     assert!(!verbose.contains("hash collision"));
-    assert!(!render(false).contains("candidate pipeline:"));
+    assert!(!render(1).contains("candidate pipeline:"));
+    assert!(!render(0).contains("candidate pipeline:"));
 }
 
 #[test]
-fn a_depth_limited_parse_is_stated_in_the_default_text_view() {
+fn a_depth_limited_parse_is_stated_as_a_note() {
     let mut report = sample_report();
     report
         .summary
@@ -604,7 +657,7 @@ fn a_depth_limited_parse_is_stated_in_the_default_text_view() {
         .push(FunnelStage::new("structural files", 2).dropping("depth_limit", 1));
     let mut buffer = Vec::new();
     report
-        .render_text(TextOptions::default(), &mut buffer)
+        .render_notes(TextOptions::default(), &mut buffer)
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
     assert!(
@@ -622,8 +675,103 @@ fn colored_text_uses_ansi_codes_only_when_enabled() {
     let mut buffer = Vec::new();
     sample_report().render_text(opts, &mut buffer).unwrap();
     let text = String::from_utf8(buffer).unwrap();
-    assert!(text.contains("\x1b[1mcodehelion scan (fast mode)\x1b[0m"));
+    assert!(text.contains("\x1b[1mcodehelion scan · fast mode · /work/project\x1b[0m"));
     assert!(text.contains("\x1b[36m"));
+}
+
+#[test]
+fn the_quiet_view_prints_the_groups_and_nothing_around_them() {
+    let opts = TextOptions {
+        quiet: true,
+        ..TextOptions::default()
+    };
+    let mut buffer = Vec::new();
+    sample_report().render_text(opts, &mut buffer).unwrap();
+    let text = String::from_utf8(buffer).unwrap();
+    assert!(text.contains("src/file0.rs:1-9"), "{text}");
+    assert!(!text.contains("codehelion scan"), "{text}");
+    assert!(!text.contains("sorted by"), "{text}");
+    assert!(!text.contains("replay"), "{text}");
+}
+
+#[test]
+fn a_quiet_run_says_nothing_about_what_qualifies_it() {
+    let mut buffer = Vec::new();
+    sample_report()
+        .render_notes(
+            TextOptions {
+                quiet: true,
+                ..TextOptions::default()
+            },
+            &mut buffer,
+        )
+        .unwrap();
+    assert!(buffer.is_empty(), "{:?}", String::from_utf8(buffer));
+}
+
+/// An id a report prints has to be one the lookup accepts, so the listing
+/// abbreviates to exactly the prefix `codehelion explain` takes and no less.
+#[test]
+fn the_listing_abbreviates_identifiers_and_the_diagnostic_view_spells_them_out() {
+    let report = sample_report();
+    let fingerprint = report.groups[0].fingerprint.clone();
+
+    let render = |verbosity| {
+        let mut buffer = Vec::new();
+        report
+            .render_text(
+                TextOptions {
+                    verbosity,
+                    ..TextOptions::default()
+                },
+                &mut buffer,
+            )
+            .unwrap();
+        String::from_utf8(buffer).unwrap()
+    };
+    let listed = render(0);
+    assert!(listed.contains(&fingerprint[..crate::suppress::MIN_CLONE_ID_CHARS]));
+    assert!(!listed.contains(&fingerprint), "{listed}");
+    assert!(render(2).contains(&fingerprint));
+}
+
+#[test]
+fn the_group_limit_is_separate_from_how_much_each_group_says() {
+    let mut report = sample_report();
+    for index in 0..TEXT_GROUP_LIMIT {
+        let mut group = visible_group();
+        group.fingerprint = format!("{index:032x}");
+        report.groups.push(group);
+    }
+
+    let render = |limit| {
+        let mut buffer = Vec::new();
+        report
+            .render_text(
+                TextOptions {
+                    limit,
+                    ..TextOptions::default()
+                },
+                &mut buffer,
+            )
+            .unwrap();
+        String::from_utf8(buffer).unwrap()
+    };
+    assert!(
+        render(None).contains("... and 1 more group (--limit 0 lists every one)"),
+        "{}",
+        render(None)
+    );
+    assert!(
+        render(Some(2)).contains("... and 9 more groups"),
+        "{}",
+        render(Some(2))
+    );
+    assert!(
+        !render(Some(0)).contains("more group"),
+        "{}",
+        render(Some(0))
+    );
 }
 
 #[test]
@@ -897,8 +1045,30 @@ fn an_entry_with_no_measurement_on_the_axis_is_listed_after_the_measured() {
     );
 }
 
-/// Two entries that tie on the axis still have to come out in one order,
-/// or a reader citing a position cites a coin toss.
+/// A tie on the axis is the ordinary case rather than the corner: raw
+/// identifier agreement pins whole cohorts at exactly 1.00. Leaving those to
+/// the fingerprint would hand the reader the tier in hash order, so the
+/// composed ranking decides inside a tie.
+#[test]
+fn entries_that_tie_on_the_axis_are_ordered_by_the_composed_ranking() {
+    let mut stronger = visible_group();
+    let mut weaker = suppressed_group();
+    stronger.identifier_jaccard = Some(1.0);
+    weaker.identifier_jaccard = Some(1.0);
+    // The weaker entry takes the smaller fingerprint, so hash order and
+    // ranking order disagree and only one of the two can be deciding.
+    std::mem::swap(&mut stronger.fingerprint, &mut weaker.fingerprint);
+
+    assert!(weaker.fingerprint < stronger.fingerprint);
+    assert!(stronger.priority.value > weaker.priority.value);
+    assert_eq!(
+        compare_on(&stronger, &weaker, Sort::IdentifierJaccard),
+        Ordering::Less,
+    );
+}
+
+/// Two entries that tie on the axis and on the ranking still have to come out
+/// in one order, or a reader citing a position cites a coin toss.
 #[test]
 fn entries_that_tie_on_the_axis_fall_back_to_the_stable_id() {
     let left = visible_group();

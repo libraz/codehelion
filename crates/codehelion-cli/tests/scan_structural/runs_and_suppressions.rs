@@ -117,12 +117,13 @@ fn a_run_shared_by_unrelated_units_is_reported_as_a_run() {
     let dir = run_fixture();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural"])
+        .args(["scan", ".", "--mode", "structural", "-v"])
         .assert()
         .success()
         // The extent is stated: without it the entry reads as a duplicated
         // function, which neither occurrence is.
-        .stdout(predicate::str::contains("type-1 run of 4 statements"))
+        .stdout(predicate::str::contains("type-1 run ×"))
+        .stdout(predicate::str::contains("run of 4 statements"))
         .stdout(predicate::str::contains(
             "src/audit.rs:11-14 (audit_entries)",
         ))
@@ -227,7 +228,7 @@ fn a_run_a_group_already_covers_is_folded_into_it_and_counted() {
     let dir = fixture();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural"])
+        .args(["scan", ".", "--mode", "structural", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -259,7 +260,7 @@ fn a_path_rule_hides_a_run_as_it_hides_a_group() {
     .unwrap();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural"])
+        .args(["scan", ".", "--mode", "structural", "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains("1 by rule"))
@@ -292,11 +293,11 @@ fn a_suppression_rule_that_matched_nothing_is_named() {
         .args(["scan", ".", "--mode", "structural"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "note: 2 suppression rule(s) matched nothing",
-        ))
-        .stdout(predicate::str::contains("path glob \"third_party/**\""))
-        .stdout(predicate::str::contains("clone id 0123456789abcdef"));
+        .stderr(
+            predicate::str::contains("note: 2 suppression rule(s) matched nothing")
+                .and(predicate::str::contains("path glob \"third_party/**\""))
+                .and(predicate::str::contains("clone id 0123456789abcdef")),
+        );
 
     let value = scan_json(dir.path());
     let unused = value["summary"]["unused_suppressions"].as_array().unwrap();
@@ -329,7 +330,7 @@ fn a_set_of_related_units_too_large_to_compare_whole_is_cut_and_said_so() {
         .args(["scan", ".", "--mode", "structural"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
+        .stderr(predicate::str::contains(
             "note: 1 set(s) of related units were too large to compare as one",
         ));
 
@@ -385,7 +386,7 @@ fn the_run_says_how_far_each_stage_of_the_pipeline_narrowed_it() {
         .stdout(predicate::str::contains("candidate pipeline:").not());
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural", "--verbose"])
+        .args(["scan", ".", "--mode", "structural", "-vv"])
         .assert()
         .success()
         .stdout(predicate::str::contains("candidate pipeline:"))

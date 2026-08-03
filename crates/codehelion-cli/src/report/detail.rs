@@ -197,8 +197,12 @@ impl CloneGroupDetail {
         )?;
         render_group(
             &self.group,
+            // A detail view is the one place that shows everything: full
+            // identifiers, every occurrence, and the numbers behind the
+            // ranking. Its reader asked about this one group by name.
             TextOptions {
-                verbose: true,
+                verbosity: 2,
+                limit: Some(0),
                 show_suppressed: true,
                 ..TextOptions::default()
             },

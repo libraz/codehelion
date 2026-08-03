@@ -97,7 +97,13 @@ fn the_run_says_how_far_each_stage_of_the_pipeline_narrowed_it() {
         .stdout(predicate::str::contains("candidate pipeline:").not());
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--verbose"])
+        .args(["scan", ".", "-v"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("candidate pipeline:").not());
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "-vv"])
         .assert()
         .success()
         .stdout(predicate::str::contains("candidate pipeline:"))
@@ -180,7 +186,7 @@ fn the_text_report_says_the_run_was_told_to_distrust_the_tree() {
     let dir = fixture();
     let output = cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--untrusted"])
+        .args(["scan", ".", "--untrusted", "-vv"])
         .output()
         .expect("run scan");
     assert!(output.status.success(), "{output:?}");
@@ -276,7 +282,7 @@ fn configured_pair_budget_exhaustion_is_reported() {
         .args(["report", "--run", &run_id.to_string(), "--format", "text"])
         .assert()
         .success()
-        .stdout(
+        .stderr(
             predicate::str::contains("candidate search was truncated")
                 .and(predicate::str::contains("candidate-pair budget")),
         );
@@ -342,7 +348,7 @@ fn a_posting_cap_marks_the_default_report_as_search_truncated() {
         .args(["report", "--run", &run_id.to_string(), "--format", "text"])
         .assert()
         .success()
-        .stdout(
+        .stderr(
             predicate::str::contains("candidate search was truncated")
                 .and(predicate::str::contains("class cap")),
         );
@@ -515,7 +521,7 @@ fn report_replay_preserves_the_effective_configuration_provenance() {
 
     cmd()
         .current_dir(dir.path())
-        .args(["report", "--run", &run_id.to_string()])
+        .args(["report", "--run", &run_id.to_string(), "-v"])
         .assert()
         .success()
         .stdout(predicate::str::contains(format!(

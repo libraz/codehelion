@@ -322,7 +322,7 @@ fn scan_args(untrusted: bool) -> ScanArgs {
         show_near_misses: false,
         include_trivial: false,
         include_vendored: false,
-        verbose: false,
+        view: ViewArgs::default(),
         no_reuse: false,
         fail_on_findings: false,
         untrusted,

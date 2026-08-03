@@ -103,7 +103,7 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
             format: args.format,
             output: args.output.as_deref(),
             force: args.force,
-            verbose: args.verbose,
+            view: args.view,
             show_suppressed: args.show_suppressed,
             show_siblings: args.show_siblings,
             show_near_misses: args.show_near_misses,

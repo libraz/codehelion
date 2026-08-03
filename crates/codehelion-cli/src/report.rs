@@ -45,7 +45,7 @@ pub use schema::{
 use schema::{
     EXPLAIN_RESPONSE_CLONE_GROUP, EXPLAIN_RESPONSE_CROSS_LANGUAGE_GROUP,
     EXPLAIN_RESPONSE_CROSS_VARIANT_GROUP, EXPLAIN_RESPONSE_OCCURRENCE, EXPLAIN_RESPONSE_SIBLING,
-    GONE_LISTED, SCOPE_FRAGMENT, TEXT_GROUP_LIMIT, TEXT_MEMBER_LIMIT, detail_json,
+    GONE_LISTED, SCOPE_FRAGMENT, SHORT_ID_CHARS, TEXT_GROUP_LIMIT, TEXT_MEMBER_LIMIT, detail_json,
 };
 
 /// A complete scan result: run metadata, summary counts and every group.
@@ -1133,8 +1133,15 @@ pub struct PriorityInputs {
 )]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TextOptions {
-    /// List every group and every member instead of the summarised excerpt.
-    pub verbose: bool,
+    /// How much is written about each group: `0` lists them, `1` adds the
+    /// ranking inputs and what the scan read, `2` adds run diagnostics and
+    /// full identifiers.
+    pub verbosity: u8,
+    /// Print the groups alone, without the heading, the summary, or the notes.
+    pub quiet: bool,
+    /// Groups the listing prints, and occurrences it prints per group.
+    /// `None` applies the defaults; `Some(0)` prints every one of both.
+    pub limit: Option<usize>,
     /// Emit ANSI colour codes.
     pub color: bool,
     /// Also list suppressed groups, with the reason each was hidden.
@@ -1154,6 +1161,49 @@ pub struct TextOptions {
     /// working maintainability picks a floor on this measure and works down
     /// from there, and doing it by hand means leaving the tool.
     pub min_identifier_jaccard: Option<f64>,
+}
+
+impl TextOptions {
+    /// Whether the reader asked for the numbers behind each group.
+    #[must_use]
+    pub(crate) const fn detailed(self) -> bool {
+        self.verbosity >= 1
+    }
+
+    /// Whether the reader asked for what the run itself did, rather than what
+    /// it found.
+    #[must_use]
+    pub(crate) const fn diagnostic(self) -> bool {
+        self.verbosity >= 2
+    }
+
+    /// Groups the listing prints before saying how many it left out.
+    pub(crate) const fn group_limit(self) -> usize {
+        match self.limit {
+            None => TEXT_GROUP_LIMIT,
+            Some(0) => usize::MAX,
+            Some(limit) => limit,
+        }
+    }
+
+    /// Occurrences printed under one group.
+    pub(crate) const fn member_limit(self) -> usize {
+        match self.limit {
+            Some(0) => usize::MAX,
+            _ => TEXT_MEMBER_LIMIT,
+        }
+    }
+
+    /// A fingerprint as this view prints it: abbreviated to the shortest
+    /// prefix `codehelion explain` accepts, unless full identifiers were
+    /// asked for.
+    pub(crate) fn id(self, hex: &str) -> &str {
+        if self.diagnostic() {
+            hex
+        } else {
+            hex.get(..SHORT_ID_CHARS).unwrap_or(hex)
+        }
+    }
 }
 
 mod render;

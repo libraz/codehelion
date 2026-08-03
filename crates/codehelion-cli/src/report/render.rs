@@ -1,10 +1,18 @@
 //! Human-readable scan report rendering.
+//!
+//! The text view has three depths, chosen by `--verbose`. The default says
+//! what was found and where; `-v` adds the numbers each group was ranked on
+//! and what the scan read; `-vv` adds what the run itself did — the candidate
+//! pipeline, the ceilings that applied, and full identifiers.
+//!
+//! Notes about an incomplete or ceiling-bound run are not part of any depth.
+//! [`Report::render_notes`] writes them separately so that the report on
+//! standard output stays something a pipe can read.
 
 use super::{
     ArtifactSavings, BASELINE_COMPARE, BaselineStatus, GONE_LISTED, GROUP_EXPANDED, GROUP_NEW,
-    Group, Report, SCOPE_FRAGMENT, Summary, TEXT_GROUP_LIMIT, TEXT_MEMBER_LIMIT, TextOptions,
-    UnusedRule, Write, budget_note, depth_truncation_files, duplicated_tokens, io,
-    search_truncation_note, severed_note,
+    Group, Member, Report, SCOPE_FRAGMENT, Summary, TextOptions, UnusedRule, Write, budget_note,
+    depth_truncation_files, duplicated_tokens, io, search_truncation_note, severed_note,
 };
 
 /// Minimal ANSI styling, disabled when the output is not a terminal.
@@ -34,6 +42,52 @@ impl Palette {
     }
 }
 
+/// A count with thousands separators, because six-digit token counts are read
+/// as often as they are compared.
+fn thousands(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
+/// How many of `total` a limit left out, as the count a note prints.
+fn remaining(total: usize, limit: usize) -> u64 {
+    u64::try_from(total.saturating_sub(limit)).unwrap_or(u64::MAX)
+}
+
+/// `1 group` or `12 groups`, so a summary line does not read as a template.
+fn plural(count: u64, noun: &str) -> String {
+    format!("{} {}", thousands(count), noun_form(count, noun))
+}
+
+/// The singular or plural noun for `count`.
+fn noun_form(count: u64, noun: &str) -> String {
+    if count == 1 {
+        noun.to_string()
+    } else {
+        format!("{noun}s")
+    }
+}
+
+/// Where one occurrence sits, in the form an editor and a grep both accept.
+fn member_location(member: &Member) -> String {
+    format!("{}:{}-{}", member.file, member.start_line, member.end_line)
+}
+
+/// The enclosing unit, parenthesised, or nothing when parsing recovered none.
+fn member_unit(member: &Member) -> String {
+    member
+        .unit
+        .as_deref()
+        .map_or_else(String::new, |name| format!(" ({name})"))
+}
+
 impl Report {
     /// The report as pretty-printed JSON, newline-terminated.
     ///
@@ -55,13 +109,205 @@ impl Report {
         let palette = Palette {
             enabled: opts.color,
         };
-        self.render_summary(&palette, out)?;
-        if opts.verbose {
-            self.render_funnel(&palette, out)?;
+        if !opts.quiet {
+            self.render_heading(opts, &palette, out)?;
+            writeln!(out)?;
         }
         self.render_groups(opts, &palette, out)?;
         if opts.show_near_misses {
             self.render_near_misses(opts, &palette, out)?;
+        }
+        if !opts.quiet {
+            self.render_totals(opts, &palette, out)?;
+        }
+        Ok(())
+    }
+
+    /// Write what the reader has to know before reading a single number:
+    /// which tree, in which mode, and — when asked — under what settings.
+    fn render_heading(
+        &self,
+        opts: TextOptions,
+        palette: &Palette,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        writeln!(
+            out,
+            "{}",
+            palette.bold(&format!(
+                "codehelion scan · {} mode · {}",
+                self.run.mode, self.run.root
+            ))
+        )?;
+        if opts.detailed() {
+            self.render_configuration(out)?;
+            self.render_inputs(opts, out)?;
+        }
+        if opts.diagnostic() {
+            self.render_funnel(palette, out)?;
+        }
+        Ok(())
+    }
+
+    /// The counts that close the report: what was found, over how much, and
+    /// how to open it again.
+    fn render_totals(
+        &self,
+        opts: TextOptions,
+        palette: &Palette,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        let summary = &self.summary;
+        writeln!(out)?;
+        let composition = group_composition(summary);
+        let counted = if composition.is_empty() {
+            plural(summary.groups.total, "group")
+        } else {
+            format!("{} ({composition})", plural(summary.groups.total, "group"))
+        };
+        let suppressed = summary.suppressed.noise + summary.suppressed.by_rule;
+        let mut headline = vec![counted];
+        if suppressed > 0 {
+            headline.push(format!("{} suppressed", thousands(suppressed)));
+        }
+        headline.push(format!("sorted by {}", opts.sort.name()));
+        writeln!(out, "{}", palette.bold(&headline.join(" · ")))?;
+        writeln!(
+            out,
+            "{} files, {} lines, {} tokens · run {} (replay: codehelion report --run {})",
+            thousands(summary.files.total),
+            thousands(summary.lines),
+            thousands(summary.tokens),
+            self.run.run_id,
+            self.run.run_id,
+        )?;
+        // Hidden without anybody asking, so the report says it happened and
+        // says how to undo it — at every depth, because a default nobody can
+        // see is a default nobody can disagree with.
+        if summary.suppressed.vendored > 0 {
+            writeln!(
+                out,
+                "{} of them are duplication inside vendored trees, which this project does not \
+                 write; --include-vendored reports them",
+                summary.suppressed.vendored,
+            )?;
+        }
+        if opts.detailed() {
+            self.render_composition_detail(out)?;
+            writeln!(out, "snapshot: {}", self.run.database)?;
+        }
+        if let Some(baseline) = &summary.baseline {
+            writeln!(
+                out,
+                "baseline {}: {} of {} matched, {} gone, {} new, {} expanded",
+                baseline.file,
+                baseline.matched,
+                baseline.entries,
+                baseline.stale,
+                baseline.appeared,
+                baseline.expanded,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The parts of the group total that are a classification rather than a
+    /// count: what is a run rather than a unit, what was folded away, and what
+    /// was hidden by a default nobody typed.
+    fn render_composition_detail(&self, out: &mut impl Write) -> io::Result<()> {
+        let summary = &self.summary;
+        // Which mechanism hid a group is what says whether to argue with a
+        // rule or with the detector, so the split is stated even when it is
+        // all zeroes.
+        writeln!(
+            out,
+            "  suppressed: {} noise, {} by rule",
+            summary.suppressed.noise, summary.suppressed.by_rule,
+        )?;
+        let runs = &summary.groups;
+        if runs.fragment_scope > 0 || runs.folded_runs > 0 || runs.subsumed_runs > 0 {
+            writeln!(
+                out,
+                "  {} of them are runs duplicated inside units that are not clones of each \
+                 other; {} more were folded into the groups that already cover them and {} \
+                 into longer runs",
+                runs.fragment_scope, runs.folded_runs, runs.subsumed_runs,
+            )?;
+        }
+        if summary.groups.test_code > 0 {
+            writeln!(
+                out,
+                "  {} of them are duplication inside test code, which repeats itself by \
+                 design; a group spanning a test and what it exercises is not counted here",
+                summary.groups.test_code,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Write what qualifies the whole report rather than any part of it: an
+    /// incomplete read, a ceiling that fired, a rule that matched nothing.
+    ///
+    /// Separate from [`Self::render_text`] because these belong on the error
+    /// stream: they are about the run, and a reader piping the report into
+    /// something else should still see them.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error from the writer.
+    pub fn render_notes(&self, opts: TextOptions, out: &mut impl Write) -> io::Result<()> {
+        if opts.quiet {
+            return Ok(());
+        }
+        let summary = &self.summary;
+        // A recovering parser reports no failure, so the share it could not
+        // follow is the only thing separating "little duplication here" from
+        // "most of this was never read".
+        if let Some(unparsed) = &summary.unparsed
+            && unparsed.files > 0
+        {
+            writeln!(
+                out,
+                "warning: the parser could not follow {:.2}% of the tokens, over {} of {} files",
+                unparsed.share * 100.0,
+                unparsed.files,
+                summary.files.total,
+            )?;
+        }
+        if !summary.unused_suppressions.is_empty() {
+            let names: Vec<String> = summary
+                .unused_suppressions
+                .iter()
+                .map(UnusedRule::label)
+                .collect();
+            writeln!(
+                out,
+                "note: {} suppression rule(s) matched nothing: {}",
+                summary.unused_suppressions.len(),
+                names.join(", "),
+            )?;
+        }
+        render_unapplied_suppression_policies(summary, out)?;
+        if summary.split_components > 0 {
+            writeln!(
+                out,
+                "note: {} set(s) of related units were too large to compare as one and were \
+                 cut; clones of each other may be reported as separate groups{}",
+                summary.split_components,
+                severed_note(&summary.funnel),
+            )?;
+        }
+        if summary.search_truncated {
+            writeln!(out, "{}", search_truncation_note(&summary.funnel))?;
+        }
+        if summary.pair_budget_exhausted {
+            writeln!(out, "{}", budget_note(&summary.funnel))?;
+        }
+        if let Some(files) = depth_truncation_files(&summary.funnel) {
+            writeln!(
+                out,
+                "note: structural parsing reached its depth limit in {files} file(s); the deepest region of each was left out of analysis"
+            )?;
         }
         Ok(())
     }
@@ -98,7 +344,7 @@ impl Report {
     /// What the scan read: how much, what was left out, and what moved since
     /// the last time. Everything here is about the input, before a single
     /// group is mentioned.
-    fn render_inputs(&self, out: &mut impl Write) -> io::Result<()> {
+    fn render_inputs(&self, opts: TextOptions, out: &mut impl Write) -> io::Result<()> {
         let summary = &self.summary;
         writeln!(
             out,
@@ -113,54 +359,26 @@ impl Report {
         {
             writeln!(out, "    bare .h headers read as {headers}")?;
         }
-        writeln!(
-            out,
-            "  excluded: {} generated, {} by glob, {} too large, {} binary, {} unreadable, {} language-disabled, {} symlinks ({} files, {} directories), {} walk errors, {} timed out ({} total)",
-            summary.excluded.generated,
-            summary.excluded.by_glob,
-            summary.excluded.too_large,
-            summary.excluded.binary,
-            summary.excluded.unreadable,
-            summary.excluded.language_excluded,
-            summary.excluded.symlinks,
-            summary.excluded.symlink_files,
-            summary.excluded.symlink_directories,
-            summary.excluded.walk_errors,
-            summary.excluded.timed_out,
-            summary.excluded.total(),
-        )?;
+        // Only the causes that excluded something: a row of zeroes is a row
+        // the eye has to check before it can dismiss it.
+        let excluded = excluded_causes(summary);
+        if excluded.is_empty() {
+            writeln!(out, "  excluded: none")?;
+        } else {
+            writeln!(
+                out,
+                "  excluded: {} ({} total)",
+                excluded.join(", "),
+                summary.excluded.total(),
+            )?;
+        }
         writeln!(
             out,
             "  lines: {}; tokens: {}; lexer diagnostics: {}",
-            summary.lines, summary.tokens, summary.lexer_diagnostics,
+            thousands(summary.lines),
+            thousands(summary.tokens),
+            summary.lexer_diagnostics,
         )?;
-        // Before anything about what was found, because it is the sentence
-        // that says how to read everything after it.
-        if let Some(guardrails) = &summary.guardrails {
-            writeln!(
-                out,
-                "  {} profile: files over {} bytes skipped, parse work capped at min(file ceiling, {} ms × {} bytes), {} ms helper deadline, posting lists up to {}, {} candidate pairs per pass, {} verification pairs, {} cells per alignment, {} units per group",
-                guardrails.profile,
-                guardrails.max_file_bytes,
-                guardrails.parse_timeout_ms,
-                crate::scan::runtime::PARSE_BYTES_PER_MILLISECOND,
-                guardrails.helper_timeout_ms,
-                guardrails.posting_cap,
-                guardrails.pair_budget,
-                guardrails.verification_budget,
-                guardrails.max_alignment_cells,
-                guardrails.max_component,
-            )?;
-            writeln!(
-                out,
-                "  diagnostics: near-match band {}, at most {} near misses; sibling sweep {} comparisons, {} per group, {} total",
-                guardrails.near_miss_delta,
-                guardrails.near_miss_cap,
-                guardrails.sibling_candidate_budget,
-                guardrails.sibling_per_group_cap,
-                guardrails.sibling_total_cap,
-            )?;
-        }
         // Beside the ceilings, and for the same reason: it says how much of
         // what follows was decided by a compiler and how much was not.
         if let Some(compiler) = &summary.compiler {
@@ -184,134 +402,11 @@ impl Report {
                 writeln!(out, "    {} file(s): {}", refusal.files, refusal.message)?;
             }
         }
+        if opts.diagnostic() {
+            render_guardrails(summary, out)?;
+        }
         if let Some(baseline) = &summary.baseline {
-            writeln!(
-                out,
-                "  baseline {}: {} of {} entries matched, {} no longer found",
-                baseline.file, baseline.matched, baseline.entries, baseline.stale,
-            )?;
-            // The same counts said as a before and an after, which is the
-            // question somebody working duplication down is asking.
-            writeln!(
-                out,
-                "    since it was recorded: {} gone (-{} repeated tokens), {} new (+{}), \
-                 {} expanded (+{} occurrence(s), +{} repeated tokens), {} unchanged",
-                baseline.stale,
-                baseline.stale_tokens,
-                baseline.appeared,
-                baseline.appeared_tokens,
-                baseline.expanded,
-                baseline.expanded_instances,
-                baseline.expanded_tokens,
-                baseline.matched.saturating_sub(baseline.expanded),
-            )?;
-            render_gone(baseline, out)?;
-        }
-        Ok(())
-    }
-
-    fn render_summary(&self, palette: &Palette, out: &mut impl Write) -> io::Result<()> {
-        let summary = &self.summary;
-        writeln!(
-            out,
-            "{}",
-            palette.bold(&format!("codehelion scan ({} mode)", self.run.mode))
-        )?;
-        writeln!(out, "  root: {}", self.run.root)?;
-        self.render_configuration(out)?;
-        self.render_inputs(out)?;
-        // A recovering parser reports no failure, so the share it could not
-        // follow is the only thing separating "little duplication here" from
-        // "most of this was never read".
-        if let Some(unparsed) = &summary.unparsed
-            && unparsed.files > 0
-        {
-            writeln!(
-                out,
-                "    the parser could not follow {:.2}% of the tokens, over {} of {} files",
-                unparsed.share * 100.0,
-                unparsed.files,
-                summary.files.total,
-            )?;
-        }
-        writeln!(
-            out,
-            "  clone groups: {} (type-1 {}, type-2 {}, type-3 {}, restricted-semantic {}; suppressed: {} noise, {} by rule)",
-            summary.groups.total,
-            summary.groups.type_1,
-            summary.groups.type_2,
-            summary.groups.type_3,
-            summary.groups.restricted_semantic,
-            summary.suppressed.noise,
-            summary.suppressed.by_rule,
-        )?;
-        let runs = &summary.groups;
-        if runs.fragment_scope > 0 || runs.folded_runs > 0 || runs.subsumed_runs > 0 {
-            writeln!(
-                out,
-                "    {} of them are runs duplicated inside units that are not clones of each \
-                 other; {} more were folded into the groups that already cover them and {} \
-                 into longer runs",
-                runs.fragment_scope, runs.folded_runs, runs.subsumed_runs,
-            )?;
-        }
-        // Hidden without anybody asking, so the report says it happened and
-        // says how to undo it.
-        if summary.suppressed.vendored > 0 {
-            writeln!(
-                out,
-                "    {} of them are duplication inside vendored trees, which this project does \
-                 not write; --include-vendored reports them",
-                summary.suppressed.vendored,
-            )?;
-        }
-        if summary.groups.test_code > 0 {
-            writeln!(
-                out,
-                "    {} of them are duplication inside test code, which repeats itself by \
-                 design; a group spanning a test and what it exercises is not counted here",
-                summary.groups.test_code,
-            )?;
-        }
-        writeln!(
-            out,
-            "  snapshot: {} (run {}; replay with `codehelion report --run {}`)",
-            self.run.database, self.run.run_id, self.run.run_id,
-        )?;
-        if !summary.unused_suppressions.is_empty() {
-            let names: Vec<String> = summary
-                .unused_suppressions
-                .iter()
-                .map(UnusedRule::label)
-                .collect();
-            writeln!(
-                out,
-                "  note: {} suppression rule(s) matched nothing: {}",
-                summary.unused_suppressions.len(),
-                names.join(", "),
-            )?;
-        }
-        render_unapplied_suppression_policies(summary, out)?;
-        if summary.split_components > 0 {
-            writeln!(
-                out,
-                "  note: {} set(s) of related units were too large to compare as one and were \
-                 cut; clones of each other may be reported as separate groups{}",
-                summary.split_components,
-                severed_note(&summary.funnel),
-            )?;
-        }
-        if summary.search_truncated {
-            writeln!(out, "{}", search_truncation_note(&summary.funnel))?;
-        }
-        if summary.pair_budget_exhausted {
-            writeln!(out, "{}", budget_note(&summary.funnel))?;
-        }
-        if let Some(files) = depth_truncation_files(&summary.funnel) {
-            writeln!(
-                out,
-                "  note: structural parsing reached its depth limit in {files} file(s); the deepest region of each was left out of analysis"
-            )?;
+            render_baseline_detail(baseline, out)?;
         }
         Ok(())
     }
@@ -355,27 +450,20 @@ impl Report {
                 })
             })
             .collect();
-        if !visible.is_empty() {
-            let limit = if opts.verbose {
-                visible.len()
-            } else {
-                TEXT_GROUP_LIMIT
-            };
-            writeln!(out)?;
+        let limit = opts.group_limit();
+        for group in visible.iter().take(limit) {
+            render_group(group, opts, palette, out)?;
+            if opts.show_siblings {
+                self.render_siblings(group, opts, out)?;
+            }
+        }
+        if visible.len() > limit {
+            let left_out = remaining(visible.len(), limit);
             writeln!(
                 out,
-                "{}",
-                palette.bold(&format!("top groups by {}:", opts.sort.name()))
+                "... and {left_out} more {} (--limit 0 lists every one)",
+                noun_form(left_out, "group"),
             )?;
-            for group in visible.iter().take(limit) {
-                render_group(group, opts, palette, out)?;
-                if opts.show_siblings {
-                    self.render_siblings(group, opts, out)?;
-                }
-            }
-            if visible.len() > limit {
-                writeln!(out, "  ... and {} more groups", visible.len() - limit)?;
-            }
         }
         // A floor that quietly swallowed the unmeasured, or the listing that
         // came out of it, would read as "there is nothing else". Said after
@@ -383,10 +471,9 @@ impl Report {
         if let Some(floor) = opts.min_identifier_jaccard
             && reported.len() > visible.len()
         {
-            writeln!(out)?;
             writeln!(
                 out,
-                "  {} group(s) are not listed: raw identifier agreement below {floor:.2}, or not \
+                "{} group(s) are not listed: raw identifier agreement below {floor:.2}, or not \
                  measured in this mode",
                 reported.len() - visible.len(),
             )?;
@@ -401,11 +488,6 @@ impl Report {
             if !suppressed.is_empty() {
                 writeln!(out)?;
                 writeln!(out, "{}", palette.bold("suppressed groups:"))?;
-                let limit = if opts.verbose {
-                    suppressed.len()
-                } else {
-                    TEXT_GROUP_LIMIT
-                };
                 for group in suppressed.iter().take(limit) {
                     render_group(group, opts, palette, out)?;
                     if opts.show_siblings {
@@ -413,10 +495,11 @@ impl Report {
                     }
                 }
                 if suppressed.len() > limit {
+                    let left_out = remaining(suppressed.len(), limit);
                     writeln!(
                         out,
-                        "  ... and {} more suppressed groups",
-                        suppressed.len() - limit
+                        "... and {left_out} more suppressed {}",
+                        noun_form(left_out, "group"),
                     )?;
                 }
             }
@@ -441,9 +524,10 @@ impl Report {
         if visible.is_empty() {
             return Ok(());
         }
+        let limit = opts.group_limit();
         writeln!(out)?;
         writeln!(out, "{}", palette.bold("near-match near misses:"))?;
-        for near_miss in visible.iter().take(TEXT_GROUP_LIMIT) {
+        for near_miss in visible.iter().take(limit) {
             writeln!(
                 out,
                 "  estimated Jaccard {:.2}: {}:{}{} ↔ {}:{}{}",
@@ -466,12 +550,8 @@ impl Report {
                     .unwrap_or_default(),
             )?;
         }
-        if visible.len() > TEXT_GROUP_LIMIT {
-            writeln!(
-                out,
-                "  ... and {} more near misses",
-                visible.len() - TEXT_GROUP_LIMIT
-            )?;
+        if visible.len() > limit {
+            writeln!(out, "  ... and {} more near misses", visible.len() - limit)?;
         }
         Ok(())
     }
@@ -499,21 +579,112 @@ impl Report {
             let member = &sibling.member;
             writeln!(
                 out,
-                "    sibling {} {} ({:.2}): {}:{}{}",
+                "  sibling {} {} ({:.2}): {}:{}{}",
                 sibling.clone_type,
                 sibling.confidence_band,
                 sibling.similarity.composite,
                 member.file,
                 member.start_line,
-                member
-                    .unit
-                    .as_deref()
-                    .map(|unit| format!(" ({unit})"))
-                    .unwrap_or_default(),
+                member_unit(member),
             )?;
         }
         Ok(())
     }
+}
+
+/// The group total broken down by clone type, leaving out the types this mode
+/// cannot report.
+fn group_composition(summary: &Summary) -> String {
+    let groups = &summary.groups;
+    let counted = [
+        ("type-1", groups.type_1),
+        ("type-2", groups.type_2),
+        ("type-3", groups.type_3),
+        ("restricted-semantic", groups.restricted_semantic),
+    ];
+    counted
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(label, count)| format!("{label} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The exclusion causes that excluded something, named with their counts.
+fn excluded_causes(summary: &Summary) -> Vec<String> {
+    let excluded = &summary.excluded;
+    let counted = [
+        ("generated", excluded.generated),
+        ("by glob", excluded.by_glob),
+        ("too large", excluded.too_large),
+        ("binary", excluded.binary),
+        ("unreadable", excluded.unreadable),
+        ("language-disabled", excluded.language_excluded),
+        ("symlinks", excluded.symlinks),
+        ("walk errors", excluded.walk_errors),
+        ("timed out", excluded.timed_out),
+    ];
+    counted
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(label, count)| format!("{count} {label}"))
+        .collect()
+}
+
+/// The ceilings this run analysed under, and the ones its diagnostics used.
+fn render_guardrails(summary: &Summary, out: &mut impl Write) -> io::Result<()> {
+    let Some(guardrails) = &summary.guardrails else {
+        return Ok(());
+    };
+    writeln!(
+        out,
+        "  {} profile: files over {} bytes skipped, parse work capped at min(file ceiling, {} ms × {} bytes), {} ms helper deadline, posting lists up to {}, {} candidate pairs per pass, {} verification pairs, {} cells per alignment, {} units per group",
+        guardrails.profile,
+        guardrails.max_file_bytes,
+        guardrails.parse_timeout_ms,
+        crate::scan::runtime::PARSE_BYTES_PER_MILLISECOND,
+        guardrails.helper_timeout_ms,
+        guardrails.posting_cap,
+        guardrails.pair_budget,
+        guardrails.verification_budget,
+        guardrails.max_alignment_cells,
+        guardrails.max_component,
+    )?;
+    writeln!(
+        out,
+        "  diagnostics: near-match band {}, at most {} near misses; sibling sweep {} comparisons, {} per group, {} total",
+        guardrails.near_miss_delta,
+        guardrails.near_miss_cap,
+        guardrails.sibling_candidate_budget,
+        guardrails.sibling_per_group_cap,
+        guardrails.sibling_total_cap,
+    )
+}
+
+/// What the baseline covered, said as counts and then as a before and an
+/// after.
+fn render_baseline_detail(baseline: &BaselineStatus, out: &mut impl Write) -> io::Result<()> {
+    writeln!(
+        out,
+        "  baseline {}: {} of {} entries matched, {} no longer found",
+        baseline.file, baseline.matched, baseline.entries, baseline.stale,
+    )?;
+    // The same counts said as a before and an after, which is the question
+    // somebody working duplication down is asking.
+    writeln!(
+        out,
+        "    since it was recorded: {} gone (-{} repeated tokens), {} new (+{}), \
+         {} expanded (+{} occurrence(s), +{} repeated tokens), {} unchanged",
+        baseline.stale,
+        baseline.stale_tokens,
+        baseline.appeared,
+        baseline.appeared_tokens,
+        baseline.expanded,
+        baseline.expanded_instances,
+        baseline.expanded_tokens,
+        baseline.matched.saturating_sub(baseline.expanded),
+    )?;
+    render_gone(baseline, out)
 }
 
 fn render_helper_diagnostics(
@@ -535,7 +706,7 @@ fn render_unapplied_suppression_policies(
     if !summary.unapplied_suppression_policies.is_empty() {
         writeln!(
             out,
-            "  note: Fast mode did not apply suppression policies that require structural classifications: {}; run with --mode structural or --mode semantic to apply them",
+            "note: Fast mode did not apply suppression policies that require structural classifications: {}; run with --mode structural or --mode semantic to apply them",
             summary.unapplied_suppression_policies.join(", "),
         )?;
     }
@@ -581,10 +752,31 @@ fn render_gone(baseline: &BaselineStatus, out: &mut impl Write) -> io::Result<()
     Ok(())
 }
 
-/// Say where a group stands relative to the baseline the run was given.
+/// Where a group stands relative to the baseline, short enough for the
+/// heading line.
 ///
-/// Only new and expanded groups get a line. "Continuing" is the unremarkable
-/// case and marking every one of them would bury the changes that matter.
+/// Only new and expanded groups get a marker. "Continuing" is the
+/// unremarkable case and marking every one of them would bury the changes
+/// that matter.
+fn baseline_marker(group: &Group, palette: &Palette) -> String {
+    let Some(baseline) = &group.baseline else {
+        return String::new();
+    };
+    match baseline.state.as_str() {
+        GROUP_NEW => format!(" {}", palette.yellow("[new]")),
+        GROUP_EXPANDED => format!(
+            " {}",
+            palette.yellow(&format!(
+                "[expanded +{}]",
+                baseline.added_instances.unwrap_or(0)
+            ))
+        ),
+        _ => String::new(),
+    }
+}
+
+/// Say where a group stands relative to the baseline the run was given, in
+/// the sentence the detailed view has room for.
 fn render_group_baseline(group: &Group, out: &mut impl Write) -> io::Result<()> {
     let Some(baseline) = &group.baseline else {
         return Ok(());
@@ -608,9 +800,11 @@ fn render_group_baseline(group: &Group, out: &mut impl Write) -> io::Result<()> 
     }
 }
 
-/// Render one group: the priority with its inputs spelled out, then its
-/// members. The non-verbose view truncates long member lists with an
-/// explicit count, never silently.
+/// Render one group.
+///
+/// The heading is one line in the shape every other command-line tool puts a
+/// finding in: where it is, what it is, and the identifier that opens it. The
+/// numbers it was ranked on follow only when they were asked for.
 pub(super) fn render_group(
     group: &Group,
     opts: TextOptions,
@@ -640,33 +834,54 @@ pub(super) fn render_group(
     };
     // A fragment-scope group states its extent: without it "type-1, 40
     // tokens" reads as a duplicated unit, which it is not.
-    let scope = match (group.scope.as_str(), group.statements) {
-        (SCOPE_FRAGMENT, Some(statements)) => format!(" run of {statements} statements"),
-        (SCOPE_FRAGMENT, None) => " run".to_string(),
-        _ => String::new(),
+    let kind = if group.scope == SCOPE_FRAGMENT {
+        format!("{} run", group.clone_type)
+    } else {
+        group.clone_type.clone()
     };
+    // The heading names the occurrence a reader opens first: the canonical
+    // one, or the first recorded when no member claims it.
+    let canonical = group.members.iter().position(|member| member.canonical);
+    let anchor = group.members.get(canonical.unwrap_or(0));
+    let location = anchor.map_or_else(
+        || "(no recorded occurrence)".to_string(),
+        |member| format!("{}{}", member_location(member), member_unit(member)),
+    );
+    let priority = &group.priority;
+    writeln!(
+        out,
+        "{location}  {kind} ×{}  {} tokens  priority {:.2}  {}{}{overlap}{marker}",
+        priority.inputs.instances,
+        thousands(duplicated_tokens(group)),
+        priority.value,
+        palette.cyan(opts.id(&group.fingerprint)),
+        baseline_marker(group, palette),
+    )?;
+    if opts.detailed() {
+        render_group_detail(group, out)?;
+    }
+    render_group_members(group, opts, canonical, out)
+}
+
+/// The measures behind one group's placement, for a reader who wants to
+/// disagree with it.
+fn render_group_detail(group: &Group, out: &mut impl Write) -> io::Result<()> {
+    render_group_baseline(group, out)?;
     let priority = &group.priority;
     let spread = match (priority.inputs.files, priority.inputs.directories) {
         (0 | 1, _) => "within one file",
         (_, 0 | 1) => "within one directory",
         _ => "across directories",
     };
-    // Raw identifier agreement sits on the heading rather than inside the
-    // list of ranking inputs: it is the measure that most often decides
-    // whether a group is worth opening, and it was unreadable buried among
-    // seven other numbers.
     let identifiers = group.identifier_jaccard.map_or_else(
-        || " identifiers n/a".to_string(),
-        |value| format!(" identifiers {value:.2}"),
+        || "identifiers n/a".to_string(),
+        |value| format!("identifiers {value:.2}"),
     );
-    writeln!(
-        out,
-        "  {} {}{scope} priority {:.2}{identifiers} [{spread}]{overlap}{marker}",
-        palette.cyan(&group.fingerprint),
-        group.clone_type,
-        priority.value,
-    )?;
-    render_group_baseline(group, out)?;
+    let extent = match (group.scope.as_str(), group.statements) {
+        (SCOPE_FRAGMENT, Some(statements)) => format!(", run of {statements} statements"),
+        _ => String::new(),
+    };
+    writeln!(out, "    {spread}, {identifiers}{extent}")?;
     // The composed number is never shown on its own: the three measures that
     // made it say why the finding is where it is, and disagreeing with the
     // placement means disagreeing with one of them.
@@ -701,29 +916,54 @@ pub(super) fn render_group(
             body.call_count,
         )?;
     }
-    render_artifact_savings(&group.artifact_savings, out)?;
-    let limit = if opts.verbose {
-        group.members.len()
-    } else {
-        TEXT_MEMBER_LIMIT
-    };
-    for member in group.members.iter().take(limit) {
-        let unit = member.unit.as_deref().map_or_else(
-            || " [no enclosing unit]".to_string(),
-            |name| format!(" ({name})"),
-        );
-        let canonical = if member.canonical { " [canonical]" } else { "" };
+    render_artifact_savings(&group.artifact_savings, out)
+}
+
+/// The occurrences under one group's heading.
+///
+/// The default view leaves out the occurrence the heading already named; the
+/// detailed view repeats it, marked, because a complete list is the point of
+/// asking for detail.
+fn render_group_members(
+    group: &Group,
+    opts: TextOptions,
+    canonical: Option<usize>,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let listed: Vec<(usize, &Member)> = group
+        .members
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| opts.detailed() || Some(*index) != canonical)
+        .collect();
+    let limit = opts.member_limit();
+    for (index, member) in listed.iter().take(limit) {
+        let detail = if opts.detailed() {
+            format!(
+                "{} [finding {}]",
+                if Some(*index) == canonical {
+                    " [canonical]"
+                } else {
+                    ""
+                },
+                opts.id(&member.finding_id),
+            )
+        } else {
+            String::new()
+        };
         writeln!(
             out,
-            "    {}:{}-{}{unit}{canonical} [finding {}]",
-            member.file, member.start_line, member.end_line, member.finding_id,
+            "  {}{}{detail}",
+            member_location(member),
+            member_unit(member),
         )?;
     }
-    if group.members.len() > limit {
+    if listed.len() > limit {
+        let left_out = remaining(listed.len(), limit);
         writeln!(
             out,
-            "    ... and {} more occurrences",
-            group.members.len() - limit
+            "  ... and {left_out} more {}",
+            noun_form(left_out, "occurrence"),
         )?;
     }
     Ok(())

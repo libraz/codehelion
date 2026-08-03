@@ -196,7 +196,12 @@ const CORPORA: &[Expected] = &[
         name: "spdlog",
         has_origin: true,
         confirmed: 21,
-        refuted: 18,
+        // One refuted finding fewer than the two this corpus used to produce
+        // over `registry-inl.h`: the two sinks it was matched against differ
+        // only in identifiers, so the report stated one relation twice. The
+        // surviving finding still covers both labelled fragments and is still
+        // refuted, so what left the count is the repetition, not the verdict.
+        refuted: 17,
         forward_confirmed: 21,
         forward_refuted: 16,
         fast: Verdicts {
@@ -271,13 +276,13 @@ const ORDERINGS: &[Ordering] = &[
         name: "priority",
         at_10: 1.0,
         at_50: 0.96,
-        map: 0.9229,
+        map: 0.9231,
     },
     Ordering {
         name: "size",
         at_10: 1.0,
         at_50: 0.94,
-        map: 0.8723,
+        map: 0.8725,
     },
 ];
 
@@ -289,7 +294,7 @@ const ORDERINGS: &[Ordering] = &[
 /// the bands themselves is argued from the table, not from this assertion.
 const BANDS: &[(&str, usize, usize)] = &[
     ("high", 43, 22),
-    ("medium", 44, 42),
+    ("medium", 44, 41),
     ("low", 14, 22),
     ("(unscored)", 18, 5),
 ];

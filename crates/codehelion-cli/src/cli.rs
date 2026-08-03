@@ -5,6 +5,7 @@
 //! parts of the engine or store that do not exist yet parse and validate their
 //! arguments here, then fail with an explicit message at dispatch.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -123,6 +124,65 @@ pub enum Format {
     Json,
     /// SARIF 2.1.0 log, for static-analysis result consumers.
     Sarif,
+}
+
+/// When a text report emits ANSI colour codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum ColorChoice {
+    /// Colour a report going to a terminal, unless `NO_COLOR` is set.
+    #[default]
+    Auto,
+    /// Colour the report even when it is piped or written to a file.
+    Always,
+    /// Emit no ANSI codes.
+    Never,
+}
+
+impl ColorChoice {
+    /// Whether this choice colours a report, given whether it is going to
+    /// standard output rather than to a file.
+    ///
+    /// `Auto` follows the two things a user of any other command-line tool
+    /// expects to control it: whether the destination is a terminal, and the
+    /// `NO_COLOR` convention.
+    #[must_use]
+    pub fn enabled(self, to_stdout: bool) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Auto => {
+                to_stdout
+                    && std::io::stdout().is_terminal()
+                    && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+            }
+        }
+    }
+}
+
+/// How much of a text report to print, shared by every command that renders
+/// one.
+///
+/// Detail and length are separate knobs on purpose. `--verbose` says how much
+/// is written about each group, `--limit` says how many groups are written
+/// about; conflating them means a reader who wants one more number has to
+/// accept every group in the tree along with it.
+#[derive(Debug, Clone, Copy, Default, clap::Args)]
+pub struct ViewArgs {
+    /// Print more about each group. Repeat for more: `-v` adds the ranking
+    /// inputs and what the scan read, `-vv` adds the candidate pipeline, the
+    /// ceilings that applied, and full identifiers.
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+    /// Print the groups alone, without the heading, the summary, or the notes.
+    #[arg(short, long, conflicts_with = "verbose")]
+    pub quiet: bool,
+    /// List at most this many groups; `0` lists every group and every
+    /// occurrence.
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
+    /// When to colour the report.
+    #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
+    pub color: ColorChoice,
 }
 
 /// An axis a report can be put in order on.
@@ -266,8 +326,8 @@ pub struct ArtifactArgs {
     #[arg(long, requires = "output")]
     pub force: bool,
     /// Include every extracted symbol in a text report.
-    #[arg(long)]
-    pub verbose: bool,
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
     /// Reject an artifact larger than this many bytes before parsing it.
     #[arg(long, default_value_t = DEFAULT_ARTIFACT_MAX_BYTES)]
     pub max_bytes: u64,
@@ -355,8 +415,8 @@ pub struct ArtifactReportArgs {
     #[arg(long, requires = "output")]
     pub force: bool,
     /// Include every extracted symbol in a text report.
-    #[arg(long)]
-    pub verbose: bool,
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
 }
 
 /// Private file-based request passed from an artifact command to its worker.
@@ -579,6 +639,9 @@ pub struct ScanArgs {
     /// and the JSON and SARIF exports are unaffected.
     #[arg(long, value_name = "JACCARD", value_parser = parse_identifier_jaccard)]
     pub min_identifier_jaccard: Option<f64>,
+    /// How much of the text report to print.
+    #[command(flatten)]
+    pub view: ViewArgs,
     /// Report duplication inside vendored trees, which is hidden by default.
     ///
     /// A flag rather than only a configuration key because the default is one
@@ -592,9 +655,6 @@ pub struct ScanArgs {
     /// this switch is for an explicit review of the predicate families.
     #[arg(long)]
     pub include_trivial: bool,
-    /// List every group and every member instead of the summarised excerpt.
-    #[arg(long)]
-    pub verbose: bool,
     /// Exit with a non-zero status if any findings are reported.
     #[arg(long)]
     pub fail_on_findings: bool,
@@ -672,9 +732,9 @@ pub struct ReportArgs {
     /// and the JSON and SARIF exports are unaffected.
     #[arg(long, value_name = "JACCARD", value_parser = parse_identifier_jaccard)]
     pub min_identifier_jaccard: Option<f64>,
-    /// List every group and every member instead of the summarised excerpt.
-    #[arg(long)]
-    pub verbose: bool,
+    /// How much of the text report to print.
+    #[command(flatten)]
+    pub view: ViewArgs,
     /// Local database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,
@@ -855,6 +915,41 @@ mod tests {
             assert_eq!(Mode::from(core), mode);
             assert_eq!(mode.name(), core.name());
         }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Parsed view state is the test subject.
+    fn the_view_separates_how_much_is_said_from_how_much_is_listed() {
+        let parsed = Cli::try_parse_from(["codehelion", "scan", "-vv", "--limit", "0"])
+            .expect("a repeated depth flag and an explicit length parse");
+        let Command::Scan(args) = parsed.command else {
+            unreachable!("a scan invocation parses as a scan");
+        };
+        assert_eq!(args.view.verbose, 2);
+        assert_eq!(args.view.limit, Some(0));
+        assert!(!args.view.quiet);
+
+        // Asking for more and for less at once names no view, so it is
+        // rejected at the boundary rather than resolved by precedence.
+        let error = Cli::try_parse_from(["codehelion", "scan", "-v", "-q"])
+            .expect_err("depth and quiet cannot both be requested");
+        assert!(error.to_string().contains("--quiet"), "{error}");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Parsed colour state is the test subject.
+    fn colour_is_a_three_way_choice_defaulting_to_the_destination() {
+        let parsed =
+            Cli::try_parse_from(["codehelion", "report"]).expect("report without a colour choice");
+        let Command::Report(args) = parsed.command else {
+            unreachable!("a report invocation parses as a report");
+        };
+        assert_eq!(args.view.color, ColorChoice::Auto);
+        assert!(ColorChoice::Always.enabled(false));
+        assert!(!ColorChoice::Never.enabled(true));
+        // A report going to a file is never a terminal, whatever this
+        // process's own standard output is.
+        assert!(!ColorChoice::Auto.enabled(false));
     }
 
     #[test]
