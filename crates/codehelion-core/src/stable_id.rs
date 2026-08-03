@@ -34,7 +34,7 @@ use crate::semantic::{SOG_SCHEMA_VERSION, SemanticOperationGraph};
 
 /// Version of the identifier-hashing recipe. Bump on any change to the hash
 /// inputs, their encoding or their order.
-pub const FP_SCHEMA_VERSION: &str = "fp-schema-v2";
+pub const FP_SCHEMA_VERSION: &str = "fp-schema-v1";
 
 /// The hash algorithm behind every identifier, recorded so a future
 /// algorithm change is an explicit versioned event rather than a silent one.
@@ -140,7 +140,7 @@ stable_id!(
 );
 
 /// Version of the policy that defines cross-build-variant comparisons.
-pub const CROSS_VARIANT_POLICY_VERSION: &str = "cross-variant-exact-v2";
+pub const CROSS_VARIANT_POLICY_VERSION: &str = "cross-variant-exact-v1";
 
 /// Version of the explicit Rust-to-C++ semantic comparison policy.
 pub const CROSS_LANGUAGE_POLICY_VERSION: &str = "cross-language-semantic-v1";

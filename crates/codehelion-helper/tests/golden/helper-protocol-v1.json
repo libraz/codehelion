@@ -1,18 +1,18 @@
 {
-  "protocol_version": 3,
+  "protocol_version": 1,
   "requests": [
     {
-      "protocol_version": 3,
+      "protocol_version": 1,
       "id": 1,
       "body": {
         "kind": "handshake",
         "client": "codehelion",
         "client_version": "0.1.0",
-        "protocol": 3
+        "protocol": 1
       }
     },
     {
-      "protocol_version": 3,
+      "protocol_version": 1,
       "id": 2,
       "body": {
         "kind": "describe_build",
@@ -20,7 +20,7 @@
       }
     },
     {
-      "protocol_version": 3,
+      "protocol_version": 1,
       "id": 3,
       "body": {
         "kind": "analyze",
@@ -54,7 +54,7 @@
       }
     },
     {
-      "protocol_version": 3,
+      "protocol_version": 1,
       "id": 4,
       "body": {
         "kind": "shutdown"
@@ -63,13 +63,13 @@
   ],
   "responses": [
     {
-      "protocol_version": 3,
+      "protocol_version": 1,
       "id": 1,
       "body": {
         "kind": "handshake",
         "name": "codehelion-backend-clang",
         "version": "0.1.0",
-        "protocol": 3,
+        "protocol": 1,
         "toolchains": [
           "clang 19.0.0"
         ],
@@ -88,7 +88,7 @@
       }
     },
     {
-      "protocol_version": 3,
+      "protocol_version": 1,
       "id": 2,
       "body": {
         "kind": "build",
@@ -101,7 +101,7 @@
       }
     },
     {
-      "protocol_version": 3,
+      "protocol_version": 1,
       "id": 3,
       "body": {
         "kind": "analyzed",
@@ -132,7 +132,7 @@
       }
     },
     {
-      "protocol_version": 3,
+      "protocol_version": 1,
       "id": 4,
       "body": {
         "kind": "unavailable",
@@ -145,14 +145,14 @@
       }
     },
     {
-      "protocol_version": 3,
+      "protocol_version": 1,
       "id": 5,
       "body": {
         "kind": "shutdown"
       }
     },
     {
-      "protocol_version": 3,
+      "protocol_version": 1,
       "id": 6,
       "body": {
         "kind": "failed",

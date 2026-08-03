@@ -337,7 +337,7 @@ pub struct ArtifactAnalysisMapping {
 }
 
 /// Current record shape for source-to-artifact correspondences.
-pub const SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION: &str = "source-artifact-mapping-v2";
+pub const SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION: &str = "source-artifact-mapping-v1";
 
 fn supported_mapping_schema(schema_version: &str) -> bool {
     schema_version == SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION

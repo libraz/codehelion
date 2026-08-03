@@ -14,7 +14,7 @@ fn origin() -> RunOrigin {
         finished_at: "2026-07-27T00:00:05Z".to_string(),
         variant_fingerprint: "abcdef0123456789".to_string(),
         normalization_version: 1,
-        detector_versions: vec![("fp-schema".to_string(), "fp-schema-v2".to_string())],
+        detector_versions: vec![("fp-schema".to_string(), "fp-schema-v1".to_string())],
     }
 }
 
@@ -335,7 +335,7 @@ fn a_file_from_a_schema_this_build_does_not_read_is_an_error() {
 #[test]
 fn a_baseline_says_when_it_describes_a_different_run() {
     let baseline = Baseline::from_run(&origin(), &[group("aa11")], "2026-07-27T01:00:00Z");
-    let detectors = vec![("fp-schema".to_string(), "fp-schema-v2".to_string())];
+    let detectors = vec![("fp-schema".to_string(), "fp-schema-v1".to_string())];
 
     let fit = baseline
         .partition("abcdef0123456789")

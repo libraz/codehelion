@@ -29,7 +29,7 @@ use crate::ir::{CompilerIr, Unavailability, UnitRef};
 ///
 /// The product has not been released, so clients and helpers use the complete
 /// current protocol directly.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Largest payload a single frame may declare.
 ///

@@ -73,7 +73,7 @@ use crate::scan::display_path;
 /// the facts it does not carry guessed at. Recreating the baseline from the
 /// current scan is the fix, and is cheap: a baseline is a record of a
 /// judgement about the tree as it stands, not an archive.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// A baseline file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

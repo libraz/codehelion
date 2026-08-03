@@ -235,7 +235,7 @@ fn explain_reads_a_cross_language_group_without_turning_it_into_a_finding() {
                 start_line: 3,
                 end_line: 6,
                 unit_name: Some("map_values".to_string()),
-                graph_schema_version: "sog-v4".to_string(),
+                graph_schema_version: "sog-v1".to_string(),
                 graph_json,
             },
             CrossLanguageSemanticMemberRow {
@@ -246,7 +246,7 @@ fn explain_reads_a_cross_language_group_without_turning_it_into_a_finding() {
                 start_line: 3,
                 end_line: 6,
                 unit_name: Some("map_values".to_string()),
-                graph_schema_version: "sog-v4".to_string(),
+                graph_schema_version: "sog-v1".to_string(),
                 graph_json: cpp_graph_json,
             },
         ],

@@ -678,7 +678,7 @@ pub(in crate::artifact) fn source_unit_instance_fingerprint(unit: &SourceUnitIde
     bytes.extend(unit.fingerprint);
     bytes.extend(unit.occurrence_ordinal.to_le_bytes());
     bytes.extend(unit.build_variant_fingerprint);
-    codehelion_artifact::ArtifactFingerprint::from_content("source-unit-instance-v2", &bytes)
+    codehelion_artifact::ArtifactFingerprint::from_content("source-unit-instance-v1", &bytes)
         .as_bytes()
 }
 

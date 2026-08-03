@@ -15,21 +15,21 @@ fn semantic_evidence_persists_one_graph_per_member_and_rolls_back_on_mismatch() 
         .members
         .push(member_with_finding(2, 3, "src/c.rs", None));
     snapshot.groups[0].semantic = Some(SemanticEvidenceRow {
-        schema_version: "sog-v4".to_string(),
+        schema_version: "sog-v1".to_string(),
         rule_id: "sequence-pipeline-v1".to_string(),
         rule_version: 1,
         rule_confidence: 0.7,
         graphs: vec![
             SemanticOperationGraphRow {
-                schema_version: "sog-v4".to_string(),
+                schema_version: "sog-v1".to_string(),
                 graph_json: semantic_graph_json("filter"),
             },
             SemanticOperationGraphRow {
-                schema_version: "sog-v4".to_string(),
+                schema_version: "sog-v1".to_string(),
                 graph_json: semantic_graph_json("map"),
             },
             SemanticOperationGraphRow {
-                schema_version: "sog-v4".to_string(),
+                schema_version: "sog-v1".to_string(),
                 graph_json: semantic_graph_json("collect"),
             },
         ],
@@ -87,7 +87,7 @@ fn semantic_evidence_persists_one_graph_per_member_and_rolls_back_on_mismatch() 
     let mut malformed = sample_snapshot(&variant, &detectors);
     malformed.groups[0].clone_type = CloneClass::RestrictedSemantic;
     malformed.groups[0].semantic = Some(SemanticEvidenceRow {
-        schema_version: "sog-v4".to_string(),
+        schema_version: "sog-v1".to_string(),
         rule_id: "sequence-pipeline-v1".to_string(),
         rule_version: 1,
         rule_confidence: 0.7,
@@ -118,7 +118,7 @@ fn cross_language_semantic_comparison_is_separate_and_keeps_its_evidence() {
                 start_line: 3,
                 end_line: 6,
                 unit_name: Some("map_values".to_string()),
-                graph_schema_version: "sog-v4".to_string(),
+                graph_schema_version: "sog-v1".to_string(),
                 graph_json: cross_language_graph_json("rust", "map", "rust::Iterator::map", 1),
             },
             CrossLanguageSemanticMemberRow {
@@ -129,7 +129,7 @@ fn cross_language_semantic_comparison_is_separate_and_keeps_its_evidence() {
                 start_line: 3,
                 end_line: 6,
                 unit_name: Some("map_values".to_string()),
-                graph_schema_version: "sog-v4".to_string(),
+                graph_schema_version: "sog-v1".to_string(),
                 graph_json: cross_language_graph_json("cpp", "map", "std::transform", 2),
             },
         ],
@@ -166,7 +166,7 @@ fn cross_language_semantic_comparison_is_separate_and_keeps_its_evidence() {
     assert_eq!(detail.correspondence_ids, vec!["sequence-map-v1"]);
     assert_eq!(detail.members.len(), 2);
     assert_eq!(detail.members[0].language, "cpp");
-    assert_eq!(detail.members[0].graph.schema_version, "sog-v4");
+    assert_eq!(detail.members[0].graph.schema_version, "sog-v1");
     assert!(
         store
             .cross_language_group(&"ff".repeat(16))

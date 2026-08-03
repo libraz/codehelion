@@ -18,7 +18,7 @@ fn semantic_finding_detail_keeps_graphs_and_mappings_readable() {
             split_pair: true,
             similarity: None,
             semantic: Some(SemanticEvidence {
-                schema_version: "sog-v4".to_string(),
+                schema_version: "sog-v1".to_string(),
                 rules: vec![SemanticRuleEvidence {
                     id: "sequence-pipeline-v1".to_string(),
                     version: 1,
@@ -46,7 +46,7 @@ fn semantic_finding_detail_keeps_graphs_and_mappings_readable() {
     let mut text = Vec::new();
     detail.render_text(&mut text).unwrap();
     let text = String::from_utf8(text).unwrap();
-    assert!(text.contains("semantic evidence: sog-v4"));
+    assert!(text.contains("semantic evidence: sog-v1"));
     assert!(text.contains("rule sequence-pipeline-v1@1"));
     assert!(text.contains("graph 1: source -> collect"));
     assert!(text.contains("node mapping: 0→0"));
@@ -80,14 +80,14 @@ fn cross_language_group_detail_keeps_closed_evidence_and_origins_readable() {
     assert_eq!(json["response_kind"], EXPLAIN_RESPONSE_CROSS_LANGUAGE_GROUP);
     assert_valid_finding_detail_schema(&json);
     assert_eq!(json["correspondence_ids"][0], "sequence-map-v1");
-    assert_eq!(json["members"][0]["graph"]["schema_version"], "sog-v4");
+    assert_eq!(json["members"][0]["graph"]["schema_version"], "sog-v1");
     let mut text = Vec::new();
     detail.render_text(&mut text).unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains("cross-language semantic group"));
     assert!(text.contains("sequence-map-v1"));
     assert!(text.contains("rust rust/src/lib.rs:3-6 (rust-variant)"));
-    assert!(text.contains("graph sog-v4: source -> collect"));
+    assert!(text.contains("graph sog-v1: source -> collect"));
 }
 
 #[test]

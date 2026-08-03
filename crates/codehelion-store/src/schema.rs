@@ -53,11 +53,11 @@ use crate::StoreError;
 /// A database recorded under another one is rejected rather than migrated.
 /// Nothing is lost by that: the audit database holds the latest scan, which
 /// re-running the scan reproduces.
-pub const SCHEMA_VERSION: i64 = 24;
+pub const SCHEMA_VERSION: i64 = 1;
 
 /// Full pre-release database layout. Existing development databases are not
 /// transformed; create a fresh database when this contract changes.
-const BASELINE_SQL: &str = r#"
+const BASELINE_SQL: &str = r"
 CREATE TABLE artifact (
     id                 INTEGER PRIMARY KEY,
     scan_run_id        INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
@@ -78,9 +78,12 @@ CREATE TABLE artifact_analysis (
     observed_bytes    INTEGER NOT NULL,
     started_at        TEXT NOT NULL,
     finished_at       TEXT NOT NULL,
-    status            TEXT NOT NULL CHECK (status IN ('completed'))
-, ir_json TEXT NOT NULL DEFAULT '{}', build_variant_manifest_path TEXT, build_variant_fingerprint BLOB
-        CHECK (build_variant_fingerprint IS NULL OR length(build_variant_fingerprint) = 16)) STRICT;
+    status            TEXT NOT NULL CHECK (status IN ('completed')),
+    ir_json           TEXT NOT NULL DEFAULT '{}',
+    build_variant_manifest_path TEXT,
+    build_variant_fingerprint   BLOB
+        CHECK (build_variant_fingerprint IS NULL OR length(build_variant_fingerprint) = 16)
+) STRICT;
 CREATE TABLE artifact_analysis_clone_group_savings (
     id                              INTEGER PRIMARY KEY,
     schema_version                  TEXT NOT NULL,
@@ -131,7 +134,7 @@ CREATE TABLE artifact_analysis_savings_calibration (
             source_build_variant_fingerprint, before_artifact_build_variant_fingerprint,
             after_artifact_fingerprint, after_artifact_build_variant_fingerprint)
 ) STRICT;
-CREATE TABLE "artifact_analysis_source_mapping" (
+CREATE TABLE artifact_analysis_source_mapping (
     id                          INTEGER PRIMARY KEY,
     schema_version              TEXT NOT NULL,
     artifact_analysis_id        INTEGER NOT NULL REFERENCES artifact_analysis (id) ON DELETE CASCADE,
@@ -162,11 +165,12 @@ CREATE TABLE artifact_analysis_symbol (
     size_inferred           INTEGER NOT NULL CHECK (size_inferred IN (0, 1)),
     code_fingerprint        BLOB NOT NULL CHECK (length(code_fingerprint) = 16),
     normalization_version   TEXT,
-    normalization_fingerprint BLOB, exported INTEGER NOT NULL DEFAULT 0 CHECK (exported IN (0, 1)),
+    normalization_fingerprint BLOB,
+    exported                INTEGER NOT NULL DEFAULT 0 CHECK (exported IN (0, 1)),
     PRIMARY KEY (analysis_id, ordinal),
     CHECK (normalization_fingerprint IS NULL OR length(normalization_fingerprint) = 16)
 ) STRICT;
-CREATE TABLE "artifact_analysis_unmapped_source" (
+CREATE TABLE artifact_analysis_unmapped_source (
     artifact_analysis_id      INTEGER NOT NULL REFERENCES artifact_analysis (id) ON DELETE CASCADE,
     source_kind               TEXT NOT NULL CHECK (source_kind IN ('unit', 'fragment')),
     source_fingerprint        BLOB NOT NULL CHECK (length(source_fingerprint) = 16),
@@ -198,7 +202,7 @@ CREATE TABLE artifact_symbol (
     code_hash      TEXT,
     is_exported    INTEGER NOT NULL CHECK (is_exported IN (0, 1))
 ) STRICT;
-CREATE TABLE "build_variant" (
+CREATE TABLE build_variant (
     id                    INTEGER PRIMARY KEY,
     variant_fingerprint   TEXT NOT NULL UNIQUE,
     canonical             TEXT NOT NULL,
@@ -209,7 +213,7 @@ CREATE TABLE "build_variant" (
         CHECK (header_language IS NULL OR header_language IN ('rust', 'c', 'cpp', '')),
     build_language        TEXT
 ) STRICT;
-CREATE TABLE "build_variant_setting" (
+CREATE TABLE build_variant_setting (
     build_variant_id INTEGER NOT NULL REFERENCES build_variant (id) ON DELETE CASCADE,
     language         TEXT NOT NULL,
     name             TEXT NOT NULL,
@@ -217,7 +221,7 @@ CREATE TABLE "build_variant_setting" (
     value            TEXT NOT NULL,
     PRIMARY KEY (build_variant_id, language, name, position)
 ) STRICT;
-CREATE TABLE "clone_group" (
+CREATE TABLE clone_group (
     id                   INTEGER PRIMARY KEY,
     scan_run_id          INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
     group_fingerprint_id INTEGER NOT NULL REFERENCES fingerprint (id),
@@ -234,11 +238,14 @@ CREATE TABLE "clone_group" (
     test_code_evidence   TEXT CHECK (test_code_evidence IN ('marker', 'path')),
     split_pair           INTEGER NOT NULL DEFAULT 0 CHECK (split_pair IN (0, 1)),
     width_family         INTEGER NOT NULL DEFAULT 0 CHECK (width_family IN (0, 1)),
-    ranked_down          INTEGER NOT NULL DEFAULT 0 CHECK (ranked_down IN (0, 1))
-, statements INTEGER, identifier_jaccard REAL CHECK (identifier_jaccard >= 0 AND identifier_jaccard <= 1)
-, has_loop INTEGER CHECK (has_loop IN (0, 1)), has_dynamic_allocation INTEGER CHECK (has_dynamic_allocation IN (0, 1))
-, call_count INTEGER CHECK (call_count >= 0),
-    UNIQUE (scan_run_id, group_fingerprint_id)) STRICT;
+    ranked_down          INTEGER NOT NULL DEFAULT 0 CHECK (ranked_down IN (0, 1)),
+    statements           INTEGER,
+    identifier_jaccard   REAL CHECK (identifier_jaccard >= 0 AND identifier_jaccard <= 1),
+    has_loop             INTEGER CHECK (has_loop IN (0, 1)),
+    has_dynamic_allocation INTEGER CHECK (has_dynamic_allocation IN (0, 1)),
+    call_count           INTEGER CHECK (call_count >= 0),
+    UNIQUE (scan_run_id, group_fingerprint_id)
+) STRICT;
 CREATE TABLE clone_group_lineage_parent (
     clone_group_id      INTEGER NOT NULL REFERENCES clone_group (id) ON DELETE CASCADE,
     ordinal             INTEGER NOT NULL CHECK (ordinal >= 0),
@@ -259,7 +266,7 @@ CREATE TABLE clone_group_member (
     PRIMARY KEY (clone_group_id, fragment_id),
     UNIQUE (scan_run_id, finding_id)
 ) STRICT;
-CREATE TABLE "clone_group_similarity" (
+CREATE TABLE clone_group_similarity (
     clone_group_id  INTEGER PRIMARY KEY REFERENCES clone_group (id) ON DELETE CASCADE,
     weight_version  TEXT NOT NULL,
     lexical         REAL NOT NULL,
@@ -516,7 +523,8 @@ CREATE TABLE compiler_unit (
     unavailable_diagnostic TEXT,
     has_cfg            INTEGER NOT NULL CHECK (has_cfg IN (0, 1)),
     effects_computed   INTEGER NOT NULL CHECK (effects_computed IN (0, 1)),
-    data_flow_computed INTEGER NOT NULL CHECK (data_flow_computed IN (0, 1)), anchored_at TEXT,
+    data_flow_computed INTEGER NOT NULL CHECK (data_flow_computed IN (0, 1)),
+    anchored_at        TEXT,
     UNIQUE (scan_run_id, unit_name, file_path, variant_key),
     CHECK ((schema_version IS NULL) <> (unavailable_reason IS NULL)),
     CHECK (unavailable_reason IS NULL
@@ -861,7 +869,7 @@ CREATE INDEX idx_cross_language_comparison_identity
     ON cross_language_comparison (comparison_id, started_at DESC);
 CREATE INDEX idx_cross_language_semantic_group_comparison
     ON cross_language_semantic_group (comparison_id);
-"#;
+";
 
 /// Initialize a new database with the one supported pre-release layout.
 pub(crate) fn initialize(conn: &mut Connection) -> Result<(), StoreError> {

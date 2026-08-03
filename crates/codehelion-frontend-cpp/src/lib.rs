@@ -19,7 +19,7 @@ use codehelion_frontend_c::{lexer, units};
 
 /// Version tag of this frontend, used as a fingerprint input. The C++ dialect
 /// revision and the shared C-family lexer revision are both part of it.
-pub const FRONTEND_VERSION: &str = "cpp-lexer-v1+c-family-lexer-v6";
+pub const FRONTEND_VERSION: &str = "cpp-lexer-v1+c-family-lexer-v1";
 
 /// C++ keywords (C++23). Contextual keywords (`override`, `final`, `import`,
 /// `module`) lex as identifiers, matching how the grammar treats them.

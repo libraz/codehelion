@@ -24,11 +24,11 @@ use codehelion_core::frontend::{Frontend, LexedFile};
 ///
 /// It is embedded in both Fast frontend fingerprint tags. Bump it whenever a
 /// change to the shared implementation changes tokens or unit boundaries.
-pub const C_FAMILY_LEXER_VERSION: &str = "c-family-lexer-v6";
+pub const C_FAMILY_LEXER_VERSION: &str = "c-family-lexer-v1";
 
 /// Version tag of this frontend, used as a fingerprint input. The C dialect
 /// revision and the shared C-family lexer revision are both part of it.
-pub const FRONTEND_VERSION: &str = "c-lexer-v1+c-family-lexer-v6";
+pub const FRONTEND_VERSION: &str = "c-lexer-v1+c-family-lexer-v1";
 
 /// The C Fast-mode frontend.
 #[derive(Debug, Clone, Copy, Default)]

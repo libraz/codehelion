@@ -402,7 +402,7 @@ fn fixture_ir_snapshot_is_current() {
     let rendered = serde_json::to_string_pretty(&artifact).expect("IR serializes");
     assert_eq!(
         rendered,
-        include_str!("../../tests/golden/minimal-ir-v2.json").trim_end()
+        include_str!("../../tests/golden/minimal-ir-v1.json").trim_end()
     );
 }
 

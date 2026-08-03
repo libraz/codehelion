@@ -1189,7 +1189,7 @@ fn restricted_semantic_evidence_is_explicit_in_json() {
     let group = &mut report.groups[0];
     group.clone_type = "restricted-semantic".to_string();
     group.semantic = Some(SemanticEvidence {
-        schema_version: "sog-v4".to_string(),
+        schema_version: "sog-v1".to_string(),
         rules: vec![SemanticRuleEvidence {
             id: "sequence-pipeline-v1".to_string(),
             version: 1,

@@ -187,7 +187,7 @@ fn sample_expressions() -> Vec<ResolvedExpression> {
 
 /// The stored document for the only compiler-IR contract this build writes.
 const GOLDEN: &str = include_str!("golden/compiler-ir-v1.json");
-const PROTOCOL_GOLDEN: &str = include_str!("golden/helper-protocol-v3.json");
+const PROTOCOL_GOLDEN: &str = include_str!("golden/helper-protocol-v1.json");
 
 fn protocol_unit() -> UnitRef {
     UnitRef {
@@ -314,7 +314,7 @@ fn the_document_reads_back_as_what_produced_it() {
 
 #[test]
 fn protocol_envelopes_match_the_document_for_this_version() {
-    assert_eq!(PROTOCOL_VERSION, 3);
+    assert_eq!(PROTOCOL_VERSION, 1);
     let written = serde_json::to_string_pretty(&protocol_envelope()).unwrap();
     assert_eq!(written, PROTOCOL_GOLDEN.trim_end());
 }

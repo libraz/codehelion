@@ -20,7 +20,7 @@ use codehelion_core::frontend::{Frontend, LexedFile};
 /// differently — a word that was an identifier becoming a keyword is the usual
 /// way — and fingerprints carry this version so that streams produced under
 /// rules that may disagree are never merged on the strength of an equal hash.
-pub const FRONTEND_VERSION: &str = "rust-lexer-v3";
+pub const FRONTEND_VERSION: &str = "rust-lexer-v1";
 
 /// The Rust Fast-mode frontend.
 #[derive(Debug, Clone, Copy, Default)]

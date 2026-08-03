@@ -167,7 +167,7 @@ fn restricted_semantic_group_uses_its_own_rule_and_preserves_evidence() {
     let group = &mut report.groups[0];
     group.clone_type = "restricted-semantic".to_string();
     group.semantic = Some(super::super::SemanticEvidence {
-        schema_version: "sog-v4".to_string(),
+        schema_version: "sog-v1".to_string(),
         rules: vec![super::super::SemanticRuleEvidence {
             id: "sequence-pipeline-v1".to_string(),
             version: 1,

@@ -160,7 +160,7 @@ fn structural_output_satisfies_the_published_schema() {
 
     // The evidence the group was judged on travels with the result.
     let similarity = &gapped["properties"]["similarity"];
-    assert_eq!(similarity["weight_version"], "structural-verify-v3");
+    assert_eq!(similarity["weight_version"], "structural-verify-v1");
     assert!(similarity["composite"].as_f64().unwrap() > 0.6);
     assert_eq!(similarity["type_similarity"], Value::Null);
 }

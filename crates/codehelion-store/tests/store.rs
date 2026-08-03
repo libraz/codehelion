@@ -51,7 +51,7 @@ const fn finding(seed: u8) -> FindingId {
 
 fn semantic_graph_json(kind: &str) -> String {
     serde_json::json!({
-        "schema_version": "sog-v4",
+        "schema_version": "sog-v1",
         "language": "c",
         "build_variant_fingerprint": vec![0_u8; 32],
         "nodes": [{
@@ -71,7 +71,7 @@ fn semantic_graph_json(kind: &str) -> String {
 
 fn cross_language_graph_json(language: &str, kind: &str, api_name: &str, variant: u8) -> String {
     serde_json::json!({
-        "schema_version": "sog-v4",
+        "schema_version": "sog-v1",
         "language": language,
         "build_variant_fingerprint": vec![variant; 32],
         "nodes": [{
@@ -93,7 +93,7 @@ fn detector_versions() -> Vec<(String, String)> {
     vec![
         ("normalization".to_string(), "2".to_string()),
         ("frontend.rust".to_string(), "rust-lexer-v1".to_string()),
-        ("fp-schema".to_string(), "fp-schema-v2".to_string()),
+        ("fp-schema".to_string(), "fp-schema-v1".to_string()),
     ]
 }
 

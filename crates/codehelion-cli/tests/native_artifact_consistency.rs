@@ -53,7 +53,7 @@ fn equivalent_native_objects_share_symbol_identity_and_import_kind() {
     let expected_fingerprint = artifacts[0].symbols[0].fingerprint;
     assert_eq!(
         expected_fingerprint.to_hex(),
-        "7fbb61484fd9bb05188d9a3f7e5a8902"
+        "1928e2c0d684a7fb82a31d5b43d6eff7"
     );
     for artifact in &artifacts {
         assert_eq!(artifact.symbols.len(), 1, "{artifact:#?}");

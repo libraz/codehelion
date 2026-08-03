@@ -30,10 +30,10 @@ pub mod wasm;
 pub mod x86;
 
 /// Version of the artifact IR document.
-pub const ARTIFACT_IR_SCHEMA_VERSION: &str = "artifact-ir-v7";
+pub const ARTIFACT_IR_SCHEMA_VERSION: &str = "artifact-ir-v1";
 
 /// Version of the fingerprint recipe for parsed artifact entities.
-pub const ARTIFACT_FINGERPRINT_VERSION: &str = "artifact-fingerprint-v2";
+pub const ARTIFACT_FINGERPRINT_VERSION: &str = "artifact-fingerprint-v1";
 
 /// JSON uses base64 strings for opaque artifact payloads rather than one
 /// number per byte, while binary serde formats retain their usual byte form.
@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn artifact_identity_is_content_based_and_format_ir_starts_empty() {
-        assert_eq!(ARTIFACT_IR_SCHEMA_VERSION, "artifact-ir-v7");
+        assert_eq!(ARTIFACT_IR_SCHEMA_VERSION, "artifact-ir-v1");
         let wasm = ArtifactIr::empty(ArtifactFormat::Wasm, b"\0asm\x01\0\0\0");
         let same = ArtifactIr::empty(ArtifactFormat::Wasm, b"\0asm\x01\0\0\0");
         let changed = ArtifactIr::empty(ArtifactFormat::Wasm, b"\0asm\x01\0\0\x01");

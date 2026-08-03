@@ -1,7 +1,7 @@
 use super::{BTreeSet, Deserialize, Error, Language, Serialize, TypeTag};
 
 /// Version of the closed SOG vocabulary and normalization contract.
-pub const SOG_SCHEMA_VERSION: &str = "sog-v4";
+pub const SOG_SCHEMA_VERSION: &str = "sog-v1";
 
 /// Version of the coarse index used to bound registered SOG comparisons.
 ///
@@ -15,7 +15,7 @@ pub const SEMANTIC_CANDIDATE_INDEX_VERSION: &str = "sog-candidate-index-v1";
 ///
 /// Source ranges are deliberately sidecar evidence: they select the reported
 /// fragment but never enter a SOG fingerprint or a stable finding identity.
-pub const SEMANTIC_WINDOWING_VERSION: &str = "sog-windowing-v2";
+pub const SEMANTIC_WINDOWING_VERSION: &str = "sog-windowing-v1";
 
 /// Version of the opt-in Rust-to-C++ candidate index.
 ///

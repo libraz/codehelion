@@ -71,7 +71,7 @@ this mode could not measure:
 crates/codehelion-cli/src/scan/structural/reporting.rs:701-722  type-1 ×2  188 tokens  priority 0.62  80fecb4e
     within one file, identifiers 0.95
     confidence 0.82, maintenance risk 0.36, refactoring difficulty 0.17 (2 instances, 188-188 tokens, 188 repeated, 1.00 similarity, 1 file(s))
-    similarity: composite 1.00 (lexical 1.00, structural 1.00, control-flow 1.00, type n/a, api 1.00); cohesion 1.00; confidence high [structural-verify-v3]
+    similarity: composite 1.00 (lexical 1.00, structural 1.00, control-flow 1.00, type n/a, api 1.00); cohesion 1.00; confidence high [structural-verify-v1]
     content entropy: 5.02 bits
     body evidence: loop no, recognised allocation no, at least 15 call site(s)
   crates/codehelion-cli/src/scan/structural/reporting.rs:701-722 [canonical] [finding e61a2fda]

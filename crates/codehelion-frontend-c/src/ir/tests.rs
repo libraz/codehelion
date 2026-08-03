@@ -437,7 +437,7 @@ fn parsing_twice_is_deterministic() {
 fn file_carries_language_and_versions() {
     let frontend = CStructuralFrontend;
     assert_eq!(frontend.language(), Language::C);
-    assert_eq!(frontend.frontend_version(), "c-ir-v2");
+    assert_eq!(frontend.frontend_version(), "c-ir-v1");
 
     let file = parse("int a;");
     assert_eq!(file.language, Language::C);

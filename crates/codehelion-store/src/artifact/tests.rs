@@ -1,6 +1,6 @@
 use super::*;
 
-const ARTIFACT_IR_SCHEMA: &str = "artifact-ir-v7";
+const ARTIFACT_IR_SCHEMA: &str = "artifact-ir-v1";
 
 #[test]
 fn persisted_confidences_display_their_sql_vocabulary() {
@@ -187,7 +187,10 @@ fn artifact_ir_storage_requires_the_row_and_document_schemas_to_agree() {
         format: "wasm",
         content_fingerprint: [0; 16],
         observed_bytes: 0,
-        ir_json: r#"{"schema_version":"artifact-ir-v1"}"#,
+        // Deliberately a schema this build does not write, so the check has a
+        // disagreement to find. Spelling it apart from the version sequence
+        // keeps it from becoming the current one the next time that moves.
+        ir_json: r#"{"schema_version":"artifact-ir-from-another-build"}"#,
         build_variant_manifest_path: None,
         build_variant_fingerprint: None,
         started_at: "2026-08-03T00:00:00Z",
@@ -226,7 +229,7 @@ fn a_mapping_without_evidence_is_rejected_without_persisting_the_analysis() {
             format: "elf",
             content_fingerprint: [1; 16],
             observed_bytes: 0,
-            ir_json: r#"{"schema_version":"artifact-ir-v7"}"#,
+            ir_json: r#"{"schema_version":"artifact-ir-v1"}"#,
             build_variant_manifest_path: None,
             build_variant_fingerprint: None,
             started_at: "2026-07-30T00:00:00Z",
@@ -261,7 +264,7 @@ fn artifact_analyses_with_distinct_build_variants_stay_distinct() {
                 format: "wasm",
                 content_fingerprint,
                 observed_bytes: 8,
-                ir_json: r#"{"schema_version":"artifact-ir-v7"}"#,
+                ir_json: r#"{"schema_version":"artifact-ir-v1"}"#,
                 build_variant_manifest_path: Some("build-variant.json"),
                 build_variant_fingerprint: Some(build_variant_fingerprint),
                 started_at: "2026-07-30T00:00:00Z",
@@ -384,7 +387,7 @@ fn standalone_analysis_and_symbols_commit_together() {
             format: "wasm",
             content_fingerprint: [1; 16],
             observed_bytes: 12,
-            ir_json: r#"{"schema_version":"artifact-ir-v7"}"#,
+            ir_json: r#"{"schema_version":"artifact-ir-v1"}"#,
             build_variant_manifest_path: Some("build-variant.json"),
             build_variant_fingerprint: Some([5; 16]),
             started_at: "2026-07-30T00:00:00Z",
@@ -422,7 +425,7 @@ fn standalone_analysis_and_symbols_commit_together() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(ir_json, r#"{"schema_version":"artifact-ir-v7"}"#);
+    assert_eq!(ir_json, r#"{"schema_version":"artifact-ir-v1"}"#);
     let variant: (Option<String>, Option<Vec<u8>>) = store
         .conn
         .query_row(
