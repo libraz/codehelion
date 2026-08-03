@@ -2,9 +2,7 @@ use super::*;
 
 #[test]
 fn a_cpp_tree_is_answered_about_rather_than_reported_as_unreadable() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let dir = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
 
@@ -63,9 +61,7 @@ fn a_cpp_tree_is_answered_about_rather_than_reported_as_unreadable() {
 
 #[test]
 fn shared_discovery_exclusions_are_counted_once_across_semantic_partitions() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let dir = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
     std::fs::write(
@@ -89,9 +85,7 @@ fn shared_discovery_exclusions_are_counted_once_across_semantic_partitions() {
 
 #[test]
 fn a_semantic_baseline_freezes_and_reapplies_every_completed_build_variant() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let directory = tempfile::tempdir().expect("temp dir");
     let root =
         codehelion_fixtures::copy_cpp("header-only", directory.path()).expect("plant fixture");
@@ -152,9 +146,7 @@ fn a_semantic_baseline_freezes_and_reapplies_every_completed_build_variant() {
 /// rule used for other SOGs without recovering names from Clang USRs.
 #[test]
 fn cplusplus_standard_api_calls_form_a_restricted_semantic_finding() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
@@ -214,9 +206,7 @@ fn cplusplus_standard_api_calls_form_a_restricted_semantic_finding() {
 
 #[test]
 fn cplusplus_semantic_scan_requires_a_helper_that_reads_cpp() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
@@ -246,9 +236,7 @@ fn cplusplus_semantic_scan_requires_a_helper_that_reads_cpp() {
 
 #[test]
 fn cplusplus_plain_range_loops_match_as_closed_collections() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
@@ -296,32 +284,21 @@ fn cplusplus_plain_range_loops_match_as_closed_collections() {
     );
 }
 
+/// Both loops reduce every element of one standard sequence, so they are the
+/// same registered claim however their accumulators differ. The loop that adds
+/// one before accumulating is a different sequence and stays outside.
 #[test]
-fn cplusplus_plain_range_loops_do_not_match_different_reductions() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+fn cplusplus_plain_range_loops_match_as_closed_reductions() {
+    require_clang_helper();
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
     let report = scan_short_semantic_windows(&root);
-    let matches = reports(&report)
-        .into_iter()
-        .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())
-        .any(|group| {
-            group["clone_type"] == "restricted-semantic"
-                && group["semantic"]["rules"][0]["id"] == "sequence-pipeline-v1"
-                && group["members"].as_array().is_some_and(|members| {
-                    let units: Vec<_> = members
-                        .iter()
-                        .filter_map(|member| member["unit"].as_str())
-                        .collect();
-                    units.len() == 2 && units.contains(&"summed") && units.contains(&"summed_again")
-                })
-        });
-    assert!(
-        !matches,
-        "addition and multiplication must not share a semantic group: {report}"
+    assert_sequence_family(
+        &report,
+        &["summed", "summed_again"],
+        &["source", "reduce"],
+        &["transformed_sum", "copied"],
     );
 }
 
@@ -329,9 +306,7 @@ fn cplusplus_plain_range_loops_do_not_match_different_reductions() {
 /// lifetime, including the explicit resource edge persisted with the SOG.
 #[test]
 fn cplusplus_direct_lock_guard_lifetimes_form_a_restricted_semantic_finding() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+    require_clang_helper();
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
@@ -370,60 +345,93 @@ fn cplusplus_direct_lock_guard_lifetimes_form_a_restricted_semantic_finding() {
     }
 }
 
+/// A registered rule compares the operation sequence the compiler resolved,
+/// not the expression handed to each operation. Three `std::transform` calls
+/// therefore form one family however their lambdas differ, and the loop that
+/// collects without transforming stays out of it.
 #[test]
-fn cplusplus_standard_algorithm_calls_do_not_match_different_transformations() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+fn cplusplus_standard_algorithm_calls_match_across_transformations() {
+    require_clang_helper();
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
     let report = scan(&root);
-    let matches = reports(&report)
-        .into_iter()
-        .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())
-        .any(|group| {
-            group["clone_type"] == "restricted-semantic"
-                && group["semantic"]["rules"][0]["id"] == "sequence-pipeline-v1"
-                && group["members"].as_array().is_some_and(|members| {
-                    let units: Vec<_> = members
-                        .iter()
-                        .filter_map(|member| member["unit"].as_str())
-                        .collect();
-                    units.len() == 2 && units.contains(&"doubled") && units.contains(&"tripled")
-                })
-        });
-    assert!(
-        !matches,
-        "different map expressions must not share a semantic group: {report}"
+    assert_sequence_family(
+        &report,
+        &["doubled", "doubled_again", "tripled"],
+        &["source", "map"],
+        &["copied", "summed"],
     );
 }
 
+/// The predicates differ and the operation sequence does not, which is the
+/// case the rule exists for. A transformation is a different sequence and
+/// stays outside.
 #[test]
-fn cplusplus_standard_filter_calls_do_not_match_different_predicates() {
-    if !clang_helper_is_usable() {
-        return;
-    }
+fn cplusplus_standard_filter_calls_match_across_predicates() {
+    require_clang_helper();
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
     let report = scan(&root);
-    let matches = reports(&report)
+    assert_sequence_family(
+        &report,
+        &["positive", "even"],
+        &["source", "filter"],
+        &["doubled", "copied"],
+    );
+}
+
+/// Find the one `sequence-pipeline-v1` group holding exactly `members`, check
+/// the operation sequence every member's graph carries, and check that each
+/// named outsider is somewhere else.
+fn assert_sequence_family(
+    report: &Value,
+    members: &[&str],
+    operations: &[&str],
+    outsiders: &[&str],
+) {
+    let group = reports(report)
         .into_iter()
         .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())
-        .any(|group| {
+        .find(|group| {
             group["clone_type"] == "restricted-semantic"
                 && group["semantic"]["rules"][0]["id"] == "sequence-pipeline-v1"
-                && group["members"].as_array().is_some_and(|members| {
-                    let units: Vec<_> = members
+                && group["members"].as_array().is_some_and(|found| {
+                    let units: Vec<_> = found
                         .iter()
                         .filter_map(|member| member["unit"].as_str())
                         .collect();
-                    units.len() == 2 && units.contains(&"positive") && units.contains(&"even")
+                    units.len() == members.len()
+                        && members.iter().all(|member| units.contains(member))
                 })
-        });
-    assert!(
-        !matches,
-        "different filter predicates must not share a semantic group: {report}"
-    );
+        })
+        .unwrap_or_else(|| panic!("{members:?} form one semantic finding: {report}"));
+    for graph in group["semantic"]["graphs"]
+        .as_array()
+        .expect("semantic graphs")
+    {
+        assert_eq!(
+            graph["nodes"]
+                .as_array()
+                .expect("graph nodes")
+                .iter()
+                .filter_map(|node| node["kind"].as_str())
+                .collect::<Vec<_>>(),
+            operations,
+            "a member left the operation sequence the family is about: {group}"
+        );
+    }
+    let units: Vec<_> = group["members"]
+        .as_array()
+        .expect("group members")
+        .iter()
+        .filter_map(|member| member["unit"].as_str())
+        .collect();
+    for outsider in outsiders {
+        assert!(
+            !units.contains(outsider),
+            "a different operation sequence entered the family: {group}"
+        );
+    }
 }

@@ -84,24 +84,25 @@ fn same_variant_rules_never_join_different_languages() {
     assert_eq!(candidates.stats.buckets, 2);
 }
 
+/// The expressions supplied to a registered API are what the rule looks past.
+/// Two pipelines filtering on different predicates are the case it exists for,
+/// so differing source structure must not withhold the match; a differing
+/// operation sequence still must.
 #[test]
-fn same_variant_pipelines_require_matching_source_structure_when_available() {
-    let graph = |structure_fingerprint| {
+fn same_variant_pipelines_compare_operations_rather_than_source_structure() {
+    let graph = |names: &[&str], structure_fingerprint| {
         let mut graph = normalize_registered_apis(
             Language::Rust,
             [13; 32],
-            vec![
-                OperationObservation {
-                    source_offset: 10,
-                    api_name: "rust::Iterator::filter".to_owned(),
+            names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| OperationObservation {
+                    source_offset: (index as u64 + 1) * 10,
+                    api_name: (*name).to_owned(),
                     type_tag: None,
-                },
-                OperationObservation {
-                    source_offset: 20,
-                    api_name: "rust::Iterator::map".to_owned(),
-                    type_tag: None,
-                },
-            ],
+                })
+                .collect(),
         )
         .expect("registered pipeline constructs form a graph")
         .graph
@@ -111,13 +112,16 @@ fn same_variant_pipelines_require_matching_source_structure_when_available() {
         }
         graph
     };
-    let even_then_square = graph([1; 16]);
-    let prime_then_cube = graph([2; 16]);
+    let filter_then_map = ["rust::Iterator::filter", "rust::Iterator::map"];
+    let even_then_square = graph(&filter_then_map, [1; 16]);
+    let prime_then_cube = graph(&filter_then_map, [2; 16]);
+    assert!(match_registered_pipeline(&even_then_square, &prime_then_cube).is_some());
+
+    let mapped_only = graph(&["rust::Iterator::map"], [2; 16]);
     assert_eq!(
-        match_registered_pipeline(&even_then_square, &prime_then_cube),
+        match_registered_pipeline(&even_then_square, &mapped_only),
         None
     );
-    assert!(match_registered_pipeline(&even_then_square, &even_then_square).is_some());
 }
 
 #[test]

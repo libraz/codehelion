@@ -390,6 +390,17 @@ pub(super) fn compatible_fallible_kinds(
     }
 }
 
+/// Two operations correspond when the compiler resolved them to the same
+/// registered operation over compatible values.
+///
+/// The source-structure fingerprint deliberately takes no part in this. It
+/// separates occurrences inside the semantic digest, so two windows keep
+/// distinct identities; requiring it to agree here would restrict a registered
+/// rule to windows whose text already matches, which is what Type-1 and Type-2
+/// detection cover. The expressions handed to a registered API are exactly what
+/// a rule is meant to look past — the labelled corpus pairs a `filter` on odd
+/// values with a `filter` on even ones, and separates them from a pipeline
+/// whose operation sequence differs.
 fn compatible_nodes(left: &OperationNode, right: &OperationNode) -> bool {
     left.kind == right.kind
         && compatible_type_tags(left.attributes.type_tag, right.attributes.type_tag)
@@ -397,17 +408,6 @@ fn compatible_nodes(left: &OperationNode, right: &OperationNode) -> bool {
             left.attributes.fallible_kind,
             right.attributes.fallible_kind,
         )
-        && compatible_structure_fingerprints(
-            left.attributes.structure_fingerprint,
-            right.attributes.structure_fingerprint,
-        )
-}
-
-fn compatible_structure_fingerprints(left: Option<[u8; 16]>, right: Option<[u8; 16]>) -> bool {
-    match (left, right) {
-        (Some(left), Some(right)) => left == right,
-        _ => true,
-    }
 }
 
 pub(super) fn direct_construct_matches(

@@ -386,10 +386,6 @@ pub(super) fn funnel(
         .dropping(
             "no_registered_operations",
             as_u64(semantic.unrepresentable_units),
-        )
-        .dropping(
-            "below_min_clone_tokens",
-            as_u64(semantic.below_min_clone_tokens),
         ),
         // A member ceiling discards buckets, not a known number of pairs:
         // omitted oversized buckets never enumerate their quadratic pair set.

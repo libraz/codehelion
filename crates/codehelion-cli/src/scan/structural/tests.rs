@@ -625,7 +625,6 @@ fn semantic_candidate_cuts_are_visible_in_the_shared_funnel() {
         registered_observations: 8,
         excluded_observations: 6,
         unrepresentable_units: 2,
-        below_min_clone_tokens: 3,
         verified_pairs: 3,
         disabled_pairs: 1,
         grouping: codehelion_core::semantic::SemanticGroupingStats::default(),
@@ -694,7 +693,8 @@ fn semantic_candidate_cuts_are_visible_in_the_shared_funnel() {
         graphs
             .dropped
             .iter()
-            .any(|drop| drop.cause == "below_min_clone_tokens" && drop.count == 3)
+            .all(|drop| drop.cause != "below_min_clone_tokens"),
+        "a registered semantic window is admitted on its rule, not on a token floor"
     );
     let verified = funnel
         .iter()
@@ -724,7 +724,6 @@ fn verification_budget_is_visible_as_search_truncation() {
         registered_observations: 0,
         excluded_observations: 0,
         unrepresentable_units: 0,
-        below_min_clone_tokens: 0,
         verified_pairs: 0,
         disabled_pairs: 0,
         grouping: codehelion_core::semantic::SemanticGroupingStats::default(),
@@ -767,7 +766,6 @@ fn candidate_pass_budgets_are_visible_in_the_shared_funnel() {
         registered_observations: 0,
         excluded_observations: 0,
         unrepresentable_units: 0,
-        below_min_clone_tokens: 0,
         verified_pairs: 0,
         disabled_pairs: 0,
         grouping: codehelion_core::semantic::SemanticGroupingStats::default(),
@@ -809,7 +807,6 @@ fn unit_group_funnel_counts_final_members_not_refinement_moves() {
         registered_observations: 0,
         excluded_observations: 0,
         unrepresentable_units: 0,
-        below_min_clone_tokens: 0,
         verified_pairs: 0,
         disabled_pairs: 0,
         grouping: codehelion_core::semantic::SemanticGroupingStats::default(),

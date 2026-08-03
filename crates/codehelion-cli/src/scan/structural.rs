@@ -205,9 +205,6 @@ struct SemanticDetection {
     excluded_observations: usize,
     /// Parser-owned units with no registered operation after normalization.
     unrepresentable_units: usize,
-    /// Semantic windows excluded because they are shorter than the scan's
-    /// configured minimum clone length.
-    below_min_clone_tokens: usize,
     verified_pairs: usize,
     disabled_pairs: usize,
     grouping: SemanticGroupingStats,

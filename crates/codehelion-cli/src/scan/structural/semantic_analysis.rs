@@ -322,7 +322,6 @@ pub(super) fn registered_semantic_pairs(
             registered_observations: 0,
             excluded_observations: 0,
             unrepresentable_units: 0,
-            below_min_clone_tokens: 0,
             verified_pairs: 0,
             disabled_pairs: 0,
             grouping: SemanticGroupingStats::default(),
@@ -425,24 +424,16 @@ pub(super) fn registered_semantic_pairs(
         }
     }
     assign_semantic_occurrence_ranks(&mut units);
-    // Keep every normalized window for explicit cross-language comparison,
-    // but admit only windows meeting the scan's floor to ordinary semantic
-    // clone detection. Candidate indices are translated back before grouping,
-    // so the report continues to point at the original parser-owned units.
-    let eligible: Vec<usize> = units
-        .iter()
-        .enumerate()
-        .filter_map(|(index, unit)| {
-            (compiler_construct_window(&unit.graph)
-                || token_count_meets_minimum(unit.token_count, cfg.min_clone_tokens))
-            .then_some(index)
-        })
-        .collect();
-    let below_min_clone_tokens = units.len().saturating_sub(eligible.len());
-    let graphs: Vec<_> = eligible
-        .iter()
-        .map(|&index| units[index].graph.clone())
-        .collect();
+    // Every normalized window is compared, without consulting the clone-size
+    // floor. A window is a closed semantic claim rather than a source
+    // fragment: it spans the operations the compiler resolved, so its token
+    // count measures the distance between two anchors and not the size of the
+    // logic the rule matched. A registered pipeline written as one chained
+    // expression is a handful of tokens wide by construction, and the labelled
+    // corpora that admit each rule label exactly those single-line fragments.
+    // The floor still decides what Fast and Structural report, where a token
+    // count does describe the finding.
+    let graphs: Vec<_> = units.iter().map(|unit| unit.graph.clone()).collect();
     let max_candidate_pairs = cfg
         .limits
         .pair_budget
@@ -463,13 +454,7 @@ pub(super) fn registered_semantic_pairs(
     let enabled = verified
         .into_iter()
         .filter(|(_, matched)| cfg.semantic.enabled(matched.rule.id))
-        .map(|(candidate, matched)| VerifiedSemanticPair {
-            candidate: codehelion_core::semantic::SemanticCandidatePair {
-                left: eligible[candidate.left],
-                right: eligible[candidate.right],
-            },
-            matched,
-        })
+        .map(|(candidate, matched)| VerifiedSemanticPair { candidate, matched })
         .collect::<Vec<_>>();
     let grouping_units = units
         .iter()
@@ -529,7 +514,6 @@ pub(super) fn registered_semantic_pairs(
         registered_observations,
         excluded_observations,
         unrepresentable_units,
-        below_min_clone_tokens,
         verified_pairs,
         disabled_pairs,
         grouping,
@@ -636,30 +620,6 @@ pub(super) fn semantic_window_location(
         token_count += 1;
     }
     (first.span.start_line, end_line, token_count)
-}
-
-/// Whether a parsed token count reaches the configuration's report floor.
-///
-/// A count that cannot fit in the configuration's `u32` representation is
-/// necessarily above that floor, so narrowing failure must not wrap it into a
-/// short window.
-pub(super) fn token_count_meets_minimum(token_count: usize, minimum: u32) -> bool {
-    u32::try_from(token_count).map_or(true, |count| count >= minimum)
-}
-
-/// Compiler-confirmed, single-operation constructs are closed semantic claims
-/// rather than source fragments, so the general clone-size floor does not
-/// decide whether they may be compared.
-fn compiler_construct_window(graph: &SemanticOperationGraph) -> bool {
-    matches!(
-        graph.nodes.as_slice(),
-        [node]
-            if matches!(
-                node.kind,
-                codehelion_core::semantic::OperationKind::PropagateError
-                    | codehelion_core::semantic::OperationKind::Validate
-            ) && node.attributes.fallible_kind.is_some()
-    )
 }
 
 /// Combine a rule's measured base confidence with non-authoritative coverage
