@@ -589,6 +589,7 @@ fn cross_language_result_expected_fixture() -> tempfile::TempDir {
     // the same standard on every Clang that accepts either.
     let mut arguments = vec!["clang++".to_string(), "-std=c++2b".to_string()];
     arguments.extend(cpp_standard_library_arguments());
+    arguments.extend(expected_header_arguments());
     arguments.extend(["-c".to_string(), "cpp/direct.cpp".to_string()]);
     let database = serde_json::json!([{
         "directory": root.display().to_string(),
@@ -616,6 +617,44 @@ fn cpp_standard_library_arguments() -> Vec<String> {
     ]).find(|path| path.is_dir());
     sdk.and_then(|path| path.to_str().map(str::to_string))
         .map_or_else(Vec::new, |path| vec!["-isysroot".to_string(), path])
+}
+
+/// Arguments that make `std::expected` visible, chosen by asking the compiler.
+///
+/// A Clang whose default standard library predates `<expected>` still parses a
+/// file that includes it: the include resolves, the declarations inside are
+/// compiled out, and every use of `std::expected` becomes an unresolved name in
+/// a translation unit the helper reports as answered. The comparison then finds
+/// no C++ side and the test reads that silence as a result, so the standard
+/// library is settled here rather than assumed — by compiling the smallest
+/// program that needs it, which is the only thing that can settle it.
+// Spawning a compiler is what the workspace forbids on the scan path, and this
+// is neither: a fixture written for a machine has to ask that machine what it
+// has, and asking is one `-fsyntax-only` over a file this function wrote.
+#[allow(clippy::disallowed_types)]
+fn expected_header_arguments() -> Vec<String> {
+    const PROBE: &str = "#include <expected>\nstd::expected<int, int> identity(std::expected<int, int> value) { return value; }\n";
+    let candidates: [Vec<String>; 2] = [Vec::new(), vec!["-stdlib=libc++".to_string()]];
+    let directory = tempfile::tempdir().expect("temporary probe directory");
+    let source = directory.path().join("expected-probe.cpp");
+    std::fs::write(&source, PROBE).expect("write standard-library probe");
+    for candidate in &candidates {
+        let compiled = std::process::Command::new("clang++")
+            .arg("-std=c++2b")
+            .args(cpp_standard_library_arguments())
+            .args(candidate)
+            .arg("-fsyntax-only")
+            .arg(&source)
+            .output();
+        if compiled.is_ok_and(|output| output.status.success()) {
+            return candidate.clone();
+        }
+    }
+    panic!(
+        "no standard library available to clang++ provides <expected>, which this fixture is \
+         about. Install one that does — libc++ is enough, and `-stdlib=libc++` is tried \
+         automatically once its headers are present."
+    )
 }
 
 fn stored_ir(root: &Path, run_id: i64) -> bool {
