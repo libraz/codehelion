@@ -31,8 +31,14 @@ jobs:
         os: [macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
+      # `rust-src` for the same reason the CI suite needs it: the Rust semantic
+      # helper reads the sysroot sources to resolve standard-library names.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
       - uses: Swatinem/rust-cache@v2
+      - name: Materialize the labelled corpora
+        run: corpus/scripts/materialize-labeled.sh
       - name: Test
         run: cargo test --workspace --all-targets --all-features
 
