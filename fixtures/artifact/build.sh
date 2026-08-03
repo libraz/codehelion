@@ -33,9 +33,10 @@ case "$profile" in
         ;;
     release)
         opt_level=2
-        # The optimized calibration pair still carries local DWARF line rows.
-        # This preserves the source-fragment evidence needed to measure the
-        # model under LTO without changing compiler or optimization settings.
+        # The optimized variants are built with debug information so their
+        # symbols can still be named and compared. It does not make them
+        # calibratable: an optimizer leaves no line rows tying each member of
+        # a clone group to its own bytes, so nothing in them is attributed.
         debuginfo=2
         ;;
 esac

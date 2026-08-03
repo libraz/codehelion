@@ -55,14 +55,14 @@ test -n "$source_run"
 
 cargo run --quiet -p codehelion -- artifact analyze \
     "$fixture_root/libduplicates.dylib" \
-    --input-format mach-o \
+    --input-format macho \
     --format json \
     --build-variant "$fixture_root/build-variant.json" \
     --source-run "$source_run" \
     --db "$temporary_root/artifact.sqlite" \
     --output "$temporary_root/report.json"
 
-grep -qE '"format": "mach-o"' "$temporary_root/report.json"
+grep -qE '"format": "macho"' "$temporary_root/report.json"
 grep -qE '"name": "_duplicate_left"' "$temporary_root/report.json"
 grep -qE '"name": "_duplicate_right"' "$temporary_root/report.json"
 grep -qE '"data_segments": [1-9]' "$temporary_root/report.json"

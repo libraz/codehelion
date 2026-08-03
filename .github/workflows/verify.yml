@@ -113,7 +113,7 @@ jobs:
       - name: Install Clang and libclang
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang libclang-dev
+          sudo apt-get install -y --no-install-recommends clang libclang-dev libc++-dev libc++abi-dev
       # The labelled precision tests refuse to pass on an empty measurement,
       # so coverage over the suite needs the same sources the suite does.
       - name: Materialize the labelled corpora

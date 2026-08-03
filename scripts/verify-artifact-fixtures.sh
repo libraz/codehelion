@@ -43,15 +43,6 @@ cargo run --quiet -p codehelion -- scan \
     --output "$temporary_root/source-scan.json"
 source_run=$(sed -n 's/^[[:space:]]*"run_id": \([0-9][0-9]*\),\{0,1\}$/\1/p' "$temporary_root/source-scan.json")
 test -n "$source_run"
-calibration_group=$(awk '
-    /"groups": \[/ { groups = 1; next }
-    groups && /"fingerprint":/ {
-        fingerprint = $2
-        gsub(/[",]/, "", fingerprint)
-    }
-    groups && /"scope": "fragment"/ { print fingerprint; exit }
-' "$temporary_root/source-scan.json")
-test -n "$calibration_group"
 
 cargo run --quiet -p codehelion -- artifact analyze \
     "$fixture_root/build/debug/duplicates.wasm" \
@@ -68,11 +59,26 @@ cargo run --quiet -p codehelion -- artifact analyze \
     --linker-map "$fixture_root/build/debug/libduplicates.map" \
     --db "$temporary_root/artifact.sqlite" \
     --output "$temporary_root/elf.json"
+# Calibration measures the savings model over one clone group, so it needs a
+# group the analysis actually attributed artifact bytes to. Only a group whose
+# every non-canonical member was attributed carries an estimate, and reading it
+# out of the report says which one that was instead of assuming.
+calibration_group=$(awk '
+    /"clone_group_fingerprint":/ {
+        fingerprint = $2
+        gsub(/[",]/, "", fingerprint)
+    }
+    /"estimated_refactor_savings_bytes": -?[0-9]/ { print fingerprint; exit }
+' "$temporary_root/elf.json")
+test -n "$calibration_group"
 objcopy --only-keep-debug \
     "$fixture_root/build/debug/libduplicates.so" \
     "$temporary_root/libduplicates.debug"
 cp "$fixture_root/build/debug/libduplicates.so" "$temporary_root/libduplicates-split.so"
 objcopy --strip-debug "$temporary_root/libduplicates-split.so"
+cp "$fixture_root/build/debug-deduplicated/libduplicates.so" \
+    "$temporary_root/libduplicates-split-deduplicated.so"
+objcopy --strip-debug "$temporary_root/libduplicates-split-deduplicated.so"
 cargo run --quiet -p codehelion -- artifact analyze \
     "$temporary_root/libduplicates-split.so" \
     --format json \
@@ -137,16 +143,22 @@ cargo run --quiet -p codehelion -- artifact calibration \
     --db "$temporary_root/artifact.sqlite" \
     --format json \
     --output "$temporary_root/calibration-baseline.json"
+# A second measurement, so the baseline comparison above has something to
+# compare. It is the same code with its debug information in a separate file:
+# a different artifact, separately analysed, whose estimate is its own. The
+# optimized builds cannot stand here — an optimizer leaves no line evidence
+# tying each member of a clone group to its own bytes, so nothing in them is
+# attributed and there is no estimate to measure.
 cargo run --quiet -p codehelion -- artifact compare \
-    "$fixture_root/build/release-lto/libduplicates.so" \
-    "$fixture_root/build/release-lto-deduplicated/libduplicates.so" \
-    --before-build-variant "$fixture_root/build/release-lto/build-variant.json" \
-    --after-build-variant "$fixture_root/build/release-lto-deduplicated/build-variant.json" \
+    "$temporary_root/libduplicates-split.so" \
+    "$temporary_root/libduplicates-split-deduplicated.so" \
+    --before-build-variant "$fixture_root/build/debug/build-variant.json" \
+    --after-build-variant "$fixture_root/build/debug-deduplicated/build-variant.json" \
     --source-run "$source_run" \
     --clone-group "$calibration_group" \
     --db "$temporary_root/artifact.sqlite" \
     --format json \
-    --output "$temporary_root/compare-calibration-release-lto.json"
+    --output "$temporary_root/compare-calibration-split-debug.json"
 cargo run --quiet -p codehelion -- artifact calibration \
     --source-run "$source_run" \
     --baseline "$temporary_root/calibration-baseline.json" \
@@ -169,9 +181,26 @@ grep -qE '"source_mappings": [1-9]' "$temporary_root/elf-split-debug.json"
 grep -qE '"mappings": [1-9]' "$temporary_root/elf-split-debug.json"
 grep -qE '"estimated_refactor_savings_bytes": -?[1-9][0-9]*' "$temporary_root/elf.json"
 grep -qE '"exact_groups": [1-9]' "$temporary_root/elf.json"
-grep -qE '"normalized_groups": [1-9]' "$temporary_root/elf.json"
+# Normalized duplicate detection reads machine instructions, and the only
+# normalizer here is for x86-64. Elsewhere the count is nothing rather than
+# something missed, and saying which is expected keeps the run honest on a
+# machine of either kind.
+case "$(uname -m)" in
+    x86_64 | amd64)
+        grep -qE '"normalized_groups": [1-9]' "$temporary_root/elf.json"
+        ;;
+    *)
+        grep -qE '"normalized_groups": 0' "$temporary_root/elf.json"
+        ;;
+esac
 grep -qE '"format": "elf"' "$temporary_root/elf-release-lto.json"
-grep -qE '"estimated_refactor_savings_bytes": -?[1-9][0-9]*' "$temporary_root/elf-release-lto.json"
+# The optimized build is read and correlated like any other, and it estimates
+# nothing: an optimizer leaves no line evidence tying each member of a clone
+# group to its own bytes, so no group has every member attributed. Saying so
+# is the point — an estimate here would be one nothing in the artifact
+# supports.
+grep -qE '"correlation": \{' "$temporary_root/elf-release-lto.json"
+grep -qE '"estimated_refactor_savings": \[\]' "$temporary_root/elf-release-lto.json"
 grep -qE '"format": "wasm"' "$temporary_root/wasm-deduplicated.json"
 grep -qE '"size_inferred": true' "$temporary_root/elf-stripped.json"
 for field in \
@@ -183,15 +212,21 @@ do
     grep -qE "\"$field\"" "$temporary_root/wasm.json"
     grep -qE "\"$field\"" "$temporary_root/elf.json"
 done
-grep -qE '"verified_savings_bytes": [0-9]+' "$temporary_root/compare.json"
+# A comparison measures the difference between two artifacts, which is an
+# observation and not a verified saving: nothing here says the difference came
+# from removing a duplicate. Only the calibrated comparisons below, which name
+# a source run and a clone group, produce a verified figure.
+grep -qE '"observed_size_reduction_bytes": -?[0-9]+' "$temporary_root/compare.json"
 grep -qE '"build_variant_warning": "build variants differ' "$temporary_root/compare.json"
-grep -qE '"verified_savings_bytes": [0-9]+' "$temporary_root/compare-elf.json"
+grep -qE '"observed_size_reduction_bytes": -?[0-9]+' "$temporary_root/compare-elf.json"
 grep -qE '"build_variant_warning": "build variants differ' "$temporary_root/compare-elf.json"
-grep -qE '"verified_savings_bytes": [1-9][0-9]*' "$temporary_root/compare-deduplicated.json"
+# The deduplicated pair is the one case where the difference has a direction:
+# the same build with the duplicate removed is smaller.
+grep -qE '"observed_size_reduction_bytes": [1-9][0-9]*' "$temporary_root/compare-deduplicated.json"
 grep -qE '"calibration": \{' "$temporary_root/compare-calibration.json"
 grep -qE '"verified_savings_bytes": [1-9][0-9]*' "$temporary_root/compare-calibration.json"
-grep -qE '"calibration": \{' "$temporary_root/compare-calibration-release-lto.json"
-grep -qE '"verified_savings_bytes": [1-9][0-9]*' "$temporary_root/compare-calibration-release-lto.json"
+grep -qE '"calibration": \{' "$temporary_root/compare-calibration-split-debug.json"
+grep -qE '"verified_savings_bytes": [1-9][0-9]*' "$temporary_root/compare-calibration-split-debug.json"
 grep -qE '"samples": 2' "$temporary_root/calibration.json"
 grep -qE '"comparison": \{' "$temporary_root/calibration.json"
 grep -qE '"baseline_schema_version": "artifact-calibration-report-v1"' "$temporary_root/calibration.json"
