@@ -71,7 +71,7 @@ use crate::verify::Confidence;
 /// medoid selection, the cohesion floors or the refinement order must bump it,
 /// as must a change to how the verdicts grouping could not place are folded
 /// into findings.
-pub const GROUPING_VERSION: &str = "grouping-v4";
+pub const GROUPING_VERSION: &str = "grouping-v5";
 
 /// Tuning for grouping. Similarities are in `[0, 1]`; the defaults are
 /// provisional and calibrated against the chain corpus.

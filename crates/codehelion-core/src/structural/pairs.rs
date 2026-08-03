@@ -179,6 +179,17 @@ pub(super) fn unrepresented_pairs(
     // normalized content, so where it accepted one crossing it accepts every
     // crossing of those contents, and the entries would be indistinguishable
     // anyway — their ids are composed from content alone.
+    //
+    // Which content that is has to be the domain the id is composed from —
+    // `Unit::group_content`, so raw content for Type-1 and normalized content
+    // for the rest. Folding on raw content while composing the id from
+    // normalized content splits one fact into two entries that then carry the
+    // same fingerprint, which is not a pair of findings but one finding
+    // reported twice.
+    //
+    // The key is the unordered pair: which side is written first is not part
+    // of the relation, and letting it in would reach the same conclusion twice
+    // under two ids.
     let mut folded: BTreeMap<(FragmentFingerprint, FragmentFingerprint, CloneClass), Folded> =
         BTreeMap::new();
     for edge in edges.iter().filter(|edge| {
@@ -188,17 +199,17 @@ pub(super) fn unrepresented_pairs(
                 _ => true,
             }
     }) {
-        // Which content is canonical follows content, not position: the two
-        // are peers, and an index would make the id depend on walk order.
-        let (canonical, other) = if units[edge.a].content <= units[edge.b].content {
-            (edge.a, edge.b)
+        let content = |member: usize| units[member].group_content(edge.class);
+        let (low, high) = if content(edge.a) <= content(edge.b) {
+            (content(edge.a), content(edge.b))
         } else {
-            (edge.b, edge.a)
+            (content(edge.b), content(edge.a))
         };
         let entry = folded
-            .entry((units[canonical].content, units[other].content, edge.class))
+            .entry((low, high, edge.class))
             .or_insert_with(|| Folded {
                 members: BTreeSet::new(),
+                crossings: 0,
                 similarity: edge.similarity,
                 breakdown: edge.breakdown,
                 confidence: edge.confidence,
@@ -206,6 +217,7 @@ pub(super) fn unrepresented_pairs(
             });
         entry.members.insert(edge.a);
         entry.members.insert(edge.b);
+        entry.crossings += 1;
         // One crossing the report does not already account for is enough to
         // make the pair worth carrying: the entry stands for every crossing of
         // those two contents, and the derived ones say nothing against it.
@@ -221,19 +233,32 @@ pub(super) fn unrepresented_pairs(
             entry.confidence = edge.confidence;
         }
     }
-    let described = folded.values().filter(|entry| entry.described).count();
+    // Counted in verified pairs, not in the entries they folded into, because
+    // that is what the funnel row it lands in is measured in: an entry stands
+    // for every crossing of its two contents, and a coarser fold that made two
+    // dropped crossings arrive as one would report the rule as removing half
+    // of what it removed.
+    let described: usize = folded
+        .values()
+        .filter(|entry| entry.described)
+        .map(|entry| entry.crossings)
+        .sum();
 
     let mut pairs: Vec<VerifiedPair> = folded
         .into_iter()
         .filter(|(_, entry)| !entry.described)
-        .map(|((canonical_content, _other_content, class), entry)| {
+        .map(|((_low, _high, class), entry)| {
             let members: Vec<usize> = entry.members.into_iter().collect();
-            // Any occurrence of the canonical content stands for it; the first
-            // in member order is the deterministic choice.
+            // Which instance is canonical follows content, not position: the
+            // members are peers, and an index would tie the anchor — and so
+            // the id — to the order the tree was walked. Raw content decides
+            // even though the relation is over normalized content, because it
+            // is the finer of the two and orders the members the identity
+            // domain holds as one.
             let canonical = members
                 .iter()
                 .copied()
-                .find(|&member| units[member].content == canonical_content)
+                .min_by_key(|&member| units[member].content)
                 .unwrap_or(members[0]);
             let boilerplate = dominant_boilerplate_members(&members, units);
             let width_family = written_once_per_width_members(canonical, &members, units, files);
@@ -273,6 +298,10 @@ pub(super) fn unrepresented_pairs(
 /// Verdicts accumulated for one pair of contents.
 struct Folded {
     members: BTreeSet<usize>,
+    /// Verified pairs folded in here, kept apart from the member count so
+    /// that dropping this entry can be accounted for in the unit the funnel
+    /// reports.
+    crossings: usize,
     similarity: f64,
     breakdown: Option<verify::SimilarityBreakdown>,
     confidence: verify::Confidence,

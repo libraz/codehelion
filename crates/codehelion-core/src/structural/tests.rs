@@ -542,6 +542,101 @@ fn an_unrepresented_pair_keeps_its_weakest_crossing_as_confidence() {
     );
 }
 
+/// Two units that differ only in their identifiers are one content to a
+/// Type-3 relation, because that relation is judged on normalized content and
+/// the group id is composed from it. Carrying a crossing against each of them
+/// separately states one relation twice — and, since both statements compose
+/// the same id, they used to arrive as two findings that could not both be
+/// recorded.
+#[test]
+fn crossings_that_differ_only_where_normalization_erases_it_are_one_finding() {
+    let files: Vec<SyntaxIrFile> = (0..3)
+        .map(|_| SyntaxIrFile {
+            language: Language::Rust,
+            frontend_version: "test",
+            ir_schema_version: IR_SCHEMA_VERSION,
+            tokens: vec![Token {
+                kind: TokenKind::Identifier,
+                text: "unit".into(),
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 1,
+                    start_line: 1,
+                    start_column: 1,
+                },
+            }],
+            roots: Vec::new(),
+            diagnostics: Vec::new(),
+            error_ranges: Vec::new(),
+            depth_truncated: false,
+            test_module: false,
+        })
+        .collect();
+    // Units 0 and 1 are renamings of each other: distinct raw content, one
+    // normalized content. Unit 2 is the other side of the relation.
+    let units: Vec<Unit> = (0..3u8)
+        .map(|index| {
+            let position = usize::from(index);
+            let normalized = if position < 2 { 10 } else { 20 };
+            Unit {
+                file: position,
+                tokens: (0, 1),
+                fingerprint: UnitFingerprint::from_bytes([index + 1; 16]),
+                content: FragmentFingerprint::from_bytes([index + 1; 16]),
+                normalized_content: FragmentFingerprint::from_bytes([normalized; 16]),
+                ..unit_at(position, 0, 1)
+            }
+        })
+        .collect();
+    let grouping_units: Vec<grouping::GroupingUnit> = units
+        .iter()
+        .map(|unit| grouping::GroupingUnit {
+            key: *unit.fingerprint.as_bytes(),
+        })
+        .collect();
+    let crossing = |a: usize, b: usize| grouping::SimilarityEdge {
+        a,
+        b,
+        similarity: 0.90,
+        breakdown: Some(SimilarityBreakdown {
+            lexical: 0.90,
+            structural: 0.90,
+            control_flow: Some(0.90),
+            type_similarity: None,
+            api: Some(0.90),
+            composite: 0.90,
+        }),
+        class: CloneClass::Type3,
+        confidence: Confidence::High,
+    };
+    let edges = [crossing(0, 2), crossing(1, 2)];
+    let grouping = grouping::group(
+        &grouping_units,
+        &edges,
+        &grouping::GroupingConfig {
+            medoid_min_similarity: 0.98,
+            min_pairwise_similarity: 0.98,
+            ..grouping::GroupingConfig::default()
+        },
+    );
+    let variant = BuildVariant::structural(
+        LanguageSelection {
+            rust: true,
+            c: false,
+            cpp: false,
+        },
+        Language::Cpp,
+    );
+
+    let (pairs, _, _) = unrepresented_pairs(&edges, &grouping, &units, &files, &variant);
+
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0].members, vec![0, 1, 2]);
+    // The anchor follows raw content, so it does not depend on which crossing
+    // the walk reached first.
+    assert_eq!(pairs[0].canonical, 0);
+}
+
 fn at(start: usize, end: usize, tag: TypeTag) -> (ByteRange, TypeTag) {
     (ByteRange { start, end }, tag)
 }
