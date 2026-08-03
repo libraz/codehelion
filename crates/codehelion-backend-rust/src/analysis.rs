@@ -156,23 +156,29 @@ fn rustup_tool(
     })
 }
 
+/// Locate a tool, keeping the name it was found under.
+///
+/// The link is deliberately left unresolved. `rustup` is a multi-call binary
+/// that decides which program to be from the name it was started as, and some
+/// distributions install it as a link to `rustup-init`. Resolving that link
+/// turns every query into the installer, which answers a request to locate a
+/// toolchain by printing its own usage. `is_file` follows the link, so a name
+/// pointing at nothing is still reported here rather than at the first
+/// spawn.
 fn resolve_tool(tool: ra_ap_toolchain::Tool) -> Result<PathBuf, String> {
-    let path = tool.path().into_std_path_buf();
-    let path = path.canonicalize().map_err(|error| {
-        format!(
-            "resolving helper {} executable {}: {error}",
-            tool.name(),
+    executable_named(tool.path().into_std_path_buf(), tool.name())
+}
+
+/// Confirm a located tool can be started, returning the path unchanged.
+fn executable_named(path: PathBuf, tool: &str) -> Result<PathBuf, String> {
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!(
+            "helper {tool} executable {} is not a file",
             path.display()
-        )
-    })?;
-    if !path.is_file() {
-        return Err(format!(
-            "helper {} executable {} is not a file",
-            tool.name(),
-            path.display()
-        ));
+        ))
     }
-    Ok(path)
 }
 
 /// What a request permitted this process to run out of the project.
@@ -867,7 +873,26 @@ fn display_of(ty: &ra_ap_hir::Type<'_>, db: &RootDatabase) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cargo_config, helper_toolchain};
+    use super::{cargo_config, executable_named, helper_toolchain};
+
+    /// A located tool keeps the name it was found under, links and all.
+    ///
+    /// `rustup` is one binary that is several programs, told apart by the name
+    /// it was started as. Installations that link `rustup` to `rustup-init`
+    /// are ordinary, and following that link hands every toolchain query to
+    /// the installer instead.
+    #[test]
+    #[cfg(unix)]
+    #[allow(clippy::expect_used)] // Test setup requires a writable temporary directory.
+    fn a_linked_tool_keeps_the_name_it_was_found_under() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let target = directory.path().join("rustup-init");
+        std::fs::write(&target, "").expect("writing the link target");
+        let link = directory.path().join("rustup");
+        std::os::unix::fs::symlink(&target, &link).expect("linking one name to the other");
+
+        assert_eq!(executable_named(link.clone(), "Rustup"), Ok(link));
+    }
 
     #[test]
     #[allow(clippy::expect_used)] // Test setup requires an installed helper toolchain.
