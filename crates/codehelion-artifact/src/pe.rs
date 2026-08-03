@@ -92,10 +92,16 @@ impl PeCoffBackend {
         let mut ir = ArtifactIr::empty(ArtifactFormat::PeCoff, bytes);
         collect_sections(&file, &mut ir).map_err(|error| malformed(error.to_string()))?;
         collect_undefined_imports(file.symbols(), &mut ir);
-        let symbol_ranges = collect_symbols(&file, &mut ir)?;
-        if ir.symbols.is_empty() {
-            infer_text_regions(&file, &mut ir)?;
-        }
+        let named = collect_symbols(&file, &mut ir)?;
+        // An inferred region is offered to the PDB join like any other. A
+        // linked image is the case where the debug information is all there is
+        // to go on, so leaving the region out of the join would discard the
+        // only evidence for exactly the input that needs it.
+        let symbol_ranges = if ir.symbols.is_empty() {
+            infer_text_regions(&file, &mut ir)?
+        } else {
+            named
+        };
         if let Some(pdb_bytes) = pdb_bytes {
             collect_pdb_frames(&file, pdb_bytes, &symbol_ranges, &mut ir)?;
         }
@@ -111,6 +117,20 @@ impl PeCoffBackend {
         };
         Ok(ir)
     }
+}
+
+/// Put a PDB address into the same space the image's symbols are read in.
+///
+/// A PDB records a relative address, while the symbols and sections of a
+/// linked image are read at the address they will be loaded at. Comparing the
+/// two without saying which is which puts every line record below the first
+/// symbol, so nothing joins and the debug information silently counts for
+/// nothing. A relocatable object has no load address and this adds zero.
+fn symbol_address_of(file: &object::File<'_>, relative_address: u32) -> u64 {
+    use object::Object as _;
+
+    file.relative_address_base()
+        .saturating_add(u64::from(relative_address))
 }
 
 /// One parser-local symbol address range used to join PDB RVAs to stable IDs.
@@ -151,12 +171,22 @@ fn collect_symbols(
 /// Linked release images commonly omit the symbol table. One explicitly
 /// inferred region per text section says that code was observed while making
 /// clear that no function boundary was available.
-fn infer_text_regions(file: &object::File<'_>, ir: &mut ArtifactIr) -> Result<(), ArtifactError> {
-    crate::native::infer_text_regions(file, ir, |section, normalized, data| {
+fn infer_text_regions(
+    file: &object::File<'_>,
+    ir: &mut ArtifactIr,
+) -> Result<Vec<SymbolRange>, ArtifactError> {
+    let ranges = crate::native::infer_text_regions(file, ir, |section, normalized, data| {
         symbol_fingerprint(None, section, normalized, data)
     })
     .map_err(|error| malformed(error.to_string()))?;
-    Ok(())
+    Ok(ranges
+        .into_iter()
+        .map(|(fingerprint, address, size)| SymbolRange {
+            fingerprint,
+            start: address,
+            end: address.saturating_add(size),
+        })
+        .collect())
 }
 
 /// Attach PDB line records to symbol identities after checking `CodeView` identity.
@@ -236,7 +266,7 @@ fn collect_pdb_frames(
                 continue;
             };
             frames.push((
-                u64::from(rva.0),
+                symbol_address_of(file, rva.0),
                 crate::ArtifactInlineFrame {
                     evidence_kind: crate::ArtifactSourceLocationEvidenceKind::Pdb,
                     source: source.into_owned(),
@@ -404,6 +434,33 @@ mod tests {
                 .map(|value| value.version.as_str()),
             Some(PE_COFF_NORMALIZATION_VERSION)
         );
+    }
+
+    /// An inferred region is something the debug information can be joined to.
+    ///
+    /// A linked image usually has no symbol table, so this region is the only
+    /// thing a PDB's line records have to attach to. Handing back its address
+    /// range is what makes that possible; dropping it leaves the image read
+    /// as code nobody can say anything about.
+    #[test]
+    fn an_inferred_text_region_can_be_joined_to_debug_information() {
+        let bytes = coff_fixture_without_symbols();
+        let file = object::File::parse(bytes.as_slice()).expect("parse symbol-free COFF fixture");
+        let mut ir = ArtifactIr::empty(ArtifactFormat::PeCoff, &bytes);
+        let ranges = infer_text_regions(&file, &mut ir).expect("infer the text region");
+
+        assert_eq!(ranges.len(), ir.symbols.len());
+        assert_eq!(ranges[0].fingerprint, ir.symbols[0].fingerprint);
+        assert!(ranges[0].end > ranges[0].start);
+    }
+
+    /// A relocatable object is read where it sits, so nothing is added.
+    #[test]
+    fn a_relative_address_without_a_load_address_is_itself() {
+        let bytes = coff_fixture();
+        let file = object::File::parse(bytes.as_slice()).expect("parse COFF fixture");
+
+        assert_eq!(symbol_address_of(&file, 0x20), 0x20);
     }
 
     #[test]
