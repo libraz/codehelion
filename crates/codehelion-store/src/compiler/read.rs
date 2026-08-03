@@ -54,7 +54,7 @@ pub(super) fn helpers(
 pub(super) fn units(conn: &Connection, run_id: i64) -> Result<Vec<StoredCompilerUnit>, StoreError> {
     let mut statement = conn.prepare(
         "SELECT u.id, u.unit_name, u.file_path, u.variant_key, u.schema_version,
-                    u.unavailable_reason, u.has_cfg, u.effects_computed, u.data_flow_computed,
+                    u.unavailable_reason, u.unavailable_diagnostic, u.has_cfg, u.effects_computed, u.data_flow_computed,
                     h.name, h.version, u.anchored_at
              FROM compiler_unit u
              LEFT JOIN compiler_helper h ON h.id = u.compiler_helper_id
@@ -71,18 +71,19 @@ pub(super) fn units(conn: &Connection, run_id: i64) -> Result<Vec<StoredCompiler
                 },
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
                 (
-                    row.get::<_, i64>(6)? != 0,
                     row.get::<_, i64>(7)? != 0,
                     row.get::<_, i64>(8)? != 0,
+                    row.get::<_, i64>(9)? != 0,
                 ),
                 helper_ref(row)?,
-                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut units = Vec::with_capacity(rows.len());
-    for (id, unit, schema, reason, flags, helper, anchored_at) in rows {
+    for (id, unit, schema, reason, diagnostic, flags, helper, anchored_at) in rows {
         let outcome = match (schema, reason) {
             (Some(schema), _) => CompilerOutcome::Analyzed(Box::new(payload(
                 conn,
@@ -97,6 +98,7 @@ pub(super) fn units(conn: &Connection, run_id: i64) -> Result<Vec<StoredCompiler
             (None, Some(reason)) => CompilerOutcome::Unavailable {
                 unit,
                 reason: unavailability(&reason)?,
+                diagnostic,
             },
             // The schema forbids it; a database that arrives here anyway
             // is reported rather than guessed at.
@@ -122,16 +124,17 @@ pub(super) fn coverage(
     run_id: i64,
 ) -> Result<Option<CompilerCoverage>, StoreError> {
     let mut statement = conn.prepare(
-        "SELECT compiler_helper_id IS NULL, unavailable_reason, count(*)
+        "SELECT compiler_helper_id IS NULL, unavailable_reason, unavailable_diagnostic, count(*)
              FROM compiler_unit WHERE scan_run_id = ?1
-             GROUP BY compiler_helper_id IS NULL, unavailable_reason",
+             GROUP BY compiler_helper_id IS NULL, unavailable_reason, unavailable_diagnostic",
     )?;
     let rows = statement
         .query_map([run_id], |row| {
             Ok((
                 row.get::<_, i64>(0)? != 0,
                 row.get::<_, Option<String>>(1)?,
-                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -142,12 +145,15 @@ pub(super) fn coverage(
         restarts: restarts(conn, run_id)?,
         ..CompilerCoverage::default()
     };
-    for (unasked, reason, count) in rows {
+    for (unasked, reason, diagnostic, count) in rows {
         let count = u64::try_from(count).unwrap_or(0);
         match (unasked, reason) {
             (true, _) => coverage.not_asked += count,
             (false, None) => coverage.answered += count,
             (false, Some(reason)) => *coverage.unavailable.entry(reason).or_default() += count,
+        }
+        if let Some(diagnostic) = diagnostic {
+            *coverage.diagnostics.entry(diagnostic).or_default() += count;
         }
     }
     Ok(Some(coverage))
@@ -625,14 +631,14 @@ fn strings(conn: &Connection, sql: &str, id: i64) -> Result<Vec<String>, StoreEr
 }
 
 fn helper_ref(row: &Row<'_>) -> rusqlite::Result<Option<StoredHelperRef>> {
-    let name: Option<String> = row.get(9)?;
-    let version: Option<String> = row.get(10)?;
+    let name: Option<String> = row.get(10)?;
+    let version: Option<String> = row.get(11)?;
     Ok(name
         .zip(version)
         .map(|(name, version)| StoredHelperRef { name, version }))
 }
 
-/// A capability name as this v1 build reads it.
+/// A capability name as this v2 build reads it.
 fn capability(name: &str) -> Result<Capability, StoreError> {
     match name {
         "types" => Ok(Capability::Types),
@@ -641,7 +647,6 @@ fn capability(name: &str) -> Result<Capability, StoreError> {
         "mir_cfg" => Ok(Capability::MirCfg),
         "macro_expansion" => Ok(Capability::MacroExpansion),
         "template_instantiation" => Ok(Capability::TemplateInstantiation),
-        "overload_resolution" => Ok(Capability::OverloadResolution),
         _ => Err(StoreError::UnknownVocabulary {
             field: "compiler_helper_capability",
             value: name.to_owned(),

@@ -92,7 +92,7 @@ fn analyze(unit: &UnitRef) -> Analysis {
     reading(Path::new(&unit.file))
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .analyze(unit, &[Capability::Types])
+        .analyze(unit, &Capability::ALL)
         .expect("the helper should answer")
 }
 

@@ -150,7 +150,12 @@ fn from_dump(text: &str, functions: &[FunctionAnchor]) -> Option<ControlFlowGrap
 }
 
 fn heading_names(function: &DumpFunction, name: &str) -> bool {
-    function.heading.contains(&format!("{name}("))
+    function
+        .heading
+        .split_once('(')
+        .and_then(|(before_parameters, _)| before_parameters.split_whitespace().last())
+        .and_then(|qualified| qualified.rsplit("::").next())
+        == Some(name)
 }
 
 fn append_function(graph: &mut ControlFlowGraph, function: &DumpFunction, anchor: &Anchor) {
@@ -384,5 +389,15 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn heading_name_requires_the_final_identifier_to_match() {
+        let function = DumpFunction {
+            heading: "int namespace::total_sum(int value)".to_string(),
+            blocks: Vec::new(),
+        };
+        assert!(!heading_names(&function, "sum"));
+        assert!(heading_names(&function, "total_sum"));
     }
 }

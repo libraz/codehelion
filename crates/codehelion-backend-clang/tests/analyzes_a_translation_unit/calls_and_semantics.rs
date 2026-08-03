@@ -401,7 +401,7 @@ fn standard_algorithm_calls_carry_closed_api_names() {
             .iter()
             .filter(|call| call.api_name.as_deref() == Some("std::transform"))
             .count(),
-        2
+        3
     );
     assert_eq!(
         ir.calls
@@ -415,8 +415,8 @@ fn standard_algorithm_calls_carry_closed_api_names() {
             .iter()
             .filter(|call| call.api_name.as_deref() == Some("std::begin"))
             .count(),
-        6,
-        "two collection, two transform, and two filter functions each contribute one input source"
+        7,
+        "two collection, three transform, and two filter functions each contribute one input source"
     );
 }
 
@@ -496,7 +496,7 @@ fn macro_calls_are_anchored_at_the_invocation_and_results_are_stable() {
             .iter()
             .filter(|call| call.anchor.expansion.file == "src/calls.cpp")
             .count(),
-        57,
+        64,
         "every written source CallExpr is represented exactly once"
     );
     assert_eq!(

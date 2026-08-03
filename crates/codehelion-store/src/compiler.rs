@@ -77,6 +77,8 @@ pub enum CompilerOutcome {
         unit: UnitRef,
         /// Why there is no analysis of it.
         reason: Unavailability,
+        /// Bounded stderr emitted by the helper while reading this unit.
+        diagnostic: Option<String>,
     },
 }
 
@@ -105,6 +107,8 @@ pub struct CompilerCoverage {
     pub not_asked: u64,
     /// Files a helper was asked about and could not answer, by reason.
     pub unavailable: BTreeMap<String, u64>,
+    /// Bounded helper diagnostics, grouped by their exact text.
+    pub diagnostics: BTreeMap<String, u64>,
     /// How often the run had to restart a helper.
     ///
     /// `None` from a run that ran one and did not count. A run that started no

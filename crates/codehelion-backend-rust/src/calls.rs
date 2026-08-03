@@ -94,7 +94,9 @@ fn written_callee_range(node: &SyntaxNode) -> ra_ap_syntax::TextRange {
 /// An expansion has no physical source range of its own. Reusing the
 /// invocation's two-sided anchor says both what a fragment can point at and
 /// where the generated expression was actually written, while still allowing
-/// the compiler to resolve the call in the expanded syntax tree.
+/// the compiler to resolve the call in the expanded syntax tree. Descendant
+/// traversal order is retained in the returned vector; the protocol adapter
+/// uses that monotonic position when several calls share this anchor.
 pub(crate) fn collect_expansion(
     sema: &Semantics<'_, RootDatabase>,
     db: &RootDatabase,

@@ -20,6 +20,8 @@
 //! mock-helper deaf-on-poison    # hangs only for a unit named `poison`
 //! mock-helper dies              # exits mid-handshake
 //! mock-helper noisy-death       # complains on stderr, then exits
+//! mock-helper noisy-stdout       # writes a diagnostic to the protocol stream
+//! mock-helper oversized-frame    # declares a response frame over the ceiling
 //! mock-helper confused          # answers a request nobody made
 //! mock-helper refuses           # answers with a failure
 //! mock-helper chatty            # floods its standard error, then exits
@@ -30,7 +32,7 @@
 //! mock-helper allergic          # dies on any unit whose file is named `poison`
 //! ```
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::time::Duration;
 
 use codehelion_helper::ir::{
@@ -38,10 +40,14 @@ use codehelion_helper::ir::{
     Unavailability, UnitRef,
 };
 use codehelion_helper::protocol::{
-    BuildDescription, Capability, Execution, Failure, HelperIdentity, PROTOCOL_VERSION, Request,
-    RequestBody, Response, ResponseBody, read_frame, write_frame,
+    BuildDescription, Capability, Execution, Failure, HelperIdentity, MAX_FRAME_BYTES,
+    PROTOCOL_VERSION, Request, RequestBody, Response, ResponseBody, read_frame, write_frame,
 };
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the mock keeps each process-level fault mode visible beside its protocol response"
+)]
 fn main() {
     let behaviour = std::env::args()
         .nth(1)
@@ -59,6 +65,19 @@ fn main() {
     if behaviour == "noisy-death" {
         eprintln!("the toolchain this helper was built for is not installed");
         std::process::exit(3);
+    }
+    if behaviour == "noisy-stdout" {
+        // Deliberately not a frame: stdout is exclusively the protocol stream.
+        let _ = output.write_all(b"diagnostic\n");
+        let _ = output.flush();
+        return;
+    }
+    if behaviour == "oversized-frame" {
+        let declared = MAX_FRAME_BYTES.saturating_add(1).to_be_bytes();
+        let _ = output.write_all(&declared);
+        let _ = output.write_all(&[0]);
+        let _ = output.flush();
+        return;
     }
 
     loop {
@@ -109,6 +128,7 @@ fn main() {
             }
             RequestBody::Analyze(analyze) => {
                 if behaviour == "allergic" && analyze.unit.file.contains("poison") {
+                    eprintln!("mock compiler crashed while reading {}", analyze.unit.file);
                     std::process::exit(6);
                 }
                 let mut ir = analyzed(analyze.unit);

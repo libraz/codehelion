@@ -718,6 +718,10 @@ pub enum Unavailability {
     HelperDied,
     /// The helper answered, but not in a schema this build reads.
     UnreadableSchema,
+    /// The helper produced an IR response over the protocol frame ceiling.
+    ResponseTooLarge,
+    /// Consecutive helper crashes exhausted the restart budget for this run.
+    RestartBudgetExhausted,
     /// The helper does not analyze this kind of input.
     NotSupported,
 }
@@ -734,6 +738,8 @@ impl Unavailability {
             Self::HelperTimedOut => "helper_timed_out",
             Self::HelperDied => "helper_died",
             Self::UnreadableSchema => "unreadable_schema",
+            Self::ResponseTooLarge => "response_too_large",
+            Self::RestartBudgetExhausted => "restart_budget_exhausted",
             Self::NotSupported => "not_supported",
         }
     }

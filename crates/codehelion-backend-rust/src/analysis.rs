@@ -30,6 +30,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use codehelion_helper::ir::{
     Anchor, CompilerIr, ResolvedSymbol, ResolvedType, SourceRange, SymbolKind, Unavailability,
@@ -51,6 +52,127 @@ pub(crate) struct Loaded {
     pub(crate) db: RootDatabase,
     pub(crate) vfs: Vfs,
     pub(crate) root: PathBuf,
+}
+
+/// The helper's installed toolchain, fixed before any target workspace is
+/// inspected. The absolute sysroot tells rustup proxies to ignore a target
+/// repository's `rust-toolchain.toml`.
+#[derive(Clone)]
+struct HelperToolchain {
+    cargo: PathBuf,
+    rustup_toolchain: String,
+}
+
+static HELPER_TOOLCHAIN: OnceLock<Result<HelperToolchain, String>> = OnceLock::new();
+
+/// The channel this helper itself was built to use, embedded from the
+/// workspace's toolchain declaration rather than read from a target tree.
+const HELPER_TOOLCHAIN_CONFIG: &str = include_str!("../../../rust-toolchain.toml");
+
+fn helper_toolchain() -> Result<HelperToolchain, String> {
+    HELPER_TOOLCHAIN
+        .get_or_init(discover_helper_toolchain)
+        .clone()
+}
+
+#[allow(
+    clippy::disallowed_types,
+    reason = "this compiler helper is the designated subprocess isolation boundary"
+)]
+fn discover_helper_toolchain() -> Result<HelperToolchain, String> {
+    let rustup = resolve_tool(ra_ap_toolchain::Tool::Rustup)?;
+    let working_directory = tempfile::tempdir()
+        .map_err(|error| format!("creating an isolated toolchain directory: {error}"))?;
+    let channel = helper_toolchain_channel()?;
+    let cargo = rustup_tool(&rustup, channel, "cargo", working_directory.path())?;
+    let rustc = rustup_tool(&rustup, channel, "rustc", working_directory.path())?;
+    let output = std::process::Command::new(&rustc)
+        .args(["--print", "sysroot"])
+        .current_dir(working_directory.path())
+        .output()
+        .map_err(|error| format!("could not start helper Rustc: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "helper Rustc could not report its installed sysroot: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let sysroot = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let sysroot = sysroot.canonicalize().map_err(|error| {
+        format!(
+            "resolving helper Rustc sysroot {}: {error}",
+            sysroot.display()
+        )
+    })?;
+    if !sysroot.is_dir() {
+        return Err(format!(
+            "helper Rustc sysroot {} is not a directory",
+            sysroot.display()
+        ));
+    }
+    Ok(HelperToolchain {
+        cargo,
+        rustup_toolchain: sysroot.display().to_string(),
+    })
+}
+
+fn helper_toolchain_channel() -> Result<&'static str, String> {
+    HELPER_TOOLCHAIN_CONFIG
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("channel = \"")?.strip_suffix('"'))
+        .ok_or_else(|| "the bundled rust-toolchain.toml has no channel".to_owned())
+}
+
+#[allow(
+    clippy::disallowed_types,
+    reason = "this compiler helper is the designated subprocess isolation boundary"
+)]
+fn rustup_tool(
+    rustup: &Path,
+    channel: &str,
+    tool: &str,
+    working_directory: &Path,
+) -> Result<PathBuf, String> {
+    let output = std::process::Command::new(rustup)
+        .args(["which", tool])
+        .current_dir(working_directory)
+        .env("RUSTUP_TOOLCHAIN", channel)
+        .env("RUSTUP_AUTO_INSTALL", "0")
+        .output()
+        .map_err(|error| format!("could not locate helper {tool}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "could not locate helper {tool} for toolchain {channel}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    path.canonicalize().map_err(|error| {
+        format!(
+            "resolving helper {tool} executable {}: {error}",
+            path.display()
+        )
+    })
+}
+
+fn resolve_tool(tool: ra_ap_toolchain::Tool) -> Result<PathBuf, String> {
+    let path = tool.path().into_std_path_buf();
+    let path = path.canonicalize().map_err(|error| {
+        format!(
+            "resolving helper {} executable {}: {error}",
+            tool.name(),
+            path.display()
+        )
+    })?;
+    if !path.is_file() {
+        return Err(format!(
+            "helper {} executable {} is not a file",
+            tool.name(),
+            path.display()
+        ));
+    }
+    Ok(path)
 }
 
 /// What a request permitted this process to run out of the project.
@@ -197,7 +319,7 @@ fn has_build_script(manifest: &Path) -> bool {
 /// One value, so that what a run is told it was analysed under and what it was
 /// actually analysed under cannot drift apart: the description below and the
 /// load above are two readings of the same configuration.
-fn cargo_config() -> ra_ap_project_model::CargoConfig {
+fn cargo_config(toolchain: &HelperToolchain) -> ra_ap_project_model::CargoConfig {
     ra_ap_project_model::CargoConfig {
         // Without the standard library almost every type resolves to nothing,
         // and evidence made of unknowns is worse than no evidence: it looks
@@ -211,12 +333,29 @@ fn cargo_config() -> ra_ap_project_model::CargoConfig {
         // independently.
         extra_args: vec!["--offline".to_owned()],
         metadata_extra_args: vec!["--offline".to_owned()],
+        extra_env: [
+            (
+                "RUSTUP_TOOLCHAIN".to_owned(),
+                Some(toolchain.rustup_toolchain.clone()),
+            ),
+            ("RUSTUP_AUTO_INSTALL".to_owned(), Some("0".to_owned())),
+        ]
+        .into_iter()
+        .collect(),
         ..ra_ap_project_model::CargoConfig::default()
     }
 }
 
 fn project_workspace(manifest: &Path) -> Result<ra_ap_project_model::ProjectWorkspace, String> {
-    verify_locked_offline_metadata(manifest)?;
+    let toolchain = helper_toolchain()?;
+    project_workspace_with_toolchain(manifest, &toolchain)
+}
+
+fn project_workspace_with_toolchain(
+    manifest: &Path,
+    toolchain: &HelperToolchain,
+) -> Result<ra_ap_project_model::ProjectWorkspace, String> {
+    verify_locked_offline_metadata(manifest, toolchain)?;
     let path = manifest
         .to_str()
         .and_then(|path| ra_ap_vfs::AbsPathBuf::try_from(path).ok())
@@ -228,8 +367,9 @@ fn project_workspace(manifest: &Path) -> Result<ra_ap_project_model::ProjectWork
         })?;
     let found = ra_ap_project_model::ProjectManifest::from_manifest_file(path)
         .map_err(|error| error.to_string())?;
-    let workspace = ra_ap_project_model::ProjectWorkspace::load(found, &cargo_config(), &|_| {})
-        .map_err(|error| error.to_string())?;
+    let workspace =
+        ra_ap_project_model::ProjectWorkspace::load(found, &cargo_config(toolchain), &|_| {})
+            .map_err(|error| error.to_string())?;
     if let ra_ap_project_model::ProjectWorkspaceKind::Cargo {
         error: Some(error), ..
     } = &workspace.kind
@@ -247,8 +387,11 @@ fn project_workspace(manifest: &Path) -> Result<ra_ap_project_model::ProjectWork
     clippy::disallowed_types,
     reason = "this compiler helper is the designated subprocess isolation boundary"
 )]
-fn verify_locked_offline_metadata(manifest: &Path) -> Result<(), String> {
-    let output = std::process::Command::new("cargo")
+fn verify_locked_offline_metadata(
+    manifest: &Path,
+    toolchain: &HelperToolchain,
+) -> Result<(), String> {
+    let output = std::process::Command::new(&toolchain.cargo)
         .args([
             "metadata",
             "--format-version=1",
@@ -257,7 +400,13 @@ fn verify_locked_offline_metadata(manifest: &Path) -> Result<(), String> {
             "--manifest-path",
         ])
         .arg(manifest)
-        .current_dir(manifest.parent().unwrap_or_else(|| Path::new(".")))
+        .current_dir(
+            tempfile::tempdir()
+                .map_err(|error| format!("creating an isolated Cargo working directory: {error}"))?
+                .path(),
+        )
+        .env("RUSTUP_TOOLCHAIN", &toolchain.rustup_toolchain)
+        .env("RUSTUP_AUTO_INSTALL", "0")
         .output()
         .map_err(|error| format!("could not start Cargo metadata: {error}"))?;
     if output.status.success() {
@@ -311,7 +460,8 @@ fn describe_workspace(manifest: &Path) -> Result<BuildDescription, String> {
 }
 
 fn load(manifest: &Path, permitted: Permissions) -> Result<Loaded, String> {
-    let config = cargo_config();
+    let toolchain = helper_toolchain()?;
+    let config = cargo_config(&toolchain);
     let load_config = ra_ap_load_cargo::LoadCargoConfig {
         // The one setting here that runs the project's code, and the only
         // thing that turns it on is a permission that travelled with the
@@ -329,7 +479,7 @@ fn load(manifest: &Path, permitted: Permissions) -> Result<Loaded, String> {
     let root = manifest
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    project_workspace(manifest)?;
+    project_workspace_with_toolchain(manifest, &toolchain)?;
     let (db, vfs, _proc_macro) =
         ra_ap_load_cargo::load_workspace_at(manifest, &config, &load_config, &|_| {})
             .map_err(|error| error.to_string())?;
@@ -717,12 +867,28 @@ fn display_of(ty: &ra_ap_hir::Type<'_>, db: &RootDatabase) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::cargo_config;
+    use super::{cargo_config, helper_toolchain};
 
     #[test]
+    #[allow(clippy::expect_used)] // Test setup requires an installed helper toolchain.
     fn rust_analyzer_metadata_is_offline_after_the_locked_preflight() {
-        let config = cargo_config();
+        let toolchain = helper_toolchain().expect("helper toolchain is available to tests");
+        let config = cargo_config(&toolchain);
         assert_eq!(config.extra_args, ["--offline"]);
         assert_eq!(config.metadata_extra_args, ["--offline"]);
+        assert_eq!(
+            config
+                .extra_env
+                .get("RUSTUP_AUTO_INSTALL")
+                .and_then(Option::as_deref),
+            Some("0")
+        );
+        assert_eq!(
+            config
+                .extra_env
+                .get("RUSTUP_TOOLCHAIN")
+                .and_then(Option::as_deref),
+            Some(toolchain.rustup_toolchain.as_str())
+        );
     }
 }

@@ -15,6 +15,20 @@ use codehelion_helper::ir::{
     SemanticConstruct, SemanticConstructKind, SourceRange, SymbolKind, TypeCategory,
     UnexpandedMacro, UnexpandedMacroReason, UnitRef,
 };
+use codehelion_helper::protocol::{
+    Analyze, BuildDescription, ClientIdentity, CompileCommandSelector, Failure, HelperIdentity,
+    PROTOCOL_VERSION, Request, RequestBody, Response, ResponseBody,
+};
+use codehelion_helper::{Capability, Execution, Unavailability};
+use serde::{Deserialize, Serialize};
+
+/// Every request and response envelope this protocol revision can write.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ProtocolEnvelope {
+    protocol_version: u32,
+    requests: Vec<Request>,
+    responses: Vec<Response>,
+}
 
 /// Every field of every message occupied, so nothing can change unobserved.
 #[allow(clippy::too_many_lines)]
@@ -173,6 +187,113 @@ fn sample_expressions() -> Vec<ResolvedExpression> {
 
 /// The stored document for the only compiler-IR contract this build writes.
 const GOLDEN: &str = include_str!("golden/compiler-ir-v1.json");
+const PROTOCOL_GOLDEN: &str = include_str!("golden/helper-protocol-v3.json");
+
+fn protocol_unit() -> UnitRef {
+    UnitRef {
+        unit: "render".to_string(),
+        file: "src/render.rs".to_string(),
+        variant: "target=host".to_string(),
+    }
+}
+
+/// Every envelope variant with each of its fields occupied, so changing a
+/// field or wire spelling cannot pass merely because compiler IR is pinned.
+fn protocol_envelope() -> ProtocolEnvelope {
+    ProtocolEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        requests: vec![
+            Request {
+                protocol_version: PROTOCOL_VERSION,
+                id: 1,
+                body: RequestBody::Handshake(ClientIdentity {
+                    client: "codehelion".to_string(),
+                    client_version: "0.1.0".to_string(),
+                    protocol: PROTOCOL_VERSION,
+                }),
+            },
+            Request {
+                protocol_version: PROTOCOL_VERSION,
+                id: 2,
+                body: RequestBody::DescribeBuild(codehelion_helper::protocol::DescribeBuild {
+                    root: "/projects/ledger".to_string(),
+                }),
+            },
+            Request {
+                protocol_version: PROTOCOL_VERSION,
+                id: 3,
+                body: RequestBody::Analyze(Analyze {
+                    unit: protocol_unit(),
+                    compile_command: Some(CompileCommandSelector {
+                        file: "/projects/ledger/src/render.cc".to_string(),
+                        directory: Some("/projects/ledger".to_string()),
+                        arguments: vec![
+                            "clang++".to_string(),
+                            "-std=c++20".to_string(),
+                            "src/render.cc".to_string(),
+                        ],
+                    }),
+                    read_boundary: None,
+                    want: Capability::ALL.into(),
+                    permitted: vec![Execution::BuildScript, Execution::GeneratedSource],
+                }),
+            },
+            Request {
+                protocol_version: PROTOCOL_VERSION,
+                id: 4,
+                body: RequestBody::Shutdown,
+            },
+        ],
+        responses: vec![
+            Response {
+                protocol_version: PROTOCOL_VERSION,
+                id: 1,
+                body: ResponseBody::Handshake(Box::new(HelperIdentity {
+                    name: "codehelion-backend-clang".to_string(),
+                    version: "0.1.0".to_string(),
+                    protocol: PROTOCOL_VERSION,
+                    toolchains: vec!["clang 19.0.0".to_string()],
+                    capabilities: Capability::ALL.into(),
+                    executes: vec![Execution::BuildScript, Execution::GeneratedSource],
+                })),
+            },
+            Response {
+                protocol_version: PROTOCOL_VERSION,
+                id: 2,
+                body: ResponseBody::Build(Box::new(BuildDescription {
+                    features: vec!["ledger/serde".to_string()],
+                    cfgs: vec!["target_os=linux".to_string()],
+                })),
+            },
+            Response {
+                protocol_version: PROTOCOL_VERSION,
+                id: 3,
+                body: ResponseBody::Analyzed(Box::new(CompilerIr::empty(protocol_unit()))),
+            },
+            Response {
+                protocol_version: PROTOCOL_VERSION,
+                id: 4,
+                body: ResponseBody::Unavailable {
+                    unit: protocol_unit(),
+                    reason: Unavailability::RequiresExecution,
+                },
+            },
+            Response {
+                protocol_version: PROTOCOL_VERSION,
+                id: 5,
+                body: ResponseBody::Shutdown,
+            },
+            Response {
+                protocol_version: PROTOCOL_VERSION,
+                id: 6,
+                body: ResponseBody::Failed(Failure {
+                    code: "unsupported_request".to_string(),
+                    message: "this helper cannot analyze that language".to_string(),
+                }),
+            },
+        ],
+    }
+}
 
 #[test]
 fn the_wire_shape_matches_the_document_for_this_version() {
@@ -189,6 +310,19 @@ fn the_document_reads_back_as_what_produced_it() {
     let parsed: CompilerIr = serde_json::from_str(GOLDEN).unwrap();
     assert_eq!(parsed, canonical());
     assert!(parsed.is_readable());
+}
+
+#[test]
+fn protocol_envelopes_match_the_document_for_this_version() {
+    assert_eq!(PROTOCOL_VERSION, 3);
+    let written = serde_json::to_string_pretty(&protocol_envelope()).unwrap();
+    assert_eq!(written, PROTOCOL_GOLDEN.trim_end());
+}
+
+#[test]
+fn protocol_envelope_document_reads_back_as_what_produced_it() {
+    let parsed: ProtocolEnvelope = serde_json::from_str(PROTOCOL_GOLDEN).unwrap();
+    assert_eq!(parsed, protocol_envelope());
 }
 
 /// Resource categories are optional for older producers, but when a current

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use codehelion_helper::client::{Analysis, Helper, HelperError, MAX_DIAGNOSTIC_LINES, Supervisor};
 use codehelion_helper::ir::{TypeCategory, Unavailability, UnitRef};
-use codehelion_helper::protocol::{Capability, Execution, PROTOCOL_VERSION};
+use codehelion_helper::protocol::{Capability, Execution, FrameError, PROTOCOL_VERSION};
 
 /// The deadline for tests that are not about a deadline.
 ///
@@ -54,9 +54,12 @@ fn a_helper_from_another_era_is_named_as_such_rather_than_used() {
         matches!(error, HelperError::NoCommonProtocol { .. }),
         "{error:?}"
     );
-    // The message has to identify the exact v1 protocol contract.
+    // The message has to identify the exact protocol contract this build uses.
     let said = error.to_string();
-    assert!(said.contains("requires protocol 1"), "{said}");
+    assert!(
+        said.contains(&format!("requires protocol {PROTOCOL_VERSION}")),
+        "{said}"
+    );
 }
 
 #[test]
@@ -139,6 +142,14 @@ fn a_busy_helper_shutdown_does_not_spend_another_analysis_timeout() {
         matches!(analysis, HelperError::TimedOut { .. }),
         "{analysis:?}"
     );
+    assert!(helper.is_poisoned_after_timeout());
+    let next = helper
+        .analyze(&unit("src/after-timeout.rs"), &[Capability::Types])
+        .expect_err("a delayed response cannot be paired with a new request");
+    assert!(
+        matches!(next, HelperError::PoisonedAfterTimeout),
+        "{next:?}"
+    );
 
     let started = Instant::now();
     helper.shutdown().expect("the hung child is killed");
@@ -168,6 +179,24 @@ fn a_helper_that_stops_answering_is_given_up_on_at_the_deadline() {
 fn a_helper_that_dies_mid_handshake_is_reported_as_dead_not_as_a_broken_pipe() {
     let error = start("dies", DEADLINE).expect_err("it exits before answering");
     assert!(matches!(error, HelperError::Died { .. }), "{error:?}");
+}
+
+#[test]
+fn stdout_diagnostics_are_refused_as_a_corrupt_protocol_frame() {
+    let error = start("noisy-stdout", DEADLINE).expect_err("stdout is the protocol only");
+    assert!(
+        matches!(error, HelperError::Frame(FrameError::TooLarge { .. })),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn an_oversized_protocol_frame_is_refused_before_it_is_allocated() {
+    let error = start("oversized-frame", DEADLINE).expect_err("frame exceeds the ceiling");
+    assert!(
+        matches!(error, HelperError::Frame(FrameError::TooLarge { .. })),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -336,6 +365,11 @@ fn the_unit_that_kills_a_helper_is_set_aside_and_the_rest_go_on() {
         Analysis::Missing(Unavailability::HelperDied)
     ));
     assert!(supervisor.has_set_aside(&unit("src/poison.rs")));
+    assert_eq!(
+        supervisor.take_diagnostics(),
+        vec!["mock compiler crashed while reading src/poison.rs"],
+        "the diagnostic follows the unavailable unit after its helper has exited"
+    );
     assert_eq!(supervisor.restarts(), 1, "one retry, so one restart");
     // And the project is still analyzable.
     assert!(matches!(

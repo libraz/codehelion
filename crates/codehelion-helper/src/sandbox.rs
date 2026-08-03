@@ -214,10 +214,40 @@ pub fn spawn(path: &Path, args: &[&str], request: SandboxRequest) -> Result<Chil
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_child_memory_limit(&mut command, request);
+    configure_child_process_group(&mut command);
     command.spawn().map_err(|source| SandboxError::NotStarted {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Put the helper in a separate process group so its compiler descendants can
+/// be terminated with it after a request deadline.
+#[cfg(unix)]
+#[allow(clippy::disallowed_types)]
+fn configure_child_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+/// Process groups are unavailable on this platform; the direct child remains
+/// the best containment boundary available to the caller.
+#[cfg(not(unix))]
+#[allow(clippy::disallowed_types)]
+const fn configure_child_process_group(_command: &mut Command) {}
+
+/// Terminate a helper and every compiler process in its dedicated group.
+#[allow(clippy::disallowed_types)]
+pub fn terminate(child: &mut Child) {
+    #[cfg(unix)]
+    if let Ok(pid) = i32::try_from(child.id()) {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+
+        let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
+    }
+    let _ = child.kill();
 }
 
 /// Put the requested limit in the child environment, never inheriting an
@@ -232,9 +262,43 @@ fn configure_child_memory_limit(command: &mut Command, request: SandboxRequest) 
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_types, clippy::expect_used)]
+#[allow(clippy::disallowed_types, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn terminating_a_helper_kills_its_whole_process_group() {
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        use nix::errno::Errno;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        let mut helper = spawn(
+            Path::new("/bin/sh"),
+            &["-c", "sleep 30 & wait"],
+            SandboxRequest::unrestricted(),
+        )
+        .expect("start helper with compiler-like background child");
+        let group = i32::try_from(helper.id()).expect("process id fits pid_t");
+
+        terminate(&mut helper);
+        helper.wait().expect("reap terminated helper");
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match kill(Pid::from_raw(-group), None) {
+                Err(Errno::ESRCH) => break,
+                Ok(()) | Err(_) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Ok(()) => panic!("compiler descendant process group survived termination"),
+                Err(error) => panic!("checking helper process group failed: {error}"),
+            }
+        }
+    }
 
     #[test]
     fn unrestricted_helpers_are_supported_on_the_portable_backend() {

@@ -27,6 +27,7 @@ fn a_unit_nobody_could_analyse_is_recorded_with_the_reason() {
         CompilerOutcome::Unavailable {
             unit: build,
             reason: Unavailability::RequiresExecution,
+            diagnostic: None,
         }
     );
     // Ruled out before any helper was involved, so nothing names one.
@@ -36,12 +37,42 @@ fn a_unit_nobody_could_analyse_is_recorded_with_the_reason() {
         CompilerOutcome::Unavailable {
             unit: missing,
             reason: Unavailability::NoBuildInformation,
+            diagnostic: None,
         }
     );
     assert_eq!(
         stored[1].helper.as_ref().map(|helper| helper.name.as_str()),
         Some("codehelion-backend-rust")
     );
+}
+
+#[test]
+fn a_helpers_bounded_diagnostic_round_trips_with_its_unavailable_unit() {
+    let (_dir, mut store, _path) = on_disk();
+    let variant = variant();
+    let unit = unit_ref("crate", "src/lib.rs");
+    let row = CompilerUnitRow {
+        helper: Some(0),
+        outcome: CompilerOutcome::Unavailable {
+            unit: unit.clone(),
+            reason: Unavailability::HelperDied,
+            diagnostic: Some("no compiler library is installed".to_string()),
+        },
+    };
+    let run = store
+        .record_snapshot(&snapshot("/tree", &variant, vec![helper_row()], vec![row]))
+        .unwrap();
+    let stored = store.run_compiler_units(run).unwrap();
+    assert_eq!(
+        stored[0].outcome,
+        CompilerOutcome::Unavailable {
+            unit,
+            reason: Unavailability::HelperDied,
+            diagnostic: Some("no compiler library is installed".to_string()),
+        }
+    );
+    let coverage = store.run_compiler_coverage(run).unwrap().unwrap();
+    assert_eq!(coverage.diagnostics["no compiler library is installed"], 1);
 }
 /// A scan that asked nothing and one whose every answer was unavailable are
 /// different records, and only the latter has compiler-unit rows.

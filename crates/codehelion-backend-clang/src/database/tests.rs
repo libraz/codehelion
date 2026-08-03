@@ -111,6 +111,45 @@ fn compiler_arguments_fail_closed_for_execution_and_output_options() {
 }
 
 #[test]
+fn untrusted_direct_reads_stay_under_the_scan_boundary() {
+    let directory = tempfile::tempdir().expect("create boundary");
+    let boundary = directory.path();
+    std::fs::create_dir(boundary.join("include")).expect("create include directory");
+    std::fs::write(boundary.join("include/generated.h"), "#define OK 1")
+        .expect("create included header");
+    let outside = tempfile::NamedTempFile::new().expect("create outside header");
+
+    let accepted = ValidatedArguments::parse(&[
+        format!("-working-directory={}", boundary.display()),
+        "-include".to_string(),
+        "include/generated.h".to_string(),
+        "-imacros".to_string(),
+        "include/generated.h".to_string(),
+    ])
+    .expect("arguments parse");
+    assert!(accepted.reads_within(boundary));
+
+    let escaped = ValidatedArguments::parse(&[
+        format!("-working-directory={}", boundary.display()),
+        "-include".to_string(),
+        outside.path().display().to_string(),
+    ])
+    .expect("arguments parse");
+    assert!(!escaped.reads_within(boundary));
+
+    let external_directory = ValidatedArguments::parse(&[
+        format!(
+            "-working-directory={}",
+            outside.path().parent().unwrap().display()
+        ),
+        "-imacros".to_string(),
+        outside.path().display().to_string(),
+    ])
+    .expect("arguments parse");
+    assert!(!external_directory.reads_within(boundary));
+}
+
+#[test]
 fn allow_list_retains_joined_and_separate_semantic_inputs() {
     let arguments = [
         "-working-directory=/work/build",

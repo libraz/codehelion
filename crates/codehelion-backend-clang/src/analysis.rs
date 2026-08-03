@@ -70,6 +70,7 @@ pub(crate) fn analyze(
     unit: &UnitRef,
     database: &Database,
     selector: Option<&CompileCommandSelector>,
+    read_boundary: Option<&Path>,
     want: &[Capability],
 ) -> Outcome {
     let Some(entry) = database.unit(&unit.unit, selector) else {
@@ -83,6 +84,9 @@ pub(crate) fn analyze(
         // a build variant this helper cannot safely answer about.
         return Outcome::Unavailable(Unavailability::NoBuildInformation);
     };
+    if read_boundary.is_some_and(|boundary| !arguments.reads_within(boundary)) {
+        return Outcome::Unavailable(Unavailability::NoBuildInformation);
+    }
     let index = Index::new(clang, false, false);
     let Ok(parsed) = index
         .parser(&entry.file)
@@ -292,7 +296,7 @@ impl<'a> Reading<'a> {
     /// with it, and declarations with the same name must remain distinct until
     /// the dump bridge rejects an ambiguity rather than merging them here.
     fn remember_function(&mut self, entity: Entity<'_>) {
-        if !callable(entity.get_kind())
+        if !cfg_callable(entity)
             || !entity
                 .get_children()
                 .iter()
@@ -691,6 +695,28 @@ fn call_target_order(left: &CallTarget, right: &CallTarget) -> std::cmp::Orderin
     }
 }
 
+/// Whether a declaration has a concrete body that Clang can dump as one CFG.
+///
+/// Template definitions are not concrete functions: one source definition can
+/// produce several specializations, while `debug.DumpCFG` identifies only a
+/// human-readable heading. Omitting them is safer than attaching a dump from
+/// one specialization to the written template definition.
+fn cfg_callable(entity: Entity<'_>) -> bool {
+    cfg_callable_kind(
+        entity.get_kind(),
+        entity.get_semantic_parent().map(|parent| parent.get_kind()),
+    )
+}
+
+fn cfg_callable_kind(kind: EntityKind, semantic_parent: Option<EntityKind>) -> bool {
+    callable(kind)
+        && kind != EntityKind::FunctionTemplate
+        && !matches!(
+            semantic_parent,
+            Some(EntityKind::ClassTemplate | EntityKind::ClassTemplatePartialSpecialization)
+        )
+}
+
 /// Whether an entity is itself something a call can name.
 const fn callable(kind: EntityKind) -> bool {
     matches!(
@@ -758,4 +784,23 @@ const fn symbol_kind(kind: EntityKind) -> Option<SymbolKind> {
         EntityKind::Namespace | EntityKind::NamespaceAlias => SymbolKind::Namespace,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cfgs_are_not_requested_for_template_definitions() {
+        assert!(cfg_callable_kind(EntityKind::FunctionDecl, None));
+        assert!(!cfg_callable_kind(EntityKind::FunctionTemplate, None));
+        assert!(!cfg_callable_kind(
+            EntityKind::Method,
+            Some(EntityKind::ClassTemplate)
+        ));
+        assert!(!cfg_callable_kind(
+            EntityKind::Method,
+            Some(EntityKind::ClassTemplatePartialSpecialization)
+        ));
+    }
 }

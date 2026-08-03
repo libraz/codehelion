@@ -115,6 +115,46 @@ impl ValidatedArguments {
     pub(crate) fn as_slice(&self) -> &[String] {
         &self.0
     }
+
+    /// Whether every direct source-file read stays below `boundary`.
+    ///
+    /// Only options that make Clang open a named file are checked here. Include
+    /// search paths remain available: they select headers as part of normal
+    /// compilation, while `-include` and `-imacros` blindly open a caller
+    /// supplied file before parsing the translation unit.
+    pub(crate) fn reads_within(&self, boundary: &Path) -> bool {
+        let boundary = canonical(boundary);
+        let mut directory = boundary.clone();
+        let mut index = 0;
+        while index < self.0.len() {
+            let argument = &self.0[index];
+            let (option, value, consumed) = match argument.as_str() {
+                "-include" | "-imacros" | "-working-directory" => {
+                    let Some(value) = self.0.get(index + 1) else {
+                        return false;
+                    };
+                    (argument.as_str(), value.as_str(), 2)
+                }
+                _ => {
+                    if let Some(value) = argument.strip_prefix("-working-directory=") {
+                        ("-working-directory", value, 1)
+                    } else {
+                        index += 1;
+                        continue;
+                    }
+                }
+            };
+            let path = canonical(&resolve(Some(&directory), Path::new(value)));
+            if !path.starts_with(&boundary) {
+                return false;
+            }
+            if option == "-working-directory" {
+                directory = path;
+            }
+            index += consumed;
+        }
+        true
+    }
 }
 
 /// Read-only switches whose meaning does not consume another argument.

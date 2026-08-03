@@ -24,11 +24,12 @@ ra_ap_ide_db = "0.0.344"
 ra_ap_load-cargo = "0.0.344"
 ra_ap_project_model = "0.0.344"
 ra_ap_syntax = "0.0.344"
+ra_ap_toolchain = "0.0.344"
 ra_ap_vfs = "0.0.344"
+tempfile = "3"
 
 [dev-dependencies]
 codehelion-fixtures = { version = "0.1.0", path = "../codehelion-fixtures" }
-tempfile = "3"
 
 [lints]
 workspace = true

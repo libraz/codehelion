@@ -29,7 +29,7 @@ use crate::ir::{CompilerIr, Unavailability, UnitRef};
 ///
 /// The product has not been released, so clients and helpers use the complete
 /// current protocol directly.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Largest payload a single frame may declare.
 ///
@@ -87,8 +87,6 @@ pub enum Capability {
     MacroExpansion,
     /// Template or generic instantiation traced to its definition.
     TemplateInstantiation,
-    /// Which overload a call resolved to.
-    OverloadResolution,
 }
 
 /// What a run does when a helper cannot supply a capability.
@@ -103,14 +101,13 @@ pub enum Absence {
 
 impl Capability {
     /// Every capability this protocol revision understands.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::Types,
         Self::NameResolution,
         Self::CallTargets,
         Self::MirCfg,
         Self::MacroExpansion,
         Self::TemplateInstantiation,
-        Self::OverloadResolution,
     ];
 
     /// Stable lowercase identifier, the same spelling this serializes as.
@@ -123,7 +120,6 @@ impl Capability {
             Self::MirCfg => "mir_cfg",
             Self::MacroExpansion => "macro_expansion",
             Self::TemplateInstantiation => "template_instantiation",
-            Self::OverloadResolution => "overload_resolution",
         }
     }
 
@@ -146,8 +142,7 @@ impl Capability {
             Self::CallTargets
             | Self::MirCfg
             | Self::MacroExpansion
-            | Self::TemplateInstantiation
-            | Self::OverloadResolution => Absence::Degrade,
+            | Self::TemplateInstantiation => Absence::Degrade,
         }
     }
 }
@@ -227,6 +222,12 @@ pub struct Analyze {
     /// recorded command identity rather than a database index, because an
     /// index changes when an unrelated command is inserted or reordered.
     pub compile_command: Option<CompileCommandSelector>,
+    /// Canonical scan-root boundary for paths a compilation command may read.
+    ///
+    /// Set only for an untrusted scan. Helpers must refuse path-bearing
+    /// compiler arguments that resolve outside this directory; omitting it
+    /// preserves the configured, trusted compilation-database behaviour.
+    pub read_boundary: Option<String>,
     /// What to spend time on.
     ///
     /// Never more than the helper offered at handshake. Asking for less than it
@@ -648,8 +649,7 @@ mod tests {
     #[test]
     fn a_capability_this_build_cannot_name_is_rejected() {
         assert!(
-            serde_json::from_str::<Vec<Capability>>(r#"["types","something_from_a_newer_helper"]"#)
-                .is_err()
+            serde_json::from_str::<Vec<Capability>>(r#"["types","overload_resolution"]"#).is_err()
         );
     }
 
@@ -664,7 +664,6 @@ mod tests {
             Capability::MirCfg,
             Capability::MacroExpansion,
             Capability::TemplateInstantiation,
-            Capability::OverloadResolution,
         ] {
             assert_eq!(capability.absence(), Absence::Degrade, "{capability:?}");
         }

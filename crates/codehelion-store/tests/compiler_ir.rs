@@ -95,7 +95,7 @@ fn helper_row() -> CompilerHelperRow {
         identity: HelperIdentity {
             name: "codehelion-backend-rust".to_string(),
             version: "0.1.0".to_string(),
-            protocol: 1,
+            protocol: 2,
             toolchains: vec!["1.85.0".to_string(), "1.86.0".to_string()],
             capabilities: vec![
                 Capability::CallTargets,
@@ -323,7 +323,6 @@ fn snapshot<'a>(
         groups: Vec::new(),
         sibling_groups: Vec::new(),
         near_misses: Vec::new(),
-        features: Vec::new(),
         files: Vec::new(),
         compiler_helpers: helpers,
         compiler_units: units,
@@ -345,7 +344,11 @@ const fn unavailable(
 ) -> CompilerUnitRow {
     CompilerUnitRow {
         helper,
-        outcome: CompilerOutcome::Unavailable { unit, reason },
+        outcome: CompilerOutcome::Unavailable {
+            unit,
+            reason,
+            diagnostic: None,
+        },
     }
 }
 

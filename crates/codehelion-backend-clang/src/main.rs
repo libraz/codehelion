@@ -165,6 +165,7 @@ impl Backend for ClangBackend<'_> {
             &request.unit,
             &database,
             request.compile_command.as_ref(),
+            request.read_boundary.as_deref().map(Path::new),
             &request.want,
         ) {
             Outcome::Analyzed(mut ir) => {

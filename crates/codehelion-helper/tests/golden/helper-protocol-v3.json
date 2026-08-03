@@ -1,0 +1,164 @@
+{
+  "protocol_version": 3,
+  "requests": [
+    {
+      "protocol_version": 3,
+      "id": 1,
+      "body": {
+        "kind": "handshake",
+        "client": "codehelion",
+        "client_version": "0.1.0",
+        "protocol": 3
+      }
+    },
+    {
+      "protocol_version": 3,
+      "id": 2,
+      "body": {
+        "kind": "describe_build",
+        "root": "/projects/ledger"
+      }
+    },
+    {
+      "protocol_version": 3,
+      "id": 3,
+      "body": {
+        "kind": "analyze",
+        "unit": {
+          "unit": "render",
+          "file": "src/render.rs",
+          "variant": "target=host"
+        },
+        "compile_command": {
+          "file": "/projects/ledger/src/render.cc",
+          "directory": "/projects/ledger",
+          "arguments": [
+            "clang++",
+            "-std=c++20",
+            "src/render.cc"
+          ]
+        },
+        "read_boundary": null,
+        "want": [
+          "types",
+          "name_resolution",
+          "call_targets",
+          "mir_cfg",
+          "macro_expansion",
+          "template_instantiation"
+        ],
+        "permitted": [
+          "build-script",
+          "generated-source"
+        ]
+      }
+    },
+    {
+      "protocol_version": 3,
+      "id": 4,
+      "body": {
+        "kind": "shutdown"
+      }
+    }
+  ],
+  "responses": [
+    {
+      "protocol_version": 3,
+      "id": 1,
+      "body": {
+        "kind": "handshake",
+        "name": "codehelion-backend-clang",
+        "version": "0.1.0",
+        "protocol": 3,
+        "toolchains": [
+          "clang 19.0.0"
+        ],
+        "capabilities": [
+          "types",
+          "name_resolution",
+          "call_targets",
+          "mir_cfg",
+          "macro_expansion",
+          "template_instantiation"
+        ],
+        "executes": [
+          "build-script",
+          "generated-source"
+        ]
+      }
+    },
+    {
+      "protocol_version": 3,
+      "id": 2,
+      "body": {
+        "kind": "build",
+        "features": [
+          "ledger/serde"
+        ],
+        "cfgs": [
+          "target_os=linux"
+        ]
+      }
+    },
+    {
+      "protocol_version": 3,
+      "id": 3,
+      "body": {
+        "kind": "analyzed",
+        "schema_version": "compiler-ir-v1",
+        "unit": {
+          "unit": "render",
+          "file": "src/render.rs",
+          "variant": "target=host"
+        },
+        "anchored_at": null,
+        "symbols": [],
+        "types": [],
+        "calls": [],
+        "semantic_constructs": [],
+        "expressions": [],
+        "unexpanded_macros": [],
+        "cfg": null,
+        "instantiations": [],
+        "effects": {
+          "computed": false,
+          "writes": [],
+          "interactions": []
+        },
+        "data_flow": {
+          "computed": false,
+          "flows": []
+        }
+      }
+    },
+    {
+      "protocol_version": 3,
+      "id": 4,
+      "body": {
+        "kind": "unavailable",
+        "unit": {
+          "unit": "render",
+          "file": "src/render.rs",
+          "variant": "target=host"
+        },
+        "reason": "requires_execution"
+      }
+    },
+    {
+      "protocol_version": 3,
+      "id": 5,
+      "body": {
+        "kind": "shutdown"
+      }
+    },
+    {
+      "protocol_version": 3,
+      "id": 6,
+      "body": {
+        "kind": "failed",
+        "code": "unsupported_request",
+        "message": "this helper cannot analyze that language"
+      }
+    }
+  ]
+}

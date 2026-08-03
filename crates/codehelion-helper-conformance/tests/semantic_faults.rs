@@ -88,6 +88,31 @@ fn scan(root: &Path, behaviour: &str, bin: &Path) -> Value {
     serde_json::from_slice(&output.stdout).expect("semantic scan emits JSON")
 }
 
+#[allow(clippy::disallowed_types)]
+fn scan_with_explicit_helper(root: &Path, behaviour: &str, helper: &Path) -> Value {
+    let output = Command::new(CLI)
+        .current_dir(root)
+        .env("CODEHELION_MOCK_HELPER_BEHAVIOUR", behaviour)
+        .args([
+            "scan",
+            ".",
+            "--mode",
+            "semantic",
+            "--format",
+            "json",
+            "--helper",
+            &format!("rust={}", helper.display()),
+        ])
+        .output()
+        .expect("run the semantic CLI wrapper with an explicit helper");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("semantic scan emits JSON")
+}
+
 fn unavailable(report: &Value) -> BTreeMap<String, u64> {
     serde_json::from_value(report["summary"]["compiler"]["unavailable"].clone())
         .expect("compiler coverage has unavailable counts")
@@ -149,6 +174,20 @@ fn assert_fault_is_partial(behaviour: &str, reason: Unavailability, timeout_ms: 
         "{report}"
     );
     records_fault(fixture.path(), &report, reason);
+}
+
+#[test]
+fn an_explicit_helper_path_is_used_without_a_sibling_or_path_lookup() {
+    let fixture = fixture();
+    let helper = fixture.path().join("named-anything");
+    std::fs::copy(MOCK, &helper).expect("copy the mock to the explicit path");
+    let report = scan_with_explicit_helper(fixture.path(), "well-behaved", &helper);
+    assert!(
+        report["summary"]["compiler"]["answered"]
+            .as_u64()
+            .is_some_and(|answered| answered > 0),
+        "{report}"
+    );
 }
 
 #[test]

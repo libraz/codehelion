@@ -61,6 +61,14 @@ std::vector<long> doubled(std::vector<long> input) {
   return output;
 }
 
+std::vector<long> doubled_again(std::vector<long> input) {
+  std::vector<long> output;
+  auto first = input.begin();
+  std::transform(first, input.end(), std::back_inserter(output),
+                 [](long value) { return value * 2; });
+  return output;
+}
+
 std::vector<long> tripled(std::vector<long> input) {
   std::vector<long> output;
   auto first = input.begin();

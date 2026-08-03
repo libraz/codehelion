@@ -29,7 +29,9 @@ mod occurrences;
 mod types;
 
 use codehelion_helper::PROTOCOL_VERSION;
-use codehelion_helper::ir::COMPILER_IR_SCHEMA_VERSION;
+use codehelion_helper::ir::{
+    COMPILER_IR_SCHEMA_VERSION, CompilerIr, DataFlowSummary, EffectSummary,
+};
 use codehelion_helper::protocol::{
     Analyze, BuildDescription, Capability, DescribeBuild, Execution, Failure, HelperIdentity,
 };
@@ -120,12 +122,107 @@ impl Backend for RustBackend {
         match self.workspaces.analyze(&request.unit, permitted) {
             Outcome::Analyzed(mut ir) => {
                 ir.schema_version = COMPILER_IR_SCHEMA_VERSION.to_string();
-                Answer::Analyzed(ir)
+                Answer::Analyzed(only_requested(ir, &request.want))
             }
             Outcome::Unavailable(reason) => Answer::Unavailable(reason),
         }
     }
 }
 
+/// Remove compiler facts the request did not ask this helper to supply.
+///
+/// Rust-analyzer shares work between these facts, so collecting a source file
+/// once and trimming the reply is safer than running several inconsistent
+/// partial walks. The wire contract remains precise: an omitted capability
+/// never appears as if it had been requested and measured.
+fn only_requested(mut ir: Box<CompilerIr>, want: &[Capability]) -> Box<CompilerIr> {
+    if !want.contains(&Capability::Types) {
+        ir.types.clear();
+        ir.expressions.clear();
+        for symbol in &mut ir.symbols {
+            symbol.type_index = None;
+        }
+        for instantiation in &mut ir.instantiations {
+            instantiation.arguments.clear();
+        }
+    }
+    if !want.contains(&Capability::NameResolution) {
+        ir.symbols.clear();
+    }
+    if !want.contains(&Capability::CallTargets) {
+        ir.calls.clear();
+        ir.semantic_constructs.clear();
+        ir.effects = EffectSummary::default();
+        ir.data_flow = DataFlowSummary::default();
+    }
+    if !want.contains(&Capability::MacroExpansion) {
+        ir.unexpanded_macros.clear();
+    }
+    if !want.contains(&Capability::TemplateInstantiation) {
+        ir.instantiations.clear();
+    }
+    ir
+}
+
 /// The analysis library's version, which is the compiler's version here.
 const RA_VERSION: &str = "0.0.344";
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use codehelion_helper::ir::{
+        Anchor, CallSite, CallTarget, ResolvedType, SourceRange, TypeCategory, UnexpandedMacro,
+        UnexpandedMacroReason, UnitRef,
+    };
+
+    fn unit() -> UnitRef {
+        UnitRef {
+            unit: "crate".to_string(),
+            file: "src/lib.rs".to_string(),
+            variant: "target=host".to_string(),
+        }
+    }
+
+    fn anchor() -> Anchor {
+        Anchor::written_here(SourceRange {
+            file: "src/lib.rs".to_string(),
+            start_byte: 0,
+            end_byte: 8,
+            start_line: 1,
+        })
+    }
+
+    #[test]
+    fn analyze_reply_contains_only_requested_capability_facts() {
+        let mut ir = CompilerIr::empty(unit());
+        ir.types.push(ResolvedType {
+            display: "String".to_string(),
+            category: TypeCategory::Text,
+            arguments: Vec::new(),
+            definition: None,
+        });
+        ir.calls.push(CallSite {
+            anchor: anchor(),
+            target: CallTarget::Unresolved,
+            api_name: Some("crate::render".to_string()),
+        });
+        ir.unexpanded_macros.push(UnexpandedMacro {
+            invocation: SourceRange {
+                file: "src/lib.rs".to_string(),
+                start_byte: 8,
+                end_byte: 16,
+                start_line: 1,
+            },
+            reason: UnexpandedMacroReason::RequiresExecution,
+        });
+
+        let reply = only_requested(Box::new(ir), &[Capability::CallTargets]);
+        assert!(reply.types.is_empty());
+        assert_eq!(reply.calls.len(), 1);
+        assert!(reply.unexpanded_macros.is_empty());
+
+        let reply = only_requested(reply, &[Capability::Types, Capability::MacroExpansion]);
+        assert!(reply.calls.is_empty());
+    }
+}

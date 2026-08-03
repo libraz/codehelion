@@ -85,17 +85,34 @@ pub fn serve<B: Backend, R: Read, W: Write>(
         };
         let closing = matches!(request.body, RequestBody::Shutdown);
         let body = answer(backend, &request);
-        write_frame(
-            output,
-            &Response {
-                // The revision this build writes, not the one that was read: a
-                // peer that asked in a revision this build does not speak is
-                // told so rather than answered in a language nobody chose.
-                protocol_version: PROTOCOL_VERSION,
-                id: request.id,
-                body,
-            },
-        )?;
+        let response = Response {
+            // The revision this build writes, not the one that was read: a
+            // peer that asked in a revision this build does not speak is
+            // told so rather than answered in a language nobody chose.
+            protocol_version: PROTOCOL_VERSION,
+            id: request.id,
+            body,
+        };
+        match write_frame(output, &response) {
+            Ok(()) => {}
+            Err(FrameError::TooLarge { .. }) if matches!(request.body, RequestBody::Analyze(_)) => {
+                let RequestBody::Analyze(analyze) = &request.body else {
+                    return Err(FrameError::TooLarge { declared: 0 });
+                };
+                write_frame(
+                    output,
+                    &Response {
+                        protocol_version: PROTOCOL_VERSION,
+                        id: request.id,
+                        body: ResponseBody::Unavailable {
+                            unit: analyze.unit.clone(),
+                            reason: Unavailability::ResponseTooLarge,
+                        },
+                    },
+                )?;
+            }
+            Err(error) => return Err(error),
+        }
         if closing {
             return Ok(());
         }
@@ -127,7 +144,10 @@ fn answer<B: Backend>(backend: &mut B, request: &Request) -> ResponseBody {
             Description::Failed(failure) => ResponseBody::Failed(failure),
         },
         RequestBody::Analyze(analyze) => match backend.analyze(analyze) {
-            Answer::Analyzed(ir) => ResponseBody::Analyzed(ir),
+            Answer::Analyzed(mut ir) => {
+                ir.unit = analyze.unit.clone();
+                ResponseBody::Analyzed(ir)
+            }
             Answer::Unavailable(reason) => ResponseBody::Unavailable {
                 unit: analyze.unit.clone(),
                 reason,
@@ -142,8 +162,8 @@ fn answer<B: Backend>(backend: &mut B, request: &Request) -> ResponseBody {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::ir::UnitRef;
-    use crate::protocol::{Capability, ClientIdentity, read_frame};
+    use crate::ir::{CompilerIr, UnitRef};
+    use crate::protocol::{Capability, ClientIdentity, MAX_FRAME_BYTES, read_frame};
 
     struct Fixed {
         answer: Answer,
@@ -184,6 +204,15 @@ mod tests {
     }
 
     fn conversation(requests: &[RequestBody]) -> (Vec<Response>, Fixed) {
+        let mut backend = Fixed {
+            answer: Answer::Unavailable(Unavailability::RequiresExecution),
+            asked: Vec::new(),
+        };
+        let responses = conversation_with(requests, &mut backend);
+        (responses, backend)
+    }
+
+    fn conversation_with(requests: &[RequestBody], backend: &mut Fixed) -> Vec<Response> {
         let mut input = Vec::new();
         for (index, body) in requests.iter().enumerate() {
             write_frame(
@@ -196,18 +225,14 @@ mod tests {
             )
             .unwrap();
         }
-        let mut backend = Fixed {
-            answer: Answer::Unavailable(Unavailability::RequiresExecution),
-            asked: Vec::new(),
-        };
         let mut output = Vec::new();
-        serve(&mut backend, &mut input.as_slice(), &mut output).unwrap();
+        serve(backend, &mut input.as_slice(), &mut output).unwrap();
         let mut stream = output.as_slice();
         let mut responses = Vec::new();
         while let Some(response) = read_frame::<_, Response>(&mut stream).unwrap() {
             responses.push(response);
         }
-        (responses, backend)
+        responses
     }
 
     fn handshake() -> RequestBody {
@@ -239,6 +264,7 @@ mod tests {
             RequestBody::Analyze(Analyze {
                 unit: unit(),
                 compile_command: None,
+                read_boundary: None,
                 want: vec![Capability::Types],
                 permitted: Vec::new(),
             }),
@@ -257,6 +283,7 @@ mod tests {
         let (responses, backend) = conversation(&[RequestBody::Analyze(Analyze {
             unit: unit(),
             compile_command: None,
+            read_boundary: None,
             want: vec![Capability::Types],
             permitted: Vec::new(),
         })]);
@@ -271,6 +298,65 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn an_analyzed_answer_is_recorded_under_the_unit_that_was_asked_for() {
+        let substituted = UnitRef {
+            unit: "wrong".to_string(),
+            file: "outside.cc".to_string(),
+            variant: "wrong".to_string(),
+        };
+        let mut backend = Fixed {
+            answer: Answer::Analyzed(Box::new(CompilerIr::empty(substituted))),
+            asked: Vec::new(),
+        };
+        let request = Request {
+            protocol_version: PROTOCOL_VERSION,
+            id: 1,
+            body: RequestBody::Analyze(Analyze {
+                unit: unit(),
+                compile_command: None,
+                read_boundary: None,
+                want: vec![Capability::Types],
+                permitted: Vec::new(),
+            }),
+        };
+        let ResponseBody::Analyzed(ir) = answer(&mut backend, &request) else {
+            panic!("analyzed response expected");
+        };
+        assert_eq!(ir.unit, unit());
+    }
+
+    #[test]
+    fn an_oversized_ir_becomes_unavailable_and_does_not_end_the_server() {
+        let mut ir = CompilerIr::empty(unit());
+        ir.anchored_at = Some("x".repeat(usize::try_from(MAX_FRAME_BYTES).unwrap()));
+        let mut backend = Fixed {
+            answer: Answer::Analyzed(Box::new(ir)),
+            asked: Vec::new(),
+        };
+        let responses = conversation_with(
+            &[
+                RequestBody::Analyze(Analyze {
+                    unit: unit(),
+                    compile_command: None,
+                    read_boundary: None,
+                    want: vec![Capability::Types],
+                    permitted: Vec::new(),
+                }),
+                RequestBody::Shutdown,
+            ],
+            &mut backend,
+        );
+        assert!(matches!(
+            responses[0].body,
+            ResponseBody::Unavailable {
+                reason: Unavailability::ResponseTooLarge,
+                ..
+            }
+        ));
+        assert!(matches!(responses[1].body, ResponseBody::Shutdown));
     }
 
     #[test]
@@ -307,6 +393,7 @@ mod tests {
             RequestBody::Analyze(Analyze {
                 unit: unit(),
                 compile_command: None,
+                read_boundary: None,
                 want: vec![Capability::Types],
                 permitted: Vec::new(),
             }),
