@@ -49,6 +49,12 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The labelled precision tests refuse to pass on an empty measurement:
+      # with no case materialized they report that nothing was measured rather
+      # than reporting success. The suite therefore needs the same sources the
+      # accuracy job fetches.
+      - name: Materialize the labelled corpora
+        run: corpus/scripts/materialize-labeled.sh
       # Formatting, lints and docs belong to the lint job. Running them here as
       # well only buys a second copy of the same answer.
       - name: Test
