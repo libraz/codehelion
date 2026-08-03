@@ -1,0 +1,36 @@
+name: Feature request
+description: Suggest something codehelion should do, or do differently.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Worth knowing before writing much: graphical or web interfaces, a
+        hosted service, general code-quality rules, vulnerability detection,
+        style checking, automatic refactoring, and languages beyond Rust, C
+        and C++ are deliberately out of scope. Those are not bad ideas; they
+        are other tools.
+        [CONTRIBUTING.md](https://github.com/libraz/codehelion/blob/main/CONTRIBUTING.md)
+        has the reasoning.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is the problem
+      description: >
+        The situation you ran into, before any particular solution. What were
+        you trying to learn about a codebase, and where did the current output
+        leave you?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: >
+        A rough sketch is fine. If it changes what a scan reports, say what you
+        would expect the report to look like afterwards.
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you are doing instead today
+      description: Existing flags, another tool, or nothing at all.
