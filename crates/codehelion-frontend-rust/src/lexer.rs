@@ -220,7 +220,7 @@ impl<'s> Lexer<'s> {
                 self.consume_raw_string_body(start);
                 true
             }
-            (Some('r'), Some('#')) if self.peek(2) == Some('"') => {
+            (Some('r'), Some('#')) if self.raw_string_opens_at(1) => {
                 let start = self.mark();
                 self.bump();
                 self.consume_raw_string_body(start);
@@ -232,7 +232,7 @@ impl<'s> Lexer<'s> {
                 self.consume_string_from(start);
                 true
             }
-            (Some('b' | 'c'), Some('r')) if matches!(self.peek(2), Some('"' | '#')) => {
+            (Some('b' | 'c'), Some('r')) if self.raw_string_opens_at(2) => {
                 let start = self.mark();
                 self.bump();
                 self.bump();
@@ -247,6 +247,19 @@ impl<'s> Lexer<'s> {
             }
             _ => false,
         }
+    }
+
+    /// Whether `offset` begins the hash delimiter of a raw string literal.
+    ///
+    /// The delimiter contains zero or more `#` characters followed by `"`.
+    /// Checking its full shape here keeps multi-hash raw strings separate from
+    /// raw identifiers such as `r#type`.
+    fn raw_string_opens_at(&self, offset: usize) -> bool {
+        let mut index = offset;
+        while self.peek(index) == Some('#') {
+            index += 1;
+        }
+        self.peek(index) == Some('"')
     }
 
     /// A `'`: either a character literal or a lifetime/label.
@@ -592,6 +605,31 @@ mod tests {
             .map(|t| t.text.as_str())
             .collect();
         assert_eq!(strings, vec!["r#\"x \"q\" y\"#", "b\"z\"", "br#\"w\"#"]);
+    }
+
+    #[test]
+    fn keeps_multi_hash_raw_strings_and_following_tokens() {
+        let hashes_255 = "#".repeat(255);
+        let source = format!(
+            "let a = r##\"a \" b\"##; let b = r###\"c \" d\"###; let c = r{hashes_255}\"e \" f\"{hashes_255}; let tail = 1;"
+        );
+        let (tokens, diagnostics) = lex(&source);
+        assert!(diagnostics.is_empty());
+
+        let strings: Vec<_> = tokens
+            .iter()
+            .filter(|token| token.kind == TokenKind::Literal(LiteralKind::String))
+            .map(|token| token.text.as_str())
+            .collect();
+        assert_eq!(
+            strings,
+            vec![
+                "r##\"a \" b\"##",
+                "r###\"c \" d\"###",
+                format!("r{hashes_255}\"e \" f\"{hashes_255}").as_str(),
+            ]
+        );
+        assert!(tokens.iter().any(|token| token.text.as_str() == "tail"));
     }
 
     #[test]

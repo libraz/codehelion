@@ -13,5 +13,8 @@ codehelion-core = { version = "0.1.0", path = "../codehelion-core" }
 tree-sitter = "0.25"
 tree-sitter-c = "0.24"
 
+[dev-dependencies]
+proptest = "1.6"
+
 [lints]
 workspace = true

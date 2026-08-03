@@ -30,18 +30,18 @@ fn alpha(data: &[u32]) -> u32 {
 
 const ALPHA_RENAMED: &str = "\
 fn beta(feed: &[u32]) -> u32 {
-    let mut state = 3u32;
-    let mut seen = 7u32;
-    for item in feed {
-        if *item > 99 {
-            state = state.wrapping_add(*item);
+    let mut acc = 0u32;
+    let mut count = 0u32;
+    for value in feed {
+        if *value > 10 {
+            acc = acc.wrapping_add(*value);
         } else {
-            state = state.wrapping_sub(2);
+            acc = acc.wrapping_sub(1);
         }
-        seen += 4;
+        count += 1;
     }
-    state = state.wrapping_mul(8);
-    return state + seen;
+    acc = acc.wrapping_mul(3);
+    return acc + count;
 }
 ";
 

@@ -31,7 +31,7 @@ use ra_ap_syntax::{Edition, SourceFile, SyntaxKind, SyntaxNode};
 /// Version tag of this structural frontend, used as a fingerprint input. Bump
 /// it whenever a change alters the token stream or the IR tree for unchanged
 /// input.
-pub const STRUCTURAL_FRONTEND_VERSION: &str = "rust-ir-v2";
+pub const STRUCTURAL_FRONTEND_VERSION: &str = "rust-ir-v3";
 
 /// Edition the parser assumes. Parsing is edition-tolerant enough for audit
 /// purposes; a wrong guess degrades to error ranges, never to a lost file.
@@ -202,6 +202,7 @@ fn classify(node: &SyntaxNode) -> Mapping {
         SyntaxKind::CALL_EXPR | SyntaxKind::METHOD_CALL_EXPR => Mapping::Emit(Shape::Call),
         SyntaxKind::AWAIT_EXPR => Mapping::Native("await_expr"),
         SyntaxKind::BIN_EXPR if is_assignment(node) => Mapping::Emit(Shape::Assign),
+        SyntaxKind::BIN_EXPR => binary_operator(node).map_or(Mapping::Transparent, Mapping::Native),
         SyntaxKind::LET_STMT => Mapping::Emit(Shape::VarDecl),
         SyntaxKind::RETURN_EXPR => Mapping::Emit(Shape::Return),
         SyntaxKind::BREAK_EXPR => Mapping::Emit(Shape::Break),
@@ -241,6 +242,34 @@ fn is_assignment(node: &SyntaxNode) -> bool {
     node.children_with_tokens()
         .filter_map(ra_ap_syntax::SyntaxElement::into_token)
         .any(|token| ASSIGN_OPS.contains(&token.kind()))
+}
+
+/// Stable native shape for a non-assignment binary operation.
+fn binary_operator(node: &SyntaxNode) -> Option<&'static str> {
+    node.children_with_tokens()
+        .filter_map(ra_ap_syntax::SyntaxElement::into_token)
+        .map(|token| token.kind())
+        .find_map(|operator| match operator {
+            SyntaxKind::PLUS => Some("binary-add"),
+            SyntaxKind::MINUS => Some("binary-sub"),
+            SyntaxKind::STAR => Some("binary-mul"),
+            SyntaxKind::SLASH => Some("binary-div"),
+            SyntaxKind::PERCENT => Some("binary-rem"),
+            SyntaxKind::SHL => Some("binary-shl"),
+            SyntaxKind::SHR => Some("binary-shr"),
+            SyntaxKind::AMP => Some("binary-bit-and"),
+            SyntaxKind::PIPE => Some("binary-bit-or"),
+            SyntaxKind::CARET => Some("binary-bit-xor"),
+            SyntaxKind::AMP2 => Some("binary-and"),
+            SyntaxKind::PIPE2 => Some("binary-or"),
+            SyntaxKind::EQ2 => Some("binary-eq"),
+            SyntaxKind::NEQ => Some("binary-ne"),
+            SyntaxKind::L_ANGLE => Some("binary-lt"),
+            SyntaxKind::R_ANGLE => Some("binary-gt"),
+            SyntaxKind::LTEQ => Some("binary-le"),
+            SyntaxKind::GTEQ => Some("binary-ge"),
+            _ => None,
+        })
 }
 
 /// Whether a statement's inner expression maps to a shape of its own, making
@@ -681,19 +710,24 @@ native:module
     block
       var-decl
         closure
+          native:binary-add
       loop
         block
           assign
             call
+              native:binary-add
       loop
+        native:binary-gt
         block
           assign
       loop
         block
           branch
+            native:binary-eq
             block
               break
             branch
+              native:binary-lt
               block
                 continue
               block
@@ -787,12 +821,8 @@ trait T {
         let body = &file.roots[0].children[0];
         assert_eq!(
             shapes_of(&body.children),
-            vec![Shape::Call, Shape::ExprStmt],
-            "a call statement is the Call node itself; an unmapped expression keeps ExprStmt"
-        );
-        assert!(
-            body.children[1].children.is_empty(),
-            "plain operands produce no nodes under the ExprStmt"
+            vec![Shape::Call, Shape::Native("binary-add".into())],
+            "a call statement and a binary expression retain their own shapes"
         );
     }
 
@@ -802,9 +832,28 @@ trait T {
         let body = &file.roots[0].children[0];
         assert_eq!(
             shapes_of(&body.children),
-            vec![Shape::Assign, Shape::Assign, Shape::ExprStmt],
-            "`=` and `+=` are assignments; `==` is interior expression detail"
+            vec![
+                Shape::Assign,
+                Shape::Assign,
+                Shape::Native("binary-eq".into())
+            ],
+            "assignments and comparisons retain distinct structural shapes"
         );
+    }
+
+    #[test]
+    fn non_assignment_binary_operators_are_distinct_structural_nodes() {
+        let file = parse("fn f(a: u64, b: u64) { a + b; a / b; }");
+        let body = &file.roots[0].children[0];
+        assert_eq!(
+            shapes_of(&body.children),
+            vec![
+                Shape::Native("binary-add".into()),
+                Shape::Native("binary-div".into())
+            ]
+        );
+        assert_eq!(body.children[0].shape, Shape::Native("binary-add".into()));
+        assert_eq!(body.children[1].shape, Shape::Native("binary-div".into()));
     }
 
     #[test]
@@ -915,7 +964,7 @@ trait T {
     fn file_carries_language_and_versions() {
         let frontend = RustStructuralFrontend;
         assert_eq!(frontend.language(), Language::Rust);
-        assert_eq!(frontend.frontend_version(), "rust-ir-v2");
+        assert_eq!(frontend.frontend_version(), "rust-ir-v3");
 
         let file = parse("fn a() {}");
         assert_eq!(file.language, Language::Rust);

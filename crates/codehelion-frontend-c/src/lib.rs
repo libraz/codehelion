@@ -24,11 +24,11 @@ use codehelion_core::frontend::{Frontend, LexedFile};
 ///
 /// It is embedded in both Fast frontend fingerprint tags. Bump it whenever a
 /// change to the shared implementation changes tokens or unit boundaries.
-pub const C_FAMILY_LEXER_VERSION: &str = "c-family-lexer-v4";
+pub const C_FAMILY_LEXER_VERSION: &str = "c-family-lexer-v6";
 
 /// Version tag of this frontend, used as a fingerprint input. The C dialect
 /// revision and the shared C-family lexer revision are both part of it.
-pub const FRONTEND_VERSION: &str = "c-lexer-v1+c-family-lexer-v4";
+pub const FRONTEND_VERSION: &str = "c-lexer-v1+c-family-lexer-v6";
 
 /// The C Fast-mode frontend.
 #[derive(Debug, Clone, Copy, Default)]
@@ -60,6 +60,9 @@ impl Frontend for CFrontend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codehelion_core::ir::StructuralFrontend;
+    use proptest::prelude::*;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn frontend_reports_language_and_version() {
@@ -77,5 +80,21 @@ mod tests {
         assert!(!lexed.tokens.is_empty());
         assert_eq!(lexed.units.len(), 1);
         assert!(lexed.diagnostics.is_empty());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn arbitrary_text_never_panics(source in proptest::collection::vec(any::<char>(), 0..1024)
+            .prop_map(|characters| characters.into_iter().collect::<String>())) {
+            let started = Instant::now();
+            let _ = CFrontend.lex(&source);
+            let _ = ir::CStructuralFrontend.parse(&source);
+            prop_assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "a bounded frontend input took too long"
+            );
+        }
     }
 }

@@ -100,7 +100,13 @@ fn cpp_sources_lex_clean_with_method_units() {
 
 #[test]
 fn verbatim_method_copy_is_recovered_as_type1() {
-    let lexed = lex_all();
+    // A group that also contains the renamed method has Type-2 as its
+    // weakest relationship. Keep this exact pair focused on the Type-1
+    // contract.
+    let lexed: Vec<_> = [SEED, VERBATIM]
+        .iter()
+        .map(|source| CppFrontend.lex(source))
+        .collect();
     let report = detect_all(&lexed);
     assert!(
         linked(&report, CloneClass::Type1, 0, 1),

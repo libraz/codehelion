@@ -20,7 +20,7 @@ use codehelion_core::frontend::{Frontend, LexedFile};
 /// differently — a word that was an identifier becoming a keyword is the usual
 /// way — and fingerprints carry this version so that streams produced under
 /// rules that may disagree are never merged on the strength of an equal hash.
-pub const FRONTEND_VERSION: &str = "rust-lexer-v2";
+pub const FRONTEND_VERSION: &str = "rust-lexer-v3";
 
 /// The Rust Fast-mode frontend.
 #[derive(Debug, Clone, Copy, Default)]
@@ -51,6 +51,9 @@ impl Frontend for RustFrontend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codehelion_core::ir::StructuralFrontend;
+    use proptest::prelude::*;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn frontend_reports_language_and_version() {
@@ -67,5 +70,21 @@ mod tests {
         assert!(!lexed.tokens.is_empty());
         assert_eq!(lexed.units.len(), 1);
         assert!(lexed.diagnostics.is_empty());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn arbitrary_text_never_panics(source in proptest::collection::vec(any::<char>(), 0..1024)
+            .prop_map(|characters| characters.into_iter().collect::<String>())) {
+            let started = Instant::now();
+            let _ = RustFrontend.lex(&source);
+            let _ = ir::RustStructuralFrontend.parse(&source);
+            prop_assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "a bounded frontend input took too long"
+            );
+        }
     }
 }

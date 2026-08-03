@@ -19,7 +19,7 @@ use codehelion_frontend_c::{lexer, units};
 
 /// Version tag of this frontend, used as a fingerprint input. The C++ dialect
 /// revision and the shared C-family lexer revision are both part of it.
-pub const FRONTEND_VERSION: &str = "cpp-lexer-v1+c-family-lexer-v4";
+pub const FRONTEND_VERSION: &str = "cpp-lexer-v1+c-family-lexer-v6";
 
 /// C++ keywords (C++23). Contextual keywords (`override`, `final`, `import`,
 /// `module`) lex as identifiers, matching how the grammar treats them.
@@ -162,10 +162,13 @@ impl Frontend for CppFrontend {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use codehelion_core::frontend::{LiteralKind, TokenKind, UnitKind};
+    use codehelion_core::ir::StructuralFrontend;
+    use proptest::prelude::*;
+    use std::time::{Duration, Instant};
 
     fn lexed(source: &str) -> LexedFile {
         CppFrontend.lex(source)
@@ -176,6 +179,22 @@ mod tests {
         let frontend = CppFrontend;
         assert_eq!(frontend.language(), Language::Cpp);
         assert_eq!(frontend.frontend_version(), FRONTEND_VERSION);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn arbitrary_text_never_panics(source in proptest::collection::vec(any::<char>(), 0..1024)
+            .prop_map(|characters| characters.into_iter().collect::<String>())) {
+            let started = Instant::now();
+            let _ = CppFrontend.lex(&source);
+            let _ = ir::CppStructuralFrontend.parse(&source);
+            prop_assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "a bounded frontend input took too long"
+            );
+        }
     }
 
     #[test]
@@ -215,6 +234,22 @@ mod tests {
     }
 
     #[test]
+    fn less_than_before_scope_resolution_is_not_a_digraph() {
+        let compact = lexed("std::vector<::T> compact;");
+        let spaced = lexed("std::vector< ::T> spaced;");
+        let punctuation = |file: &LexedFile| {
+            file.tokens
+                .iter()
+                .filter(|token| token.kind == TokenKind::Punctuation)
+                .map(|token| token.text.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(punctuation(&compact), punctuation(&spaced));
+        assert_eq!(punctuation(&compact), vec!["::", "<", "::", ">", ";"]);
+    }
+
+    #[test]
     fn raw_strings_lex_whole_with_custom_delimiters() {
         let out = lexed("auto s = R\"(a \"quoted\" b)\"; auto t = R\"xy(close )\" here)xy\";");
         let strings: Vec<_> = out
@@ -228,6 +263,19 @@ mod tests {
             vec!["R\"(a \"quoted\" b)\"", "R\"xy(close )\" here)xy\"",]
         );
         assert!(out.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn raw_string_pseudo_directives_do_not_make_code_unreachable() {
+        let source = "const char* note = R\"(#if 0\n#endif)\";\nint still_live;\n";
+        let file = lexed(source);
+        let paths = lexer::conditional_paths(source, &file.tokens, &CPP);
+        let index = file
+            .tokens
+            .iter()
+            .position(|token| token.text == "still_live")
+            .unwrap_or_else(|| panic!("missing still_live"));
+        assert!(!paths[index].is_unreachable());
     }
 
     #[test]

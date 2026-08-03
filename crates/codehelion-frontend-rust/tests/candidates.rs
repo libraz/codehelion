@@ -100,8 +100,8 @@ fn sum_even(values: &[i32]) -> i32 {
     let mut seen = 0;
     for value in values {
         seen += 1;
-        if value % 2 == 0 {
-            total += value;
+        if value % 3 != 1 {
+            total += value * 2;
         }
     }
     let _ = seen;

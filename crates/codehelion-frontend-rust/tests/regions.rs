@@ -323,23 +323,20 @@ fn tally_gamma(items: &[String], seed: usize) -> usize {
 ";
 
 #[test]
-fn a_run_a_longer_one_accounts_for_is_not_reported_twice() {
+fn a_nested_loop_body_is_reported_once() {
     let report = analyze(&[NESTED_DONOR, NESTED_HOST, SUMMARY_TWIN]);
-    // The loop body and the run it sits in are both duplicated in the same
-    // two places, so the longer one says everything the shorter one says.
-    assert_eq!(shape(&report), vec![(CloneClass::Type1, 5, 2)]);
-    assert_eq!(report.stats.region_subsumed, 1);
+    // The exact loop body is the common source span. The surrounding host
+    // statements are deliberately distinct, so no wider summary-only region
+    // may turn this into a second finding.
+    assert_eq!(shape(&report), vec![(CloneClass::Type1, 4, 2)]);
+    assert_eq!(report.stats.region_subsumed, 0);
 }
 
 #[test]
-fn a_verbatim_run_inside_a_renamed_one_is_still_reported() {
-    // "These five statements match up to renaming, and these four of them
-    // match verbatim" is two facts. Reporting only the first loses the
-    // stronger one.
+fn a_verbatim_nested_run_survives_a_renamed_surrounding_host() {
+    // The surrounding host uses renamed values, but the loop body itself is
+    // still verbatim and must stay visible as the stronger local fact.
     let report = analyze(&[NESTED_DONOR, RENAMED_NESTED_HOST, SUMMARY_TWIN]);
-    assert_eq!(
-        shape(&report),
-        vec![(CloneClass::Type1, 4, 2), (CloneClass::Type2, 5, 2)]
-    );
+    assert_eq!(shape(&report), vec![(CloneClass::Type1, 4, 2)]);
     assert_eq!(report.stats.region_subsumed, 0);
 }

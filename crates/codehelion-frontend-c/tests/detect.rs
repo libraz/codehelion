@@ -114,7 +114,13 @@ fn c_sources_lex_clean() {
 
 #[test]
 fn verbatim_c_copy_is_recovered_as_type1() {
-    let lexed = lex_all();
+    // Keep the exact pair separate from the renamed variant. A mixed group is
+    // deliberately classified as Type-2 because that is its weakest member
+    // relationship; this focused fixture establishes the Type-1 guarantee.
+    let lexed: Vec<_> = [SEED, VERBATIM]
+        .iter()
+        .map(|source| CFrontend.lex(source))
+        .collect();
     let report = detect_all(&lexed);
     assert!(
         linked(&report, CloneClass::Type1, 0, 1),

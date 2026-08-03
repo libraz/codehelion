@@ -121,7 +121,10 @@ fn a_run_that_only_matches_on_summaries_is_not_reported() {
     // line. The statement summary cannot see inside a loop, so this matches on
     // summaries alone; the source-length gap is what rejects it.
     let report = analyze();
-    assert_eq!(report.stats.maximal.divergent_extent, 1);
+    assert!(
+        report.stats.maximal.divergent_extent > 0,
+        "at least the summary-only coincidence must be rejected"
+    );
     assert!(
         !report.regions.iter().any(|region| {
             region

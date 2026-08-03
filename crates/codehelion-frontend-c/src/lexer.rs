@@ -73,6 +73,7 @@ struct Lexer<'d, 's> {
     interner: LexemeInterner,
     tokens: Vec<Token>,
     diagnostics: Vec<Diagnostic>,
+    conditional_directives: Vec<(usize, ConditionalDirective)>,
 }
 
 /// A position captured at the start of a token.
@@ -105,6 +106,7 @@ impl<'d, 's> Lexer<'d, 's> {
             interner: LexemeInterner::new(),
             tokens: Vec::new(),
             diagnostics: Vec::new(),
+            conditional_directives: Vec::new(),
         }
     }
 
@@ -198,7 +200,18 @@ impl<'d, 's> Lexer<'d, 's> {
         }
     }
 
-    fn run(mut self) -> (Vec<Token>, Vec<Diagnostic>) {
+    fn run(self) -> (Vec<Token>, Vec<Diagnostic>) {
+        let (tokens, diagnostics, _) = self.run_with_directives();
+        (tokens, diagnostics)
+    }
+
+    fn run_with_directives(
+        mut self,
+    ) -> (
+        Vec<Token>,
+        Vec<Diagnostic>,
+        Vec<(usize, ConditionalDirective)>,
+    ) {
         while let Some(c) = self.peek(0) {
             // A UTF-8 BOM is an encoding marker, not source text. Consume it
             // only at byte zero. Keep its byte width in spans without letting
@@ -257,7 +270,8 @@ impl<'d, 's> Lexer<'d, 's> {
         // Streams are long-lived (the whole scan holds every file's tokens),
         // so growth slack is returned to the allocator.
         self.tokens.shrink_to_fit();
-        (self.tokens, self.diagnostics)
+        self.conditional_directives.shrink_to_fit();
+        (self.tokens, self.diagnostics, self.conditional_directives)
     }
 
     fn consume_line_comment(&mut self) {
@@ -304,6 +318,7 @@ impl<'d, 's> Lexer<'d, 's> {
     /// Consume a preprocessor directive from its `#` through the end of the
     /// logical line, honouring `\` line continuations and embedded comments.
     fn consume_directive(&mut self) {
+        let start = self.mark();
         while let Some(c) = self.peek(0) {
             if self.try_line_splice() {
                 continue;
@@ -315,7 +330,7 @@ impl<'d, 's> Lexer<'d, 's> {
             if c == '\n' {
                 // Leave the newline for the main loop, which resets the
                 // line state.
-                return;
+                break;
             }
             if c == '/' && self.peek(1) == Some('*') {
                 self.consume_block_comment();
@@ -323,9 +338,13 @@ impl<'d, 's> Lexer<'d, 's> {
             }
             if c == '/' && self.peek(1) == Some('/') {
                 self.consume_line_comment();
-                return;
+                break;
             }
             self.bump();
+        }
+        if let Some(directive) = directive(self.text_from(start)) {
+            self.conditional_directives
+                .push((self.byte_at[start.index], directive));
         }
     }
 
@@ -560,6 +579,18 @@ impl<'d, 's> Lexer<'d, 's> {
     fn consume_punct(&mut self) {
         let start = self.mark();
         for &(spelling, normalized) in DIGRAPHS.iter().chain(TRIGRAPHS) {
+            // C++ gives `<::` a dedicated maximal-munch exception: unless the
+            // fourth character is `:` or `>`, the `<` is its own token and
+            // the following `::` is scope resolution, not the `<:` digraph
+            // followed by `:`. The C dialect has no `::` operator and keeps
+            // the ordinary digraph rule.
+            if spelling == "<:"
+                && self.dialect.multi_punct.contains(&"::")
+                && self.matches_ahead("<::")
+                && !matches!(self.peek(3), Some(':' | '>'))
+            {
+                continue;
+            }
             if self.matches_ahead(spelling) {
                 for _ in spelling.chars() {
                     self.bump();
@@ -607,8 +638,8 @@ pub fn lex(source: &str, dialect: &Dialect) -> (Vec<Token>, Vec<Diagnostic>) {
 /// intentionally recognises only literal `0` / `1` conditions; macro and
 /// expression evaluation belongs to a compiler frontend, not Fast mode.
 #[must_use]
-pub fn conditional_paths(source: &str, tokens: &[Token]) -> Vec<ArmPath> {
-    let directives = directives(source);
+pub fn conditional_paths(source: &str, tokens: &[Token], dialect: &Dialect) -> Vec<ArmPath> {
+    let (_, _, directives) = Lexer::new(source, dialect).run_with_directives();
     if !directives_are_balanced(&directives) {
         return vec![ArmPath::default(); tokens.len()];
     }
@@ -656,20 +687,7 @@ enum ConditionalDirective {
     End,
 }
 
-/// Extract line-start C preprocessor directives without interpreting code.
-fn directives(source: &str) -> Vec<(usize, ConditionalDirective)> {
-    let mut directives = Vec::new();
-    let mut offset = 0usize;
-    for line in source.split_inclusive('\n') {
-        if let Some(directive) = directive(line) {
-            directives.push((offset, directive));
-        }
-        offset += line.len();
-    }
-    directives
-}
-
-/// Classify one physical directive line when it starts with a directive mark.
+/// Classify one lexically recognised directive line.
 fn directive(line: &str) -> Option<ConditionalDirective> {
     let line = line.trim_start_matches([' ', '\t', '\r']);
     let line = line
@@ -791,7 +809,7 @@ mod tests {
         let src = "#ifdef _WIN32\nint windows_value;\n#else\nint unix_value;\n#endif\n#if 0\nint dead_value;\n#else\nint live_value;\n#endif\n";
         let (tokens, diagnostics) = lex_c(src);
         assert!(diagnostics.is_empty());
-        let paths = conditional_paths(src, &tokens);
+        let paths = conditional_paths(src, &tokens, &dialect::C);
         let path_for = |name: &str| {
             let index = tokens
                 .iter()
@@ -810,7 +828,7 @@ mod tests {
         let src = "#ifdef MAYBE\nint first_value;\n#else\nint second_value;\n";
         let (tokens, diagnostics) = lex_c(src);
         assert!(diagnostics.is_empty());
-        let paths = conditional_paths(src, &tokens);
+        let paths = conditional_paths(src, &tokens, &dialect::C);
         let path_for = |name: &str| {
             let index = tokens
                 .iter()
@@ -823,6 +841,19 @@ mod tests {
             !path_for("first_value").excludes(path_for("second_value")),
             "malformed directives must not hide a Fast finding"
         );
+    }
+
+    #[test]
+    fn comment_pseudo_directives_do_not_make_code_unreachable() {
+        let src = "// #if 0\nint still_live;\n// #endif\n";
+        let (tokens, diagnostics) = lex_c(src);
+        assert!(diagnostics.is_empty());
+        let paths = conditional_paths(src, &tokens, &dialect::C);
+        let index = tokens
+            .iter()
+            .position(|token| token.text == "still_live")
+            .unwrap_or_else(|| panic!("missing still_live"));
+        assert!(!paths[index].is_unreachable());
     }
 
     #[test]
