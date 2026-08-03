@@ -58,14 +58,6 @@ fn scan(root: &std::path::Path) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout is one JSON document")
 }
 
-/// Run the semantic fixture at a floor suitable for checking short, closed
-/// compiler-recognized operation windows.
-fn scan_short_semantic_windows(root: &std::path::Path) -> Value {
-    std::fs::write(root.join("codehelion.toml"), "min-clone-tokens = 1\n")
-        .expect("configure the semantic window floor");
-    scan(root)
-}
-
 fn scan_comparing(root: &std::path::Path, format: &str) -> std::process::Output {
     cmd()
         .current_dir(root)

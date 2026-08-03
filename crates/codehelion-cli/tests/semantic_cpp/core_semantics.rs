@@ -150,7 +150,7 @@ fn cplusplus_standard_api_calls_form_a_restricted_semantic_finding() {
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
-    let report = scan_short_semantic_windows(&root);
+    let report = scan(&root);
     let group = reports(&report)
         .into_iter()
         .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())
@@ -240,7 +240,7 @@ fn cplusplus_plain_range_loops_match_as_closed_collections() {
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
-    let report = scan_short_semantic_windows(&root);
+    let report = scan(&root);
     let group = reports(&report)
         .into_iter()
         .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())
@@ -293,7 +293,7 @@ fn cplusplus_plain_range_loops_match_as_closed_reductions() {
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
-    let report = scan_short_semantic_windows(&root);
+    let report = scan(&root);
     assert_sequence_family(
         &report,
         &["summed", "summed_again"],
@@ -310,7 +310,7 @@ fn cplusplus_direct_lock_guard_lifetimes_form_a_restricted_semantic_finding() {
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
-    let report = scan_short_semantic_windows(&root);
+    let report = scan(&root);
     let group = reports(&report)
         .into_iter()
         .flat_map(|partition| partition["groups"].as_array().into_iter().flatten())

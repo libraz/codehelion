@@ -304,7 +304,7 @@ int total(const int *values, int count) {
     std::fs::write(root.join("second.cpp"), cpp).expect("write second C++ source");
     std::fs::write(root.join("lib.rs"), "pub fn marker() {}\n").expect("write Rust source");
 
-    let report = scan_short_semantic_windows(dir.path());
+    let report = scan(dir.path());
     let no_build_sources: u64 = reports(&report)
         .into_iter()
         .filter_map(|partition| {
