@@ -30,8 +30,11 @@
 //! Alignment is a by-product: the LCS backtrace records which statements
 //! matched and which are unique to each side, which is the diff `explain`
 //! shows. The composite weights are configurable and versioned
-//! ([`WEIGHT_VERSION`]); changing them changes findings, so the version travels
-//! with the detector identity (AGENTS.md §2-4). Everything here is a pure
+//! ([`WEIGHT_VERSION`]), and that version travels with the detector identity
+//! (AGENTS.md §2-4) so two results can be compared knowing which weights
+//! produced them. Changing the weights changes findings, and before the first
+//! release that invalidates the results recorded under the old ones rather
+//! than raising the version, which stays at v1. Everything here is a pure
 //! function of its inputs.
 //!
 //! # What the composite can and cannot separate
@@ -69,7 +72,7 @@ use crate::types::{ApiEvidence, TypeEvidence};
 /// Version of the composite-weight recipe and judgment rules. Bump it when any
 /// weight default or classification rule changes, since findings change with
 /// it. Recorded as a detector version.
-pub const WEIGHT_VERSION: &str = "structural-verify-v3";
+pub const WEIGHT_VERSION: &str = "structural-verify-v1";
 
 /// Relative weights of the similarity dimensions in the composite score.
 ///

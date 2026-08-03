@@ -27,17 +27,20 @@
 //!
 //! # Schema versioning
 //!
-//! [`IR_SCHEMA_VERSION`] is a fingerprint input. Any change that can alter a
+//! [`IR_SCHEMA_VERSION`] is a fingerprint input, and fingerprints built from
+//! different IR schema versions are never considered equal. It stays at 1
+//! until the first release tag: nothing has shipped, so a change that alters a
 //! comparison result — adding or removing a [`Shape`], changing a shape tag,
-//! changing how frontends map native kinds — must bump it, and fingerprints
-//! built from different IR schema versions are never considered equal.
+//! changing how frontends map native kinds — invalidates the databases holding
+//! the old results rather than being versioned away from them, and re-running
+//! the scan is the whole of the recovery.
 
 use crate::discovery::Language;
 use crate::frontend::{Diagnostic, Lexeme, Token};
 
 /// Version of the Syntax IR schema, recorded per file and hashed into every
 /// structural fingerprint.
-pub const IR_SCHEMA_VERSION: u32 = 2;
+pub const IR_SCHEMA_VERSION: u32 = 1;
 
 /// Maximum number of IR nodes on one root-to-leaf path emitted by the bundled
 /// structural frontends.

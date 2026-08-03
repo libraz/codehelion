@@ -11,7 +11,7 @@ This is maintained in spare time, so review is not fast. It does arrive.
 Nothing below is a bar you have to clear on your own. It describes what the
 code ends up looking like, not a checklist a pull request is scored against.
 Where a change is right but the shape around it is off — a missing test, a
-version constant left unbumped, a commit message in the wrong form — that is
+recorded number that moved, a commit message in the wrong form — that is
 straightened out before it merges, and doing that is the maintainer's job, not
 a reason to send the branch back.
 
@@ -77,12 +77,13 @@ higher standard of writing, just more to record, because they move numbers
 people compare across runs. Most of this ends up being a conversation in
 review rather than something to get right in advance.
 
-- Anything that changes which findings are produced — normalization, feature
-  extraction, verification weights, grouping rules — bumps the version constant
-  belonging to the stage it changes. Each stage carries its own, and all of them
-  reach the report header, which is what lets two results be compared honestly.
-  Which stage a change lands in is not always obvious from the outside; if it
-  is unclear, leave it and mention it.
+- Leave the version constants alone. Every stage carries one — normalization,
+  feature extraction, verification weights, grouping rules — and they all reach
+  the report header so that two results can be compared honestly. Until the
+  first release tag they are all at v1 and stay there: nothing has shipped, so a
+  second number can only describe a database or baseline somebody still has on
+  disk, and re-running the scan is the whole of the recovery. They start moving
+  when there is a released version for them to be moving away from.
 - Accuracy is measured against `corpus/`. `make eval` prints the current
   numbers, and putting them before and after the change in the pull request
   helps, though the accuracy job runs on CI either way. The synthetic corpora

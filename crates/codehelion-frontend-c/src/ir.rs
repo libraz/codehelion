@@ -50,7 +50,7 @@ use tree_sitter::{Node, Parser};
 /// Version tag of this structural frontend, used as a fingerprint input. Bump
 /// it whenever a change alters the token stream or the IR tree for unchanged
 /// input.
-pub const STRUCTURAL_FRONTEND_VERSION: &str = "c-ir-v2";
+pub const STRUCTURAL_FRONTEND_VERSION: &str = "c-ir-v1";
 
 /// Grammar kinds lexed as one atomic token: the walker emits a single token
 /// for the whole node and never descends into its children (escape sequences,
@@ -91,7 +91,9 @@ pub enum Mapping {
 pub trait IrMapping {
     /// Decide how one CST node maps onto the IR. This table is the
     /// granularity contract of a frontend; changing it changes fingerprint
-    /// input and requires a frontend-version bump.
+    /// input, which invalidates every result recorded under the old table.
+    /// Before the first release that is settled by rescanning rather than by
+    /// raising the frontend version, which stays at v1.
     fn classify(&self, node: &Node<'_>) -> Mapping;
 
     /// Recover the declared name of a node that emits a named shape.
