@@ -46,8 +46,10 @@ jobs:
             runner: ubuntu-latest
             extension: ''
             archive: tar.gz
+          # Pinned rather than macos-latest so the helpers and the CLI they are
+          # loaded by are built against the same macOS version.
           - name: macos-aarch64
-            runner: macos-latest
+            runner: macos-15
             extension: ''
             archive: tar.gz
           - name: windows-x86_64
@@ -110,13 +112,13 @@ jobs:
             archive: tar.gz
             cross_linker: aarch64-linux-gnu-gcc
           - name: macos-x86_64
-            runner: macos-13
+            runner: macos-15-intel
             target: x86_64-apple-darwin
             extension: ''
             archive: tar.gz
             cross_linker: ''
           - name: macos-aarch64
-            runner: macos-14
+            runner: macos-15
             target: aarch64-apple-darwin
             extension: ''
             archive: tar.gz
@@ -132,10 +134,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install Linux cross linker
+      # The cross compiler alone is not enough: dependencies that carry C sources
+      # compile them for the target, and that needs the target's libc headers.
+      - name: Install Linux cross toolchain
         if: matrix.cross_linker != ''
         shell: bash
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: Build CLI
         shell: bash
         run: cargo build --locked --release -p codehelion --target ${{ matrix.target }}
@@ -174,9 +181,11 @@ jobs:
     needs: [verify-tag, build-helpers, build-cli]
     runs-on: ubuntu-latest
     steps:
+      # Every artifact this run produced, with no pattern to narrow it: the
+      # release carries both the CLI and the helpers, and a pattern that names
+      # one of them drops the other from the release without failing.
       - uses: actions/download-artifact@v4
         with:
-          pattern: helpers-*
           path: dist
           merge-multiple: true
       - name: Generate archive checksums
