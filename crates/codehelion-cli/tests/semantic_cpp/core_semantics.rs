@@ -435,3 +435,119 @@ fn assert_sequence_family(
         );
     }
 }
+
+/// The compiler's answer and the fragments cut from the same file have to be
+/// about the same bytes of the same file, and three separate things have to
+/// line up for that: how the analysis names the file, whether it says anything
+/// about it, and whether what it says points where the scan read.
+///
+/// Each is checked separately because a scan that loses any one of them looks
+/// identical from the outside — a full, successful, semantic run that reports
+/// nothing a compiler contributed. Which of the three went is the difference
+/// between a spelling fault, a compiler that answered about nothing, and
+/// offsets measured against a different copy of the file.
+#[test]
+fn a_cpp_answer_is_about_the_bytes_the_scan_read() {
+    require_clang_helper();
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
+        .expect("plant fixture");
+    let report = scan(&root);
+    let run_id = report["run"]["run_id"]
+        .as_i64()
+        .or_else(|| reports(&report).first()?["run"]["run_id"].as_i64())
+        .expect("the scan records a run id");
+
+    let store = Store::open(&root.join(".codehelion/audit.db")).expect("open audit database");
+    let source = root.join("src").join("range_loop.cpp");
+    let absolute = codehelion_core::paths::canonical(&source).expect("the planted source resolves");
+    let text = std::fs::read_to_string(&source).expect("the planted source is readable");
+
+    let irs: Vec<_> = store
+        .run_compiler_units(run_id)
+        .expect("read compiler rows")
+        .into_iter()
+        .filter_map(|unit| match unit.outcome {
+            CompilerOutcome::Analyzed(ir) => Some(ir),
+            CompilerOutcome::Unavailable { .. } => None,
+        })
+        .collect();
+    assert!(!irs.is_empty(), "no unit of this tree was analyzed");
+
+    // How a reader holding the file asks about it, written by the same rule the
+    // helper wrote its anchors with. Everything below is filed under this name.
+    let named: Vec<String> = irs.iter().map(|ir| ir.spelling(&absolute)).collect();
+    let anchored: Vec<&str> = irs
+        .iter()
+        .flat_map(|ir| {
+            ir.calls
+                .iter()
+                .map(|call| call.anchor.expansion.file.as_str())
+        })
+        .collect();
+    assert!(
+        named.iter().any(|name| anchored.contains(&name.as_str())),
+        "no answer is filed under the name a reader looks this file up by.\n\
+         looked up as: {named:?}\n\
+         answers are filed under: {:?}\n\
+         anchored at: {:?}",
+        anchored
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        irs.iter().map(|ir| &ir.anchored_at).collect::<Vec<_>>()
+    );
+
+    let spelling = named
+        .iter()
+        .find(|name| anchored.contains(&name.as_str()))
+        .expect("one of the answers is about this file");
+    let ir = irs
+        .iter()
+        .find(|ir| {
+            ir.calls
+                .iter()
+                .any(|call| call.anchor.expansion.file == *spelling)
+        })
+        .expect("the answer about this file");
+
+    // What it says about it. A standard call is the smallest thing every rule
+    // over this fixture is built out of.
+    let standard: Vec<_> = ir
+        .calls
+        .iter()
+        .filter(|call| call.anchor.expansion.file == *spelling)
+        .filter(|call| call.api_name.as_deref() == Some("std::push_back"))
+        .collect();
+    assert!(
+        !standard.is_empty(),
+        "the compiler resolved no standard call in a file written out of them: {:?}",
+        ir.calls
+            .iter()
+            .filter(|call| call.anchor.expansion.file == *spelling)
+            .filter_map(|call| call.api_name.as_deref())
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+    assert!(
+        ir.semantic_constructs
+            .iter()
+            .any(|construct| construct.anchor.expansion.file == *spelling),
+        "the compiler reported no construct in a file of range loops"
+    );
+
+    // And where. An offset is only an offset into some copy of the file, so it
+    // is checked against the copy the scan read rather than assumed to be the
+    // same one.
+    for call in standard {
+        let range = &call.anchor.expansion;
+        let start = usize::try_from(range.start_byte).expect("an offset within this file");
+        let end = usize::try_from(range.end_byte).expect("an offset within this file");
+        let written = text
+            .get(start..end)
+            .unwrap_or_else(|| panic!("{start}..{end} is outside the {} bytes read", text.len()));
+        assert!(
+            written.contains("push_back"),
+            "the offsets point at {written:?}, not at the call they were reported for"
+        );
+    }
+}
