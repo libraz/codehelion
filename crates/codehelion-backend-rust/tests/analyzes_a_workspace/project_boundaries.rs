@@ -78,6 +78,39 @@ fn every_symbol_is_anchored_where_it_was_written() {
     }
 }
 
+/// A request names a file; it does not dictate how the answer spells it.
+///
+/// What belongs to the requested file is decided by comparing spellings, so a
+/// caller who writes the same path a slightly different way must not lose the
+/// declarations. The failure this guards against is quiet: names still resolve
+/// and calls are still reported, and only the declarations go missing, so the
+/// answer looks like a file that declares nothing rather than like a fault.
+#[test]
+fn a_file_named_a_roundabout_way_is_the_file_it_names() {
+    let direct = unit("plain", "ledger", "ledger");
+    let roundabout = UnitRef {
+        file: codehelion_fixtures::rust("plain")
+            .unwrap()
+            .join("ledger")
+            .join(".")
+            .join("src/lib.rs")
+            .display()
+            .to_string(),
+        ..direct.clone()
+    };
+    assert_ne!(roundabout.file, direct.file, "the two spellings are one");
+
+    let ir = analyzed(&roundabout);
+    assert_eq!(category_of(&ir, "labels"), TypeCategory::Sequence);
+    assert!(
+        ir.symbols
+            .iter()
+            .any(|symbol| symbol.name == "Entry" && symbol.kind == SymbolKind::Type),
+        "the declarations were dropped: {:?}",
+        ir.symbols.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+}
+
 /// A crate whose types only exist after a build script has run cannot be
 /// analysed without running it. Answering with whatever happens to resolve
 /// would report a partial reading as a complete one.

@@ -687,12 +687,51 @@ impl CompilerIr {
 ///
 /// A path outside `root` keeps its own name: made relative it would climb out
 /// of the project with `..`, which says less than the path it started as.
+///
+/// Components are separated by `/` whatever the platform separates them with.
+/// This spelling is a value on the wire, in the audit database and in every
+/// exported report, so a file has to have one name rather than one per
+/// operating system — and Windows opens a path spelled this way as readily as
+/// its own.
 #[must_use]
 pub fn spell(root: Option<&Path>, path: &Path) -> String {
-    root.and_then(|root| path.strip_prefix(root).ok())
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    let relative = root
+        .and_then(|root| relative_to(root, path))
+        .unwrap_or(path);
+    separated_by(&relative.display().to_string(), std::path::MAIN_SEPARATOR)
+}
+
+/// Where `path` sits under `root`, if it sits under it at all.
+///
+/// The two sides of this question are resolved by two different programs, and
+/// on Windows resolving a path can produce the *verbatim* form — the `\\?\`
+/// spelling that exists so paths the ordinary rules cannot express are still
+/// reachable. One side arriving in that form and the other not is a difference
+/// in how the two were written down, not in which directory they name, so the
+/// prefix is read past on both sides before they are compared.
+fn relative_to<'a>(root: &Path, path: &'a Path) -> Option<&'a Path> {
+    ordinary(path).strip_prefix(ordinary(root)).ok()
+}
+
+/// A Windows verbatim path read as the path it stands for, and anything else
+/// unchanged.
+fn ordinary(path: &Path) -> &Path {
+    path.to_str()
+        .and_then(|text| text.strip_prefix(r"\\?\"))
+        .map_or(path, Path::new)
+}
+
+/// Restate a path that was written with `separator` so its components are
+/// separated by `/`.
+///
+/// Takes the separator rather than reading it, so that the rewrite Windows
+/// needs can be exercised on any machine. A rule only one operating system can
+/// run is a rule only that operating system can find a mistake in.
+fn separated_by(displayed: &str, separator: char) -> String {
+    if separator == '/' {
+        return displayed.to_owned();
+    }
+    displayed.replace(separator, "/")
 }
 
 /// Why a unit has no compiler IR.
@@ -853,5 +892,115 @@ mod tests {
     #[test]
     fn an_unknown_symbol_kind_is_rejected() {
         assert!(serde_json::from_str::<SymbolKind>("\"something_new\"").is_err());
+    }
+
+    /// Built the way the platform builds one, so that on Windows the parts are
+    /// joined by the separator this rule has to answer for.
+    fn native(parts: &[&str]) -> std::path::PathBuf {
+        parts.iter().collect()
+    }
+
+    /// A file inside the project is named by where it sits in the project,
+    /// with the separator every reader of this value expects — and it is the
+    /// same string wherever the file was read, because the value travels on
+    /// the wire, into the audit database and out into every report.
+    #[test]
+    fn a_file_under_the_root_is_named_relative_to_it() {
+        let root = native(&["home", "project"]);
+        let nested = native(&["home", "project", "src", "inner", "mod.rs"]);
+        assert_eq!(spell(Some(&root), &nested), "src/inner/mod.rs");
+    }
+
+    /// The rewrite Windows depends on, run here whatever this machine is.
+    #[test]
+    fn a_path_written_with_backslashes_is_named_with_slashes() {
+        assert_eq!(separated_by(r"src\inner\mod.rs", '\\'), "src/inner/mod.rs");
+        assert_eq!(separated_by(r"C:\home\project", '\\'), "C:/home/project");
+        // Already spelled that way, from a caller that wrote it by hand.
+        assert_eq!(separated_by("src/lib.rs", '\\'), "src/lib.rs");
+        // On a platform whose separator is already the one wanted, a name
+        // containing a backslash is a name, not a separator.
+        assert_eq!(separated_by(r"src/odd\name.rs", '/'), r"src/odd\name.rs");
+    }
+
+    /// The same path written the way Windows writes one it had to reach past
+    /// the ordinary rules for. Built from a native path so that the rule can be
+    /// exercised on any machine: what is under test is reading past the prefix,
+    /// and a prefix nothing here can produce is still a prefix that arrives.
+    fn verbatim(path: &Path) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!(r"\\?\{}", path.display()))
+    }
+
+    /// Two programs resolved these paths, and only one of them need have come
+    /// back in the verbatim form for the file to look like it sits somewhere
+    /// else entirely.
+    #[test]
+    fn a_root_and_a_file_written_in_different_forms_still_meet() {
+        let root = native(&["home", "project"]);
+        let file = native(&["home", "project", "src", "lib.rs"]);
+        let expected = native(&["src", "lib.rs"]);
+        for (root, file) in [
+            (root.clone(), verbatim(&file)),
+            (verbatim(&root), file.clone()),
+            (verbatim(&root), verbatim(&file)),
+            (root.clone(), file.clone()),
+        ] {
+            assert_eq!(
+                relative_to(&root, &file),
+                Some(expected.as_path()),
+                "{} under {}",
+                file.display(),
+                root.display()
+            );
+        }
+    }
+
+    /// Reading past the prefix is for comparing, not for deciding a file is
+    /// somewhere it is not.
+    #[test]
+    fn reading_past_the_prefix_does_not_put_a_file_under_the_wrong_root() {
+        let root = verbatim(&native(&["home", "project"]));
+        for elsewhere in [
+            native(&["home", "other", "x.rs"]),
+            verbatim(&native(&["home", "other", "x.rs"])),
+        ] {
+            assert_eq!(
+                relative_to(&root, &elsewhere),
+                None,
+                "{}",
+                elsewhere.display()
+            );
+        }
+    }
+
+    /// Outside the root there is nothing to be relative to, so the path keeps
+    /// its own name rather than climbing out of the project to reach it.
+    #[test]
+    fn a_file_outside_the_root_keeps_its_own_name() {
+        let root = native(&["home", "project"]);
+        let elsewhere = native(&["home", "elsewhere", "vendor.rs"]);
+        assert_eq!(spell(Some(&root), &elsewhere), "home/elsewhere/vendor.rs");
+        assert_eq!(
+            spell(None, &elsewhere),
+            spell(Some(&root), &elsewhere),
+            "an unrooted analysis names the file the same way"
+        );
+    }
+
+    /// What a caller holding an absolute path looks up, written by the same
+    /// rule the helper wrote the anchor with.
+    #[test]
+    fn a_reader_looks_a_file_up_the_way_the_helper_wrote_it() {
+        let root = native(&["home", "project"]);
+        let mut ir = CompilerIr::empty(UnitRef {
+            unit: "crate".into(),
+            file: "src/lib.rs".into(),
+            variant: "v1".into(),
+        });
+        ir.anchored_at = Some(root.display().to_string());
+        assert_eq!(
+            ir.spelling(&native(&["home", "project", "src", "lib.rs"])),
+            "src/lib.rs"
+        );
     }
 }

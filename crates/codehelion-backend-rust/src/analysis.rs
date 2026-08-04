@@ -488,10 +488,21 @@ fn load(manifest: &Path, permitted: Permissions) -> Result<Loaded, String> {
 fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
     let db = &loaded.db;
     let requested_path = Path::new(&unit.file);
-    if file_of(loaded, requested_path).is_none() {
+    let Some(requested_id) = file_of(loaded, requested_path) else {
         return Outcome::Unavailable(Unavailability::NoBuildInformation);
-    }
-    let requested_file = codehelion_helper::ir::spell(Some(&loaded.root), requested_path);
+    };
+    // Spelled from the file the workspace resolved the request to, not from the
+    // path the request arrived as. Every anchor below is spelled from the
+    // workspace's own copy, and this string decides by equality which of them
+    // belong to the requested file: derived from the caller's spelling it would
+    // be a second rendering of the same file that only has to agree, and one
+    // that names a separator differently agrees on no symbol at all.
+    let requested_file = loaded
+        .vfs
+        .file_path(requested_id)
+        .as_path()
+        .map(|path| codehelion_helper::ir::spell(Some(&loaded.root), Path::new(path.as_str())))
+        .unwrap_or_default();
     let Some(krate) = Crate::all(db).into_iter().find(|krate| {
         krate
             .display_name(db)
