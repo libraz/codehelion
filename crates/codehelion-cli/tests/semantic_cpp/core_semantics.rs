@@ -453,20 +453,28 @@ fn a_cpp_answer_is_about_the_bytes_the_scan_read() {
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
     let report = scan(&root);
-    let run_id = report["run"]["run_id"]
-        .as_i64()
-        .or_else(|| reports(&report).first()?["run"]["run_id"].as_i64())
-        .expect("the scan records a run id");
+    // Every partition, because a `-D` splits this tree into two programs with
+    // a run of their own, and the file asked about below belongs to one of
+    // them. Reading whichever comes first would make the answer depend on the
+    // order two independent programs happen to be reported in.
+    let run_ids: Vec<i64> = reports(&report)
+        .iter()
+        .filter_map(|partition| partition["run"]["run_id"].as_i64())
+        .collect();
+    assert!(!run_ids.is_empty(), "the scan records a run id: {report}");
 
     let store = Store::open(&root.join(".codehelion/audit.db")).expect("open audit database");
     let source = root.join("src").join("range_loop.cpp");
     let absolute = codehelion_core::paths::canonical(&source).expect("the planted source resolves");
     let text = std::fs::read_to_string(&source).expect("the planted source is readable");
 
-    let irs: Vec<_> = store
-        .run_compiler_units(run_id)
-        .expect("read compiler rows")
-        .into_iter()
+    let irs: Vec<_> = run_ids
+        .iter()
+        .flat_map(|run_id| {
+            store
+                .run_compiler_units(*run_id)
+                .expect("read compiler rows")
+        })
         .filter_map(|unit| match unit.outcome {
             CompilerOutcome::Analyzed(ir) => Some(ir),
             CompilerOutcome::Unavailable { .. } => None,
