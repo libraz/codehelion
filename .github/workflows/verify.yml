@@ -64,8 +64,11 @@ jobs:
       - name: Materialize the labelled corpora
         shell: bash
         run: corpus/scripts/materialize-labeled.sh
+      # Every test binary runs, rather than stopping at the first one that
+      # fails. A fault that only shows on one platform is rarely alone, and
+      # stopping at the first means meeting the next a full round trip later.
       - name: Test
-        run: cargo test --workspace --all-targets --all-features
+        run: cargo test --workspace --all-targets --all-features --no-fail-fast
 
   # Artifact inspection is an optional layer: the clone engine is complete
   # without it, and a tree with nothing built in it is the case that matters.

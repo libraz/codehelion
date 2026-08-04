@@ -64,7 +64,7 @@ verify-pe-artifact-fixtures: ## Build and verify real PE/PDB fixtures (Windows)
 
 .PHONY: test
 test: ## Run the full test suite
-	$(ONESHOT) $(CARGO) test --workspace --all-targets --all-features
+	$(ONESHOT) $(CARGO) test --workspace --all-targets --all-features --no-fail-fast
 
 .PHONY: doc
 doc: ## Build docs, failing on warnings
