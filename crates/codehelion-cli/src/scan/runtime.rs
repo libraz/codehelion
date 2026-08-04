@@ -424,7 +424,7 @@ fn ensure_existing_path_is_confined(
         }
         match std::fs::symlink_metadata(&prefix) {
             Ok(_) => {
-                let resolved = prefix.canonicalize().with_context(|| {
+                let resolved = codehelion_core::paths::canonical(&prefix).with_context(|| {
                     format!("resolving database path component {}", prefix.display())
                 })?;
                 if !resolved.starts_with(boundary) {

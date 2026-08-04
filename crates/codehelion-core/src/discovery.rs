@@ -174,7 +174,7 @@ pub enum DiscoveryError {
     reason = "discovery keeps traversal accounting and the single-read source handoff together"
 )]
 pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport, DiscoveryError> {
-    let root = root.canonicalize().map_err(|source| DiscoveryError::Root {
+    let root = crate::paths::canonical(root).map_err(|source| DiscoveryError::Root {
         path: root.to_path_buf(),
         source,
     })?;

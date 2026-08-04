@@ -19,9 +19,12 @@
 
 pub mod artifact;
 pub mod compiler;
+pub mod path_key;
 pub mod query;
 pub mod schema;
 pub mod snapshot;
+
+pub use path_key::{display_path, path_key};
 
 use std::path::Path;
 use std::time::Duration;

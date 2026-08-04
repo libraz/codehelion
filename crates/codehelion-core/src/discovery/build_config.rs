@@ -267,7 +267,7 @@ fn source_argument_matches(argument: &str, file: &Path, directory: Option<&Path>
 }
 
 fn normalize_path(path: &Path) -> std::path::PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    crate::paths::canonical(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// What a Rust crate was built with.

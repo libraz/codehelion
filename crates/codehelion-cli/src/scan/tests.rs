@@ -585,24 +585,6 @@ fn glob_filter_applies_include_then_exclude() {
     assert_eq!(excluded, 2);
 }
 
-#[cfg(unix)]
-#[test]
-fn non_utf8_path_keys_stay_distinct_from_each_other_and_utf8_names() {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-
-    let first = PathBuf::from(OsString::from_vec(b"src/\x80.rs".to_vec()));
-    let second = PathBuf::from(OsString::from_vec(b"src/\x81.rs".to_vec()));
-    let first_key = path_key(&first);
-    let second_key = path_key(&second);
-    assert_ne!(first_key, second_key);
-    assert_ne!(first_key, "src/\u{fffd}.rs");
-    assert!(first_key.starts_with('\u{001f}'));
-    assert!(display_path(&first_key).starts_with("<non-UTF-8 path: "));
-    assert!(!display_path(&first_key).contains("codehelion-path-bytes"));
-    assert_eq!(path_key(Path::new("src/plain.rs")), "src/plain.rs");
-}
-
 #[test]
 fn malformed_globs_are_an_error() {
     let cfg = Config {

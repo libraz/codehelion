@@ -357,9 +357,7 @@ mod tests {
 pub(crate) fn report_database(
     args: &ReportArgs,
 ) -> Result<(PathBuf, config::ResolvedConfig, PathBuf)> {
-    let root = args
-        .path
-        .canonicalize()
+    let root = codehelion_core::paths::canonical(&args.path)
         .with_context(|| format!("resolving path {}", args.path.display()))?;
     let resolved_config = config::load(args.config.as_deref(), &root)?;
     let path = scan::database_path(&root, args.db.as_deref(), &resolved_config, false)?;

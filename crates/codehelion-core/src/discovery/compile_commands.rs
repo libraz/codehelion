@@ -87,7 +87,7 @@ impl CompileEntry {
     #[must_use]
     pub fn selector_fields(&self) -> (String, Option<String>, Vec<String>) {
         let normalize = |path: &Path| {
-            path.canonicalize()
+            crate::paths::canonical(path)
                 .unwrap_or_else(|_| path.to_path_buf())
                 .display()
                 .to_string()

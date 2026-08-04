@@ -307,9 +307,7 @@ pub fn semantic(
     out: &mut impl Write,
 ) -> Result<Outcome> {
     let sandbox = semantic_sandbox(args)?;
-    let root = args
-        .path
-        .canonicalize()
+    let root = codehelion_core::paths::canonical(&args.path)
         .with_context(|| format!("resolving scan path {}", args.path.display()))?;
     let resolved = config::load(args.config.as_deref(), &root)?;
     let helper_paths = config::helper_paths(&resolved.config.helpers, &args.helpers)?;
@@ -342,9 +340,7 @@ fn run_with(
         bail!("--compare-languages requires --mode semantic");
     }
     let started_at = rfc3339_now();
-    let root = args
-        .path
-        .canonicalize()
+    let root = codehelion_core::paths::canonical(&args.path)
         .with_context(|| format!("resolving scan path {}", args.path.display()))?;
     if !root.is_dir() {
         bail!("scan path {} is not a directory", root.display());

@@ -46,17 +46,13 @@ pub(super) fn cpp_partitions(
             let entry_paths: BTreeSet<PathBuf> = entries
                 .iter()
                 .map(|entry| {
-                    entry
-                        .file
-                        .canonicalize()
+                    codehelion_core::paths::canonical(&entry.file)
                         .unwrap_or_else(|_| entry.file.clone())
                 })
                 .collect();
             for entry in entries {
                 let (file, directory, arguments) = entry.selector_fields();
-                let path = entry
-                    .file
-                    .canonicalize()
+                let path = codehelion_core::paths::canonical(&entry.file)
                     .unwrap_or_else(|_| entry.file.clone());
                 commands.insert(
                     path,
@@ -100,9 +96,7 @@ pub(super) fn unconfigured_cpp_partition(
                     .entries
                     .iter()
                     .map(|entry| {
-                        entry
-                            .file
-                            .canonicalize()
+                        codehelion_core::paths::canonical(&entry.file)
                             .unwrap_or_else(|_| entry.file.clone())
                     })
                     .collect()

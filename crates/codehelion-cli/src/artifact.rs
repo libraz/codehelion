@@ -824,10 +824,10 @@ fn resolve_wasm_source_map(
     let Some(parent) = artifact_path.parent() else {
         return unavailable("artifact_parent_unavailable");
     };
-    let Ok(root) = parent.canonicalize() else {
+    let Ok(root) = codehelion_core::paths::canonical(parent) else {
         return unavailable("artifact_parent_unavailable");
     };
-    let Ok(path) = parent.join(uri).canonicalize() else {
+    let Ok(path) = codehelion_core::paths::canonical(&parent.join(uri)) else {
         return unavailable("map_not_found");
     };
     if !path.starts_with(&root) {

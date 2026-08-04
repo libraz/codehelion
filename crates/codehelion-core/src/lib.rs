@@ -20,6 +20,7 @@ pub mod grouping;
 pub mod ir;
 pub mod maximal;
 pub mod near_match;
+pub mod paths;
 pub mod priority;
 pub mod semantic;
 pub mod stable_id;

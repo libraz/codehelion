@@ -89,9 +89,7 @@ pub fn run(cli: &Cli) -> Result<Outcome> {
 fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
     match command {
         Command::Doctor(args) => {
-            let root = args
-                .path
-                .canonicalize()
+            let root = codehelion_core::paths::canonical(&args.path)
                 .with_context(|| format!("resolving path {}", args.path.display()))?;
             let resolved = config::load(args.config.as_deref(), &root)?;
             let helpers = config::helper_paths(&resolved.config.helpers, &args.helpers)?;
@@ -306,9 +304,7 @@ fn install_channel(exe: &Path) -> &'static str {
 /// Append the local database's location to the doctor report, with a hint
 /// when the database would be committed to version control.
 fn doctor_database(args: &DoctorArgs, out: &mut impl Write) -> Result<()> {
-    let cwd = args
-        .path
-        .canonicalize()
+    let cwd = codehelion_core::paths::canonical(&args.path)
         .with_context(|| format!("resolving {}", args.path.display()))?;
     let db = resolve_db_at(
         &cwd,
@@ -421,9 +417,7 @@ fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
         BaselineAction::Create(args) => (&args.common, true, args.force),
         BaselineAction::Update(args) => (args, false, false),
     };
-    let root = args
-        .path
-        .canonicalize()
+    let root = codehelion_core::paths::canonical(&args.path)
         .with_context(|| format!("resolving path {}", args.path.display()))?;
     let resolved_config = config::load(args.config.as_deref(), &root)?;
     let db_path = scan::database_path(&root, args.db.as_deref(), &resolved_config, false)?;
@@ -710,10 +704,9 @@ fn remove_database_file(path: &Path) -> Result<bool> {
 /// Resolve the local-database path: an explicit flag wins, otherwise the
 /// configured location (discovered `codehelion.toml` or defaults).
 fn resolve_db(flag: Option<&Path>) -> Result<PathBuf> {
-    let root = std::env::current_dir()
-        .context("resolving the current directory")?
-        .canonicalize()
-        .context("resolving the current directory")?;
+    let current = std::env::current_dir().context("resolving the current directory")?;
+    let root =
+        codehelion_core::paths::canonical(&current).context("resolving the current directory")?;
     resolve_db_at(&root, flag, None, false)
 }
 
@@ -727,8 +720,7 @@ fn resolve_db_at(
     config_path: Option<&Path>,
     untrusted: bool,
 ) -> Result<PathBuf> {
-    let root = root
-        .canonicalize()
+    let root = codehelion_core::paths::canonical(root)
         .with_context(|| format!("resolving path {}", root.display()))?;
     let resolved_config = config::load(config_path, &root)?;
     scan::database_path(&root, flag, &resolved_config, untrusted)

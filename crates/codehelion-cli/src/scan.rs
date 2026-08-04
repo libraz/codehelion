@@ -104,9 +104,7 @@ struct LexedSource {
 pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     validate_fast_args(args)?;
     let started_at = rfc3339_now();
-    let root = args
-        .path
-        .canonicalize()
+    let root = codehelion_core::paths::canonical(&args.path)
         .with_context(|| format!("resolving scan path {}", args.path.display()))?;
     if !root.is_dir() {
         bail!("scan path {} is not a directory", root.display());
@@ -819,8 +817,9 @@ pub(crate) use baseline::{ScanBaseline, apply_baseline, load_baseline};
 
 pub(crate) mod store;
 
+pub(crate) use codehelion_store::{display_path, path_key};
 use store::{detector_versions, rank_and_record};
-pub(crate) use store::{display_path, file_rows, open_store, path_key};
+pub(crate) use store::{file_rows, open_store};
 
 /// The current time as fixed-width RFC 3339 UTC with microsecond precision.
 ///
