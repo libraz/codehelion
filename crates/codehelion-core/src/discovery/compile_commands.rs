@@ -368,13 +368,16 @@ mod tests {
         )
         .unwrap();
         let path = dir.path().join("compile_commands.json");
-        let directory = source_dir.display();
+        // Quoted rather than pasted between quotation marks: a path is not made
+        // only of characters JSON leaves alone, and on Windows every separator
+        // in it reads as the start of an escape.
+        let directory = serde_json::to_string(&source_dir.display().to_string()).unwrap();
         std::fs::write(
             &path,
             format!(
                 r#"[
-                    {{"directory": "{directory}", "file": "first.cpp", "arguments": ["clang++", "-std=c++20", "-c", "first.cpp"]}},
-                    {{"directory": "{directory}", "file": "second.cpp", "arguments": ["clang++", "-std=c++20", "-c", "second.cpp"]}}
+                    {{"directory": {directory}, "file": "first.cpp", "arguments": ["clang++", "-std=c++20", "-c", "first.cpp"]}},
+                    {{"directory": {directory}, "file": "second.cpp", "arguments": ["clang++", "-std=c++20", "-c", "second.cpp"]}}
                 ]"#
             ),
         )
