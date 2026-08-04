@@ -332,7 +332,19 @@ fn render(template: &Path, directory: &Path) -> Result<String, FixtureError> {
     let printable = directory
         .to_str()
         .ok_or_else(|| FixtureError::UnprintablePath(directory.to_path_buf()))?;
-    Ok(text.replace(DIRECTORY_PLACEHOLDER, printable))
+    // The placeholder stands inside a JSON string, and a path is not made
+    // only of characters JSON leaves alone — on Windows every separator is a
+    // backslash, which reads as the start of an escape. Written the way JSON
+    // says to write it, so the rendered database is still a database.
+    let quoted = serde_json::to_string(printable).map_err(|source| FixtureError::Malformed {
+        path: template.to_path_buf(),
+        source,
+    })?;
+    let escaped = quoted
+        .strip_prefix('"')
+        .and_then(|text| text.strip_suffix('"'))
+        .unwrap_or(quoted.as_str());
+    Ok(text.replace(DIRECTORY_PLACEHOLDER, escaped))
 }
 
 #[cfg(test)]
@@ -342,6 +354,27 @@ mod tests {
 
     fn read(path: &Path) -> String {
         std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    }
+
+    /// Where the checkout sits is not this repository's to choose, and on one
+    /// of the platforms it runs on every separator in that path is a
+    /// character JSON reserves.
+    #[test]
+    fn a_directory_json_would_read_as_escapes_still_renders_a_database() {
+        let scratch = tempfile::tempdir().unwrap();
+        let template = scratch.path().join("compile_commands.json.in");
+        std::fs::write(
+            &template,
+            format!("[{{\"directory\": \"{DIRECTORY_PLACEHOLDER}\"}}]"),
+        )
+        .unwrap();
+        let awkward = Path::new(r#"C:\a\codehelion\"quoted""#);
+
+        let rendered = render(&template, awkward).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&rendered)
+            .unwrap_or_else(|error| panic!("{rendered} is not a database: {error}"));
+        assert_eq!(parsed[0]["directory"], awkward.to_str().unwrap());
     }
 
     /// A renamed or deleted fixture would otherwise be discovered one test at a
