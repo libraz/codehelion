@@ -2,6 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
+/// What the ordinary Windows rules cap a path at. A longer one is reachable
+/// only through the verbatim form, which is the case that form exists for.
+#[cfg(any(windows, test))]
+const PATH_LIMIT: usize = 260;
+
 /// Resolve `path` to its canonical location, spelled the way the platform
 /// ordinarily spells it.
 ///
@@ -22,12 +27,14 @@ use std::path::{Path, PathBuf};
 ///
 /// Returns whatever [`std::fs::canonicalize`] returns: the path has to exist
 /// and every component of it has to be traversable.
-#[inline]
 pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
     let resolved = path.canonicalize()?;
     #[cfg(windows)]
     {
-        Ok(simplify(&resolved).unwrap_or(resolved))
+        // A path that is not UTF-8 keeps the form it was given: reading it
+        // apart below would mean deciding what its bytes say.
+        let simplified = resolved.to_str().and_then(simplify).map(PathBuf::from);
+        Ok(simplified.unwrap_or(resolved))
     }
     #[cfg(not(windows))]
     {
@@ -35,73 +42,81 @@ pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
+// Compiled where it is used and where it is checked. The rule is about
+// Windows paths, and the tests that hold it to account are run everywhere —
+// which is the only reason a mistake in it is found by anything other than a
+// Windows machine.
 /// Rewrite a Windows verbatim path in the ordinary form, or decline.
 ///
-/// Declining is the safe answer and is taken whenever anything about the path
-/// makes the two forms mean different things.
-#[cfg(windows)]
-fn simplify(path: &Path) -> Option<PathBuf> {
-    use std::path::{Component, Prefix};
-
-    // What the ordinary rules cap a path at. A longer one is reachable only
-    // through the verbatim form, which is the case this prefix exists for.
-    const PATH_LIMIT: usize = 260;
-
-    let Some(Component::Prefix(prefix)) = path.components().next() else {
-        return None;
-    };
-    // A verbatim UNC share could be rewritten too, and a device path
-    // (`\\?\PIPE\...`) could not: nothing outside the verbatim form names it
-    // at all. Only a local drive is rewritten here, because that is the form
-    // a repository is scanned from and the one whose spelling a person
-    // recognises.
-    if !matches!(prefix.kind(), Prefix::VerbatimDisk(_)) {
-        return None;
-    }
-    // A path that is not UTF-8 keeps the form it was given: comparing it
-    // component by component below would mean deciding what its bytes say.
-    let simplified = path.to_str()?.strip_prefix(r"\\?\")?;
+/// Read as text rather than through [`Path`], because on every platform but
+/// one `Path` does not know what these strings are — and a rule that can only
+/// be exercised where it is used is a rule nobody is checking.
+///
+/// Declining is the safe answer, and is taken whenever anything about the
+/// path makes the two forms name different things.
+#[cfg(any(windows, test))]
+fn simplify(path: &str) -> Option<&str> {
+    let simplified = path.strip_prefix(r"\\?\")?;
     if simplified.len() >= PATH_LIMIT {
         return None;
     }
-    Path::new(simplified)
-        .components()
-        .skip(1)
+    // A local drive, and nothing else. A share (`UNC\server\...`) would be a
+    // different rewrite, and a device (`PIPE\name`) has no other spelling at
+    // all.
+    let (drive, rest) = simplified.split_at_checked(3)?;
+    let mut spelling = drive.chars();
+    if !spelling
+        .next()
+        .is_some_and(|letter| letter.is_ascii_alphabetic())
+        || spelling.next() != Some(':')
+        || spelling.next() != Some('\\')
+    {
+        return None;
+    }
+    // The drive's own root has no components to check and is reached the same
+    // way under either form.
+    if rest.is_empty() {
+        return Some(simplified);
+    }
+    rest.split('\\')
         .all(ordinarily_reachable)
-        .then(|| PathBuf::from(simplified))
+        .then_some(simplified)
 }
 
 /// Whether a path component means the same thing outside the verbatim form.
 ///
-/// Three kinds do not. A name the system reserves for a device is resolved to
+/// Four kinds do not. A name the system reserves for a device is resolved to
 /// that device rather than to the file. A name ending in a dot or a space has
-/// those characters stripped. And a `.` or `..` is resolved rather than taken
-/// literally, which is the whole difference the verbatim form makes.
-#[cfg(windows)]
-fn ordinarily_reachable(component: std::path::Component<'_>) -> bool {
+/// those characters stripped. A `.` or `..` is resolved rather than taken
+/// literally, which is the whole difference the verbatim form makes. And an
+/// empty component is a repeated separator, which the ordinary rules collapse
+/// and the verbatim form keeps.
+#[cfg(any(windows, test))]
+fn ordinarily_reachable(component: &str) -> bool {
     const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
     const NUMBERED: [&str; 2] = ["COM", "LPT"];
 
-    let std::path::Component::Normal(name) = component else {
-        return false;
-    };
-    let Some(name) = name.to_str() else {
-        return false;
-    };
-    if name.ends_with('.') || name.ends_with(' ') {
+    if matches!(component, "" | "." | "..") || component.ends_with('.') || component.ends_with(' ')
+    {
         return false;
     }
-    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    let stem = component.split('.').next().unwrap_or(component).trim_end();
     if RESERVED
         .iter()
         .any(|reserved| stem.eq_ignore_ascii_case(reserved))
     {
         return false;
     }
+    // `COM1` through `COM9` and the same for `LPT`. `COM10` is a file.
     !NUMBERED.iter().any(|device| {
         stem.len() == device.len() + 1
-            && stem[..device.len()].eq_ignore_ascii_case(device)
-            && matches!(stem.as_bytes()[device.len()], b'1'..=b'9')
+            && stem
+                .get(..device.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(device))
+            && stem
+                .as_bytes()
+                .last()
+                .is_some_and(|digit| digit.is_ascii_digit() && *digit != b'0')
     })
 }
 
