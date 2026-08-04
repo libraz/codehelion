@@ -311,6 +311,10 @@ fn database_readers_share_repository_path_and_config_resolution() {
         .expect("scan fixture");
     assert!(scanned.status.success(), "{scanned:?}");
     assert!(database.is_file(), "scan used the named configuration");
+    // What the readers print is where the database resolved to, not the
+    // spelling the configuration reached it by.
+    let resolved_database =
+        codehelion_core::paths::canonical(&database).expect("resolving the database");
     let report: serde_json::Value = serde_json::from_slice(&scanned.stdout).unwrap();
     let run = report["run"]["run_id"].as_i64().expect("recorded run id");
     let group = group_ids(&report).into_iter().next().expect("clone group");
@@ -357,7 +361,7 @@ fn database_readers_share_repository_path_and_config_resolution() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            database.to_string_lossy().as_ref(),
+            resolved_database.to_string_lossy().as_ref(),
         ));
 
     cmd()

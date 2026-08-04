@@ -1,5 +1,14 @@
 use super::*;
 
+/// A configuration naming where the database goes.
+///
+/// Written as a TOML literal string rather than a basic one, because a
+/// Windows path is mostly backslashes and a basic string reads each of them
+/// as the start of an escape.
+fn database_setting(path: &Path) -> String {
+    format!("database = '{}'\n", path.display())
+}
+
 /// A scan report with the fields that legitimately differ between runs
 /// removed, so two of them can be compared whole.
 fn comparable_report(root: &Path, extra: &[&str]) -> serde_json::Value {
@@ -405,7 +414,7 @@ fn discovered_database_paths_cannot_escape_the_scan_tree() {
 
     let absolute = outside.join("absolute.db");
     for database in [
-        format!("database = \"{}\"\n", absolute.display()),
+        database_setting(&absolute),
         "database = \"../outside/traversal.db\"\n".to_string(),
     ] {
         std::fs::write(root.join("codehelion.toml"), database).unwrap();
@@ -423,7 +432,7 @@ fn discovered_database_paths_cannot_escape_the_scan_tree() {
     let retained = outside.join("retain.db");
     std::fs::write(&retained, "must survive cache clear").unwrap();
     for database in [
-        format!("database = \"{}\"\n", retained.display()),
+        database_setting(&retained),
         "database = \"../outside/retain.db\"\n".to_string(),
     ] {
         std::fs::write(root.join("codehelion.toml"), database).unwrap();
@@ -442,7 +451,7 @@ fn discovered_database_paths_cannot_escape_the_scan_tree() {
     let trusted_configured = outside.join("trusted-configured.db");
     std::fs::write(
         root.join("codehelion.toml"),
-        format!("database = \"{}\"\n", trusted_configured.display()),
+        database_setting(&trusted_configured),
     )
     .unwrap();
     cmd()
@@ -455,7 +464,7 @@ fn discovered_database_paths_cannot_escape_the_scan_tree() {
     let untrusted_configured = outside.join("untrusted-configured.db");
     std::fs::write(
         root.join("codehelion.toml"),
-        format!("database = \"{}\"\n", untrusted_configured.display()),
+        database_setting(&untrusted_configured),
     )
     .unwrap();
     cmd()

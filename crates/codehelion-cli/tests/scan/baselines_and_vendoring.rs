@@ -4,11 +4,12 @@ use super::*;
 fn baseline_create_and_update_keep_every_completed_partition_of_one_invocation() {
     let dir = fixture();
     let root = dir.path();
-    let root_text = root
-        .canonicalize()
-        .expect("canonical fixture root")
-        .to_string_lossy()
-        .into_owned();
+    // Seeded through the same rule the scan records under. Spelling the key
+    // out here instead would be a second copy of that rule, and a copy that
+    // agrees on one platform is how a lookup comes to miss a row on another.
+    let root_text = codehelion_store::path_key(
+        &codehelion_core::paths::canonical(root).expect("canonical fixture root"),
+    );
     let fast = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let structural = BuildVariant::structural(LanguageSelection::default(), Language::C);
     std::fs::create_dir_all(root.join(".codehelion")).expect("create audit directory");
