@@ -146,3 +146,24 @@ mod templates_and_artifacts;
 fn names_the_file(path: &str, tail: &str) -> bool {
     std::path::Path::new(path).ends_with(tail)
 }
+
+/// Whether the artifact's symbols are decorated in an ABI this build does not
+/// read a name out of.
+///
+/// The artifact backend demangles Rust and the Itanium C++ ABI. A C++ compiler
+/// targeting the Microsoft ABI decorates differently — `?`-prefixed — and those
+/// names reach the report as they stand. Correlating a stripped object to its
+/// sources goes through the name, so where this is true there is nothing for it
+/// to go through, and the tool is expected to say so rather than to guess.
+fn decorated_by_an_unread_abi(report: &Value) -> bool {
+    // Any, not all: an object may hold a C symbol nobody decorated, while an
+    // Itanium name never begins this way — that ABI spells them `_Z...`, and a
+    // `?` cannot open a C identifier either.
+    report["symbols"].as_array().is_some_and(|symbols| {
+        symbols.iter().any(|symbol| {
+            symbol["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with('?'))
+        })
+    })
+}

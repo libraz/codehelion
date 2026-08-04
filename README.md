@@ -381,6 +381,10 @@ by the ceilings rather than by disk.
 nothing; supply the unstripped build or a verified debug companion. Duplicate
 detection that sees past register and immediate differences is implemented for
 x86 only — on other architectures, only byte-identical duplicates are found.
+Correlating an artifact back to the sources reads a name out of each symbol,
+which is done for Rust and for the Itanium C++ ABI; a C++ artifact decorated
+for the Microsoft ABI is still read for size and duplication, but reports no
+source correspondence rather than a guessed one.
 
 **The audit database is not migrated.** A database written under a different
 schema is rejected rather than converted; move it aside and rescan. This will

@@ -4,6 +4,11 @@ use super::*;
 /// through its compiler display key and demangled symbol name. Debug locations
 /// are deliberately absent here, so the generic-origin evidence is the only
 /// route that can produce the report entry.
+///
+/// That route reads a name out of the object, so it holds only for an ABI this
+/// build demangles. Where the C++ compiler decorates for the Microsoft ABI
+/// instead, what is checked is that the tool reports no correspondence rather
+/// than a wrong one.
 #[test]
 #[allow(
     clippy::disallowed_types,
@@ -91,6 +96,24 @@ fn cpp_template_specializations_correlate_to_a_debugless_object() {
     let origins = report["correlation"]["generic_origins"]
         .as_array()
         .expect("generic origins are reported");
+    if decorated_by_an_unread_abi(&report) {
+        // Nothing below can hold here, and the reason is not this fixture. The
+        // only route to a stripped object is the symbol name, so it needs an
+        // ABI this build can read one from: Rust's and the Itanium C++ one.
+        // Where a C++ compiler decorates for the Microsoft ABI instead, the
+        // names stay decorated, and reporting no correspondence is the correct
+        // answer -- which is what is checked instead of the correspondences.
+        assert_eq!(
+            report["correlation"]["mappings"].as_u64(),
+            Some(0),
+            "an undecipherable name produced a correspondence: {report}"
+        );
+        assert!(
+            origins.is_empty(),
+            "an undecipherable name produced a generic origin: {report}"
+        );
+        return;
+    }
     assert!(
         origins.iter().any(|origin| {
             origin["specializations"]
