@@ -377,7 +377,7 @@ fn direct_standard_fallible_early_return(
     if condition.get_kind() != EntityKind::UnaryOperator
         || condition
             .get_range()
-            .map(|range| range.tokenize())
+            .map(written_tokens)
             .is_none_or(|tokens| {
                 tokens
                     .first()
@@ -454,13 +454,34 @@ fn direct_returned_name(returned: Entity<'_>) -> Option<String> {
     }
 }
 
+/// The tokens written across `range`, or none when there are none to read.
+///
+/// libclang answers a range it cannot tokenize with an empty buffer and no
+/// pointer at all, and the binding builds a slice from that pointer without
+/// looking — which is undefined, and on a build with the checks compiled in
+/// aborts the process rather than unwinding. A helper that dies takes the
+/// whole analysis with it, so the ranges that produce no pointer are not
+/// handed over: one that reaches into no file, one whose ends are in
+/// different files, and one that covers nothing.
+fn written_tokens(range: clang::source::SourceRange<'_>) -> Vec<clang::token::Token<'_>> {
+    let start = range.get_start().get_file_location();
+    let end = range.get_end().get_file_location();
+    let (Some(from), Some(to)) = (start.file, end.file) else {
+        return Vec::new();
+    };
+    if from != to || end.offset <= start.offset {
+        return Vec::new();
+    }
+    range.tokenize()
+}
+
 /// The direct source and element bindings written in one C++ range-for loop.
 ///
 /// The cursor includes compiler-generated `__range`/`__begin` variables, so
 /// user spelling is read from the loop tokens and the element binding is the
 /// unique non-generated `VarDecl` in the loop's desugaring.
 fn direct_range_bindings(loop_: Entity<'_>) -> Option<(String, String)> {
-    let tokens = loop_.get_range()?.tokenize();
+    let tokens = written_tokens(loop_.get_range()?);
     let tokens: Vec<_> = tokens
         .iter()
         .map(clang::token::Token::get_spelling)
@@ -527,7 +548,7 @@ fn direct_call_argument_is(call: Entity<'_>, binding: &str) -> bool {
     let Some(range) = call.get_range() else {
         return false;
     };
-    let tokens = range.tokenize();
+    let tokens = written_tokens(range);
     let tokens: Vec<_> = tokens
         .iter()
         .map(clang::token::Token::get_spelling)
@@ -554,7 +575,7 @@ fn direct_numeric_accumulation(statement: Entity<'_>, binding: &str) -> bool {
     let Some(range) = statement.get_range() else {
         return false;
     };
-    let tokens = range.tokenize();
+    let tokens = written_tokens(range);
     let tokens: Vec<_> = tokens
         .iter()
         .map(clang::token::Token::get_spelling)
