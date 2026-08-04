@@ -685,19 +685,22 @@ impl CompilerIr {
 /// it and a reader looks them up with it, so the two spellings agree because
 /// they are the same rule rather than because they were written to match.
 ///
-/// A path outside `root` keeps its own name: made relative it would climb out
-/// of the project with `..`, which says less than the path it started as.
+/// A path made relative has its components separated by `/` whatever the
+/// platform separates them with. Where a file sits inside the project is a
+/// value on the wire, in the audit database and in every exported report, so
+/// it has to read as one name rather than one per operating system — and
+/// Windows opens a path spelled that way as readily as its own.
 ///
-/// Components are separated by `/` whatever the platform separates them with.
-/// This spelling is a value on the wire, in the audit database and in every
-/// exported report, so a file has to have one name rather than one per
-/// operating system — and Windows opens a path spelled this way as readily as
-/// its own.
+/// A path outside `root` keeps its own name, exactly as it stands: made
+/// relative it would climb out of the project with `..`, which says less than
+/// the path it started as, and respelled it would stop being what the
+/// filesystem answered — a Windows path reached past the ordinary rules is
+/// spelled one way only.
 #[must_use]
 pub fn spell(root: Option<&Path>, path: &Path) -> String {
-    let relative = root
-        .and_then(|root| relative_to(root, path))
-        .unwrap_or(path);
+    let Some(relative) = root.and_then(|root| relative_to(root, path)) else {
+        return path.display().to_string();
+    };
     separated_by(&relative.display().to_string(), std::path::MAIN_SEPARATOR)
 }
 
@@ -979,11 +982,27 @@ mod tests {
     fn a_file_outside_the_root_keeps_its_own_name() {
         let root = native(&["home", "project"]);
         let elsewhere = native(&["home", "elsewhere", "vendor.rs"]);
-        assert_eq!(spell(Some(&root), &elsewhere), "home/elsewhere/vendor.rs");
+        assert_eq!(
+            spell(Some(&root), &elsewhere),
+            elsewhere.display().to_string()
+        );
         assert_eq!(
             spell(None, &elsewhere),
             spell(Some(&root), &elsewhere),
             "an unrooted analysis names the file the same way"
+        );
+    }
+
+    /// A path the ordinary Windows rules cannot express is reachable by one
+    /// spelling only. Respelling it, as a path inside the project is respelled,
+    /// would produce a name that reaches nothing at all.
+    #[test]
+    fn a_file_named_the_only_way_it_can_be_keeps_that_name() {
+        let root = native(&["home", "project"]);
+        let elsewhere = verbatim(&native(&["home", "elsewhere", "vendor.rs"]));
+        assert_eq!(
+            spell(Some(&root), &elsewhere),
+            elsewhere.display().to_string()
         );
     }
 
