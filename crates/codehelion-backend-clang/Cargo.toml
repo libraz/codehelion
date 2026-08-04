@@ -18,7 +18,13 @@ codehelion-helper = { version = "0.1.0", path = "../codehelion-helper" }
 #
 # No `clang_*` feature is enabled, so only the API every supported release has
 # is compiled — the reason to talk to a compiler through a C ABI at all.
-clang = { version = "2", features = ["runtime"] }
+#
+# Not `2`: tokenizing a range libclang returns nothing for reads the empty
+# answer out of a null pointer, which is undefined behaviour and aborts the
+# process where the check is compiled in. 2.1 asks whether the pointer is
+# there. Nothing this helper can do at the call site prevents it — the answer
+# arrives already read — so the floor is the version that reads it correctly.
+clang = { version = "2.1", features = ["runtime"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

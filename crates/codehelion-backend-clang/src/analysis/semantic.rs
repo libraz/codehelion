@@ -456,13 +456,11 @@ fn direct_returned_name(returned: Entity<'_>) -> Option<String> {
 
 /// The tokens written across `range`, or none when there are none to read.
 ///
-/// libclang answers a range it cannot tokenize with an empty buffer and no
-/// pointer at all, and the binding builds a slice from that pointer without
-/// looking — which is undefined, and on a build with the checks compiled in
-/// aborts the process rather than unwinding. A helper that dies takes the
-/// whole analysis with it, so the ranges that produce no pointer are not
-/// handed over: one that reaches into no file, one whose ends are in
-/// different files, and one that covers nothing.
+/// Every caller here reads a fixed shape out of the tokens of one construct,
+/// so a range that is not a stretch of one file has nothing to say to them: it
+/// reaches into no file at all, its two ends are in different files, or it
+/// covers nothing. Tokenizing those would answer a question nobody asked, and
+/// the empty answer they produce is the one libclang is least careful with.
 fn written_tokens(range: clang::source::SourceRange<'_>) -> Vec<clang::token::Token<'_>> {
     let start = range.get_start().get_file_location();
     let end = range.get_end().get_file_location();
