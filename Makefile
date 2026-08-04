@@ -45,12 +45,10 @@ verify-artifact-boundaries: ## Verify the source engine does not link artifact c
 # A crate is packaged as a directory of its own, so anything it reads from
 # outside that directory is there in the working tree and gone in the tarball.
 # Nothing else builds a crate that way, which is why the failure otherwise
-# waits until a release is already tagged. Uncommitted work is packaged as it
-# stands: the question is whether the tree in front of you can be published,
-# and refusing to answer it until the change is committed asks it too late.
+# waits until a release is already tagged.
 .PHONY: verify-packaging
 verify-packaging: ## Verify every publishable crate builds from its own package
-	$(ONESHOT) $(CARGO) package --workspace --locked --allow-dirty
+	$(ONESHOT) sh scripts/verify-packaging.sh
 
 .PHONY: verify-artifact-fixtures
 verify-artifact-fixtures: ## Build and verify real WASM and ELF artifact fixtures (Linux)
