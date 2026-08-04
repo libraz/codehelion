@@ -137,3 +137,12 @@ mod builds_and_database;
 mod core_semantics;
 #[path = "semantic_cpp/templates_and_artifacts.rs"]
 mod templates_and_artifacts;
+
+/// Whether `path` ends in `tail`, comparing whole components rather than text.
+///
+/// A unit is named by where its file is, so the name carries the separator the
+/// platform writes paths with, while the tail is written here once for every
+/// platform. Compared as text the two agree on one platform and on no other.
+fn names_the_file(path: &str, tail: &str) -> bool {
+    std::path::Path::new(path).ends_with(tail)
+}

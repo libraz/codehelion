@@ -232,7 +232,7 @@ fn a_duplicate_source_command_selects_each_exact_build_entry() {
                 .iter()
                 .find_map(|stored| match &stored.outcome {
                     CompilerOutcome::Analyzed(ir)
-                        if ir.unit.file.ends_with("include/accumulate.hpp") =>
+                        if names_the_file(&ir.unit.file, "include/accumulate.hpp") =>
                     {
                         ir.symbols.iter().find_map(|symbol| {
                             (symbol.name == "total")
@@ -278,7 +278,9 @@ fn template_instantiations_survive_header_agreement_and_storage() {
     let header = units
         .iter()
         .find_map(|stored| match &stored.outcome {
-            CompilerOutcome::Analyzed(ir) if ir.unit.file.ends_with("include/templates.hpp") => {
+            CompilerOutcome::Analyzed(ir)
+                if names_the_file(&ir.unit.file, "include/templates.hpp") =>
+            {
                 Some(ir)
             }
             CompilerOutcome::Analyzed(_) | CompilerOutcome::Unavailable { .. } => None,

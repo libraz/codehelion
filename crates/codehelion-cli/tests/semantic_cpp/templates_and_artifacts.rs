@@ -212,7 +212,7 @@ fn call_targets_survive_header_agreement_and_sqlite_round_trip() {
                 .iter()
                 .find_map(|stored| match &stored.outcome {
                     CompilerOutcome::Analyzed(ir)
-                        if ir.unit.file.ends_with("include/calls.hpp") =>
+                        if names_the_file(&ir.unit.file, "include/calls.hpp") =>
                     {
                         Some(ir.clone())
                     }
