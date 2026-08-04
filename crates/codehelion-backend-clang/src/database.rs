@@ -427,7 +427,7 @@ impl Database {
         let named = Path::new(unit);
         let absolute = canonical(named);
         self.entries.iter().find(|entry| {
-            selector.is_none_or(|wanted| entry.selector == *wanted)
+            selector.is_none_or(|wanted| entry.selector.names_the_same_entry(wanted))
                 && (Path::new(&codehelion_helper::ir::spell(Some(&self.root), &entry.file))
                     == named
                     || entry.file == absolute)

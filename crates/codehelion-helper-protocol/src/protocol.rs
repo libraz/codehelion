@@ -256,6 +256,34 @@ pub struct CompileCommandSelector {
     pub arguments: Vec<String>,
 }
 
+impl CompileCommandSelector {
+    /// Whether this and `other` name one entry of one compilation database.
+    ///
+    /// Not derived equality, because the two are built by two programs out of
+    /// one database and their paths are two resolvings of one file. Those are
+    /// compared as paths, and past a Windows verbatim prefix that only one of
+    /// the two need have come back carrying — where they are compared as
+    /// strings instead, no entry matches any request and every unit of a C or
+    /// C++ project comes back with no build information.
+    ///
+    /// The arguments are compared exactly: they are the words the database
+    /// recorded, which neither side resolved and neither side may reword.
+    #[must_use]
+    pub fn names_the_same_entry(&self, other: &Self) -> bool {
+        fn one_path(left: &str, right: &str) -> bool {
+            crate::ir::ordinary(std::path::Path::new(left))
+                == crate::ir::ordinary(std::path::Path::new(right))
+        }
+        self.arguments == other.arguments
+            && one_path(&self.file, &other.file)
+            && match (self.directory.as_deref(), other.directory.as_deref()) {
+                (Some(mine), Some(theirs)) => one_path(mine, theirs),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
 /// Something a helper may be permitted to run out of the project it is
 /// analyzing.
 ///
@@ -667,5 +695,43 @@ mod tests {
         ] {
             assert_eq!(capability.absence(), Absence::Degrade, "{capability:?}");
         }
+    }
+
+    fn selector(file: &str, directory: Option<&str>) -> CompileCommandSelector {
+        CompileCommandSelector {
+            file: file.to_owned(),
+            directory: directory.map(ToOwned::to_owned),
+            arguments: vec!["clang++".into(), "-c".into(), "a.cpp".into()],
+        }
+    }
+
+    /// The scanner and the helper each resolve the database's paths for
+    /// themselves, and one of them coming back with the verbatim form is a
+    /// difference in how the path was written down rather than in which file
+    /// it names.
+    #[test]
+    fn one_entry_resolved_by_two_programs_is_one_entry() {
+        let plain = selector("C:/w/a.cpp", Some("C:/w"));
+        let verbatim = selector(r"\\?\C:/w/a.cpp", Some(r"\\?\C:/w"));
+        assert!(plain.names_the_same_entry(&verbatim));
+        assert!(verbatim.names_the_same_entry(&plain));
+        assert!(plain.names_the_same_entry(&plain));
+    }
+
+    /// A database may list one source more than once under different settings,
+    /// which is the whole reason a selector carries the command.
+    #[test]
+    fn two_commands_over_one_source_are_two_entries() {
+        let mut other = selector("C:/w/a.cpp", Some("C:/w"));
+        other.arguments.push("-DWIDE".into());
+        assert!(!selector("C:/w/a.cpp", Some("C:/w")).names_the_same_entry(&other));
+        assert!(
+            !selector("C:/w/a.cpp", Some("C:/w"))
+                .names_the_same_entry(&selector("C:/w/b.cpp", Some("C:/w")))
+        );
+        assert!(
+            !selector("C:/w/a.cpp", Some("C:/w"))
+                .names_the_same_entry(&selector("C:/w/a.cpp", None))
+        );
     }
 }

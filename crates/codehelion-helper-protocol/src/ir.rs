@@ -715,7 +715,7 @@ fn relative_to<'a>(root: &Path, path: &'a Path) -> Option<&'a Path> {
 
 /// A Windows verbatim path read as the path it stands for, and anything else
 /// unchanged.
-fn ordinary(path: &Path) -> &Path {
+pub(crate) fn ordinary(path: &Path) -> &Path {
     path.to_str()
         .and_then(|text| text.strip_prefix(r"\\?\"))
         .map_or(path, Path::new)
