@@ -8,9 +8,28 @@ use super::{
     SemanticGroup, SemanticGroupingStats, SemanticGroupingUnit, SemanticOperationGraph,
     SemanticPair, SemanticUnitGraph, SourceMeta, SourceUnit, StructuralReport, StructuralUnit,
     SyntaxIrFile, VerifiedSemanticPair, bail, extract_registered_candidates,
-    group_verified_semantic_pairs, registered_semantic_windows, semantic, stable_id, structural,
-    verify_registered_candidates,
+    group_verified_semantic_pairs, path_key, registered_semantic_windows, semantic, stable_id,
+    structural, verify_registered_candidates,
 };
+
+/// What a file's compiler answer is looked up under.
+///
+/// The same rule the file's own metadata was named by, because that metadata
+/// is what does the looking up. Naming the two sides separately is how a file
+/// comes to be present on both sides and found on neither: on Windows one
+/// spelling separates with a backslash and the other with a slash, and every
+/// unit is then skipped as unanswered — a scan that reports itself semantic,
+/// answers about every file, and produces no finding a compiler contributed.
+fn answered_by_file<'a>(
+    sources: &'a [SourceUnit],
+    asked: &'a semantic::Answers,
+) -> BTreeMap<String, (&'a SourceUnit, &'a semantic::Answer)> {
+    sources
+        .iter()
+        .zip(&asked.per_source)
+        .map(|(source, answer)| (path_key(&source.relative_path), (source, answer)))
+        .collect()
+}
 
 pub(super) struct SemanticPartition {
     pub(super) variant: BuildVariant,
@@ -263,11 +282,7 @@ pub(super) fn resolved_types(
     sources: &[SourceUnit],
     files: &[SourceMeta],
 ) -> structural::ResolvedTypes {
-    let answered: BTreeMap<&str, (&SourceUnit, &semantic::Answer)> = sources
-        .iter()
-        .zip(&asked.per_source)
-        .filter_map(|(source, answer)| Some((source.relative_path.to_str()?, (source, answer))))
-        .collect();
+    let answered = answered_by_file(sources, asked);
     let resolved: Vec<_> = files
         .iter()
         .map(|meta| {
@@ -322,11 +337,7 @@ pub(super) fn registered_semantic_pairs(
         });
     };
     let variant_fingerprint = semantic_variant_fingerprint(variant)?;
-    let answered: BTreeMap<&str, (&SourceUnit, &semantic::Answer)> = sources
-        .iter()
-        .zip(&asked.per_source)
-        .filter_map(|(source, answer)| Some((source.relative_path.to_str()?, (source, answer))))
-        .collect();
+    let answered = answered_by_file(sources, asked);
     let mut units = Vec::new();
     let mut registered_observations = 0_usize;
     let mut excluded_observations = 0_usize;
@@ -871,4 +882,60 @@ pub(super) fn semantic_variant_fingerprint(variant: &BuildVariant) -> Result<[u8
             .with_context(|| format!("BuildVariant fingerprint {hex:?} is not hexadecimal"))?;
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use codehelion_core::discovery::{ContentHash, TargetKind};
+
+    use super::{Language, SourceUnit, answered_by_file, path_key, semantic};
+
+    fn source(relative: &str) -> SourceUnit {
+        SourceUnit {
+            relative_path: PathBuf::from(relative),
+            absolute_path: PathBuf::from("/w").join(relative),
+            language: Language::Cpp,
+            is_header: false,
+            content_hash: ContentHash::of(b""),
+            source_bytes: Vec::new().into(),
+            byte_len: 0,
+            package: None,
+            crate_name: None,
+            target_kind: TargetKind::Library,
+        }
+    }
+
+    /// The name a compiler's answer is filed under is the name the file's own
+    /// metadata carries. Naming the two sides separately is how a file comes to
+    /// be present on both and found on neither.
+    #[test]
+    fn an_answer_is_filed_under_the_name_the_file_is_looked_up_by() {
+        let sources = [source("src/range_loop.cpp"), source("include/calls.hpp")];
+        let asked = semantic::Answers {
+            helpers: Vec::new(),
+            per_source: sources
+                .iter()
+                .map(|source| semantic::Answer::NotAsked {
+                    unit: codehelion_helper::ir::UnitRef {
+                        unit: String::new(),
+                        file: source.absolute_path.display().to_string(),
+                        variant: String::new(),
+                    },
+                    reason: codehelion_helper::ir::Unavailability::NotSupported,
+                })
+                .collect(),
+        };
+
+        let answered = answered_by_file(&sources, &asked);
+
+        for source in &sources {
+            assert!(
+                answered.contains_key(&path_key(&source.relative_path)),
+                "{} is not filed under the name its metadata carries",
+                source.relative_path.display()
+            );
+        }
+    }
 }
