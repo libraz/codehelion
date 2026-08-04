@@ -349,7 +349,7 @@ pub(crate) fn database_path(
     untrusted: bool,
 ) -> Result<PathBuf> {
     if let Some(path) = flag {
-        return Ok(path.to_path_buf());
+        return Ok(spelled_natively(path));
     }
     let boundary = repository_root(root);
     let discovered = matches!(&config.source, ConfigSource::Discovered(_));
@@ -362,9 +362,24 @@ pub(crate) fn database_path(
             } else {
                 "a configuration discovered in the scanned repository"
             },
-        );
+        )
+        .map(|path| spelled_natively(&path));
     }
-    Ok(configured_database_path(&boundary, &config.config.database))
+    Ok(spelled_natively(&configured_database_path(
+        &boundary,
+        &config.config.database,
+    )))
+}
+
+/// `path` with every component separated the way the platform separates them.
+///
+/// Where the database is gets recorded in a report and printed by every reader
+/// of it, and the part of it a configuration supplies is written by hand — on
+/// Windows commonly with the separator the rest of the world uses. Joining that
+/// onto a resolved root leaves one path spelled two ways in the middle, which
+/// reads as a typo and compares as a different file.
+fn spelled_natively(path: &Path) -> PathBuf {
+    path.components().collect()
 }
 
 /// Apply the established, trusted configuration-path behaviour.
@@ -458,4 +473,38 @@ fn repository_root(root: &Path) -> PathBuf {
         current = directory.parent();
     }
     root.to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::spelled_natively;
+
+    /// Where the database is has to read as one path, whatever mixture of
+    /// separators and redundant components the configuration reached it by.
+    #[test]
+    fn a_configured_location_is_spelled_one_way() {
+        let boundary = Path::new("project");
+        for configured in ["state/audit.db", "state/./audit.db", "./state/audit.db"] {
+            assert_eq!(
+                spelled_natively(&boundary.join(configured)),
+                ["project", "state", "audit.db"].iter().collect::<PathBuf>(),
+                "{configured}"
+            );
+        }
+    }
+
+    /// Folding the spelling is not folding the path: what climbs out of a
+    /// directory still climbs out of it, so the checks that refuse such a path
+    /// are looking at what it says.
+    #[test]
+    fn respelling_a_path_does_not_resolve_it() {
+        assert_eq!(
+            spelled_natively(Path::new("project/../elsewhere/audit.db")),
+            ["project", "..", "elsewhere", "audit.db"]
+                .iter()
+                .collect::<PathBuf>()
+        );
+    }
 }

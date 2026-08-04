@@ -492,9 +492,10 @@ fn report_replay_preserves_the_effective_configuration_provenance() {
     let dir = fixture();
     let config_path = dir.path().join("codehelion.toml");
     std::fs::write(&config_path, "min-clone-tokens = 25\n").unwrap();
-    let recorded_config_path = dir
-        .path()
-        .canonicalize()
+    // Resolved by the rule the tool records paths with, not by the one the
+    // platform answers with: on Windows those are two different strings for
+    // one file, and the recorded one is what a later invocation has to match.
+    let recorded_config_path = codehelion_core::paths::canonical(dir.path())
         .expect("fixture root resolves")
         .join("codehelion.toml");
 
