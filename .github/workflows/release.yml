@@ -196,3 +196,71 @@ jobs:
             dist/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Last, because it is the one step nothing undoes: a published version stays
+  # published, and yanking it does not free the number. Everything that can
+  # still be corrected — the builds, the archives, the release notes — has
+  # already succeeded by the time this runs.
+  publish-crates:
+    name: Publish to crates.io
+    needs: [verify-tag, publish-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Trusted publishing: crates.io exchanges this run's identity for a token
+      # that expires with the job, so no registry credential is stored here.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Asked before publishing rather than discovered during it. A run that
+      # already published cannot publish again, so re-running a tag has to be
+      # able to end in nothing happening — and a run that got partway through
+      # has to say so rather than fail halfway a second time.
+      - name: Ask the registry what is already published
+        id: registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.verify-tag.outputs.version }}"
+          crates="$(cargo metadata --no-deps --format-version 1 | python3 -c \
+            'import json, sys; print("\n".join(package["name"] for package in json.load(sys.stdin)["packages"] if package["publish"] is None))')"
+          present=()
+          absent=()
+          for crate in $crates; do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: codehelion release workflow (https://github.com/libraz/codehelion)' \
+              "https://crates.io/api/v1/crates/$crate/$version")"
+            case "$status" in
+              200) present+=("$crate") ;;
+              404) absent+=("$crate") ;;
+              *) echo "crates.io answered $status for $crate $version" >&2; exit 1 ;;
+            esac
+          done
+          if [ "${#absent[@]}" -eq 0 ]; then
+            echo "every crate is already at $version; nothing to publish"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          elif [ "${#present[@]}" -eq 0 ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "version $version is published for ${present[*]} but not for ${absent[*]}." >&2
+            echo "cargo cannot resume a partial release; finish the remaining crates by hand." >&2
+            exit 1
+          fi
+      # No token is configured for a crate that does not exist yet, so the
+      # first release of a new name is made from a workstation and this job
+      # finds nothing left to do. From the second release on it is the whole
+      # of the publish.
+      - name: Authenticate with crates.io
+        if: steps.registry.outputs.publish == 'true'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      # Verification builds each crate from its own package before uploading
+      # it, and cargo waits for each upload to be resolvable before publishing
+      # what depends on it.
+      - name: Publish
+        if: steps.registry.outputs.publish == 'true'
+        run: cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
