@@ -100,6 +100,21 @@ jobs:
       - name: Measure
         run: make eval
 
+  packaging:
+    name: publishable crates build from their own package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Building a crate from its own package directory is the only thing that
+      # reads it the way a dependent will, and nothing else in this workflow
+      # does. Asking on every change rather than at release time keeps the
+      # answer current: the alternative is finding out at the tag that a crate
+      # has been unbuildable from its own tarball for weeks.
+      - name: Package every publishable crate
+        run: make verify-packaging
+
   msrv:
     name: minimum supported rust version
     runs-on: ubuntu-latest

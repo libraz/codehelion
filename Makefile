@@ -42,6 +42,16 @@ verify-helper-boundaries: ## Verify core and CLI do not link compiler adapter de
 verify-artifact-boundaries: ## Verify the source engine does not link artifact crates
 	sh scripts/verify-artifact-boundaries.sh
 
+# A crate is packaged as a directory of its own, so anything it reads from
+# outside that directory is there in the working tree and gone in the tarball.
+# Nothing else builds a crate that way, which is why the failure otherwise
+# waits until a release is already tagged. Uncommitted work is packaged as it
+# stands: the question is whether the tree in front of you can be published,
+# and refusing to answer it until the change is committed asks it too late.
+.PHONY: verify-packaging
+verify-packaging: ## Verify every publishable crate builds from its own package
+	$(ONESHOT) $(CARGO) package --workspace --locked --allow-dirty
+
 .PHONY: verify-artifact-fixtures
 verify-artifact-fixtures: ## Build and verify real WASM and ELF artifact fixtures (Linux)
 	sh scripts/verify-artifact-fixtures.sh
@@ -69,7 +79,7 @@ eval: ## Show detection accuracy over the committed corpora
 	$(CARGO) test -p codehelion --test candidate_stages -- --nocapture
 
 .PHONY: check
-check: format-check lint verify-helper-boundaries verify-artifact-boundaries test doc ## Run every CI check locally
+check: format-check lint verify-helper-boundaries verify-artifact-boundaries verify-packaging test doc ## Run every CI check locally
 
 ## --- convenience ----------------------------------------------------------
 
