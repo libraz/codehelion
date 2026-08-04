@@ -65,9 +65,9 @@ struct HelperToolchain {
 
 static HELPER_TOOLCHAIN: OnceLock<Result<HelperToolchain, String>> = OnceLock::new();
 
-/// The channel this helper itself was built to use, embedded from the
-/// workspace's toolchain declaration rather than read from a target tree.
-const HELPER_TOOLCHAIN_CONFIG: &str = include_str!("../../../rust-toolchain.toml");
+/// The toolchain this helper itself was built with, recorded by the build
+/// script rather than read from a target tree.
+const HELPER_TOOLCHAIN_CHANNEL: &str = env!("CODEHELION_HELPER_TOOLCHAIN");
 
 fn helper_toolchain() -> Result<HelperToolchain, String> {
     HELPER_TOOLCHAIN
@@ -83,7 +83,7 @@ fn discover_helper_toolchain() -> Result<HelperToolchain, String> {
     let rustup = resolve_tool(ra_ap_toolchain::Tool::Rustup)?;
     let working_directory = tempfile::tempdir()
         .map_err(|error| format!("creating an isolated toolchain directory: {error}"))?;
-    let channel = helper_toolchain_channel()?;
+    let channel = HELPER_TOOLCHAIN_CHANNEL;
     let cargo = rustup_tool(&rustup, channel, "cargo", working_directory.path())?;
     let rustc = rustup_tool(&rustup, channel, "rustc", working_directory.path())?;
     let output = std::process::Command::new(&rustc)
@@ -114,14 +114,6 @@ fn discover_helper_toolchain() -> Result<HelperToolchain, String> {
         cargo,
         rustup_toolchain: sysroot.display().to_string(),
     })
-}
-
-fn helper_toolchain_channel() -> Result<&'static str, String> {
-    HELPER_TOOLCHAIN_CONFIG
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("channel = \"")?.strip_suffix('"'))
-        .ok_or_else(|| "the bundled rust-toolchain.toml has no channel".to_owned())
 }
 
 #[allow(
@@ -898,6 +890,18 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).expect("linking one name to the other");
 
         assert_eq!(executable_named(link.clone(), "Rustup"), Ok(link));
+    }
+
+    /// Fixed when the helper is built, because nothing at run time can supply
+    /// it: an empty value would be handed to every rustup proxy, and rustup
+    /// answers an empty `RUSTUP_TOOLCHAIN` by selecting whatever the directory
+    /// it runs in declares — the one outcome this constant exists to prevent.
+    #[test]
+    fn the_helper_knows_which_toolchain_it_was_built_with() {
+        assert!(
+            !super::HELPER_TOOLCHAIN_CHANNEL.trim().is_empty(),
+            "the build recorded no toolchain"
+        );
     }
 
     #[test]
