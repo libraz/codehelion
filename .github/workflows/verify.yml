@@ -34,6 +34,17 @@ jobs:
         # separators, and the native shells.
         os: [macos-latest, windows-latest]
     steps:
+      # An audit is over the bytes of the tree it is given, so the tree has to
+      # be the one that was measured. This repository declares its line
+      # endings, but a labelled corpus is reconstructed from a pinned commit,
+      # and a commit older than that declaration is extracted under whatever
+      # this platform does by default. A multi-line string literal then holds
+      # different bytes, which is enough to move a finding that sat on the size
+      # floor — and the suite reports that as a regression. Extraction and
+      # checkout both keep the recorded bytes instead.
+      - name: Take the sources as they were committed
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
