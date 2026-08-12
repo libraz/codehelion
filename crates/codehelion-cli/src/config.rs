@@ -361,6 +361,18 @@ pub struct Limits {
     /// Maximum incomplete local mirrors retained in one structural report.
     /// Unset selects the structural default.
     pub sibling_total_cap: Option<usize>,
+    /// Upper bound on signature-based sibling candidates examined by one
+    /// structural report. Unset selects the signature-channel default. Used
+    /// only when `--siblings-by-signature` enables that channel.
+    pub signature_sibling_candidate_budget: Option<usize>,
+    /// Maximum signature-based incomplete local mirrors retained for each
+    /// primary group. Unset selects the signature-channel default. Used only
+    /// when `--siblings-by-signature` enables that channel.
+    pub signature_sibling_per_group_cap: Option<usize>,
+    /// Maximum signature-based incomplete local mirrors retained in one
+    /// structural report. Unset selects the signature-channel default. Used
+    /// only when `--siblings-by-signature` enables that channel.
+    pub signature_sibling_total_cap: Option<usize>,
     /// Upper bound on Structural pairs passed to precise verification.
     /// Unset selects the structural default.
     pub verification_budget: Option<usize>,
@@ -438,6 +450,9 @@ impl Default for Limits {
             sibling_candidate_budget: None,
             sibling_per_group_cap: None,
             sibling_total_cap: None,
+            signature_sibling_candidate_budget: None,
+            signature_sibling_per_group_cap: None,
+            signature_sibling_total_cap: None,
             verification_budget: None,
             max_alignment_cells: None,
             max_component: codehelion_core::grouping::GroupingConfig::default().max_component,
@@ -489,6 +504,15 @@ impl Limits {
         }
         if self.sibling_total_cap == Some(0) {
             bail!("limits.sibling-total-cap must be at least 1 when set");
+        }
+        if self.signature_sibling_candidate_budget == Some(0) {
+            bail!("limits.signature-sibling-candidate-budget must be at least 1 when set");
+        }
+        if self.signature_sibling_per_group_cap == Some(0) {
+            bail!("limits.signature-sibling-per-group-cap must be at least 1 when set");
+        }
+        if self.signature_sibling_total_cap == Some(0) {
+            bail!("limits.signature-sibling-total-cap must be at least 1 when set");
         }
         if self.verification_budget == Some(0) {
             bail!("limits.verification-budget must be at least 1 when set");
@@ -547,6 +571,26 @@ impl Limits {
             self.sibling_total_cap
                 .map_or(sibling_defaults.total_cap, |cap| {
                     cap.min(sibling_defaults.total_cap)
+                }),
+        );
+        let signature_sibling_defaults =
+            codehelion_core::structural::SignatureSiblingConfig::default();
+        self.signature_sibling_candidate_budget = Some(
+            self.signature_sibling_candidate_budget
+                .map_or(signature_sibling_defaults.candidate_budget, |budget| {
+                    budget.min(signature_sibling_defaults.candidate_budget)
+                }),
+        );
+        self.signature_sibling_per_group_cap = Some(
+            self.signature_sibling_per_group_cap
+                .map_or(signature_sibling_defaults.per_group_cap, |cap| {
+                    cap.min(signature_sibling_defaults.per_group_cap)
+                }),
+        );
+        self.signature_sibling_total_cap = Some(
+            self.signature_sibling_total_cap
+                .map_or(signature_sibling_defaults.total_cap, |cap| {
+                    cap.min(signature_sibling_defaults.total_cap)
                 }),
         );
         self.max_component = self.max_component.min(profile.max_component);
@@ -732,6 +776,9 @@ impl Config {
             || self.limits.sibling_candidate_budget.is_none()
             || self.limits.sibling_per_group_cap.is_none()
             || self.limits.sibling_total_cap.is_none()
+            || self.limits.signature_sibling_candidate_budget.is_none()
+            || self.limits.signature_sibling_per_group_cap.is_none()
+            || self.limits.signature_sibling_total_cap.is_none()
         {
             text.push_str("\n# Unset optional settings\n");
             if self.jobs.is_none() {
@@ -757,6 +804,21 @@ impl Config {
             }
             if self.limits.sibling_total_cap.is_none() {
                 text.push_str("# limits.sibling-total-cap: structural default\n");
+            }
+            if self.limits.signature_sibling_candidate_budget.is_none() {
+                text.push_str(
+                    "# limits.signature-sibling-candidate-budget: default used only with --siblings-by-signature\n",
+                );
+            }
+            if self.limits.signature_sibling_per_group_cap.is_none() {
+                text.push_str(
+                    "# limits.signature-sibling-per-group-cap: default used only with --siblings-by-signature\n",
+                );
+            }
+            if self.limits.signature_sibling_total_cap.is_none() {
+                text.push_str(
+                    "# limits.signature-sibling-total-cap: default used only with --siblings-by-signature\n",
+                );
             }
         }
         Ok(text)
@@ -1015,6 +1077,13 @@ pub const TEMPLATE: &str = "\
 # sibling-per-group-cap = 8
 # Maximum incomplete local mirrors retained in one Structural report.
 # sibling-total-cap = 1000
+# The signature-based limits below are used only with --siblings-by-signature.
+# Maximum signature-based sibling comparisons.
+# signature-sibling-candidate-budget = 50000
+# Maximum signature-based incomplete local mirrors retained for one primary group.
+# signature-sibling-per-group-cap = 8
+# Maximum signature-based incomplete local mirrors retained in one Structural report.
+# signature-sibling-total-cap = 1000
 # Maximum Structural candidate pairs that enter precise verification.
 # verification-budget = 1000000
 # Maximum dynamic-programming cells used by one Structural alignment.

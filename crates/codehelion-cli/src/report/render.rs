@@ -331,14 +331,19 @@ impl Report {
             "{}",
             palette.bold(&headline.join(&format!(" {} ", opts.decoration.separator())))
         )?;
+        render_supplemental_totals(summary, out)?;
+        let run_label = self.run.run_id.map_or_else(
+            || "run unrecorded".to_string(),
+            |run_id| format!("run {run_id}"),
+        );
         writeln!(
             out,
-            "{} files, {} lines, {} tokens {separator} run {} (replay: codehelion report --run {})",
+            "{} files, {} lines, {} tokens {separator}{}{}",
             thousands(summary.files.total),
             thousands(summary.lines),
             thousands(summary.tokens),
-            self.run.run_id,
-            self.run.run_id,
+            run_label,
+            run_status(self),
             separator = opts.decoration.separator(),
         )?;
         // Hidden without anybody asking, so the report says it happened and
@@ -354,7 +359,11 @@ impl Report {
         }
         if opts.detailed() {
             self.render_composition_detail(out)?;
-            writeln!(out, "snapshot: {}", self.run.database)?;
+            if self.run.run_id.is_some() {
+                writeln!(out, "snapshot: {}", self.run.database)?;
+            } else {
+                writeln!(out, "database: {} (run not recorded)", self.run.database)?;
+            }
         }
         if let Some(baseline) = &summary.baseline {
             writeln!(
@@ -407,14 +416,15 @@ impl Report {
         if !legend.is_empty() {
             writeln!(out, "{}", palette.dim(&legend.join(&separator)))?;
         }
-        writeln!(
-            out,
-            "{}",
-            palette.dim(&format!(
+        let guidance = if self.run.run_id.is_some() {
+            format!(
                 "open one: codehelion explain {}{separator}list every group: --limit 0",
                 opts.id(&first.fingerprint),
-            )),
-        )
+            )
+        } else {
+            "list every group: --limit 0".to_string()
+        };
+        writeln!(out, "{}", palette.dim(&guidance))
     }
 
     /// The parts of the group total that are a classification rather than a
@@ -462,6 +472,25 @@ impl Report {
     ///
     /// Returns any error from the writer.
     pub fn render_notes(&self, opts: TextOptions, out: &mut impl Write) -> io::Result<()> {
+        self.render_notes_with_artifact_guidance(opts, out, true)
+    }
+
+    /// Render notes for one partition when an enclosing partitioned report
+    /// will decide whether artifact guidance is needed for all partitions.
+    pub(crate) fn render_notes_without_artifact_guidance(
+        &self,
+        opts: TextOptions,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        self.render_notes_with_artifact_guidance(opts, out, false)
+    }
+
+    fn render_notes_with_artifact_guidance(
+        &self,
+        opts: TextOptions,
+        out: &mut impl Write,
+        include_artifact_guidance: bool,
+    ) -> io::Result<()> {
         if opts.quiet {
             return Ok(());
         }
@@ -528,7 +557,12 @@ impl Report {
                 names.join(", "),
             )?;
         }
-        render_unapplied_suppression_policies(summary, out)
+        render_unapplied_suppression_policies(summary, out)?;
+        render_unmeasured_in_this_mode(summary, out)?;
+        if include_artifact_guidance {
+            render_artifact_guidance(self, out)?;
+        }
+        Ok(())
     }
 
     /// The stage-by-stage pass counts, wide enough to be read as a column.
@@ -695,12 +729,26 @@ impl Report {
         if let Some(floor) = opts.min_identifier_jaccard
             && reported.len() > visible.len()
         {
+            let unmeasured = reported
+                .iter()
+                .filter(|group| group.identifier_jaccard.is_none())
+                .count();
+            let below_floor = reported
+                .iter()
+                .filter(|group| group.identifier_jaccard.is_some_and(|value| value < floor))
+                .count();
+            let unmeasured_clause = if unmeasured == 0 {
+                String::new()
+            } else {
+                format!(" ({unmeasured} of them were not measured in this mode)")
+            };
             writeln!(
                 out,
-                "{} group(s) are not listed: raw identifier agreement below {floor:.2}, or not \
-                 measured in this mode",
+                "{} group(s) are not listed: raw identifier agreement below {floor:.2}{}",
                 reported.len() - visible.len(),
+                unmeasured_clause,
             )?;
+            debug_assert_eq!(reported.len() - visible.len(), below_floor + unmeasured);
         }
 
         if opts.show_suppressed {
@@ -806,12 +854,17 @@ impl Report {
             .filter(|sibling| opts.show_suppressed || sibling.suppressed.is_none())
         {
             let member = &sibling.member;
+            let evidence = if sibling.basis == "signature" {
+                format!("({:.2}) [same signature]", sibling.similarity.composite)
+            } else {
+                format!("({:.2})", sibling.similarity.composite)
+            };
             writeln!(
                 out,
-                "  sibling {} {} ({:.2}): {}:{}{}",
+                "  sibling {} {} {}: {}:{}{}",
                 sibling.clone_type,
                 sibling.confidence_band,
-                sibling.similarity.composite,
+                evidence,
                 member.file,
                 member.start_line,
                 member_unit(member),
@@ -823,6 +876,107 @@ impl Report {
 
 /// The group total broken down by clone type, leaving out the types this mode
 /// cannot report.
+fn run_status(report: &Report) -> String {
+    let Some(run_id) = report.run.run_id else {
+        return " (replay and baseline comparison unavailable)".to_string();
+    };
+    if report.run.reused {
+        return format!(" (reused: tree unchanged; replay: codehelion report --run {run_id})");
+    }
+    if let Some(changes) = &report.summary.changes {
+        let changed = changes
+            .modified
+            .saturating_add(changes.added)
+            .saturating_add(changes.removed);
+        return format!(
+            " ({} file(s) changed; replay: codehelion report --run {})",
+            thousands(changed),
+            run_id
+        );
+    }
+    // A report reconstructed by `report --run` has no invocation-level reuse
+    // fact. Naming the replay is precise without inventing one.
+    format!(" (replay: codehelion report --run {run_id})")
+}
+
+/// Totals for serialized supplemental evidence that the default body hides.
+///
+/// Counts come from the final vectors, while cap notes come from the recorded
+/// funnel. A configured ceiling that dropped nothing is not mentioned.
+fn render_supplemental_totals(summary: &Summary, out: &mut impl Write) -> io::Result<()> {
+    let sibling_drops = funnel_drop_count(
+        summary,
+        &[
+            "sibling_candidate_budget",
+            "sibling_per_group_cap",
+            "sibling_total_cap",
+            "signature_sibling_candidate_budget",
+            "signature_sibling_per_group_cap",
+            "signature_sibling_total_cap",
+        ],
+    );
+    let near_miss_drops = funnel_drop_count(summary, &["retention_cap"]);
+    if summary.siblings == 0 && summary.near_misses == 0 {
+        let mut drops = Vec::new();
+        if sibling_drops > 0 {
+            drops.push(format!(
+                "{} sibling candidate(s) dropped by search ceilings",
+                thousands(sibling_drops)
+            ));
+        }
+        if near_miss_drops > 0 {
+            drops.push(format!(
+                "{} near miss(es) dropped by the retention cap",
+                thousands(near_miss_drops)
+            ));
+        }
+        if !drops.is_empty() {
+            writeln!(out, "supplemental: {}", drops.join(", "))?;
+        }
+        return Ok(());
+    }
+    let mut entries = Vec::new();
+    if summary.siblings > 0 {
+        let dropped = if sibling_drops > 0 {
+            format!("; {} dropped by search ceilings", thousands(sibling_drops))
+        } else {
+            String::new()
+        };
+        entries.push(format!(
+            "{} siblings (--show-siblings{})",
+            thousands(summary.siblings),
+            dropped
+        ));
+    }
+    if summary.near_misses > 0 {
+        let dropped = if near_miss_drops > 0 {
+            format!(
+                "; {} dropped by the retention cap",
+                thousands(near_miss_drops)
+            )
+        } else {
+            String::new()
+        };
+        entries.push(format!(
+            "{} near misses (--show-near-misses{})",
+            thousands(summary.near_misses),
+            dropped
+        ));
+    }
+    writeln!(out, "supplemental: {}", entries.join(", "))?;
+    Ok(())
+}
+
+fn funnel_drop_count(summary: &Summary, causes: &[&str]) -> u64 {
+    summary
+        .funnel
+        .iter()
+        .flat_map(|stage| &stage.dropped)
+        .filter(|drop| causes.contains(&drop.cause.as_str()))
+        .map(|drop| drop.count)
+        .fold(0, u64::saturating_add)
+}
+
 fn group_composition(summary: &Summary) -> String {
     let groups = &summary.groups;
     let counted = [
@@ -879,7 +1033,7 @@ fn render_guardrails(summary: &Summary, out: &mut impl Write) -> io::Result<()> 
         guardrails.max_alignment_cells,
         guardrails.max_component,
     )?;
-    writeln!(
+    write!(
         out,
         "  diagnostics: near-match band {}, at most {} near misses; sibling sweep {} comparisons, {} per group, {} total",
         guardrails.near_miss_delta,
@@ -887,7 +1041,21 @@ fn render_guardrails(summary: &Summary, out: &mut impl Write) -> io::Result<()> 
         guardrails.sibling_candidate_budget,
         guardrails.sibling_per_group_cap,
         guardrails.sibling_total_cap,
-    )
+    )?;
+    if summary
+        .funnel
+        .iter()
+        .any(|stage| stage.stage == "signature sibling entries")
+    {
+        write!(
+            out,
+            "; signature sibling sweep {} candidates, {} per group, {} total",
+            guardrails.signature_sibling_candidate_budget,
+            guardrails.signature_sibling_per_group_cap,
+            guardrails.signature_sibling_total_cap,
+        )?;
+    }
+    writeln!(out)
 }
 
 /// What the baseline covered, said as counts and then as a before and an
@@ -940,6 +1108,59 @@ fn render_unapplied_suppression_policies(
         )?;
     }
     Ok(())
+}
+
+/// Explain the measurements Fast intentionally leaves to Structural mode.
+fn render_unmeasured_in_this_mode(summary: &Summary, out: &mut impl Write) -> io::Result<()> {
+    if summary.unmeasured_in_this_mode.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "note: Fast duplicated-token totals may overlap because one source location can appear in multiple groups; this mode does not measure {}",
+        summary.unmeasured_in_this_mode.join(", "),
+    )
+}
+
+/// Give a source report a single path to artifact correlation when no group
+/// has been hydrated with saved artifact evidence.
+const ARTIFACT_GUIDANCE: &str = "note: no artifact savings are recorded; provide an artifact at <PATH> retaining symbols/debug info, or a matching companion via --debug-file <PATH>, then run artifact analyze <PATH> --source-run <id> --build-variant <manifest>";
+
+fn artifact_guidance_needed<'a>(groups: impl Iterator<Item = &'a Group>) -> bool {
+    let mut has_group = false;
+    for group in groups {
+        has_group = true;
+        if !group.artifact_savings.is_empty() {
+            return false;
+        }
+    }
+    has_group
+}
+
+fn render_artifact_guidance(report: &Report, out: &mut impl Write) -> io::Result<()> {
+    if report.run.run_id.is_none() {
+        return Ok(());
+    }
+    if !artifact_guidance_needed(report.groups.iter()) {
+        return Ok(());
+    }
+    writeln!(out, "{ARTIFACT_GUIDANCE}")
+}
+
+/// Render artifact guidance once for a partitioned report envelope.
+pub(super) fn render_partition_artifact_guidance(
+    reports: &[Report],
+    out: &mut impl Write,
+) -> io::Result<()> {
+    if !artifact_guidance_needed(
+        reports
+            .iter()
+            .filter(|report| report.run.run_id.is_some())
+            .flat_map(|report| report.groups.iter()),
+    ) {
+        return Ok(());
+    }
+    writeln!(out, "{ARTIFACT_GUIDANCE}")
 }
 
 /// List what the baseline froze that this run no longer reports.

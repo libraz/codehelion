@@ -58,7 +58,6 @@
         "build_variant",
         "detector_versions",
         "database",
-        "run_id",
         "ranking",
         "configuration"
       ],
@@ -96,7 +95,7 @@
         },
         "run_id": {
           "type": "integer",
-          "description": "Row id of the recorded scan run."
+          "description": "Row id of the recorded scan run; absent when analysis completed but persistence failed."
         },
         "ranking": {
           "$ref": "#/$defs/ranking"
@@ -199,6 +198,10 @@
         "excluded",
         "groups",
         "suppressed",
+        "siblings",
+        "near_misses",
+        "identity_collapsed",
+        "unmeasured_in_this_mode",
         "unused_suppressions",
         "funnel",
         "split_components",
@@ -493,6 +496,34 @@
             }
           }
         },
+        "siblings": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total sibling entries serialized in the report, including entries suppressed from the default text listing."
+        },
+        "near_misses": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total near-miss entries serialized in the report, including entries suppressed from the default text listing."
+        },
+        "identity_collapsed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Stable identity records removed because an exact duplicate was emitted during final report assembly. Duplicate whole groups count once and their members are not counted again."
+        },
+        "unmeasured_in_this_mode": {
+          "type": "array",
+          "description": "Measurements deliberately unavailable in the selected mode. Fast reports identifier agreement, similarity breakdown, siblings and near misses here; Structural and Semantic report an empty array.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "identifier agreement",
+              "similarity breakdown",
+              "siblings",
+              "near misses"
+            ]
+          }
+        },
         "unused_suppressions": {
           "type": "array",
           "description": "Configured suppression rules that hid nothing in this run. A rule matching nothing reads as an instruction that took effect while the findings it was meant to cover are still reported, so it is named rather than left to be found by accident.",
@@ -654,6 +685,21 @@
               "type": "integer",
               "minimum": 0,
               "description": "Maximum siblings retained by the whole run."
+            },
+            "signature_sibling_candidate_budget": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Largest number of signature-sibling candidates compared in one run."
+            },
+            "signature_sibling_per_group_cap": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Maximum signature siblings retained by one primary group."
+            },
+            "signature_sibling_total_cap": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Maximum signature siblings retained by the whole run."
             }
           }
         },
@@ -1009,6 +1055,15 @@
       "properties": {
         "clone_type": { "enum": ["type-1", "type-2", "type-3"] },
         "confidence_band": { "enum": ["high", "medium", "low"] },
+        "basis": {
+          "enum": ["similarity", "signature"],
+          "description": "Independent candidate channel that supplied this sibling. Optional for compatibility with older v1 reports."
+        },
+        "signature": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Exact normalized signature for signature-channel siblings."
+        },
         "similarity": { "$ref": "#/$defs/sibling_similarity" },
         "member": { "$ref": "#/$defs/member" },
         "suppressed": {
@@ -1017,7 +1072,46 @@
             { "type": "null" }
           ]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["basis"],
+            "properties": { "basis": { "const": "signature" } }
+          },
+          "then": {
+            "required": ["signature"],
+            "properties": {
+              "signature": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["basis"],
+            "properties": { "basis": { "const": "similarity" } }
+          },
+          "then": {
+            "properties": {
+              "signature": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["signature"],
+            "properties": {
+              "signature": { "type": "string", "minLength": 1 }
+            }
+          },
+          "then": {
+            "required": ["basis"],
+            "properties": {
+              "basis": { "const": "signature" }
+            }
+          }
+        }
+      ]
     },
     "sibling_similarity": {
       "type": "object",

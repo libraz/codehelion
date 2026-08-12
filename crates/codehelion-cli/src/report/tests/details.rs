@@ -143,6 +143,28 @@ fn sibling_detail_preserves_its_separate_finding_namespace() {
 }
 
 #[test]
+fn signature_sibling_detail_keeps_the_basis_and_exact_signature_marker() {
+    let mut sibling = sample_siblings().siblings.remove(0);
+    sibling.basis = "signature".to_string();
+    sibling.signature = Some("detail-signature-sentinel".to_string());
+    let detail = SiblingDetail {
+        scan_run: 17,
+        group_fingerprint: "19".repeat(16),
+        sibling,
+    };
+
+    let json: serde_json::Value = serde_json::from_str(&detail.to_json().unwrap()).unwrap();
+    assert_eq!(json["sibling"]["basis"], "signature");
+    assert_eq!(json["sibling"]["signature"], "detail-signature-sentinel");
+    let mut text = Vec::new();
+    detail.render_text(&mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("[same signature]"));
+    assert!(text.contains("basis: signature"));
+    assert!(text.contains("signature: detail-signature-sentinel"));
+}
+
+#[test]
 fn a_scored_group_reports_every_dimension_and_marks_the_absent_one() {
     let mut report = sample_report();
     report.summary.groups.type_3 = 1;

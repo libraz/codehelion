@@ -274,7 +274,8 @@ impl<'a> From<&'a Report> for Log<'a> {
 #[serde(rename_all = "camelCase")]
 struct Run<'a> {
     tool: Tool<'a>,
-    automation_details: AutomationDetails,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automation_details: Option<AutomationDetails>,
     original_uri_base_ids: BTreeMap<&'static str, UriBase>,
     invocations: [Invocation; 1],
     results: Vec<ResultEntry<'a>>,
@@ -298,9 +299,9 @@ impl<'a> From<&'a Report> for Run<'a> {
                     notifications: NOTICES.iter().map(NoticeDescriptor::from).collect(),
                 },
             },
-            automation_details: AutomationDetails {
-                id: format!("codehelion/{}/{}", run.mode, run.run_id),
-            },
+            automation_details: run.run_id.map(|run_id| AutomationDetails {
+                id: format!("codehelion/{}/{}", run.mode, run_id),
+            }),
             original_uri_base_ids: std::iter::once((
                 SRCROOT,
                 UriBase {
@@ -310,7 +311,7 @@ impl<'a> From<&'a Report> for Run<'a> {
             .collect(),
             invocations: [Invocation {
                 // A run that read less of a tree than the tree holds still ran.
-                execution_successful: true,
+                execution_successful: run.run_id.is_some(),
                 start_time_utc: millisecond_timestamp(&run.started_at),
                 end_time_utc: millisecond_timestamp(&run.finished_at),
                 tool_execution_notifications: notifications(report),
@@ -705,7 +706,8 @@ struct RunProperties<'a> {
     ranking: &'a RankingInfo,
     summary: &'a Summary,
     database: &'a str,
-    run_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<i64>,
     near_misses: &'a [super::NearMiss],
 }
 

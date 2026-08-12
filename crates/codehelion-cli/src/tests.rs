@@ -17,6 +17,32 @@ use codehelion_store::snapshot::{
 };
 
 #[test]
+fn analysis_failure_hints_name_only_independent_measurements() {
+    let cases = [
+        (
+            Mode::Fast,
+            "hint: fast analysis failed; structural mode measures parsed source independently",
+        ),
+        (
+            Mode::Structural,
+            "hint: structural analysis failed; fast mode measures token-level duplication independently",
+        ),
+        (
+            Mode::Semantic,
+            "hint: semantic analysis failed; structural and fast modes make separate parsed-source and token-level measurements",
+        ),
+    ];
+    for (mode, expected) in cases {
+        let error = analysis_failure(mode, anyhow::anyhow!("deterministic analysis failure"));
+        let failure = error
+            .downcast_ref::<AnalysisFailure>()
+            .expect("analysis failure remains downcastable at the command boundary");
+        assert_eq!(analysis_hint(failure.mode), expected);
+        assert!(format!("{error:#}").contains("deterministic analysis failure"));
+    }
+}
+
+#[test]
 fn comparison_and_presentation_flags_reject_unsupported_modes() {
     let mut args = ScanArgs {
         helpers: Vec::new(),
@@ -40,6 +66,7 @@ fn comparison_and_presentation_flags_reject_unsupported_modes() {
         compare_languages: false,
         show_suppressed: false,
         show_siblings: false,
+        siblings_by_signature: false,
         show_near_misses: false,
         include_trivial: false,
         include_vendored: false,
@@ -69,6 +96,14 @@ fn comparison_and_presentation_flags_reject_unsupported_modes() {
     assert!(
         format!("{error:#}")
             .contains("--include-trivial requires --mode structural or --mode semantic")
+    );
+
+    args.include_trivial = false;
+    args.siblings_by_signature = true;
+    let error = scan_command(&args, &mut Vec::new()).expect_err("signature siblings need parsing");
+    assert!(
+        format!("{error:#}")
+            .contains("--siblings-by-signature requires --mode structural or --mode semantic")
     );
 }
 

@@ -47,6 +47,17 @@ impl Guardrails {
             sibling_total_cap: limits
                 .sibling_total_cap
                 .unwrap_or_else(|| codehelion_core::structural::SiblingConfig::default().total_cap),
+            signature_sibling_candidate_budget: limits
+                .signature_sibling_candidate_budget
+                .unwrap_or_else(|| {
+                    codehelion_core::structural::SignatureSiblingConfig::default().candidate_budget
+                }),
+            signature_sibling_per_group_cap: limits.signature_sibling_per_group_cap.unwrap_or_else(
+                || codehelion_core::structural::SignatureSiblingConfig::default().per_group_cap,
+            ),
+            signature_sibling_total_cap: limits.signature_sibling_total_cap.unwrap_or_else(|| {
+                codehelion_core::structural::SignatureSiblingConfig::default().total_cap
+            }),
             max_component: limits.max_component,
         }
     }
@@ -69,6 +80,14 @@ impl From<&GuardrailsRow> for Guardrails {
                 .unwrap_or(usize::MAX),
             sibling_per_group_cap: usize::try_from(row.sibling_per_group_cap).unwrap_or(usize::MAX),
             sibling_total_cap: usize::try_from(row.sibling_total_cap).unwrap_or(usize::MAX),
+            signature_sibling_candidate_budget: usize::try_from(
+                row.signature_sibling_candidate_budget,
+            )
+            .unwrap_or(usize::MAX),
+            signature_sibling_per_group_cap: usize::try_from(row.signature_sibling_per_group_cap)
+                .unwrap_or(usize::MAX),
+            signature_sibling_total_cap: usize::try_from(row.signature_sibling_total_cap)
+                .unwrap_or(usize::MAX),
             max_component: usize::try_from(row.max_component).unwrap_or(usize::MAX),
         }
     }
@@ -337,6 +356,47 @@ pub fn stored_funnel(funnel: &[FunnelStage]) -> Vec<FunnelStageRow> {
         .collect()
 }
 
+/// Add the persisted form of the stable-identity normalization stage.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn append_stored_identity_stage(
+    funnel: &mut Vec<FunnelStageRow>,
+    groups: usize,
+    identity_collapsed: u64,
+) {
+    if identity_collapsed > 0 {
+        funnel.push(FunnelStageRow {
+            name: "identity normalization".to_string(),
+            passed: u64::try_from(groups).unwrap_or(u64::MAX),
+            dropped: vec![FunnelDropRow {
+                cause: "exact_duplicate_identity".to_string(),
+                count: identity_collapsed,
+            }],
+        });
+    }
+}
+
+/// Recover the number of records removed at the identity boundary.
+#[must_use]
+pub fn identity_collapsed(funnel: &[FunnelStage]) -> u64 {
+    funnel
+        .iter()
+        .flat_map(|stage| &stage.dropped)
+        .filter(|drop| drop.cause == "exact_duplicate_identity")
+        .map(|drop| drop.count)
+        .fold(0, u64::saturating_add)
+}
+
+/// Recover the number of persisted records removed at the identity boundary.
+#[must_use]
+pub fn stored_identity_collapsed(funnel: &[FunnelStageRow]) -> u64 {
+    funnel
+        .iter()
+        .flat_map(|stage| &stage.dropped)
+        .filter(|drop| drop.cause == "exact_duplicate_identity")
+        .map(|drop| drop.count)
+        .fold(0, u64::saturating_add)
+}
+
 /// The rules that hid nothing, in the shape the audit database stores them.
 #[must_use]
 pub fn stored_rules(rules: &[UnusedRule]) -> Vec<UnusedRuleRow> {
@@ -357,6 +417,10 @@ pub fn stored_rules(rules: &[UnusedRule]) -> Vec<UnusedRuleRow> {
 /// hid — is left absent here, because those are statements about *this*
 /// invocation rather than about the recorded run.
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "restoration keeps every persisted summary field visible beside its source"
+)]
 pub fn restored(stored: &SummaryRow, groups: &[Group], analysis_mode: &str) -> Summary {
     let count = |predicate: &dyn Fn(&Group) -> bool| {
         u64::try_from(groups.iter().filter(|group| predicate(group)).count()).unwrap_or(u64::MAX)
@@ -443,6 +507,12 @@ pub fn restored(stored: &SummaryRow, groups: &[Group], analysis_mode: &str) -> S
                     == Some(VENDORED_SCOPE)
             }),
         },
+        // Supplemental rows are assembled outside the persisted summary row;
+        // the report envelope fills these from the final vectors after mode
+        // specific assembly (and replay does the same after hydration).
+        siblings: 0,
+        near_misses: 0,
+        unmeasured_in_this_mode: unmeasured_in_this_mode(analysis_mode),
         unused_suppressions: stored
             .unused_suppressions
             .iter()
@@ -456,6 +526,7 @@ pub fn restored(stored: &SummaryRow, groups: &[Group], analysis_mode: &str) -> S
         split_components: stored.split_components,
         pair_budget_exhausted: stored.pair_budget_exhausted,
         search_truncated,
+        identity_collapsed: stored_identity_collapsed(&stored.funnel),
     }
 }
 
@@ -471,6 +542,28 @@ pub fn unapplied_suppression_policies(analysis_mode: &str) -> Vec<String> {
             "suppression.boilerplate",
             "suppression.test-code",
             "suppression.width-family",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Measurements unavailable in one analysis mode.
+///
+/// This is derived from the mode rather than stored in the summary row so a
+/// replay carries the same contract as the source run. Fast intentionally
+/// leaves all four Structural supplemental measures out.
+#[must_use]
+pub fn unmeasured_in_this_mode(analysis_mode: &str) -> Vec<String> {
+    if analysis_mode == "fast" {
+        [
+            "identifier agreement",
+            "similarity breakdown",
+            "siblings",
+            "near misses",
         ]
         .into_iter()
         .map(str::to_string)
@@ -734,7 +827,7 @@ impl Similarity {
 }
 
 /// One occurrence of a group's content.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Member {
     /// Stable per-occurrence finding identifier, hex-encoded.
     pub finding_id: String,

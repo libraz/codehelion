@@ -24,14 +24,17 @@
 //! rather than a failure to fix.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use codehelion_eval::detected;
 use codehelion_eval::labels::LabelSet;
-use codehelion_eval::metrics::{DEFAULT_MATCH_THRESHOLD, Metrics, evaluate};
-use codehelion_eval::schema::CloneType;
+use codehelion_eval::metrics::{
+    DEFAULT_MATCH_THRESHOLD, Metrics, evaluate, evaluate_siblings, stability,
+};
+use codehelion_eval::schema::{CloneType, SiblingBasis};
 
 /// What one analysis mode currently recovers from one corpus.
 struct Measurements {
@@ -81,19 +84,19 @@ const CORPORA: &[Expected] = &[
         measurements: [
             Measurements {
                 mode: "fast",
-                by_type: [Some(1.0), Some(1.0), Some(0.0)],
-                precision: 1.0,
-                findings_per_kloc: 14.3885,
-                false_positives_per_kloc: 0.0,
-                recall: 5.0 / 6.0,
+                by_type: [Some(0.75), Some(1.0), Some(0.0)],
+                precision: 2.0 / 3.0,
+                findings_per_kloc: 16.4835,
+                false_positives_per_kloc: 5.4945,
+                recall: 5.0 / 7.0,
                 non_clone_hits: 0,
-                shortfall: "Fast reports contiguous matching fragments, so it does not recover the gapped Type-3 pair",
+                shortfall: "Fast reports contiguous matching fragments, so it misses the duplicated-loop Type-1 pair and does not recover the gapped Type-3 pair",
             },
             Measurements {
                 mode: "structural",
                 by_type: [Some(1.0), Some(1.0), Some(1.0)],
                 precision: 1.0,
-                findings_per_kloc: 21.5827,
+                findings_per_kloc: 21.9780,
                 false_positives_per_kloc: 0.0,
                 recall: 1.0,
                 non_clone_hits: 0,
@@ -132,10 +135,14 @@ const CORPORA: &[Expected] = &[
             Measurements {
                 mode: "fast",
                 by_type: [Some(1.0), Some(1.0), Some(0.0)],
-                precision: 1.0 / 3.0,
-                findings_per_kloc: 43.1655,
-                false_positives_per_kloc: 28.7770,
-                recall: 5.0 / 6.0,
+                precision: 3.0 / 7.0,
+                // The signature mirror adds fifteen source lines without
+                // entering the primary finding stream, so the counts stay
+                // fixed while the per-kLOC denominators move from 170 to
+                // 185 lines.
+                findings_per_kloc: 37.8378,
+                false_positives_per_kloc: 21.6216,
+                recall: 6.0 / 7.0,
                 non_clone_hits: 0,
                 shortfall: "Fast reports contiguous matching fragments, so it does not recover the gapped Type-3 pair",
             },
@@ -143,7 +150,7 @@ const CORPORA: &[Expected] = &[
                 mode: "structural",
                 by_type: [Some(1.0), Some(1.0), Some(1.0)],
                 precision: 1.0,
-                findings_per_kloc: 21.5827,
+                findings_per_kloc: 21.6216,
                 false_positives_per_kloc: 0.0,
                 recall: 1.0,
                 non_clone_hits: 0,
@@ -384,8 +391,17 @@ fn repo_root() -> PathBuf {
 
 /// Scan a corpus in one source-analysis mode and return its report JSON.
 fn scan(corpus: &Path, mode: &str, database: &Path) -> String {
-    let output = Command::cargo_bin("codehelion")
-        .expect("binary should build")
+    scan_with_signature(corpus, mode, database, false)
+}
+
+fn scan_with_signature(
+    corpus: &Path,
+    mode: &str,
+    database: &Path,
+    siblings_by_signature: bool,
+) -> String {
+    let mut command = Command::cargo_bin("codehelion").expect("binary should build");
+    command
         .arg("scan")
         .arg(corpus)
         .args(["--mode", mode, "--format", "json"])
@@ -394,7 +410,11 @@ fn scan(corpus: &Path, mode: &str, database: &Path) -> String {
         // the vendored default happens to name — bitflags writes its
         // external-crate integrations in `src/external` — would otherwise have
         // its ground truth moved by a presentation setting.
-        .arg("--include-vendored")
+        .arg("--include-vendored");
+    if siblings_by_signature {
+        command.arg("--siblings-by-signature");
+    }
+    let output = command
         .arg("--db")
         .arg(database)
         .output()
@@ -406,6 +426,184 @@ fn scan(corpus: &Path, mode: &str, database: &Path) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("report is utf-8")
+}
+
+/// The primary stream's identity is the set of source ranges, not the
+/// detector-assigned fingerprint. This is the same identity used by the
+/// evaluation harness's stability metric, kept here so the regression test
+/// also makes the set comparison explicit.
+fn primary_keys(
+    result: &codehelion_eval::schema::DetectionResult,
+) -> BTreeSet<Vec<(String, u32, u32)>> {
+    result
+        .findings
+        .iter()
+        .map(|finding| {
+            let mut key: Vec<_> = finding
+                .fragments
+                .iter()
+                .map(|fragment| {
+                    (
+                        fragment.file.clone(),
+                        fragment.start_line,
+                        fragment.end_line,
+                    )
+                })
+                .collect();
+            key.sort();
+            key
+        })
+        .collect()
+}
+
+#[test]
+fn cpp_signature_mirror_is_measured_outside_primary_accuracy() {
+    let root = repo_root();
+    let corpus = root.join("corpus/synthetic/cpp");
+    let labels_text =
+        std::fs::read_to_string(corpus.join("labels.json")).expect("cpp labels are committed");
+    let labels = LabelSet::from_json(&labels_text).expect("cpp labels parse");
+    assert_eq!(labels.known_siblings.len(), 1);
+
+    let scratch = tempfile::tempdir().expect("temp dir");
+    let report_off = scan(
+        &corpus,
+        "structural",
+        &scratch.path().join("cpp-structural-off.db"),
+    );
+    let (result_off, lines_off, sibling_groups_off) =
+        detected::from_report_json_with_siblings(&report_off)
+            .expect("default-off structural report has the sibling contract");
+    let sibling_metrics_off =
+        evaluate_siblings(&sibling_groups_off, &labels, DEFAULT_MATCH_THRESHOLD);
+    assert_eq!(sibling_metrics_off.known_mirrors_recovered, 0);
+    assert_eq!(sibling_metrics_off.known_mirrors_total, 1);
+    assert_eq!(sibling_metrics_off.signature_siblings_total, 0);
+    let off_json: serde_json::Value = serde_json::from_str(&report_off).expect("off JSON");
+    assert!(
+        off_json["summary"]["funnel"]
+            .as_array()
+            .expect("off funnel")
+            .iter()
+            .all(|stage| stage["stage"] != "signature sibling entries")
+    );
+
+    let report = scan_with_signature(
+        &corpus,
+        "structural",
+        &scratch.path().join("cpp-structural-on.db"),
+        true,
+    );
+    let (result, lines, sibling_groups) = detected::from_report_json_with_siblings(&report)
+        .expect("structural report has the current sibling contract");
+    let metrics = evaluate(&result, &labels, lines, DEFAULT_MATCH_THRESHOLD, 10);
+
+    // The pre-existing Structural primary baseline remains four true
+    // positives. The mirror is supplemental evidence, not a fifth finding.
+    assert_eq!(metrics.total_findings, 4);
+    assert_eq!(metrics.true_positives, 4);
+    assert_eq!(metrics.false_positives, 0);
+    assert_eq!(metrics.recall_overall, Some(1.0));
+    assert!(result.findings.iter().all(|finding| {
+        finding
+            .fragments
+            .iter()
+            .all(|fragment| fragment.file != "signature_mirror.cpp")
+    }));
+
+    let sibling_metrics = evaluate_siblings(&sibling_groups, &labels, DEFAULT_MATCH_THRESHOLD);
+    assert_eq!(sibling_metrics.known_mirrors_recovered, 1);
+    assert_eq!(sibling_metrics.known_mirrors_total, 1);
+    // Structural currently retains one similarity sibling and two exact
+    // signature siblings (the edited mirror and the existing Type-3 variant).
+    assert_eq!(sibling_metrics.signature_siblings_total, 2);
+
+    let signature_siblings: Vec<_> = sibling_groups
+        .iter()
+        .flat_map(|group| &group.siblings)
+        .filter(|sibling| sibling.basis == SiblingBasis::Signature)
+        .collect();
+    assert_eq!(signature_siblings.len(), 2);
+    assert!(signature_siblings.iter().all(|sibling| {
+        sibling.confidence_band == "low"
+            && sibling
+                .signature
+                .as_ref()
+                .is_some_and(|signature| !signature.is_empty())
+            && sibling.similarity.composite.is_finite()
+            && (0.0..=1.0).contains(&sibling.similarity.composite)
+    }));
+    let mirror_siblings: Vec<_> = sibling_groups
+        .iter()
+        .flat_map(|group| &group.siblings)
+        .filter(|sibling| sibling.member.file == "signature_mirror.cpp")
+        .collect();
+    assert_eq!(mirror_siblings.len(), 1);
+    assert_eq!(mirror_siblings[0].basis, SiblingBasis::Signature);
+    assert!(
+        sibling_groups
+            .iter()
+            .flat_map(|group| &group.siblings)
+            .filter(|sibling| sibling.member.file == "signature_mirror.cpp")
+            .all(|sibling| sibling.basis == SiblingBasis::Signature)
+    );
+    assert_eq!(primary_keys(&result_off), primary_keys(&result));
+    assert_eq!(
+        evaluate(&result_off, &labels, lines_off, DEFAULT_MATCH_THRESHOLD, 10).total_findings,
+        metrics.total_findings
+    );
+}
+
+#[test]
+fn cpp_mirror_does_not_change_primary_sets_or_stability() {
+    let root = repo_root();
+    let committed = root.join("corpus/synthetic/cpp");
+    let scratch = tempfile::tempdir().expect("temp dir");
+    let fixtureless = scratch.path().join("cpp-without-mirror");
+    std::fs::create_dir(&fixtureless).expect("fixtureless corpus directory");
+    for file in ["seed.cpp", "type1.cpp", "type2.cpp", "type3.cpp"] {
+        std::fs::copy(committed.join(file), fixtureless.join(file))
+            .unwrap_or_else(|error| panic!("copying {file}: {error}"));
+    }
+
+    for (mode, expected_count) in [("fast", 7), ("structural", 4)] {
+        let committed_report = scan(
+            &committed,
+            mode,
+            &scratch.path().join(format!("committed-{mode}.db")),
+        );
+        let fixtureless_report = scan(
+            &fixtureless,
+            mode,
+            &scratch.path().join(format!("fixtureless-{mode}.db")),
+        );
+        let (committed_result, _) =
+            detected::from_report_json(&committed_report).expect("committed report reads");
+        let (fixtureless_result, _) =
+            detected::from_report_json(&fixtureless_report).expect("fixtureless report reads");
+
+        assert_eq!(
+            committed_result.findings.len(),
+            expected_count,
+            "{mode} count"
+        );
+        assert_eq!(
+            fixtureless_result.findings.len(),
+            expected_count,
+            "{mode} fixtureless count"
+        );
+        assert_eq!(
+            primary_keys(&committed_result),
+            primary_keys(&fixtureless_result),
+            "{mode} primary finding set"
+        );
+        let run_stability = stability(&committed_result, &fixtureless_result);
+        assert!(run_stability.identical, "{mode} primary stability");
+        assert!(
+            (run_stability.jaccard - 1.0).abs() < f64::EPSILON,
+            "{mode} primary jaccard"
+        );
+    }
 }
 
 // Recall split by what the labelled pair was made to be. Overall recall says

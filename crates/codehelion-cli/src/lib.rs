@@ -29,6 +29,7 @@ pub mod semantic;
 pub mod suppress;
 
 use std::ffi::OsString;
+use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -58,6 +59,50 @@ pub enum Outcome {
     /// A scan reported findings and `--fail-on-findings` was set; exit
     /// [`EXIT_FINDINGS`].
     FindingsPresent,
+}
+
+/// A failure in the selected analysis stage, kept distinct from discovery,
+/// persistence and output errors so the command can offer an honest mode
+/// alternative only when another analysis is actually relevant.
+#[derive(Debug)]
+struct AnalysisFailure {
+    mode: Mode,
+    source: anyhow::Error,
+}
+
+impl fmt::Display for AnalysisFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} analysis failed: {}",
+            self.mode.name(),
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for AnalysisFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+fn analysis_failure(mode: Mode, source: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(AnalysisFailure { mode, source })
+}
+
+const fn analysis_hint(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Fast => {
+            "hint: fast analysis failed; structural mode measures parsed source independently"
+        }
+        Mode::Structural => {
+            "hint: structural analysis failed; fast mode measures token-level duplication independently"
+        }
+        Mode::Semantic => {
+            "hint: semantic analysis failed; structural and fast modes make separate parsed-source and token-level measurements"
+        }
+    }
 }
 
 impl Outcome {
@@ -239,16 +284,35 @@ fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     if args.include_trivial && args.mode == Mode::Fast {
         bail!("--include-trivial requires --mode structural or --mode semantic");
     }
+    if args.siblings_by_signature && args.mode == Mode::Fast {
+        bail!("--siblings-by-signature requires --mode structural or --mode semantic");
+    }
     // Resolved before the mode is dispatched on, because a permission that
     // nothing in the chosen mode could act on is refused rather than accepted:
     // Fast and Structural run nothing whatever they are told, and somebody who
     // granted an execution to one of them is owed the sentence saying so.
     let permitted = scan::permitted(args)?;
-    match args.mode {
+    // The scan lock creates the database's parent directory. Capture whether
+    // that would be a first creation before dispatching into any mode, then
+    // announce it only after the complete scan (including report output) has
+    // succeeded.
+    let database_hint = scan::new_database_directory_hint(args)?;
+    let result = match args.mode {
         Mode::Semantic => scan::structural::semantic(args, &permitted, out),
         Mode::Structural => scan::structural::run(args, out),
         Mode::Fast => scan::run(args, out),
+    };
+    if let Err(error) = &result
+        && let Some(failure) = error.downcast_ref::<AnalysisFailure>()
+    {
+        eprintln!("{}", analysis_hint(failure.mode));
     }
+    if result.is_ok()
+        && let Some(hint) = database_hint
+    {
+        hint.emit();
+    }
+    result
 }
 
 /// Re-render a completed snapshot without reading the scanned source tree.
@@ -377,7 +441,7 @@ fn write_lease_status(database: &Path, out: &mut impl Write) -> Result<()> {
 }
 
 /// The enclosing git repository root, found by walking up for a `.git` entry.
-fn find_git_root(start: &Path) -> Option<PathBuf> {
+pub(crate) fn find_git_root(start: &Path) -> Option<PathBuf> {
     let mut dir = Some(start);
     while let Some(current) = dir {
         if current.join(".git").exists() {
@@ -393,7 +457,7 @@ fn find_git_root(start: &Path) -> Option<PathBuf> {
 /// Only the root ignore file is consulted — this backs a hint, not an access
 /// decision. Paths outside the repository are reported as ignored so the
 /// hint stays quiet about them.
-fn is_git_ignored(repo_root: &Path, target: &Path) -> bool {
+pub(crate) fn is_git_ignored(repo_root: &Path, target: &Path) -> bool {
     let Ok(relative) = target.strip_prefix(repo_root) else {
         return true;
     };

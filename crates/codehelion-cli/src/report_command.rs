@@ -86,7 +86,7 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
                 .collect(),
             ranking,
             database: path.display().to_string(),
-            run_id: run.id,
+            run_id: Some(run.id),
             reused: false,
         },
         summary: report::Summary {
@@ -97,7 +97,35 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
         siblings,
         near_misses,
     };
-    scan::hydrate_artifact_savings(&store, run.id, &mut model.groups)?;
+    let hydration_error = scan::hydrate_artifact_savings(&store, run.id, &mut model.groups).err();
+    model.order_supplemental();
+    model.refresh_supplemental_summary();
+    if let Some(error) = hydration_error {
+        for group in &mut model.groups {
+            group.artifact_savings.clear();
+        }
+        model.refresh_supplemental_summary();
+        scan::write_report_options_without_artifact_guidance(
+            scan::ReportOutput {
+                format: args.format,
+                output: args.output.as_deref(),
+                force: args.force,
+                view: args.view,
+                show_suppressed: args.show_suppressed,
+                show_siblings: args.show_siblings,
+                show_near_misses: args.show_near_misses,
+                sort,
+                min_identifier_jaccard: args.min_identifier_jaccard,
+            },
+            out,
+            &model,
+        )?;
+        eprintln!(
+            "warning: artifact savings were not loaded ({error}); run {} remains recorded, but artifact evidence and guidance are unavailable for this report",
+            run.id
+        );
+        return Err(error);
+    }
     scan::write_report_options(
         scan::ReportOutput {
             format: args.format,
@@ -175,6 +203,8 @@ fn recorded_sibling(sibling: &codehelion_store::query::StoredSibling) -> report:
     report::Sibling {
         clone_type: sibling.clone_type.clone(),
         confidence_band: sibling.confidence_band.clone(),
+        basis: sibling.basis.clone(),
+        signature: sibling.signature.clone(),
         similarity: report::SiblingSimilarity {
             weight_version: sibling.weight_version.clone(),
             lexical: sibling.lexical,

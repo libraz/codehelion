@@ -16,7 +16,12 @@ use crate::report;
 
 /// Top-level command-line parser.
 #[derive(Debug, Parser)]
-#[command(name = "codehelion", version, about, long_about = None)]
+#[command(
+    name = "codehelion",
+    version,
+    about = "Index source duplication for maintainability; artifact analysis is optional.",
+    long_about = None
+)]
 pub struct Cli {
     /// Subcommand to run.
     #[command(subcommand)]
@@ -75,17 +80,19 @@ pub enum Command {
 /// Analysis mode selecting how much work the scan performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Mode {
-    /// Token-level Type-1/Type-2 and partial-clone detection; never runs the
-    /// target code.
+    /// Measures token equality and identifier/literal changes for Type-1 and
+    /// Type-2 copies. It does not measure identifier agreement, similarity
+    /// breakdowns, siblings or near misses, and never runs target code.
     Fast,
-    /// Syntax-structural detection: gapped Type-3 clones and duplicated
-    /// statement runs, judged on a similarity breakdown. Parses the sources
-    /// and never runs the target code.
+    /// Measures gapped Type-3 copies and duplicated statement runs, with
+    /// identifier agreement, similarity breakdowns and near misses. Sibling
+    /// generation is opt-in with `--siblings-by-signature`. Parses sources
+    /// and never runs target code.
     Structural,
-    /// Adds the clones a registered rule recognises across differing syntax,
-    /// judged on what an out-of-process compiler helper resolved. Needs a
-    /// helper `doctor` reports as available, and runs none of the project's
-    /// own code unless `--allow-execution` names a class.
+    /// Adds registered semantic matches and compiler-resolved type/name
+    /// evidence to Structural measurements. Needs a helper `doctor` reports
+    /// as available, and runs none of the project's own code unless
+    /// `--allow-execution` names a class.
     Semantic,
 }
 
@@ -675,6 +682,14 @@ pub struct ScanArgs {
     /// JSON and SARIF always retain sibling data.
     #[arg(long)]
     pub show_siblings: bool,
+    /// Generate sibling evidence from normalized signatures.
+    ///
+    /// This is separate from `--show-siblings`, which only changes text
+    /// presentation. The flag is available in Structural and Semantic modes;
+    /// it is off by default because signature matching is bounded by the
+    /// configured sibling ceilings.
+    #[arg(long)]
+    pub siblings_by_signature: bool,
     /// Also list bounded LSH proposals that narrowly missed the primary
     /// near-match estimate gate. JSON and SARIF always retain these diagnostics.
     #[arg(long)]
@@ -1033,6 +1048,27 @@ mod tests {
             parsed.command,
             Command::Scan(ScanArgs {
                 include_trivial: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Parsed opt-in state is the test subject.
+    fn siblings_by_signature_is_a_scan_generation_flag() {
+        let parsed = Cli::try_parse_from([
+            "codehelion",
+            "scan",
+            "--mode",
+            "structural",
+            "--siblings-by-signature",
+        ])
+        .expect("the signature-sibling generation flag parses");
+        assert!(matches!(
+            parsed.command,
+            Command::Scan(ScanArgs {
+                mode: Mode::Structural,
+                siblings_by_signature: true,
                 ..
             })
         ));

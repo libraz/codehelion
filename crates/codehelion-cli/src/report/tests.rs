@@ -55,6 +55,7 @@ pub(super) fn semantic_graph() -> SemanticOperationGraph {
 
 /// A two-group report whose second group is hidden by a path rule; shared
 /// with the sibling reporter tests.
+#[allow(clippy::too_many_lines)] // Keep this shared fixture's complete report shape visible.
 pub(super) fn sample_report() -> Report {
     Report {
         schema_version: SCHEMA_VERSION,
@@ -87,7 +88,7 @@ pub(super) fn sample_report() -> Report {
                 refactoring_ease: 1,
             },
             database: ".codehelion/audit.db".to_string(),
-            run_id: 1,
+            run_id: Some(1),
             reused: false,
         },
         summary: Summary {
@@ -133,6 +134,15 @@ pub(super) fn sample_report() -> Report {
                 by_rule: 1,
                 vendored: 0,
             },
+            siblings: 0,
+            near_misses: 0,
+            identity_collapsed: 0,
+            unmeasured_in_this_mode: vec![
+                "identifier agreement".to_string(),
+                "similarity breakdown".to_string(),
+                "siblings".to_string(),
+                "near misses".to_string(),
+            ],
             unused_suppressions: Vec::new(),
             unapplied_suppression_policies: Vec::new(),
             funnel: vec![
@@ -195,6 +205,8 @@ pub(super) fn sample_siblings() -> GroupSiblings {
         siblings: vec![Sibling {
             clone_type: "type-3".to_string(),
             confidence_band: "low".to_string(),
+            basis: "similarity".to_string(),
+            signature: None,
             similarity: SiblingSimilarity {
                 weight_version: "structural-verify-v1".to_string(),
                 lexical: 0.72,
@@ -289,6 +301,139 @@ fn visible_group() -> Group {
         &Weights::default(),
         20,
     )
+}
+
+#[test]
+fn identity_normalization_counts_a_duplicate_group_once_without_member_double_counting() {
+    let normalized = normalize_identities(vec![visible_group(), visible_group()])
+        .expect("exact duplicate groups are safe to collapse");
+    assert_eq!(normalized.groups.len(), 1);
+    assert_eq!(normalized.identity_collapsed, 1);
+}
+
+#[test]
+fn identity_normalization_counts_duplicate_findings_within_one_group() {
+    let mut group = visible_group();
+    group.members.push(group.members[0].clone());
+    let normalized = normalize_identities(vec![group])
+        .expect("equal finding payloads inside one group are safe to collapse");
+    assert_eq!(normalized.groups.len(), 1);
+    assert_eq!(normalized.groups[0].members.len(), 7);
+    assert_eq!(normalized.identity_collapsed, 1);
+}
+
+#[test]
+fn identity_normalization_rejects_a_finding_id_reused_by_another_group() {
+    let mut second = visible_group();
+    second.fingerprint = "0c".repeat(16);
+    let error = normalize_identities(vec![visible_group(), second])
+        .expect_err("one finding id cannot identify two groups");
+    assert!(error.to_string().contains("stable finding identity"));
+}
+
+#[test]
+fn identity_normalization_rejects_an_equal_group_id_with_an_unequal_payload() {
+    let mut second = visible_group();
+    second.members[0].file = "src/changed.rs".to_string();
+    let error = normalize_identities(vec![visible_group(), second])
+        .expect_err("an unequal payload cannot be selected by a stable id");
+    assert!(error.to_string().contains("stable clone-group identity"));
+}
+
+#[test]
+fn identity_normalization_does_not_collapse_distinct_non_finite_payloads() {
+    let mut nan = visible_group();
+    nan.confidence = f64::NAN;
+    let mut infinity = visible_group();
+    infinity.confidence = f64::INFINITY;
+    let error = normalize_identities(vec![nan, infinity])
+        .expect_err("NaN and infinity must remain unequal identity payloads");
+    assert!(error.to_string().contains("stable clone-group identity"));
+}
+
+#[test]
+fn identity_normalization_does_not_collapse_signed_zero_payloads() {
+    let mut positive = visible_group();
+    positive.entropy_bits = 0.0;
+    let mut negative = visible_group();
+    negative.entropy_bits = -0.0;
+    let error = normalize_identities(vec![positive, negative])
+        .expect_err("signed zero must remain unequal identity payloads");
+    assert!(error.to_string().contains("stable clone-group identity"));
+}
+
+fn artifact_savings_with_assumptions(assumptions: serde_json::Value) -> ArtifactSavings {
+    ArtifactSavings {
+        artifact_analysis_id: 17,
+        source_build_variant_fingerprint: "01".repeat(16),
+        artifact_build_variant_fingerprint: "02".repeat(16),
+        duplicated_bytes: 24,
+        estimated_refactor_savings_bytes: 9,
+        mapping_confidence: "high".to_string(),
+        clone_confidence: 1.0,
+        model_confidence: "low".to_string(),
+        savings_confidence: "low".to_string(),
+        model_schema_version: "refactor-savings-model-v1".to_string(),
+        assumptions,
+    }
+}
+
+#[test]
+fn identity_normalization_collapses_exact_nested_json_assumptions() {
+    let assumptions = serde_json::json!({
+        "nested": [null, true, "text", 7, { "inner": [1.5, false] }]
+    });
+    let mut first = visible_group();
+    first
+        .artifact_savings
+        .push(artifact_savings_with_assumptions(assumptions.clone()));
+    let mut second = visible_group();
+    second
+        .artifact_savings
+        .push(artifact_savings_with_assumptions(assumptions));
+    let normalized = normalize_identities(vec![first, second])
+        .expect("exact nested JSON assumptions should collapse");
+    assert_eq!(normalized.groups.len(), 1);
+    assert_eq!(normalized.identity_collapsed, 1);
+}
+
+#[test]
+fn identity_normalization_rejects_signed_zero_in_nested_json_assumptions() {
+    let positive = serde_json::Value::Number(
+        serde_json::Number::from_f64(0.0).expect("finite zero is a JSON number"),
+    );
+    let negative = serde_json::Value::Number(
+        serde_json::Number::from_f64(-0.0).expect("finite zero is a JSON number"),
+    );
+    let mut first = visible_group();
+    first
+        .artifact_savings
+        .push(artifact_savings_with_assumptions(serde_json::json!({
+            "nested": [positive]
+        })));
+    let mut second = visible_group();
+    second
+        .artifact_savings
+        .push(artifact_savings_with_assumptions(serde_json::json!({
+            "nested": [negative]
+        })));
+    let error = normalize_identities(vec![first, second])
+        .expect_err("signed zero in nested JSON must remain unequal");
+    assert!(error.to_string().contains("stable clone-group identity"));
+}
+
+#[test]
+fn identity_normalization_stage_round_trips_through_stored_summary() {
+    let mut funnel = Vec::new();
+    append_stored_identity_stage(&mut funnel, 3, 2);
+    assert_eq!(stored_identity_collapsed(&funnel), 2);
+
+    let stored = SummaryRow {
+        funnel,
+        ..SummaryRow::default()
+    };
+    let restored = restored(&stored, &[], "fast");
+    assert_eq!(restored.identity_collapsed, 2);
 }
 
 /// A group a path rule hid, kept in the report rather than dropped.
@@ -558,6 +703,90 @@ fn text_names_the_run_required_for_replay() {
 }
 
 #[test]
+fn text_run_status_names_reuse_and_the_exact_tree_delta() {
+    let mut reused = sample_report();
+    reused.run.reused = true;
+    let mut rendered = Vec::new();
+    reused
+        .render_text(TextOptions::default(), &mut rendered)
+        .unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+    assert!(
+        rendered.contains("run 1 (reused: tree unchanged; replay: codehelion report --run 1)"),
+        "{rendered}"
+    );
+
+    let mut changed = sample_report();
+    changed.summary.changes = Some(TreeChanges {
+        since_run_id: 7,
+        modified: 1,
+        added: 1,
+        removed: 1,
+        unchanged: 4,
+    });
+    let mut rendered = Vec::new();
+    changed
+        .render_text(TextOptions::default(), &mut rendered)
+        .unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+    assert!(
+        rendered.contains("run 1 (3 file(s) changed; replay: codehelion report --run 1)"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("reused: tree unchanged"), "{rendered}");
+}
+
+#[test]
+fn an_unrecorded_report_does_not_offer_replay_or_artifact_guidance() {
+    let mut report = sample_report();
+    report.run.run_id = None;
+
+    let json: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    assert!(json["run"].get("run_id").is_none(), "{json}");
+
+    let mut text = Vec::new();
+    report
+        .render_text(TextOptions::default(), &mut text)
+        .unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("run unrecorded"), "{text}");
+    assert!(!text.contains("codehelion report --run"), "{text}");
+    assert!(!text.contains("codehelion explain"), "{text}");
+    assert!(text.contains("list every group: --limit 0"), "{text}");
+    assert!(!text.contains("artifact savings"), "{text}");
+
+    let mut detailed = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut detailed,
+        )
+        .unwrap();
+    let detailed = String::from_utf8(detailed).unwrap();
+    assert!(
+        detailed
+            .lines()
+            .any(|line| line == "database: .codehelion/audit.db (run not recorded)"),
+        "{detailed}"
+    );
+    assert!(!detailed.contains("snapshot:"), "{detailed}");
+    assert!(!detailed.contains("codehelion explain"), "{detailed}");
+    assert!(
+        detailed.contains("list every group: --limit 0"),
+        "{detailed}"
+    );
+
+    let sarif: serde_json::Value = serde_json::from_str(&report.to_sarif().unwrap()).unwrap();
+    let run = &sarif["runs"][0];
+    assert!(run.get("automationDetails").is_none(), "{sarif}");
+    assert_eq!(run["invocations"][0]["executionSuccessful"], false);
+    assert!(run["properties"].get("run_id").is_none(), "{sarif}");
+}
+
+#[test]
 fn replay_order_uses_the_recorded_rank_down_verdict() {
     let ordinary = visible_group();
     let delayed = suppressed_group();
@@ -587,6 +816,11 @@ fn a_sibling_is_exported_but_text_hides_it_until_requested() {
         value["siblings"][0]["siblings"][0]["similarity"]["composite"],
         0.76
     );
+    assert_eq!(value["siblings"][0]["siblings"][0]["basis"], "similarity");
+    assert_eq!(
+        value["siblings"][0]["siblings"][0]["signature"],
+        serde_json::Value::Null
+    );
 
     let mut default_text = Vec::new();
     report
@@ -611,6 +845,291 @@ fn a_sibling_is_exported_but_text_hides_it_until_requested() {
     let shown_text = String::from_utf8(shown_text).unwrap();
     assert!(shown_text.contains("sibling type-3 low (0.76): src/incomplete.rs:30"));
     assert!(shown_text.contains("incomplete_checksum"));
+
+    let sarif: serde_json::Value = serde_json::from_str(&report.to_sarif().unwrap()).unwrap();
+    let sibling = &sarif["runs"][0]["results"][0]["properties"]["siblings"][0];
+    assert_eq!(sibling["basis"], "similarity");
+    assert_eq!(sibling["signature"], serde_json::Value::Null);
+}
+
+#[test]
+fn signature_siblings_keep_their_identity_and_render_as_exact_matches() {
+    let mut report = sample_report();
+    let mut siblings = sample_siblings();
+    let sibling = siblings
+        .siblings
+        .first_mut()
+        .expect("sample has one sibling");
+    sibling.basis = "signature".to_string();
+    sibling.signature = Some("normalized-signature-sentinel".to_string());
+    report.siblings = vec![siblings];
+    report.summary.guardrails = Some(Guardrails {
+        profile: "untrusted".to_string(),
+        max_file_bytes: 1,
+        parse_timeout_ms: 2,
+        helper_timeout_ms: 3,
+        posting_cap: 4,
+        pair_budget: 5,
+        verification_budget: 6,
+        max_alignment_cells: 7,
+        near_miss_delta: 0.1,
+        near_miss_cap: 8,
+        sibling_candidate_budget: 9,
+        sibling_per_group_cap: 10,
+        sibling_total_cap: 11,
+        signature_sibling_candidate_budget: 12,
+        signature_sibling_per_group_cap: 13,
+        signature_sibling_total_cap: 14,
+        max_component: 15,
+    });
+
+    let mut disabled_diagnostics = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                verbosity: 2,
+                show_siblings: true,
+                ..TextOptions::default()
+            },
+            &mut disabled_diagnostics,
+        )
+        .unwrap();
+    assert!(
+        !String::from_utf8(disabled_diagnostics)
+            .unwrap()
+            .contains("signature sibling sweep"),
+        "the opt-in channel's ceilings must not look active when its stage is absent"
+    );
+    report
+        .summary
+        .funnel
+        .push(FunnelStage::new("signature sibling entries", 1));
+
+    let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    let sibling = &value["siblings"][0]["siblings"][0];
+    assert_eq!(sibling["basis"], "signature");
+    assert_eq!(sibling["signature"], "normalized-signature-sentinel");
+    assert_eq!(
+        value["summary"]["guardrails"]["signature_sibling_candidate_budget"],
+        12
+    );
+    assert_eq!(
+        value["summary"]["guardrails"]["signature_sibling_per_group_cap"],
+        13
+    );
+    assert_eq!(
+        value["summary"]["guardrails"]["signature_sibling_total_cap"],
+        14
+    );
+
+    let mut text = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                show_siblings: true,
+                ..TextOptions::default()
+            },
+            &mut text,
+        )
+        .unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("sibling type-3 low (0.76) [same signature]: src/incomplete.rs:30"));
+
+    let mut diagnostics = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                verbosity: 2,
+                show_siblings: true,
+                ..TextOptions::default()
+            },
+            &mut diagnostics,
+        )
+        .unwrap();
+    let diagnostics = String::from_utf8(diagnostics).unwrap();
+    assert!(diagnostics.contains("signature sibling sweep 12 candidates, 13 per group, 14 total"));
+
+    let sarif: serde_json::Value = serde_json::from_str(&report.to_sarif().unwrap()).unwrap();
+    let sibling = &sarif["runs"][0]["results"][0]["properties"]["siblings"][0];
+    assert_eq!(sibling["basis"], "signature");
+    assert_eq!(sibling["signature"], "normalized-signature-sentinel");
+}
+
+#[test]
+fn supplemental_totals_count_serialized_hidden_entries_and_name_the_flags() {
+    let mut report = sample_report();
+    report.siblings = vec![sample_siblings()];
+    report.near_misses = vec![sample_near_miss()];
+    report.refresh_supplemental_summary();
+
+    let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    assert_eq!(value["summary"]["siblings"], 1);
+    assert_eq!(value["summary"]["near_misses"], 1);
+
+    let mut default_text = Vec::new();
+    report
+        .render_text(TextOptions::default(), &mut default_text)
+        .unwrap();
+    let default_text = String::from_utf8(default_text).unwrap();
+    assert!(
+        default_text.contains(
+            "supplemental: 1 siblings (--show-siblings), 1 near misses (--show-near-misses)"
+        ),
+        "{default_text}"
+    );
+    assert!(!default_text.contains("sibling type-3"), "{default_text}");
+    assert!(
+        !default_text.contains("near-match near misses:"),
+        "{default_text}"
+    );
+
+    let mut shown_text = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                show_siblings: true,
+                show_near_misses: true,
+                ..TextOptions::default()
+            },
+            &mut shown_text,
+        )
+        .unwrap();
+    let shown_text = String::from_utf8(shown_text).unwrap();
+    assert!(shown_text.contains("sibling type-3 low (0.76): src/incomplete.rs:30"));
+    assert!(shown_text.contains("near-match near misses:"));
+}
+
+#[test]
+fn supplemental_totals_omit_the_summary_line_when_empty() {
+    let report = sample_report();
+    let mut rendered = Vec::new();
+    report
+        .render_text(TextOptions::default(), &mut rendered)
+        .unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+    assert!(!rendered.contains("supplemental:"), "{rendered}");
+}
+
+#[test]
+fn supplemental_cap_note_requires_actual_dropped_entries() {
+    let mut report = sample_report();
+    report.siblings = vec![sample_siblings()];
+    report.summary.funnel.push(
+        FunnelStage::new("sibling entries", 1)
+            .dropping("sibling_total_cap", 2)
+            .dropping("sibling_candidate_budget", 0),
+    );
+    report.refresh_supplemental_summary();
+
+    let mut rendered = Vec::new();
+    report
+        .render_text(TextOptions::default(), &mut rendered)
+        .unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+    assert!(
+        rendered
+            .contains("supplemental: 1 siblings (--show-siblings; 2 dropped by search ceilings)"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("near miss(es) were dropped"),
+        "{rendered}"
+    );
+
+    let mut no_drop = sample_report();
+    no_drop.siblings = vec![sample_siblings()];
+    no_drop
+        .summary
+        .funnel
+        .push(FunnelStage::new("sibling entries", 1));
+    no_drop.refresh_supplemental_summary();
+    let mut rendered = Vec::new();
+    no_drop
+        .render_text(TextOptions::default(), &mut rendered)
+        .unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+    assert!(
+        !rendered.contains("dropped by search ceilings"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn signature_sibling_caps_are_supplemental_but_not_primary_search_truncation() {
+    let mut report = sample_report();
+    report.summary.funnel = vec![
+        FunnelStage::new("signature sibling entries", 0)
+            .dropping("signature_sibling_candidate_budget", 2)
+            .dropping("signature_sibling_per_group_cap", 3)
+            .dropping("signature_sibling_total_cap", 4),
+    ];
+    assert!(!search_truncated(&report.summary.funnel));
+
+    let mut rendered = Vec::new();
+    report
+        .render_text(TextOptions::default(), &mut rendered)
+        .unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+    assert!(
+        rendered.contains("supplemental: 9 sibling candidate(s) dropped by search ceilings"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("search was truncated"), "{rendered}");
+}
+
+#[test]
+fn identifier_floor_reports_the_exact_unmeasured_count() {
+    let mut report = sample_report();
+    let mut measured = structural_group();
+    measured.identifier_jaccard = Some(0.5);
+    report.groups.push(measured);
+
+    let mut rendered = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                min_identifier_jaccard: Some(0.9),
+                ..TextOptions::default()
+            },
+            &mut rendered,
+        )
+        .unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+    assert!(
+        rendered.contains(
+            "2 group(s) are not listed: raw identifier agreement below 0.90 (1 of them were not measured in this mode)"
+        ),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn identifier_floor_omits_unmeasured_clause_when_every_group_has_a_measure() {
+    let mut report = sample_report();
+    report.groups[0].identifier_jaccard = Some(0.5);
+    let mut measured = structural_group();
+    measured.identifier_jaccard = Some(0.6);
+    report.groups.push(measured);
+
+    let mut rendered = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                min_identifier_jaccard: Some(0.9),
+                ..TextOptions::default()
+            },
+            &mut rendered,
+        )
+        .unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+    assert!(
+        rendered.contains("2 group(s) are not listed: raw identifier agreement below 0.90\n"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("not measured in this mode"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -914,6 +1433,82 @@ fn a_lexing_mode_reports_no_parse_coverage_rather_than_a_clean_one() {
 }
 
 #[test]
+fn fast_summary_names_overlapping_totals_and_unmeasured_evidence() {
+    let report = sample_report();
+    let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    assert_eq!(
+        value["summary"]["unmeasured_in_this_mode"],
+        serde_json::json!([
+            "identifier agreement",
+            "similarity breakdown",
+            "siblings",
+            "near misses"
+        ])
+    );
+
+    let mut notes = Vec::new();
+    report
+        .render_notes(TextOptions::default(), &mut notes)
+        .unwrap();
+    let notes = String::from_utf8(notes).unwrap();
+    assert!(
+        notes.contains(
+            "Fast duplicated-token totals may overlap because one source location can appear in multiple groups"
+        ),
+        "{notes}"
+    );
+    for feature in [
+        "identifier agreement",
+        "similarity breakdown",
+        "siblings",
+        "near misses",
+    ] {
+        assert!(notes.contains(feature), "{feature}: {notes}");
+    }
+}
+
+#[test]
+fn unmeasured_measurements_are_scoped_to_fast_mode() {
+    assert_eq!(
+        unmeasured_in_this_mode("fast"),
+        [
+            "identifier agreement",
+            "similarity breakdown",
+            "siblings",
+            "near misses",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+    );
+    assert!(unmeasured_in_this_mode("structural").is_empty());
+    assert!(unmeasured_in_this_mode("semantic").is_empty());
+}
+
+#[test]
+fn structural_summary_serializes_an_empty_fast_only_unmeasured_list() {
+    let mut report = sample_report();
+    report.run.mode = "structural".to_string();
+    report.summary.unmeasured_in_this_mode.clear();
+
+    let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    assert_eq!(
+        value["summary"]["unmeasured_in_this_mode"],
+        serde_json::json!([])
+    );
+
+    let mut notes = Vec::new();
+    report
+        .render_notes(TextOptions::default(), &mut notes)
+        .unwrap();
+    let notes = String::from_utf8(notes).unwrap();
+    assert!(
+        !notes.contains("duplicated-token totals may overlap"),
+        "{notes}"
+    );
+}
+
+#[test]
 fn json_view_serializes_the_documented_shape() {
     let value: serde_json::Value =
         serde_json::from_str(&sample_report().to_json().unwrap()).unwrap();
@@ -1014,6 +1609,10 @@ fn structural_shape_label_keeps_the_rule_judgement() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one schema test keeps the complete current, legacy-additive, and invalid sibling contracts together"
+)]
 fn current_json_report_validates_against_the_shipped_v1_schema() {
     let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA).unwrap();
     let mut schemas = Schemas::new();
@@ -1024,6 +1623,14 @@ fn current_json_report_validates_against_the_shipped_v1_schema() {
     let value: serde_json::Value =
         serde_json::from_str(&sample_report().to_json().unwrap()).unwrap();
     schemas.validate(&value, index).unwrap();
+
+    let mut unrecorded = sample_report();
+    unrecorded.run.run_id = None;
+    unrecorded.run.reused = false;
+    unrecorded.summary.changes = None;
+    let unrecorded: serde_json::Value =
+        serde_json::from_str(&unrecorded.to_json().unwrap()).unwrap();
+    schemas.validate(&unrecorded, index).unwrap();
 
     let mut with_execution_refusal = sample_report();
     with_execution_refusal.summary.compiler = Some(CompilerCoverage {
@@ -1055,6 +1662,131 @@ fn current_json_report_validates_against_the_shipped_v1_schema() {
     let without_a_recorded_band: serde_json::Value =
         serde_json::from_str(&report.to_json().unwrap()).unwrap();
     schemas.validate(&without_a_recorded_band, index).unwrap();
+
+    // The additive fields remain optional for reports emitted before sibling
+    // provenance was persisted.
+    let mut old_v1_report = sample_report();
+    old_v1_report.siblings = vec![sample_siblings()];
+    old_v1_report.summary.guardrails = Some(Guardrails {
+        profile: "untrusted".to_string(),
+        max_file_bytes: 1,
+        parse_timeout_ms: 2,
+        helper_timeout_ms: 3,
+        posting_cap: 4,
+        pair_budget: 5,
+        verification_budget: 6,
+        max_alignment_cells: 7,
+        near_miss_delta: 0.1,
+        near_miss_cap: 8,
+        sibling_candidate_budget: 9,
+        sibling_per_group_cap: 10,
+        sibling_total_cap: 11,
+        signature_sibling_candidate_budget: 12,
+        signature_sibling_per_group_cap: 13,
+        signature_sibling_total_cap: 14,
+        max_component: 15,
+    });
+    let mut old_v1: serde_json::Value =
+        serde_json::from_str(&old_v1_report.to_json().unwrap()).unwrap();
+    let old_sibling = old_v1["siblings"][0]["siblings"][0]
+        .as_object_mut()
+        .expect("sibling object");
+    old_sibling.remove("basis");
+    old_sibling.remove("signature");
+    let old_guardrails = old_v1["summary"]["guardrails"]
+        .as_object_mut()
+        .expect("guardrails object");
+    old_guardrails.remove("signature_sibling_candidate_budget");
+    old_guardrails.remove("signature_sibling_per_group_cap");
+    old_guardrails.remove("signature_sibling_total_cap");
+    schemas.validate(&old_v1, index).unwrap();
+
+    let mut signature_report = sample_report();
+    let mut signature_group = sample_siblings();
+    signature_group.siblings[0].basis = "signature".to_string();
+    signature_group.siblings[0].signature = Some("schema-signature".to_string());
+    signature_report.siblings = vec![signature_group];
+    let signature_value: serde_json::Value =
+        serde_json::from_str(&signature_report.to_json().unwrap()).unwrap();
+    schemas.validate(&signature_value, index).unwrap();
+
+    let mut missing_signature = signature_value;
+    missing_signature["siblings"][0]["siblings"][0]
+        .as_object_mut()
+        .expect("sibling object")
+        .remove("signature");
+    assert!(schemas.validate(&missing_signature, index).is_err());
+
+    let null_signature: serde_json::Value =
+        serde_json::from_str(&signature_report.to_json().unwrap()).unwrap();
+    let mut null_signature = null_signature;
+    null_signature["siblings"][0]["siblings"][0]["signature"] = serde_json::Value::Null;
+    assert!(schemas.validate(&null_signature, index).is_err());
+
+    let mut orphan_signature = value.clone();
+    orphan_signature["siblings"] = serde_json::json!([{
+        "group_fingerprint": "0b".repeat(16),
+        "siblings": [{
+            "clone_type": "type-3",
+            "confidence_band": "low",
+            "signature": "orphan-signature",
+            "similarity": {
+                "weight_version": "structural-verify-v1",
+                "lexical": 0.72,
+                "structural": 0.91,
+                "control_flow": 0.8,
+                "type_similarity": null,
+                "api": 0.7,
+                "composite": 0.76
+            },
+            "member": {
+                "finding_id": "f0".repeat(16),
+                "content": "f1".repeat(16),
+                "file": "src/incomplete.rs",
+                "language": "rust",
+                "start_line": 30,
+                "end_line": 36,
+                "unit": "incomplete_checksum",
+                "tokens": 31,
+                "canonical": false
+            },
+            "suppressed": null
+        }]
+    }]);
+    assert!(schemas.validate(&orphan_signature, index).is_err());
+
+    let mut similarity_with_signature = value.clone();
+    similarity_with_signature["siblings"] = serde_json::json!([{
+        "group_fingerprint": "0b".repeat(16),
+        "siblings": [{
+            "clone_type": "type-3",
+            "confidence_band": "low",
+            "basis": "similarity",
+            "signature": "must-not-be-present",
+            "similarity": {
+                "weight_version": "structural-verify-v1",
+                "lexical": 0.72,
+                "structural": 0.91,
+                "control_flow": 0.8,
+                "type_similarity": null,
+                "api": 0.7,
+                "composite": 0.76
+            },
+            "member": {
+                "finding_id": "f0".repeat(16),
+                "content": "f1".repeat(16),
+                "file": "src/incomplete.rs",
+                "language": "rust",
+                "start_line": 30,
+                "end_line": 36,
+                "unit": "incomplete_checksum",
+                "tokens": 31,
+                "canonical": false
+            },
+            "suppressed": null
+        }]
+    }]);
+    assert!(schemas.validate(&similarity_with_signature, index).is_err());
 
     let mut unsupported = value;
     unsupported["schema_version"] = serde_json::json!(2);
@@ -1160,6 +1892,125 @@ fn artifact_savings_use_the_same_group_value_in_every_report_format() {
         sarif["runs"][0]["results"][1]["properties"]["artifact_savings"],
         serde_json::json!([])
     );
+}
+
+#[test]
+fn artifact_guidance_appears_only_when_every_group_lacks_savings() {
+    let mut report = sample_report();
+    let mut notes = Vec::new();
+    report
+        .render_notes(TextOptions::default(), &mut notes)
+        .unwrap();
+    let notes = String::from_utf8(notes).unwrap();
+    assert!(
+        notes.contains(
+            "note: no artifact savings are recorded; provide an artifact at <PATH> retaining symbols/debug info, or a matching companion via --debug-file <PATH>, then run artifact analyze <PATH> --source-run <id> --build-variant <manifest>\n"
+        ),
+        "{notes}"
+    );
+
+    report.groups[0].artifact_savings.push(ArtifactSavings {
+        artifact_analysis_id: 17,
+        source_build_variant_fingerprint: "01".repeat(16),
+        artifact_build_variant_fingerprint: "02".repeat(16),
+        duplicated_bytes: 24,
+        estimated_refactor_savings_bytes: 9,
+        mapping_confidence: "high".to_string(),
+        clone_confidence: 1.0,
+        model_confidence: "low".to_string(),
+        savings_confidence: "low".to_string(),
+        model_schema_version: "refactor-savings-model-v1".to_string(),
+        assumptions: serde_json::json!([]),
+    });
+    let mut notes = Vec::new();
+    report
+        .render_notes(TextOptions::default(), &mut notes)
+        .unwrap();
+    let notes = String::from_utf8(notes).unwrap();
+    assert!(
+        !notes.contains("no artifact savings are recorded"),
+        "{notes}"
+    );
+
+    let mut empty = sample_report();
+    empty.groups.clear();
+    let mut notes = Vec::new();
+    empty
+        .render_notes(TextOptions::default(), &mut notes)
+        .unwrap();
+    let notes = String::from_utf8(notes).unwrap();
+    assert!(
+        !notes.contains("no artifact savings are recorded"),
+        "{notes}"
+    );
+}
+
+#[test]
+fn partition_artifact_guidance_is_aggregated_over_all_models() {
+    const GUIDANCE: &str = "note: no artifact savings are recorded; provide an artifact at <PATH> retaining symbols/debug info, or a matching companion via --debug-file <PATH>, then run artifact analyze <PATH> --source-run <id> --build-variant <manifest>";
+
+    let reports = [sample_report(), sample_report()];
+    let mut notes = Vec::new();
+    for report in &reports {
+        report
+            .render_notes_without_artifact_guidance(TextOptions::default(), &mut notes)
+            .unwrap();
+    }
+    render_partition_artifact_guidance(&reports, &mut notes).unwrap();
+    let notes = String::from_utf8(notes).unwrap();
+    assert_eq!(notes.matches(GUIDANCE).count(), 1, "{notes}");
+
+    let mut with_savings = sample_report();
+    with_savings.groups[0]
+        .artifact_savings
+        .push(ArtifactSavings {
+            artifact_analysis_id: 17,
+            source_build_variant_fingerprint: "01".repeat(16),
+            artifact_build_variant_fingerprint: "02".repeat(16),
+            duplicated_bytes: 24,
+            estimated_refactor_savings_bytes: 9,
+            mapping_confidence: "high".to_string(),
+            clone_confidence: 1.0,
+            model_confidence: "low".to_string(),
+            savings_confidence: "low".to_string(),
+            model_schema_version: "refactor-savings-model-v1".to_string(),
+            assumptions: serde_json::json!([]),
+        });
+    let reports = [sample_report(), with_savings];
+    let mut notes = Vec::new();
+    for report in &reports {
+        report
+            .render_notes_without_artifact_guidance(TextOptions::default(), &mut notes)
+            .unwrap();
+    }
+    render_partition_artifact_guidance(&reports, &mut notes).unwrap();
+    let notes = String::from_utf8(notes).unwrap();
+    assert_eq!(notes.matches(GUIDANCE).count(), 0, "{notes}");
+
+    let mut empty = sample_report();
+    empty.groups.clear();
+    let reports = [empty, sample_report()];
+    let mut notes = Vec::new();
+    for report in &reports {
+        report
+            .render_notes_without_artifact_guidance(TextOptions::default(), &mut notes)
+            .unwrap();
+    }
+    render_partition_artifact_guidance(&reports, &mut notes).unwrap();
+    let notes = String::from_utf8(notes).unwrap();
+    assert_eq!(notes.matches(GUIDANCE).count(), 1, "{notes}");
+
+    let reports = [empty_report(), empty_report()];
+    let mut notes = Vec::new();
+    render_partition_artifact_guidance(&reports, &mut notes).unwrap();
+    let notes = String::from_utf8(notes).unwrap();
+    assert_eq!(notes.matches(GUIDANCE).count(), 0, "{notes}");
+}
+
+fn empty_report() -> Report {
+    let mut report = sample_report();
+    report.groups.clear();
+    report
 }
 
 #[test]

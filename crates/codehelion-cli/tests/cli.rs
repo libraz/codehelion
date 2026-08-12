@@ -104,7 +104,7 @@ fn doctor_and_cache_status_report_a_live_database_lease() {
 }
 
 #[test]
-fn scan_recreates_an_incompatible_pre_release_database() {
+fn scan_rejects_an_incompatible_database_without_replacing_it() {
     let directory = tempfile::tempdir().expect("temp dir");
     let database = directory.path().join("audit.db");
     let source = directory.path().join("lib.rs");
@@ -112,26 +112,77 @@ fn scan_recreates_an_incompatible_pre_release_database() {
     codehelion_store::Store::open(&database).expect("create database");
     let connection = rusqlite::Connection::open(&database).expect("open database");
     connection
-        .execute("UPDATE schema_meta SET version = 999", [])
+        .execute("UPDATE schema_meta SET version = 1", [])
         .expect("change schema version");
+    connection
+        .execute_batch(
+            "CREATE TABLE sentinel (value TEXT NOT NULL);
+             INSERT INTO sentinel (value) VALUES ('keep-me');",
+        )
+        .expect("write sentinel data");
     drop(connection);
 
-    cmd()
+    let before_main = std::fs::read(&database).expect("read database before rejection");
+    let sidecars = [
+        database.with_file_name("audit.db-wal"),
+        database.with_file_name("audit.db-shm"),
+    ];
+    std::fs::write(&sidecars[0], b"wal-sentinel").expect("write WAL sentinel");
+    std::fs::write(&sidecars[1], b"shm-sentinel").expect("write SHM sentinel");
+    let before_sidecars = sidecars
+        .iter()
+        .map(|path| std::fs::read(path).expect("read sidecar before rejection"))
+        .collect::<Vec<_>>();
+
+    let output = cmd()
         .args([
             "scan",
             directory.path().to_str().expect("scan path"),
             "--db",
             database.to_str().expect("database path"),
         ])
-        .assert()
-        .success();
-
-    let store = codehelion_store::Store::open_existing(&database).expect("recreated database");
-    assert_eq!(
-        store.schema_version().expect("schema version"),
-        codehelion_store::schema::SCHEMA_VERSION
+        .output()
+        .expect("run scan against incompatible database");
+    assert!(!output.status.success(), "scan unexpectedly succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("database schema version 1"), "{stderr}");
+    assert!(
+        stderr.contains("automatic migration is not supported"),
+        "{stderr}"
     );
-    assert_eq!(store.table_count("scan_run").expect("scan runs"), 1);
+    assert!(
+        stderr.contains("existing database was left unchanged"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("fresh scan"), "{stderr}");
+    assert_eq!(
+        std::fs::read(&database).expect("read database after rejection"),
+        before_main
+    );
+    for (path, before) in sidecars.iter().zip(before_sidecars) {
+        assert_eq!(
+            std::fs::read(path).expect("read sidecar after rejection"),
+            before
+        );
+    }
+    let verification = directory.path().join("verification.db");
+    std::fs::copy(&database, &verification).expect("copy main database for verification");
+    let verification_connection = rusqlite::Connection::open(&verification)
+        .expect("open verified copy of unchanged main database");
+    assert_eq!(
+        verification_connection
+            .query_row("SELECT version FROM schema_meta", [], |row| row
+                .get::<_, i64>(0))
+            .expect("read preserved schema version"),
+        1
+    );
+    assert_eq!(
+        verification_connection
+            .query_row("SELECT value FROM sentinel", [], |row| row
+                .get::<_, String>(0))
+            .expect("read preserved sentinel"),
+        "keep-me"
+    );
 }
 
 #[test]
@@ -465,6 +516,66 @@ fn japanese_readme_explains_the_fast_mode_comment_and_whitespace_normalization()
         include_str!("../../../README_ja.md").contains("コメントと空白を除く"),
         "Japanese README must retain Fast-mode normalization semantics"
     );
+}
+
+#[test]
+fn mode_help_describes_measurement_differences_and_safety() {
+    let output = cmd().args(["scan", "--help"]).output().expect("scan help");
+    assert!(output.status.success(), "{output:?}");
+    let help = String::from_utf8(output.stdout).expect("help output");
+    assert!(help.contains("identifier agreement"), "{help}");
+    assert!(help.contains("similarity breakdown"), "{help}");
+    assert!(help.contains("siblings"), "{help}");
+    assert!(help.contains("near misses"), "{help}");
+    assert!(help.contains("never runs target code"), "{help}");
+    assert!(help.contains("--allow-execution"), "{help}");
+}
+
+#[test]
+fn readmes_explain_artifact_folding_and_size_relevance() {
+    let english = include_str!("../../../README.md");
+    let japanese = include_str!("../../../README_ja.md");
+    assert!(english.contains("Identical code folding"));
+    assert!(english.contains("Type-1 copies"));
+    assert!(english.contains("Type-2 and Type-3 copies"));
+    assert!(japanese.contains("identical code folding"));
+    assert!(japanese.contains("Type-1"));
+    assert!(japanese.contains("Type-2 / Type-3"));
+}
+
+#[test]
+fn readmes_describe_opt_in_sibling_evidence_limits() {
+    let english = include_str!("../../../README.md");
+    for snippet in [
+        "--siblings-by-signature",
+        "off by default",
+        "low-confidence sibling",
+        "normalized signature",
+        "same directory",
+        "sibling-search ceiling",
+        "mirror-consistency checker",
+    ] {
+        assert!(
+            english.contains(snippet),
+            "English README is missing {snippet}"
+        );
+    }
+
+    let japanese = include_str!("../../../README_ja.md");
+    for snippet in [
+        "--siblings-by-signature",
+        "既定では無効",
+        "正規化済みシグネチャ",
+        "低信頼度の sibling",
+        "別ディレクトリ",
+        "探索の上限",
+        "ミラー整合性検査ツールではありません",
+    ] {
+        assert!(
+            japanese.contains(snippet),
+            "Japanese README is missing {snippet}"
+        );
+    }
 }
 
 #[test]
@@ -824,6 +935,9 @@ fn config_show_prints_defaults_when_no_file() {
         ))
         .stdout(predicate::str::contains(
             "limits.pair-budget: mode-specific default",
+        ))
+        .stdout(predicate::str::contains(
+            "limits.signature-sibling-candidate-budget: default used only with --siblings-by-signature",
         ));
 }
 

@@ -70,6 +70,18 @@ fn degenerate_numeric_settings_are_rejected_with_their_key() {
         ("limits.pair-budget", "[limits]\npair-budget = 0"),
         ("limits.near-miss-delta", "[limits]\nnear-miss-delta = 0"),
         ("limits.near-miss-cap", "[limits]\nnear-miss-cap = 0"),
+        (
+            "limits.signature-sibling-candidate-budget",
+            "[limits]\nsignature-sibling-candidate-budget = 0",
+        ),
+        (
+            "limits.signature-sibling-per-group-cap",
+            "[limits]\nsignature-sibling-per-group-cap = 0",
+        ),
+        (
+            "limits.signature-sibling-total-cap",
+            "[limits]\nsignature-sibling-total-cap = 0",
+        ),
         ("limits.max-component", "[limits]\nmax-component = 1"),
     ] {
         let error = Config::from_toml(text).expect_err("degenerate value must be rejected");
@@ -154,6 +166,20 @@ fn near_miss_diagnostic_band_and_cap_are_configurable_and_bounded() {
         .expect_err("the default estimate threshold bounds the diagnostic band");
     assert!(format!("{error:#}").contains("limits.near-miss-delta"));
     assert!(format!("{error:#}").contains("(0.0, 0.3]"));
+}
+
+#[test]
+fn signature_sibling_limits_are_independent_and_parseable() {
+    let config = Config::from_toml(
+        "[limits]\nsignature-sibling-candidate-budget = 13\nsignature-sibling-per-group-cap = 5\nsignature-sibling-total-cap = 17",
+    )
+    .expect("signature sibling settings parse");
+    assert_eq!(config.limits.signature_sibling_candidate_budget, Some(13));
+    assert_eq!(config.limits.signature_sibling_per_group_cap, Some(5));
+    assert_eq!(config.limits.signature_sibling_total_cap, Some(17));
+    assert_eq!(config.limits.sibling_candidate_budget, None);
+    assert_eq!(config.limits.sibling_per_group_cap, None);
+    assert_eq!(config.limits.sibling_total_cap, None);
 }
 
 #[test]

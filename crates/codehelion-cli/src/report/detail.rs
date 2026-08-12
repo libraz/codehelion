@@ -248,8 +248,15 @@ impl SiblingDetail {
             self.sibling.confidence_band,
             self.sibling.similarity.composite,
         )?;
+        writeln!(out, "  basis: {}", self.sibling.basis)?;
+        if let Some(signature) = &self.sibling.signature {
+            writeln!(out, "  signature: {signature}")?;
+        }
         if let Some(unit) = &self.sibling.member.unit {
             writeln!(out, "    unit: {unit}")?;
+        }
+        if self.sibling.basis == "signature" {
+            writeln!(out, "    [same signature]")?;
         }
         Ok(())
     }
