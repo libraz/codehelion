@@ -352,6 +352,7 @@ pub(super) fn funnel(
             .dropping("unshared_content", as_u64(stats.region_singletons))
             .dropping("overlapping_occurrence", as_u64(stats.region_overlapping))
             .dropping("adjoining_occurrence", as_u64(stats.region_adjoining))
+            .dropping("same_content", as_u64(stats.region_folded))
             .dropping("subsumed", as_u64(stats.region_subsumed))
             .dropping(
                 "below_min_clone_tokens",

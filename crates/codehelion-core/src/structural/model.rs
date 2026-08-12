@@ -383,6 +383,10 @@ pub struct StructuralStats {
     /// Longer runs made by joining confirmed runs that describe one stretch at
     /// two offsets. The parts they cover leave through `region_subsumed`.
     pub region_merged: usize,
+    /// Confirmed runs folded into another run holding the same content. Two
+    /// candidates can propose one duplication, and a run is identified by what
+    /// it holds, so both are the same run and are reported once.
+    pub region_folded: usize,
     /// Confirmed duplicated statement runs dropped because at least one
     /// occurrence is shorter than the configured minimum clone length.
     pub below_min_clone_token_regions: usize,

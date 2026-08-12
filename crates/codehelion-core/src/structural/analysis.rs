@@ -1,8 +1,8 @@
 use super::{
     BTreeMap, BTreeSet, BuildVariant, FileFeatures, GroupDetail, GroupingUnit, ResolvedTypes,
-    SimilarityEdge, StructuralConfig, StructuralNearMiss, StructuralRegion, StructuralReport,
-    StructuralStats, StructuralUnit, SyntaxIrFile, Unit, UnitEvidence, VerifyConfig, candidate,
-    confirm_regions, control_flow, drop_subsumed, features, flatten_units, group_detail, grouping,
+    SimilarityEdge, StructuralConfig, StructuralNearMiss, StructuralReport, StructuralStats,
+    StructuralUnit, SyntaxIrFile, Unit, UnitEvidence, VerifyConfig, candidate, confirm_regions,
+    control_flow, drop_subsumed, features, flatten_units, fold_by_content, group_detail, grouping,
     grow_runs, lift_to_unit_pairs, maximal, near_match, sweep_siblings, token_count_meets_minimum,
     unit_evidence, unit_meets_minimum, unrepresented_pairs, verify, view,
 };
@@ -90,8 +90,7 @@ pub fn analyze_resolved(
         variant,
         config.literals,
     );
-    let mut regions: Vec<StructuralRegion> =
-        confirmed.into_iter().map(|entry| entry.region).collect();
+    let (mut regions, folded) = fold_by_content(confirmed, &mut dropped);
     let subsumed = drop_subsumed(&mut regions);
     let confirmed_regions = regions.len();
     regions.retain(|region| {
@@ -172,6 +171,7 @@ pub fn analyze_resolved(
         region_adjoining: dropped.adjoining,
         region_subsumed: subsumed,
         region_merged: merged,
+        region_folded: folded,
         below_min_clone_token_regions,
         nested_pairs: lifted.nested,
         alternative_pairs: lifted.alternatives,

@@ -1,7 +1,7 @@
 use super::{
-    BTreeMap, BTreeSet, BuildVariant, ByteRange, CloneClass, ContentNorm, FileContext,
-    FragmentFingerprint, LiteralNorm, RegionOccurrence, RegionSide, SharedRegion, StructuralRegion,
-    SyntaxIrFile, Token, line_range, maximal, stable_id,
+    BTreeMap, BTreeSet, BuildVariant, ByteRange, CloneClass, CloneGroupFingerprint, ContentNorm,
+    FileContext, FragmentFingerprint, LiteralNorm, RegionOccurrence, RegionSide, SharedRegion,
+    StructuralRegion, SyntaxIrFile, Token, line_range, maximal, stable_id,
 };
 
 /// Confirm candidate runs against the tokens they cover and split them into
@@ -192,6 +192,91 @@ pub(super) fn grow_runs(
 pub(super) struct Confirmed {
     pub(super) region: StructuralRegion,
     pub(super) sides: Vec<RegionSide>,
+}
+
+/// Fold the confirmed runs that hold one content into one run, and return how
+/// many entries that absorbed.
+///
+/// A run is identified by the content it holds — that is what keeps its id
+/// stable while the rest of the tree moves, and it is the whole of the
+/// identity: two runs holding one content are one run, however they were
+/// found. Confirmation cannot see that, because it works one candidate at a
+/// time, and a candidate is not a complete account of where its content
+/// occurs. Two of them reach it holding the same content whenever the seed
+/// closure did not put every occurrence in one set — the pairs that would join
+/// them need not all survive the earlier stages — and again whenever a run
+/// grown along one alignment covers the source that a candidate confirmed
+/// directly.
+///
+/// Reported apart, those state one duplication once per candidate and give
+/// several findings a single stable id, which is then not an identity at all.
+/// Folding them makes the same claim confirmation already made, one step
+/// wider: occurrences are collected by the content they hold rather than by
+/// the candidate that proposed them. The union goes back through [`distinct`],
+/// which settles the overlaps that collecting them can bring into one class
+/// exactly as it settles the ones a single candidate arrives with.
+pub(super) fn fold_by_content(
+    confirmed: Vec<Confirmed>,
+    dropped: &mut Dropped,
+) -> (Vec<StructuralRegion>, usize) {
+    let mut classes: BTreeMap<CloneGroupFingerprint, Vec<Confirmed>> = BTreeMap::new();
+    for entry in confirmed {
+        classes
+            .entry(entry.region.fingerprint)
+            .or_default()
+            .push(entry);
+    }
+    // What the fold removed: every entry after the first of its content. A
+    // class the occurrence rules then empty out leaves through the counter
+    // that names the reason it emptied, as it would have without the fold.
+    let folded: usize = classes
+        .values()
+        .map(|entries| entries.len().saturating_sub(1))
+        .sum();
+
+    let mut regions = Vec::with_capacity(classes.len());
+    for (fingerprint, entries) in classes {
+        let Some(clone_type) = entries.first().map(|entry| entry.region.clone_type) else {
+            continue;
+        };
+        // The entries hold one content, so they agree on how many statements
+        // that content is. Taking the longest keeps the fold total if a future
+        // stage ever brings together two that do not.
+        let statements = entries
+            .iter()
+            .map(|entry| entry.region.statements)
+            .max()
+            .unwrap_or(0);
+        let mut occurrences: Vec<(RegionOccurrence, RegionSide)> = entries
+            .into_iter()
+            .flat_map(|entry| entry.region.occurrences.into_iter().zip(entry.sides))
+            .collect();
+        // Source order, so the survivor of an overlapping cluster is decided by
+        // where the occurrences sit and not by which candidate found them.
+        occurrences.sort_by_key(|(occurrence, _)| {
+            (
+                occurrence.file,
+                occurrence.range.start,
+                occurrence.range.end,
+            )
+        });
+        // Two candidates naming the same occurrence describe it once. That is
+        // not an occurrence dropped for overlapping another, so it is removed
+        // before the overlap rule runs rather than counted by it.
+        occurrences.dedup_by(|a, b| a.0 == b.0);
+        let kept = distinct(occurrences, dropped);
+        if kept.len() < 2 {
+            dropped.singletons += kept.len();
+            continue;
+        }
+        regions.push(StructuralRegion {
+            fingerprint,
+            clone_type,
+            statements,
+            occurrences: kept.into_iter().map(|(occurrence, _)| occurrence).collect(),
+        });
+    }
+    (regions, folded)
 }
 
 /// Candidate runs made by joining confirmed runs that continue one another.

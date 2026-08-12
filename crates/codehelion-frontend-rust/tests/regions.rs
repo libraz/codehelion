@@ -9,6 +9,8 @@
 //! while computing something else.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeSet;
+
 use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_core::ir::{StructuralFrontend, SyntaxIrFile};
@@ -192,6 +194,23 @@ fn every_copy_of_one_run_lands_in_the_same_report_entry() {
         .map(|occurrence| occurrence.file)
         .collect();
     assert_eq!(files, vec![0, 1, 2]);
+}
+
+#[test]
+fn one_fingerprint_names_one_run() {
+    // A run's fingerprint is its identity, and an identity names one finding:
+    // two runs carrying one fingerprint cannot be told apart afterwards, by a
+    // reader or by the store the scan is recorded in.
+    let report = analyze(&[DONOR, VERBATIM_HOST, RENAMED_HOST, LOOKALIKE_HOST]);
+    let mut seen = BTreeSet::new();
+    for region in &report.regions {
+        assert!(
+            seen.insert(region.fingerprint),
+            "two runs share the fingerprint {}: {:#?}",
+            region.fingerprint.to_hex(),
+            shape(&report)
+        );
+    }
 }
 
 #[test]

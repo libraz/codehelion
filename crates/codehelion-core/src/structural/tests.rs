@@ -1,9 +1,10 @@
+use super::regions::Dropped;
 use super::reporting::{group_detail, group_fingerprint};
 use super::{
     Boilerplate, CloneClass, Confirmed, CrossVariantUnit, RegionOccurrence, RegionSide,
     ResolvedTypes, StructuralConfig, StructuralRegion, Unit, compare_build_variants, covers_run,
-    dominant_boilerplate, drop_subsumed, features, flatten_units, is_allocation_api,
-    merge_adjacent, set_jaccard, unit_evidence, unrepresented_pairs, view,
+    dominant_boilerplate, drop_subsumed, features, flatten_units, fold_by_content,
+    is_allocation_api, merge_adjacent, set_jaccard, unit_evidence, unrepresented_pairs, view,
 };
 use crate::candidate::StatementRun;
 use crate::conditional::ArmPath;
@@ -997,6 +998,133 @@ fn joining_does_not_depend_on_the_order_the_runs_arrive_in() {
     let reversed: Vec<Confirmed> = build().into_iter().rev().collect();
     assert_eq!(forward, merge_adjacent(&reversed));
     assert!(!forward.is_empty());
+}
+
+#[test]
+fn runs_holding_one_content_are_one_run() {
+    // Two candidates confirmed the same content in four places between them.
+    // That is one duplication with four occurrences: reported apart the two
+    // would carry one fingerprint, which is then no longer an identity.
+    let mut dropped = Dropped::default();
+    let (regions, folded) = fold_by_content(
+        vec![
+            confirmed(1, 4, &[(0, 0), (1, 0)]),
+            confirmed(1, 4, &[(0, 10), (1, 10)]),
+        ],
+        &mut dropped,
+    );
+
+    assert_eq!(folded, 1);
+    assert_eq!(regions.len(), 1);
+    let places: Vec<(usize, ByteRange)> = regions[0]
+        .occurrences
+        .iter()
+        .map(|occurrence| (occurrence.file, occurrence.range))
+        .collect();
+    assert_eq!(
+        places,
+        vec![
+            (0, ByteRange { start: 0, end: 40 }),
+            (
+                0,
+                ByteRange {
+                    start: 100,
+                    end: 140
+                }
+            ),
+            (1, ByteRange { start: 0, end: 40 }),
+            (
+                1,
+                ByteRange {
+                    start: 100,
+                    end: 140
+                }
+            ),
+        ],
+        "the occurrences of one content are collected in source order"
+    );
+}
+
+#[test]
+fn an_occurrence_two_candidates_both_name_is_described_once() {
+    // The second candidate covers everything the first does and one place
+    // more. Naming a place twice is not an overlap between two stretches of
+    // source, so it is not counted as one.
+    let mut dropped = Dropped::default();
+    let (regions, folded) = fold_by_content(
+        vec![
+            confirmed(1, 4, &[(0, 0), (1, 0)]),
+            confirmed(1, 4, &[(0, 0), (1, 0), (2, 0)]),
+        ],
+        &mut dropped,
+    );
+
+    assert_eq!(folded, 1);
+    assert_eq!(regions.len(), 1);
+    assert_eq!(regions[0].occurrences.len(), 3);
+    assert_eq!(dropped.overlapping, 0);
+}
+
+#[test]
+fn collecting_one_content_still_settles_its_overlaps() {
+    // The two candidates reach into each other in the first file: those are
+    // one stretch of source, and the rule that decides so within a candidate
+    // decides it across two.
+    let mut dropped = Dropped::default();
+    let (regions, _) = fold_by_content(
+        vec![
+            confirmed(1, 4, &[(0, 0), (1, 0)]),
+            confirmed(1, 4, &[(0, 2), (2, 0)]),
+        ],
+        &mut dropped,
+    );
+
+    assert_eq!(regions.len(), 1);
+    assert_eq!(dropped.overlapping, 1);
+    let files: Vec<usize> = regions[0]
+        .occurrences
+        .iter()
+        .map(|occurrence| occurrence.file)
+        .collect();
+    assert_eq!(files, vec![0, 1, 2]);
+}
+
+#[test]
+fn runs_holding_different_content_stay_apart() {
+    let mut dropped = Dropped::default();
+    let (regions, folded) = fold_by_content(
+        vec![
+            confirmed(1, 4, &[(0, 0), (1, 0)]),
+            confirmed(2, 4, &[(0, 10), (1, 10)]),
+        ],
+        &mut dropped,
+    );
+
+    assert_eq!(folded, 0);
+    assert_eq!(regions.len(), 2);
+}
+
+#[test]
+fn no_two_folded_runs_share_a_fingerprint() {
+    let mut dropped = Dropped::default();
+    let (regions, _) = fold_by_content(
+        vec![
+            confirmed(1, 4, &[(0, 0), (1, 0)]),
+            confirmed(1, 4, &[(0, 10), (1, 10)]),
+            confirmed(2, 4, &[(0, 20), (1, 20)]),
+            confirmed(2, 4, &[(0, 30), (1, 30)]),
+        ],
+        &mut dropped,
+    );
+
+    let mut seen = BTreeSet::new();
+    for region in &regions {
+        assert!(
+            seen.insert(region.fingerprint),
+            "a stable id names one finding"
+        );
+    }
+    assert_eq!(regions.len(), 2);
 }
 
 #[test]
