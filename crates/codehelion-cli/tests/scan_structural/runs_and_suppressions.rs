@@ -124,12 +124,13 @@ fn a_run_shared_by_unrelated_units_is_reported_as_a_run() {
         // function, which neither occurrence is.
         .stdout(predicate::str::contains("type-1 run ×"))
         .stdout(predicate::str::contains("run of 4 statements"))
-        .stdout(predicate::str::contains(
-            "src/audit.rs:11-14 (audit_entries)",
-        ))
-        .stdout(predicate::str::contains(
-            "src/render.rs:17-20 (render_rows)",
-        ))
+        // Each occurrence and the unit it sits in. Asserted apart because the
+        // two are separate columns, and the space between them is whatever
+        // the widest path in the listing needed.
+        .stdout(predicate::str::contains("src/audit.rs:11-14"))
+        .stdout(predicate::str::contains("audit_entries"))
+        .stdout(predicate::str::contains("src/render.rs:17-20"))
+        .stdout(predicate::str::contains("render_rows"))
         .stdout(predicate::str::contains(
             "1 of them are runs duplicated inside units that are not clones of each other",
         ));
@@ -330,8 +331,11 @@ fn a_set_of_related_units_too_large_to_compare_whole_is_cut_and_said_so() {
         .args(["scan", ".", "--mode", "structural"])
         .assert()
         .success()
+        // A warning rather than a note: a cut set is duplication the run may
+        // have reported as several groups, or not at all, which is about
+        // whether to believe the report rather than about how to read it.
         .stderr(predicate::str::contains(
-            "note: 1 set(s) of related units were too large to compare as one",
+            "warning: 1 set(s) of related units were too large to compare as one",
         ));
 
     let value = scan_json(dir.path());

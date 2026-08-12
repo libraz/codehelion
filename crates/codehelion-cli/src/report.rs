@@ -1126,6 +1126,86 @@ pub struct PriorityInputs {
     pub ownership_spread: Option<f64>,
 }
 
+/// The glyph set a text report draws its structure with.
+///
+/// Separate from colour because the two fail in different places: colour is
+/// wrong when the destination is not a terminal, glyphs are wrong when the
+/// terminal cannot draw them. A log viewer that renders box-drawing characters
+/// as replacement squares still renders colour perfectly well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Decoration {
+    /// Box-drawing characters and symbols.
+    #[default]
+    Unicode,
+    /// ASCII stand-ins for every glyph.
+    Ascii,
+    /// No tree and no marks: indentation alone, for a destination that should
+    /// carry no structure it has to look past.
+    None,
+}
+
+impl Decoration {
+    /// The branch drawn before an occurrence that is not the last one.
+    pub(crate) const fn branch(self) -> &'static str {
+        match self {
+            Self::Unicode => "├─ ",
+            Self::Ascii => "|- ",
+            Self::None => "   ",
+        }
+    }
+
+    /// The branch drawn before the last occurrence under a group.
+    pub(crate) const fn last_branch(self) -> &'static str {
+        match self {
+            Self::Unicode => "└─ ",
+            Self::Ascii => "`- ",
+            Self::None => "   ",
+        }
+    }
+
+    /// The mark on the occurrence a group is measured against.
+    pub(crate) const fn canonical(self) -> &'static str {
+        match self {
+            Self::Unicode => "◆",
+            Self::Ascii => "*",
+            Self::None => "",
+        }
+    }
+
+    /// The mark on a line that qualifies the whole run.
+    pub(crate) const fn warning(self) -> &'static str {
+        match self {
+            Self::Unicode => "⚠ ",
+            Self::Ascii => "! ",
+            Self::None => "",
+        }
+    }
+
+    /// The multiplication sign before an occurrence count.
+    pub(crate) const fn times(self) -> &'static str {
+        match self {
+            Self::Unicode => "×",
+            Self::Ascii | Self::None => "x",
+        }
+    }
+
+    /// What separates the parts of a one-line heading.
+    pub(crate) const fn separator(self) -> &'static str {
+        match self {
+            Self::Unicode => "·",
+            Self::Ascii | Self::None => "|",
+        }
+    }
+
+    /// What stands between the two sides of a comparison.
+    pub(crate) const fn between(self) -> &'static str {
+        match self {
+            Self::Unicode => "↔",
+            Self::Ascii | Self::None => "<->",
+        }
+    }
+}
+
 /// Rendering options for the text view of a [`Report`].
 #[allow(
     clippy::struct_excessive_bools,
@@ -1144,6 +1224,8 @@ pub struct TextOptions {
     pub limit: Option<usize>,
     /// Emit ANSI colour codes.
     pub color: bool,
+    /// The glyph set the listing draws its structure with.
+    pub decoration: Decoration,
     /// Also list suppressed groups, with the reason each was hidden.
     pub show_suppressed: bool,
     /// Also list incomplete local mirrors attached to visible primary groups.
@@ -1208,7 +1290,7 @@ impl TextOptions {
 
 mod render;
 
-use render::{Palette, render_group};
+use render::{GroupColumns, Palette, render_group};
 
 mod detail;
 

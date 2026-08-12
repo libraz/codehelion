@@ -24,35 +24,45 @@ codehelion 自身のツリーに対する Structural モードの実行結果で
 ```text
 codehelion scan · structural mode · ~/src/codehelion
 
-crates/codehelion-cli/src/scan/structural/reporting.rs:701-722  type-1 ×2  188 tokens  priority 0.62  80fecb4e
-  crates/codehelion-cli/src/scan/structural/reporting.rs:805-826
-crates/codehelion-frontend-c/src/ir.rs:435-449 (line_column)  type-1 ×2  128 tokens  priority 0.59  c8641036
-  crates/codehelion-frontend-rust/src/ir.rs:377-391 (line_column)
-crates/codehelion-core/src/engine/segment.rs:20-35 (brace_pairs)  type-1 ×2  115 tokens  priority 0.59  cd0956cb
-  crates/codehelion-frontend-rust/src/units.rs:66-81 (match_braces)
-... and 729 more groups (--limit 0 lists every one)
+ #1  0.62  type-1 ×2  188 tokens  f7f71e71
+     ├─ ◆ crates/codehelion-cli/src/scan/structural/reporting.rs:698-719
+     └─   crates/codehelion-cli/src/scan/structural/reporting.rs:802-823
 
-944 groups (type-1 71, type-2 126, type-3 747) · 205 suppressed · sorted by priority
-356 files, 134,235 lines, 713,877 tokens · run 1 (replay: codehelion report --run 1)
+ #2  0.59  type-1 ×2  128 tokens  814ddea4
+     ├─ ◆ crates/codehelion-frontend-c/src/ir.rs:437-451        line_column
+     └─   crates/codehelion-frontend-rust/src/ir.rs:379-393     line_column
+
+ #3  0.59  type-1 ×2  115 tokens  e6b021f2
+     ├─ ◆ crates/codehelion-core/src/engine/segment.rs:20-35    brace_pairs
+     └─   crates/codehelion-frontend-rust/src/units.rs:66-81    match_braces
+
+... and 760 more groups (--limit 0 lists every one)
+
+968 groups (type-1 71, type-2 126, type-3 771) · 205 suppressed · sorted by priority
+361 files, 136,345 lines, 723,964 tokens · run 1 (replay: codehelion report --run 1)
+◆ the occurrence a group is measured against
+open one: codehelion explain f7f71e71 · list every group: --limit 0
 ```
 
-各見出しの末尾にある識別子は `codehelion explain` が受け付ける最短の prefix なので、一覧からそのままグループを開けます。上限の発火や何にも一致しなかったルールなど、実行そのものを限定する情報は標準エラー出力に回り、標準出力のレポートはパイプに流せる状態を保ちます。
+見出しの先頭に来るのは順位づけの値です。一覧はこの値の順に並んでいるので、並び順をそのまま縦に読めます。`◆` はそのグループの基準になっている出現箇所、つまり最初に開くべき一件を指します。見出しの末尾にある識別子は `codehelion explain` が受け付ける最短の prefix なので、一覧からそのままグループを開けます。
+
+`--decoration ascii` は同じ一覧を ASCII の範囲だけで描き、`--decoration none` はツリーそのものを落とします。上限の発火や何にも一致しなかったルールなど、実行そのものを限定する情報は標準エラー出力に回り、標準出力のレポートはパイプに流せる状態を保ちます。
 
 ```text
-note: candidate search was truncated by high frequency, high frequency postings; duplication the tree contains may be missing from this report
+⚠ warning: candidate search was truncated by high frequency, high frequency postings; duplication the tree contains may be missing from this report
 ```
 
 `-v` は各グループの順位づけの根拠を追加します。このモードでは測れなかった similarity の次元も含みます。
 
 ```text
-crates/codehelion-cli/src/scan/structural/reporting.rs:701-722  type-1 ×2  188 tokens  priority 0.62  80fecb4e
-    within one file, identifiers 0.95
-    confidence 0.82, maintenance risk 0.36, refactoring difficulty 0.17 (2 instances, 188-188 tokens, 188 repeated, 1.00 similarity, 1 file(s))
-    similarity: composite 1.00 (lexical 1.00, structural 1.00, control-flow 1.00, type n/a, api 1.00); cohesion 1.00; confidence high [structural-verify-v1]
-    content entropy: 5.02 bits
-    body evidence: loop no, recognised allocation no, at least 15 call site(s)
-  crates/codehelion-cli/src/scan/structural/reporting.rs:701-722 [canonical] [finding e61a2fda]
-  crates/codehelion-cli/src/scan/structural/reporting.rs:805-826 [finding 23402ced]
+ #1  0.62  type-1 ×2  188 tokens  f7f71e71
+     within one file, identifiers 0.95
+     confidence 0.82, maintenance risk 0.36, refactoring difficulty 0.17 (2 instances, 188-188 tokens, 188 repeated, 1.00 similarity, 1 file(s))
+     similarity: composite 1.00 (lexical 1.00, structural 1.00, control-flow 1.00, type n/a, api 1.00); cohesion 1.00; confidence high [structural-verify-v1]
+     content entropy: 5.02 bits
+     body evidence: loop no, recognised allocation no, at least 15 call site(s)
+     ├─ ◆ crates/codehelion-cli/src/scan/structural/reporting.rs:698-719    [finding 0300f485]
+     └─   crates/codehelion-cli/src/scan/structural/reporting.rs:802-823    [finding 18957a06]
 ```
 
 `-vv` は実行そのものの記録を追加します。候補パイプラインの段階ごとの通過数、適用された上限、そして完全な識別子です。
@@ -123,6 +133,7 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 - `--jobs <n>` は frontend の read/lex worker 数を指定します（host parallelism の 4 倍まで）。clone grouping と report rendering は serial です。`--no-ignore` は無視対象のファイルも読みます。
 - `--baseline <file>` は判断済みの finding と比較します。`--show-suppressed`、`--show-siblings`、`--show-near-misses` は text 出力を展開します。JSON と SARIF には常にこれらのデータが含まれます。
 - `-v` / `-vv` は各グループについて書く量を、`--limit <n>` は列挙するグループ数を決めます。`--quiet` はグループだけを出力します。`--color <auto|always|never>` は端末判定を上書きし、`NO_COLOR` にも従います。
+- `--decoration <auto|unicode|ascii|none>` は一覧を描くグリフを選びます。色とは違って出力先には従いません。ファイルに書き出したレポートも端末と同じツリーを保ちます。エスケープシーケンスと違い、罫線素片はファイルの中でも読めるからです。`auto` は Windows を除いて罫線素片を使います。Windows のコンソールはアクティブなコードページ次第で描画が変わるためです。
 - `--include-trivial` は Structural / Semantic モードで predicate family を計測済みの priority に戻します。
 - `--fail-on-findings` は visible finding が残ると exit code 3 を返します。
 - `--compare-build-variants` と `--compare-languages` は独立した Semantic comparison を要求し、通常の scan partition を混ぜません。

@@ -12,6 +12,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use codehelion_core::discovery::AnalysisMode;
 use serde::{Deserialize, Serialize};
 
+use crate::report;
+
 /// Top-level command-line parser.
 #[derive(Debug, Parser)]
 #[command(name = "codehelion", version, about, long_about = None)]
@@ -159,6 +161,47 @@ impl ColorChoice {
     }
 }
 
+/// Which glyphs a text report draws its structure with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum DecorationChoice {
+    /// Box-drawing characters for a terminal, ASCII stand-ins elsewhere.
+    #[default]
+    Auto,
+    /// Box-drawing characters and symbols.
+    Unicode,
+    /// ASCII stand-ins for every glyph.
+    Ascii,
+    /// No tree and no marks, for a report something else reads.
+    None,
+}
+
+impl DecorationChoice {
+    /// The glyph set this choice draws with.
+    ///
+    /// Deliberately not conditioned on the destination being a terminal, as
+    /// colour is. Colour in a file is damage; a box-drawing character in a
+    /// file is a box-drawing character, and the reader who opens that file
+    /// wants the same structure the terminal showed. What decides the glyph is
+    /// whether the console can draw it, which is a platform question: every
+    /// target this tool builds for reads UTF-8 by default except Windows,
+    /// whose console still depends on the active code page.
+    #[must_use]
+    pub const fn resolve(self) -> report::Decoration {
+        match self {
+            Self::Unicode => report::Decoration::Unicode,
+            Self::Ascii => report::Decoration::Ascii,
+            Self::None => report::Decoration::None,
+            Self::Auto => {
+                if cfg!(windows) {
+                    report::Decoration::Ascii
+                } else {
+                    report::Decoration::Unicode
+                }
+            }
+        }
+    }
+}
+
 /// How much of a text report to print, shared by every command that renders
 /// one.
 ///
@@ -183,6 +226,9 @@ pub struct ViewArgs {
     /// When to colour the report.
     #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
     pub color: ColorChoice,
+    /// Which glyphs the listing draws its structure with.
+    #[arg(long, value_enum, default_value_t = DecorationChoice::Auto)]
+    pub decoration: DecorationChoice,
 }
 
 /// An axis a report can be put in order on.
@@ -206,12 +252,12 @@ pub enum SortAxis {
 impl SortAxis {
     /// The report-side axis this selects.
     #[must_use]
-    pub const fn axis(self) -> crate::report::Sort {
+    pub const fn axis(self) -> report::Sort {
         match self {
-            Self::Priority => crate::report::Sort::Priority,
-            Self::IdentifierJaccard => crate::report::Sort::IdentifierJaccard,
-            Self::DuplicatedTokens => crate::report::Sort::DuplicatedTokens,
-            Self::Instances => crate::report::Sort::Instances,
+            Self::Priority => report::Sort::Priority,
+            Self::IdentifierJaccard => report::Sort::IdentifierJaccard,
+            Self::DuplicatedTokens => report::Sort::DuplicatedTokens,
+            Self::Instances => report::Sort::Instances,
         }
     }
 }
@@ -231,8 +277,8 @@ impl BaselineMode {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Suppress => crate::report::BASELINE_SUPPRESS,
-            Self::Compare => crate::report::BASELINE_COMPARE,
+            Self::Suppress => report::BASELINE_SUPPRESS,
+            Self::Compare => report::BASELINE_COMPARE,
         }
     }
 }
@@ -764,6 +810,9 @@ pub struct ExplainArgs {
     /// Output format for the detail view.
     #[arg(long, value_enum, default_value_t = DetailFormat::Text)]
     pub format: DetailFormat,
+    /// Which glyphs the occurrence list draws its structure with.
+    #[arg(long, value_enum, default_value_t = DecorationChoice::Auto)]
+    pub decoration: DecorationChoice,
     /// Local database path, overriding the configured location.
     #[arg(long)]
     pub db: Option<PathBuf>,
@@ -954,6 +1003,25 @@ mod tests {
         // A report going to a file is never a terminal, whatever this
         // process's own standard output is.
         assert!(!ColorChoice::Auto.enabled(false));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Parsed glyph state is the test subject.
+    fn decoration_is_chosen_apart_from_colour() {
+        let parsed = Cli::try_parse_from(["codehelion", "scan"])
+            .expect("a scan without a decoration choice");
+        let Command::Scan(args) = parsed.command else {
+            unreachable!("a scan invocation parses as a scan");
+        };
+        assert_eq!(args.view.decoration, DecorationChoice::Auto);
+        assert_eq!(DecorationChoice::Ascii.resolve(), report::Decoration::Ascii);
+        assert_eq!(DecorationChoice::None.resolve(), report::Decoration::None);
+        // Unlike colour, the choice does not turn on where the report is
+        // going: a file gets the same glyphs the terminal would have shown.
+        assert_eq!(
+            DecorationChoice::Unicode.resolve(),
+            report::Decoration::Unicode
+        );
     }
 
     #[test]

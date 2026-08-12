@@ -1,11 +1,11 @@
 //! Standalone finding-detail serialization and text rendering.
 
 use super::{
-    EXPLAIN_RESPONSE_CLONE_GROUP, EXPLAIN_RESPONSE_CROSS_LANGUAGE_GROUP,
+    Decoration, EXPLAIN_RESPONSE_CLONE_GROUP, EXPLAIN_RESPONSE_CROSS_LANGUAGE_GROUP,
     EXPLAIN_RESPONSE_CROSS_VARIANT_GROUP, EXPLAIN_RESPONSE_OCCURRENCE, EXPLAIN_RESPONSE_SIBLING,
-    FINDING_DETAIL_SCHEMA_VERSION, Group, MappingEvidence, Member, Palette, SCOPE_FRAGMENT,
-    SemanticEvidence, SemanticOperationGraph, Serialize, Sibling, Similarity, Suppression,
-    TestCodeEvidence, TextOptions, Write, detail_json, io, render_group,
+    FINDING_DETAIL_SCHEMA_VERSION, Group, GroupColumns, MappingEvidence, Member, Palette,
+    SCOPE_FRAGMENT, SemanticEvidence, SemanticOperationGraph, Serialize, Sibling, Similarity,
+    Suppression, TestCodeEvidence, TextOptions, Write, detail_json, io, render_group,
 };
 
 /// Where a stored run ranked a finding, as it was recorded.
@@ -187,7 +187,7 @@ impl CloneGroupDetail {
     /// # Errors
     ///
     /// Returns any error from the writer.
-    pub fn render_text(&self, out: &mut impl Write) -> io::Result<()> {
+    pub fn render_text(&self, decoration: Decoration, out: &mut impl Write) -> io::Result<()> {
         writeln!(out, "clone group {}", self.group.fingerprint)?;
         writeln!(out, "  database: {}", self.database)?;
         writeln!(
@@ -195,18 +195,24 @@ impl CloneGroupDetail {
             "  run: {} ({}; build variant {})",
             self.scan_run, self.analysis_mode, self.build_variant
         )?;
+        // A detail view is the one place that shows everything: full
+        // identifiers, every occurrence, and the numbers behind the ranking.
+        // Its reader asked about this one group by name.
+        let opts = TextOptions {
+            verbosity: 2,
+            limit: Some(0),
+            show_suppressed: true,
+            decoration,
+            ..TextOptions::default()
+        };
+        // Unnumbered: a listing numbers its entries so that one can be named
+        // against the others, and there are no others here.
         render_group(
             &self.group,
-            // A detail view is the one place that shows everything: full
-            // identifiers, every occurrence, and the numbers behind the
-            // ranking. Its reader asked about this one group by name.
-            TextOptions {
-                verbosity: 2,
-                limit: Some(0),
-                show_suppressed: true,
-                ..TextOptions::default()
-            },
+            None,
+            opts,
             &Palette { enabled: false },
+            &GroupColumns::single(&self.group, opts),
             out,
         )
     }

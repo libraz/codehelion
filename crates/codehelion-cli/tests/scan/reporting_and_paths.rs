@@ -277,9 +277,9 @@ fn default_reports_truncate_members_and_verbose_lists_them_all() {
         .args(["scan", "."])
         .assert()
         .success()
-        // The heading names the canonical occurrence, so five of the other
-        // nine are listed under it.
-        .stdout(predicate::str::contains("... and 4 more occurrences"));
+        // Every occurrence is listed under the group, so five of the ten
+        // appear and the count carries the rest.
+        .stdout(predicate::str::contains("... and 5 more occurrences"));
     cmd()
         .current_dir(dir.path())
         .args(["scan", ".", "--limit", "0"])
@@ -339,6 +339,46 @@ fn colour_follows_the_destination_the_flag_and_no_color() {
         .assert()
         .success()
         .stdout(ansi.not());
+}
+
+/// Glyphs are chosen apart from colour, and a report written to a file keeps
+/// the ones a terminal would have shown.
+#[test]
+fn decoration_is_chosen_by_its_own_flag_and_survives_redirection() {
+    let dir = fixture();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--decoration", "ascii"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("|- "))
+        .stdout(predicate::str::contains("├─").not())
+        .stdout(predicate::str::contains('·').not());
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--decoration", "none"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("|- ").not())
+        .stdout(predicate::str::contains("├─").not())
+        .stdout(predicate::str::contains("src/a.rs"));
+    cmd()
+        .current_dir(dir.path())
+        .args([
+            "scan",
+            ".",
+            "--decoration",
+            "unicode",
+            "--output",
+            "report.txt",
+        ])
+        .assert()
+        .success();
+    let report = std::fs::read_to_string(dir.path().join("report.txt")).unwrap();
+    // Colour in a file is damage; a box-drawing character in a file is a box-
+    // drawing character, so redirection does not change this choice.
+    assert!(report.contains("├─"), "{report}");
+    assert!(!report.contains('\x1b'), "{report}");
 }
 
 #[test]

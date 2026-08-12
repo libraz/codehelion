@@ -1,6 +1,6 @@
 use super::report_command::*;
 use super::*;
-use crate::cli::{BaselineMode, SortAxis};
+use crate::cli::{BaselineMode, DecorationChoice, SortAxis};
 use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::Language;
 use codehelion_core::semantic::{
@@ -179,6 +179,7 @@ fn explain_reads_a_cross_variant_group_from_the_id_the_report_prints() {
         config: None,
         finding_id: "50".repeat(16),
         format: DetailFormat::Json,
+        decoration: DecorationChoice::Ascii,
         db: Some(database),
         untrusted: false,
     };
@@ -270,6 +271,7 @@ fn explain_reads_a_cross_language_group_without_turning_it_into_a_finding() {
         config: None,
         finding_id: "48".repeat(16),
         format: DetailFormat::Text,
+        decoration: DecorationChoice::Ascii,
         db: Some(database),
         untrusted: false,
     };

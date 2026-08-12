@@ -767,7 +767,7 @@ pub(crate) fn explain_clone_group(
     };
     match args.format {
         DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
-        DetailFormat::Text => detail.render_text(out)?,
+        DetailFormat::Text => detail.render_text(args.decoration.resolve(), out)?,
     }
     Ok(Outcome::Success)
 }

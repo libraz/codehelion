@@ -1,4 +1,9 @@
 //! Human-readable notes for incomplete scans and grouping ceilings.
+//!
+//! Each returns the sentence alone. Whether it reaches the reader as a note or
+//! as a warning is the caller's to decide, because the same fact is a
+//! different weight in a report than it is in a comparison rendered inside
+//! one.
 
 use super::{BTreeSet, FunnelDrop, FunnelStage, is_search_truncation};
 
@@ -34,13 +39,11 @@ pub(super) fn budget_note(funnel: &[FunnelStage]) -> String {
     });
     let total = examined.saturating_add(skipped);
     if total == 0 {
-        return "note: the candidate-pair budget was exhausted; results may be incomplete"
-            .to_string();
+        return "the candidate-pair budget was exhausted; results may be incomplete".to_string();
     }
     format!(
-        "note: the candidate-pair budget stopped the search after {examined} of {total} \
-         candidate pairs; the {skipped} left unexamined may hold duplication this report does \
-         not list"
+        "the candidate-pair budget stopped the search after {examined} of {total} candidate \
+         pairs; the {skipped} left unexamined may hold duplication this report does not list"
     )
 }
 
@@ -59,7 +62,7 @@ pub fn search_truncation_note(funnel: &[FunnelStage]) -> String {
         .collect();
     let listed = causes.into_iter().collect::<Vec<_>>().join(", ");
     format!(
-        "note: candidate search was truncated by {listed}; duplication the tree contains may be missing from this report"
+        "candidate search was truncated by {listed}; duplication the tree contains may be missing from this report"
     )
 }
 

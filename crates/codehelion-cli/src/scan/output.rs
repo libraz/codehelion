@@ -105,6 +105,7 @@ pub(crate) fn text_options(options: &ReportOutput<'_>) -> report::TextOptions {
         quiet: options.view.quiet,
         limit: options.view.limit,
         color: options.view.color.enabled(options.output.is_none()),
+        decoration: options.view.decoration.resolve(),
         show_suppressed: options.show_suppressed,
         show_siblings: options.show_siblings,
         show_near_misses: options.show_near_misses,
@@ -623,7 +624,7 @@ fn append_cross_language_text(
     if comparison.search_truncated {
         writeln!(
             text,
-            "{}",
+            "warning: {}",
             report::search_truncation_note(&comparison.funnel)
         )?;
     }

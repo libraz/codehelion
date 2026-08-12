@@ -42,40 +42,53 @@ left out:
 ```text
 codehelion scan · structural mode · ~/src/codehelion
 
-crates/codehelion-cli/src/scan/structural/reporting.rs:701-722  type-1 ×2  188 tokens  priority 0.62  80fecb4e
-  crates/codehelion-cli/src/scan/structural/reporting.rs:805-826
-crates/codehelion-frontend-c/src/ir.rs:435-449 (line_column)  type-1 ×2  128 tokens  priority 0.59  c8641036
-  crates/codehelion-frontend-rust/src/ir.rs:377-391 (line_column)
-crates/codehelion-core/src/engine/segment.rs:20-35 (brace_pairs)  type-1 ×2  115 tokens  priority 0.59  cd0956cb
-  crates/codehelion-frontend-rust/src/units.rs:66-81 (match_braces)
-... and 729 more groups (--limit 0 lists every one)
+ #1  0.62  type-1 ×2  188 tokens  f7f71e71
+     ├─ ◆ crates/codehelion-cli/src/scan/structural/reporting.rs:698-719
+     └─   crates/codehelion-cli/src/scan/structural/reporting.rs:802-823
 
-944 groups (type-1 71, type-2 126, type-3 747) · 205 suppressed · sorted by priority
-356 files, 134,235 lines, 713,877 tokens · run 1 (replay: codehelion report --run 1)
+ #2  0.59  type-1 ×2  128 tokens  814ddea4
+     ├─ ◆ crates/codehelion-frontend-c/src/ir.rs:437-451        line_column
+     └─   crates/codehelion-frontend-rust/src/ir.rs:379-393     line_column
+
+ #3  0.59  type-1 ×2  115 tokens  e6b021f2
+     ├─ ◆ crates/codehelion-core/src/engine/segment.rs:20-35    brace_pairs
+     └─   crates/codehelion-frontend-rust/src/units.rs:66-81    match_braces
+
+... and 760 more groups (--limit 0 lists every one)
+
+968 groups (type-1 71, type-2 126, type-3 771) · 205 suppressed · sorted by priority
+361 files, 136,345 lines, 723,964 tokens · run 1 (replay: codehelion report --run 1)
+◆ the occurrence a group is measured against
+open one: codehelion explain f7f71e71 · list every group: --limit 0
 ```
 
-The identifier at the end of each heading is the shortest prefix
-`codehelion explain` accepts, so a group can be opened straight from the
-listing. Anything qualifying the run — a ceiling that fired, a rule that
-matched nothing — goes to the error stream instead, which leaves the report on
-standard output pipeable:
+The ranking value leads each heading because it is what the listing is in
+order on. `◆` marks the occurrence the group is measured against, which is
+the one to read first. The identifier that closes the heading is the shortest
+prefix `codehelion explain` accepts, so a group can be opened straight from
+the listing.
+
+`--decoration ascii` draws the same listing without a character outside
+ASCII, and `--decoration none` drops the tree entirely. Anything qualifying
+the run — a ceiling that fired, a rule that matched nothing — goes to the
+error stream instead, which leaves the report on standard output pipeable:
 
 ```text
-note: candidate search was truncated by high frequency, high frequency postings; duplication the tree contains may be missing from this report
+⚠ warning: candidate search was truncated by high frequency, high frequency postings; duplication the tree contains may be missing from this report
 ```
 
 `-v` adds what each group was ranked on, including the similarity dimensions
 this mode could not measure:
 
 ```text
-crates/codehelion-cli/src/scan/structural/reporting.rs:701-722  type-1 ×2  188 tokens  priority 0.62  80fecb4e
-    within one file, identifiers 0.95
-    confidence 0.82, maintenance risk 0.36, refactoring difficulty 0.17 (2 instances, 188-188 tokens, 188 repeated, 1.00 similarity, 1 file(s))
-    similarity: composite 1.00 (lexical 1.00, structural 1.00, control-flow 1.00, type n/a, api 1.00); cohesion 1.00; confidence high [structural-verify-v1]
-    content entropy: 5.02 bits
-    body evidence: loop no, recognised allocation no, at least 15 call site(s)
-  crates/codehelion-cli/src/scan/structural/reporting.rs:701-722 [canonical] [finding e61a2fda]
-  crates/codehelion-cli/src/scan/structural/reporting.rs:805-826 [finding 23402ced]
+ #1  0.62  type-1 ×2  188 tokens  f7f71e71
+     within one file, identifiers 0.95
+     confidence 0.82, maintenance risk 0.36, refactoring difficulty 0.17 (2 instances, 188-188 tokens, 188 repeated, 1.00 similarity, 1 file(s))
+     similarity: composite 1.00 (lexical 1.00, structural 1.00, control-flow 1.00, type n/a, api 1.00); cohesion 1.00; confidence high [structural-verify-v1]
+     content entropy: 5.02 bits
+     body evidence: loop no, recognised allocation no, at least 15 call site(s)
+     ├─ ◆ crates/codehelion-cli/src/scan/structural/reporting.rs:698-719    [finding 0300f485]
+     └─   crates/codehelion-cli/src/scan/structural/reporting.rs:802-823    [finding 18957a06]
 ```
 
 `-vv` adds what the run itself did: the candidate pipeline stage by stage, the
@@ -171,6 +184,7 @@ The main scan controls are:
 - `--jobs <n>` sets frontend read-and-lex workers (capped at four times host parallelism); clone grouping and report rendering remain serial. `--no-ignore` also reads ignored files.
 - `--baseline <file>` compares with accepted findings; `--show-suppressed`, `--show-siblings`, and `--show-near-misses` expand text output. JSON and SARIF retain those data regardless.
 - `-v`/`-vv` choose how much is said about each group, `--limit <n>` how many groups are listed, and `--quiet` prints the groups alone. `--color <auto|always|never>` overrides the terminal detection, and `NO_COLOR` is honoured.
+- `--decoration <auto|unicode|ascii|none>` chooses the glyphs the listing is drawn with. Unlike colour it does not follow the destination: a report written to a file keeps the tree a terminal would have shown, because a box-drawing character in a file is still readable where an escape sequence is not. `auto` draws box-drawing characters everywhere except Windows, whose console depends on the active code page.
 - `--include-trivial` restores predicate families to their measured priority in Structural and Semantic mode.
 - `--fail-on-findings` returns exit code 3 when visible findings remain.
 - `--compare-build-variants` and `--compare-languages` request separate Semantic comparisons; they never merge ordinary scan partitions.

@@ -537,9 +537,9 @@ fn text_view_truncates_with_an_explicit_count() {
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
     assert!(text.contains("2 files, 40 lines, 200 tokens"), "{text}");
-    // The heading already named the canonical occurrence, so the list under
-    // it holds the other six and stops at five.
-    assert!(text.contains("... and 1 more occurrence"), "{text}");
+    // Every occurrence is listed under the group, canonical included, so the
+    // seven stop at five and the count says what is missing.
+    assert!(text.contains("... and 2 more occurrences"), "{text}");
     assert!(!text.contains("src/file6.rs"));
     assert!(!text.contains("vendor/a.rs")); // suppressed and not requested
     assert!(!text.contains('\x1b'));
@@ -554,6 +554,158 @@ fn a_candidate_search_cut_is_stated_as_a_note() {
     let text = String::from_utf8(buffer).unwrap();
     assert!(text.contains("candidate search was truncated by high frequency"));
     assert!(text.contains("may be missing from this report"));
+}
+
+/// The listing renders as text, with the options a caller passes.
+fn rendered(report: &Report, opts: TextOptions) -> String {
+    let mut buffer = Vec::new();
+    report.render_text(opts, &mut buffer).unwrap();
+    String::from_utf8(buffer).unwrap()
+}
+
+#[test]
+fn each_group_is_numbered_and_its_occurrences_hang_from_it() {
+    let text = rendered(&sample_report(), TextOptions::default());
+    assert!(text.contains(" #1  "), "{text}");
+    assert!(text.contains("├─ "), "{text}");
+    assert!(text.contains("└─ "), "{text}");
+    // The number is what `explain` is offered against, so it exists for the
+    // reader to name one entry among the others.
+    let numbered = text.lines().filter(|line| line.contains('#')).count();
+    assert!(numbered >= 1, "{text}");
+}
+
+#[test]
+fn the_canonical_occurrence_leads_its_group_and_is_marked() {
+    let text = rendered(&sample_report(), TextOptions::default());
+    let occurrences: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("src/file"))
+        .collect();
+    let first = occurrences.first().copied().unwrap_or_default();
+    // file0 is the canonical member of the sample group.
+    assert!(first.contains("src/file0.rs"), "{text}");
+    assert!(first.contains('◆'), "{text}");
+    // Exactly one occurrence carries the mark.
+    assert_eq!(
+        occurrences.iter().filter(|line| line.contains('◆')).count(),
+        1,
+        "{text}"
+    );
+}
+
+#[test]
+fn an_ascii_listing_carries_nothing_outside_ascii() {
+    let text = rendered(
+        &sample_report(),
+        TextOptions {
+            decoration: Decoration::Ascii,
+            ..TextOptions::default()
+        },
+    );
+    // The whole point of asking for it: a console that draws no box-drawing
+    // character gets a report with none in it, heading and summary included.
+    assert!(text.is_ascii(), "{text}");
+    assert!(text.contains("|- "), "{text}");
+    assert!(text.contains("`- "), "{text}");
+}
+
+#[test]
+fn an_undecorated_listing_draws_no_glyphs_but_keeps_its_columns() {
+    let text = rendered(
+        &sample_report(),
+        TextOptions {
+            decoration: Decoration::None,
+            ..TextOptions::default()
+        },
+    );
+    // No tree, no marks: the occurrences are a plain indented list, which is
+    // what something reading this report line by line wants.
+    for glyph in ['├', '└', '◆', '×', '·'] {
+        assert!(!text.contains(glyph), "{glyph} in {text}");
+    }
+    assert!(text.is_ascii(), "{text}");
+    // The structure indentation and the columns still carry.
+    assert!(text.contains(" #1  "), "{text}");
+    assert!(text.contains("src/file0.rs"), "{text}");
+}
+
+#[test]
+fn one_listings_headings_share_their_columns() {
+    let mut report = sample_report();
+    // A second group whose kind is wider than the first's, which is what
+    // pushes every column right if the widths are measured per row.
+    report.groups[1].suppressed = None;
+    report.groups[1].scope = SCOPE_FRAGMENT.to_string();
+    let text = rendered(&report, TextOptions::default());
+    let headings: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains(" tokens  "))
+        .collect();
+    assert_eq!(headings.len(), 2, "{text}");
+    let columns: Vec<Option<usize>> = headings.iter().map(|line| line.find(" tokens")).collect();
+    assert_eq!(columns[0], columns[1], "{text}");
+}
+
+#[test]
+fn what_unsettles_the_report_is_written_as_a_warning_before_the_notes() {
+    let mut report = sample_report();
+    report.summary.unused_suppressions = vec![UnusedRule {
+        scope: "path".to_string(),
+        pattern: "vendor/**".to_string(),
+    }];
+    let mut buffer = Vec::new();
+    report
+        .render_notes(TextOptions::default(), &mut buffer)
+        .unwrap();
+    let text = String::from_utf8(buffer).unwrap();
+    let warning = text.find("⚠ warning: candidate search was truncated");
+    let note = text.find("note: 1 suppression rule(s) matched nothing");
+    assert!(warning.is_some() && note.is_some(), "{text}");
+    // A reader who stops after one line should have stopped after the line
+    // that changes what the rest of the report means.
+    assert!(warning < note, "{text}");
+}
+
+#[test]
+fn the_report_closes_with_the_marks_it_used_and_what_to_type_next() {
+    let text = rendered(&sample_report(), TextOptions::default());
+    assert!(
+        text.contains("◆ the occurrence a group is measured against"),
+        "{text}"
+    );
+    assert!(text.contains("codehelion explain 0b0b0b0b"), "{text}");
+    assert!(text.contains("--limit 0"), "{text}");
+    // "run" is not a word this report used, so it is not a word this report
+    // explains.
+    assert!(!text.contains("\"run\""), "{text}");
+}
+
+#[test]
+fn a_listing_of_runs_says_what_a_run_is() {
+    let mut report = sample_report();
+    report.groups[0].scope = SCOPE_FRAGMENT.to_string();
+    let text = rendered(&report, TextOptions::default());
+    assert!(text.contains("type-1 run ×"), "{text}");
+    assert!(text.contains("\"run\" a repeated stretch"), "{text}");
+}
+
+#[test]
+fn a_quiet_listing_is_the_groups_alone() {
+    let text = rendered(
+        &sample_report(),
+        TextOptions {
+            quiet: true,
+            ..TextOptions::default()
+        },
+    );
+    assert!(!text.contains("codehelion scan"), "{text}");
+    assert!(
+        !text.contains("the occurrence a group is measured against"),
+        "{text}"
+    );
+    assert!(!text.contains("codehelion explain"), "{text}");
+    assert!(text.contains("src/file0.rs"), "{text}");
 }
 
 #[test]
@@ -848,7 +1000,7 @@ fn clone_group_detail_has_a_discriminated_schema_envelope() {
     assert_eq!(value["build_variant"], "ab".repeat(32));
     assert_valid_finding_detail_schema(&value);
     let mut text = Vec::new();
-    detail.render_text(&mut text).unwrap();
+    detail.render_text(Decoration::Ascii, &mut text).unwrap();
     assert!(
         String::from_utf8(text)
             .unwrap()
