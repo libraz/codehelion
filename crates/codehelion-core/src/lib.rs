@@ -17,6 +17,7 @@ pub mod execution;
 pub mod features;
 pub mod frontend;
 pub mod grouping;
+pub mod identity;
 pub mod ir;
 pub mod maximal;
 pub mod near_match;
