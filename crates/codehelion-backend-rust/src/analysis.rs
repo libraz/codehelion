@@ -337,11 +337,38 @@ fn cargo_config(toolchain: &HelperToolchain) -> ra_ap_project_model::CargoConfig
                 Some(toolchain.rustup_toolchain.clone()),
             ),
             ("RUSTUP_AUTO_INSTALL".to_owned(), Some("0".to_owned())),
+            // Do not let a caller-provided shared target directory reuse a
+            // build script from another workspace. Build-script outputs are
+            // workspace-specific (notably OUT_DIR), so Cargo must choose a
+            // target directory owned by the project being analysed.
+            ("CARGO_TARGET_DIR".to_owned(), None),
         ]
         .into_iter()
         .collect(),
         ..ra_ap_project_model::CargoConfig::default()
     }
+}
+
+/// Build the project-model configuration used for an actual workspace load.
+///
+/// The project-model metadata adapter currently translates an absent value in
+/// `extra_env` into an empty environment value. Keep the canonical config's
+/// `None` (which the toolchain command correctly interprets as removal), then
+/// give metadata and build-script commands an explicit target under the
+/// workspace. This preserves the isolation promised by the removal while
+/// avoiding an invalid empty `CARGO_TARGET_DIR` in that adapter.
+fn cargo_config_for_workspace(
+    toolchain: &HelperToolchain,
+    manifest: &Path,
+) -> ra_ap_project_model::CargoConfig {
+    let mut config = cargo_config(toolchain);
+    if let Some(workspace_root) = manifest.parent() {
+        config.extra_env.insert(
+            "CARGO_TARGET_DIR".to_owned(),
+            Some(workspace_root.join("target").display().to_string()),
+        );
+    }
+    config
 }
 
 fn project_workspace(manifest: &Path) -> Result<ra_ap_project_model::ProjectWorkspace, String> {
@@ -365,9 +392,12 @@ fn project_workspace_with_toolchain(
         })?;
     let found = ra_ap_project_model::ProjectManifest::from_manifest_file(path)
         .map_err(|error| error.to_string())?;
-    let workspace =
-        ra_ap_project_model::ProjectWorkspace::load(found, &cargo_config(toolchain), &|_| {})
-            .map_err(|error| error.to_string())?;
+    let workspace = ra_ap_project_model::ProjectWorkspace::load(
+        found,
+        &cargo_config_for_workspace(toolchain, manifest),
+        &|_| {},
+    )
+    .map_err(|error| error.to_string())?;
     if let ra_ap_project_model::ProjectWorkspaceKind::Cargo {
         error: Some(error), ..
     } = &workspace.kind
@@ -405,6 +435,7 @@ fn verify_locked_offline_metadata(
         )
         .env("RUSTUP_TOOLCHAIN", &toolchain.rustup_toolchain)
         .env("RUSTUP_AUTO_INSTALL", "0")
+        .env_remove("CARGO_TARGET_DIR")
         .output()
         .map_err(|error| format!("could not start Cargo metadata: {error}"))?;
     if output.status.success() {
@@ -459,7 +490,7 @@ fn describe_workspace(manifest: &Path) -> Result<BuildDescription, String> {
 
 fn load(manifest: &Path, permitted: Permissions) -> Result<Loaded, String> {
     let toolchain = helper_toolchain()?;
-    let config = cargo_config(&toolchain);
+    let config = cargo_config_for_workspace(&toolchain, manifest);
     let load_config = ra_ap_load_cargo::LoadCargoConfig {
         // The one setting here that runs the project's code, and the only
         // thing that turns it on is a permission that travelled with the
@@ -936,5 +967,6 @@ mod tests {
                 .and_then(Option::as_deref),
             Some(toolchain.rustup_toolchain.as_str())
         );
+        assert_eq!(config.extra_env.get("CARGO_TARGET_DIR"), Some(&None));
     }
 }
