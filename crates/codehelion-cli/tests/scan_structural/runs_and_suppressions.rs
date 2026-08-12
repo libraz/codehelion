@@ -117,7 +117,15 @@ fn a_run_shared_by_unrelated_units_is_reported_as_a_run() {
     let dir = run_fixture();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural", "-v"])
+        .args([
+            "scan",
+            ".",
+            "--mode",
+            "structural",
+            "-v",
+            "--decoration",
+            "unicode",
+        ])
         .assert()
         .success()
         // The extent is stated: without it the entry reads as a duplicated

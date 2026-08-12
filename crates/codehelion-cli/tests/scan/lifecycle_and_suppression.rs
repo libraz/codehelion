@@ -821,14 +821,21 @@ fn fast_and_structural_modes_run_without_compiler_helpers() {
 
     cmd()
         .current_dir(dir.path())
-        .args(["scan", "."])
+        .args(["scan", ".", "--decoration", "unicode"])
         .assert()
         .success()
         .stdout(predicate::str::contains("codehelion scan · fast mode ·"));
 
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural"])
+        .args([
+            "scan",
+            ".",
+            "--mode",
+            "structural",
+            "--decoration",
+            "unicode",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains(

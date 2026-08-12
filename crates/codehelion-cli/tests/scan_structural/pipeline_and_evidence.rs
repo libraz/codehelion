@@ -513,7 +513,15 @@ fn a_gapped_clone_is_detected_and_recorded_with_its_evidence() {
     let dir = fixture();
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--mode", "structural", "-v"])
+        .args([
+            "scan",
+            ".",
+            "--mode",
+            "structural",
+            "-v",
+            "--decoration",
+            "unicode",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains(

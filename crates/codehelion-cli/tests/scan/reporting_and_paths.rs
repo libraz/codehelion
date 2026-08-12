@@ -386,7 +386,14 @@ fn output_flag_writes_the_report_to_a_file() {
     let dir = fixture();
     let output = cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--output", "report.txt"])
+        .args([
+            "scan",
+            ".",
+            "--decoration",
+            "unicode",
+            "--output",
+            "report.txt",
+        ])
         .output()
         .expect("run redirected scan");
     assert!(output.status.success(), "{output:?}");
@@ -452,7 +459,15 @@ fn output_flag_preserves_an_existing_file_unless_forced() {
 
     cmd()
         .current_dir(dir.path())
-        .args(["scan", ".", "--output", "report.txt", "--force"])
+        .args([
+            "scan",
+            ".",
+            "--decoration",
+            "unicode",
+            "--output",
+            "report.txt",
+            "--force",
+        ])
         .assert()
         .success()
         .stderr(predicate::str::contains("wrote report.txt"));
