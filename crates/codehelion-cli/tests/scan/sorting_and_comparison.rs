@@ -207,6 +207,10 @@ fn an_identifier_floor_narrows_the_listing_without_moving_a_count() {
         floored.contains("group(s) are not listed: raw identifier agreement below 0.90"),
         "what a floor left out has to be said: {floored}"
     );
+    assert!(
+        !floored.contains("not measured in this mode"),
+        "structural groups carry identifier measurements: {floored}"
+    );
     let structural = scan_json_with(root, &["--mode", "structural"]);
     let low_agreement: Vec<&str> = structural["groups"]
         .as_array()
@@ -244,6 +248,119 @@ fn an_identifier_floor_narrows_the_listing_without_moving_a_count() {
             &["--mode", "structural", "--min-identifier-jaccard", "0.9"],
         )),
     );
+}
+
+#[test]
+fn a_fast_record_replay_names_exactly_which_floor_candidates_were_unmeasured() {
+    let dir = fixture();
+    let report = scan_json(dir.path());
+    assert_eq!(
+        report["summary"]["unmeasured_in_this_mode"],
+        serde_json::json!([
+            "identifier agreement",
+            "similarity breakdown",
+            "siblings",
+            "near misses"
+        ])
+    );
+    let unmeasured = report["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .filter(|group| group["identifier_jaccard"].is_null())
+        .count();
+    assert!(
+        unmeasured > 0,
+        "Fast groups do not carry identifier evidence"
+    );
+
+    let reused = scan_json(dir.path());
+    assert_eq!(reused["run"]["reused"], serde_json::json!(true));
+    assert_eq!(
+        reused["summary"]["unmeasured_in_this_mode"],
+        report["summary"]["unmeasured_in_this_mode"]
+    );
+
+    let output = cmd()
+        .current_dir(dir.path())
+        .args([
+            "report",
+            "--format",
+            "text",
+            "--min-identifier-jaccard",
+            "0.90",
+        ])
+        .output()
+        .expect("replay Fast report with an identifier floor");
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).expect("text output");
+    assert!(
+        text.contains(&format!(
+            "({unmeasured} of them were not measured in this mode)"
+        )),
+        "{text}"
+    );
+    let notes = String::from_utf8(output.stderr).expect("notes output");
+    assert!(
+        notes.contains(
+            "Fast duplicated-token totals may overlap because one source location can appear in multiple groups"
+        ),
+        "{notes}"
+    );
+    for feature in [
+        "identifier agreement",
+        "similarity breakdown",
+        "siblings",
+        "near misses",
+    ] {
+        assert!(notes.contains(feature), "{feature}: {notes}");
+    }
+}
+
+#[test]
+fn structural_text_omits_fast_overlap_and_unmeasured_notes() {
+    let dir = fixture();
+    let root = dir.path();
+    let output = cmd()
+        .current_dir(dir.path())
+        .args([
+            "scan",
+            ".",
+            "--mode",
+            "structural",
+            "--format",
+            "text",
+            "--no-reuse",
+        ])
+        .output()
+        .expect("run Structural text scan");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).expect("text report");
+    let stderr = String::from_utf8(output.stderr).expect("notes output");
+    let json = scan_json_with(root, &["--mode", "structural"]);
+    assert_eq!(
+        json["summary"]["unmeasured_in_this_mode"],
+        serde_json::json!([]),
+        "Structural JSON must not claim Fast-only unmeasured values: {json}"
+    );
+    assert!(
+        !stdout.contains("duplicated-token totals may overlap"),
+        "{stdout}"
+    );
+    assert!(
+        !stderr.contains("duplicated-token totals may overlap"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("this mode does not measure"), "{stdout}");
+    assert!(!stderr.contains("this mode does not measure"), "{stderr}");
+}
+
+#[test]
+fn fast_mode_does_not_report_structural_subsumption() {
+    let dir = fixture();
+    let report = scan_json(dir.path());
+    assert_eq!(report["summary"]["groups"]["folded_runs"], 0);
+    assert_eq!(report["summary"]["groups"]["subsumed_runs"], 0);
 }
 
 #[test]

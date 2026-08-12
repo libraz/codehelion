@@ -243,6 +243,28 @@ fn semantic_rust_corpus_keeps_structural_coverage_and_reports_the_split_type3_pa
     let semantic = scan(corpus.path());
 
     for (mode, report) in [("structural", &structural), ("semantic", &semantic)] {
+        assert!(
+            report["summary"]["identity_collapsed"].is_u64(),
+            "{mode} summary must expose identity_collapsed"
+        );
+        let mut group_ids = std::collections::BTreeSet::new();
+        let mut finding_ids = std::collections::BTreeSet::new();
+        for group in report["groups"].as_array().expect("report groups") {
+            assert!(
+                group_ids.insert(group["fingerprint"].as_str().expect("group fingerprint")),
+                "{mode} report emits duplicate group identity: {group}"
+            );
+            for member in group["members"].as_array().expect("group members") {
+                assert!(
+                    finding_ids.insert(
+                        member["finding_id"]
+                            .as_str()
+                            .expect("member finding identity")
+                    ),
+                    "{mode} report emits duplicate finding identity: {member}"
+                );
+            }
+        }
         let report_json = serde_json::to_string(report).expect("report remains serializable");
         let (result, lines) = detected::from_report_json(&report_json)
             .unwrap_or_else(|error| panic!("read {mode} corpus report: {error}"));

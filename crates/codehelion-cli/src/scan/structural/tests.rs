@@ -1,10 +1,11 @@
 use super::{
     CategoryAction, Compilers, Config, CrossLanguageCandidateInput, ExecutionPolicy, Language,
     LanguageSelection, SandboxRequest, ScanArgs, SemanticCandidateConfig, SemanticOperationGraph,
-    StructuralConfig, VerifiedPair, copy_guardrails, coverage, enabled_cross_language_matches,
-    extract_cross_language_candidates, helper_timeout, installed_helper, pair_shape_suppression,
-    presentation_suppression, report, run_with, semantic_sandbox, structural_config,
-    unanimous_boilerplate, unavailable_execution_message, verify_cross_language_candidates,
+    StructuralConfig, VerifiedPair, copy_guardrails, coverage, detector_versions,
+    enabled_cross_language_matches, extract_cross_language_candidates, helper_timeout,
+    installed_helper, pair_shape_suppression, presentation_suppression, report, run_with,
+    semantic_sandbox, structural_config, unanimous_boilerplate, unavailable_execution_message,
+    verify_cross_language_candidates,
 };
 use super::{SourceMeta, compile_rules, evaluate_suppression, reportable_regions};
 use crate::cli::{Format, Mode, SortAxis};
@@ -25,9 +26,34 @@ use codehelion_core::{
     grouping::{GroupingConfig, GroupingUnit, SimilarityEdge, group as group_units},
     ir::ByteRange,
 };
-use codehelion_helper::ir::{Unavailability, UnitRef};
+use codehelion_helper::ir::{CompilerIr, Unavailability, UnitRef};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+#[test]
+fn directory_partitions_are_sorted_and_opaque() {
+    let files = ["z/file.rs", "a/one.rs", "z/other.rs", "file.rs"]
+        .into_iter()
+        .map(|relative_path| SourceMeta {
+            relative_path: relative_path.to_string(),
+            directory_key: std::path::Path::new(relative_path)
+                .parent()
+                .map(crate::scan::path_key)
+                .unwrap_or_default(),
+            language: Language::Rust,
+            marker_lines: Vec::new(),
+            lines: 1,
+            diagnostics: 0,
+            unaccounted_tokens: 0,
+            depth_truncated: false,
+        })
+        .collect::<Vec<_>>();
+    let partitions = super::directory_partitions(&files);
+    assert_eq!(partitions[0].index(), 2);
+    assert_eq!(partitions[1].index(), 1);
+    assert_eq!(partitions[2].index(), 2);
+    assert_eq!(partitions[3].index(), 0);
+}
 
 #[test]
 fn shared_discovery_exclusions_belong_to_one_semantic_partition() {
@@ -187,6 +213,8 @@ fn supplemental_diagnostics_apply_path_suppression_like_primary_findings() {
                 clone_type: CloneClass::Type3,
                 confidence: Confidence::Low,
                 breakdown: perfect,
+                basis: codehelion_core::structural::SiblingBasis::Similarity,
+                signature: None,
             }],
         }],
         near_misses: vec![StructuralNearMiss {
@@ -206,6 +234,10 @@ fn supplemental_diagnostics_apply_path_suppression_like_primary_findings() {
     .into_iter()
     .map(|relative_path| SourceMeta {
         relative_path: relative_path.to_string(),
+        directory_key: std::path::Path::new(relative_path)
+            .parent()
+            .map(crate::scan::path_key)
+            .unwrap_or_default(),
         language: Language::Rust,
         marker_lines: Vec::new(),
         lines: 1,
@@ -386,6 +418,71 @@ fn denied_build_scripts_keep_their_cost_and_exact_permission() {
     assert!(refusal.message.contains(&refusal.permission_argument));
 }
 
+#[test]
+fn semantic_detector_versions_are_sorted_and_deduplicate_answered_ir_schemas() {
+    let first_unit = UnitRef {
+        unit: "first".to_string(),
+        file: "src/lib.rs".to_string(),
+        variant: "debug".to_string(),
+    };
+    let second_unit = UnitRef {
+        unit: "second".to_string(),
+        file: "src/lib.rs".to_string(),
+        variant: "debug".to_string(),
+    };
+    let mut first = CompilerIr::empty(first_unit.clone());
+    first.schema_version = "compiler-ir-v2".to_string();
+    let mut duplicate = CompilerIr::empty(second_unit.clone());
+    duplicate.schema_version = "compiler-ir-v2".to_string();
+    let mut other = CompilerIr::empty(second_unit);
+    other.schema_version = "compiler-ir-v1".to_string();
+    let answers = crate::semantic::Answers {
+        helpers: Vec::new(),
+        per_source: vec![
+            crate::semantic::Answer::Analyzed {
+                helper: 0,
+                ir: Box::new(first),
+            },
+            crate::semantic::Answer::Unavailable {
+                helper: None,
+                unit: first_unit,
+                reason: Unavailability::NoBuildInformation,
+                diagnostics: Vec::new(),
+            },
+            crate::semantic::Answer::Analyzed {
+                helper: 0,
+                ir: Box::new(duplicate),
+            },
+            crate::semantic::Answer::Analyzed {
+                helper: 0,
+                ir: Box::new(other),
+            },
+        ],
+    };
+
+    let versions = detector_versions(
+        codehelion_core::engine::LiteralNorm::Full,
+        0.6,
+        Some(&answers),
+    );
+    assert!(versions.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert_eq!(
+        versions
+            .iter()
+            .filter(|(component, _)| component == "compiler_ir")
+            .collect::<Vec<_>>(),
+        vec![
+            &("compiler_ir".to_string(), "compiler-ir-v1".to_string()),
+            &("compiler_ir".to_string(), "compiler-ir-v2".to_string()),
+        ]
+    );
+    assert!(
+        detector_versions(codehelion_core::engine::LiteralNorm::Full, 0.6, None)
+            .iter()
+            .all(|(component, _)| component != "compiler_ir")
+    );
+}
+
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn untrusted_semantic_requires_an_enforceable_memory_limit() {
@@ -411,6 +508,7 @@ fn untrusted_semantic_requires_an_enforceable_memory_limit() {
         compare_languages: false,
         show_suppressed: false,
         show_siblings: false,
+        siblings_by_signature: false,
         show_near_misses: false,
         include_trivial: false,
         no_reuse: false,
@@ -451,6 +549,7 @@ fn untrusted_semantic_requires_a_linux_memory_limit() {
         compare_languages: false,
         show_suppressed: false,
         show_siblings: false,
+        siblings_by_signature: false,
         show_near_misses: false,
         include_trivial: false,
         no_reuse: false,
@@ -521,6 +620,7 @@ fn an_empty_tree_is_not_reported_as_a_missing_compiler() {
         compare_languages: false,
         show_suppressed: false,
         show_siblings: false,
+        siblings_by_signature: false,
         show_near_misses: false,
         include_trivial: false,
         include_vendored: false,
@@ -559,6 +659,10 @@ fn an_unset_ceiling_leaves_every_stage_at_its_own_default() {
         config.control_flow.pair_budget,
         defaults.control_flow.pair_budget
     );
+    assert_eq!(
+        config.signature_siblings, defaults.signature_siblings,
+        "unset signature sibling limits keep the independent core defaults"
+    );
 }
 
 /// A ceiling that is set bounds the whole funnel, not one stage of it.
@@ -593,6 +697,55 @@ fn a_configured_ceiling_reaches_every_candidate_stage() {
     }
     assert_eq!(config.verification_budget, 13);
     assert_eq!(config.verify.max_alignment_cells, 17);
+}
+
+#[test]
+fn signature_sibling_limits_reach_core_without_reusing_similarity_limits() {
+    let cfg = Config {
+        limits: crate::config::Limits {
+            sibling_candidate_budget: Some(7),
+            sibling_per_group_cap: Some(11),
+            sibling_total_cap: Some(13),
+            signature_sibling_candidate_budget: Some(17),
+            signature_sibling_per_group_cap: Some(19),
+            signature_sibling_total_cap: Some(23),
+            ..crate::config::Limits::default()
+        },
+        ..Config::default()
+    };
+    let config = structural_config(&cfg);
+    assert_eq!(config.siblings.candidate_budget, 7);
+    assert_eq!(config.siblings.per_group_cap, 11);
+    assert_eq!(config.siblings.total_cap, 13);
+    assert_eq!(config.signature_siblings.candidate_budget, 17);
+    assert_eq!(config.signature_siblings.per_group_cap, 19);
+    assert_eq!(config.signature_siblings.total_cap, 23);
+}
+
+#[test]
+fn untrusted_clamp_reaches_signature_sibling_core_limits() {
+    let mut cfg = Config {
+        limits: crate::config::Limits {
+            signature_sibling_candidate_budget: Some(usize::MAX),
+            signature_sibling_per_group_cap: Some(usize::MAX),
+            signature_sibling_total_cap: Some(usize::MAX),
+            ..crate::config::Limits::default()
+        },
+        ..Config::default()
+    };
+    cfg.limits
+        .clamp_to_untrusted(&codehelion_core::execution::Limits::untrusted());
+    let config = structural_config(&cfg);
+    let defaults = codehelion_core::structural::SignatureSiblingConfig::default();
+    assert_eq!(
+        config.signature_siblings.candidate_budget,
+        defaults.candidate_budget
+    );
+    assert_eq!(
+        config.signature_siblings.per_group_cap,
+        defaults.per_group_cap
+    );
+    assert_eq!(config.signature_siblings.total_cap, defaults.total_cap);
 }
 
 #[test]

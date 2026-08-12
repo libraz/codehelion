@@ -89,6 +89,74 @@ struct LexedSource {
     diagnostics: usize,
 }
 
+/// A first-run hint for the local audit database directory.
+///
+/// The scan lock creates the directory before the source pipeline starts, so
+/// this value is captured by the command dispatcher before a mode acquires
+/// that lock. It is emitted only after the mode and its report have completed.
+pub(crate) struct DatabaseDirectoryHint {
+    directory: PathBuf,
+    ignore_entry: String,
+}
+
+impl DatabaseDirectoryHint {
+    pub(crate) fn emit(self) {
+        eprintln!(
+            "note: created local database directory {}; consider adding `{}` to .gitignore",
+            self.directory.display(),
+            self.ignore_entry,
+        );
+    }
+}
+
+/// Capture whether this scan will create a new, unignored database directory.
+///
+/// An explicit `--db` is an intentional storage choice and never receives this
+/// default-database hint. For all other paths, including a database selected by
+/// configuration, the actual parent-directory state is the authority: this is
+/// what the lock acquisition will create. Git classification is delegated to
+/// the same helpers used by `doctor`.
+pub(crate) fn new_database_directory_hint(
+    args: &ScanArgs,
+) -> Result<Option<DatabaseDirectoryHint>> {
+    if args.db.is_some() {
+        return Ok(None);
+    }
+    let root = codehelion_core::paths::canonical(&args.path)
+        .with_context(|| format!("resolving scan path {}", args.path.display()))?;
+    if !root.is_dir() {
+        // Let the selected mode return its usual actionable scan-path error.
+        return Ok(None);
+    }
+    let resolved_config = config::load(args.config.as_deref(), &root)?;
+    let db_path = database_path(&root, None, &resolved_config, args.untrusted)?;
+    let Some(directory) = db_path.parent().filter(|path| !path.as_os_str().is_empty()) else {
+        return Ok(None);
+    };
+    if directory.exists() {
+        return Ok(None);
+    }
+    let Some(repo_root) = crate::find_git_root(&root) else {
+        return Ok(None);
+    };
+    if crate::is_git_ignored(&repo_root, &db_path) {
+        return Ok(None);
+    }
+    let ignore_entry = db_path
+        .strip_prefix(&repo_root)
+        .ok()
+        .and_then(Path::parent)
+        .filter(|path| !path.as_os_str().is_empty())
+        .map_or_else(
+            || directory.display().to_string(),
+            |path| format!("{}/", path.to_string_lossy().replace('\\', "/")),
+        );
+    Ok(Some(DatabaseDirectoryHint {
+        directory: directory.to_path_buf(),
+        ignore_entry,
+    }))
+}
+
 /// Execute `codehelion scan` in Fast mode.
 ///
 /// # Errors
@@ -131,7 +199,8 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
 
     let lex_timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
     let (lexed, unreadable, timed_out) =
-        lex_sources(&sources, jobs, cfg.limits.max_file_bytes, lex_timeout)?;
+        lex_sources(&sources, jobs, cfg.limits.max_file_bytes, lex_timeout)
+            .map_err(|error| crate::analysis_failure(Mode::Fast, error))?;
 
     let engine_config = engine_config(&cfg)?;
     let input: Vec<InputFile<'_>> = lexed
@@ -173,9 +242,9 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         root: &root,
         db_path: &db_path,
         configuration: &configuration,
-        // Both filled in from the recording below, which cannot run until the
-        // entries it records the ranking of exist.
-        run_id: 0,
+        // Filled in only after the snapshot has been recorded. A provisional
+        // report therefore cannot accidentally publish a fake database id.
+        run_id: None,
         started_at: &started_at,
         finished_at: &finished_at,
         discovered: &discovered,
@@ -199,13 +268,14 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         reused: false,
         changes: None,
     };
-    let stored = summary_row(
+    let mut stored = summary_row(
         &inputs,
         baseline.as_ref().map(ScanBaseline::digest),
         guardrails.as_ref(),
     );
-    let groups = rank_and_record(&mut inputs, &cfg, &contexts, file_rows(&sources), &stored)?;
-    let mut model = build_report(&inputs, &stored, groups);
+    let ranked = rank_groups(&inputs, &mut stored)?;
+    let mut model = build_report(&inputs, &stored, ranked);
+    model.run.run_id = inputs.run_id;
     model.run.reused = inputs.reused;
     model.summary.changes.clone_from(&inputs.changes);
     model.summary.guardrails = guardrails;
@@ -214,8 +284,63 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     model.summary.baseline = baseline
         .as_ref()
         .map(|baseline| apply_baseline(baseline, &mut model.groups));
-    write_report(args, out, &model)?;
-    Ok(outcome(args, &model))
+    model.refresh_supplemental_summary();
+    let record_result = record_ranked(
+        &mut inputs,
+        &cfg,
+        &contexts,
+        file_rows(&sources),
+        &stored,
+        &model.groups,
+    );
+    match record_result {
+        Ok(()) => {
+            model.run.run_id = inputs.run_id;
+            model.run.reused = inputs.reused;
+            model.summary.changes.clone_from(&inputs.changes);
+            let hydration_error = if let Some(run_id) = model.run.run_id {
+                match open_store(&db_path) {
+                    Ok(store) => hydrate_artifact_savings(&store, run_id, &mut model.groups)
+                        .err()
+                        .map(|error| (run_id, error)),
+                    Err(error) => Some((run_id, error)),
+                }
+            } else {
+                None
+            };
+            if let Some((run_id, error)) = hydration_error {
+                for group in &mut model.groups {
+                    group.artifact_savings.clear();
+                }
+                model.refresh_supplemental_summary();
+                write_report_without_artifact_guidance(args, out, &model)?;
+                eprintln!(
+                    "warning: artifact savings were not loaded ({error}); run {run_id} remains recorded, but artifact evidence and guidance are unavailable for this report"
+                );
+                return Err(error);
+            }
+            model.refresh_supplemental_summary();
+            write_report(args, out, &model)?;
+            Ok(outcome(args, &model))
+        }
+        Err(error) => {
+            // The analysis result is still useful even though it has no
+            // durable identity. Do not hydrate artifact rows or emit replay
+            // guidance for this provisional report.
+            model.run.run_id = None;
+            model.run.reused = false;
+            model.summary.changes = None;
+            for group in &mut model.groups {
+                group.artifact_savings.clear();
+            }
+            model.refresh_supplemental_summary();
+            write_report(args, out, &model)?;
+            eprintln!(
+                "warning: this run was not recorded ({error}); replay and baseline comparison are unavailable for it"
+            );
+            Err(error)
+        }
+    }
 }
 
 fn validate_fast_args(args: &ScanArgs) -> Result<()> {
@@ -230,6 +355,9 @@ fn validate_fast_args(args: &ScanArgs) -> Result<()> {
     }
     if args.show_siblings {
         bail!("--show-siblings requires --mode structural or --mode semantic");
+    }
+    if args.siblings_by_signature {
+        bail!("--siblings-by-signature requires --mode structural or --mode semantic");
     }
     if args.show_near_misses {
         bail!("--show-near-misses requires --mode structural or --mode semantic");
@@ -366,7 +494,7 @@ struct BuildInputs<'a> {
     root: &'a Path,
     db_path: &'a Path,
     configuration: &'a report::ConfigurationInfo,
-    run_id: i64,
+    run_id: Option<i64>,
     started_at: &'a str,
     finished_at: &'a str,
     discovered: &'a DiscoveryReport,
@@ -449,6 +577,14 @@ pub(crate) fn guardrails_row(guardrails: &report::Guardrails) -> GuardrailsRow {
             .unwrap_or(u64::MAX),
         sibling_per_group_cap: u64::try_from(guardrails.sibling_per_group_cap).unwrap_or(u64::MAX),
         sibling_total_cap: u64::try_from(guardrails.sibling_total_cap).unwrap_or(u64::MAX),
+        signature_sibling_candidate_budget: u64::try_from(
+            guardrails.signature_sibling_candidate_budget,
+        )
+        .unwrap_or(u64::MAX),
+        signature_sibling_per_group_cap: u64::try_from(guardrails.signature_sibling_per_group_cap)
+            .unwrap_or(u64::MAX),
+        signature_sibling_total_cap: u64::try_from(guardrails.signature_sibling_total_cap)
+            .unwrap_or(u64::MAX),
         max_component: u64::try_from(guardrails.max_component).unwrap_or(u64::MAX),
     }
 }
@@ -462,7 +598,7 @@ pub(crate) struct RunInfoInputs<'a> {
     /// Effective configuration recorded with the scan.
     pub configuration: &'a report::ConfigurationInfo,
     /// Persisted scan run identifier.
-    pub run_id: i64,
+    pub run_id: Option<i64>,
     /// Invocation start timestamp.
     pub started_at: &'a str,
     /// Invocation finish timestamp.
@@ -747,8 +883,9 @@ fn fast_group_scope(group: &CloneGroup, lexed: &[LexedSource]) -> CloneScope {
 pub(crate) mod output;
 
 pub(crate) use output::{
-    ReportOutput, hydrate_artifact_savings, write_partitioned_reports, write_report,
-    write_report_options,
+    ReportOutput, hydrate_artifact_savings, write_partitioned_reports,
+    write_partitioned_reports_without_artifact_guidance, write_report, write_report_options,
+    write_report_options_without_artifact_guidance, write_report_without_artifact_guidance,
 };
 
 /// One lexed file's units as the suppression rules see them: their line
@@ -818,8 +955,8 @@ pub(crate) use baseline::{ScanBaseline, apply_baseline, load_baseline};
 pub(crate) mod store;
 
 pub(crate) use codehelion_store::{display_path, path_key};
-use store::{detector_versions, rank_and_record};
-pub(crate) use store::{file_rows, open_store};
+use store::{detector_versions, rank_groups, record_ranked};
+pub(crate) use store::{file_rows, open_store, reuse_config_hash};
 
 /// The current time as fixed-width RFC 3339 UTC with microsecond precision.
 ///

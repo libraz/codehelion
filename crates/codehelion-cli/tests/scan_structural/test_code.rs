@@ -241,6 +241,28 @@ fn disabling_test_paths_removes_path_evidence_without_affecting_marker_evidence(
 }
 
 #[test]
+fn invalid_test_path_glob_is_a_configuration_error_without_a_structural_hint() {
+    let dir = fixture();
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[suppression]\ntest-paths = [\"[\"]\n",
+    )
+    .unwrap();
+    let output = cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural", "--format", "json"])
+        .output()
+        .expect("run structural scan with invalid test-path glob");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("in suppression test-paths"), "{stderr}");
+    assert!(
+        !stderr.contains("hint: "),
+        "configuration error is not analysis: {stderr}"
+    );
+}
+
+#[test]
 fn a_recorded_run_reemits_test_code_evidence() {
     let dir = split_suite_fixture(false);
     let scanned = scan_json(dir.path());

@@ -1,4 +1,5 @@
 use super::*;
+use rusqlite::Connection;
 
 #[test]
 fn scan_detects_clones_and_records_a_snapshot() {
@@ -53,6 +54,144 @@ fn scan_detects_clones_and_records_a_snapshot() {
 
     let findings = store.run_findings(run.id).unwrap();
     assert!(!findings.is_empty());
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn persistence_failure_still_emits_a_fast_or_structural_json_report() {
+    for mode in ["fast", "structural"] {
+        let dir = fixture();
+        let initial = cmd()
+            .current_dir(dir.path())
+            .args(["scan", ".", "--mode", mode, "--format", "json"])
+            .output()
+            .expect("initial scan creates the real database");
+        assert!(initial.status.success(), "{mode}: {initial:?}");
+        let database = dir.path().join(".codehelion/audit.db");
+        let connection = Connection::open(&database).expect("open initialized SQLite database");
+        connection
+            .execute_batch(
+                "CREATE TRIGGER force_scan_insert BEFORE INSERT ON scan_run
+                 BEGIN SELECT RAISE(FAIL, 'forced persistence failure'); END;",
+            )
+            .expect("install deterministic persistence trigger");
+        let before: i64 = connection
+            .query_row("SELECT COUNT(*) FROM scan_run", [], |row| row.get(0))
+            .expect("count initial scan runs");
+        drop(connection);
+
+        let failed = cmd()
+            .current_dir(dir.path())
+            .args([
+                "scan",
+                ".",
+                "--mode",
+                mode,
+                "--format",
+                "json",
+                "--no-reuse",
+            ])
+            .output()
+            .expect("run scan with forced persistence failure");
+        assert!(!failed.status.success(), "{mode}: {failed:?}");
+        let report: serde_json::Value =
+            serde_json::from_slice(&failed.stdout).expect("provisional stdout is valid JSON");
+        assert!(report["run"].get("run_id").is_none(), "{report}");
+        assert!(report["run"].get("reused").is_none(), "{report}");
+        assert!(report["summary"].get("changes").is_none(), "{report}");
+        assert!(
+            report["groups"].as_array().is_some_and(|groups| {
+                groups.iter().all(|group| {
+                    group["artifact_savings"]
+                        .as_array()
+                        .is_some_and(Vec::is_empty)
+                })
+            }),
+            "{report}"
+        );
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        let warning = "warning: this run was not recorded (";
+        assert_eq!(stderr.matches(warning).count(), 1, "{stderr}");
+        assert!(stderr.contains("forced persistence failure"), "{stderr}");
+        assert!(
+            !stderr.contains("hint: "),
+            "persistence failure is not analysis: {stderr}"
+        );
+
+        let report_path = dir.path().join(format!("{mode}-unrecorded.json"));
+        let failed_file = cmd()
+            .current_dir(dir.path())
+            .args([
+                "scan",
+                ".",
+                "--mode",
+                mode,
+                "--format",
+                "json",
+                "--no-reuse",
+                "--output",
+                report_path.to_str().expect("UTF-8 report path"),
+            ])
+            .output()
+            .expect("run redirected scan with forced persistence failure");
+        assert!(!failed_file.status.success(), "{mode}: {failed_file:?}");
+        assert!(
+            failed_file.stdout.is_empty(),
+            "redirected report leaked to stdout"
+        );
+        let redirected: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&report_path).expect("read redirected provisional report"),
+        )
+        .expect("redirected provisional report is valid JSON");
+        assert!(redirected["run"].get("run_id").is_none(), "{redirected}");
+        assert!(redirected["run"].get("reused").is_none(), "{redirected}");
+        assert!(
+            redirected["summary"].get("changes").is_none(),
+            "{redirected}"
+        );
+        assert!(
+            redirected["groups"].as_array().is_some_and(|groups| {
+                groups.iter().all(|group| {
+                    group["artifact_savings"]
+                        .as_array()
+                        .is_some_and(Vec::is_empty)
+                })
+            }),
+            "{redirected}"
+        );
+        let redirected_stderr = String::from_utf8_lossy(&failed_file.stderr);
+        assert_eq!(
+            redirected_stderr
+                .matches("warning: this run was not recorded (")
+                .count(),
+            1,
+            "{redirected_stderr}"
+        );
+        assert!(!redirected_stderr.contains("hint: "), "{redirected_stderr}");
+
+        let connection = Connection::open(&database).expect("reopen SQLite database");
+        let after: i64 = connection
+            .query_row("SELECT COUNT(*) FROM scan_run", [], |row| row.get(0))
+            .expect("count scan runs after rollback");
+        assert_eq!(after, before, "{mode}: failed recording changed scan_run");
+    }
+}
+
+#[test]
+fn fast_validation_failure_does_not_emit_an_analysis_hint() {
+    let dir = fixture();
+    let output = cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "fast", "--jobs", "0"])
+        .output()
+        .expect("run Fast scan with invalid jobs");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("jobs must be at least 1"), "{stderr}");
+    assert!(
+        !stderr.contains("hint: "),
+        "validation is not analysis: {stderr}"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -224,6 +363,267 @@ fn recorded_artifact_savings_reach_json_text_and_sarif_reports() {
         .expect("matching SARIF result")["properties"]["artifact_savings"]
         .clone();
     assert_eq!(sarif_savings, expected);
+}
+
+#[test]
+fn a_reused_scan_hydrates_artifact_savings_before_text_guidance() {
+    let dir = fixture();
+    let scanned = scan_json(dir.path());
+    let run_id = scanned["run"]["run_id"]
+        .as_i64()
+        .expect("scan JSON carries the recorded run id");
+    let group = scanned["groups"]
+        .as_array()
+        .and_then(|groups| groups.first())
+        .expect("scan finds a clone group");
+    let group_fingerprint = fingerprint(group["fingerprint"].as_str().expect("group fingerprint"));
+    let source_variant = fingerprint(
+        scanned["run"]["build_variant"]["fingerprint"]
+            .as_str()
+            .expect("source build variant fingerprint"),
+    );
+
+    let before = cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--format", "text", "-v"])
+        .output()
+        .expect("render reused scan without artifact evidence");
+    assert!(before.status.success(), "{before:?}");
+    let before_stdout = String::from_utf8(before.stdout).expect("text report");
+    let before_notes = String::from_utf8(before.stderr).expect("notes output");
+    assert!(
+        before_notes.contains("no artifact savings are recorded"),
+        "{before_notes}"
+    );
+    assert!(
+        before_notes.contains(
+            "note: no artifact savings are recorded; provide an artifact at <PATH> retaining symbols/debug info, or a matching companion via --debug-file <PATH>, then run artifact analyze <PATH> --source-run <id> --build-variant <manifest>\n"
+        ),
+        "{before_notes}"
+    );
+    assert_eq!(
+        before_notes
+            .matches("no artifact savings are recorded")
+            .count(),
+        1,
+        "the artifact guidance is run-scoped, not repeated per group"
+    );
+    assert!(
+        !before_stdout.contains("no artifact savings are recorded"),
+        "{before_stdout}"
+    );
+
+    record_artifact_savings(dir.path(), run_id, group_fingerprint, source_variant);
+
+    let after = cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--format", "text", "-v"])
+        .output()
+        .expect("render reused scan with artifact evidence");
+    assert!(after.status.success(), "{after:?}");
+    let after_stdout = String::from_utf8(after.stdout).expect("text report");
+    let after_notes = String::from_utf8(after.stderr).expect("notes output");
+    assert!(
+        after_stdout.contains("artifact refactoring estimates (not guaranteed):"),
+        "{after_stdout}"
+    );
+    assert!(
+        !after_notes.contains("no artifact savings are recorded"),
+        "{after_notes}"
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn artifact_hydration_corruption_keeps_recorded_identity_for_reuse_and_replay() {
+    for mode in ["fast", "structural"] {
+        let dir = fixture();
+        let initial = cmd()
+            .current_dir(dir.path())
+            .args(["scan", ".", "--mode", mode, "--format", "json"])
+            .output()
+            .expect("initial scan creates the recorded snapshot");
+        assert!(initial.status.success(), "{mode}: {initial:?}");
+        let initial: serde_json::Value =
+            serde_json::from_slice(&initial.stdout).expect("initial JSON report");
+        let run_id = initial["run"]["run_id"]
+            .as_i64()
+            .expect("initial report has a run id");
+        let group = initial["groups"]
+            .as_array()
+            .and_then(|groups| groups.first())
+            .expect("initial report has a clone group");
+        let second_group = initial["groups"]
+            .as_array()
+            .and_then(|groups| groups.get(1))
+            .expect("initial report has a second clone group");
+        let group_fingerprint = fingerprint(
+            group["fingerprint"]
+                .as_str()
+                .expect("initial group fingerprint"),
+        );
+        let source_variant = fingerprint(
+            initial["run"]["build_variant"]["fingerprint"]
+                .as_str()
+                .expect("initial source variant fingerprint"),
+        );
+        record_artifact_savings(dir.path(), run_id, group_fingerprint, source_variant);
+        let second_group_fingerprint = fingerprint(
+            second_group["fingerprint"]
+                .as_str()
+                .expect("second group fingerprint"),
+        );
+        record_artifact_savings(dir.path(), run_id, second_group_fingerprint, source_variant);
+
+        let database = dir.path().join(".codehelion/audit.db");
+        Connection::open(&database)
+            .expect("open scan database")
+            .execute(
+                "UPDATE artifact_analysis_clone_group_savings
+                 SET assumptions_json = 'not-json'
+                 WHERE clone_group_fingerprint = ?1",
+                [second_group_fingerprint.as_slice()],
+            )
+            .expect("corrupt the second supplemental assumptions payload");
+
+        let failed_reuse = cmd()
+            .current_dir(dir.path())
+            .args(["scan", ".", "--mode", mode, "--format", "json"])
+            .output()
+            .expect("reuse scan with corrupt artifact evidence");
+        assert!(!failed_reuse.status.success(), "{mode}: {failed_reuse:?}");
+        let reused: serde_json::Value =
+            serde_json::from_slice(&failed_reuse.stdout).expect("failed reuse still emits JSON");
+        assert_eq!(reused["run"]["run_id"], run_id, "{reused}");
+        assert_eq!(reused["run"]["reused"], serde_json::json!(true), "{reused}");
+        assert_artifacts_cleared(&reused);
+        let reuse_stderr = String::from_utf8_lossy(&failed_reuse.stderr);
+        assert_eq!(
+            reuse_stderr
+                .matches("warning: artifact savings were not loaded")
+                .count(),
+            1,
+            "{reuse_stderr}"
+        );
+        assert!(
+            !reuse_stderr.contains("no artifact savings are recorded"),
+            "{reuse_stderr}"
+        );
+        assert!(!reuse_stderr.contains("hint: "), "{reuse_stderr}");
+
+        let failed_text = cmd()
+            .current_dir(dir.path())
+            .args(["scan", ".", "--mode", mode, "--format", "text", "-v"])
+            .output()
+            .expect("text reuse scan with corrupt artifact evidence");
+        assert!(!failed_text.status.success(), "{mode}: {failed_text:?}");
+        let text_stdout = String::from_utf8_lossy(&failed_text.stdout);
+        assert!(text_stdout.contains("snapshot:"), "{text_stdout}");
+        let text_stderr = String::from_utf8_lossy(&failed_text.stderr);
+        assert_eq!(
+            text_stderr
+                .matches("warning: artifact savings were not loaded")
+                .count(),
+            1,
+            "{text_stderr}"
+        );
+        assert!(
+            !text_stderr.contains("no artifact savings are recorded"),
+            "{text_stderr}"
+        );
+        assert!(
+            !text_stderr.contains("artifact refactoring estimates"),
+            "{text_stderr}"
+        );
+        assert!(!text_stderr.contains("hint: "), "{text_stderr}");
+
+        let output_path = dir.path().join(format!("{mode}-hydration-failure.json"));
+        let failed_output = cmd()
+            .current_dir(dir.path())
+            .args([
+                "scan",
+                ".",
+                "--mode",
+                mode,
+                "--format",
+                "json",
+                "--output",
+                output_path.to_str().expect("UTF-8 output path"),
+            ])
+            .output()
+            .expect("redirected reuse scan with corrupt artifact evidence");
+        assert!(!failed_output.status.success(), "{mode}: {failed_output:?}");
+        assert!(failed_output.stdout.is_empty(), "{failed_output:?}");
+        let redirected: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&output_path).expect("read redirected hydration report"),
+        )
+        .expect("redirected hydration report is valid JSON");
+        assert_eq!(redirected["run"]["run_id"], run_id, "{redirected}");
+        assert_eq!(
+            redirected["run"]["reused"],
+            serde_json::json!(true),
+            "{redirected}"
+        );
+        assert_artifacts_cleared(&redirected);
+        let output_stderr = String::from_utf8_lossy(&failed_output.stderr);
+        assert_eq!(
+            output_stderr
+                .matches("warning: artifact savings were not loaded")
+                .count(),
+            1,
+            "{output_stderr}"
+        );
+        assert!(
+            !output_stderr.contains("no artifact savings are recorded"),
+            "{output_stderr}"
+        );
+
+        let run_arg = run_id.to_string();
+        let replay = cmd()
+            .current_dir(dir.path())
+            .args(["report", "--run", &run_arg, "--format", "json"])
+            .output()
+            .expect("replay recorded run with corrupt artifact evidence");
+        assert!(!replay.status.success(), "{mode}: {replay:?}");
+        let replayed: serde_json::Value =
+            serde_json::from_slice(&replay.stdout).expect("failed replay still emits JSON");
+        assert_eq!(replayed["run"]["run_id"], run_id, "{replayed}");
+        assert!(replayed["run"].get("reused").is_none(), "{replayed}");
+        assert_artifacts_cleared(&replayed);
+        let replay_stderr = String::from_utf8_lossy(&replay.stderr);
+        assert_eq!(
+            replay_stderr
+                .matches("warning: artifact savings were not loaded")
+                .count(),
+            1,
+            "{replay_stderr}"
+        );
+        assert!(
+            !replay_stderr.contains("no artifact savings are recorded"),
+            "{replay_stderr}"
+        );
+        assert!(!replay_stderr.contains("hint: "), "{replay_stderr}");
+
+        let store = open_store(dir.path());
+        assert_eq!(
+            store.table_count("scan_run").expect("count scan runs"),
+            1,
+            "hydration failures must not create or remove the recorded run"
+        );
+    }
+}
+
+fn assert_artifacts_cleared(report: &serde_json::Value) {
+    assert!(
+        report["groups"].as_array().is_some_and(|groups| {
+            groups.iter().all(|group| {
+                group["artifact_savings"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty)
+            })
+        }),
+        "{report}"
+    );
 }
 
 fn fingerprint(value: &str) -> [u8; 16] {
@@ -592,6 +992,73 @@ fn path_suppression_hides_but_records_findings() {
         .success()
         .stdout(predicate::str::contains("suppressed groups:"))
         .stdout(predicate::str::contains("src/one.c"));
+}
+
+#[test]
+fn reuse_restores_the_recorded_suppression_policy_for_replay() {
+    for mode in ["fast", "structural"] {
+        let dir = fixture();
+        let root = dir.path();
+        let config = root.join("codehelion.toml");
+        let scan = |root: &Path, mode: &str| {
+            let output = cmd()
+                .current_dir(root)
+                .args(["scan", ".", "--mode", mode, "--format", "json"])
+                .output()
+                .expect("scan suppression-policy fixture");
+            assert!(output.status.success(), "{mode}: {output:?}");
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("scan emits JSON")
+        };
+
+        std::fs::write(&config, "[suppression]\npaths = [\"src/*.c\"]\n").unwrap();
+        let first = scan(root, mode);
+        let first_run = first["run"]["run_id"].as_i64().expect("first run id");
+
+        std::fs::write(&config, "[suppression]\npaths = [\"src/*.rs\"]\n").unwrap();
+        let intervening = scan(root, mode);
+        assert_ne!(intervening["run"]["run_id"], first_run);
+
+        std::fs::write(&config, "[suppression]\npaths = [\"src/*.c\"]\n").unwrap();
+        let reused = scan(root, mode);
+        assert_eq!(reused["run"]["run_id"], first_run, "{reused}");
+        assert_eq!(reused["run"]["reused"], true, "{reused}");
+        assert_eq!(reused["groups"], first["groups"]);
+
+        let replay = cmd()
+            .current_dir(root)
+            .args([
+                "report",
+                "--run",
+                &first_run.to_string(),
+                "--format",
+                "json",
+            ])
+            .output()
+            .expect("replay reused policy");
+        assert!(replay.status.success(), "{mode}: {replay:?}");
+        let replay: serde_json::Value =
+            serde_json::from_slice(&replay.stdout).expect("replay emits JSON");
+        assert_eq!(replay["groups"], first["groups"]);
+
+        let connection = Connection::open(root.join(".codehelion/audit.db")).unwrap();
+        let active: Vec<(String, bool)> = connection
+            .prepare(
+                "SELECT pattern, active FROM suppression \
+                 WHERE pattern IN ('src/*.c', 'src/*.rs') ORDER BY pattern",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            active,
+            vec![
+                ("src/*.c".to_string(), true),
+                ("src/*.rs".to_string(), false)
+            ]
+        );
+    }
 }
 
 #[test]

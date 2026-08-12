@@ -1,12 +1,12 @@
 //! Conversion of structural analysis results into public report models.
 
 use super::{
-    BTreeMap, CloneScope, DiscoveryReport, GroupDetail, LiteralNorm, REGION_SIMILARITY, Report,
-    ReportInputs, SemanticDetection, SemanticUnitGraph, StructuralGroup, StructuralRegion,
-    StructuralUnit, SummaryRow, VerifiedPair, WEIGHT_VERSION, aggregate_test_code_evidence, as_u64,
-    engine, region_identifier_jaccard, region_test_code_evidence, report,
-    semantic_group_member_fingerprints, semantic_member_ranks, semantic_scope, shared, stable_id,
-    structural, unit_token_span,
+    BTreeMap, BTreeSet, CloneScope, DiscoveryReport, GroupDetail, LiteralNorm, REGION_SIMILARITY,
+    Report, ReportInputs, Result, SemanticDetection, SemanticUnitGraph, StructuralGroup,
+    StructuralRegion, StructuralUnit, SummaryRow, VerifiedPair, WEIGHT_VERSION,
+    aggregate_test_code_evidence, as_u64, engine, region_identifier_jaccard,
+    region_test_code_evidence, report, semantic_group_member_fingerprints, semantic_member_ranks,
+    semantic_scope, shared, stable_id, structural, unit_token_span,
 };
 use codehelion_core::boilerplate::BOILERPLATE_VERSION;
 use codehelion_core::discovery::NORMALIZATION_VERSION;
@@ -25,7 +25,7 @@ use codehelion_store::snapshot::UnparsedRow;
 
 use crate::scan::{RunInfoInputs, common_run_info, display_path, file_counts, guardrails_row};
 
-pub(super) fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
+pub(super) fn build_groups(inputs: &ReportInputs<'_>) -> Result<report::NormalizedGroups> {
     let mut entries: Vec<report::Group> = (0..inputs.analysis.groups.groups.len())
         .map(|index| build_group(inputs, index))
         // A run carries no boilerplate classification: the classifier reads
@@ -44,7 +44,7 @@ pub(super) fn build_groups(inputs: &ReportInputs<'_>) -> Vec<report::Group> {
         .chain((0..inputs.semantic_pairs.len()).map(|index| build_semantic_pair(inputs, index)))
         .collect();
     report::order(&mut entries, inputs.suppression, inputs.sort);
-    entries
+    report::normalize_identities(entries)
 }
 
 /// Turn one verified semantic relation left outside every cohesive group into
@@ -296,6 +296,35 @@ pub(super) fn funnel(
         // fell through the primary estimate gate.
         report::FunnelStage::new("near-match near misses", as_u64(near.near_misses_retained))
             .dropping("retention_cap", as_u64(near.near_miss_cap_dropped)),
+        report::FunnelStage::new("sibling entries", as_u64(stats.siblings.accepted))
+            .dropping(
+                "sibling_candidate_budget",
+                as_u64(stats.siblings.candidate_budget_dropped),
+            )
+            .dropping(
+                "sibling_per_group_cap",
+                as_u64(stats.siblings.per_group_cap_dropped),
+            )
+            .dropping(
+                "sibling_total_cap",
+                as_u64(stats.siblings.total_cap_dropped),
+            ),
+        report::FunnelStage::new(
+            "signature sibling entries",
+            as_u64(stats.signature_siblings.accepted),
+        )
+        .dropping(
+            "signature_sibling_candidate_budget",
+            as_u64(stats.signature_siblings.candidate_budget_dropped),
+        )
+        .dropping(
+            "signature_sibling_per_group_cap",
+            as_u64(stats.signature_siblings.per_group_cap_dropped),
+        )
+        .dropping(
+            "signature_sibling_total_cap",
+            as_u64(stats.signature_siblings.total_cap_dropped),
+        ),
         report::FunnelStage::new(
             "control-flow pairs",
             as_u64(stats.control_flow.candidate_pairs),
@@ -430,7 +459,7 @@ pub(super) fn funnel(
 /// Assemble the report model both output formats render from.
 pub(super) fn build_report(
     inputs: &ReportInputs<'_>,
-    run_id: i64,
+    run_id: Option<i64>,
     stored: &SummaryRow,
     groups: Vec<report::Group>,
 ) -> Report {
@@ -443,10 +472,14 @@ pub(super) fn build_report(
             started_at: inputs.started_at,
             finished_at: inputs.finished_at,
             variant: inputs.variant,
-            detector_versions: detector_versions(inputs.literals, inputs.entropy_ratio_floor)
-                .into_iter()
-                .map(|(component, version)| report::DetectorVersion { component, version })
-                .collect(),
+            detector_versions: detector_versions(
+                inputs.literals,
+                inputs.entropy_ratio_floor,
+                inputs.compiler_answers,
+            )
+            .into_iter()
+            .map(|(component, version)| report::DetectorVersion { component, version })
+            .collect(),
             weights: &inputs.weights,
         }),
         stored,
@@ -455,6 +488,7 @@ pub(super) fn build_report(
     );
     report.siblings = build_siblings(inputs);
     report.near_misses = build_near_misses(inputs);
+    report.order_supplemental();
     report
 }
 
@@ -522,6 +556,8 @@ fn build_siblings(inputs: &ReportInputs<'_>) -> Vec<report::GroupSiblings> {
                         report::Sibling {
                             clone_type: sibling.clone_type.name().to_string(),
                             confidence_band: sibling.confidence.name().to_string(),
+                            basis: sibling.basis.name().to_string(),
+                            signature: sibling.signature.clone(),
                             similarity: report::SiblingSimilarity {
                                 weight_version: WEIGHT_VERSION.to_string(),
                                 lexical: sibling.breakdown.lexical,
@@ -999,9 +1035,10 @@ fn similarity(group: &StructuralGroup, detail: &GroupDetail) -> report::Similari
     }
 }
 
-/// The `(component, version)` pairs recorded with every structural snapshot.
-/// The frontend versions are the structural parsers', which is what the
-/// fingerprints were derived under.
+/// The `(component, version)` pairs recorded with every Structural/Semantic
+/// snapshot. The frontend versions are the structural parsers', which is what
+/// the fingerprints were derived under; an answering compiler additionally
+/// qualifies the public set with each distinct IR schema it actually emitted.
 ///
 /// What a difference in any of them costs a recorded result is weighed by
 /// [`codehelion_core::compat`] rather than assumed from being listed: the
@@ -1010,8 +1047,9 @@ fn similarity(group: &StructuralGroup, detail: &GroupDetail) -> report::Similari
 pub(super) fn detector_versions(
     literals: LiteralNorm,
     entropy_ratio_floor: f64,
+    answers: Option<&crate::semantic::Answers>,
 ) -> Vec<(String, String)> {
-    vec![
+    let mut versions = vec![
         ("fp-schema".to_string(), FP_SCHEMA_VERSION.to_string()),
         (
             "literals".to_string(),
@@ -1057,5 +1095,22 @@ pub(super) fn detector_versions(
             "frontend.cpp".to_string(),
             codehelion_frontend_cpp::ir::STRUCTURAL_FRONTEND_VERSION.to_string(),
         ),
-    ]
+    ];
+    let compiler_ir_versions: BTreeSet<String> = answers
+        .into_iter()
+        .flat_map(|answers| answers.per_source.iter())
+        .filter_map(|answer| match answer {
+            crate::semantic::Answer::Analyzed { ir, .. } => Some(ir.schema_version.clone()),
+            crate::semantic::Answer::Unavailable { .. }
+            | crate::semantic::Answer::NotAsked { .. } => None,
+        })
+        .collect();
+    versions.extend(compiler_ir_versions.into_iter().map(|version| {
+        (
+            codehelion_store::compiler::IR_SCHEMA_COMPONENT.to_string(),
+            version,
+        )
+    }));
+    versions.sort_unstable();
+    versions
 }

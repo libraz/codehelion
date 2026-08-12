@@ -12,7 +12,6 @@ use super::{
     UnitRow, build_group, engine, fast_group_scope, literal_norm, path_key, priority_row, report,
     shared, stable_id,
 };
-use std::ffi::OsString;
 
 /// The tree a scan read, as rows to record beside its findings.
 ///
@@ -31,24 +30,73 @@ pub(crate) fn file_rows(units: &[SourceUnit]) -> Vec<FileRow> {
         .collect()
 }
 
-/// Rank every entry, persist the snapshot, and fill in what the recording
-/// decided: the run id and what became of the duplication since last time.
+/// Hash the effective detector configuration and the reuse profile.
 ///
-/// The order matters and is the point of the arrangement. The ranking reads
-/// the assembled report entries, and the audit database stores what those
-/// entries say, so a run's two accounts of where a finding belongs are one
-/// account written twice rather than two derivations that happen to agree.
-pub(super) fn rank_and_record(
+/// The profile is part of reuse compatibility even though it is not a
+/// detector setting serialized by `Config`: an untrusted scan is subject to a
+/// different execution contract from a trusted one. Keeping this recipe in
+/// one place prevents the Fast, Structural, and Semantic paths from selecting
+/// different predecessors for the same invocation.
+pub(crate) fn reuse_config_hash(
+    cfg: &Config,
+    untrusted: bool,
+    siblings_by_signature: bool,
+) -> Result<ContentHash> {
+    let config_text = format!(
+        "{}\nreuse-profile-v2:untrusted={};siblings-by-signature={}",
+        cfg.to_toml()?,
+        untrusted,
+        siblings_by_signature,
+    );
+    Ok(ContentHash::of(config_text.as_bytes()))
+}
+
+/// Rank every Fast entry without touching the audit database.
+pub(super) fn rank_groups(
+    inputs: &BuildInputs<'_>,
+    summary: &mut SummaryRow,
+) -> Result<Vec<report::Group>> {
+    let raw_ranked: Vec<report::Group> = (0..inputs.report.groups.len())
+        .map(|index| build_group(inputs, index))
+        .collect();
+    let normalized = report::normalize_identities(raw_ranked)?;
+    report::append_stored_identity_stage(
+        &mut summary.funnel,
+        normalized.groups.len(),
+        normalized.identity_collapsed,
+    );
+    // The report model carries the retained groups; persistence reconstructs
+    // source positions by their stable group fingerprints after presentation
+    // ordering, so no second copy of non-Clone report values is required.
+    Ok(normalized.groups)
+}
+
+/// Persist already-ranked Fast findings and fill in what recording decided:
+/// the run id and what became of duplication since the previous run.
+pub(super) fn record_ranked(
     inputs: &mut BuildInputs<'_>,
     cfg: &Config,
     contexts: &[FileContext<'_>],
     files: Vec<FileRow>,
     summary: &SummaryRow,
-) -> Result<Vec<report::Group>> {
-    let ranked: Vec<report::Group> = (0..inputs.report.groups.len())
-        .map(|index| build_group(inputs, index))
-        .collect();
+    ranked: &[report::Group],
+) -> Result<()> {
     let variant = &inputs.discovered.build_variant;
+    let source_indices: Vec<usize> = ranked
+        .iter()
+        .map(|group| {
+            inputs
+                .ids
+                .iter()
+                .position(|ids| ids.fingerprint.to_hex() == group.fingerprint)
+                .with_context(|| {
+                    format!(
+                        "ranked Fast group {} is missing from the engine identity report",
+                        group.fingerprint
+                    )
+                })
+        })
+        .collect::<Result<_>>()?;
     let (units, groups) = snapshot_rows(
         inputs.lexed,
         contexts,
@@ -56,16 +104,12 @@ pub(super) fn rank_and_record(
         inputs.report,
         inputs.ids,
         inputs.group_suppressed,
-        &ranked,
+        ranked,
+        &source_indices,
         &cfg.suppression,
     );
     let mut store = open_store(inputs.db_path)?;
-    let config_text = format!(
-        "{}\nreuse-profile-v1:untrusted={}",
-        cfg.to_toml()?,
-        inputs.untrusted
-    );
-    let config_hash = ContentHash::of(config_text.as_bytes());
+    let config_hash = reuse_config_hash(cfg, inputs.untrusted, false)?;
     let mut detector_versions = detector_versions(
         literal_norm(cfg.literal_normalization),
         cfg.entropy_ratio_floor,
@@ -88,9 +132,10 @@ pub(super) fn rank_and_record(
                 .is_some_and(|stored| stored.baseline_digest == summary.baseline_digest)
             && previous_tree == current_tree
         {
-            inputs.run_id = previous.id;
+            store.activate_suppressions(&inputs.rules.rows)?;
+            inputs.run_id = Some(previous.id);
             inputs.reused = true;
-            return Ok(ranked);
+            return Ok(());
         }
     }
     let snapshot = Snapshot {
@@ -116,11 +161,10 @@ pub(super) fn rank_and_record(
         compiler_units: Vec::new(),
         summary: summary.clone(),
     };
-    inputs.run_id = store.record_snapshot(&snapshot)?;
-    if let Some(previous) = predecessor {
-        store.adopt_matching_lineages(inputs.run_id, previous.id)?;
-    }
-    Ok(ranked)
+    let run_id = store
+        .record_snapshot_with_predecessor(&snapshot, predecessor.as_ref().map(|run| run.id))?;
+    inputs.run_id = Some(run_id);
+    Ok(())
 }
 
 fn file_tree(files: &[FileRow]) -> BTreeMap<String, String> {
@@ -160,7 +204,7 @@ fn tree_changes(
     }
 }
 
-/// Open the v1 store, creating its parent directory when needed.
+/// Open the current store, creating its parent directory when needed.
 pub(crate) fn open_store(path: &Path) -> Result<Store> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -168,38 +212,12 @@ pub(crate) fn open_store(path: &Path) -> Result<Store> {
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
     }
-    match Store::open(path) {
-        Ok(store) => Ok(store),
-        Err(codehelion_store::StoreError::UnsupportedSchema { .. }) => {
-            remove_incompatible_database(path)?;
-            Store::open(path)
-                .with_context(|| format!("recreating audit database {}", path.display()))
-        }
-        Err(error) => {
-            Err(error).with_context(|| format!("opening audit database {}", path.display()))
-        }
-    }
-}
-
-/// Remove one incompatible pre-release baseline and its WAL sidecars.
-///
-/// This is called only from scan persistence after the command acquired the
-/// database lease. Read paths use `Store::open_existing` and never reach it.
-fn remove_incompatible_database(path: &Path) -> Result<()> {
-    for suffix in ["", "-wal", "-shm"] {
-        let mut candidate: OsString = path.as_os_str().to_owned();
-        candidate.push(suffix);
-        let candidate = std::path::PathBuf::from(candidate);
-        match std::fs::remove_file(&candidate) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("removing incompatible {}", candidate.display()));
-            }
-        }
-    }
-    Ok(())
+    Store::open(path).with_context(|| {
+        format!(
+            "opening audit database {}; incompatible databases are not migrated or deleted; use a fresh path for a new scan",
+            path.display()
+        )
+    })
 }
 
 /// The `(component, version)` pairs recorded with every snapshot.
@@ -266,6 +284,7 @@ fn snapshot_rows(
     ids: &[GroupIds],
     group_suppressed: &[Option<usize>],
     ranked: &[report::Group],
+    retained_indices: &[usize],
     suppression: &crate::config::Suppression,
 ) -> (Vec<UnitRow>, Vec<GroupRow>) {
     let mut host_index: BTreeMap<(usize, usize), usize> = BTreeMap::new();
@@ -301,13 +320,19 @@ fn snapshot_rows(
         });
     }
 
-    let groups = report
-        .groups
+    let groups = ranked
         .iter()
-        .zip(ids)
-        .zip(group_suppressed)
-        .enumerate()
-        .map(|(index, ((group, group_ids), suppressed_by))| {
+        .zip(retained_indices)
+        .map(|(ranked_group, &source_index)| {
+            let group = &report.groups[source_index];
+            let group_ids = &ids[source_index];
+            let suppressed_by = group_suppressed[source_index];
+            let retained_findings = ranked_group
+                .members
+                .iter()
+                .map(|member| member.finding_id.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut emitted_findings = std::collections::BTreeSet::new();
             let mut row = shared::stored_group(shared::StoredGroupCore {
                 fingerprint: group_ids.fingerprint,
                 clone_type: group.clone_type,
@@ -315,23 +340,28 @@ fn snapshot_rows(
                 statements: None,
                 score: group.score,
                 entropy_bits: group.entropy_bits,
-                suppressed_by: *suppressed_by,
-                ranked_down: report::ranks_down(&ranked[index], suppression),
-                priority: priority_row(&ranked[index].priority),
+                suppressed_by,
+                ranked_down: report::ranks_down(ranked_group, suppression),
+                priority: priority_row(&ranked_group.priority),
                 members: group
                     .members
                     .iter()
                     .zip(&group_ids.members)
-                    .map(|(instance, member_ids)| MemberRow {
-                        content: member_ids.content,
-                        finding: member_ids.finding,
-                        language: lexed[instance.file].language,
-                        host_unit: instance.unit.map(|unit| host_index[&(instance.file, unit)]),
-                        boilerplate: None,
-                        file_path: lexed[instance.file].relative_path.clone(),
-                        start_line: instance.start_line,
-                        end_line: instance.end_line,
-                        token_count: instance.token_end - instance.token_start,
+                    .filter_map(|(instance, member_ids)| {
+                        let finding = member_ids.finding.to_hex();
+                        (retained_findings.contains(finding.as_str())
+                            && emitted_findings.insert(finding))
+                        .then_some(MemberRow {
+                            content: member_ids.content,
+                            finding: member_ids.finding,
+                            language: lexed[instance.file].language,
+                            host_unit: instance.unit.map(|unit| host_index[&(instance.file, unit)]),
+                            boilerplate: None,
+                            file_path: lexed[instance.file].relative_path.clone(),
+                            start_line: instance.start_line,
+                            end_line: instance.end_line,
+                            token_count: instance.token_end - instance.token_start,
+                        })
                     })
                     .collect(),
             });

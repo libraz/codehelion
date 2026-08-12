@@ -1,4 +1,5 @@
 use super::*;
+use rusqlite::Connection;
 
 #[test]
 fn a_cpp_tree_is_answered_about_rather_than_reported_as_unreadable() {
@@ -57,6 +58,111 @@ fn a_cpp_tree_is_answered_about_rather_than_reported_as_unreadable() {
                 setting.name == "compiler_version" && setting.value.contains("clang")
             })
     }));
+}
+
+#[test]
+fn semantic_partition_persistence_failure_publishes_unrecorded_partitions() {
+    require_clang_helper();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant fixture");
+    let initial = cmd()
+        .current_dir(&root)
+        .args(["scan", ".", "--mode", "semantic", "--format", "json"])
+        .output()
+        .expect("initial semantic scan");
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+
+    let database = root.join(".codehelion/audit.db");
+    let connection = Connection::open(&database).expect("open semantic SQLite database");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER force_semantic_scan_complete
+             BEFORE UPDATE OF status ON scan_run WHEN NEW.status = 'completed'
+             BEGIN SELECT RAISE(FAIL, 'forced semantic completion failure'); END;",
+        )
+        .expect("install semantic persistence trigger");
+    let before: i64 = connection
+        .query_row("SELECT COUNT(*) FROM scan_run", [], |row| row.get(0))
+        .expect("count completed semantic runs");
+    drop(connection);
+
+    let failed = cmd()
+        .current_dir(&root)
+        .args([
+            "scan",
+            ".",
+            "--mode",
+            "semantic",
+            "--format",
+            "json",
+            "--no-reuse",
+        ])
+        .output()
+        .expect("semantic scan with forced persistence failure");
+    assert!(!failed.status.success(), "{failed:?}");
+    let report: Value = serde_json::from_slice(&failed.stdout).expect("partitioned JSON report");
+    let partitions = report["partitions"].as_array().expect("partitioned report");
+    assert_eq!(partitions.len(), 2, "{report}");
+    assert!(
+        partitions
+            .iter()
+            .all(|partition| partition["run"].get("run_id").is_none()),
+        "{report}"
+    );
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert_eq!(
+        stderr
+            .matches("warning: this run was not recorded (")
+            .count(),
+        1,
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("forced semantic completion failure"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("hint: "),
+        "persistence failure is not analysis: {stderr}"
+    );
+
+    let connection = Connection::open(&database).expect("reopen semantic SQLite database");
+    let after: i64 = connection
+        .query_row("SELECT COUNT(*) FROM scan_run", [], |row| row.get(0))
+        .expect("count semantic runs after rollback");
+    assert_eq!(
+        after, before,
+        "staged semantic partitions were not discarded"
+    );
+}
+
+#[test]
+fn invalid_semantic_test_path_glob_is_a_configuration_error_without_an_analysis_hint() {
+    require_clang_helper();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant fixture");
+    std::fs::write(
+        root.join("codehelion.toml"),
+        "[suppression]\ntest-paths = [\"[\"]\n",
+    )
+    .expect("write invalid test-path glob");
+
+    let output = cmd()
+        .current_dir(&root)
+        .args(["scan", ".", "--mode", "semantic", "--format", "json"])
+        .output()
+        .expect("run semantic scan with invalid test-path glob");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("in suppression test-paths"), "{stderr}");
+    assert!(
+        !stderr.contains("hint: "),
+        "configuration error is not analysis: {stderr}"
+    );
 }
 
 #[test]

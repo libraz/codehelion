@@ -428,7 +428,7 @@ pub(super) fn registered_semantic_pairs(
             });
         }
     }
-    assign_semantic_occurrence_ranks(&mut units);
+    assign_semantic_occurrence_ranks(&mut units, analysis);
     // Every normalized window is compared, without consulting the clone-size
     // floor. A window is a closed semantic claim rather than a source
     // fragment: it spans the operations the compiler resolved, so its token
@@ -836,18 +836,132 @@ pub(super) fn semantic_member_ranks<'a>(
 
 /// Derive one host-local occurrence rank before grouping so every consumer
 /// uses the same position-independent identity for the same semantic window.
-fn assign_semantic_occurrence_ranks(units: &mut [SemanticUnitGraph]) {
+fn assign_semantic_occurrence_ranks(units: &mut [SemanticUnitGraph], analysis: &StructuralReport) {
     let mut ordered: Vec<_> = units
         .iter()
         .enumerate()
-        .map(|(index, member)| (index, member.unit, member.range, member.content))
+        .map(|(index, member)| {
+            (
+                index,
+                analysis.units[member.unit].fingerprint,
+                member.range,
+                member.content,
+            )
+        })
         .collect();
-    ordered.sort_by_key(|(_, unit, range, content)| (*unit, *range, *content));
-    let mut next_by_unit = BTreeMap::new();
-    for (index, unit, _, _) in ordered {
-        let rank = next_by_unit.entry(unit).or_insert(0_u32);
+    ordered.sort_by_key(|(_, host, range, content)| (*host, *range, *content));
+    let mut next_by_host = BTreeMap::new();
+    for (index, host, _, _) in ordered {
+        let rank = next_by_host.entry(host).or_insert(0_u32);
         units[index].occurrence_rank = *rank;
         *rank = rank.saturating_add(1);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::default_trait_access, clippy::expect_used)]
+mod occurrence_rank_tests {
+    use super::{
+        ByteRange, SemanticOperationGraph, SemanticUnitGraph, StructuralReport, StructuralUnit,
+        assign_semantic_occurrence_ranks, stable_id,
+    };
+    use codehelion_core::discovery::Language;
+    use codehelion_core::frontend::UnitKind;
+    use codehelion_core::grouping::{GroupingConfig, group};
+    use codehelion_core::structural::StructuralStats;
+
+    fn make_unit(file: usize, fingerprint: stable_id::UnitFingerprint) -> StructuralUnit {
+        StructuralUnit {
+            file,
+            kind: UnitKind::Function,
+            range: ByteRange { start: 0, end: 100 },
+            start_line: 1,
+            end_line: 10,
+            token_start: 0,
+            token_end: 10,
+            name: None,
+            boilerplate: None,
+            test_code: false,
+            test_code_evidence: None,
+            fingerprint,
+            content: stable_id::FragmentFingerprint::from_bytes([11; 16]),
+            normalized_content: stable_id::FragmentFingerprint::from_bytes([12; 16]),
+        }
+    }
+
+    #[test]
+    fn identical_hosts_from_different_units_get_distinct_semantic_ranks() {
+        let host = stable_id::UnitFingerprint::from_bytes([7; 16]);
+        let other_host = stable_id::UnitFingerprint::from_bytes([8; 16]);
+        let content = stable_id::FragmentFingerprint::from_bytes([9; 16]);
+        let graph = SemanticOperationGraph::new(Language::Rust, [0; 32], Vec::new(), Vec::new())
+            .expect("empty graph is valid");
+        let analysis = StructuralReport {
+            units: vec![
+                make_unit(0, host),
+                make_unit(1, host),
+                make_unit(2, other_host),
+            ],
+            groups: group(&[], &[], &GroupingConfig::default()),
+            regions: Vec::new(),
+            details: Vec::new(),
+            unrepresented: Vec::new(),
+            siblings: Vec::new(),
+            near_misses: Vec::new(),
+            stats: StructuralStats::default(),
+        };
+        let mut windows = vec![
+            SemanticUnitGraph {
+                unit: 0,
+                occurrence_rank: 0,
+                range: ByteRange { start: 40, end: 50 },
+                start_line: 4,
+                end_line: 5,
+                token_count: 2,
+                graph: graph.clone(),
+                content,
+                normalization_confidence: 1.0,
+                interactions: Default::default(),
+                data_flows: Default::default(),
+                cfg_shape: None,
+            },
+            SemanticUnitGraph {
+                unit: 1,
+                occurrence_rank: 0,
+                range: ByteRange { start: 10, end: 20 },
+                start_line: 1,
+                end_line: 2,
+                token_count: 2,
+                graph: graph.clone(),
+                content,
+                normalization_confidence: 1.0,
+                interactions: Default::default(),
+                data_flows: Default::default(),
+                cfg_shape: None,
+            },
+            SemanticUnitGraph {
+                unit: 2,
+                occurrence_rank: 0,
+                range: ByteRange { start: 10, end: 20 },
+                start_line: 1,
+                end_line: 2,
+                token_count: 2,
+                graph,
+                content,
+                normalization_confidence: 1.0,
+                interactions: Default::default(),
+                data_flows: Default::default(),
+                cfg_shape: None,
+            },
+        ];
+        assign_semantic_occurrence_ranks(&mut windows, &analysis);
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| window.occurrence_rank)
+                .collect::<Vec<_>>(),
+            vec![1, 0, 0]
+        );
     }
 }
 

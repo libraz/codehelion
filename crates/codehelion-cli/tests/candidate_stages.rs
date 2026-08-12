@@ -53,9 +53,9 @@ struct Expected {
 const CORPORA: &[Expected] = &[
     Expected {
         path: "synthetic/rust",
-        groups: 2,
-        without_near_match: 2,
-        without_shape_gate: 2,
+        groups: 3,
+        without_near_match: 3,
+        without_shape_gate: 3,
     },
     Expected {
         path: "synthetic/c",
@@ -65,9 +65,9 @@ const CORPORA: &[Expected] = &[
     },
     Expected {
         path: "synthetic/cpp",
-        groups: 2,
-        without_near_match: 2,
-        without_shape_gate: 2,
+        groups: 3,
+        without_near_match: 3,
+        without_shape_gate: 3,
     },
     Expected {
         path: "synthetic/rust-graded",

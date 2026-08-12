@@ -21,8 +21,8 @@ use anyhow::{Context, Result, bail};
 use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::CloneScope;
 use codehelion_core::discovery::{
-    BuildConfiguration, BuildVariant, ContentHash, CppBuild, DiscoveryReport, Language,
-    LanguageSelection, RustBuild, SourceUnit, content_hash,
+    BuildConfiguration, BuildVariant, CppBuild, DiscoveryReport, Language, LanguageSelection,
+    RustBuild, SourceUnit, content_hash,
 };
 use codehelion_core::engine::{self, LiteralNorm};
 use codehelion_core::frontend::Token;
@@ -38,8 +38,8 @@ use codehelion_core::semantic::{
 };
 use codehelion_core::stable_id;
 use codehelion_core::structural::{
-    self, CrossVariantUnit, GroupDetail, RegionOccurrence, SourceTokenSpan, StructuralConfig,
-    StructuralRegion, StructuralReport, StructuralUnit, VerifiedPair,
+    self, CrossVariantUnit, DirectoryPartition, GroupDetail, RegionOccurrence, SourceTokenSpan,
+    StructuralConfig, StructuralRegion, StructuralReport, StructuralUnit, VerifiedPair,
 };
 use codehelion_core::test_code::{self, TestCodeEvidence};
 use codehelion_core::verify::WEIGHT_VERSION;
@@ -49,13 +49,13 @@ use codehelion_store::snapshot::{
     CrossVariantComparisonSnapshot, CrossVariantGroupRow, CrossVariantMemberRow, FileRow, GroupRow,
     MemberRow, NearMissRow, PriorityRow, SemanticEvidenceRow, SemanticNodeMappingRow,
     SemanticOperationGraphRow, SiblingGroupRow, SiblingRow, SimilarityBreakdownRow, Snapshot,
-    SummaryRow, UnitRow,
+    SnapshotComparisons, StagedSnapshotPart, SummaryRow, UnitRow,
 };
 
 use super::{
     FileOutcome, ScanBaseline, as_u64, database_path, discover_sources, effective_jobs,
     filter_globs, literal_norm, map_sources, open_store, parse_work_byte_limit, path_key,
-    rfc3339_now, shared, write_partitioned_reports,
+    rfc3339_now, shared, write_partitioned_reports, write_report_without_artifact_guidance,
 };
 
 use crate::Outcome;
@@ -71,8 +71,11 @@ use codehelion_helper::protocol::{CompileCommandSelector, Execution};
 use codehelion_helper::{Helper, SandboxRequest};
 
 /// The reporting metadata of one parsed source file.
-struct SourceMeta {
+pub(super) struct SourceMeta {
     relative_path: String,
+    /// Repository-relative parent key used only to build opaque core
+    /// directory partitions for signature siblings.
+    directory_key: String,
     language: Language,
     /// 1-based lines carrying an inline suppression marker.
     marker_lines: Vec<u32>,
@@ -91,6 +94,36 @@ struct SourceMeta {
 struct ParsedSource {
     meta: SourceMeta,
     ir: SyntaxIrFile,
+}
+
+/// Intern repository-relative parent directory keys deterministically before
+/// crossing into core. Raw paths remain a CLI/reporting concern; core sees
+/// only opaque integer partitions.
+pub(super) fn directory_partitions(files: &[SourceMeta]) -> Vec<DirectoryPartition> {
+    let mut keys: Vec<&str> = files
+        .iter()
+        .map(|file| file.directory_key.as_str())
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let indexes: BTreeMap<&str, u32> = keys
+        .into_iter()
+        .enumerate()
+        .map(|(index, key)| (key, u32::try_from(index).unwrap_or(u32::MAX)))
+        .collect();
+    files
+        .iter()
+        .map(|file| DirectoryPartition::new(indexes[file.directory_key.as_str()]))
+        .collect()
+}
+
+const SIGNATURE_SIBLING_FUNNEL_STAGE: &str = "signature sibling entries";
+
+/// Remove the signature-specific funnel stage from a default-off report.
+pub(super) fn remove_signature_sibling_funnel_stage(summary: &mut SummaryRow) {
+    summary
+        .funnel
+        .retain(|stage| stage.name != SIGNATURE_SIBLING_FUNNEL_STAGE);
 }
 
 /// One normalized SOG anchored to the syntactic unit it describes.
@@ -255,29 +288,48 @@ struct PartitionOutcome {
     report: Report,
     comparison_units: Vec<CrossComparisonUnit>,
     cross_language_units: Vec<CrossLanguageComparisonUnit>,
+    /// Persistence errors are returned with the already-built report so the
+    /// caller can still publish an unrecorded result.
+    recording_error: Option<anyhow::Error>,
+    staged: Option<StagedSnapshotPart>,
 }
 
 fn reuse_semantic_partition(
     report: &mut Report,
     db_path: &Path,
     root: &Path,
-    _cfg: &Config,
-    _args: &ScanArgs,
-) -> Result<()> {
-    let new_run_id = report.run.run_id;
-    let mut store = open_store(db_path)?;
-    let Some(previous) =
-        store.latest_run_for_variant(&path_key(root), &report.run.build_variant.fingerprint)?
-    else {
-        return Ok(());
+    cfg: &Config,
+    args: &ScanArgs,
+    staged: &StagedSnapshotPart,
+) -> Result<bool> {
+    let Some(new_run_id) = report.run.run_id else {
+        return Ok(false);
     };
-    if store.run_tree(previous.id)? != store.run_tree(new_run_id)? {
-        return Ok(());
+    let mut store = open_store(db_path)?;
+    let config_hash = super::reuse_config_hash(cfg, args.untrusted, args.siblings_by_signature)?;
+    let Some(previous) = store.latest_compatible_run(
+        &path_key(root),
+        config_hash.as_str(),
+        &report.run.build_variant.fingerprint,
+    )?
+    else {
+        return Ok(false);
+    };
+    let same_baseline = store
+        .run_summary_row(previous.id)?
+        .zip(store.run_summary_row(new_run_id)?)
+        .is_some_and(|(old, new)| old.baseline_digest == new.baseline_digest);
+    if !same_baseline || store.run_tree(previous.id)? != store.run_tree(new_run_id)? {
+        return Ok(false);
     }
-    store.discard_run(new_run_id)?;
-    report.run.run_id = previous.id;
+    // Keep the opaque token alive for invocation-level suppression cleanup.
+    // The run itself is discarded now because this partition reuses the
+    // completed predecessor; aborting the token here could delete a newly
+    // created rule that a later live partition shares.
+    store.discard_run(staged.run_id())?;
+    report.run.run_id = Some(previous.id);
     report.run.reused = true;
-    Ok(())
+    Ok(true)
 }
 
 /// Execute `codehelion scan` in Structural mode.
@@ -396,9 +448,10 @@ fn run_with(
             let mut reports = Vec::with_capacity(partitions.len());
             let mut comparison_units = Vec::new();
             let mut cross_language_units = Vec::new();
-            let mut new_run_ids = Vec::with_capacity(partitions.len());
-            let mut lineage_predecessors = Vec::with_capacity(partitions.len());
+            let mut staged_parts: Vec<StagedSnapshotPart> = Vec::with_capacity(partitions.len());
+            let mut retired_parts: Vec<StagedSnapshotPart> = Vec::new();
             let mut outcome = Outcome::Success;
+            let mut recording_error: Option<anyhow::Error> = None;
             for (index, partition) in partitions.into_iter().enumerate() {
                 // Discovery happens before a source can belong to a build
                 // variant. Record its exclusions exactly once rather than
@@ -406,7 +459,7 @@ fn run_with(
                 // partition list is fingerprint-sorted above, so this owner
                 // is deterministic.
                 let shared_discovery = (index == 0).then_some(&discovered);
-                let mut partition = run_semantic_partition(
+                let mut partition = match run_semantic_partition(
                     args,
                     &cfg,
                     guardrails.as_ref(),
@@ -420,23 +473,44 @@ fn run_with(
                     glob_excluded,
                     asking.as_deref(),
                     &partition,
-                )?;
-                let new_run_id = partition.report.run.run_id;
-                // The newly written semantic partition remains incomplete
-                // until every partition has finished, so this query can only
-                // return an older completed run. Preserve that predecessor
-                // now: after completion the new run would be its own latest
-                // candidate.
-                let predecessor = open_store(&db_path)?
-                    .latest_run_for_variant(
-                        &path_key(&root),
-                        &partition.report.run.build_variant.fingerprint,
-                    )?
-                    .map(|run| run.id);
-                new_run_ids.push(new_run_id);
-                lineage_predecessors.push((new_run_id, predecessor));
-                if !args.no_reuse && !args.compare_build_variants && !args.compare_languages {
-                    reuse_semantic_partition(&mut partition.report, &db_path, &root, &cfg, args)?;
+                ) {
+                    Ok(partition) => partition,
+                    Err(error) => {
+                        if let Ok(mut store) = open_store(&db_path) {
+                            let mut cleanup_parts = staged_parts.clone();
+                            cleanup_parts.extend(retired_parts.clone());
+                            let _ = store.abort_snapshot_parts(&cleanup_parts);
+                        }
+                        return Err(error);
+                    }
+                };
+                if recording_error.is_none() {
+                    recording_error = partition.recording_error.take();
+                }
+                let mut staged = partition.staged.take();
+                if recording_error.is_none()
+                    && !args.no_reuse
+                    && !args.compare_build_variants
+                    && !args.compare_languages
+                    && let Some(staged_part) = staged.as_ref()
+                    && let Err(error) = reuse_semantic_partition(
+                        &mut partition.report,
+                        &db_path,
+                        &root,
+                        &cfg,
+                        args,
+                        staged_part,
+                    )
+                {
+                    recording_error = Some(error);
+                }
+                if partition.report.run.reused {
+                    if let Some(staged) = staged.take() {
+                        retired_parts.push(staged);
+                    }
+                }
+                if let Some(staged) = staged {
+                    staged_parts.push(staged);
                 }
                 if partition.outcome == Outcome::FindingsPresent {
                     outcome = Outcome::FindingsPresent;
@@ -445,51 +519,129 @@ fn run_with(
                 cross_language_units.extend(partition.cross_language_units);
                 reports.push(partition.report);
             }
-            let comparison = if args.compare_build_variants {
-                record_cross_variant_comparison(&db_path, &root, &started_at, &comparison_units)?
-            } else {
-                None
-            };
-            let comparison_not_run = args
-                .compare_build_variants
-                .then(|| comparison.is_none())
+            let mut prepared_variant = None;
+            if recording_error.is_none() && args.compare_build_variants {
+                match prepare_cross_variant_comparison(&root, &started_at, &comparison_units) {
+                    Ok(value) => prepared_variant = value,
+                    Err(error) => recording_error = Some(error),
+                }
+            }
+            let comparison_not_run = (recording_error.is_none() && args.compare_build_variants)
+                .then(|| prepared_variant.is_none())
                 .filter(|not_run| *not_run)
                 .map(|_| cross_variant_comparison_not_run(&reports));
-            let cross_language_comparison = if args.compare_languages {
-                record_cross_language_comparison(
-                    &db_path,
+            let mut prepared_cross_language = None;
+            if recording_error.is_none() && args.compare_languages {
+                match prepare_cross_language_comparison(
                     &root,
                     &started_at,
                     &cross_language_units,
                     &cfg,
-                )?
-            } else {
-                None
-            };
-            let cross_language_not_run = args
-                .compare_languages
-                .then(|| cross_language_comparison.is_none())
+                ) {
+                    Ok(value) => prepared_cross_language = value,
+                    Err(error) => recording_error = Some(error),
+                }
+            }
+            let cross_language_not_run = (recording_error.is_none() && args.compare_languages)
+                .then(|| prepared_cross_language.is_none())
                 .filter(|not_run| *not_run)
                 .map(|_| cross_language_comparison_not_run(&reports, &cross_language_units));
-            let pending_run_ids: Vec<i64> = new_run_ids
-                .into_iter()
-                .filter(|run_id| {
-                    reports
-                        .iter()
-                        .any(|report| report.run.run_id == *run_id && !report.run.reused)
-                })
-                .collect();
-            if !pending_run_ids.is_empty() {
-                open_store(&db_path)?.complete_snapshot_parts(&pending_run_ids)?;
-                let pending: BTreeSet<i64> = pending_run_ids.iter().copied().collect();
-                let mut store = open_store(&db_path)?;
-                for (newer_run, predecessor) in lineage_predecessors {
-                    if pending.contains(&newer_run)
-                        && let Some(predecessor) = predecessor
-                    {
-                        store.adopt_matching_lineages(newer_run, predecessor)?;
-                    }
+            if recording_error.is_none() && (!staged_parts.is_empty() || !retired_parts.is_empty())
+            {
+                let variant_snapshot = prepared_variant
+                    .as_ref()
+                    .map(PreparedCrossVariant::snapshot);
+                let language_snapshot = prepared_cross_language
+                    .as_ref()
+                    .map(PreparedCrossLanguage::snapshot);
+                let comparisons = SnapshotComparisons {
+                    cross_variant: variant_snapshot.as_ref(),
+                    cross_language: language_snapshot.as_ref(),
+                };
+                if let Err(error) = open_store(&db_path).and_then(|mut store| {
+                    store.finalize_snapshot_parts_with_retired(
+                        &staged_parts,
+                        &retired_parts,
+                        comparisons,
+                    )?;
+                    Ok(())
+                }) {
+                    recording_error = Some(error);
                 }
+            }
+            if let Some(error) = recording_error {
+                if let Ok(mut store) = open_store(&db_path) {
+                    let mut cleanup_parts = staged_parts.clone();
+                    cleanup_parts.extend(retired_parts.clone());
+                    let _ = store.abort_snapshot_parts(&cleanup_parts);
+                }
+                for report in &mut reports {
+                    report.run.run_id = None;
+                    report.run.reused = false;
+                    report.summary.changes = None;
+                    for group in &mut report.groups {
+                        group.artifact_savings.clear();
+                    }
+                    report.refresh_supplemental_summary();
+                }
+                crate::scan::write_partitioned_reports_without_artifact_guidance(
+                    args, out, &reports, None, None, None, None,
+                )?;
+                eprintln!(
+                    "warning: this run was not recorded ({error}); replay and baseline comparison are unavailable for it"
+                );
+                return Err(error);
+            }
+            if !retired_parts.is_empty()
+                && let Ok(mut store) = open_store(&db_path)
+            {
+                // Reused partitions have no running row left, but their
+                // tokens still own any suppression row created while staging.
+                // Missing runs are intentionally idempotent here.
+                let _ = store.abort_snapshot_parts(&retired_parts);
+            }
+            let comparison = prepared_variant.map(|prepared| prepared.report);
+            let cross_language_comparison = prepared_cross_language.map(|prepared| prepared.report);
+            let mut hydration_error = None;
+            if recording_error.is_none() {
+                match open_store(&db_path) {
+                    Ok(store) => {
+                        for report in &mut reports {
+                            if let Some(run_id) = report.run.run_id
+                                && let Err(error) = crate::scan::hydrate_artifact_savings(
+                                    &store,
+                                    run_id,
+                                    &mut report.groups,
+                                )
+                            {
+                                hydration_error = Some(error);
+                                break;
+                            }
+                        }
+                    }
+                    Err(error) => hydration_error = Some(error),
+                }
+            }
+            if let Some(error) = hydration_error {
+                for report in &mut reports {
+                    for group in &mut report.groups {
+                        group.artifact_savings.clear();
+                    }
+                    report.refresh_supplemental_summary();
+                }
+                crate::scan::write_partitioned_reports_without_artifact_guidance(
+                    args,
+                    out,
+                    &reports,
+                    comparison.as_ref(),
+                    comparison_not_run.as_ref(),
+                    cross_language_comparison.as_ref(),
+                    cross_language_not_run.as_ref(),
+                )?;
+                eprintln!(
+                    "warning: artifact savings were not loaded ({error}); recorded run data remains available, but artifact evidence and guidance are unavailable for this report"
+                );
+                return Err(error);
             }
             write_partitioned_reports(
                 args,
@@ -504,10 +656,16 @@ fn run_with(
         }
     }
     let variant = variant_of(asking.as_deref(), &cfg, discovered.header_language, &root)?;
+    let analysis_mode = if compilers.is_some() {
+        crate::cli::Mode::Semantic
+    } else {
+        crate::cli::Mode::Structural
+    };
     let timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
     let (parsed, unreadable, timed_out) = map_sources(&sources, jobs, |source| {
         parse_one(source, cfg.limits.max_file_bytes, timeout)
-    })?;
+    })
+    .map_err(|error| crate::analysis_failure(analysis_mode, error))?;
     let (files, mut irs): (Vec<SourceMeta>, Vec<SyntaxIrFile>) = parsed
         .into_iter()
         .map(|source| (source.meta, source.ir))
@@ -523,8 +681,19 @@ fn run_with(
         args.untrusted.then_some(root.as_path()),
         std::time::Duration::from_millis(cfg.limits.helper_timeout_ms),
     );
-    let mut analysis =
-        structural::analyze_resolved(&irs, &variant, &structural_config(&cfg), &resolved);
+    let structural_cfg = structural_config(&cfg);
+    let mut analysis = if args.siblings_by_signature {
+        let directory_partitions = directory_partitions(&files);
+        structural::analyze_resolved_with_context(
+            &irs,
+            &variant,
+            &structural_cfg,
+            &resolved,
+            &directory_partitions,
+        )
+    } else {
+        structural::analyze_resolved(&irs, &variant, &structural_cfg, &resolved)
+    };
     mark_test_paths(&cfg, &files, &mut analysis)?;
     let semantic = registered_semantic_pairs(
         asked.as_ref(),
@@ -534,7 +703,8 @@ fn run_with(
         &analysis,
         &variant,
         &cfg,
-    )?;
+    )
+    .map_err(|error| crate::analysis_failure(analysis_mode, error))?;
 
     let mut rules = compile_rules(&cfg, &files, &analysis)?;
     let matched_rules: BTreeSet<usize> = rules
@@ -550,6 +720,7 @@ fn run_with(
         &detector_versions(
             literal_norm(cfg.literal_normalization),
             cfg.entropy_ratio_floor,
+            asked.as_ref(),
         ),
         cfg.min_clone_tokens,
     )?;
@@ -580,6 +751,7 @@ fn run_with(
         semantic_groups: &semantic.groups,
         semantic_pairs: &semantic.pairs,
         semantic_detection: &semantic,
+        compiler_answers: asked.as_ref(),
         rules: &rules.rules,
         matched_rules: &matched_rules,
         group_suppressed: &suppressed.groups,
@@ -601,28 +773,27 @@ fn run_with(
         sort: args.sort.axis(),
         reuse_allowed: !args.no_reuse,
         untrusted: args.untrusted,
+        siblings_by_signature: args.siblings_by_signature,
     };
     // Ranked before recorded: the audit database and the report are two views
     // of one verdict about where each finding belongs, not two derivations of
     // it that happen to agree.
-    let groups = build_groups(&inputs);
-    let stored = summary_row(
+    let normalized = build_groups(&inputs)?;
+    let groups = normalized.groups;
+    let identity_collapsed = normalized.identity_collapsed;
+    let mut stored = summary_row(
         &inputs,
         Some(&discovered),
         baseline.as_ref().map(ScanBaseline::digest),
         guardrails.as_ref(),
     );
-    let (run_id, reused) = record(
-        &cfg,
-        &inputs,
-        &groups,
-        crate::scan::file_rows(&sources),
-        &stored,
-        asked.as_ref(),
-        true,
-    )?;
-    let mut model = build_report(&inputs, run_id, &stored, groups);
-    model.run.reused = reused;
+    if !args.siblings_by_signature {
+        remove_signature_sibling_funnel_stage(&mut stored);
+    }
+    report::append_stored_identity_stage(&mut stored.funnel, groups.len(), identity_collapsed);
+    let mut model = build_report(&inputs, None, &stored, groups);
+    model.run.reused = false;
+    model.summary.changes = None;
     model.summary.guardrails = guardrails;
     model.summary.compiler = asked.as_ref().map(coverage);
     // Counted against the assembled report rather than the raw analysis: a
@@ -630,28 +801,90 @@ fn run_with(
     model.summary.baseline = baseline
         .as_ref()
         .map(|baseline| crate::scan::apply_baseline(baseline, &mut model.groups));
-    let outcome = crate::scan::outcome(args, &model);
-    let models = [model];
-    let comparison_not_run = args
-        .compare_build_variants
-        .then(|| cross_variant_comparison_not_run(&models));
-    write_partitioned_reports(
-        args,
-        out,
-        &models,
-        None,
-        comparison_not_run.as_ref(),
-        None,
-        None,
-    )?;
-    Ok(outcome)
+    model.refresh_supplemental_summary();
+    let record_result = record(
+        &cfg,
+        &inputs,
+        &model.groups,
+        crate::scan::file_rows(&sources),
+        &stored,
+        asked.as_ref(),
+        true,
+    );
+    match record_result {
+        Ok(recorded) => {
+            model.run.run_id = Some(recorded.run_id);
+            model.run.reused = recorded.reused;
+            model.summary.changes = recorded.changes;
+            let hydration_error = match open_store(&db_path) {
+                Ok(store) => crate::scan::hydrate_artifact_savings(
+                    &store,
+                    recorded.run_id,
+                    &mut model.groups,
+                )
+                .err(),
+                Err(error) => Some(error),
+            };
+            if let Some(error) = hydration_error {
+                for group in &mut model.groups {
+                    group.artifact_savings.clear();
+                }
+                model.refresh_supplemental_summary();
+                write_report_without_artifact_guidance(args, out, &model)?;
+                eprintln!(
+                    "warning: artifact savings were not loaded ({error}); run {} remains recorded, but artifact evidence and guidance are unavailable for this report",
+                    recorded.run_id
+                );
+                return Err(error);
+            }
+            model.refresh_supplemental_summary();
+            let outcome = crate::scan::outcome(args, &model);
+            let models = [model];
+            let comparison_not_run = args
+                .compare_build_variants
+                .then(|| cross_variant_comparison_not_run(&models));
+            write_partitioned_reports(
+                args,
+                out,
+                &models,
+                None,
+                comparison_not_run.as_ref(),
+                None,
+                None,
+            )?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            model.run.run_id = None;
+            model.run.reused = false;
+            model.summary.changes = None;
+            for group in &mut model.groups {
+                group.artifact_savings.clear();
+            }
+            model.refresh_supplemental_summary();
+            crate::scan::write_partitioned_reports_without_artifact_guidance(
+                args,
+                out,
+                std::slice::from_ref(&model),
+                None,
+                None,
+                None,
+                None,
+            )?;
+            eprintln!(
+                "warning: this run was not recorded ({error}); replay and baseline comparison are unavailable for it"
+            );
+            Err(error)
+        }
+    }
 }
 
 mod comparison;
 
 use comparison::{
-    cross_language_comparison_not_run, cross_variant_comparison_not_run,
-    record_cross_language_comparison, record_cross_variant_comparison,
+    PreparedCrossLanguage, PreparedCrossVariant, cross_language_comparison_not_run,
+    cross_variant_comparison_not_run, prepare_cross_language_comparison,
+    prepare_cross_variant_comparison,
 };
 
 #[cfg(test)]
@@ -785,9 +1018,15 @@ fn parse_one(
         Language::Cpp => codehelion_frontend_cpp::ir::CppStructuralFrontend.parse(&text),
     };
     let unaccounted_tokens = as_u64(ir.unaccounted_tokens());
+    let directory_key = source
+        .relative_path
+        .parent()
+        .map(path_key)
+        .unwrap_or_default();
     FileOutcome::Done(Box::new(ParsedSource {
         meta: SourceMeta {
             relative_path: path_key(&source.relative_path),
+            directory_key,
             language: source.language,
             marker_lines: suppress::marker_lines(&text),
             lines: u64::try_from(text.lines().count()).unwrap_or(u64::MAX),
@@ -834,6 +1073,9 @@ struct ReportInputs<'a> {
     semantic_pairs: &'a [SemanticPair],
     /// Bounded-candidate accounting for the restricted-semantic branch.
     semantic_detection: &'a SemanticDetection,
+    /// Compiler answers whose IR schema versions qualify this run's detector
+    /// set. `None` for Structural mode, which does not ask a helper.
+    compiler_answers: Option<&'a semantic::Answers>,
     rules: &'a suppress::Rules,
     /// Selectors that matched scanned source, independently from the rule
     /// that ultimately hid each finding.
@@ -875,6 +1117,8 @@ struct ReportInputs<'a> {
     sort: report::Sort,
     reuse_allowed: bool,
     untrusted: bool,
+    /// Whether the signature-based sibling detector ran for this snapshot.
+    siblings_by_signature: bool,
 }
 
 impl ReportInputs<'_> {

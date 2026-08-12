@@ -30,6 +30,32 @@ pub(crate) fn write_report(args: &ScanArgs, out: &mut impl Write, model: &Report
     )
 }
 
+/// Render a source report when supplemental artifact evidence could not be
+/// loaded. The source verdict remains truthful, while text output omits the
+/// now-invalid artifact follow-up guidance.
+pub(crate) fn write_report_without_artifact_guidance(
+    args: &ScanArgs,
+    out: &mut impl Write,
+    model: &Report,
+) -> Result<()> {
+    write_report_options_internal(
+        ReportOutput {
+            format: args.format,
+            output: args.output.as_deref(),
+            force: args.force,
+            view: args.view,
+            show_suppressed: args.show_suppressed,
+            show_siblings: args.show_siblings,
+            show_near_misses: args.show_near_misses,
+            sort: args.sort.axis(),
+            min_identifier_jaccard: args.min_identifier_jaccard,
+        },
+        out,
+        model,
+        false,
+    )
+}
+
 /// Output choices shared by a freshly scanned and a recorded report.
 #[allow(
     clippy::struct_excessive_bools,
@@ -64,6 +90,25 @@ pub(crate) fn write_report_options(
     out: &mut impl Write,
     model: &Report,
 ) -> Result<()> {
+    write_report_options_internal(options, out, model, true)
+}
+
+/// Render a source report without artifact follow-up guidance after a
+/// supplemental artifact read failed.
+pub(crate) fn write_report_options_without_artifact_guidance(
+    options: ReportOutput<'_>,
+    out: &mut impl Write,
+    model: &Report,
+) -> Result<()> {
+    write_report_options_internal(options, out, model, false)
+}
+
+fn write_report_options_internal(
+    options: ReportOutput<'_>,
+    out: &mut impl Write,
+    model: &Report,
+    include_artifact_guidance: bool,
+) -> Result<()> {
     validate_presentation_options(
         options.format,
         options.show_suppressed,
@@ -93,7 +138,14 @@ pub(crate) fn write_report_options(
     // still carries its warnings to the person who ran it.
     if options.format == Format::Text {
         out.flush()?;
-        model.render_notes(text_options(&options), &mut std::io::stderr())?;
+        if include_artifact_guidance {
+            model.render_notes(text_options(&options), &mut std::io::stderr())?;
+        } else {
+            model.render_notes_without_artifact_guidance(
+                text_options(&options),
+                &mut std::io::stderr(),
+            )?;
+        }
     }
     Ok(())
 }
@@ -213,6 +265,55 @@ pub(crate) fn write_partitioned_reports(
     cross_language: Option<&report::CrossLanguageComparison>,
     cross_language_not_run: Option<&report::CrossLanguageComparisonNotRun>,
 ) -> Result<()> {
+    write_partitioned_reports_internal(
+        args,
+        out,
+        models,
+        cross_variant,
+        cross_variant_not_run,
+        cross_language,
+        cross_language_not_run,
+        true,
+    )
+}
+
+/// Render partitioned source reports while suppressing artifact follow-up
+/// guidance after supplemental hydration failed.
+pub(crate) fn write_partitioned_reports_without_artifact_guidance(
+    args: &ScanArgs,
+    out: &mut impl Write,
+    models: &[Report],
+    cross_variant: Option<&report::CrossVariantComparison>,
+    cross_variant_not_run: Option<&report::CrossVariantComparisonNotRun>,
+    cross_language: Option<&report::CrossLanguageComparison>,
+    cross_language_not_run: Option<&report::CrossLanguageComparisonNotRun>,
+) -> Result<()> {
+    write_partitioned_reports_internal(
+        args,
+        out,
+        models,
+        cross_variant,
+        cross_variant_not_run,
+        cross_language,
+        cross_language_not_run,
+        false,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the public partitioned-report shape is mirrored while only the guidance policy varies"
+)]
+fn write_partitioned_reports_internal(
+    args: &ScanArgs,
+    out: &mut impl Write,
+    models: &[Report],
+    cross_variant: Option<&report::CrossVariantComparison>,
+    cross_variant_not_run: Option<&report::CrossVariantComparisonNotRun>,
+    cross_language: Option<&report::CrossLanguageComparison>,
+    cross_language_not_run: Option<&report::CrossLanguageComparisonNotRun>,
+    include_artifact_guidance: bool,
+) -> Result<()> {
     validate_presentation_options(
         args.format,
         args.show_suppressed,
@@ -226,7 +327,11 @@ pub(crate) fn write_partitioned_reports(
         cross_language,
         cross_language_not_run,
     ) {
-        return write_report(args, out, model);
+        return if include_artifact_guidance {
+            write_report(args, out, model)
+        } else {
+            write_report_without_artifact_guidance(args, out, model)
+        };
     }
     let text = match args.format {
         Format::Json => partitioned_json(
@@ -259,7 +364,10 @@ pub(crate) fn write_partitioned_reports(
         out.flush()?;
         let options = partition_text_options(args);
         for model in models {
-            model.render_notes(options, &mut std::io::stderr())?;
+            model.render_notes_without_artifact_guidance(options, &mut std::io::stderr())?;
+        }
+        if include_artifact_guidance && !options.quiet {
+            report::render_partition_artifact_guidance(models, &mut std::io::stderr())?;
         }
     }
     Ok(())

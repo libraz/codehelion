@@ -8,9 +8,10 @@ use super::{
     PartitionOutcome, Path, Report, ReportInputs, Result, ScanArgs, ScanBaseline,
     SemanticCandidateConfig, SemanticDetection, SemanticPartition, SourceMeta, SourceUnit,
     StructuralReport, SyntaxIrFile, as_u64, build_groups, build_report, compile_rules, coverage,
-    detector_versions, evaluate_suppression, extract_cross_language_candidates, literal_norm,
-    map_sources, mark_test_modules, mark_test_paths, open_store, parse_one, path_key,
-    presentation_suppression, record, registered_semantic_pairs, report, reportable_regions,
+    detector_versions, directory_partitions, evaluate_suppression,
+    extract_cross_language_candidates, literal_norm, map_sources, mark_test_modules,
+    mark_test_paths, parse_one, path_key, presentation_suppression, record,
+    registered_semantic_pairs, remove_signature_sibling_funnel_stage, report, reportable_regions,
     resolve, rfc3339_now, semantic_confidence, stable_id, structural, structural_config,
     summary_row, suppress, verify_cross_language_candidates,
 };
@@ -64,7 +65,8 @@ pub(super) fn run_semantic_partition(
     let timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
     let (parsed, unreadable, timed_out) = map_sources(sources, jobs, |source| {
         parse_one(source, cfg.limits.max_file_bytes, timeout)
-    })?;
+    })
+    .map_err(|error| crate::analysis_failure(crate::cli::Mode::Semantic, error))?;
     let (files, mut irs): (Vec<SourceMeta>, Vec<SyntaxIrFile>) = parsed
         .into_iter()
         .map(|source| (source.meta, source.ir))
@@ -80,8 +82,19 @@ pub(super) fn run_semantic_partition(
         args.untrusted.then_some(root),
         std::time::Duration::from_millis(cfg.limits.helper_timeout_ms),
     );
-    let mut analysis =
-        structural::analyze_resolved(&irs, &partition.variant, &structural_config(cfg), &resolved);
+    let structural_cfg = structural_config(cfg);
+    let mut analysis = if args.siblings_by_signature {
+        let directory_partitions = directory_partitions(&files);
+        structural::analyze_resolved_with_context(
+            &irs,
+            &partition.variant,
+            &structural_cfg,
+            &resolved,
+            &directory_partitions,
+        )
+    } else {
+        structural::analyze_resolved(&irs, &partition.variant, &structural_cfg, &resolved)
+    };
     mark_test_paths(cfg, &files, &mut analysis)?;
     let semantic = registered_semantic_pairs(
         asked.as_ref(),
@@ -91,7 +104,8 @@ pub(super) fn run_semantic_partition(
         &analysis,
         &partition.variant,
         cfg,
-    )?;
+    )
+    .map_err(|error| crate::analysis_failure(crate::cli::Mode::Semantic, error))?;
     let mut rules = compile_rules(cfg, &files, &analysis)?;
     let matched_rules: BTreeSet<usize> = rules
         .files
@@ -106,6 +120,7 @@ pub(super) fn run_semantic_partition(
         &detector_versions(
             literal_norm(cfg.literal_normalization),
             cfg.entropy_ratio_floor,
+            asked.as_ref(),
         ),
         cfg.min_clone_tokens,
     )?;
@@ -135,6 +150,7 @@ pub(super) fn run_semantic_partition(
         semantic_groups: &semantic.groups,
         semantic_pairs: &semantic.pairs,
         semantic_detection: &semantic,
+        compiler_answers: asked.as_ref(),
         rules: &rules.rules,
         matched_rules: &matched_rules,
         group_suppressed: &suppressed.groups,
@@ -156,30 +172,30 @@ pub(super) fn run_semantic_partition(
         sort: args.sort.axis(),
         reuse_allowed: false,
         untrusted: args.untrusted,
+        siblings_by_signature: args.siblings_by_signature,
     };
-    let groups = build_groups(&inputs);
-    let stored = summary_row(
+    let normalized = build_groups(&inputs)?;
+    let groups = normalized.groups;
+    let identity_collapsed = normalized.identity_collapsed;
+    let mut stored = summary_row(
         &inputs,
         shared_discovery,
         baseline.as_ref().map(ScanBaseline::digest),
         guardrails,
     );
-    let (run_id, reused) = record(
-        cfg,
-        &inputs,
-        &groups,
-        crate::scan::file_rows(sources),
-        &stored,
-        asked.as_ref(),
-        false,
-    )?;
-    let mut model = build_report(&inputs, run_id, &stored, groups);
-    model.run.reused = reused;
+    if !args.siblings_by_signature {
+        remove_signature_sibling_funnel_stage(&mut stored);
+    }
+    report::append_stored_identity_stage(&mut stored.funnel, groups.len(), identity_collapsed);
+    let mut model = build_report(&inputs, None, &stored, groups);
+    model.run.reused = false;
+    model.summary.changes = None;
     model.summary.guardrails = guardrails.map(copy_guardrails);
     model.summary.compiler = asked.as_ref().map(coverage);
     model.summary.baseline = baseline
         .as_ref()
         .map(|baseline| crate::scan::apply_baseline(baseline, &mut model.groups));
+    model.refresh_supplemental_summary();
     let comparison_units =
         maybe_cross_comparison_units(args, &partition.variant, &files, &irs, &analysis);
     let cross_language_units = maybe_cross_language_comparison_units(
@@ -189,12 +205,32 @@ pub(super) fn run_semantic_partition(
         &analysis,
         &semantic,
     );
+    let record_result = record(
+        cfg,
+        &inputs,
+        &model.groups,
+        crate::scan::file_rows(sources),
+        &stored,
+        asked.as_ref(),
+        false,
+    );
+    let (recording_error, staged) = match record_result {
+        Ok(recorded) => {
+            model.run.run_id = Some(recorded.run_id);
+            model.run.reused = recorded.reused;
+            model.summary.changes = recorded.changes;
+            (None, recorded.staged)
+        }
+        Err(error) => (Some(error), None),
+    };
     let outcome = crate::scan::outcome(args, &model);
     Ok(PartitionOutcome {
         outcome,
         report: model,
         comparison_units,
         cross_language_units,
+        recording_error,
+        staged,
     })
 }
 
@@ -267,6 +303,9 @@ pub(super) fn copy_guardrails(guardrails: &report::Guardrails) -> report::Guardr
         sibling_candidate_budget: guardrails.sibling_candidate_budget,
         sibling_per_group_cap: guardrails.sibling_per_group_cap,
         sibling_total_cap: guardrails.sibling_total_cap,
+        signature_sibling_candidate_budget: guardrails.signature_sibling_candidate_budget,
+        signature_sibling_per_group_cap: guardrails.signature_sibling_per_group_cap,
+        signature_sibling_total_cap: guardrails.signature_sibling_total_cap,
         max_component: guardrails.max_component,
     }
 }
@@ -303,15 +342,43 @@ pub(super) fn cross_comparison_units(
         .collect()
 }
 
-/// Directly compare the completed C/C++ partitions and persist the result in
-/// tables outside normal snapshots. This opt-in invocation records what it
-/// compared now.
-pub(super) fn record_cross_variant_comparison(
-    db_path: &Path,
+/// Prepared cross-build comparison kept alive until the normal partition
+/// finalizer commits every staged snapshot.
+pub(super) struct PreparedCrossVariant {
+    pub root_path: String,
+    pub comparison_id: stable_id::CrossVariantComparisonId,
+    pub policy_version: String,
+    pub started_at: String,
+    pub finished_at: String,
+    pub origins: Vec<String>,
+    pub groups: Vec<CrossVariantGroupRow>,
+    pub report: report::CrossVariantComparison,
+}
+
+impl PreparedCrossVariant {
+    pub(super) fn snapshot(&self) -> CrossVariantComparisonSnapshot<'_> {
+        CrossVariantComparisonSnapshot {
+            root_path: &self.root_path,
+            comparison_id: self.comparison_id,
+            policy_version: &self.policy_version,
+            started_at: &self.started_at,
+            finished_at: &self.finished_at,
+            origins: &self.origins,
+            groups: &self.groups,
+        }
+    }
+}
+
+/// Directly compare the completed C/C++ partitions without persisting yet.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the preparation boundary remains fallible as comparison preparation grows"
+)]
+pub(super) fn prepare_cross_variant_comparison(
     root: &Path,
     started_at: &str,
     units: &[CrossComparisonUnit],
-) -> Result<Option<report::CrossVariantComparison>> {
+) -> Result<Option<PreparedCrossVariant>> {
     let inputs: Vec<CrossVariantUnit<'_>> = units
         .iter()
         .map(|unit| CrossVariantUnit {
@@ -351,59 +418,84 @@ pub(super) fn record_cross_variant_comparison(
         .collect();
     let finished_at = rfc3339_now();
     let root_path = path_key(root);
-    let snapshot = CrossVariantComparisonSnapshot {
-        root_path: &root_path,
-        comparison_id: comparison.id,
-        policy_version: stable_id::CROSS_VARIANT_POLICY_VERSION,
-        started_at,
-        finished_at: &finished_at,
-        origins: &comparison.origin_variants,
-        groups: &groups,
-    };
-    let mut store = open_store(db_path)?;
-    store.record_cross_variant_comparison(&snapshot)?;
-    Ok(Some(report::CrossVariantComparison {
+    let report = report::CrossVariantComparison {
         policy_version: stable_id::CROSS_VARIANT_POLICY_VERSION.to_string(),
         comparison_id: comparison.id.to_hex(),
         comparison_kind: "exact-type-1-whole-units".to_string(),
-        origin_variants: comparison.origin_variants,
+        origin_variants: comparison.origin_variants.clone(),
         groups: comparison
             .groups
-            .into_iter()
+            .iter()
             .map(|group| report::CrossVariantGroup {
                 id: group.id.to_hex(),
                 clone_type: group.clone_type.name().to_string(),
                 members: group
                     .members
-                    .into_iter()
+                    .iter()
                     .map(|member| report::CrossVariantMember {
-                        origin_variant: member.origin_variant,
+                        origin_variant: member.origin_variant.clone(),
                         language: member.language.name().to_string(),
                         file: crate::scan::display_path(&member.file_path),
                         start_line: member.start_line,
                         end_line: member.end_line,
-                        name: member.name,
+                        name: member.name.clone(),
                         token_count: member.token_count,
                     })
                     .collect(),
             })
             .collect(),
+    };
+    Ok(Some(PreparedCrossVariant {
+        root_path,
+        comparison_id: comparison.id,
+        policy_version: stable_id::CROSS_VARIANT_POLICY_VERSION.to_string(),
+        started_at: started_at.to_string(),
+        finished_at,
+        origins: comparison.origin_variants,
+        groups,
+        report,
     }))
 }
 
-/// Directly compare the completed Rust and C++ semantic partitions and retain
-/// the closed API correspondence evidence outside normal snapshots.
+/// Prepared Rust-to-C++ comparison kept alive until all semantic partitions
+/// have been finalized.
+pub(super) struct PreparedCrossLanguage {
+    pub root_path: String,
+    pub comparison_id: stable_id::CrossLanguageComparisonId,
+    pub policy_version: String,
+    pub started_at: String,
+    pub finished_at: String,
+    pub origins: Vec<String>,
+    pub groups: Vec<CrossLanguageSemanticGroupRow>,
+    pub report: report::CrossLanguageComparison,
+}
+
+impl PreparedCrossLanguage {
+    pub(super) fn snapshot(&self) -> CrossLanguageComparisonSnapshot<'_> {
+        CrossLanguageComparisonSnapshot {
+            root_path: &self.root_path,
+            comparison_id: self.comparison_id,
+            policy_version: &self.policy_version,
+            started_at: &self.started_at,
+            finished_at: &self.finished_at,
+            origins: &self.origins,
+            groups: &self.groups,
+        }
+    }
+}
+
+/// Directly compare the completed Rust and C++ semantic partitions without
+/// persisting yet.
 #[allow(
     clippy::too_many_lines,
     reason = "the comparison boundary constructs report and persistence evidence together"
 )]
-pub(super) fn record_cross_language_comparison(
-    db_path: &Path,
+pub(super) fn prepare_cross_language_comparison(
     root: &Path,
     started_at: &str,
     units: &[CrossLanguageComparisonUnit],
     cfg: &Config,
-) -> Result<Option<report::CrossLanguageComparison>> {
+) -> Result<Option<PreparedCrossLanguage>> {
     let mut origins: Vec<String> = units
         .iter()
         .map(|unit| unit.origin_variant.clone())
@@ -513,26 +605,25 @@ pub(super) fn record_cross_language_comparison(
     }
     let finished_at = rfc3339_now();
     let root_path = path_key(root);
-    let snapshot = CrossLanguageComparisonSnapshot {
-        root_path: &root_path,
-        comparison_id,
-        policy_version: stable_id::CROSS_LANGUAGE_POLICY_VERSION,
-        started_at,
-        finished_at: &finished_at,
-        origins: &origins,
-        groups: &store_groups,
-    };
-    let mut store = open_store(db_path)?;
-    store.record_cross_language_comparison(&snapshot)?;
-    Ok(Some(report::CrossLanguageComparison {
+    let report = report::CrossLanguageComparison {
         policy_version: stable_id::CROSS_LANGUAGE_POLICY_VERSION.to_string(),
         comparison_id: comparison_id.to_hex(),
         comparison_kind: "restricted-semantic-rust-cpp-pipelines".to_string(),
-        origin_variants: origins,
+        origin_variants: origins.clone(),
         funnel: cross_language_funnel(&candidates.stats),
         search_truncated: candidates.stats.oversized_buckets > 0
             || candidates.stats.pairs_budget_dropped > 0,
         groups: report_groups,
+    };
+    Ok(Some(PreparedCrossLanguage {
+        root_path,
+        comparison_id,
+        policy_version: stable_id::CROSS_LANGUAGE_POLICY_VERSION.to_string(),
+        started_at: started_at.to_string(),
+        finished_at,
+        origins,
+        groups: store_groups,
+        report,
     }))
 }
 

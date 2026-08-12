@@ -354,6 +354,147 @@ fn a_semantic_run_reported_again_still_says_what_the_compiler_answered() {
     }
 }
 
+fn write_semantic_replay_fixture(root: &Path) {
+    std::fs::create_dir_all(root.join("src")).expect("fixture source directory");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"semantic_replay_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("fixture manifest");
+    std::fs::write(
+        root.join("src/lib.rs"),
+        r"
+pub fn checksum_a(seed: u64, data: &[u64]) -> u64 {
+    let mut total = seed;
+    for item in data {
+        total = total.wrapping_mul(31).wrapping_add(*item);
+    }
+    total
+}
+
+pub fn checksum_b(seed: u64, data: &[u64]) -> u64 {
+    let mut total = seed;
+    for item in data {
+        total = total.wrapping_mul(31).wrapping_add(*item);
+    }
+    total
+}
+
+pub fn checksum_sibling(seed: u64, data: &[u64]) -> u64 {
+    let mut total = seed;
+    for item in data {
+        total = total.wrapping_add(*item);
+    }
+    if total > 100 { total } else { 0 }
+}
+",
+    )
+    .expect("fixture source");
+}
+
+/// A semantic report rendered directly after the scan and one reconstructed
+/// from its completed snapshot must expose the same persisted evidence. The
+/// fixture supplies enough primary groups and supplemental siblings to make
+/// detector-version and ordering drift observable here.
+#[test]
+fn a_semantic_fresh_report_matches_report_run_for_persisted_evidence() {
+    let fixture = tempfile::tempdir().expect("semantic replay fixture");
+    write_semantic_replay_fixture(fixture.path());
+    let database = tempfile::tempdir().expect("database directory");
+    let database_path = database.path().join("audit.db");
+    let database_text = database_path.to_str().expect("database path is utf-8");
+    let first = cmd()
+        .current_dir(fixture.path())
+        .args([
+            "scan",
+            ".",
+            "--mode",
+            "semantic",
+            "--siblings-by-signature",
+            "--format",
+            "json",
+            "--no-reuse",
+            "--db",
+            database_text,
+        ])
+        .output()
+        .expect("the semantic scan should run");
+    if !first.status.success() {
+        // The compiler helper is optional on a developer machine. The other
+        // semantic tests cover the explicit missing-helper contract.
+        return;
+    }
+    let fresh: serde_json::Value =
+        serde_json::from_slice(&first.stdout).expect("fresh semantic output is one JSON document");
+    let fresh = fresh["partitions"]
+        .as_array()
+        .and_then(|partitions| {
+            partitions.iter().find(|partition| {
+                partition["siblings"]
+                    .as_array()
+                    .is_some_and(|s| !s.is_empty())
+            })
+        })
+        .unwrap_or(&fresh);
+    assert!(
+        fresh["siblings"]
+            .as_array()
+            .is_some_and(|siblings| !siblings.is_empty()),
+        "the real semantic E2E fixture must retain sibling evidence"
+    );
+    assert_eq!(
+        fresh["summary"]["unmeasured_in_this_mode"],
+        serde_json::json!([]),
+        "Semantic mode must not claim Fast-only unmeasured values: {fresh}"
+    );
+    assert!(
+        fresh["run"]["detector_versions"]
+            .as_array()
+            .is_some_and(|versions| {
+                versions
+                    .iter()
+                    .any(|version| version["component"] == "compiler_ir")
+            }),
+        "a compiler-answering semantic run must name its IR schema detector"
+    );
+    let run_id = fresh["run"]["run_id"]
+        .as_i64()
+        .expect("fresh semantic output names its run");
+    let run_text = run_id.to_string();
+    let replayed = cmd()
+        .current_dir(fixture.path())
+        .args([
+            "report",
+            "--path",
+            ".",
+            "--run",
+            &run_text,
+            "--format",
+            "json",
+            "--db",
+            database_text,
+        ])
+        .output()
+        .expect("the recorded semantic run should replay");
+    assert!(replayed.status.success(), "{replayed:?}");
+    let replayed: serde_json::Value =
+        serde_json::from_slice(&replayed.stdout).expect("replay is one JSON document");
+
+    assert_eq!(
+        fresh["run"]["detector_versions"], replayed["run"]["detector_versions"],
+        "fresh and replayed semantic runs must name the same detector versions"
+    );
+    assert_eq!(fresh["siblings"], replayed["siblings"]);
+    assert_eq!(fresh["groups"], replayed["groups"]);
+    assert_eq!(fresh["summary"], replayed["summary"]);
+    assert_eq!(fresh["near_misses"], replayed["near_misses"]);
+    assert_eq!(
+        replayed["summary"]["unmeasured_in_this_mode"],
+        serde_json::json!([]),
+        "Semantic replay must not claim Fast-only unmeasured values: {replayed}"
+    );
+}
+
 /// The reuse path's own tests: a tree nobody touched is reported from the
 /// recorded run rather than analysed again, and every input that could change
 /// the answer defeats that.
@@ -363,9 +504,15 @@ mod reuse {
 
     /// Scan and parse, letting the reuse decision take its course.
     fn scan(root: &Path, extra: &[&str]) -> serde_json::Value {
+        let mut args = vec!["scan", "."];
+        if !extra.contains(&"--mode") {
+            args.extend(["--mode", "semantic"]);
+        }
+        args.push("--format");
+        args.push("json");
         let output = cmd()
             .current_dir(root)
-            .args(["scan", ".", "--format", "json"])
+            .args(args)
             .args(extra)
             .output()
             .expect("run scan");
@@ -374,13 +521,30 @@ mod reuse {
     }
 
     fn reused(value: &serde_json::Value) -> bool {
-        value["run"]["reused"] == serde_json::json!(true)
+        value["partitions"].as_array().map_or_else(
+            || value["run"]["reused"] == serde_json::json!(true),
+            |partitions| {
+                !partitions.is_empty()
+                    && partitions
+                        .iter()
+                        .all(|partition| partition["run"]["reused"] == serde_json::json!(true))
+            },
+        )
     }
 
-    /// The report a reused run produces is the report an analysis produces:
-    /// everything but the run's own metadata and what it says about *this*
-    /// invocation's comparisons.
-    fn findings(mut value: serde_json::Value) -> serde_json::Value {
+    fn run_ids(value: &serde_json::Value) -> Vec<serde_json::Value> {
+        value["partitions"].as_array().map_or_else(
+            || vec![value["run"]["run_id"].clone()],
+            |partitions| {
+                partitions
+                    .iter()
+                    .map(|partition| partition["run"]["run_id"].clone())
+                    .collect()
+            },
+        )
+    }
+
+    fn strip_run_metadata(value: &mut serde_json::Value) {
         let run = value["run"].as_object_mut().expect("run object");
         for key in ["started_at", "finished_at", "run_id", "reused"] {
             run.remove(key);
@@ -388,6 +552,19 @@ mod reuse {
         let summary = value["summary"].as_object_mut().expect("summary object");
         for key in ["changes", "audit"] {
             summary.remove(key);
+        }
+    }
+
+    /// The report a reused run produces is the report an analysis produces:
+    /// everything but the run's own metadata and what it says about *this*
+    /// invocation's comparisons.
+    fn findings(mut value: serde_json::Value) -> serde_json::Value {
+        if let Some(partitions) = value["partitions"].as_array_mut() {
+            for partition in partitions {
+                strip_run_metadata(partition);
+            }
+        } else {
+            strip_run_metadata(&mut value);
         }
         value
     }
@@ -400,7 +577,7 @@ mod reuse {
 
         let again = scan(dir.path(), &[]);
         assert!(reused(&again), "{again:#?}");
-        assert_eq!(again["run"]["run_id"], analysed["run"]["run_id"]);
+        assert_eq!(run_ids(&again), run_ids(&analysed));
         assert_eq!(findings(again), findings(analysed));
     }
 
@@ -412,8 +589,14 @@ mod reuse {
         scan(dir.path(), &[]);
 
         let store = super::open_store(dir.path());
-        let latest = store.latest_run().unwrap().expect("a recorded run");
-        assert_eq!(latest.id, 1, "the reused scans recorded nothing");
+        let recorded = store.table_count("scan_run").unwrap();
+        assert!(recorded > 0, "a semantic partition was recorded");
+        scan(dir.path(), &[]);
+        assert_eq!(
+            store.table_count("scan_run").unwrap(),
+            recorded,
+            "the reused scans recorded nothing"
+        );
     }
 
     #[test]

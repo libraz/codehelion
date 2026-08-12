@@ -87,6 +87,15 @@ pub(super) fn structural_config(cfg: &Config) -> StructuralConfig {
     if let Some(cap) = cfg.limits.sibling_total_cap {
         config.siblings.total_cap = cap;
     }
+    if let Some(budget) = cfg.limits.signature_sibling_candidate_budget {
+        config.signature_siblings.candidate_budget = budget;
+    }
+    if let Some(cap) = cfg.limits.signature_sibling_per_group_cap {
+        config.signature_siblings.per_group_cap = cap;
+    }
+    if let Some(cap) = cfg.limits.signature_sibling_total_cap {
+        config.signature_siblings.total_cap = cap;
+    }
     config.literals = literal_norm(cfg.literal_normalization);
     config
 }

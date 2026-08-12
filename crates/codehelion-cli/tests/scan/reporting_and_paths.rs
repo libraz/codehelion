@@ -384,18 +384,43 @@ fn decoration_is_chosen_by_its_own_flag_and_survives_redirection() {
 #[test]
 fn output_flag_writes_the_report_to_a_file() {
     let dir = fixture();
-    cmd()
+    let output = cmd()
         .current_dir(dir.path())
         .args(["scan", ".", "--output", "report.txt"])
-        .assert()
-        .success()
-        // Progress about a redirected report, so it does not take the
-        // report's place on standard output.
-        .stdout(predicate::str::contains("wrote report.txt").not())
-        .stderr(predicate::str::contains("wrote report.txt"));
+        .output()
+        .expect("run redirected scan");
+    assert!(output.status.success(), "{output:?}");
+    let expected_hint = database_directory_hint_line(dir.path());
+    assert_database_hint_lines(&output.stderr, Some(&expected_hint), 1);
+    // Progress about a redirected report and the first-run hint both belong
+    // on stderr, never in the report's place on standard output.
+    assert!(
+        output.stdout.is_empty(),
+        "redirected report unexpectedly wrote stdout: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains(DATABASE_DIRECTORY_HINT),
+        "database-directory hint leaked into stdout: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("wrote report.txt"),
+        "redirect progress leaked into stdout: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("wrote report.txt"),
+        "redirect progress missing from stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
     let report = std::fs::read_to_string(dir.path().join("report.txt")).unwrap();
     assert!(report.contains("codehelion scan · fast mode ·"));
     assert!(report.contains("groups"));
+    assert!(
+        !report.contains(DATABASE_DIRECTORY_HINT),
+        "database-directory hint leaked into report file: {report}",
+    );
 }
 
 #[test]
@@ -404,12 +429,22 @@ fn output_flag_preserves_an_existing_file_unless_forced() {
     let destination = dir.path().join("report.txt");
     std::fs::write(&destination, "do not replace\n").expect("write existing report");
 
-    cmd()
+    let failed = cmd()
         .current_dir(dir.path())
         .args(["scan", ".", "--output", "report.txt"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("refusing to overwrite"));
+        .output()
+        .expect("run scan with an existing output");
+    assert!(!failed.status.success(), "{failed:?}");
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("refusing to overwrite"),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr),
+    );
+    assert_database_hint_lines(&failed.stderr, None, 0);
+    assert!(
+        dir.path().join(".codehelion").is_dir(),
+        "database directory is created before report output is attempted",
+    );
     assert_eq!(
         std::fs::read_to_string(&destination).expect("read preserved report"),
         "do not replace\n"
@@ -780,6 +815,122 @@ fn doctor_hints_until_the_database_is_gitignored() {
         .stdout(predicate::str::contains("hint:").not());
 }
 
+const DATABASE_DIRECTORY_HINT: &str = "created local database directory";
+
+fn database_directory_hint_line(root: &Path) -> String {
+    let directory = codehelion_core::paths::canonical(root)
+        .expect("canonicalize scan root")
+        .join(".codehelion");
+    format!(
+        "note: created local database directory {}; consider adding `.codehelion/` to .gitignore",
+        directory.display(),
+    )
+}
+
+fn assert_database_hint_lines(stderr: &[u8], expected: Option<&str>, count: usize) {
+    let stderr = String::from_utf8_lossy(stderr);
+    let lines: Vec<_> = stderr
+        .lines()
+        .filter(|line| line.contains(DATABASE_DIRECTORY_HINT))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        count,
+        "database-directory hint lines: {lines:?}; full stderr: {stderr}",
+    );
+    if let Some(expected) = expected {
+        assert_eq!(
+            lines,
+            vec![expected],
+            "database-directory hint must be one exact line; full stderr: {stderr}",
+        );
+    }
+}
+
+fn parse_json_scan(output: &std::process::Output) -> serde_json::Value {
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains(DATABASE_DIRECTORY_HINT),
+        "database-directory hint leaked into stdout: {stdout}",
+    );
+    serde_json::from_slice(&output.stdout).expect("scan output is one JSON document")
+}
+
+#[test]
+fn the_first_scan_hints_about_a_new_unignored_database_directory_only_once() {
+    let dir = fixture();
+    let first = cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--format", "json"])
+        .output()
+        .expect("run first scan");
+    let first_report = parse_json_scan(&first);
+    assert!(first_report["run"]["run_id"].is_number());
+    let expected_hint = database_directory_hint_line(dir.path());
+    assert_database_hint_lines(&first.stderr, Some(&expected_hint), 1);
+
+    let second = cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--format", "json"])
+        .output()
+        .expect("run second scan");
+    let second_report = parse_json_scan(&second);
+    assert_eq!(
+        second_report["run"]["run_id"],
+        first_report["run"]["run_id"]
+    );
+    assert_database_hint_lines(&second.stderr, None, 0);
+}
+
+#[test]
+fn a_gitignored_database_directory_does_not_get_a_first_scan_hint() {
+    let dir = fixture();
+    std::fs::write(dir.path().join(".gitignore"), ".codehelion/\n").unwrap();
+    let output = cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--format", "json"])
+        .output()
+        .expect("run ignored-directory scan");
+    parse_json_scan(&output);
+    assert_database_hint_lines(&output.stderr, None, 0);
+}
+
+#[test]
+fn an_explicit_database_path_does_not_get_a_default_directory_hint() {
+    let dir = fixture();
+    let external = tempfile::tempdir().expect("external database directory");
+    let database = external.path().join("audit.db");
+    let output = cmd()
+        .current_dir(dir.path())
+        .args([
+            "scan",
+            ".",
+            "--format",
+            "json",
+            "--db",
+            database.to_str().expect("temporary path is UTF-8"),
+        ])
+        .output()
+        .expect("run explicit-database scan");
+    parse_json_scan(&output);
+    assert!(database.is_file());
+    assert_database_hint_lines(&output.stderr, None, 0);
+}
+
+#[test]
+fn structural_scans_use_the_same_first_directory_hint() {
+    let dir = fixture();
+    let output = cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--mode", "structural", "--format", "json"])
+        .output()
+        .expect("run first structural scan");
+    parse_json_scan(&output);
+    let expected_hint = database_directory_hint_line(dir.path());
+    assert_database_hint_lines(&output.stderr, Some(&expected_hint), 1);
+}
+
 #[test]
 fn a_scan_says_what_moved_since_the_previous_scan_of_the_tree() {
     let dir = fixture();
@@ -814,6 +965,113 @@ fn a_scan_says_what_moved_since_the_previous_scan_of_the_tree() {
     assert_eq!(changes["added"], 0);
     assert_eq!(changes["removed"], 0);
     assert_eq!(changes["unchanged"], 5);
+}
+
+#[test]
+fn text_headers_name_reuse_changes_and_no_reuse() {
+    let dir = fixture();
+    let root = dir.path();
+
+    let first = cmd()
+        .current_dir(root)
+        .args(["scan", "."])
+        .output()
+        .expect("run the first scan");
+    assert!(first.status.success(), "{first:?}");
+
+    let reused = cmd()
+        .current_dir(root)
+        .args(["scan", "."])
+        .output()
+        .expect("run the reused scan");
+    assert!(reused.status.success(), "{reused:?}");
+    let reused_text = String::from_utf8(reused.stdout).expect("text output");
+    assert!(
+        reused_text.contains("reused: tree unchanged"),
+        "{reused_text}"
+    );
+
+    std::fs::write(
+        root.join("src/a.rs"),
+        format!("{CHECKSUM_RS}\n// changed\n"),
+    )
+    .unwrap();
+    std::fs::write(root.join("src/d.rs"), RENAMED_RS).unwrap();
+    std::fs::remove_file(root.join("src/two.c")).unwrap();
+    let changed = cmd()
+        .current_dir(root)
+        .args(["scan", "."])
+        .output()
+        .expect("run the changed scan");
+    assert!(changed.status.success(), "{changed:?}");
+    let changed_text = String::from_utf8(changed.stdout).expect("text output");
+    assert!(changed_text.contains("3 file(s) changed"), "{changed_text}");
+    assert!(
+        !changed_text.contains("reused: tree unchanged"),
+        "{changed_text}"
+    );
+
+    let no_reuse = cmd()
+        .current_dir(root)
+        .args(["scan", ".", "--no-reuse"])
+        .output()
+        .expect("run with reuse disabled");
+    assert!(no_reuse.status.success(), "{no_reuse:?}");
+    let no_reuse_text = String::from_utf8(no_reuse.stdout).expect("text output");
+    assert!(
+        no_reuse_text.contains("0 file(s) changed"),
+        "{no_reuse_text}"
+    );
+    assert!(
+        !no_reuse_text.contains("reused: tree unchanged"),
+        "{no_reuse_text}"
+    );
+
+    let replay = cmd()
+        .current_dir(root)
+        .args(["report", "--format", "text"])
+        .output()
+        .expect("replay the recorded run");
+    assert!(replay.status.success(), "{replay:?}");
+    let replay_text = String::from_utf8(replay.stdout).expect("text output");
+    assert!(
+        replay_text.contains("replay: codehelion report --run"),
+        "{replay_text}"
+    );
+    assert!(
+        !replay_text.contains("reused: tree unchanged"),
+        "{replay_text}"
+    );
+}
+
+#[test]
+fn structural_text_header_names_tree_changes() {
+    let dir = fixture();
+    let root = dir.path();
+    let first = cmd()
+        .current_dir(root)
+        .args(["scan", ".", "--mode", "structural"])
+        .output()
+        .expect("run the first structural scan");
+    assert!(first.status.success(), "{first:?}");
+
+    std::fs::write(
+        root.join("src/a.rs"),
+        format!("{CHECKSUM_RS}\n// changed\n"),
+    )
+    .unwrap();
+    let changed = cmd()
+        .current_dir(root)
+        .args(["scan", ".", "--mode", "structural"])
+        .output()
+        .expect("run the changed structural scan");
+    assert!(changed.status.success(), "{changed:?}");
+    let changed_text = String::from_utf8(changed.stdout).expect("text output");
+    assert!(changed_text.contains("1 file(s) changed"), "{changed_text}");
+    assert!(
+        !changed_text.contains("reused: tree unchanged"),
+        "{changed_text}"
+    );
 }
 
 #[test]
@@ -865,8 +1123,7 @@ fn an_identical_second_scan_reuses_the_recorded_history() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("snapshot:").and(predicate::str::contains(
-                "(replay: codehelion report --run ",
-            )),
+            predicate::str::contains("snapshot:")
+                .and(predicate::str::contains("reused: tree unchanged")),
         );
 }
