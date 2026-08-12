@@ -25,6 +25,7 @@ use codehelion_core::stable_id::{
     CrossVariantComparisonId, CrossVariantGroupId, CrossVariantMemberId, FindingId,
     FragmentFingerprint, GroupLineageId, HASH_ALGORITHM, UnitFingerprint, group_lineage_id,
 };
+use codehelion_core::structural::SiblingBasis;
 use codehelion_core::test_code::TestCodeEvidence;
 use codehelion_core::verify::Confidence;
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -301,6 +302,11 @@ pub struct SiblingRow {
     pub content: FragmentFingerprint,
     /// Stable occurrence identity in the owning group domain.
     pub finding: FindingId,
+    /// Independent candidate channel that supplied this sibling.
+    pub basis: SiblingBasis,
+    /// Exact normalized signature when the sibling came from the signature
+    /// channel. Similarity siblings intentionally carry no signature.
+    pub signature: Option<String>,
     /// The verifier classification.
     pub clone_type: CloneClass,
     /// The verifier confidence band.
@@ -675,6 +681,12 @@ pub struct GuardrailsRow {
     pub sibling_per_group_cap: u64,
     /// Largest number of sibling findings retained across one run.
     pub sibling_total_cap: u64,
+    /// Largest number of signature-sibling candidates compared in one run.
+    pub signature_sibling_candidate_budget: u64,
+    /// Largest number of signature siblings retained for one clone group.
+    pub signature_sibling_per_group_cap: u64,
+    /// Largest number of signature siblings retained across one run.
+    pub signature_sibling_total_cap: u64,
     /// Largest related component refined together.
     pub max_component: u64,
 }
@@ -746,6 +758,61 @@ pub struct AbandonedRun {
     pub started_at: String,
     /// Time this partition finished writing its incomplete snapshot.
     pub finished_at: String,
+}
+
+/// One suppression row held by a staged partition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedSuppression {
+    /// The content-addressed suppression row.
+    id: i64,
+    /// The reason supplied by this invocation, to apply only on commit.
+    reason: Option<String>,
+    /// Whether staging created this row and abort may therefore remove it.
+    created: bool,
+}
+
+/// Opaque handle returned for a staged snapshot partition.
+///
+/// The suppression identifiers are deliberately carried by the handle rather
+/// than reconstructed from finding rows: a configured rule may match source
+/// code without hiding a persisted finding, and must still become active only
+/// when the whole invocation commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedSnapshotPart {
+    /// The running snapshot row to promote or abort.
+    run_id: i64,
+    /// Every suppression row supplied by this partition, in input order.
+    suppressions: Vec<StagedSuppression>,
+    /// The completed predecessor selected before this invocation started.
+    predecessor_run: Option<i64>,
+}
+
+impl StagedSnapshotPart {
+    /// Return the database row id carried by this store-issued handle.
+    #[must_use]
+    pub const fn run_id(&self) -> i64 {
+        self.run_id
+    }
+
+    /// Attach the predecessor selected by the CLI before finalization.
+    #[must_use]
+    pub const fn with_predecessor(mut self, predecessor_run: Option<i64>) -> Self {
+        self.predecessor_run = predecessor_run;
+        self
+    }
+}
+
+/// An owned collection of optional comparison writes supplied to the atomic
+/// multi-partition finalizer.
+///
+/// The concrete comparison snapshots are borrowed by the finalizer. CLI code
+/// keeps their owned preparation objects alive until this call returns.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SnapshotComparisons<'a> {
+    /// Optional exact cross-build-variant comparison.
+    pub cross_variant: Option<&'a CrossVariantComparisonSnapshot<'a>>,
+    /// Optional restricted cross-language semantic comparison.
+    pub cross_language: Option<&'a CrossLanguageComparisonSnapshot<'a>>,
 }
 
 mod groups;

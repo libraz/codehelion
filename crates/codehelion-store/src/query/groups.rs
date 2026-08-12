@@ -24,7 +24,8 @@ impl Store {
                         u.name, s.boilerplate, s.clone_type, s.confidence_band,
                         s.weight_version, s.lexical, s.structural, s.control_flow,
                         s.type_similarity, s.api, s.composite,
-                        sup.scope, sup.pattern, sup.reason, sup.active
+                        sup.scope, sup.pattern, sup.reason, sup.active,
+                        s.basis, s.signature
                  FROM clone_group_sibling s
                  JOIN clone_group g ON g.id = s.clone_group_id
                  JOIN fingerprint group_fp ON group_fp.id = g.group_fingerprint_id
@@ -62,6 +63,8 @@ impl Store {
                             api: row.get(18)?,
                             composite: row.get(19)?,
                             suppressed_by: stored_suppression(row, 20)?,
+                            basis: row.get(24)?,
+                            signature: row.get(25)?,
                         },
                     })
                 },
@@ -245,7 +248,8 @@ impl Store {
                         u.name, s.boilerplate, s.clone_type, s.confidence_band,
                         s.weight_version, s.lexical, s.structural, s.control_flow,
                         s.type_similarity, s.api, s.composite,
-                        sup.scope, sup.pattern, sup.reason, sup.active
+                        sup.scope, sup.pattern, sup.reason, sup.active,
+                        s.basis, s.signature
                  FROM clone_group_sibling s
                  JOIN source_unit u ON u.id = s.source_unit_id
                  LEFT JOIN suppression sup ON sup.id = s.suppression_id
@@ -276,6 +280,8 @@ impl Store {
                     api: row.get(16)?,
                     composite: row.get(17)?,
                     suppressed_by: stored_suppression(row, 18)?,
+                    basis: row.get(22)?,
+                    signature: row.get(23)?,
                 })
             })?
             .collect::<Result<_, _>>()
@@ -537,6 +543,9 @@ impl Store {
                         guardrail_posting_cap, guardrail_pair_budget,
                         guardrail_sibling_candidate_budget,
                         guardrail_sibling_per_group_cap, guardrail_sibling_total_cap,
+                        guardrail_signature_sibling_candidate_budget,
+                        guardrail_signature_sibling_per_group_cap,
+                        guardrail_signature_sibling_total_cap,
                         guardrail_max_component, folded_runs, subsumed_runs,
                         split_components, pair_budget_exhausted, baseline_digest,
                         excluded_language, excluded_symlink_files,
@@ -558,11 +567,14 @@ impl Store {
                     let guardrail_sibling_candidate_budget: Option<i64> = row.get(24)?;
                     let guardrail_sibling_per_group_cap: Option<i64> = row.get(25)?;
                     let guardrail_sibling_total_cap: Option<i64> = row.get(26)?;
-                    let guardrail_max_component: Option<i64> = row.get(27)?;
-                    let guardrail_near_miss_delta: Option<i64> = row.get(36)?;
-                    let guardrail_near_miss_cap: Option<i64> = row.get(37)?;
-                    let guardrail_verification_budget: Option<i64> = row.get(38)?;
-                    let guardrail_max_alignment_cells: Option<i64> = row.get(39)?;
+                    let guardrail_signature_sibling_candidate_budget: Option<i64> = row.get(27)?;
+                    let guardrail_signature_sibling_per_group_cap: Option<i64> = row.get(28)?;
+                    let guardrail_signature_sibling_total_cap: Option<i64> = row.get(29)?;
+                    let guardrail_max_component: Option<i64> = row.get(30)?;
+                    let guardrail_near_miss_delta: Option<i64> = row.get(39)?;
+                    let guardrail_near_miss_cap: Option<i64> = row.get(40)?;
+                    let guardrail_verification_budget: Option<i64> = row.get(41)?;
+                    let guardrail_max_alignment_cells: Option<i64> = row.get(42)?;
                     Ok(SummaryRow {
                         analyzed_files: FileCountsRow {
                             total: count(row.get(0)?),
@@ -604,16 +616,25 @@ impl Store {
                                 guardrail_sibling_per_group_cap.unwrap_or(0),
                             ),
                             sibling_total_cap: count(guardrail_sibling_total_cap.unwrap_or(0)),
+                            signature_sibling_candidate_budget: count(
+                                guardrail_signature_sibling_candidate_budget.unwrap_or(0),
+                            ),
+                            signature_sibling_per_group_cap: count(
+                                guardrail_signature_sibling_per_group_cap.unwrap_or(0),
+                            ),
+                            signature_sibling_total_cap: count(
+                                guardrail_signature_sibling_total_cap.unwrap_or(0),
+                            ),
                             max_component: count(guardrail_max_component.unwrap_or(0)),
                         }),
-                        folded_runs: count(row.get(28)?),
-                        subsumed_runs: count(row.get(29)?),
-                        split_components: count(row.get(30)?),
-                        pair_budget_exhausted: row.get(31)?,
-                        baseline_digest: row.get(32)?,
-                        excluded_language: count(row.get(33)?),
-                        excluded_symlink_files: count(row.get(34)?),
-                        excluded_symlink_directories: count(row.get(35)?),
+                        folded_runs: count(row.get(31)?),
+                        subsumed_runs: count(row.get(32)?),
+                        split_components: count(row.get(33)?),
+                        pair_budget_exhausted: row.get(34)?,
+                        baseline_digest: row.get(35)?,
+                        excluded_language: count(row.get(36)?),
+                        excluded_symlink_files: count(row.get(37)?),
+                        excluded_symlink_directories: count(row.get(38)?),
                         funnel: Vec::new(),
                         unused_suppressions: Vec::new(),
                     })

@@ -47,6 +47,72 @@ fn count(conn: &Connection, table: &str) -> i64 {
     .unwrap()
 }
 
+/// Seed the source-unit foreign key required by `clone_group_sibling` checks.
+fn sibling_ready() -> Connection {
+    let conn = seeded();
+    conn.execute(
+        "INSERT INTO fingerprint
+             (id, kind, hash_algo, hash, normalization_version, frontend_version,
+              analysis_mode, language, build_variant_id)
+         VALUES (3, 'unit', 'blake3', randomblob(16), 1, 'unit-v1',
+                 'structural', 'rust', 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO source_unit
+             (id, scan_run_id, fingerprint_id, language, unit_kind, name,
+              file_path, start_line, end_line, token_count)
+         VALUES (1, 1, 3, 'rust', 'function', 'sibling', 'src/sibling.rs', 1, 4, 20)",
+        [],
+    )
+    .unwrap();
+    conn
+}
+
+fn insert_sibling(
+    conn: &Connection,
+    basis: &str,
+    signature: Option<&str>,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT INTO clone_group_sibling
+             (clone_group_id, scan_run_id, source_unit_id, fragment_fingerprint,
+              finding_id, basis, signature, clone_type, confidence_band, weight_version,
+              lexical, structural, composite)
+         VALUES (1, 1, 1, randomblob(16), randomblob(16), ?1, ?2,
+                 'type-3', 'low', 'test-v1', 0.1, 0.2, 0.15)",
+        rusqlite::params![basis, signature],
+    )
+}
+
+#[test]
+fn sibling_basis_and_signature_checks_reject_inconsistent_raw_rows() {
+    let valid_similarity = sibling_ready();
+    assert_eq!(
+        insert_sibling(&valid_similarity, "similarity", None).unwrap(),
+        1
+    );
+
+    let valid_signature = sibling_ready();
+    assert_eq!(
+        insert_sibling(&valid_signature, "signature", Some("signature-sentinel")).unwrap(),
+        1
+    );
+
+    for (basis, signature) in [
+        ("similarity", Some("must-be-null")),
+        ("signature", None),
+        ("signature", Some("")),
+    ] {
+        let conn = sibling_ready();
+        assert!(
+            insert_sibling(&conn, basis, signature).is_err(),
+            "inconsistent sibling row unexpectedly inserted: basis={basis:?}, signature={signature:?}"
+        );
+    }
+}
+
 /// Creating the baseline under enforced foreign keys leaves its seeded
 /// relation rows intact.
 #[test]

@@ -31,66 +31,10 @@ impl Store {
             .iter()
             .map(ParsedAdoption::parse)
             .collect::<Result<Vec<_>, _>>()?;
-        self.ensure_completed_run(newer_run)?;
-        self.ensure_completed_run(predecessor_run)?;
-
         let tx = self.conn.transaction()?;
-        let mut result = LineageAdoptionResult::default();
-        for adoption in parsed {
-            let newer = tx
-                .query_row(
-                    "SELECT id, lineage_state FROM clone_group
-                     WHERE scan_run_id = ?1 AND group_fingerprint_id =
-                           (SELECT id FROM fingerprint WHERE hash = ?2 LIMIT 1)",
-                    params![newer_run, adoption.group.as_slice()],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-                )
-                .optional()?;
-            let predecessor = tx
-                .query_row(
-                    "SELECT lineage FROM clone_group
-                     WHERE scan_run_id = ?1 AND group_fingerprint_id =
-                           (SELECT id FROM fingerprint WHERE hash = ?2 LIMIT 1)",
-                    params![predecessor_run, adoption.previous_group.as_slice()],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .optional()?;
-            let (Some((newer_group_id, state)), Some(previous_lineage)) = (newer, predecessor)
-            else {
-                result.unknown.push(adoption.group_hex);
-                continue;
-            };
-            if state != "new" {
-                result.already_connected.push(adoption.group_hex);
-                continue;
-            }
-            if previous_lineage.as_slice() != adoption.lineage.as_slice() {
-                return Err(StoreError::InvalidLineageEvidence {
-                    reason: format!(
-                        "predecessor {} does not belong to requested lineage {}",
-                        adoption.previous_group_hex, adoption.lineage_hex
-                    ),
-                });
-            }
-            tx.execute(
-                "UPDATE clone_group SET lineage = ?2, lineage_state = 'expanded' WHERE id = ?1",
-                params![newer_group_id, adoption.lineage.as_slice()],
-            )?;
-            tx.execute(
-                "INSERT INTO clone_group_lineage_parent
-                     (clone_group_id, ordinal, parent_fingerprint, parent_lineage, is_primary,
-                      shared_content, overlap)
-                 VALUES (?1, 0, ?2, ?3, 1, ?4, ?5)",
-                params![
-                    newer_group_id,
-                    adoption.previous_group.as_slice(),
-                    adoption.lineage.as_slice(),
-                    adoption.shared,
-                    adoption.overlap,
-                ],
-            )?;
-            result.taken.push(adoption.group_hex);
-        }
+        ensure_completed_run_tx(&tx, newer_run)?;
+        ensure_completed_run_tx(&tx, predecessor_run)?;
+        let result = apply_lineage_adoptions_tx(&tx, newer_run, predecessor_run, &parsed)?;
         tx.commit()?;
         Ok(result)
     }
@@ -111,40 +55,15 @@ impl Store {
         newer_run: i64,
         predecessor_run: i64,
     ) -> Result<LineageAdoptionResult, StoreError> {
-        self.ensure_completed_run(newer_run)?;
-        self.ensure_completed_run(predecessor_run)?;
         let newer = lineage_candidates(&self.conn, newer_run)?;
         let predecessors = lineage_candidates(&self.conn, predecessor_run)?;
-        let mut adoptions = Vec::new();
-        for (group, candidate) in &newer {
-            if candidate.state != "new" || candidate.contents.is_empty() {
-                continue;
-            }
-            let Some((previous_group, previous, _)) = predecessors
-                .iter()
-                .filter_map(|(fingerprint, prior)| {
-                    let shared = candidate.contents.intersection(&prior.contents).count();
-                    (fingerprint != group && shared > 0).then_some((fingerprint, prior, shared))
-                })
-                .filter(|(_, _, shared)| shared.saturating_mul(2) >= candidate.contents.len())
-                .max_by(|(left_id, _, left_shared), (right_id, _, right_shared)| {
-                    left_shared
-                        .cmp(right_shared)
-                        .then_with(|| right_id.cmp(left_id))
-                })
-            else {
-                continue;
-            };
-            let shared = candidate.contents.intersection(&previous.contents).count();
-            adoptions.push(LineageAdoption {
-                group: group.clone(),
-                previous_group: previous_group.clone(),
-                lineage: previous.lineage.clone(),
-                shared: u64::try_from(shared).unwrap_or(u64::MAX),
-                overlap: overlap_fraction(shared, candidate.contents.len()),
-            });
-        }
-        self.adopt_lineage(newer_run, predecessor_run, &adoptions)
+        let adoptions = matching_adoptions(&newer, &predecessors)?;
+        let tx = self.conn.transaction()?;
+        ensure_completed_run_tx(&tx, newer_run)?;
+        ensure_completed_run_tx(&tx, predecessor_run)?;
+        let result = apply_lineage_adoptions_tx(&tx, newer_run, predecessor_run, &adoptions)?;
+        tx.commit()?;
+        Ok(result)
     }
 
     /// Persist one opt-in cross-build-variant comparison.
@@ -160,6 +79,16 @@ impl Store {
         comparison: &CrossVariantComparisonSnapshot<'_>,
     ) -> Result<i64, StoreError> {
         let tx = self.conn.transaction()?;
+        let comparison_row = Self::write_cross_variant_comparison_tx(&tx, comparison)?;
+        tx.commit()?;
+        Ok(comparison_row)
+    }
+
+    /// Write one cross-build comparison into an existing transaction.
+    pub(super) fn write_cross_variant_comparison_tx(
+        tx: &Transaction<'_>,
+        comparison: &CrossVariantComparisonSnapshot<'_>,
+    ) -> Result<i64, StoreError> {
         tx.execute(
             "INSERT INTO cross_variant_comparison
                  (comparison_id, policy_version, root_path, started_at, finished_at)
@@ -213,7 +142,6 @@ impl Store {
                 )?;
             }
         }
-        tx.commit()?;
         Ok(comparison_row)
     }
 
@@ -231,6 +159,16 @@ impl Store {
         comparison: &CrossLanguageComparisonSnapshot<'_>,
     ) -> Result<i64, StoreError> {
         let tx = self.conn.transaction()?;
+        let comparison_row = Self::write_cross_language_comparison_tx(&tx, comparison)?;
+        tx.commit()?;
+        Ok(comparison_row)
+    }
+
+    /// Write one cross-language comparison into an existing transaction.
+    pub(super) fn write_cross_language_comparison_tx(
+        tx: &Transaction<'_>,
+        comparison: &CrossLanguageComparisonSnapshot<'_>,
+    ) -> Result<i64, StoreError> {
         tx.execute(
             "INSERT INTO cross_language_comparison
                  (comparison_id, policy_version, root_path, started_at, finished_at)
@@ -298,8 +236,138 @@ impl Store {
                 )?;
             }
         }
-        tx.commit()?;
         Ok(comparison_row)
+    }
+}
+
+/// Validate and apply already-parsed lineage edges inside a caller-owned
+/// transaction.
+pub(super) fn apply_lineage_adoptions_tx(
+    tx: &Transaction<'_>,
+    newer_run: i64,
+    predecessor_run: i64,
+    adoptions: &[ParsedAdoption],
+) -> Result<LineageAdoptionResult, StoreError> {
+    let mut result = LineageAdoptionResult::default();
+    for adoption in adoptions {
+        let newer = tx
+            .query_row(
+                "SELECT id, lineage_state FROM clone_group
+                 WHERE scan_run_id = ?1 AND group_fingerprint_id =
+                       (SELECT id FROM fingerprint WHERE hash = ?2 LIMIT 1)",
+                params![newer_run, adoption.group.as_slice()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let predecessor = tx
+            .query_row(
+                "SELECT lineage FROM clone_group
+                 WHERE scan_run_id = ?1 AND group_fingerprint_id =
+                       (SELECT id FROM fingerprint WHERE hash = ?2 LIMIT 1)",
+                params![predecessor_run, adoption.previous_group.as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        let (Some((newer_group_id, state)), Some(previous_lineage)) = (newer, predecessor) else {
+            result.unknown.push(adoption.group_hex.clone());
+            continue;
+        };
+        if state != "new" {
+            result.already_connected.push(adoption.group_hex.clone());
+            continue;
+        }
+        if previous_lineage.as_slice() != adoption.lineage.as_slice() {
+            return Err(StoreError::InvalidLineageEvidence {
+                reason: format!(
+                    "predecessor {} does not belong to requested lineage {}",
+                    adoption.previous_group_hex, adoption.lineage_hex
+                ),
+            });
+        }
+        tx.execute(
+            "UPDATE clone_group SET lineage = ?2, lineage_state = 'expanded' WHERE id = ?1",
+            params![newer_group_id, adoption.lineage.as_slice()],
+        )?;
+        tx.execute(
+            "INSERT INTO clone_group_lineage_parent
+                 (clone_group_id, ordinal, parent_fingerprint, parent_lineage, is_primary,
+                  shared_content, overlap)
+             VALUES (?1, 0, ?2, ?3, 1, ?4, ?5)",
+            params![
+                newer_group_id,
+                adoption.previous_group.as_slice(),
+                adoption.lineage.as_slice(),
+                adoption.shared,
+                adoption.overlap,
+            ],
+        )?;
+        result.taken.push(adoption.group_hex.clone());
+    }
+    Ok(result)
+}
+
+/// Plan matching lineage edges using rows visible in the caller's transaction.
+pub(super) fn plan_matching_lineages_tx(
+    tx: &Transaction<'_>,
+    newer_run: i64,
+    predecessor_run: i64,
+) -> Result<Vec<ParsedAdoption>, StoreError> {
+    let newer = lineage_candidates(tx, newer_run)?;
+    let predecessors = lineage_candidates(tx, predecessor_run)?;
+    matching_adoptions(&newer, &predecessors)
+}
+
+fn matching_adoptions(
+    newer: &BTreeMap<String, LineageCandidate>,
+    predecessors: &BTreeMap<String, LineageCandidate>,
+) -> Result<Vec<ParsedAdoption>, StoreError> {
+    let mut adoptions = Vec::new();
+    for (group, candidate) in newer {
+        if candidate.state != "new" || candidate.contents.is_empty() {
+            continue;
+        }
+        let Some((previous_group, previous, _)) = predecessors
+            .iter()
+            .filter_map(|(fingerprint, prior)| {
+                let shared = candidate.contents.intersection(&prior.contents).count();
+                (fingerprint != group && shared > 0).then_some((fingerprint, prior, shared))
+            })
+            .filter(|(_, _, shared)| shared.saturating_mul(2) >= candidate.contents.len())
+            .max_by(|(left_id, _, left_shared), (right_id, _, right_shared)| {
+                left_shared
+                    .cmp(right_shared)
+                    .then_with(|| right_id.cmp(left_id))
+            })
+        else {
+            continue;
+        };
+        let shared = candidate.contents.intersection(&previous.contents).count();
+        adoptions.push(ParsedAdoption {
+            group_hex: group.clone(),
+            group: parse_stable_id(group)?,
+            previous_group_hex: previous_group.clone(),
+            previous_group: parse_stable_id(previous_group)?,
+            lineage_hex: previous.lineage.clone(),
+            lineage: parse_stable_id(&previous.lineage)?,
+            shared: i64::try_from(shared).unwrap_or(i64::MAX),
+            overlap: overlap_fraction(shared, candidate.contents.len()),
+        });
+    }
+    Ok(adoptions)
+}
+
+fn ensure_completed_run_tx(tx: &Transaction<'_>, run_id: i64) -> Result<(), StoreError> {
+    let status: Option<String> = tx
+        .query_row(
+            "SELECT status FROM scan_run WHERE id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match status.as_deref() {
+        Some("completed") => Ok(()),
+        Some(_) => Err(StoreError::RunNotCompleted { run_id }),
+        None => Err(StoreError::RunNotFound { run_id }),
     }
 }
 
@@ -352,7 +420,7 @@ fn lineage_candidates(
     Ok(candidates)
 }
 
-struct ParsedAdoption {
+pub(super) struct ParsedAdoption {
     group_hex: String,
     group: [u8; 16],
     previous_group_hex: String,
@@ -503,10 +571,10 @@ pub(super) fn write_sibling_groups(
     let mut insert = tx.prepare_cached(
         "INSERT INTO clone_group_sibling
              (clone_group_id, scan_run_id, source_unit_id, fragment_fingerprint, finding_id,
-              clone_type, confidence_band, weight_version, lexical, structural,
+              basis, signature, clone_type, confidence_band, weight_version, lexical, structural,
               control_flow, type_similarity, api, composite, boilerplate, suppression_id)
          VALUES (?1, (SELECT scan_run_id FROM clone_group WHERE id = ?1),
-                 ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
     )?;
     for siblings in sibling_groups {
         let group_row_id = *group_row_ids
@@ -527,6 +595,8 @@ pub(super) fn write_sibling_groups(
                 source_unit_id,
                 sibling.content.as_bytes().as_slice(),
                 sibling.finding.as_bytes().as_slice(),
+                sibling.basis.name(),
+                sibling.signature,
                 sibling.clone_type.name(),
                 sibling.confidence.name(),
                 sibling.similarity.weight_version,

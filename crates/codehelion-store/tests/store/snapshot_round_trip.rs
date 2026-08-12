@@ -71,35 +71,71 @@ fn a_sibling_round_trips_without_becoming_a_primary_member() {
         end_line: 36,
         token_count: 31,
     });
+    snapshot.units.push(UnitRow {
+        fingerprint: unit_fp(3),
+        language: Language::Rust,
+        kind: UnitKind::Function,
+        name: Some("similarity_checksum".to_string()),
+        file_path: "src/d.rs".to_string(),
+        start_line: 40,
+        end_line: 46,
+        token_count: 29,
+    });
     snapshot.sibling_groups.push(SiblingGroupRow {
         group: group_fp(9),
-        siblings: vec![SiblingRow {
-            unit: 2,
-            content: frag_fp(2),
-            finding: finding(203),
-            clone_type: CloneClass::Type3,
-            confidence: Confidence::Low,
-            similarity: SimilarityBreakdownRow {
-                weight_version: "structural-verify-v1".to_string(),
-                lexical: 0.72,
-                structural: 0.91,
-                control_flow: Some(0.8),
-                type_similarity: None,
-                api: Some(0.7),
-                composite: 0.76,
-                min_pairwise: 0.76,
-                confidence_band: Confidence::Low,
+        siblings: vec![
+            SiblingRow {
+                unit: 2,
+                content: frag_fp(2),
+                finding: finding(203),
+                basis: SiblingBasis::Signature,
+                signature: Some("rust|params=[]|return=()".to_string()),
+                clone_type: CloneClass::Type3,
+                confidence: Confidence::Low,
+                similarity: SimilarityBreakdownRow {
+                    weight_version: "structural-verify-v1".to_string(),
+                    lexical: 0.72,
+                    structural: 0.91,
+                    control_flow: Some(0.8),
+                    type_similarity: None,
+                    api: Some(0.7),
+                    composite: 0.76,
+                    min_pairwise: 0.76,
+                    confidence_band: Confidence::Low,
+                },
+                boilerplate: None,
+                suppressed_by: Some(0),
             },
-            boilerplate: None,
-            suppressed_by: Some(0),
-        }],
+            SiblingRow {
+                unit: 3,
+                content: frag_fp(3),
+                finding: finding(204),
+                basis: SiblingBasis::Similarity,
+                signature: None,
+                clone_type: CloneClass::Type3,
+                confidence: Confidence::Medium,
+                similarity: SimilarityBreakdownRow {
+                    weight_version: "structural-verify-v1".to_string(),
+                    lexical: 0.42,
+                    structural: 0.55,
+                    control_flow: None,
+                    type_similarity: None,
+                    api: Some(0.31),
+                    composite: 0.42,
+                    min_pairwise: 0.42,
+                    confidence_band: Confidence::Medium,
+                },
+                boilerplate: None,
+                suppressed_by: Some(0),
+            },
+        ],
     });
     let mut store = Store::open_in_memory().unwrap();
     let run_id = store.record_snapshot(&snapshot).unwrap();
 
     let groups = store.run_groups(run_id).unwrap();
     assert_eq!(groups[0].members.len(), 2);
-    assert_eq!(groups[0].siblings.len(), 1);
+    assert_eq!(groups[0].siblings.len(), 2);
     let sibling = &groups[0].siblings[0];
     assert_eq!(sibling.member.file_path, "src/c.rs");
     assert_eq!(
@@ -109,6 +145,11 @@ fn a_sibling_round_trips_without_becoming_a_primary_member() {
     assert_eq!(sibling.member.finding_hex, finding(203).to_hex());
     assert_eq!(sibling.clone_type, "type-3");
     assert_eq!(sibling.confidence_band, "low");
+    assert_eq!(sibling.basis, "signature");
+    assert_eq!(
+        sibling.signature.as_deref(),
+        Some("rust|params=[]|return=()")
+    );
     assert!((sibling.composite - 0.76).abs() < f64::EPSILON);
     let rule = sibling
         .suppressed_by
@@ -116,6 +157,12 @@ fn a_sibling_round_trips_without_becoming_a_primary_member() {
         .expect("the sibling retains its suppression rule");
     assert_eq!(rule.scope, "path_glob");
     assert_eq!(rule.pattern, "vendor/**");
+
+    let similarity = &groups[0].siblings[1];
+    assert_eq!(similarity.member.file_path, "src/d.rs");
+    assert_eq!(similarity.basis, "similarity");
+    assert!(similarity.signature.is_none());
+    assert!((similarity.composite - 0.42).abs() < f64::EPSILON);
 
     let explained = store
         .sibling(&finding(203).to_hex())
@@ -131,6 +178,13 @@ fn a_sibling_round_trips_without_becoming_a_primary_member() {
             id: finding(203).to_hex(),
         }]
     );
+    let explained_similarity = store
+        .sibling(&finding(204).to_hex())
+        .unwrap()
+        .expect("similarity sibling id resolves");
+    assert_eq!(explained_similarity.sibling.basis, "similarity");
+    assert!(explained_similarity.sibling.signature.is_none());
+    assert!((explained_similarity.sibling.composite - 0.42).abs() < f64::EPSILON);
 }
 
 #[test]

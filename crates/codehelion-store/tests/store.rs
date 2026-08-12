@@ -16,6 +16,7 @@ use codehelion_core::stable_id::{
     CrossVariantComparisonId, CrossVariantGroupId, CrossVariantMemberId, FindingId,
     FragmentFingerprint, UnitFingerprint, group_lineage_id,
 };
+use codehelion_core::structural::SiblingBasis;
 use codehelion_core::verify::Confidence;
 use codehelion_store::artifact::{
     ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION, ArtifactAnalysisCorrelation,
@@ -254,6 +255,9 @@ fn sample_summary() -> SummaryRow {
             sibling_candidate_budget: 51,
             sibling_per_group_cap: 52,
             sibling_total_cap: 53,
+            signature_sibling_candidate_budget: 57,
+            signature_sibling_per_group_cap: 58,
+            signature_sibling_total_cap: 59,
             max_component: 60,
         }),
         excluded_skipped: 5,
@@ -296,5 +300,7 @@ mod build_variants;
 mod feature_and_run_metadata;
 #[path = "store/semantic_snapshots.rs"]
 mod semantic_snapshots;
+#[path = "store/snapshot_atomicity.rs"]
+mod snapshot_atomicity;
 #[path = "store/snapshot_round_trip.rs"]
 mod snapshot_round_trip;

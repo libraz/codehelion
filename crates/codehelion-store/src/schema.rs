@@ -1,4 +1,4 @@
-//! Schema definition for the single pre-release v1 baseline.
+//! Schema definition for the current local v2 baseline.
 //!
 //! The schema covers every scan entity: `ScanRun`, `BuildVariant`,
 //! `SourceUnit`, `Fragment`, `Fingerprint`, `CloneGroup`, `Finding`,
@@ -40,23 +40,24 @@
 //! - Savings and confidence live in separate columns; there is no single
 //!   collapsed score column.
 //!
-//! Before the first release, schema fragments are assembled into one baseline.
+//! The current local v2 baseline is intentionally self-contained.
 //! `schema_meta` records which baseline a database holds. A database from any
-//! other layout is rejected and recreated without conversion.
+//! other layout is rejected without automatic migration; the operator must
+//! move it aside or choose a fresh database path and scan again.
 
 use rusqlite::Connection;
 
 use crate::StoreError;
 
-/// The one unreleased development schema baseline this build reads.
+/// The current local schema baseline this build reads.
 ///
 /// A database recorded under another one is rejected rather than migrated.
-/// Nothing is lost by that: the audit database holds the latest scan, which
-/// re-running the scan reproduces.
-pub const SCHEMA_VERSION: i64 = 1;
+/// The audit database holds derived scan state, so re-running the scan on a
+/// fresh path reproduces it without mutating the incompatible file.
+pub const SCHEMA_VERSION: i64 = 2;
 
-/// Full pre-release database layout. Existing development databases are not
-/// transformed; create a fresh database when this contract changes.
+/// Full current local database layout. Existing incompatible databases are
+/// not transformed; create a fresh database when this contract changes.
 const BASELINE_SQL: &str = r"
 CREATE TABLE artifact (
     id                 INTEGER PRIMARY KEY,
@@ -284,6 +285,8 @@ CREATE TABLE clone_group_sibling (
     source_unit_id       INTEGER NOT NULL REFERENCES source_unit (id) ON DELETE CASCADE,
     fragment_fingerprint BLOB NOT NULL CHECK (length(fragment_fingerprint) = 16),
     finding_id           BLOB NOT NULL CHECK (length(finding_id) = 16),
+    basis                TEXT NOT NULL CHECK (basis IN ('similarity', 'signature')),
+    signature            TEXT,
     clone_type           TEXT NOT NULL CHECK (clone_type IN ('type-1', 'type-2', 'type-3')),
     confidence_band      TEXT NOT NULL CHECK (confidence_band IN ('high', 'medium', 'low')),
     weight_version       TEXT NOT NULL,
@@ -295,6 +298,8 @@ CREATE TABLE clone_group_sibling (
     composite            REAL NOT NULL,
     boilerplate          TEXT CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition', 'guarded-dispatch', 'configured-answer')),
     suppression_id       INTEGER REFERENCES suppression (id),
+    CHECK ((basis = 'signature' AND signature IS NOT NULL AND length(signature) > 0)
+        OR (basis = 'similarity' AND signature IS NULL)),
     PRIMARY KEY (clone_group_id, source_unit_id),
     UNIQUE (scan_run_id, finding_id)
 ) STRICT;
@@ -697,6 +702,9 @@ CREATE TABLE run_summary (
     guardrail_sibling_candidate_budget INTEGER,
     guardrail_sibling_per_group_cap INTEGER,
     guardrail_sibling_total_cap INTEGER,
+    guardrail_signature_sibling_candidate_budget INTEGER,
+    guardrail_signature_sibling_per_group_cap INTEGER,
+    guardrail_signature_sibling_total_cap INTEGER,
     guardrail_max_component INTEGER,
     folded_runs           INTEGER NOT NULL,
     subsumed_runs         INTEGER NOT NULL,
@@ -871,7 +879,7 @@ CREATE INDEX idx_cross_language_semantic_group_comparison
     ON cross_language_semantic_group (comparison_id);
 ";
 
-/// Initialize a new database with the one supported pre-release layout.
+/// Initialize a new database with the one supported local layout.
 pub(crate) fn initialize(conn: &mut Connection) -> Result<(), StoreError> {
     let has_meta: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta')",

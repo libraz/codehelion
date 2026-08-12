@@ -570,6 +570,7 @@ dependencies = [
 name = "codehelion-store"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "codehelion-core",
  "codehelion-helper-protocol",
  "rusqlite",

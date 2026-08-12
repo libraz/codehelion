@@ -217,7 +217,7 @@ fn on_disk_databases_reopen_and_a_newer_schema_is_refused() {
             .unwrap();
     }
     {
-        // Reopen: the v1 baseline remains readable and the data is still there.
+        // Reopen: the current v2 baseline remains readable and the data is still there.
         let store = Store::open(&path).unwrap();
         assert_eq!(
             store.schema_version().unwrap(),
@@ -234,6 +234,219 @@ fn on_disk_databases_reopen_and_a_newer_schema_is_refused() {
     }
     let err = Store::open(&path).unwrap_err();
     assert!(matches!(err, StoreError::UnsupportedSchema { found: 999 }));
+}
+
+#[test]
+fn incompatible_schema_rejection_leaves_the_database_and_wal_sidecars_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let cases = [(1_i64, "v1"), (999_i64, "unknown"), (0_i64, "markerless")];
+    for (version, label) in cases {
+        let path = dir.path().join(format!("{label}.db"));
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            if version != 0 {
+                conn.execute_batch(
+                    "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1),
+                                                  version INTEGER NOT NULL) STRICT;
+                     INSERT INTO schema_meta (id, version) VALUES (1, 1);
+                     CREATE TABLE sentinel (value TEXT NOT NULL);
+                     INSERT INTO sentinel (value) VALUES ('keep-me');",
+                )
+                .unwrap();
+                conn.execute("UPDATE schema_meta SET version = ?1", [version])
+                    .unwrap();
+            } else {
+                conn.execute_batch(
+                    "CREATE TABLE sentinel (value TEXT NOT NULL);
+                     INSERT INTO sentinel (value) VALUES ('keep-me');",
+                )
+                .unwrap();
+            }
+        }
+        let sidecars = [
+            (
+                format!("{}-wal", path.display()),
+                b"wal-sentinel".as_slice(),
+            ),
+            (
+                format!("{}-shm", path.display()),
+                b"shm-sentinel".as_slice(),
+            ),
+        ];
+        for (sidecar, bytes) in &sidecars {
+            std::fs::write(sidecar, bytes).unwrap();
+        }
+        let before_main = std::fs::read(&path).unwrap();
+        let before_sidecars = sidecars
+            .iter()
+            .map(|(path, _)| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+
+        let error = Store::open(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            StoreError::UnsupportedSchema { found } if found == version
+        ));
+        let text = error.to_string();
+        assert!(text.contains("automatic migration is not supported"));
+        assert!(text.contains("existing database was left unchanged"));
+        assert!(text.contains("--db path"));
+        assert!(text.contains("fresh scan"));
+        assert_eq!(std::fs::read(&path).unwrap(), before_main);
+        for ((sidecar, _), before) in sidecars.iter().zip(before_sidecars) {
+            assert_eq!(std::fs::read(sidecar).unwrap(), before);
+        }
+    }
+}
+
+fn sqlite_sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    sidecar.into()
+}
+
+fn file_state(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
+}
+
+#[test]
+#[allow(
+    clippy::disallowed_types,
+    reason = "a child process is required to leave a genuine crash-stale SQLite WAL without running destructors"
+)]
+fn stale_wal_schema_rejection_preserves_the_real_database_and_sidecars() {
+    if let Some(raw_path) = std::env::var_os("CODEHELION_STALE_WAL_CHILD") {
+        // This process exits without running Rust destructors.  SQLite still
+        // receives the OS close, leaving a genuine committed WAL and shared
+        // memory file just as a process crash would.
+        let path: std::path::PathBuf = raw_path.into();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.pragma_update(None, "wal_autocheckpoint", 0_i64)
+            .unwrap();
+        conn.execute("UPDATE schema_meta SET version = 1 WHERE id = 1", [])
+            .unwrap();
+        std::process::exit(86);
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("stale-wal.db");
+
+    // Establish a checkpointed v2 main file first.  The child process then
+    // commits a v1 marker into a genuine WAL and exits without destructors, so
+    // the main file and logical database disagree as they can after a crash.
+    {
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 2);
+    }
+    let checkpoint = rusqlite::Connection::open(&path).unwrap();
+    checkpoint
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    drop(checkpoint);
+
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "feature_and_run_metadata::stale_wal_schema_rejection_preserves_the_real_database_and_sidecars",
+            "--nocapture",
+        ])
+        .env("CODEHELION_STALE_WAL_CHILD", &path)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(86));
+
+    let wal = sqlite_sidecar(&path, "-wal");
+    let shm = sqlite_sidecar(&path, "-shm");
+    let main_before = std::fs::read(&path).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), main_before);
+    assert!(
+        wal.is_file(),
+        "the schema downgrade must remain in a real WAL"
+    );
+    assert!(
+        shm.is_file(),
+        "the WAL writer must have a shared-memory file"
+    );
+
+    // The main file alone says v2, whereas the same main file with its real
+    // WAL says v1.  This is the boundary the old immutable-main preflight
+    // missed.
+    let main_only_directory = tempfile::tempdir().unwrap();
+    let main_only = main_only_directory.path().join("main-only.db");
+    std::fs::copy(&path, &main_only).unwrap();
+    let main_only_conn = rusqlite::Connection::open_with_flags(
+        &main_only,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .unwrap();
+    let main_only_version: i64 = main_only_conn
+        .query_row("SELECT version FROM schema_meta WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(main_only_version, 2);
+
+    let private_directory = tempfile::tempdir().unwrap();
+    let private = private_directory.path().join("with-wal.db");
+    std::fs::copy(&path, &private).unwrap();
+    std::fs::copy(&wal, sqlite_sidecar(&private, "-wal")).unwrap();
+    let private_conn = rusqlite::Connection::open(&private).unwrap();
+    let private_version: i64 = private_conn
+        .query_row("SELECT version FROM schema_meta WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(private_version, 1);
+
+    let before = [file_state(&path), file_state(&wal), file_state(&shm)];
+
+    let error = Store::open(&path).unwrap_err();
+    assert!(matches!(error, StoreError::UnsupportedSchema { found: 1 }));
+    assert_eq!(
+        [file_state(&path), file_state(&wal), file_state(&shm)],
+        before,
+        "preflight rejection must not recover or delete the real WAL"
+    );
+
+    let error = Store::open_existing(&path).unwrap_err();
+    assert!(matches!(error, StoreError::UnsupportedSchema { found: 1 }));
+    assert_eq!(
+        [file_state(&path), file_state(&wal), file_state(&shm)],
+        before,
+        "open_existing must use the same non-mutating preflight"
+    );
+}
+
+#[test]
+fn a_valid_wal_schema_is_opened_and_its_uncheckpointed_data_survives() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("valid-wal.db");
+    {
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 2);
+    }
+
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    writer
+        .pragma_update(None, "wal_autocheckpoint", 0_i64)
+        .unwrap();
+    writer
+        .execute_batch(
+            "CREATE TABLE wal_sentinel (value TEXT NOT NULL);
+             INSERT INTO wal_sentinel (value) VALUES ('preserved');",
+        )
+        .unwrap();
+
+    let store = Store::open(&path).unwrap();
+    drop(store);
+    let reader = rusqlite::Connection::open(&path).unwrap();
+    let value: String = reader
+        .query_row("SELECT value FROM wal_sentinel", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(value, "preserved");
+    drop(writer);
 }
 
 #[test]

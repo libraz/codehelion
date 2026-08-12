@@ -7,15 +7,15 @@
 //!
 //! Layout:
 //!
-//! - [`schema`] — the single pre-release database baseline,
+//! - [`schema`] — the current local database baseline,
 //! - [`snapshot`] — the write path: one scan, one atomic transaction,
 //! - [`query`] — the read path: every SQL query as a typed function,
 //! - [`compiler`] — both directions for the compiler IR, whose shape is
 //!   defined by the helper protocol rather than here,
 //!
-//! Before release, opening a new database creates the current baseline.
-//! Any earlier development layout is deliberately rejected; its findings
-//! should be recreated by a fresh scan.
+//! Opening a new database creates the current baseline. Any incompatible
+//! layout is deliberately rejected; its findings should be recreated by a
+//! fresh scan.
 
 pub mod artifact;
 pub mod compiler;
@@ -23,6 +23,8 @@ pub mod path_key;
 pub mod query;
 pub mod schema;
 pub mod snapshot;
+
+mod preflight;
 
 pub use path_key::{display_path, path_key};
 
@@ -58,6 +60,23 @@ pub fn directory_of(path: &str) -> &str {
 /// Storage errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    /// The original database or one of its relevant sidecars changed while a
+    /// private preflight snapshot was being copied or validated.
+    #[error(
+        "database changed while it was being validated; no original database or sidecar was opened for writing, retry the operation"
+    )]
+    DatabaseChangedDuringPreflight,
+    /// A missing or empty main database was accompanied by a `SQLite` sidecar.
+    #[error(
+        "database path is missing or empty but has SQLite sidecars; remove the orphaned sidecars or choose another --db path"
+    )]
+    OrphanedDatabaseSidecar,
+    /// An I/O failure occurred while making the private validation snapshot.
+    #[error("database preflight I/O error: {message}")]
+    PreflightIo {
+        /// The operating-system diagnostic.
+        message: String,
+    },
     /// An underlying database error.
     #[error("database error: {message}")]
     Sqlite {
@@ -67,8 +86,7 @@ pub enum StoreError {
     },
     /// The database is not the baseline this build supports.
     #[error(
-        "database schema version {found} is not supported by this codehelion build; \
-         move the database aside, then run a fresh scan"
+        "database schema version {found} is not supported by this codehelion build; automatic migration is not supported and the existing database was left unchanged; move it aside or choose another --db path, then run a fresh scan"
     )]
     UnsupportedSchema {
         /// Version recorded in the database, or zero when its layout has no marker.
@@ -89,13 +107,15 @@ pub enum StoreError {
         fingerprint: String,
     },
     /// A snapshot attempted to emit two primary groups with one stable ID.
-    #[error("snapshot emits duplicate clone-group fingerprint {fingerprint}")]
+    #[error(
+        "core invariant breach: duplicate clone-group fingerprint {fingerprint} reached the store"
+    )]
     DuplicateGroupFingerprint {
         /// Hex form of the conflicting stable group fingerprint.
         fingerprint: String,
     },
     /// A snapshot attempted to emit two findings with one stable ID.
-    #[error("snapshot emits duplicate finding id {finding}")]
+    #[error("core invariant breach: duplicate finding id {finding} reached the store")]
     DuplicateFindingId {
         /// Hex form of the conflicting stable finding id.
         finding: String,
@@ -122,6 +142,19 @@ pub enum StoreError {
         /// Number of rules in the snapshot.
         rules: usize,
     },
+    /// A staged snapshot token did not match the suppression rows it names.
+    #[error("invalid staged suppression: {reason}")]
+    InvalidSuppression {
+        /// Why the token cannot be trusted for atomic finalization.
+        reason: String,
+    },
+    /// A staged finalization request was empty, duplicated, or internally
+    /// inconsistent.
+    #[error("invalid staged snapshot parts: {reason}")]
+    InvalidSnapshotParts {
+        /// Why the finalizer rejected the supplied handles.
+        reason: String,
+    },
     /// A caller tried to read a run before its scan invocation completed.
     #[error("scan run {run_id} did not complete and cannot be read")]
     RunNotCompleted {
@@ -139,6 +172,15 @@ pub enum StoreError {
     RunNotRunning {
         /// Row id of the unexpected run state.
         run_id: i64,
+    },
+    /// A failed multi-partition finalization could not clean up all staged
+    /// rows after rolling back its primary operation.
+    #[error("snapshot finalization failed: {primary}; cleanup also failed: {cleanup}")]
+    AtomicFinalization {
+        /// The operation that caused finalization to fail.
+        primary: String,
+        /// The cleanup error observed while removing staged state.
+        cleanup: String,
     },
     /// An identifier string was not a 32-digit hex id.
     #[error("malformed identifier {id:?}: expected 32 hex digits")]
@@ -278,10 +320,38 @@ impl Store {
     /// [`StoreError::UnsupportedSchema`] when an incompatible layout
     /// exists at the path; otherwise any underlying database error.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        let conn = Connection::open(path)?;
+        preflight::reject_orphaned_sidecars(path)?;
+        let existing = std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0);
+        if existing {
+            // SQLite can recover a WAL or rollback journal as part of opening
+            // a writer. Validate a private copy first, so an incompatible
+            // database is rejected without mutating the original or its
+            // sidecars.
+            preflight::validate_existing(path)?;
+        }
+        let mut conn = if existing {
+            Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?
+        } else {
+            Connection::open(path)?
+        };
         conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        // Initialize only a fresh path. Existing databases have already been
+        // validated against a private copy and must be validated once more
+        // after acquiring the real connection; applying the baseline here
+        // would turn a race that changed the marker to zero into a mutation.
+        if existing {
+            schema::validate_existing(&conn)?;
+        } else {
+            schema::initialize(&mut conn)?;
+        }
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        Self::from_connection(conn)
+        let mut store = Self { conn };
+        store.discard_expired_abandoned_runs()?;
+        Ok(store)
     }
 
     /// Open an existing database without creating or initializing a file.
@@ -297,12 +367,20 @@ impl Store {
     /// database, and an underlying database error when the path is absent or
     /// unreadable.
     pub fn open_existing(path: &Path) -> Result<Self, StoreError> {
+        preflight::reject_orphaned_sidecars(path)?;
+        let existing = std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0);
+        if existing {
+            preflight::validate_existing(path)?;
+        }
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         conn.pragma_update(None, "foreign_keys", true)?;
+        // A compatible existing database is validated again after the real
+        // connection is acquired. This closes the race between private
+        // preflight and the read command's SQLite connection.
         schema::validate_existing(&conn)?;
         Ok(Self { conn })
     }
@@ -557,6 +635,30 @@ mod tests {
     #[test]
     fn fingerprint_hex_is_lowercase_and_fixed_width() {
         assert_eq!(fingerprint_hex([0xab; 16]), "ab".repeat(16));
+    }
+
+    #[test]
+    fn duplicate_identity_errors_are_explicit_core_invariant_breaches() {
+        let group_fingerprint = "0123456789abcdef0123456789abcdef";
+        let finding_id = "fedcba9876543210fedcba9876543210";
+
+        assert_eq!(
+            StoreError::DuplicateGroupFingerprint {
+                fingerprint: group_fingerprint.to_string(),
+            }
+            .to_string(),
+            format!(
+                "core invariant breach: duplicate clone-group fingerprint {group_fingerprint} \
+                 reached the store"
+            )
+        );
+        assert_eq!(
+            StoreError::DuplicateFindingId {
+                finding: finding_id.to_string(),
+            }
+            .to_string(),
+            format!("core invariant breach: duplicate finding id {finding_id} reached the store")
+        );
     }
 
     #[test]

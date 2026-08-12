@@ -364,6 +364,10 @@ pub struct StoredSibling {
     pub api: Option<f64>,
     /// Composite verifier similarity.
     pub composite: f64,
+    /// Independent candidate channel that supplied this sibling.
+    pub basis: String,
+    /// Exact normalized signature for signature-channel siblings.
+    pub signature: Option<String>,
     /// The ungrouped sibling occurrence.
     pub member: StoredMember,
     /// The rule that hid this supplemental finding in its run.
