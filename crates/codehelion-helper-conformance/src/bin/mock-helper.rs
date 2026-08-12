@@ -20,8 +20,8 @@
 //! mock-helper deaf-on-poison    # hangs only for a unit named `poison`
 //! mock-helper dies              # exits mid-handshake
 //! mock-helper noisy-death       # complains on stderr, then exits
-//! mock-helper noisy-stdout       # writes a diagnostic to the protocol stream
-//! mock-helper oversized-frame    # declares a response frame over the ceiling
+//! mock-helper noisy-stdout      # writes a diagnostic to the protocol stream
+//! mock-helper oversized-frame   # declares a response frame over the ceiling
 //! mock-helper confused          # answers a request nobody made
 //! mock-helper refuses           # answers with a failure
 //! mock-helper chatty            # floods its standard error, then exits
@@ -66,18 +66,24 @@ fn main() {
         eprintln!("the toolchain this helper was built for is not installed");
         std::process::exit(3);
     }
+    // Both of these stay alive after writing. What they are here to provoke is
+    // the client's reading of a frame it must refuse, and a process that exits
+    // the moment it has written races the client's next write to it: the write
+    // fails against a gone process, which the client rightly reports as the
+    // death rather than as the frame. Exiting is what `dies` and `noisy-death`
+    // are for.
     if behaviour == "noisy-stdout" {
         // Deliberately not a frame: stdout is exclusively the protocol stream.
         let _ = output.write_all(b"diagnostic\n");
         let _ = output.flush();
-        return;
+        park();
     }
     if behaviour == "oversized-frame" {
         let declared = MAX_FRAME_BYTES.saturating_add(1).to_be_bytes();
         let _ = output.write_all(&declared);
         let _ = output.write_all(&[0]);
         let _ = output.flush();
-        return;
+        park();
     }
 
     loop {
