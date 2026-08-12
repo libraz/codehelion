@@ -36,7 +36,7 @@ const MAX_RUN: [Place; 4] = [
 ];
 
 /// The getter the corpus labels a deliberate non-clone.
-const GETTER: [Place; 2] = [("seed.cpp", 32), ("type2.cpp", 32)];
+const GETTER: [Place; 2] = [("seed.cpp", 47), ("type2.cpp", 32)];
 
 fn analyze() -> StructuralReport {
     let files: Vec<SyntaxIrFile> = FILES

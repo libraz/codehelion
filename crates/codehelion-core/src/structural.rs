@@ -43,7 +43,7 @@ use crate::frontend::{Lexeme, Token, TokenKind, UnitKind};
 use crate::grouping::{
     self, GroupingConfig, GroupingSet, GroupingStats, GroupingUnit, SimilarityEdge,
 };
-use crate::ir::{ByteRange, IrNode, Shape, SyntaxIrFile};
+use crate::ir::{ByteRange, IrNode, Shape, Signature, SyntaxIrFile};
 use crate::maximal::{self, MaximalConfig, RegionSide, RegionStats, SharedRegion};
 use crate::near_match::{self, NearMatchConfig, NearMatchStats};
 use crate::stable_id::{
@@ -68,8 +68,10 @@ use evidence::{UnitEvidence, token_count_meets_minimum, unit_evidence, unit_meet
 use pairs::{lift_to_unit_pairs, unrepresented_pairs};
 use regions::{confirm_regions, drop_subsumed, fold_by_content, grow_runs};
 use reporting::{dominant_boilerplate_members, group_detail, written_once_per_width_members};
-use siblings::sweep_siblings;
-use units::{flatten_units, line_range, view};
+use siblings::sweep_siblings_with_context;
+#[cfg(test)]
+use units::flatten_units;
+use units::{flatten_units_with_context, line_range, view};
 
 #[cfg(test)]
 use regions::{Confirmed, covers_run, merge_adjacent};
@@ -90,6 +92,13 @@ struct Unit {
     fingerprint: UnitFingerprint,
     content: FragmentFingerprint,
     normalized_content: FragmentFingerprint,
+    /// The frontend's normalized function signature, when it could recover
+    /// one. This is a sibling-candidate side channel only: it never feeds a
+    /// fingerprint, feature vector, or primary grouping decision.
+    signature: Option<Signature>,
+    /// Opaque directory context supplied by the caller for the signature
+    /// sibling channel. It is absent when the caller used the legacy API.
+    directory: Option<DirectoryPartition>,
     range: ByteRange,
     lines: (u32, u32),
     tokens: (usize, usize),

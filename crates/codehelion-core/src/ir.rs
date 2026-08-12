@@ -29,11 +29,12 @@
 //!
 //! [`IR_SCHEMA_VERSION`] is a fingerprint input, and fingerprints built from
 //! different IR schema versions are never considered equal. It stays at 1
-//! until the first release tag: nothing has shipped, so a change that alters a
-//! comparison result — adding or removing a [`Shape`], changing a shape tag,
-//! changing how frontends map native kinds — invalidates the databases holding
-//! the old results rather than being versioned away from them, and re-running
-//! the scan is the whole of the recovery.
+//! until a released version requires a compatibility boundary. The `v0.1.0`
+//! release has shipped, so a change that alters a comparison result must use a
+//! deliberate compatibility decision; this side-table addition does not alter
+//! the IR tree or any fingerprint input.
+
+use core::fmt;
 
 use crate::discovery::Language;
 use crate::frontend::{Diagnostic, Lexeme, Token};
@@ -41,6 +42,79 @@ use crate::frontend::{Diagnostic, Lexeme, Token};
 /// Version of the Syntax IR schema, recorded per file and hashed into every
 /// structural fingerprint.
 pub const IR_SCHEMA_VERSION: u32 = 1;
+
+/// Domain and recipe version for syntax signatures.
+pub const SYNTAX_SIGNATURE_VERSION: &str = "syntax-signature-v1";
+
+/// The 128-bit content key of one normalized function or method signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SignatureKey([u8; 16]);
+
+impl SignatureKey {
+    /// Wrap bytes previously produced by this signature recipe.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// Return the raw key bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+
+    /// Lowercase hexadecimal form suitable for reports and storage.
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        self.to_string()
+    }
+}
+
+impl fmt::Display for SignatureKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+/// A canonical, position-free function or method signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signature {
+    /// BLAKE3-128 key derived from the language and normalized form.
+    pub key: SignatureKey,
+    /// Deterministic structured signature text supplied by a frontend.
+    pub normalized: String,
+}
+
+impl Signature {
+    /// Construct a signature and derive its key from one canonical input.
+    #[must_use]
+    pub fn new(language: Language, normalized: impl Into<String>) -> Self {
+        // Frontends own canonicalization (including trivia removal). Keep
+        // their structured text byte-for-byte: whitespace can be payload in
+        // literals and template arguments, and changing it here would make
+        // distinct signatures collide.
+        let normalized = normalized.into();
+        let mut hasher = blake3::Hasher::new();
+        write_signature_part(&mut hasher, SYNTAX_SIGNATURE_VERSION.as_bytes());
+        write_signature_part(&mut hasher, language.name().as_bytes());
+        write_signature_part(&mut hasher, normalized.as_bytes());
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+        Self {
+            key: SignatureKey(bytes),
+            normalized,
+        }
+    }
+}
+
+fn write_signature_part(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    hasher.update(&len.to_le_bytes());
+    hasher.update(bytes);
+}
 
 /// Maximum number of IR nodes on one root-to-leaf path emitted by the bundled
 /// structural frontends.
@@ -357,6 +431,12 @@ pub struct SyntaxIrFile {
     /// Tokens in source order, comments and whitespace removed. Same
     /// representation as Fast mode, so token-level normalization is shared.
     pub tokens: Vec<Token>,
+    /// Function and method signatures keyed by their exact source range.
+    ///
+    /// This is a reporting and semantic-evidence side table only. It is not
+    /// read by structural or Fast fingerprint construction, so changing a
+    /// signature never changes an existing structural identity.
+    pub signatures: Vec<(ByteRange, Signature)>,
     /// Top-level IR nodes in source order.
     pub roots: Vec<IrNode>,
     /// Recoverable lexical problems, as in Fast mode.
@@ -382,6 +462,21 @@ pub struct SyntaxIrFile {
 }
 
 impl SyntaxIrFile {
+    /// Look up a signature by exact source range.
+    #[must_use]
+    pub fn signature_for_range(&self, range: ByteRange) -> Option<&Signature> {
+        debug_assert!(
+            self.signatures.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "SyntaxIrFile.signatures must be strictly source-order sorted"
+        );
+        self.signatures
+            .binary_search_by_key(&(range.start, range.end), |(candidate, _)| {
+                (candidate.start, candidate.end)
+            })
+            .ok()
+            .and_then(|index| self.signatures.get(index).map(|(_, signature)| signature))
+    }
+
     /// Depth-first pre-order traversal over every node in the file.
     pub fn walk(&self, visit: &mut impl FnMut(&IrNode)) {
         for root in &self.roots {
@@ -424,6 +519,45 @@ impl SyntaxIrFile {
         });
         lost
     }
+}
+
+/// Canonicalize frontend-produced signature entries.
+///
+/// Entries are returned in strict source order. Exact duplicate entries are
+/// collapsed deterministically; if one byte range has unequal signatures,
+/// every candidate for that range is discarded because the frontend has no
+/// safe way to choose one interpretation. Structural fingerprints never read
+/// this side table, so dropping an ambiguous entry is preferable to inventing
+/// evidence.
+#[must_use]
+pub fn canonicalize_signatures(
+    mut signatures: Vec<(ByteRange, Signature)>,
+) -> Vec<(ByteRange, Signature)> {
+    signatures.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.normalized.cmp(&right.1.normalized))
+            .then_with(|| left.1.key.cmp(&right.1.key))
+    });
+
+    let mut canonical = Vec::with_capacity(signatures.len());
+    let mut index = 0;
+    while index < signatures.len() {
+        let range = signatures[index].0;
+        let group_start = index;
+        index += 1;
+        while index < signatures.len() && signatures[index].0 == range {
+            index += 1;
+        }
+        let candidate = &signatures[group_start].1;
+        if signatures[group_start + 1..index]
+            .iter()
+            .all(|(_, signature)| signature == candidate)
+        {
+            canonical.push(signatures[group_start].clone());
+        }
+    }
+    canonical
 }
 
 /// A Structural-mode parser for one language.
@@ -564,6 +698,91 @@ mod tests {
     }
 
     #[test]
+    fn signatures_are_language_scoped_and_exactly_looked_up() {
+        let first = Signature::new(Language::Rust, "rust | params = [i32] | return = ()");
+        assert_eq!(first.normalized, "rust | params = [i32] | return = ()");
+        let same_text_cpp = Signature::new(Language::Cpp, first.normalized.clone());
+        assert_ne!(first.key, same_text_cpp.key);
+        assert_eq!(SYNTAX_SIGNATURE_VERSION, "syntax-signature-v1");
+        assert_eq!(IR_SCHEMA_VERSION, 1);
+        let file = SyntaxIrFile {
+            language: Language::Rust,
+            frontend_version: "test-v1",
+            ir_schema_version: IR_SCHEMA_VERSION,
+            tokens: Vec::new(),
+            signatures: vec![
+                (ByteRange { start: 2, end: 3 }, first.clone()),
+                (ByteRange { start: 8, end: 9 }, same_text_cpp),
+            ],
+            roots: Vec::new(),
+            diagnostics: Vec::new(),
+            error_ranges: Vec::new(),
+            depth_truncated: false,
+            test_module: false,
+        };
+        assert_eq!(
+            file.signature_for_range(ByteRange { start: 2, end: 3 }),
+            Some(&first)
+        );
+        assert!(
+            file.signature_for_range(ByteRange { start: 2, end: 4 })
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn signature_recipe_digest_is_pinned() {
+        let signature = Signature::new(Language::Rust, "receiver=free|params=[i32]|return=()");
+        assert_eq!(signature.normalized, "receiver=free|params=[i32]|return=()");
+        assert_eq!(signature.key.to_hex(), "c32d8883402f5a9c6aa26a437791f51e");
+    }
+
+    #[test]
+    fn signature_constructor_preserves_literal_whitespace_payload() {
+        let with_space = Signature::new(Language::Cpp, r#"return=decltype("a b")"#);
+        let without_space = Signature::new(Language::Cpp, r#"return=decltype("ab")"#);
+        assert_eq!(with_space.normalized, r#"return=decltype("a b")"#);
+        assert_ne!(with_space.key, without_space.key);
+    }
+
+    #[test]
+    fn signature_canonicalization_keeps_exact_duplicates_and_drops_conflicts() {
+        let first = Signature::new(Language::Rust, "rust|receiver=free|return=()");
+        let conflicting = Signature::new(Language::Rust, "rust|receiver=free|return=i32");
+        let range = ByteRange { start: 10, end: 20 };
+        let second_range = ByteRange { start: 30, end: 40 };
+        let canonical = canonicalize_signatures(vec![
+            (second_range, first.clone()),
+            (range, conflicting),
+            (range, first.clone()),
+            (second_range, first.clone()),
+        ]);
+        assert_eq!(canonical, vec![(second_range, first)]);
+        assert!(canonical.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    }
+
+    #[test]
+    fn changing_signatures_does_not_change_structural_features() {
+        let root = IrNode {
+            shape: Shape::Function,
+            name: None,
+            token_start: 0,
+            token_end: 0,
+            range: ByteRange { start: 0, end: 1 },
+            children: Vec::new(),
+        };
+        let mut with_signature = file_of(vec![root.clone()]);
+        with_signature.signatures.push((
+            root.range,
+            Signature::new(Language::Rust, "rust|params=[]|return=()"),
+        ));
+        assert_eq!(
+            crate::features::extract(&file_of(vec![root])),
+            crate::features::extract(&with_signature)
+        );
+    }
+
+    #[test]
     fn statement_summaries_take_statement_children_in_order() {
         let tokens: Vec<Token> = ["let", "x", "=", "f", "(", ")", "return", "x"]
             .iter()
@@ -642,6 +861,7 @@ mod tests {
             frontend_version: "test-v1",
             ir_schema_version: IR_SCHEMA_VERSION,
             tokens: Vec::new(),
+            signatures: Vec::new(),
             roots: vec![root],
             diagnostics: Vec::new(),
             error_ranges: Vec::new(),
@@ -669,6 +889,7 @@ mod tests {
             frontend_version: "test-v1",
             ir_schema_version: IR_SCHEMA_VERSION,
             tokens: Vec::new(),
+            signatures: Vec::new(),
             roots,
             diagnostics: Vec::new(),
             error_ranges: Vec::new(),

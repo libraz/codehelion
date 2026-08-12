@@ -113,6 +113,7 @@ fn structural_file() -> SyntaxIrFile {
         frontend_version: "guardrail-work-bench",
         ir_schema_version: IR_SCHEMA_VERSION,
         tokens,
+        signatures: Vec::new(),
         roots: vec![node(Shape::Function, 0, 20, vec![body])],
         diagnostics: Vec::new(),
         error_ranges: Vec::new(),

@@ -24,7 +24,8 @@ use codehelion_core::frontend::{
     Lexeme, LexemeInterner, LiteralKind, SourceSpan, Token, TokenKind,
 };
 use codehelion_core::ir::{
-    ByteRange, IR_SCHEMA_VERSION, IrNode, MAX_IR_DEPTH, Shape, StructuralFrontend, SyntaxIrFile,
+    ByteRange, IR_SCHEMA_VERSION, IrNode, MAX_IR_DEPTH, Shape, Signature, StructuralFrontend,
+    SyntaxIrFile, canonicalize_signatures,
 };
 use ra_ap_syntax::{Edition, SourceFile, SyntaxKind, SyntaxNode};
 
@@ -83,27 +84,87 @@ fn delimiter_nesting_overflow(tokens: &[Token], source_len: usize) -> Option<Byt
 
 /// Build the explicit partial result returned when preflight blocks CST
 /// construction for excessive delimiter nesting.
-fn depth_error_file(tokens: Vec<Token>, range: ByteRange) -> SyntaxIrFile {
-    let token_start = tokens.partition_point(|token| token.span.start_byte < range.start);
-    let token_end = tokens.partition_point(|token| token.span.start_byte < range.end);
+fn depth_error_file(source: &str, tokens: Vec<Token>, range: ByteRange) -> SyntaxIrFile {
+    // The delimiter preflight tells us where recursive parsing must stop, but
+    // it does not make the source before that point unusable. Parse that
+    // prefix independently so healthy functions remain available even when a
+    // later generated expression exceeds the depth budget.
+    let prefix_end = safe_depth_prefix_end(&tokens, range);
+    let omitted_range = ByteRange {
+        start: prefix_end,
+        end: range.end,
+    };
+    let prefix = source.get(..prefix_end).unwrap_or("");
+    let parse = SourceFile::parse(prefix, PARSE_EDITION);
+    let root = parse.syntax_node();
+    let mut builder = IrBuilder::new(prefix);
+    builder.collect_tokens(&root);
+    let mut roots = Vec::new();
+    for child in root.children() {
+        builder.visit(&child, &mut roots, 1);
+    }
+    for error in parse.errors() {
+        let error_range = error.range();
+        builder.error_ranges.push(ByteRange {
+            start: usize::from(error_range.start()),
+            end: usize::from(error_range.end()),
+        });
+    }
+    builder.error_ranges.push(omitted_range);
+    builder
+        .error_ranges
+        .sort_unstable_by_key(|error_range| (error_range.start, error_range.end));
+    builder.error_ranges.dedup();
+
+    let token_start = tokens.partition_point(|token| token.span.start_byte < omitted_range.start);
+    let token_end = tokens.partition_point(|token| token.span.start_byte < omitted_range.end);
+    roots.push(IrNode {
+        shape: Shape::Error,
+        name: None,
+        token_start,
+        token_end,
+        range: omitted_range,
+        children: Vec::new(),
+    });
     SyntaxIrFile {
         language: Language::Rust,
         frontend_version: STRUCTURAL_FRONTEND_VERSION,
         ir_schema_version: IR_SCHEMA_VERSION,
         tokens,
-        roots: vec![IrNode {
-            shape: Shape::Error,
-            name: None,
-            token_start,
-            token_end,
-            range,
-            children: Vec::new(),
-        }],
+        signatures: canonicalize_signatures(builder.signatures),
+        roots,
         diagnostics: Vec::new(),
-        error_ranges: vec![range],
+        error_ranges: builder.error_ranges,
         depth_truncated: true,
         test_module: false,
     }
+}
+
+/// Keep the recovery parse shallow enough that the parser itself cannot
+/// overflow its native call stack while still retaining top-level units that
+/// precede a pathological nesting run. The omitted range is represented as
+/// one explicit Error leaf below.
+fn safe_depth_prefix_end(tokens: &[Token], overflow: ByteRange) -> usize {
+    let safe_limit = (MAX_IR_DEPTH / 8).max(1);
+    let mut expected_closers = Vec::new();
+    for token in tokens {
+        if token.span.start_byte >= overflow.start {
+            break;
+        }
+        match token.text.as_str() {
+            "{" => expected_closers.push("}"),
+            "(" => expected_closers.push(")"),
+            "[" => expected_closers.push("]"),
+            "}" | ")" | "]" if expected_closers.last() == Some(&token.text.as_str()) => {
+                expected_closers.pop();
+            }
+            _ => continue,
+        }
+        if expected_closers.len() >= safe_limit {
+            return token.span.start_byte;
+        }
+    }
+    overflow.start
 }
 
 /// The Rust Structural-mode frontend.
@@ -122,7 +183,7 @@ impl StructuralFrontend for RustStructuralFrontend {
     fn parse(&self, source: &str) -> SyntaxIrFile {
         let (preflight_tokens, _) = crate::lexer::lex(source);
         if let Some(range) = delimiter_nesting_overflow(&preflight_tokens, source.len()) {
-            return depth_error_file(preflight_tokens, range);
+            return depth_error_file(source, preflight_tokens, range);
         }
 
         let parse = SourceFile::parse(source, PARSE_EDITION);
@@ -148,11 +209,14 @@ impl StructuralFrontend for RustStructuralFrontend {
             .sort_unstable_by_key(|range| (range.start, range.end));
         builder.error_ranges.dedup();
 
+        let signatures = canonicalize_signatures(builder.signatures);
+
         SyntaxIrFile {
             language: Language::Rust,
             frontend_version: STRUCTURAL_FRONTEND_VERSION,
             ir_schema_version: IR_SCHEMA_VERSION,
             tokens: builder.tokens,
+            signatures,
             roots,
             // Lexical diagnostics are a Fast-lexer concept; the structural
             // frontend reports problems through `error_ranges` only.
@@ -235,6 +299,448 @@ fn fn_shape(node: &SyntaxNode) -> Shape {
     } else {
         Shape::Function
     }
+}
+
+/// Build the conservative signature side-table entry for one Rust function.
+///
+/// The CST gives us the type nodes directly, so the function name and every
+/// parameter pattern can be left out without guessing where an identifier is
+/// part of a type. A function whose parameter type is itself a function
+/// pointer, a macro or an incomplete/error node is deliberately unsupported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GenericBinding {
+    name: String,
+    role: &'static str,
+    index: usize,
+}
+
+fn rust_signature(node: &SyntaxNode) -> Option<Signature> {
+    let parameter_list = rust_signature_parameter_list(node)?;
+    let generic_lists = rust_generic_parameter_lists(node);
+    let generic_bindings = rust_generic_bindings(&generic_lists)?;
+    let ancestor_where_clauses = rust_generic_where_clauses(node);
+    if rust_has_nested_generic_binder(node, &ancestor_where_clauses) {
+        return None;
+    }
+    let body_start: usize = node
+        .children()
+        .find(|child| child.kind() == SyntaxKind::BLOCK_EXPR)
+        .map_or_else(
+            || usize::from(parameter_list.text_range().start()),
+            |body| usize::from(body.text_range().start()),
+        );
+    if node
+        .children()
+        .filter(|child| usize::from(child.text_range().start()) < body_start)
+        .any(|child| {
+            child.kind() != SyntaxKind::ATTR
+                && child.descendants().any(|descendant| {
+                    matches!(
+                        descendant.kind(),
+                        SyntaxKind::ERROR | SyntaxKind::MACRO_CALL
+                    )
+                })
+        })
+    {
+        return None;
+    }
+    let receiver = rust_receiver_kind(node, &parameter_list);
+    let mut normalized = String::from("rust|receiver=");
+    normalized.push_str(receiver);
+    normalized.push_str("|qual=");
+    let mut generic = String::new();
+    let mut qualifiers = String::new();
+    for element in node.children_with_tokens() {
+        match element {
+            ra_ap_syntax::NodeOrToken::Node(child) => match child.kind() {
+                SyntaxKind::VISIBILITY
+                | SyntaxKind::ATTR
+                | SyntaxKind::NAME
+                | SyntaxKind::PARAM_LIST
+                | SyntaxKind::RET_TYPE
+                | SyntaxKind::BLOCK_EXPR
+                | SyntaxKind::GENERIC_PARAM_LIST => {}
+                _ => push_signature_chunk(
+                    &mut qualifiers,
+                    &compact_element_with_generics(&child, &generic_bindings),
+                ),
+            },
+            ra_ap_syntax::NodeOrToken::Token(token) => {
+                let text = token.text();
+                if !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT)
+                    && !matches!(text, "fn" | ";")
+                {
+                    push_signature_token(&mut qualifiers, text);
+                }
+            }
+        }
+    }
+    for where_clause in &ancestor_where_clauses {
+        push_signature_chunk(
+            &mut qualifiers,
+            &compact_node_with_generics(where_clause, &generic_bindings),
+        );
+    }
+    for list in &generic_lists {
+        push_signature_chunk(
+            &mut generic,
+            &compact_node_with_generics(list, &generic_bindings),
+        );
+    }
+    normalized.push_str(&qualifiers);
+    normalized.push_str("|generic=");
+    normalized.push_str(&generic);
+    normalized.push_str("|params=");
+    for parameter in parameter_list.children() {
+        let parameter_text = match parameter.kind() {
+            SyntaxKind::SELF_PARAM => compact_node_with_generics(&parameter, &generic_bindings),
+            SyntaxKind::PARAM => rust_parameter_signature(&parameter, &generic_bindings)?,
+            _ => return None,
+        };
+        normalized.push('[');
+        normalized.push_str(&parameter_text);
+        normalized.push(']');
+    }
+    normalized.push_str("|return=");
+    if let Some(return_type) = node
+        .children()
+        .find(|child| child.kind() == SyntaxKind::RET_TYPE)
+    {
+        normalized.push_str(&rust_return_signature(&return_type, &generic_bindings)?);
+    } else {
+        normalized.push_str("()");
+    }
+
+    Some(Signature::new(Language::Rust, normalized))
+}
+
+fn rust_generic_parameter_lists(node: &SyntaxNode) -> Vec<SyntaxNode> {
+    let mut lists: Vec<SyntaxNode> = node
+        .ancestors()
+        .skip(1)
+        .filter(|ancestor| matches!(ancestor.kind(), SyntaxKind::IMPL | SyntaxKind::TRAIT))
+        .filter_map(|ancestor| {
+            ancestor
+                .children()
+                .find(|child| child.kind() == SyntaxKind::GENERIC_PARAM_LIST)
+        })
+        .collect();
+    lists.reverse();
+    if let Some(function_list) = node
+        .children()
+        .find(|child| child.kind() == SyntaxKind::GENERIC_PARAM_LIST)
+    {
+        lists.push(function_list);
+    }
+    lists
+}
+
+fn rust_generic_where_clauses(node: &SyntaxNode) -> Vec<SyntaxNode> {
+    let mut clauses: Vec<SyntaxNode> = node
+        .ancestors()
+        .skip(1)
+        .filter(|ancestor| matches!(ancestor.kind(), SyntaxKind::IMPL | SyntaxKind::TRAIT))
+        .filter_map(|ancestor| {
+            ancestor
+                .children()
+                .find(|child| child.kind() == SyntaxKind::WHERE_CLAUSE)
+        })
+        .collect();
+    clauses.reverse();
+    clauses
+}
+
+fn rust_has_nested_generic_binder(
+    node: &SyntaxNode,
+    ancestor_where_clauses: &[SyntaxNode],
+) -> bool {
+    node.children()
+        .filter(|child| child.kind() != SyntaxKind::BLOCK_EXPR)
+        .any(|child| {
+            child.kind() == SyntaxKind::FOR_BINDER
+                || child
+                    .descendants()
+                    .any(|descendant| descendant.kind() == SyntaxKind::FOR_BINDER)
+        })
+        || ancestor_where_clauses.iter().any(|clause| {
+            clause
+                .descendants()
+                .any(|descendant| descendant.kind() == SyntaxKind::FOR_BINDER)
+        })
+}
+
+fn rust_generic_bindings(lists: &[SyntaxNode]) -> Option<Vec<GenericBinding>> {
+    let mut bindings = Vec::new();
+    for list in lists {
+        for parameter in list.children() {
+            let (role, name) = match parameter.kind() {
+                SyntaxKind::TYPE_PARAM => ("type", rust_generic_name(&parameter)?),
+                SyntaxKind::LIFETIME_PARAM => ("lifetime", rust_generic_name(&parameter)?),
+                SyntaxKind::CONST_PARAM => ("const", rust_generic_name(&parameter)?),
+                _ => return None,
+            };
+            if bindings
+                .iter()
+                .any(|binding: &GenericBinding| binding.name == name)
+            {
+                return None;
+            }
+            let index = bindings
+                .iter()
+                .filter(|binding| binding.role == role)
+                .count();
+            bindings.push(GenericBinding { name, role, index });
+        }
+    }
+    Some(bindings)
+}
+
+fn rust_generic_name(parameter: &SyntaxNode) -> Option<String> {
+    if parameter.kind() == SyntaxKind::LIFETIME_PARAM {
+        return parameter
+            .descendants_with_tokens()
+            .filter_map(ra_ap_syntax::NodeOrToken::into_token)
+            .find(|token| token.kind() == SyntaxKind::LIFETIME_IDENT)
+            .map(|token| token.text().to_owned());
+    }
+    parameter
+        .children()
+        .find(|child| child.kind() == SyntaxKind::NAME)
+        .map(|name| name.text().to_string())
+}
+
+fn rust_signature_parameter_list(node: &SyntaxNode) -> Option<SyntaxNode> {
+    // A foreign item inherits its ABI from the surrounding `extern` block.
+    // The local function node does not carry that ancestor in the same shape
+    // as an `extern "C" fn` item, so retaining it here would risk colliding
+    // distinct foreign ABIs. Until inherited ABI is modelled, reject it.
+    let mut ancestor = node.parent();
+    while let Some(current) = ancestor {
+        if current.kind() == SyntaxKind::EXTERN_BLOCK {
+            return None;
+        }
+        ancestor = current.parent();
+    }
+    if !node
+        .children()
+        .any(|child| child.kind() == SyntaxKind::BLOCK_EXPR)
+    {
+        // Bodyless declarations are valid required trait items, but the
+        // grammar also recovers invalid top-level and impl `fn f();` items.
+        let mut context = node.parent();
+        let in_trait = loop {
+            let Some(current) = context else {
+                break false;
+            };
+            if current.kind() == SyntaxKind::TRAIT {
+                break true;
+            }
+            context = current.parent();
+        };
+        if !in_trait {
+            return None;
+        }
+    }
+    node.children()
+        .find(|child| child.kind() == SyntaxKind::PARAM_LIST)
+}
+
+fn rust_return_signature(
+    return_type: &SyntaxNode,
+    generic_bindings: &[GenericBinding],
+) -> Option<String> {
+    if return_type.descendants().any(|child| {
+        matches!(
+            child.kind(),
+            SyntaxKind::ERROR | SyntaxKind::MACRO_CALL | SyntaxKind::FN_PTR_TYPE
+        )
+    }) {
+        return None;
+    }
+    let type_node = return_type
+        .children()
+        .find(|child| format!("{:?}", child.kind()).ends_with("_TYPE"))?;
+    Some(compact_node_with_generics(&type_node, generic_bindings))
+}
+
+/// Classify the declaration context without including the associated type or
+/// function name. Receiver presence is a semantic part of a Rust method's
+/// callable shape, while a self-less associated function is distinct from a
+/// free function even when all type fields match.
+fn rust_receiver_kind<'a>(node: &SyntaxNode, parameters: &SyntaxNode) -> &'a str {
+    if node
+        .parent()
+        .is_none_or(|parent| parent.kind() != SyntaxKind::ASSOC_ITEM_LIST)
+    {
+        return "free";
+    }
+    if parameters.children().any(|parameter| {
+        parameter.kind() == SyntaxKind::SELF_PARAM
+            || (parameter.kind() == SyntaxKind::PARAM
+                && rust_parameter_has_self_pattern(&parameter))
+    }) {
+        "instance"
+    } else {
+        "associated"
+    }
+}
+
+fn rust_parameter_has_self_pattern(parameter: &SyntaxNode) -> bool {
+    parameter
+        .children()
+        .find(|child| format!("{:?}", child.kind()).ends_with("_PAT"))
+        .is_some_and(|pattern| {
+            let tokens: Vec<String> = pattern
+                .descendants_with_tokens()
+                .filter_map(ra_ap_syntax::NodeOrToken::into_token)
+                .filter(|token| {
+                    !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT)
+                })
+                .map(|token| token.text().to_owned())
+                .collect();
+            tokens == ["self"] || tokens == ["mut", "self"]
+        })
+}
+
+/// Extract one Rust parameter's type while omitting its pattern/name.
+fn rust_parameter_signature(
+    parameter: &SyntaxNode,
+    generic_bindings: &[GenericBinding],
+) -> Option<String> {
+    if parameter.descendants().any(|child| {
+        matches!(
+            child.kind(),
+            SyntaxKind::ERROR | SyntaxKind::MACRO_CALL | SyntaxKind::FN_PTR_TYPE
+        )
+    }) {
+        return None;
+    }
+    let children: Vec<SyntaxNode> = parameter.children().collect();
+    let type_node = children.iter().rev().find(|child| {
+        let kind = format!("{:?}", child.kind());
+        kind.ends_with("_TYPE")
+    })?;
+    let mut normalized = compact_node_with_generics(type_node, generic_bindings);
+    let self_pattern = rust_parameter_has_self_pattern(parameter);
+    if self_pattern {
+        normalized.insert_str(0, "self:");
+    }
+    if parameter.children_with_tokens().any(|element| {
+        matches!(
+            element,
+            ra_ap_syntax::NodeOrToken::Token(token) if token.text() == "const"
+        )
+    }) {
+        normalized.insert_str(0, "const");
+    }
+    Some(normalized)
+}
+
+fn compact_node_with_generics(node: &SyntaxNode, generic_bindings: &[GenericBinding]) -> String {
+    let mut out = String::new();
+    for token in node
+        .descendants_with_tokens()
+        .filter_map(ra_ap_syntax::NodeOrToken::into_token)
+        .filter(|token| {
+            !token
+                .parent_ancestors()
+                .any(|ancestor| ancestor.kind() == SyntaxKind::ATTR)
+        })
+        .filter(|token| !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT))
+    {
+        if let Some(binding) = rust_generic_binding_for_token(&token, generic_bindings) {
+            push_signature_generic(&mut out, binding);
+        } else {
+            push_signature_token(&mut out, token.text());
+        }
+    }
+    out
+}
+
+fn compact_element_with_generics(node: &SyntaxNode, generic_bindings: &[GenericBinding]) -> String {
+    compact_node_with_generics(node, generic_bindings)
+}
+
+fn rust_generic_binding_for_token<'a>(
+    token: &ra_ap_syntax::SyntaxToken,
+    generic_bindings: &'a [GenericBinding],
+) -> Option<&'a GenericBinding> {
+    let binding = generic_bindings
+        .iter()
+        .find(|binding| binding.name == token.text())?;
+    if token
+        .prev_token()
+        .is_some_and(|previous| previous.kind() == SyntaxKind::COLON2)
+    {
+        return None;
+    }
+    if rust_is_associated_type_label(token) {
+        return None;
+    }
+    if rust_is_field_expr_member(token) {
+        return None;
+    }
+    Some(binding)
+}
+
+fn rust_is_associated_type_label(token: &ra_ap_syntax::SyntaxToken) -> bool {
+    let Some(associated) = token
+        .parent_ancestors()
+        .find(|ancestor| ancestor.kind() == SyntaxKind::ASSOC_TYPE_ARG)
+    else {
+        return false;
+    };
+    let first = associated
+        .descendants_with_tokens()
+        .filter_map(ra_ap_syntax::NodeOrToken::into_token)
+        .find(|candidate| {
+            !matches!(
+                candidate.kind(),
+                SyntaxKind::WHITESPACE | SyntaxKind::COMMENT
+            )
+        });
+    first.is_some_and(|first| first.text_range() == token.text_range())
+}
+
+fn rust_is_field_expr_member(token: &ra_ap_syntax::SyntaxToken) -> bool {
+    if !token.parent_ancestors().any(|ancestor| {
+        matches!(
+            ancestor.kind(),
+            SyntaxKind::FIELD_EXPR | SyntaxKind::METHOD_CALL_EXPR
+        )
+    }) {
+        return false;
+    }
+    let mut previous = token.prev_token();
+    while previous
+        .as_ref()
+        .is_some_and(|token| matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT))
+    {
+        previous = previous.and_then(|token| token.prev_token());
+    }
+    previous.is_some_and(|token| token.kind() == SyntaxKind::DOT)
+}
+
+/// Keep every non-trivia Rust token boundary explicit. Literal tokens are
+/// emitted atomically, so whitespace inside a string or raw string remains
+/// payload rather than becoming a separator.
+fn push_signature_token(output: &mut String, token: &str) {
+    use core::fmt::Write as _;
+
+    let _ = write!(output, "t{}:{}", token.len(), token);
+}
+
+fn push_signature_generic(output: &mut String, binding: &GenericBinding) {
+    use core::fmt::Write as _;
+
+    let _ = write!(output, "g{}{};", binding.role, binding.index);
+}
+
+fn push_signature_chunk(output: &mut String, chunk: &str) {
+    if chunk.is_empty() {
+        return;
+    }
+    output.push_str(chunk);
 }
 
 /// Whether a `BIN_EXPR`'s operator token is `=` or a compound assignment.
@@ -323,6 +829,7 @@ struct IrBuilder<'s> {
     /// Byte offset of the start of each source line.
     line_starts: Vec<usize>,
     error_ranges: Vec<ByteRange>,
+    signatures: Vec<(ByteRange, Signature)>,
     depth_truncated: bool,
 }
 
@@ -341,6 +848,7 @@ impl<'s> IrBuilder<'s> {
             token_starts: Vec::new(),
             line_starts,
             error_ranges: Vec::new(),
+            signatures: Vec::new(),
             depth_truncated: false,
         }
     }
@@ -402,6 +910,12 @@ impl<'s> IrBuilder<'s> {
         match classify(cst) {
             Mapping::Emit(shape) => {
                 let name = self.node_name(cst);
+                if matches!(shape, Shape::Function | Shape::Method)
+                    && cst.kind() == SyntaxKind::FN
+                    && let Some(signature) = rust_signature(cst)
+                {
+                    self.signatures.push((byte_range(cst), signature));
+                }
                 let node = self.build_node(shape, name, cst, depth);
                 out.push(node);
             }
@@ -973,5 +1487,314 @@ trait T {
         assert_eq!(file.frontend_version, STRUCTURAL_FRONTEND_VERSION);
         assert_eq!(file.ir_schema_version, IR_SCHEMA_VERSION);
         assert!(file.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn signatures_are_sorted_exact_and_ignore_parameter_names() {
+        let source = "fn first(left: &str, values: [u8; 4]) -> Option<u8> { None }\nfn second(right: &str, items: [u8; 4]) -> Option<u8> { None }";
+        let file = parse(source);
+        assert!(
+            file.error_ranges.is_empty(),
+            "unexpected parse errors: {:?}",
+            file.error_ranges
+        );
+        assert_eq!(file.signatures.len(), 2);
+        assert!(file.signatures.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        let first = file.signature_for_range(file.signatures[0].0).unwrap();
+        let second = file.signature_for_range(file.signatures[1].0).unwrap();
+        assert_eq!(first.normalized, second.normalized);
+        assert_eq!(first.key, second.key);
+        assert!(first.normalized.contains("t1:&t3:str"));
+        assert!(first.normalized.contains("t1:[t2:u8t1:;t1:4t1:]"));
+    }
+
+    #[test]
+    fn signatures_keep_self_form_and_return_type_distinctions() {
+        let borrowed = parse("impl Item { fn value(&self, input: i32) -> i32 { input } }");
+        let mutable = parse("impl Item { fn value(&mut self, input: i32) -> i32 { input } }");
+        let returned = parse("impl Item { fn value(&self, input: i32) -> i64 { input as i64 } }");
+        let typed_self =
+            parse("impl Item { fn value(self: Box<Self>, input: i32) -> i32 { input } }");
+        assert_ne!(borrowed.signatures[0].1.key, mutable.signatures[0].1.key);
+        assert_ne!(borrowed.signatures[0].1.key, returned.signatures[0].1.key);
+        assert!(
+            typed_self.signatures[0]
+                .1
+                .normalized
+                .contains("t4:selft1::t3:Boxt1:<t4:Selft1:>")
+        );
+        assert!(
+            borrowed.signatures[0]
+                .1
+                .normalized
+                .contains("return=t3:i32")
+        );
+        assert!(!borrowed.signatures[0].1.normalized.contains("return=->"));
+    }
+
+    #[test]
+    fn signatures_distinguish_free_associated_and_instance_receivers() {
+        let free = parse("fn free(value: i32) -> i32 { value }");
+        let associated = parse("impl Item { fn associated(value: i32) -> i32 { value } }");
+        let instance = parse("impl Item { fn instance(&self, value: i32) -> i32 { value } }");
+        assert!(free.signatures[0].1.normalized.contains("receiver=free"));
+        assert!(
+            associated.signatures[0]
+                .1
+                .normalized
+                .contains("receiver=associated")
+        );
+        assert!(
+            instance.signatures[0]
+                .1
+                .normalized
+                .contains("receiver=instance")
+        );
+        assert_ne!(free.signatures[0].1.key, associated.signatures[0].1.key);
+        assert_ne!(associated.signatures[0].1.key, instance.signatures[0].1.key);
+
+        let same_kind = parse(
+            "impl Item { fn first(value: i32) -> i32 { value } fn second(other: i32) -> i32 { other } }",
+        );
+        assert_eq!(same_kind.signatures[0].1, same_kind.signatures[1].1);
+    }
+
+    #[test]
+    fn function_body_macros_do_not_remove_a_valid_signature() {
+        let plain = parse("fn value(input: i32) -> i32 { input }");
+        let macro_body = parse("fn value(input: i32) -> i32 { todo!() }");
+        let malformed_body = parse("fn value(input: i32) -> i32 { let = ; }");
+        assert_eq!(plain.signatures[0].1, macro_body.signatures[0].1);
+        assert!(!malformed_body.error_ranges.is_empty());
+        assert_eq!(plain.signatures[0].1, malformed_body.signatures[0].1);
+    }
+
+    #[test]
+    fn signatures_keep_healthy_units_when_another_header_is_broken() {
+        let source = "fn healthy(value: i32) { todo!(); }\nfn broken(value: ) { return; }";
+        let file = parse(source);
+        assert!(!file.error_ranges.is_empty());
+        assert_eq!(file.signatures.len(), 1);
+        let (range, signature) = &file.signatures[0];
+        assert!(source[range.start..range.end].contains("healthy"));
+        assert!(signature.normalized.contains("receiver=free"));
+    }
+
+    #[test]
+    fn depth_truncation_keeps_a_signature_before_the_omitted_region() {
+        let mut source = String::from("fn healthy(value: i32) -> i32 { value }\nfn deep() ");
+        source.push_str(&"{".repeat(MAX_IR_DEPTH + 10));
+        source.push(';');
+        source.push_str(&"}".repeat(MAX_IR_DEPTH + 10));
+        let file = parse(&source);
+        assert!(file.depth_truncated);
+        assert!(
+            file.signatures
+                .iter()
+                .any(|(range, _)| source[range.start..range.end].contains("healthy"))
+        );
+    }
+
+    #[test]
+    fn signatures_reject_variadic_macro_and_function_pointer_parameters() {
+        for source in [
+            "fn callback(handler: fn(i32) -> i32) { let _ = handler; }",
+            "fn macro_type(value: some_type!()) { let _ = value; }",
+            "fn broken(value: ) { let _ = value; }",
+        ] {
+            let file = parse(source);
+            assert!(
+                file.signatures.is_empty(),
+                "unsupported signature must not be guessed: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn signatures_ignore_function_attributes_and_reject_function_pointer_returns() {
+        let attributed = parse(
+            "#[inline] fn first(value: i32) -> i32 { value }\n#[cold] fn second(other: i32) -> i32 { other }",
+        );
+        assert_eq!(attributed.signatures.len(), 2);
+        assert_eq!(attributed.signatures[0].1, attributed.signatures[1].1);
+        assert!(!attributed.signatures[0].1.normalized.contains("inline"));
+        assert!(!attributed.signatures[1].1.normalized.contains("cold"));
+
+        for source in [
+            "fn callback() -> fn(i32) -> i32 { todo!() }",
+            "fn macro_return() -> return_type!() { todo!() }",
+            "fn broken() -> { todo!() }",
+        ] {
+            let file = parse(source);
+            assert!(
+                file.signatures.is_empty(),
+                "unsupported return type must not be guessed: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn signatures_keep_abi_and_where_constraints_and_skip_bodyless_semicolons() {
+        let abi = parse(
+            "extern \"C\" fn first(value: i32) -> i32 { value }\nfn second(other: i32) -> i32 { other }",
+        );
+        assert_eq!(abi.signatures.len(), 2);
+        assert_ne!(abi.signatures[0].1.key, abi.signatures[1].1.key);
+
+        let where_clauses = parse(
+            "fn first<T>(value: T) -> T where T: Copy { value }\nfn second<T>(other: T) -> T where T: Copy { other }\nfn third<T>(item: T) -> T where T: Clone { item }",
+        );
+        assert_eq!(where_clauses.signatures.len(), 3);
+        assert_eq!(where_clauses.signatures[0].1, where_clauses.signatures[1].1);
+        assert_ne!(
+            where_clauses.signatures[0].1.key,
+            where_clauses.signatures[2].1.key
+        );
+
+        let foreign = parse(
+            "extern \"C\" { fn first(value: i32); }\nextern \"system\" { fn second(value: i32); }",
+        );
+        assert!(foreign.signatures.is_empty());
+
+        let recovered_invalid =
+            parse("fn first(value: i32);\nimpl Item { fn second(value: i32); }");
+        assert!(recovered_invalid.error_ranges.is_empty());
+        assert!(recovered_invalid.signatures.is_empty());
+
+        let bodyless = parse("trait Item { fn first(value: i32); fn second(other: i32) {} }");
+        assert!(
+            bodyless.error_ranges.is_empty(),
+            "{:#?}",
+            bodyless.error_ranges
+        );
+        assert_eq!(bodyless.signatures.len(), 2);
+        assert_eq!(bodyless.signatures[0].1, bodyless.signatures[1].1);
+        assert!(!bodyless.signatures[0].1.normalized.contains("t1:;"));
+    }
+
+    #[test]
+    fn signatures_alpha_normalize_ancestor_generics_and_keep_ancestor_where_clauses() {
+        let same = parse(
+            "impl<T> Thing<T> where T: Copy { fn f<U>(x: T, y: U) -> T where U: Copy { x } }\nimpl<X> Thing<X> where X: Copy { fn f<V>(x: X, y: V) -> X where V: Copy { x } }",
+        );
+        assert!(same.error_ranges.is_empty(), "{:?}", same.error_ranges);
+        assert_eq!(same.signatures.len(), 2);
+        assert_eq!(same.signatures[0].1, same.signatures[1].1);
+
+        let different = parse(
+            "impl<T> Thing<T> where T: Copy { fn f<U>(x: T, y: U) -> T where U: Copy { x } }\nimpl<X> Thing<X> where X: Clone { fn f<V>(x: X, y: V) -> X where V: Copy { x } }",
+        );
+        assert!(
+            different.error_ranges.is_empty(),
+            "{:?}",
+            different.error_ranges
+        );
+        assert_eq!(different.signatures.len(), 2);
+        assert_ne!(different.signatures[0].1.key, different.signatures[1].1.key);
+        assert!(different.signatures[0].1.normalized.contains("gtype0;"));
+    }
+
+    #[test]
+    fn signatures_reject_nested_higher_ranked_generic_binders() {
+        let file = parse(
+            "fn first<T>(value: T) -> impl for<'a> Fn(&'a T) { todo!() }\nfn second<T>(value: T) where T: for<'a> Trait<&'a T> { todo!() }",
+        );
+        assert!(file.error_ranges.is_empty(), "{:?}", file.error_ranges);
+        assert!(file.signatures.is_empty());
+    }
+
+    #[test]
+    fn signatures_ignore_higher_ranked_binders_inside_function_bodies() {
+        let file = parse(
+            "fn first<T>(value: T) -> T { let _: for<'a> fn(&'a str) = todo!(); value }\nfn second<U>(renamed: U) -> U { renamed }",
+        );
+        assert!(file.error_ranges.is_empty(), "{:?}", file.error_ranges);
+        assert_eq!(file.signatures.len(), 2);
+        assert_eq!(file.signatures[0].1, file.signatures[1].1);
+    }
+
+    #[test]
+    fn signatures_keep_associated_type_labels_raw_while_alpha_normalizing_type_params() {
+        let file = parse(
+            "fn first<Item: Iterator<Item = u8>>(value: Item) -> Item { value }\nfn second<T: Iterator<Item = u8>>(value: T) -> T { value }",
+        );
+        assert!(file.error_ranges.is_empty(), "{:?}", file.error_ranges);
+        assert_eq!(file.signatures.len(), 2);
+        assert_eq!(file.signatures[0].1, file.signatures[1].1);
+        assert!(file.signatures[0].1.normalized.contains("t4:Item"));
+    }
+
+    #[test]
+    fn signatures_keep_const_field_members_raw_while_alpha_normalizing_const_params() {
+        let file = parse(
+            "fn first<const N: usize>(value: [u8; { value.N }]) {}\nfn second<const M: usize>(value: [u8; { value.M }]) {}",
+        );
+        assert!(file.error_ranges.is_empty(), "{:?}", file.error_ranges);
+        assert_eq!(file.signatures.len(), 2);
+        assert_ne!(file.signatures[0].1.key, file.signatures[1].1.key);
+        assert!(file.signatures[0].1.normalized.contains("t1:N"));
+        assert!(file.signatures[1].1.normalized.contains("t1:M"));
+
+        let associated_const = parse(
+            "fn first<const N: usize>() -> Trait<N = N> { todo!() }\nfn second<const M: usize>() -> Trait<N = M> { todo!() }",
+        );
+        assert!(
+            associated_const.error_ranges.is_empty(),
+            "{:?}",
+            associated_const.error_ranges
+        );
+        assert_eq!(associated_const.signatures.len(), 2);
+        assert_eq!(
+            associated_const.signatures[0].1,
+            associated_const.signatures[1].1
+        );
+        assert!(associated_const.signatures[0].1.normalized.contains("t1:N"));
+    }
+
+    #[test]
+    fn signatures_keep_method_members_raw_while_alpha_normalizing_const_params() {
+        let renamed = parse(
+            "fn first<const N: usize>(value: [u8; { value.N() }]) {}\nfn second<const M: usize>(value: [u8; { value.N() }]) {}",
+        );
+        assert!(
+            renamed.error_ranges.is_empty(),
+            "{:?}",
+            renamed.error_ranges
+        );
+        assert_eq!(renamed.signatures.len(), 2);
+        assert_eq!(renamed.signatures[0].1, renamed.signatures[1].1);
+
+        let changed_method = parse(
+            "fn first<const N: usize>(value: [u8; { value.N() }]) {}\nfn second<const N: usize>(value: [u8; { value.M() }]) {}",
+        );
+        assert!(
+            changed_method.error_ranges.is_empty(),
+            "{:?}",
+            changed_method.error_ranges
+        );
+        assert_eq!(changed_method.signatures.len(), 2);
+        assert_ne!(
+            changed_method.signatures[0].1.key,
+            changed_method.signatures[1].1.key
+        );
+    }
+
+    #[test]
+    fn signatures_preserve_rust_token_boundaries_and_literal_payload() {
+        let boundaries = parse(
+            "fn first(value: dyn Fn()) -> i32 { value(); 0 }\nfn second(value: dynFn()) -> i32 { value(); 0 }",
+        );
+        assert_eq!(boundaries.signatures.len(), 2);
+        assert_ne!(
+            boundaries.signatures[0].1.key,
+            boundaries.signatures[1].1.key
+        );
+
+        let literals = parse(
+            "fn first(value: [u8; 4]) -> &str { value }\nfn second(value: [u8; 5]) -> &str { value }",
+        );
+        assert_eq!(literals.signatures.len(), 2);
+        assert_ne!(literals.signatures[0].1.key, literals.signatures[1].1.key);
+        assert!(literals.signatures[0].1.normalized.contains("t1:4"));
     }
 }

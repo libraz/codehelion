@@ -1,19 +1,36 @@
 use super::{
-    ArmPath, BuildVariant, ContentNorm, FileContext, FileFeatures, IrNode, Resolution,
-    ResolvedTypes, Shape, SyntaxIrFile, TestCodeEvidence, Token, Unit, UnitEvidence, UnitKind,
-    UnitView, boilerplate, stable_id, test_code, verify,
+    ArmPath, BuildVariant, ContentNorm, DirectoryPartition, FileContext, FileFeatures, IrNode,
+    Resolution, ResolvedTypes, Shape, SyntaxIrFile, TestCodeEvidence, Token, Unit, UnitEvidence,
+    UnitKind, UnitView, boilerplate, stable_id, test_code, verify,
 };
 
 /// Flatten every file's units into one global list, in IR-walk order, and
 /// record each file's starting offset. The unit order matches
 /// [`features::extract`]'s, so a `(file, local)` index pair maps to the global
 /// index `offsets[file] + local`.
+#[cfg(test)]
 pub(super) fn flatten_units(
     files: &[SyntaxIrFile],
     variant: &BuildVariant,
     literals: crate::engine::LiteralNorm,
     resolved: &ResolvedTypes,
 ) -> (Vec<Unit>, Vec<usize>) {
+    flatten_units_with_context(files, variant, literals, resolved, None)
+}
+
+/// Flatten units while carrying an optional opaque directory context for the
+/// signature sibling channel. A context with the wrong cardinality disables
+/// that channel for the whole run rather than guessing which file a partition
+/// belongs to.
+pub(super) fn flatten_units_with_context(
+    files: &[SyntaxIrFile],
+    variant: &BuildVariant,
+    literals: crate::engine::LiteralNorm,
+    resolved: &ResolvedTypes,
+    directory_partitions: Option<&[DirectoryPartition]>,
+) -> (Vec<Unit>, Vec<usize>) {
+    let directory_partitions =
+        directory_partitions.filter(|partitions| partitions.len() == files.len());
     let mut units = Vec::new();
     let mut offsets = Vec::with_capacity(files.len());
     // Conditional identifiers run across the whole corpus rather than per
@@ -33,6 +50,8 @@ pub(super) fn flatten_units(
             resolution: resolved.names_for(file_index),
             local: 0,
             next_conditional: &mut next_conditional,
+            directory: directory_partitions
+                .and_then(|partitions| partitions.get(file_index).copied()),
             units: &mut units,
         };
         // A file the tree declares as a test module starts marked: the
@@ -60,6 +79,7 @@ struct UnitWalk<'a> {
     variant: &'a BuildVariant,
     literals: crate::engine::LiteralNorm,
     resolution: Option<&'a Resolution>,
+    directory: Option<DirectoryPartition>,
     local: usize,
     /// Hands out conditional identifiers; shared across every file in a run.
     next_conditional: &'a mut u32,
@@ -109,6 +129,8 @@ impl UnitWalk<'_> {
                 fingerprint,
                 content,
                 normalized_content,
+                signature: self.source.signature_for_range(node.range).cloned(),
+                directory: self.directory,
                 range: node.range,
                 lines: line_range(tokens),
                 tokens: (start, end),

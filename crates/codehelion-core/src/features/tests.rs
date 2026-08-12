@@ -46,6 +46,7 @@ fn file_of(roots: Vec<IrNode>, tokens: Vec<Token>) -> SyntaxIrFile {
         frontend_version: "test-ir-v1",
         ir_schema_version: IR_SCHEMA_VERSION,
         tokens,
+        signatures: Vec::new(),
         roots,
         diagnostics: Vec::new(),
         error_ranges: Vec::new(),

@@ -1,10 +1,11 @@
 use super::{
-    BTreeMap, BTreeSet, BuildVariant, FileFeatures, GroupDetail, GroupingUnit, ResolvedTypes,
-    SimilarityEdge, StructuralConfig, StructuralNearMiss, StructuralReport, StructuralStats,
-    StructuralUnit, SyntaxIrFile, Unit, UnitEvidence, VerifyConfig, candidate, confirm_regions,
-    control_flow, drop_subsumed, features, flatten_units, fold_by_content, group_detail, grouping,
-    grow_runs, lift_to_unit_pairs, maximal, near_match, sweep_siblings, token_count_meets_minimum,
-    unit_evidence, unit_meets_minimum, unrepresented_pairs, verify, view,
+    BTreeMap, BTreeSet, BuildVariant, DirectoryPartition, FileFeatures, GroupDetail, GroupingUnit,
+    ResolvedTypes, SimilarityEdge, StructuralConfig, StructuralNearMiss, StructuralReport,
+    StructuralStats, StructuralUnit, SyntaxIrFile, Unit, UnitEvidence, VerifyConfig, candidate,
+    confirm_regions, control_flow, drop_subsumed, features, flatten_units_with_context,
+    fold_by_content, group_detail, grouping, grow_runs, lift_to_unit_pairs, maximal, near_match,
+    sweep_siblings_with_context, token_count_meets_minimum, unit_evidence, unit_meets_minimum,
+    unrepresented_pairs, verify, view,
 };
 
 /// Run the structural pipeline over parsed IR files.
@@ -17,7 +18,31 @@ pub fn analyze(
     variant: &BuildVariant,
     config: &StructuralConfig,
 ) -> StructuralReport {
-    analyze_resolved(files, variant, config, &ResolvedTypes::default())
+    analyze_resolved_inner(files, variant, config, &ResolvedTypes::default(), None)
+}
+
+/// Run the structural pipeline with caller-owned opaque directory partitions.
+///
+/// The partitions enable only the supplementary signature sibling channel.
+/// They are never interpreted as paths and never participate in fingerprints,
+/// feature extraction, primary grouping, or the existing file-scoped sibling
+/// sweep. If their length differs from `files.len()`, the signature channel is
+/// disabled for the whole run rather than guessing which partition belongs to
+/// any file.
+#[must_use]
+pub fn analyze_with_context(
+    files: &[SyntaxIrFile],
+    variant: &BuildVariant,
+    config: &StructuralConfig,
+    directory_partitions: &[DirectoryPartition],
+) -> StructuralReport {
+    analyze_resolved_inner(
+        files,
+        variant,
+        config,
+        &ResolvedTypes::default(),
+        Some(directory_partitions),
+    )
 }
 
 /// [`analyze`] with what a compiler resolved about the same files.
@@ -36,9 +61,48 @@ pub fn analyze_resolved(
     config: &StructuralConfig,
     resolved: &ResolvedTypes,
 ) -> StructuralReport {
+    analyze_resolved_inner(files, variant, config, resolved, None)
+}
+
+/// [`analyze_resolved`] with caller-owned opaque directory partitions.
+///
+/// If the partition slice length differs from `files.len()`, the signature
+/// channel is disabled for the whole run rather than guessing file identity.
+#[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the structural pipeline deliberately keeps its ordered stages together"
+)]
+pub fn analyze_resolved_with_context(
+    files: &[SyntaxIrFile],
+    variant: &BuildVariant,
+    config: &StructuralConfig,
+    resolved: &ResolvedTypes,
+    directory_partitions: &[DirectoryPartition],
+) -> StructuralReport {
+    analyze_resolved_inner(files, variant, config, resolved, Some(directory_partitions))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the structural pipeline deliberately keeps its ordered stages together"
+)]
+fn analyze_resolved_inner(
+    files: &[SyntaxIrFile],
+    variant: &BuildVariant,
+    config: &StructuralConfig,
+    resolved: &ResolvedTypes,
+    directory_partitions: Option<&[DirectoryPartition]>,
+) -> StructuralReport {
     let feature_files: Vec<FileFeatures> = files.iter().map(features::extract).collect();
 
-    let (units, offsets) = flatten_units(files, variant, config.literals, resolved);
+    let (units, offsets) = flatten_units_with_context(
+        files,
+        variant,
+        config.literals,
+        resolved,
+        directory_partitions,
+    );
     let evidence = unit_evidence(&units, resolved);
 
     // Stage: candidate extraction (exact seeds, near matches and shared
@@ -155,8 +219,15 @@ pub fn analyze_resolved(
     // This is intentionally after primary grouping and unrepresented-pair
     // carry-out. It only inspects ungrouped units and cannot add an edge or a
     // member to `groups`.
-    let (siblings, sibling_stats) =
-        sweep_siblings(&groups, &units, files, &feature_files, &evidence, config);
+    let (siblings, sibling_stats, signature_sibling_stats) = sweep_siblings_with_context(
+        &groups,
+        &units,
+        files,
+        &feature_files,
+        &evidence,
+        config,
+        directory_partitions.is_some_and(|partitions| partitions.len() == files.len()),
+    );
 
     let stats = StructuralStats {
         files: files.len(),
@@ -185,6 +256,7 @@ pub fn analyze_resolved(
         severed_pairs,
         grouping: groups.stats.clone(),
         siblings: sibling_stats,
+        signature_siblings: signature_sibling_stats,
     };
 
     StructuralReport {

@@ -66,6 +66,10 @@ pub struct StructuralConfig {
     /// Bounded post-grouping search for incomplete copies beside an established
     /// group. This never changes primary group membership.
     pub siblings: SiblingConfig,
+    /// Bounded post-grouping search using exact normalized syntax signatures
+    /// within caller-supplied directory partitions. This never changes
+    /// primary group membership and is independently capped from `siblings`.
+    pub signature_siblings: SignatureSiblingConfig,
 }
 
 impl Default for StructuralConfig {
@@ -82,7 +86,30 @@ impl Default for StructuralConfig {
             max_shape_divergence: DEFAULT_MAX_SHAPE_DIVERGENCE,
             grouping: GroupingConfig::default(),
             siblings: SiblingConfig::default(),
+            signature_siblings: SignatureSiblingConfig::default(),
         }
+    }
+}
+
+/// An opaque directory identity supplied by a caller that owns path policy.
+///
+/// Core never interprets the value as a path and never includes it in a
+/// fingerprint. The CLI interns repository-relative directory keys into this
+/// type before passing them across the core boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DirectoryPartition(u32);
+
+impl DirectoryPartition {
+    /// Construct an opaque partition from a caller-owned deterministic index.
+    #[must_use]
+    pub const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// Return the caller-owned deterministic index.
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0
     }
 }
 
@@ -117,6 +144,32 @@ impl Default for SiblingConfig {
             // membership, so they may recover a small omitted tail while
             // still requiring substantial verifier agreement.
             similarity_delta: 0.10,
+            candidate_budget: 50_000,
+            per_group_cap: 8,
+            total_cap: 1_000,
+        }
+    }
+}
+
+/// Tuning for the post-grouping signature sibling sweep.
+///
+/// These ceilings are deliberately separate from [`SiblingConfig`]. The
+/// existing similarity channel is file-scoped and has different candidate
+/// economics; sharing a counter would make one channel silently starve the
+/// other and would make the reason for a dropped candidate unknowable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureSiblingConfig {
+    /// Maximum signature-key candidates examined by the sweep.
+    pub candidate_budget: usize,
+    /// Maximum signature siblings retained for one primary group.
+    pub per_group_cap: usize,
+    /// Maximum signature siblings retained over the whole report.
+    pub total_cap: usize,
+}
+
+impl Default for SignatureSiblingConfig {
+    fn default() -> Self {
+        Self {
             candidate_budget: 50_000,
             per_group_cap: 8,
             total_cap: 1_000,
@@ -422,6 +475,8 @@ pub struct StructuralStats {
     pub grouping: GroupingStats,
     /// Post-grouping sibling-sweep accounting.
     pub siblings: SiblingSweepStats,
+    /// Post-grouping signature-sibling accounting.
+    pub signature_siblings: SignatureSiblingSweepStats,
 }
 
 /// Counters for the bounded post-grouping sibling sweep.
@@ -444,18 +499,82 @@ pub struct SiblingSweepStats {
     pub total_cap_dropped: usize,
 }
 
+/// Counters for the bounded post-grouping signature sibling sweep.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SignatureSiblingSweepStats {
+    /// Established primary groups considered for signature siblings.
+    pub groups_considered: usize,
+    /// Entries in the ungrouped `(signature, directory)` postings considered
+    /// eligible before per-unit safety guards. This is counted from posting
+    /// lengths, so it does not require materializing a group-by-posting list.
+    pub eligible_candidates: usize,
+    /// Posting entries inspected in deterministic order, including entries
+    /// rejected by exact-text or safety guards. Accepted entries carry a
+    /// verifier breakdown, reusing the existing similarity breakdown when
+    /// available and otherwise invoking the verifier once.
+    pub candidates_examined: usize,
+    /// Signature siblings retained after exact-key selection.
+    pub accepted: usize,
+    /// Posting entries left uninspected because `candidate_budget` was reached.
+    pub candidate_budget_dropped: usize,
+    /// Posting entries left uninspected after their group reached
+    /// `per_group_cap`.
+    pub per_group_cap_dropped: usize,
+    /// Posting entries left uninspected after the report reached `total_cap`.
+    pub total_cap_dropped: usize,
+}
+
+/// Which independent sibling-candidate channel supplied one entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiblingBasis {
+    /// The existing file-scoped verifier-similarity sweep.
+    Similarity,
+    /// The exact normalized-signature directory sweep.
+    Signature,
+}
+
+impl SiblingBasis {
+    /// Stable lowercase identifier used in reports and storage.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Similarity => "similarity",
+            Self::Signature => "signature",
+        }
+    }
+
+    /// Read back a sibling-candidate basis written by [`Self::name`].
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "similarity" => Some(Self::Similarity),
+            "signature" => Some(Self::Signature),
+            _ => None,
+        }
+    }
+}
+
 /// One incomplete local mirror attached to an established primary group.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructuralSibling {
     /// The ungrouped unit. It is never added to `StructuralGroup::members`.
     pub unit: usize,
-    /// The verifier's clone classification, or Type-3 for a relaxed-only hit.
+    /// The verifier's clone classification for the similarity channel. A
+    /// signature-channel sibling is always Type-3, regardless of verifier
+    /// classification or score.
     pub clone_type: CloneClass,
-    /// The verifier confidence, clamped to low below the normal Type-3
-    /// threshold even when an exact-structure shortcut classified the pair.
+    /// The verifier confidence for the similarity channel, clamped to low
+    /// below the normal Type-3 threshold. A signature-channel sibling is
+    /// always Low; verifier confidence and threshold never gate acceptance.
     pub confidence: verify::Confidence,
-    /// The canonical-to-sibling similarity breakdown.
+    /// The canonical-to-sibling verifier breakdown retained as evidence. For
+    /// the signature channel it is evidence only and does not decide
+    /// acceptance.
     pub breakdown: SimilarityBreakdown,
+    /// The independent candidate channel that supplied this sibling.
+    pub basis: SiblingBasis,
+    /// Exact normalized signature text when `basis` is `Signature`.
+    pub signature: Option<String>,
 }
 
 /// Siblings of one primary group, addressed by its index in
