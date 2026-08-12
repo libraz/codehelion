@@ -12,7 +12,7 @@
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{CloneType, Fragment};
+use crate::schema::{CloneType, Fragment, SiblingBasis};
 
 /// Schema version of [`LabelSet`] documents this crate accepts.
 pub const LABEL_SCHEMA_VERSION: u32 = 1;
@@ -88,6 +88,24 @@ pub struct NonClone {
     pub fragments: Vec<Fragment>,
 }
 
+/// A known incomplete mirror used to measure the supplemental sibling channel.
+///
+/// The two primary fragments identify the ordinary clone group that owns the
+/// mirror.  The sibling fragment is deliberately kept outside that pair: a
+/// detector earns this label only when it reports both primary members in one
+/// group and separately attaches the sibling occurrence to that group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownSibling {
+    /// Stable label identifier within the corpus (e.g. `ks-001`).
+    pub id: String,
+    /// Candidate channel expected to recover the mirror.
+    pub basis: SiblingBasis,
+    /// The two primary fragments that establish the owning clone group.
+    pub primary_fragments: [Fragment; 2],
+    /// The incomplete mirror occurrence expected as a supplemental sibling.
+    pub sibling: Fragment,
+}
+
 /// Deserialize a controlled-vocabulary negative-label reason.
 fn non_clone_reason<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
@@ -117,6 +135,10 @@ pub struct LabelSet {
     /// Fragments that must not be reported as clones.
     #[serde(default)]
     pub non_clones: Vec<NonClone>,
+    /// Incomplete mirrors whose primary group and sibling are known by the
+    /// corpus author. These are scored separately from primary findings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_siblings: Vec<KnownSibling>,
 }
 
 impl LabelSet {
@@ -168,9 +190,10 @@ mod tests {
       "clone_pairs": [
         {"id":"cp-001","type":"type-2","fragments":[{"file":"seed.rs","start_line":1,"end_line":12},{"file":"type2.rs","start_line":1,"end_line":12}]}
       ],
-      "non_clones": [
-        {"id":"nc-001","reason":"getter-boilerplate","fragments":[{"file":"seed.rs","start_line":20,"end_line":22},{"file":"type2.rs","start_line":25,"end_line":27}]}
-      ]
+          "non_clones": [
+            {"id":"nc-001","reason":"getter-boilerplate","fragments":[{"file":"seed.rs","start_line":20,"end_line":22},{"file":"type2.rs","start_line":25,"end_line":27}]}
+      ],
+      "known_siblings": []
     }"#;
 
     #[test]
@@ -183,6 +206,7 @@ mod tests {
         assert_eq!(labels.clone_pairs[0].clone_type, CloneType::Type2);
         assert_eq!(labels.non_clones.len(), 1);
         assert_eq!(labels.non_clones[0].reason, "getter-boilerplate");
+        assert!(labels.known_siblings.is_empty());
     }
 
     #[test]
@@ -195,6 +219,7 @@ mod tests {
         }"#;
         let labels = LabelSet::from_json(json).expect("parses without non_clones");
         assert!(labels.non_clones.is_empty());
+        assert!(labels.known_siblings.is_empty());
     }
 
     #[test]
@@ -235,6 +260,49 @@ mod tests {
                 .to_string()
                 .contains("unsupported label schema_version 2")
         );
+    }
+
+    #[test]
+    fn known_siblings_require_two_primary_fragments_and_a_controlled_basis() {
+        let json = r#"{
+          "schema_version": 1,
+          "language": "cpp",
+          "files": ["seed.cpp", "mirror.cpp"],
+          "clone_pairs": [],
+          "known_siblings": [{
+            "id": "ks-001",
+            "basis": "signature",
+            "primary_fragments": [
+              {"file":"seed.cpp","start_line":1,"end_line":2},
+              {"file":"seed.cpp","start_line":3,"end_line":4}
+            ],
+            "sibling": {"file":"mirror.cpp","start_line":1,"end_line":4}
+          }]
+        }"#;
+        let labels = LabelSet::from_json(json).expect("known sibling parses");
+        assert_eq!(labels.known_siblings[0].basis, SiblingBasis::Signature);
+        assert_eq!(labels.known_siblings[0].primary_fragments.len(), 2);
+    }
+
+    #[test]
+    fn unknown_known_sibling_basis_is_rejected_at_import() {
+        let json = r#"{
+          "schema_version": 1,
+          "language": "cpp",
+          "files": ["seed.cpp"],
+          "clone_pairs": [],
+          "known_siblings": [{
+            "id": "ks-001",
+            "basis": "not-a-channel",
+            "primary_fragments": [
+              {"file":"seed.cpp","start_line":1,"end_line":2},
+              {"file":"seed.cpp","start_line":3,"end_line":4}
+            ],
+            "sibling": {"file":"seed.cpp","start_line":5,"end_line":8}
+          }]
+        }"#;
+        let error = LabelSet::from_json(json).expect_err("unknown basis must not parse");
+        assert!(error.to_string().contains("unknown variant"));
     }
 
     #[test]

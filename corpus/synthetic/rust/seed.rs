@@ -27,6 +27,27 @@ fn max_run(flags: &[bool]) -> usize {
     best
 }
 
+fn values_equal(left: &[i32], right: &[i32]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut left_index = 0;
+    while left_index < left.len() {
+        if left[left_index] != right[left_index] {
+            return false;
+        }
+        left_index += 1;
+    }
+    let mut right_index = 0;
+    while right_index < left.len() {
+        if left[right_index] != right[right_index] {
+            return false;
+        }
+        right_index += 1;
+    }
+    true
+}
+
 struct Counter {
     count: u32,
 }

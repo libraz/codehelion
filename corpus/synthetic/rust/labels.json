@@ -42,17 +42,17 @@
     },
     {
       "id": "cp-003",
-      "type": "type-2",
+      "type": "type-1",
       "fragments": [
         {
           "file": "seed.rs",
-          "start_line": 4,
-          "end_line": 12
+          "start_line": 30,
+          "end_line": 49
         },
         {
-          "file": "type2.rs",
-          "start_line": 4,
-          "end_line": 12
+          "file": "type1.rs",
+          "start_line": 35,
+          "end_line": 54
         }
       ]
     },
@@ -62,6 +62,22 @@
       "fragments": [
         {
           "file": "seed.rs",
+          "start_line": 4,
+          "end_line": 12
+        },
+        {
+          "file": "type2.rs",
+          "start_line": 4,
+          "end_line": 12
+        }
+      ]
+    },
+    {
+      "id": "cp-005",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "seed.rs",
           "start_line": 14,
           "end_line": 28
         },
@@ -73,7 +89,7 @@
       ]
     },
     {
-      "id": "cp-005",
+      "id": "cp-006",
       "type": "type-3",
       "fragments": [
         {
@@ -89,7 +105,7 @@
       ]
     },
     {
-      "id": "cp-006",
+      "id": "cp-007",
       "type": "type-1",
       "fragments": [
         {
@@ -112,8 +128,8 @@
       "fragments": [
         {
           "file": "seed.rs",
-          "start_line": 35,
-          "end_line": 37
+          "start_line": 56,
+          "end_line": 58
         },
         {
           "file": "type2.rs",

@@ -1,4 +1,5 @@
 use super::*;
+use crate::schema::SiblingBasis;
 
 const SEED: &str = "\
 // seed
@@ -21,6 +22,7 @@ fn base_spec() -> MutationSpec {
         seed: "seed.rs".to_string(),
         variants: Vec::new(),
         non_clones: Vec::new(),
+        known_siblings: Vec::new(),
     }
 }
 
@@ -77,6 +79,176 @@ fn generate_is_deterministic() {
     let first = generate(&type2_spec(), SEED).expect("first run");
     let second = generate(&type2_spec(), SEED).expect("second run");
     assert_eq!(first, second);
+}
+
+#[test]
+fn known_siblings_resolve_seed_and_variant_items_to_exact_ranges() {
+    let mut spec = base_spec();
+    spec.variants.push(VariantSpec {
+        file: "v1.rs".to_string(),
+        clone_type: CloneType::Type1,
+        header_comment: "Mirror variant.".to_string(),
+        items: vec![item("fn add"), item("fn twice")],
+    });
+    spec.known_siblings.push(KnownSiblingSpec {
+        basis: SiblingBasis::Signature,
+        primary_fragments: [
+            ItemRef {
+                file: "seed.rs".to_string(),
+                item: "fn add".to_string(),
+            },
+            ItemRef {
+                file: "v1.rs".to_string(),
+                item: "fn add".to_string(),
+            },
+        ],
+        sibling: ItemRef {
+            file: "v1.rs".to_string(),
+            item: "fn twice".to_string(),
+        },
+    });
+    let corpus = generate(&spec, SEED).expect("generates known sibling");
+    assert_eq!(corpus.labels.known_siblings.len(), 1);
+    let known = &corpus.labels.known_siblings[0];
+    assert_eq!(known.id, "ks-001");
+    assert_eq!(known.basis, SiblingBasis::Signature);
+    assert_eq!(
+        known.primary_fragments[0],
+        Fragment {
+            file: "seed.rs".to_string(),
+            start_line: 3,
+            end_line: 6,
+            tokens: 0,
+        }
+    );
+    assert_eq!(
+        known.primary_fragments[1],
+        Fragment {
+            file: "v1.rs".to_string(),
+            start_line: 4,
+            end_line: 7,
+            tokens: 0,
+        }
+    );
+    assert_eq!(
+        known.sibling,
+        Fragment {
+            file: "v1.rs".to_string(),
+            start_line: 9,
+            end_line: 12,
+            tokens: 0,
+        }
+    );
+}
+
+#[test]
+fn known_sibling_ranges_include_inserted_lines_not_just_seed_provenance() {
+    let mut spec = base_spec();
+    spec.variants.push(VariantSpec {
+        file: "v3.rs".to_string(),
+        clone_type: CloneType::Type3,
+        header_comment: "Inserted mirror variant.".to_string(),
+        items: vec![ItemSpec {
+            edits: vec![EditOp::InsertBefore {
+                anchor: "fn add(a: i32, b: i32) -> i32 {".to_string(),
+                lines: vec![
+                    "fn generated_header() -> i32 {".to_string(),
+                    "    7".to_string(),
+                    "}".to_string(),
+                ],
+            }],
+            ..item("fn add")
+        }],
+    });
+    spec.known_siblings.push(KnownSiblingSpec {
+        basis: SiblingBasis::Similarity,
+        primary_fragments: [
+            ItemRef {
+                file: "seed.rs".to_string(),
+                item: "fn add".to_string(),
+            },
+            ItemRef {
+                file: "seed.rs".to_string(),
+                item: "fn twice".to_string(),
+            },
+        ],
+        sibling: ItemRef {
+            file: "v3.rs".to_string(),
+            item: "fn add".to_string(),
+        },
+    });
+    let corpus = generate(&spec, SEED).expect("generates inserted lines");
+    assert_eq!(
+        corpus.labels.known_siblings[0].sibling,
+        Fragment {
+            file: "v3.rs".to_string(),
+            start_line: 4,
+            end_line: 10,
+            tokens: 0,
+        }
+    );
+}
+
+#[test]
+fn unknown_known_sibling_item_is_rejected() {
+    let mut spec = base_spec();
+    spec.known_siblings.push(KnownSiblingSpec {
+        basis: SiblingBasis::Signature,
+        primary_fragments: [
+            ItemRef {
+                file: "seed.rs".to_string(),
+                item: "fn missing".to_string(),
+            },
+            ItemRef {
+                file: "seed.rs".to_string(),
+                item: "fn twice".to_string(),
+            },
+        ],
+        sibling: ItemRef {
+            file: "seed.rs".to_string(),
+            item: "fn add".to_string(),
+        },
+    });
+    assert!(matches!(
+        generate(&spec, SEED),
+        Err(Error::UnknownKnownSiblingRef { .. })
+    ));
+}
+
+#[test]
+fn duplicate_known_sibling_relationship_is_rejected() {
+    let mut spec = base_spec();
+    for file in ["v1.rs", "v2.rs"] {
+        spec.variants.push(VariantSpec {
+            file: file.to_string(),
+            clone_type: CloneType::Type1,
+            header_comment: "Mirror variant.".to_string(),
+            items: vec![item("fn add")],
+        });
+    }
+    let declaration = KnownSiblingSpec {
+        basis: SiblingBasis::Signature,
+        primary_fragments: [
+            ItemRef {
+                file: "seed.rs".to_string(),
+                item: "fn add".to_string(),
+            },
+            ItemRef {
+                file: "seed.rs".to_string(),
+                item: "fn twice".to_string(),
+            },
+        ],
+        sibling: ItemRef {
+            file: "v1.rs".to_string(),
+            item: "fn add".to_string(),
+        },
+    };
+    spec.known_siblings.push(declaration.clone());
+    spec.known_siblings.push(declaration);
+    assert!(matches!(
+        generate(&spec, SEED),
+        Err(Error::DuplicateKnownSiblingRef { .. })
+    ));
 }
 
 #[test]

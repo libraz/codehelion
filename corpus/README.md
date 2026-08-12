@@ -207,6 +207,21 @@ stable ID suffix indicating the original member positions (for example,
 that contains only part of a group from being judged by an implicit
 all-members rule.
 
+An optional `known_siblings` array records an incomplete mirror separately from
+primary clone accuracy. Each entry has a stable `id`, a `basis` of `similarity`
+or `signature`, exactly two `primary_fragments` that identify its owning clone
+group, and one `sibling` fragment that is expected to remain outside that
+group. A signature entry also documents a normalized callable shape in the
+detector report; it is evidence for a mirror, not another `clone_pair`, and an
+unlabelled sibling is not counted as a primary false positive. The evaluator's
+`signature_siblings_total` is a volume measurement for the sibling channel,
+not a precision score: it counts retained signature evidence whether or not a
+corpus author labelled that particular mirror.
+
+The CLI generates this signature channel only with `--siblings-by-signature`.
+Sibling-specific measurements must opt in to that flag; the primary accuracy
+measurements remain unchanged when the channel is off.
+
 ```json
 {
   "schema_version": 1,

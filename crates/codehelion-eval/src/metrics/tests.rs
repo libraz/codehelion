@@ -1,6 +1,7 @@
 use super::*;
-use crate::labels::{LabelPair, NonClone};
-use crate::schema::Axes;
+use crate::detected::{DetectedSibling, DetectedSiblingGroup, DetectedSiblingSimilarity};
+use crate::labels::{KnownSibling, LabelPair, NonClone};
+use crate::schema::{Axes, SiblingBasis};
 
 fn fragment(file: &str, start: u32, end: u32) -> Fragment {
     Fragment {
@@ -79,6 +80,7 @@ fn self_test_inputs() -> (DetectionResult, LabelSet) {
             rule_id: None,
             fragments: vec![fragment("x.rs", 200, 210), fragment("y.rs", 200, 210)],
         }],
+        known_siblings: Vec::new(),
     };
     (results, labels)
 }
@@ -106,6 +108,172 @@ fn evaluate_matches_hand_computed_values() {
 
     // Top-3 precision equals overall precision here.
     assert_eq!(metrics.precision_at_k, Some(2.0 / 3.0));
+}
+
+#[test]
+fn sibling_metrics_match_owner_primaries_and_count_signature_volume_separately() {
+    let labels = LabelSet {
+        schema_version: 1,
+        language: "cpp".to_string(),
+        files: vec!["seed.cpp".to_string(), "mirror.cpp".to_string()],
+        clone_pairs: Vec::new(),
+        non_clones: Vec::new(),
+        known_siblings: vec![KnownSibling {
+            id: "ks-001".to_string(),
+            basis: SiblingBasis::Signature,
+            primary_fragments: [fragment("seed.cpp", 1, 10), fragment("copy.cpp", 1, 10)],
+            sibling: fragment("mirror.cpp", 1, 12),
+        }],
+    };
+    let sibling_groups = vec![DetectedSiblingGroup {
+        owner_group_fingerprint: "primary".to_string(),
+        owner_members: vec![fragment("seed.cpp", 1, 10), fragment("copy.cpp", 1, 10)],
+        siblings: vec![DetectedSibling {
+            clone_type: CloneType::Type3,
+            confidence_band: "low".to_string(),
+            basis: SiblingBasis::Signature,
+            signature: Some("int(const int*,int)".to_string()),
+            similarity: DetectedSiblingSimilarity {
+                lexical: Some(0.2),
+                structural: Some(0.5),
+                control_flow: None,
+                api: None,
+                composite: 0.42,
+            },
+            member: fragment("mirror.cpp", 1, 12),
+        }],
+    }];
+    let metrics = evaluate_siblings(&sibling_groups, &labels, DEFAULT_MATCH_THRESHOLD);
+    assert_eq!(metrics.known_mirrors_recovered, 1);
+    assert_eq!(metrics.known_mirrors_total, 1);
+    assert_eq!(metrics.signature_siblings_total, 1);
+    assert_eq!(
+        metrics.to_string(),
+        "known mirrors recovered     1 / 1\nsignature-derived siblings  1"
+    );
+}
+
+#[test]
+fn sibling_metrics_require_both_labelled_primaries_in_one_owner() {
+    let labels = LabelSet {
+        schema_version: 1,
+        language: "cpp".to_string(),
+        files: vec![
+            "seed.cpp".to_string(),
+            "copy.cpp".to_string(),
+            "other.cpp".to_string(),
+        ],
+        clone_pairs: Vec::new(),
+        non_clones: Vec::new(),
+        known_siblings: vec![KnownSibling {
+            id: "ks-001".to_string(),
+            basis: SiblingBasis::Signature,
+            primary_fragments: [fragment("seed.cpp", 1, 10), fragment("copy.cpp", 1, 10)],
+            sibling: fragment("mirror.cpp", 1, 12),
+        }],
+    };
+    let sibling_groups = vec![DetectedSiblingGroup {
+        owner_group_fingerprint: "wrong-owner".to_string(),
+        owner_members: vec![fragment("seed.cpp", 1, 10), fragment("other.cpp", 1, 10)],
+        siblings: vec![DetectedSibling {
+            clone_type: CloneType::Type3,
+            confidence_band: "low".to_string(),
+            basis: SiblingBasis::Signature,
+            signature: Some("int(const int*,int)".to_string()),
+            similarity: DetectedSiblingSimilarity {
+                lexical: None,
+                structural: Some(0.5),
+                control_flow: None,
+                api: None,
+                composite: 0.5,
+            },
+            member: fragment("mirror.cpp", 1, 12),
+        }],
+    }];
+
+    let metrics = evaluate_siblings(&sibling_groups, &labels, DEFAULT_MATCH_THRESHOLD);
+    assert_eq!(metrics.known_mirrors_recovered, 0);
+    assert_eq!(metrics.known_mirrors_total, 1);
+    assert_eq!(metrics.signature_siblings_total, 1);
+}
+
+#[test]
+fn duplicate_sibling_detections_recover_one_label_but_count_twice() {
+    let labels = LabelSet {
+        schema_version: 1,
+        language: "cpp".to_string(),
+        files: vec![
+            "seed.cpp".to_string(),
+            "copy.cpp".to_string(),
+            "mirror.cpp".to_string(),
+        ],
+        clone_pairs: Vec::new(),
+        non_clones: Vec::new(),
+        known_siblings: vec![KnownSibling {
+            id: "ks-001".to_string(),
+            basis: SiblingBasis::Signature,
+            primary_fragments: [fragment("seed.cpp", 1, 10), fragment("copy.cpp", 1, 10)],
+            sibling: fragment("mirror.cpp", 1, 12),
+        }],
+    };
+    let duplicate = || DetectedSibling {
+        clone_type: CloneType::Type3,
+        confidence_band: "low".to_string(),
+        basis: SiblingBasis::Signature,
+        signature: Some("int(const int*,int)".to_string()),
+        similarity: DetectedSiblingSimilarity {
+            lexical: None,
+            structural: Some(0.5),
+            control_flow: None,
+            api: None,
+            composite: 0.5,
+        },
+        member: fragment("mirror.cpp", 1, 12),
+    };
+    let sibling_groups = vec![DetectedSiblingGroup {
+        owner_group_fingerprint: "primary".to_string(),
+        owner_members: vec![fragment("seed.cpp", 1, 10), fragment("copy.cpp", 1, 10)],
+        siblings: vec![duplicate(), duplicate()],
+    }];
+
+    let metrics = evaluate_siblings(&sibling_groups, &labels, DEFAULT_MATCH_THRESHOLD);
+    assert_eq!(metrics.known_mirrors_recovered, 1);
+    assert_eq!(metrics.known_mirrors_total, 1);
+    assert_eq!(metrics.signature_siblings_total, 2);
+}
+
+#[test]
+fn an_unlabelled_sibling_is_not_a_primary_false_positive() {
+    let labels = LabelSet {
+        schema_version: 1,
+        language: "cpp".to_string(),
+        files: Vec::new(),
+        clone_pairs: Vec::new(),
+        non_clones: Vec::new(),
+        known_siblings: Vec::new(),
+    };
+    let sibling_groups = vec![DetectedSiblingGroup {
+        owner_group_fingerprint: "primary".to_string(),
+        owner_members: vec![fragment("a.cpp", 1, 4), fragment("b.cpp", 1, 4)],
+        siblings: vec![DetectedSibling {
+            clone_type: CloneType::Type3,
+            confidence_band: "low".to_string(),
+            basis: SiblingBasis::Similarity,
+            signature: None,
+            similarity: DetectedSiblingSimilarity {
+                lexical: None,
+                structural: Some(0.4),
+                control_flow: None,
+                api: None,
+                composite: 0.4,
+            },
+            member: fragment("c.cpp", 1, 4),
+        }],
+    }];
+    let metrics = evaluate_siblings(&sibling_groups, &labels, DEFAULT_MATCH_THRESHOLD);
+    assert_eq!(metrics.known_mirrors_recovered, 0);
+    assert_eq!(metrics.known_mirrors_total, 0);
+    assert_eq!(metrics.signature_siblings_total, 0);
 }
 
 #[test]
@@ -233,6 +401,7 @@ fn nothing_judged_has_no_precision_measurement() {
         files: vec![],
         clone_pairs: vec![],
         non_clones: vec![],
+        known_siblings: vec![],
     };
     let ruled = adjudicate(&results, &empty, DEFAULT_MATCH_THRESHOLD);
     assert_eq!(ruled.judged(), 0);

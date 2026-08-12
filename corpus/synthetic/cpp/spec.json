@@ -23,6 +23,13 @@
             { "op": "comment_before", "text": "Longest run of consecutive true flags." },
             { "op": "comment_after", "anchor": "current = 0;", "text": "A false flag resets the run." }
           ]
+        },
+        {
+          "item": "fn cells_match",
+          "labelled": true,
+          "edits": [
+            { "op": "comment_before", "text": "Compares two cell sequences twice." }
+          ]
         }
       ]
     },
@@ -69,9 +76,61 @@
           "type": "type-1"
         }
       ]
+    },
+    {
+      "file": "signature_mirror.cpp",
+      "type": "type-3",
+      "header_comment": "Signature mirror: same callable shape, deliberately rewritten control flow.",
+      "items": [
+        {
+          "item": "fn sum_even",
+          "rename": { "sum_even": "signature_mirror", "values": "source", "total": "result" },
+          "edits": [
+            {
+              "op": "replace",
+              "anchor": "int result = 0;",
+              "lines": [
+                "    const int *cursor = source;",
+                "    const int *end = source + count;",
+                "    int result = 0;"
+              ]
+            },
+            {
+              "op": "replace",
+              "anchor": "for (int i = 0; i < count; i++) {",
+              "lines": ["    while (cursor != end) {"]
+            },
+            {
+              "op": "replace",
+              "anchor": "if (source[i] % 2 == 0) {",
+              "lines": ["        if (cursor != end) {"]
+            },
+            {
+              "op": "replace",
+              "anchor": "result += source[i];",
+              "lines": ["            result += (*cursor % 2 == 0) ? *cursor : 0;"]
+            },
+            {
+              "op": "insert_after",
+              "anchor": "result += (*cursor % 2 == 0) ? *cursor : 0;",
+              "lines": ["            ++cursor;"]
+            }
+          ]
+        }
+      ]
     }
   ],
   "non_clones": [
     { "reason": "getter-boilerplate", "function": "fn value", "variant": "type2.cpp" }
+  ],
+  "known_siblings": [
+    {
+      "basis": "signature",
+      "primary_fragments": [
+        { "file": "seed.cpp", "item": "fn sum_even" },
+        { "file": "type1.cpp", "item": "fn sum_even" }
+      ],
+      "sibling": { "file": "signature_mirror.cpp", "item": "fn sum_even" }
+    }
   ]
 }

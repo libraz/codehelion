@@ -27,6 +27,21 @@ int max_run(const bool *flags, int count) {
     return best;
 }
 
+bool cells_match(const int *left, const int *right, int count) {
+    const int *left_cursor = left;
+    const int *right_cursor = right;
+    int remaining = count;
+    bool equal = true;
+    for (; remaining--;)
+        equal &= *left_cursor++ == *right_cursor++;
+    left_cursor = left;
+    right_cursor = right;
+    remaining = count;
+    for (; remaining--;)
+        equal &= *left_cursor++ == *right_cursor++;
+    return equal;
+}
+
 class Counter {
 public:
     int value() const {

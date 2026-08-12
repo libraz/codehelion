@@ -29,8 +29,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use crate::detected::DetectedSiblingGroup;
 use crate::labels::LabelSet;
-use crate::schema::{CloneType, DetectionResult, Finding, Fragment};
+use crate::schema::{CloneType, DetectionResult, Finding, Fragment, SiblingBasis};
 
 mod adjudication;
 mod stability;
@@ -50,10 +51,18 @@ pub const DEFAULT_MATCH_THRESHOLD: f64 = 0.5;
 /// See the [module documentation](self) for the exact "covers" semantics.
 #[must_use]
 pub fn covers(finding: &Finding, fragments: &[Fragment], threshold: f64) -> bool {
-    !fragments.is_empty()
-        && fragments.iter().all(|labelled| {
-            finding
-                .fragments
+    covers_fragments(&finding.fragments, fragments, threshold)
+}
+
+/// Whether every labelled fragment is covered by a reported fragment.
+fn covers_fragments(
+    reported_fragments: &[Fragment],
+    labelled_fragments: &[Fragment],
+    threshold: f64,
+) -> bool {
+    !labelled_fragments.is_empty()
+        && labelled_fragments.iter().all(|labelled| {
+            reported_fragments
                 .iter()
                 .any(|reported| reported.overlap(labelled) >= threshold)
         })
@@ -98,6 +107,66 @@ pub struct Metrics {
     pub false_positives: usize,
     /// The `k` used for [`precision_at_k`](Self::precision_at_k).
     pub top_k: usize,
+}
+
+/// Metrics for supplemental sibling evidence, kept separate from primary
+/// clone precision and recall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SiblingMetrics {
+    /// Known mirror labels recovered by their owning primary group and sibling
+    /// overlap.
+    pub known_mirrors_recovered: usize,
+    /// Number of known mirror labels in the corpus.
+    pub known_mirrors_total: usize,
+    /// All retained signature-channel sibling entries in the report.
+    pub signature_siblings_total: usize,
+}
+
+/// Score known mirror labels against rich sibling evidence.
+#[must_use]
+pub fn evaluate_siblings(
+    sibling_groups: &[DetectedSiblingGroup],
+    labels: &LabelSet,
+    threshold: f64,
+) -> SiblingMetrics {
+    let known_mirrors_recovered = labels
+        .known_siblings
+        .iter()
+        .filter(|known| {
+            sibling_groups.iter().any(|group| {
+                covers_fragments(&group.owner_members, &known.primary_fragments, threshold)
+                    && group.siblings.iter().any(|sibling| {
+                        sibling.basis == known.basis
+                            && sibling.member.overlap(&known.sibling) >= threshold
+                    })
+            })
+        })
+        .count();
+    let signature_siblings_total = sibling_groups
+        .iter()
+        .flat_map(|group| &group.siblings)
+        .filter(|sibling| sibling.basis == SiblingBasis::Signature)
+        .count();
+    SiblingMetrics {
+        known_mirrors_recovered,
+        known_mirrors_total: labels.known_siblings.len(),
+        signature_siblings_total,
+    }
+}
+
+impl fmt::Display for SiblingMetrics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "known mirrors recovered     {} / {}",
+            self.known_mirrors_recovered, self.known_mirrors_total
+        )?;
+        write!(
+            f,
+            "signature-derived siblings  {}",
+            self.signature_siblings_total
+        )
+    }
 }
 
 /// Measured ratio `num / den`, or `None` when `den` is zero.
@@ -278,6 +347,7 @@ pub fn evaluate_by_rule(
                     .filter(|non_clone| non_clone.rule_id.as_deref() == Some(rule_id))
                     .cloned()
                     .collect(),
+                known_siblings: Vec::new(),
             };
             (
                 rule_id.to_string(),

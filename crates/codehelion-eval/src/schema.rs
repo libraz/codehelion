@@ -10,6 +10,27 @@ use serde::{Deserialize, Serialize};
 /// Schema version of the [`DetectionResult`] documents this crate produces.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Independent candidate channel that can produce a supplemental sibling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SiblingBasis {
+    /// Existing verifier-similarity candidate channel.
+    Similarity,
+    /// Exact normalized-signature candidate channel.
+    Signature,
+}
+
+impl SiblingBasis {
+    /// Stable string form used in reports and display output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Similarity => "similarity",
+            Self::Signature => "signature",
+        }
+    }
+}
+
 /// Whether a count is zero, for leaving unstated counts out of the JSON.
 #[allow(clippy::trivially_copy_pass_by_ref)] // serde requires this signature.
 const fn is_zero(count: &u64) -> bool {

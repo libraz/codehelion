@@ -23,6 +23,13 @@
             { "op": "comment_before", "text": "Longest run of consecutive true flags." },
             { "op": "comment_after", "anchor": "current = 0;", "text": "A false flag resets the run." }
           ]
+        },
+        {
+          "item": "fn values_equal",
+          "labelled": true,
+          "edits": [
+            { "op": "comment_before", "text": "Compares two value sequences twice with index loops." }
+          ]
         }
       ]
     },

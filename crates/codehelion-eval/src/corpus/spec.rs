@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::CloneType;
+use crate::schema::{CloneType, SiblingBasis};
 
 /// Top-level mutation-spec document.
 ///
@@ -71,6 +71,13 @@ pub struct MutationSpec {
     /// Deliberate non-clones to carry into the label document.
     #[serde(default)]
     pub non_clones: Vec<NonCloneSpec>,
+    /// Known incomplete mirrors to carry into the generated label document.
+    ///
+    /// Each reference names a seed or generated variant file plus one seed
+    /// item. The generator resolves the item to the exact rendered line
+    /// range, so these labels do not contain hand-maintained line numbers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_siblings: Vec<KnownSiblingSpec>,
 }
 
 impl MutationSpec {
@@ -328,6 +335,36 @@ pub struct NonCloneSpec {
     pub variant: String,
 }
 
+/// A known incomplete mirror declared in a mutation spec.
+///
+/// `primary_fragments` contains exactly two item references that establish the owning
+/// clone group. `sibling` names the separate item that a supplemental sibling
+/// channel should recover. The generated label receives a deterministic
+/// `ks-001`-style id; ids are intentionally not hand-authored in a spec.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnownSiblingSpec {
+    /// Candidate channel expected to recover this mirror (`similarity` or
+    /// `signature`).
+    pub basis: SiblingBasis,
+    /// The two primary items that establish the owning group. The
+    /// The shorter `primary` alias is accepted for compact mutation specs.
+    #[serde(alias = "primary")]
+    pub primary_fragments: [ItemRef; 2],
+    /// The incomplete mirror item.
+    pub sibling: ItemRef,
+}
+
+/// A seed or generated-variant item reference in a known-sibling spec.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemRef {
+    /// Source file name: the spec seed or one of its generated variants.
+    pub file: String,
+    /// Scanner key of the item, such as `fn sum_even`.
+    pub item: String,
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -379,6 +416,52 @@ mod tests {
         );
         assert_eq!(variant.items[1].clone_type, Some(CloneType::Type1));
         assert_eq!(spec.non_clones.len(), 1);
+        assert!(spec.known_siblings.is_empty());
+    }
+
+    #[test]
+    fn parses_known_sibling_item_references_with_exactly_two_primaries() {
+        let json = r#"{
+          "schema_version": 1,
+          "language": "cpp",
+          "seed": "seed.cpp",
+          "variants": [],
+          "known_siblings": [{
+            "basis": "signature",
+            "primary_fragments": [
+              {"file":"seed.cpp","item":"fn first"},
+              {"file":"type1.cpp","item":"fn first"}
+            ],
+            "sibling": {"file":"mirror.cpp","item":"fn first"}
+          }]
+        }"#;
+        let spec = MutationSpec::from_json(json).expect("known sibling spec parses");
+        assert_eq!(spec.known_siblings.len(), 1);
+        assert_eq!(spec.known_siblings[0].basis, SiblingBasis::Signature);
+        assert_eq!(
+            spec.known_siblings[0].primary_fragments[1].file,
+            "type1.cpp"
+        );
+    }
+
+    #[test]
+    fn known_sibling_spec_rejects_unknown_fields() {
+        let json = r#"{
+          "schema_version": 1,
+          "language": "cpp",
+          "seed": "seed.cpp",
+          "variants": [],
+          "known_siblings": [{
+            "basis": "signature",
+            "primary": [
+              {"file":"seed.cpp","item":"fn first"},
+              {"file":"seed.cpp","item":"fn second"}
+            ],
+            "sibling": {"file":"seed.cpp","item":"fn third"},
+            "id": "ks-001"
+          }]
+        }"#;
+        assert!(MutationSpec::from_json(json).is_err());
     }
 
     #[test]

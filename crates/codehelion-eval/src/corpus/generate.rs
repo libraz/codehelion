@@ -1,11 +1,13 @@
-//! Variant emission, provenance-based range computation and label assembly.
+//! Variant emission, provenance tracking, and label assembly.
 //!
 //! Rendering keeps, for every output line, the seed line it derives from (its
-//! *provenance*). Label ranges are then computed from that mapping: a labelled
-//! region's variant fragment spans the first to the last output line whose
-//! provenance falls inside the region's seed range. Inserted lines between
-//! mapped lines are covered by the span; comment lines inserted before an
-//! item's header are not.
+//! *provenance*). Ordinary clone-pair ranges are then computed from that
+//! mapping: a labelled region's variant fragment spans the first to the last
+//! output line whose provenance falls inside the region's seed range. Inserted
+//! lines between mapped lines are covered by the span; comment lines inserted
+//! before an item's header are not. Known-sibling item ranges use the exact
+//! rendered item bounds instead, so a fully replaced or inserted item is not
+//! shortened by missing provenance.
 //!
 //! Transplanted fragments ([`TransplantSpec`]) are tracked by insertion
 //! identity instead: each transplant's lines carry the transplant's ordinal,
@@ -18,10 +20,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::corpus::lexer::substitute;
 use crate::corpus::scan::{Item, Language, ScanError, brace_balance, scan_items};
 use crate::corpus::spec::{
-    EditOp, ItemSpec, MutationSpec, NonCloneSpec, TransplantSpec, VariantSpec,
+    EditOp, ItemRef, ItemSpec, KnownSiblingSpec, MutationSpec, NonCloneSpec, TransplantSpec,
+    VariantSpec,
 };
 use crate::corpus::{Error, LABEL_SCHEMA_VERSION, LABELS_FILE, SPEC_SCHEMA_VERSION};
-use crate::labels::{LabelPair, LabelSet, NonClone};
+use crate::labels::{KnownSibling, LabelPair, LabelSet, NonClone};
 use crate::schema::{CloneType, Fragment};
 
 /// Marker comment emitted as the second line of every generated variant file.
@@ -87,6 +90,8 @@ struct Line {
 struct RenderedVariant {
     file: String,
     lines: Vec<Line>,
+    /// Exact output-line ranges for each item carried into this variant.
+    item_ranges: BTreeMap<String, (u32, u32)>,
 }
 
 /// A labelled region whose variant range is resolved after rendering.
@@ -206,6 +211,12 @@ pub fn generate(spec: &MutationSpec, seed_text: &str) -> Result<GeneratedCorpus,
         files: files_list,
         clone_pairs: resolve_pairs(&pending.pairs, &rendered, &spec.seed)?,
         non_clones,
+        known_siblings: resolve_known_siblings(
+            &spec.known_siblings,
+            &by_key,
+            &rendered,
+            &spec.seed,
+        )?,
     };
     let files = collect_files(rendered, &labels)?;
     Ok(GeneratedCorpus {
@@ -262,6 +273,7 @@ fn render_variant(
         },
     ];
     let mut seen = BTreeSet::new();
+    let mut item_ranges = BTreeMap::new();
     for item_spec in &variant.items {
         if !seen.insert(item_spec.item.as_str()) {
             return Err(Error::DuplicateItem {
@@ -296,6 +308,10 @@ fn render_variant(
             });
         }
         let (mut item_lines, changed) = render_item(item_spec, item, ctx, pending)?;
+        let start = to_u32(lines.len().saturating_add(1));
+        let item_line_count = to_u32(item_lines.len());
+        let end = start.saturating_add(item_line_count.saturating_sub(1));
+        item_ranges.insert(item_spec.item.clone(), (start, end));
         lines.append(&mut item_lines);
 
         if effective == CloneType::Type3 && (changed > 0 || item_spec.target_change_rate.is_some())
@@ -312,6 +328,7 @@ fn render_variant(
     Ok(RenderedVariant {
         file: variant.file.clone(),
         lines,
+        item_ranges,
     })
 }
 
@@ -851,6 +868,119 @@ fn resolve_non_clones(
             })
         })
         .collect()
+}
+
+/// Resolve known-sibling item references to exact generated line ranges.
+///
+/// Keeping this resolution in the generator makes the committed `labels.json`
+/// a derived artifact just like every variant source. A line move in a seed
+/// or a preceding edit therefore changes both the source and its label in one
+/// deterministic regeneration.
+fn resolve_known_siblings(
+    specs: &[KnownSiblingSpec],
+    by_key: &BTreeMap<&str, &Item>,
+    rendered: &[RenderedVariant],
+    seed_file: &str,
+) -> Result<Vec<KnownSibling>, Error> {
+    let mut seen = BTreeSet::new();
+    specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            let references = [
+                &spec.primary_fragments[0],
+                &spec.primary_fragments[1],
+                &spec.sibling,
+            ];
+            let mut item_refs = BTreeSet::new();
+            for reference in references {
+                let key = format!("{}:{}", reference.file, reference.item);
+                if !item_refs.insert(key.clone()) {
+                    return Err(Error::InvalidKnownSiblingRef { reference: key });
+                }
+            }
+            let mut primary_keys = [
+                format!(
+                    "{}:{}",
+                    spec.primary_fragments[0].file, spec.primary_fragments[0].item
+                ),
+                format!(
+                    "{}:{}",
+                    spec.primary_fragments[1].file, spec.primary_fragments[1].item
+                ),
+            ];
+            primary_keys.sort();
+            let relation = format!(
+                "{}|{}|{}|{}:{}",
+                spec.basis.as_str(),
+                primary_keys[0],
+                primary_keys[1],
+                spec.sibling.file,
+                spec.sibling.item
+            );
+            if !seen.insert(relation.clone()) {
+                return Err(Error::DuplicateKnownSiblingRef {
+                    reference: relation,
+                });
+            }
+            let primary_fragments = spec
+                .primary_fragments
+                .iter()
+                .map(|reference| resolve_known_sibling_ref(reference, by_key, rendered, seed_file))
+                .collect::<Result<Vec<_>, _>>()?;
+            let primary_fragments: [Fragment; 2] =
+                primary_fragments
+                    .try_into()
+                    .map_err(|_| Error::InvalidKnownSiblingRef {
+                        reference: relation.clone(),
+                    })?;
+            let sibling = resolve_known_sibling_ref(&spec.sibling, by_key, rendered, seed_file)?;
+            Ok(KnownSibling {
+                id: format!("ks-{:03}", index + 1),
+                basis: spec.basis,
+                primary_fragments,
+                sibling,
+            })
+        })
+        .collect()
+}
+
+/// Resolve one known-sibling file/item reference.
+fn resolve_known_sibling_ref(
+    reference: &ItemRef,
+    by_key: &BTreeMap<&str, &Item>,
+    rendered: &[RenderedVariant],
+    seed_file: &str,
+) -> Result<Fragment, Error> {
+    let range = if reference.file == seed_file {
+        let item = by_key
+            .get(reference.item.as_str())
+            .copied()
+            .ok_or_else(|| Error::UnknownKnownSiblingRef {
+                reference: format!("{}:{}", reference.file, reference.item),
+            })?;
+        (item.start_line, item.end_line)
+    } else {
+        let variant = rendered
+            .iter()
+            .find(|variant| variant.file == reference.file)
+            .ok_or_else(|| Error::UnknownKnownSiblingRef {
+                reference: format!("{}:{}", reference.file, reference.item),
+            })?;
+        variant
+            .item_ranges
+            .get(&reference.item)
+            .copied()
+            .ok_or_else(|| Error::UnknownKnownSiblingRef {
+                reference: format!("{}:{}", reference.file, reference.item),
+            })?
+    };
+    Ok(Fragment {
+        file: reference.file.clone(),
+        start_line: range.0,
+        end_line: range.1,
+        tokens: 0,
+    })
 }
 
 /// Resolve the transplant-derived non-clones. Their ids continue the

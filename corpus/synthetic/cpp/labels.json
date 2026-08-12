@@ -5,7 +5,8 @@
     "seed.cpp",
     "type1.cpp",
     "type2.cpp",
-    "type3.cpp"
+    "type3.cpp",
+    "signature_mirror.cpp"
   ],
   "clone_pairs": [
     {
@@ -42,17 +43,17 @@
     },
     {
       "id": "cp-003",
-      "type": "type-2",
+      "type": "type-1",
       "fragments": [
         {
           "file": "seed.cpp",
-          "start_line": 4,
-          "end_line": 12
+          "start_line": 30,
+          "end_line": 43
         },
         {
-          "file": "type2.cpp",
-          "start_line": 4,
-          "end_line": 12
+          "file": "type1.cpp",
+          "start_line": 35,
+          "end_line": 48
         }
       ]
     },
@@ -62,6 +63,22 @@
       "fragments": [
         {
           "file": "seed.cpp",
+          "start_line": 4,
+          "end_line": 12
+        },
+        {
+          "file": "type2.cpp",
+          "start_line": 4,
+          "end_line": 12
+        }
+      ]
+    },
+    {
+      "id": "cp-005",
+      "type": "type-2",
+      "fragments": [
+        {
+          "file": "seed.cpp",
           "start_line": 14,
           "end_line": 28
         },
@@ -73,7 +90,7 @@
       ]
     },
     {
-      "id": "cp-005",
+      "id": "cp-006",
       "type": "type-3",
       "fragments": [
         {
@@ -89,7 +106,7 @@
       ]
     },
     {
-      "id": "cp-006",
+      "id": "cp-007",
       "type": "type-1",
       "fragments": [
         {
@@ -112,8 +129,8 @@
       "fragments": [
         {
           "file": "seed.cpp",
-          "start_line": 32,
-          "end_line": 34
+          "start_line": 47,
+          "end_line": 49
         },
         {
           "file": "type2.cpp",
@@ -121,6 +138,29 @@
           "end_line": 34
         }
       ]
+    }
+  ],
+  "known_siblings": [
+    {
+      "id": "ks-001",
+      "basis": "signature",
+      "primary_fragments": [
+        {
+          "file": "seed.cpp",
+          "start_line": 4,
+          "end_line": 12
+        },
+        {
+          "file": "type1.cpp",
+          "start_line": 4,
+          "end_line": 14
+        }
+      ],
+      "sibling": {
+        "file": "signature_mirror.cpp",
+        "start_line": 4,
+        "end_line": 15
+      }
     }
   ]
 }

@@ -117,6 +117,28 @@ pub enum Error {
         /// The unresolved reference (variant file or function key).
         reference: String,
     },
+    /// A known-sibling spec names a channel outside the controlled vocabulary.
+    UnsupportedSiblingBasis {
+        /// The unsupported channel name.
+        basis: String,
+    },
+    /// A known-sibling item reference could not be resolved to a seed or
+    /// generated variant item.
+    UnknownKnownSiblingRef {
+        /// The unresolved `file:item` reference.
+        reference: String,
+    },
+    /// A known-sibling declaration is malformed or repeats an item reference.
+    InvalidKnownSiblingRef {
+        /// The declaration's short description.
+        reference: String,
+    },
+    /// Two known-sibling declarations describe the same primary/sibling
+    /// relationship and would otherwise produce ambiguous labels.
+    DuplicateKnownSiblingRef {
+        /// Canonical relationship description.
+        reference: String,
+    },
     /// A labelled region has no surviving lines in the variant, so no range
     /// can be computed for it.
     EmptyRange {
@@ -178,6 +200,18 @@ impl fmt::Display for Error {
             ),
             Self::UnknownNonCloneRef { reference } => {
                 write!(f, "non-clone label references unknown `{reference}`")
+            }
+            Self::UnsupportedSiblingBasis { basis } => {
+                write!(f, "known-sibling basis `{basis}` is not supported")
+            }
+            Self::UnknownKnownSiblingRef { reference } => {
+                write!(f, "known-sibling label references unknown `{reference}`")
+            }
+            Self::InvalidKnownSiblingRef { reference } => {
+                write!(f, "invalid known-sibling reference `{reference}`")
+            }
+            Self::DuplicateKnownSiblingRef { reference } => {
+                write!(f, "duplicate known-sibling reference `{reference}`")
             }
             Self::EmptyRange { variant, item } => {
                 write!(
