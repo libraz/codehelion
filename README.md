@@ -182,7 +182,7 @@ The main scan controls are:
 
 - `--config <file>` and `--db <path>` choose the configuration and local database.
 - `--jobs <n>` sets frontend read-and-lex workers (capped at four times host parallelism); clone grouping and report rendering remain serial. `--no-ignore` also reads ignored files.
-- `--baseline <file>` compares with accepted findings; `--show-suppressed`, `--show-siblings`, and `--show-near-misses` expand text output. JSON and SARIF retain those data regardless.
+- `--baseline <file>` compares with accepted findings; `--show-suppressed`, `--show-siblings`, and `--show-near-misses` expand text output. JSON and SARIF retain those data regardless. `--siblings-by-signature` enables signature-based sibling generation in Structural and Semantic modes; it is off by default, while `--show-siblings` only changes text visibility.
 - `-v`/`-vv` choose how much is said about each group, `--limit <n>` how many groups are listed, and `--quiet` prints the groups alone. `--color <auto|always|never>` overrides the terminal detection, and `NO_COLOR` is honoured.
 - `--decoration <auto|unicode|ascii|none>` chooses the glyphs the listing is drawn with. Unlike colour it does not follow the destination: a report written to a file keeps the tree a terminal would have shown, because a box-drawing character in a file is still readable where an escape sequence is not. `auto` draws box-drawing characters everywhere except Windows, whose console depends on the active code page.
 - `--include-trivial` restores predicate families to their measured priority in Structural and Semantic mode.
@@ -376,15 +376,30 @@ keep in step, not bytes a compiler emits. Optimisers routinely fold identical
 code that is still duplicated in the source, so removing a reported clone need
 not make the built artifact any smaller.
 
+Identical code folding can already remove same-signature functions with identical
+bodies in C++ and Rust. Type-1 copies are therefore often folded by the linker
+already. Type-2 and Type-3 copies that change identifiers or literals can leave
+distinct machine code, so they can matter more when size is the reason to
+inspect duplication.
+
 **Fast mode reports more than you want to read.** The suppression policies for
 boilerplate, test code and integer-width families need structural
 classifications, so Fast mode cannot apply them and says so in the report. On a
 tree of any size, `--mode structural` is what produces a list worth reading
 top-down.
 
-**Incomplete or edited copies are harder to detect.** codehelion is not a
-mirror-consistency checker: the Structural detector can miss an otherwise
-similar mirror when it diverges enough not to become a candidate.
+**Incomplete or edited copies are harder to detect.** Structural and Semantic
+modes generate the sibling channel only with `--siblings-by-signature`; it is
+off by default: on a measured 264,860-line C++ tree, the 1,000-entry report
+ceiling filled and another 8,586 signature candidates were dropped by the
+configured ceilings. When enabled, the channel can retain a
+low-confidence sibling when its normalized signature matches the group’s
+canonical function and the otherwise ungrouped function is in the same directory.
+`--show-siblings` only changes text visibility; JSON and SARIF retain generated
+sibling data. A mirror in another directory, a changed signature, or a
+candidate beyond the sibling-search ceiling can still keep a copy out;
+codehelion is not a mirror-consistency checker. It does not prove that every
+mirror has been found or that two same-signature bodies behave alike.
 
 **Large trees hit ceilings.** The candidate budget and the high-frequency
 posting cap bound the search, and a run that hits either reports how much it

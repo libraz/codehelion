@@ -131,7 +131,7 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 
 - `--config <file>` と `--db <path>` は設定ファイルとローカルデータベースを選びます。
 - `--jobs <n>` は frontend の read/lex worker 数を指定します（host parallelism の 4 倍まで）。clone grouping と report rendering は serial です。`--no-ignore` は無視対象のファイルも読みます。
-- `--baseline <file>` は判断済みの finding と比較します。`--show-suppressed`、`--show-siblings`、`--show-near-misses` は text 出力を展開します。JSON と SARIF には常にこれらのデータが含まれます。
+- `--baseline <file>` は判断済みの finding と比較します。`--show-suppressed`、`--show-siblings`、`--show-near-misses` は text 出力を展開します。JSON と SARIF には常にこれらのデータが含まれます。`--siblings-by-signature` は Structural / Semantic モードでシグネチャによる sibling 生成を有効にします。既定では無効で、`--show-siblings` は text 表示だけを変えます。
 - `-v` / `-vv` は各グループについて書く量を、`--limit <n>` は列挙するグループ数を決めます。`--quiet` はグループだけを出力します。`--color <auto|always|never>` は端末判定を上書きし、`NO_COLOR` にも従います。
 - `--decoration <auto|unicode|ascii|none>` は一覧を描くグリフを選びます。色とは違って出力先には従いません。ファイルに書き出したレポートも端末と同じツリーを保ちます。エスケープシーケンスと違い、罫線素片はファイルの中でも読めるからです。`auto` は Windows を除いて罫線素片を使います。Windows のコンソールはアクティブなコードページ次第で描画が変わるためです。
 - `--include-trivial` は Structural / Semantic モードで predicate family を計測済みの priority に戻します。
@@ -260,9 +260,11 @@ split-pairs は、同じ完全なクローングループに入らない検証�
 
 **finding が測るのは保守性であってサイズではありません。** finding が示すのは読み手が同期を取り続ける必要のあるコードであり、コンパイラが出力するバイト数ではありません。最適化器はソース上で重複したままのコードを日常的に畳むため、報告されたクローンを解消しても成果物が小さくなるとは限りません。
 
+C++ と Rust では、同じシグネチャと同じ本体を持つ関数が identical code folding の対象になります。Type-1 の重複はリンカがすでに畳んでいる可能性が高く、識別子やリテラルが変わる Type-2 / Type-3 は機械語が別になることがあるため、サイズが目的ならこちらの方が調べる価値が高くなります。
+
 **Fast モードは読み切れない量を報告します。** boilerplate・テストコード・整数幅の関数群に対する抑制ポリシーは構造分類を必要とするため、Fast モードでは適用できず、その旨をレポートに明示します。ある程度以上の規模のツリーで上から読んでいける一覧がほしい場合は `--mode structural` を使ってください。
 
-**欠落や編集のあるコピーは検出しにくくなります。** codehelion はミラーの整合性検査ツールではありません。Structural detector は、候補にならないほど差異が大きい場合、ほかの点では似ているミラーを見逃すことがあります。
+**欠落や編集のあるコピーは検出しにくくなります。** Structural / Semantic モードの sibling channel は `--siblings-by-signature` を指定したときだけ生成されます。264,860 行の C++ ツリーで計測したところ、レポート上限の 1,000 件に達し、設定済みの探索上限によってさらに 8,586 件のシグネチャ候補が落ちたため、既定では無効です。有効にすると、グループの canonical function と正規化済みシグネチャが一致し、まだグループ化されていない関数が同じディレクトリにある場合、低信頼度の sibling として保持できます。`--show-siblings` は text 表示だけを変え、JSON と SARIF には生成済みの sibling が残ります。別ディレクトリの mirror、変化したシグネチャ、sibling 探索の上限を超えた候補は、なお見逃すことがあります。codehelion はミラー整合性検査ツールではありません。すべての mirror を見つけたことや、同じシグネチャの本体が同じ動作をすることを証明するものではありません。
 
 **大きなツリーでは上限に達します。** 候補 budget と高頻度 posting の上限が探索範囲を区切ります。どちらかに達した実行は、未検査のまま残した量を報告します。索引はメモリ上に置くため、非常に大きなツリーではディスク容量ではなくこれらの上限が効きます。
 
