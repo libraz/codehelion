@@ -390,9 +390,12 @@ top-down.
 
 **Incomplete or edited copies are harder to detect.** Structural and Semantic
 modes generate the sibling channel only with `--siblings-by-signature`; it is
-off by default: on a measured 264,860-line C++ tree, the 1,000-entry report
-ceiling filled and another 8,586 signature candidates were dropped by the
-configured ceilings. When enabled, the channel can retain a
+off by default because of how much it produces. Run over a 264,860-line C++
+tree in Structural mode, it filled the 1,000-entry report ceiling and dropped
+8,586 further signature candidates — 7,322 to the per-group cap and 1,264 to
+the total cap. The counts are deterministic for a given tree and set of caps,
+so they are a property of the settings rather than of the machine; both caps
+are configurable. When enabled, the channel can retain a
 low-confidence sibling when its normalized signature matches the group’s
 canonical function and the otherwise ungrouped function is in the same directory.
 `--show-siblings` only changes text visibility; JSON and SARIF retain generated
@@ -419,6 +422,77 @@ source correspondence rather than a guessed one.
 schema is rejected rather than converted; move it aside and rescan. This will
 change before 1.0.
 
+## Accuracy
+
+Measured with `make eval` at 0.2.0. Both corpora are committed, so these
+numbers are reproducible from a checkout. `corpus/README.md` explains why each
+half can answer only one of the two questions.
+
+**Recall — nine generated mutation corpora, 42 clone pairs and 11 deliberate
+non-clones.** A generated corpus knows every clone it contains, so it can be
+scored for recall. It cannot be scored for precision: it labels the clones it
+was built around and nothing else, so an unlabelled true copy would count
+against the detector.
+
+| corpus | Fast | Structural |
+|---|---|---|
+| rust | 0.7143 | 1.0000 |
+| c | 0.8333 | 1.0000 |
+| cpp | 0.8571 | 1.0000 |
+| rust-graded | 1.0000 | 1.0000 |
+| rust-literals | 1.0000 | 1.0000 |
+| rust-replaced | 1.0000 | 1.0000 |
+| rust-negative | 1.0000 | 1.0000 |
+| rust-partial | 1.0000 | 0.5000 |
+| rust-divergent | 0.4000 | 0.8000 |
+
+Fast mode reaches no type-3 clone at all in `rust`, `c` and `cpp`, which is the
+cost of skipping the structural pass rather than a tuning question.
+`rust-partial` is the one corpus where Structural mode scores below Fast.
+
+The six restricted-semantic corpora are not scored here. Each registered rule
+is asserted by its own tests, which state why a pair matched or was dropped —
+a stronger claim than a corpus average over rules that answer different
+questions.
+
+**Precision — eight labelled snapshots of real projects, 141 clone-pair and 177
+non-clone verdicts.** Every group the detector reported on these trees carries
+a hand-written verdict, so precision is measurable. Recall is not: nobody
+enumerated the clones in those projects first.
+
+| case | Structural precision | confirmed | refuted |
+|---|---|---|---|
+| fast-yaml | 1.0000 | 1 | 0 |
+| codehelion-store | 1.0000 | 2 | 0 |
+| bitflags | 0.7857 | 11 | 3 |
+| cjson | 0.7000 | 14 | 6 |
+| spdlog | 0.5526 | 21 | 17 |
+| serde-json | 0.5357 | 45 | 39 |
+| lz4 | 0.5172 | 15 | 14 |
+| tinyxml2 | 0.4762 | 10 | 11 |
+| **all cases** | **0.5694** | **119** | **90** |
+
+Two of the eight are this author's own projects, and both score 1.0000.
+Dropping them moves the aggregate to 0.5631 — they carry 3 of the 209
+verdicts, so the figure is the other six projects' either way.
+
+0.5694 is the figure for the whole report read end to end, which is not how a
+duplication report is read. Over the same 209 judged findings:
+
+| ordered by | p@10 | p@50 | MAP |
+|---|---|---|---|
+| priority | 1.0000 | 0.9600 | 0.9231 |
+| size | 1.0000 | 0.9400 | 0.8725 |
+
+Nothing false reaches the first ten either way. What the aggregate says is that
+the tail is close to half noise, which is why the priority ordering and
+`--mode structural` are defaults rather than options.
+
+The snapshots these verdicts are anchored to are fetched by
+`corpus/scripts/materialize-labeled.sh` and never redistributed. A case that
+has not been materialized is reported as unscored rather than scored as
+perfect.
+
 ## Development
 
 Common tasks are wrapped in the `Makefile` (`make help` for the full list):
@@ -441,8 +515,10 @@ network sockets in the scan path. Tests are written alongside the code they
 cover and a pre-commit hook runs the whole `make check` suite.
 
 Detection accuracy is measured against the corpora in `corpus/`, which record
-hand-written verdicts on real projects rather than the projects themselves; see
-`corpus/README.md` for what each half can and cannot answer.
+hand-written verdicts on real projects rather than the projects themselves.
+`make eval` prints the tables; the current figures are under
+[Accuracy](#accuracy), and `corpus/README.md` covers what each half can and
+cannot answer.
 
 The protocol handshake cases live in `crates/codehelion-helper-conformance/`.
 They run the independently built helper binaries, rather than checking the
