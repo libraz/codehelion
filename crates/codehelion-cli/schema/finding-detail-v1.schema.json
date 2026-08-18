@@ -17,6 +17,8 @@
         "scan_run": { "type": "integer" },
         "analysis_mode": { "enum": ["fast", "structural", "semantic"] },
         "build_variant": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "latest_scan_run": { "type": ["integer", "null"] },
+        "present_in_latest_run": { "type": ["boolean", "null"] },
         "group": {
           "$ref": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v1.schema.json#/$defs/group"
         }

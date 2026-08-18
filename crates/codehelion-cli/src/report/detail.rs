@@ -165,6 +165,14 @@ pub struct CloneGroupDetail {
     pub analysis_mode: String,
     /// Build variant fingerprint that qualifies the group.
     pub build_variant: String,
+    /// Row id of the newest run comparable with the one the group was found
+    /// in: same root, same analysis mode, same build variant. `None` when the
+    /// found run is the only comparable one, which leaves nothing to say about
+    /// what a later run made of the group.
+    pub latest_scan_run: Option<i64>,
+    /// Whether that newest comparable run still records this group. `None` for
+    /// the same reason [`latest_scan_run`](Self::latest_scan_run) is.
+    pub present_in_latest_run: Option<bool>,
     /// The group, with its members and the inputs its ranking read.
     pub group: Group,
 }
@@ -190,11 +198,21 @@ impl CloneGroupDetail {
     pub fn render_text(&self, decoration: Decoration, out: &mut impl Write) -> io::Result<()> {
         writeln!(out, "clone group {}", self.group.fingerprint)?;
         writeln!(out, "  database: {}", self.database)?;
-        writeln!(
+        write!(
             out,
             "  run: {} ({}; build variant {})",
             self.scan_run, self.analysis_mode, self.build_variant
         )?;
+        // Whether the group survived is the question a lookup is usually
+        // asking, so it is stated rather than left to be inferred from the run
+        // number. Nothing is said when there is no second run to compare with.
+        match (self.latest_scan_run, self.present_in_latest_run) {
+            (Some(_), Some(true)) => writeln!(out, " — latest")?,
+            (Some(latest), Some(false)) => {
+                writeln!(out, " — not present in the latest run {latest}")?;
+            }
+            _ => writeln!(out)?,
+        }
         // A detail view is the one place that shows everything: full
         // identifiers, every occurrence, and the numbers behind the ranking.
         // Its reader asked about this one group by name.

@@ -4,7 +4,12 @@ use super::{
 };
 
 impl Store {
-    /// Newest completed run for one root and exact build variant.
+    /// Newest completed run for one root, analysis mode and exact build
+    /// variant.
+    ///
+    /// All three have to agree for two runs to be about the same question:
+    /// results computed under different build variants or under a different
+    /// analysis mode are never compared with one another.
     ///
     /// # Errors
     ///
@@ -12,6 +17,7 @@ impl Store {
     pub fn latest_run_for_variant(
         &self,
         root_path: &str,
+        analysis_mode: &str,
         variant_fingerprint: &str,
     ) -> Result<Option<RunSummary>, StoreError> {
         self.conn
@@ -22,11 +28,12 @@ impl Store {
                  FROM scan_run r
                  JOIN build_variant v ON v.id = r.build_variant_id
                  WHERE r.root_path = ?1
-                   AND v.variant_fingerprint = ?2
+                   AND r.analysis_mode = ?2
+                   AND v.variant_fingerprint = ?3
                    AND r.status = 'completed'
                  ORDER BY r.started_at DESC, r.id DESC
                  LIMIT 1",
-                params![root_path, variant_fingerprint],
+                params![root_path, analysis_mode, variant_fingerprint],
                 |row| {
                     Ok(RunSummary {
                         id: row.get(0)?,
@@ -41,6 +48,35 @@ impl Store {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    /// How many completed runs share one root, analysis mode and build
+    /// variant, and are therefore comparable with one another.
+    ///
+    /// A count of one says a recorded run has nothing to be compared with, so
+    /// a caller cannot report what a later run made of the same finding.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn comparable_run_count(
+        &self,
+        root_path: &str,
+        analysis_mode: &str,
+        variant_fingerprint: &str,
+    ) -> Result<u64, StoreError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*)
+                 FROM scan_run r
+                 JOIN build_variant v ON v.id = r.build_variant_id
+                 WHERE r.root_path = ?1
+                   AND r.analysis_mode = ?2
+                   AND v.variant_fingerprint = ?3
+                   AND r.status = 'completed'",
+            params![root_path, analysis_mode, variant_fingerprint],
+            |row| row.get(0),
+        )?;
+        Ok(u64::try_from(count).unwrap_or(0))
     }
 
     /// Newest completed run recorded under the exact analysis configuration.

@@ -324,6 +324,32 @@ impl Store {
             .map(|group| StoredGroupDetail { run_id, group }))
     }
 
+    /// Whether one completed run records the clone group named by the hex form
+    /// of its fingerprint.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn run_holds_group(&self, run_id: i64, fingerprint_hex: &str) -> Result<bool, StoreError> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT 1
+                 FROM clone_group g
+                 JOIN fingerprint f ON f.id = g.group_fingerprint_id
+                 {COMPLETED_CLONE_GROUP_RUN_JOIN}
+                 WHERE g.scan_run_id = ?1
+                   AND lower(hex(f.hash)) = ?2
+                 LIMIT 1",
+                ),
+                params![run_id, fingerprint_hex],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
     /// Every recorded id starting with `prefix`, across the kinds a lookup can
     /// name.
     ///

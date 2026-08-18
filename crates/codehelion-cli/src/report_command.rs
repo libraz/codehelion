@@ -786,6 +786,8 @@ pub(crate) fn explain_clone_group(
         .run_group_priority(found.run_id, fingerprint)?
         .with_context(|| format!("clone group {fingerprint} was recorded without a ranking"))?;
     let origin = store.run_origin(found.run_id)?;
+    let (latest_scan_run, present_in_latest_run) =
+        latest_comparable_run(store, &origin, &found.group.fingerprint_hex)?;
     let mut group = recorded_group(found.group, &priority)?;
     scan::hydrate_artifact_savings(store, found.run_id, std::slice::from_mut(&mut group))?;
     let detail = report::CloneGroupDetail {
@@ -793,6 +795,8 @@ pub(crate) fn explain_clone_group(
         scan_run: origin.id,
         analysis_mode: origin.analysis_mode,
         build_variant: origin.variant_fingerprint,
+        latest_scan_run,
+        present_in_latest_run,
         group,
     };
     match args.format {
@@ -800,6 +804,39 @@ pub(crate) fn explain_clone_group(
         DetailFormat::Text => detail.render_text(args.decoration.resolve(), out)?,
     }
     Ok(Outcome::Success)
+}
+
+/// The newest run a group's own run can be compared with, and whether that run
+/// still records the group.
+///
+/// Only runs over the same root, in the same analysis mode and under the same
+/// build variant are comparable, so a group found under one set of conditions
+/// is never reported as gone on the strength of a run made under another.
+/// Both answers are `None` when the found run is the only comparable one:
+/// there is then no later scan whose silence could mean anything.
+fn latest_comparable_run(
+    store: &Store,
+    origin: &RunOrigin,
+    fingerprint_hex: &str,
+) -> Result<(Option<i64>, Option<bool>)> {
+    let comparable = store.comparable_run_count(
+        &origin.root_path,
+        &origin.analysis_mode,
+        &origin.variant_fingerprint,
+    )?;
+    if comparable < 2 {
+        return Ok((None, None));
+    }
+    let Some(latest) = store.latest_run_for_variant(
+        &origin.root_path,
+        &origin.analysis_mode,
+        &origin.variant_fingerprint,
+    )?
+    else {
+        return Ok((None, None));
+    };
+    let present = store.run_holds_group(latest.id, fingerprint_hex)?;
+    Ok((Some(latest.id), Some(present)))
 }
 
 /// Print one group from an explicit cross-language comparison.

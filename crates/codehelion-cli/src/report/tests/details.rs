@@ -1133,6 +1133,8 @@ fn clone_group_detail_has_a_discriminated_schema_envelope() {
         scan_run: 17,
         analysis_mode: "structural".to_string(),
         build_variant: "ab".repeat(32),
+        latest_scan_run: None,
+        present_in_latest_run: None,
         group: visible_group(),
     };
     let value: serde_json::Value = serde_json::from_str(&detail.to_json().unwrap()).unwrap();
@@ -1144,11 +1146,48 @@ fn clone_group_detail_has_a_discriminated_schema_envelope() {
     assert_valid_finding_detail_schema(&value);
     let mut text = Vec::new();
     detail.render_text(Decoration::Ascii, &mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("run: 17 (structural; build variant"));
+    // Nothing to compare the run with, so the run line makes no claim about
+    // what a later scan found.
+    assert!(!text.contains("latest"), "{text}");
+}
+
+#[test]
+fn clone_group_detail_says_whether_the_newest_comparable_run_still_holds_the_group() {
+    let mut detail = CloneGroupDetail {
+        database: ".codehelion/audit.db".to_string(),
+        scan_run: 1,
+        analysis_mode: "structural".to_string(),
+        build_variant: "ab".repeat(32),
+        latest_scan_run: Some(4),
+        present_in_latest_run: Some(false),
+        group: visible_group(),
+    };
+    let mut text = Vec::new();
+    detail.render_text(Decoration::Ascii, &mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("not present in the latest run 4"), "{text}");
+    let value: serde_json::Value = serde_json::from_str(&detail.to_json().unwrap()).unwrap();
+    assert_eq!(value["latest_scan_run"], 4);
+    assert_eq!(value["present_in_latest_run"], false);
+    assert_valid_finding_detail_schema(&value);
+
+    detail.scan_run = 4;
+    detail.present_in_latest_run = Some(true);
+    let mut text = Vec::new();
+    detail.render_text(Decoration::Ascii, &mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
     assert!(
-        String::from_utf8(text)
-            .unwrap()
-            .contains("run: 17 (structural; build variant")
+        text.contains(&format!(
+            "run: 4 (structural; build variant {}) — latest",
+            "ab".repeat(32)
+        )),
+        "{text}"
     );
+    let value: serde_json::Value = serde_json::from_str(&detail.to_json().unwrap()).unwrap();
+    assert_eq!(value["present_in_latest_run"], true);
+    assert_valid_finding_detail_schema(&value);
 }
 
 #[test]
