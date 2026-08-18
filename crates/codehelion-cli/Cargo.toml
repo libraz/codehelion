@@ -22,15 +22,15 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-codehelion-core = { version = "0.2.0", path = "../codehelion-core" }
-codehelion-artifact = { version = "0.2.0", path = "../codehelion-artifact" }
+codehelion-core = { version = "0.3.0", path = "../codehelion-core" }
+codehelion-artifact = { version = "0.3.0", path = "../codehelion-artifact" }
 # Only to look for helper programs and, later, to run them. The engine crates
 # do not depend on this; the layer that starts processes does.
-codehelion-helper = { version = "0.2.0", path = "../codehelion-helper" }
-codehelion-frontend-c = { version = "0.2.0", path = "../codehelion-frontend-c" }
-codehelion-frontend-cpp = { version = "0.2.0", path = "../codehelion-frontend-cpp" }
-codehelion-frontend-rust = { version = "0.2.0", path = "../codehelion-frontend-rust" }
-codehelion-store = { version = "0.2.0", path = "../codehelion-store" }
+codehelion-helper = { version = "0.3.0", path = "../codehelion-helper" }
+codehelion-frontend-c = { version = "0.3.0", path = "../codehelion-frontend-c" }
+codehelion-frontend-cpp = { version = "0.3.0", path = "../codehelion-frontend-cpp" }
+codehelion-frontend-rust = { version = "0.3.0", path = "../codehelion-frontend-rust" }
+codehelion-store = { version = "0.3.0", path = "../codehelion-store" }
 globset = "0.4"
 fs2 = "0.4"
 ignore = "0.4"
@@ -50,7 +50,7 @@ codehelion-eval = { path = "../codehelion-eval" }
 # Plants a C or C++ tree with the compilation database that describes it, so a
 # semantic scan can be run against a project rather than against a snippet.
 codehelion-fixtures = { path = "../codehelion-fixtures" }
-codehelion-store = { version = "0.2.0", path = "../codehelion-store" }
+codehelion-store = { version = "0.3.0", path = "../codehelion-store" }
 object = { version = "0.39", default-features = false, features = ["write", "macho"] }
 predicates = "3"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
