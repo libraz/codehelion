@@ -183,6 +183,23 @@ fn signature_sibling_limits_are_independent_and_parseable() {
 }
 
 #[test]
+fn the_signature_sharing_limit_is_configurable_but_must_leave_room_for_a_pair() {
+    let config = Config::from_toml("[limits]\nsignature-sibling-max-units-per-signature = 64")
+        .expect("a widened sharing limit parses");
+    assert_eq!(
+        config.limits.signature_sibling_max_units_per_signature,
+        Some(64)
+    );
+
+    let error = Config::from_toml("[limits]\nsignature-sibling-max-units-per-signature = 1")
+        .expect_err("a limit below two silences the channel instead of tuning it");
+    assert!(
+        format!("{error:#}").contains("limits.signature-sibling-max-units-per-signature"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn boilerplate_policy_defaults_set_aside_the_shapes_that_say_nothing() {
     let policy = Suppression::default().boilerplate;
     assert_eq!(

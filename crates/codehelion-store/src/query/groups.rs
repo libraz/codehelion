@@ -579,7 +579,9 @@ impl Store {
                         excluded_language, excluded_symlink_files,
                         excluded_symlink_directories, guardrail_near_miss_delta,
                         guardrail_near_miss_cap, guardrail_verification_budget,
-                        guardrail_max_alignment_cells
+                        guardrail_max_alignment_cells,
+                        guardrail_signature_sibling_max_units_per_signature,
+                        common_signatures_skipped, largest_skipped_signature_units
                  FROM run_summary WHERE scan_run_id = ?1",
                 params![run_id],
                 |row| {
@@ -603,6 +605,8 @@ impl Store {
                     let guardrail_near_miss_cap: Option<i64> = row.get(40)?;
                     let guardrail_verification_budget: Option<i64> = row.get(41)?;
                     let guardrail_max_alignment_cells: Option<i64> = row.get(42)?;
+                    let guardrail_signature_sibling_max_units_per_signature: Option<i64> =
+                        row.get(43)?;
                     Ok(SummaryRow {
                         analyzed_files: FileCountsRow {
                             total: count(row.get(0)?),
@@ -653,11 +657,16 @@ impl Store {
                             signature_sibling_total_cap: count(
                                 guardrail_signature_sibling_total_cap.unwrap_or(0),
                             ),
+                            signature_sibling_max_units_per_signature: count(
+                                guardrail_signature_sibling_max_units_per_signature.unwrap_or(0),
+                            ),
                             max_component: count(guardrail_max_component.unwrap_or(0)),
                         }),
                         folded_runs: count(row.get(31)?),
                         subsumed_runs: count(row.get(32)?),
                         split_components: count(row.get(33)?),
+                        common_signatures_skipped: count(row.get(44)?),
+                        largest_skipped_signature_units: count(row.get(45)?),
                         pair_budget_exhausted: row.get(34)?,
                         baseline_digest: row.get(35)?,
                         excluded_language: count(row.get(36)?),

@@ -631,6 +631,11 @@ pub struct SummaryRow {
     /// Groups of related units cut because they were too large to refine as
     /// one piece.
     pub split_components: u64,
+    /// Signature keys left out of the sibling candidate index because more
+    /// units shared them than the rarity limit admits.
+    pub common_signatures_skipped: u64,
+    /// Units sharing the most widely shared excluded signature key.
+    pub largest_skipped_signature_units: u64,
     /// Whether a candidate stage ran out of budget, making the result
     /// potentially incomplete.
     pub pair_budget_exhausted: bool,
@@ -691,6 +696,9 @@ pub struct GuardrailsRow {
     pub signature_sibling_per_group_cap: u64,
     /// Largest number of signature siblings retained across one run.
     pub signature_sibling_total_cap: u64,
+    /// Largest number of units that may share a signature before that
+    /// signature stops being sibling evidence.
+    pub signature_sibling_max_units_per_signature: u64,
     /// Largest related component refined together.
     pub max_component: u64,
 }

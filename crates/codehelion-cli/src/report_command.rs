@@ -205,6 +205,9 @@ fn recorded_sibling(sibling: &codehelion_store::query::StoredSibling) -> report:
         confidence_band: sibling.confidence_band.clone(),
         basis: sibling.basis.clone(),
         signature: sibling.signature.clone(),
+        signature_units: sibling
+            .signature_units
+            .and_then(|units| u64::try_from(units).ok()),
         similarity: report::SiblingSimilarity {
             weight_version: sibling.weight_version.clone(),
             lexical: sibling.lexical,

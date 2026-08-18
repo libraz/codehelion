@@ -324,6 +324,13 @@ pub(super) fn funnel(
         .dropping(
             "signature_sibling_total_cap",
             as_u64(stats.signature_siblings.total_cap_dropped),
+        )
+        // Kept apart from the three caps above: a reader who cannot tell a
+        // candidate the sharing limit removed from one a cap dropped cannot
+        // tell which of the two to move.
+        .dropping(
+            "signature_shared_by_too_many_units",
+            as_u64(stats.signature_siblings.common_signature_dropped),
         ),
         report::FunnelStage::new(
             "control-flow pairs",
@@ -558,6 +565,9 @@ fn build_siblings(inputs: &ReportInputs<'_>) -> Vec<report::GroupSiblings> {
                             confidence_band: sibling.confidence.name().to_string(),
                             basis: sibling.basis.name().to_string(),
                             signature: sibling.signature.clone(),
+                            signature_units: sibling
+                                .signature_units
+                                .map(|units| u64::try_from(units).unwrap_or(u64::MAX)),
                             similarity: report::SiblingSimilarity {
                                 weight_version: WEIGHT_VERSION.to_string(),
                                 lexical: sibling.breakdown.lexical,
@@ -641,6 +651,10 @@ pub(super) fn summary_row(
         folded_runs: as_u64(inputs.regions.folded),
         subsumed_runs: as_u64(stats.region_subsumed),
         split_components: as_u64(stats.grouping.oversized_components),
+        common_signatures_skipped: as_u64(stats.signature_siblings.common_signatures_skipped),
+        largest_skipped_signature_units: as_u64(
+            stats.signature_siblings.largest_skipped_signature_units,
+        ),
         // Any candidate stage exhausting its budget makes the result
         // potentially incomplete.
         pair_budget_exhausted: stats.candidate.budget_exhausted

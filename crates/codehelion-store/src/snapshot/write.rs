@@ -777,11 +777,13 @@ fn write_summary(
               subsumed_runs, split_components, pair_budget_exhausted, baseline_digest,
               excluded_language, excluded_symlink_files, excluded_symlink_directories,
               guardrail_near_miss_delta, guardrail_near_miss_cap,
-              guardrail_verification_budget, guardrail_max_alignment_cells)
+              guardrail_verification_budget, guardrail_max_alignment_cells,
+              guardrail_signature_sibling_max_units_per_signature,
+              common_signatures_skipped, largest_skipped_signature_units)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
                  ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38,
-                 ?39, ?40, ?41, ?42, ?43, ?44)",
+                 ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47)",
         params![
             run_id,
             count(summary.analyzed_files.total),
@@ -875,6 +877,12 @@ fn write_summary(
                 .guardrails
                 .as_ref()
                 .map(|row| count(row.max_alignment_cells)),
+            summary
+                .guardrails
+                .as_ref()
+                .map(|row| count(row.signature_sibling_max_units_per_signature)),
+            count(summary.common_signatures_skipped),
+            count(summary.largest_skipped_signature_units),
         ],
     )?;
     let mut insert_stage = tx.prepare_cached(

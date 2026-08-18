@@ -373,6 +373,17 @@ pub struct Limits {
     /// structural report. Unset selects the signature-channel default. Used
     /// only when `--siblings-by-signature` enables that channel.
     pub signature_sibling_total_cap: Option<usize>,
+    /// Largest number of units that may share one signature before that
+    /// signature stops being sibling evidence. Unset selects the
+    /// signature-channel default. Used only when `--siblings-by-signature`
+    /// enables that channel.
+    ///
+    /// This is a rarity threshold, not a resource ceiling: a signature shared
+    /// by much of a tree proposes work without proposing duplication. Raising
+    /// it admits more candidates, and the channel's caps bound what that
+    /// costs, so a project whose signatures are genuinely distinctive may
+    /// raise it.
+    pub signature_sibling_max_units_per_signature: Option<usize>,
     /// Upper bound on Structural pairs passed to precise verification.
     /// Unset selects the structural default.
     pub verification_budget: Option<usize>,
@@ -453,6 +464,7 @@ impl Default for Limits {
             signature_sibling_candidate_budget: None,
             signature_sibling_per_group_cap: None,
             signature_sibling_total_cap: None,
+            signature_sibling_max_units_per_signature: None,
             verification_budget: None,
             max_alignment_cells: None,
             max_component: codehelion_core::grouping::GroupingConfig::default().max_component,
@@ -513,6 +525,15 @@ impl Limits {
         }
         if self.signature_sibling_total_cap == Some(0) {
             bail!("limits.signature-sibling-total-cap must be at least 1 when set");
+        }
+        // A sibling needs two units sharing a signature, so a limit below two
+        // silences the channel instead of tuning it. Enabling a channel and
+        // configuring it to find nothing is a mistake worth naming.
+        if self
+            .signature_sibling_max_units_per_signature
+            .is_some_and(|limit| limit < 2)
+        {
+            bail!("limits.signature-sibling-max-units-per-signature must be at least 2 when set");
         }
         if self.verification_budget == Some(0) {
             bail!("limits.verification-budget must be at least 1 when set");
@@ -593,6 +614,16 @@ impl Limits {
                     cap.min(signature_sibling_defaults.total_cap)
                 }),
         );
+        // The rarity limit is a detection knob a trusted project may raise,
+        // but the configuration carrying that request can come from the tree
+        // being scanned. An untrusted tree therefore does not get to widen the
+        // signatures its own layout made common, so this is clamped down like
+        // the ceilings above.
+        self.signature_sibling_max_units_per_signature =
+            Some(self.signature_sibling_max_units_per_signature.map_or(
+                signature_sibling_defaults.max_units_per_signature,
+                |limit| limit.min(signature_sibling_defaults.max_units_per_signature),
+            ));
         self.max_component = self.max_component.min(profile.max_component);
         self.verification_budget = Some(
             self.verification_budget
@@ -779,6 +810,10 @@ impl Config {
             || self.limits.signature_sibling_candidate_budget.is_none()
             || self.limits.signature_sibling_per_group_cap.is_none()
             || self.limits.signature_sibling_total_cap.is_none()
+            || self
+                .limits
+                .signature_sibling_max_units_per_signature
+                .is_none()
         {
             text.push_str("\n# Unset optional settings\n");
             if self.jobs.is_none() {
@@ -818,6 +853,15 @@ impl Config {
             if self.limits.signature_sibling_total_cap.is_none() {
                 text.push_str(
                     "# limits.signature-sibling-total-cap: default used only with --siblings-by-signature\n",
+                );
+            }
+            if self
+                .limits
+                .signature_sibling_max_units_per_signature
+                .is_none()
+            {
+                text.push_str(
+                    "# limits.signature-sibling-max-units-per-signature: default used only with --siblings-by-signature\n",
                 );
             }
         }

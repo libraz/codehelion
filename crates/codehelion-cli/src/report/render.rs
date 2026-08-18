@@ -886,10 +886,20 @@ impl Report {
             .filter(|sibling| opts.show_suppressed || sibling.suppressed.is_none())
         {
             let member = &sibling.member;
-            let evidence = if sibling.basis == "signature" {
-                format!("({:.2}) [same signature]", sibling.similarity.composite)
-            } else {
-                format!("({:.2})", sibling.similarity.composite)
+            // How many units share the signature is the whole strength of this
+            // channel: a signature held by a handful of units says something,
+            // and one the whole layer shares says nothing. The number is shown
+            // so the reader can tell those apart; it never moves the band.
+            let evidence = match (sibling.basis.as_str(), sibling.signature_units) {
+                ("signature", Some(units)) => format!(
+                    "({:.2}) [same signature, {} units share it]",
+                    sibling.similarity.composite,
+                    thousands(units),
+                ),
+                ("signature", None) => {
+                    format!("({:.2}) [same signature]", sibling.similarity.composite)
+                }
+                _ => format!("({:.2})", sibling.similarity.composite),
             };
             writeln!(
                 out,
@@ -948,6 +958,7 @@ fn render_supplemental_totals(summary: &Summary, out: &mut impl Write) -> io::Re
         ],
     );
     let near_miss_drops = funnel_drop_count(summary, &["retention_cap"]);
+    render_common_signatures(summary, out)?;
     if summary.siblings == 0 && summary.near_misses == 0 {
         let mut drops = Vec::new();
         if sibling_drops > 0 {
@@ -997,6 +1008,25 @@ fn render_supplemental_totals(summary: &Summary, out: &mut impl Write) -> io::Re
     }
     writeln!(out, "supplemental: {}", entries.join(", "))?;
     Ok(())
+}
+
+/// Signatures the sibling channel would not index because too much of the tree
+/// shares them.
+///
+/// Printed unconditionally rather than behind a diagnostic switch, and before
+/// the supplemental totals return early on an empty channel: the run where the
+/// rarity gate silenced the channel outright is the run whose reader most
+/// needs to know the channel does not fit this code.
+fn render_common_signatures(summary: &Summary, out: &mut impl Write) -> io::Result<()> {
+    if summary.common_signatures_skipped == 0 {
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "signature siblings: {} signatures skipped as too common (the most common covers {} units)",
+        thousands(summary.common_signatures_skipped),
+        thousands(summary.largest_skipped_signature_units),
+    )
 }
 
 fn funnel_drop_count(summary: &Summary, causes: &[&str]) -> u64 {

@@ -653,6 +653,10 @@ pub struct Sibling {
     /// Exact normalized signature for signature-channel siblings. Similarity
     /// siblings carry no signature because their evidence is score-based.
     pub signature: Option<String>,
+    /// How many units in the tree share that signature. A signature is
+    /// evidence only while it is rare, so the count travels with the finding
+    /// and the reader weighs it; it never moves `confidence_band`.
+    pub signature_units: Option<u64>,
     /// Canonical-to-sibling verifier evidence.
     pub similarity: SiblingSimilarity,
     /// The ungrouped unit. It is intentionally not repeated in the owning
@@ -989,6 +993,20 @@ pub struct Summary {
     /// chance that two members on opposite sides of it would have been
     /// reported together.
     pub split_components: u64,
+    /// Signature keys the sibling channel refused to index because too many
+    /// units in the tree share them.
+    ///
+    /// A signature is evidence only while it is rare. On a tree where one
+    /// signature covers most of a directory it proposes work without proposing
+    /// duplication, so the channel leaves it out; saying how often that
+    /// happened is what tells a reader the channel does not fit their code.
+    pub common_signatures_skipped: u64,
+    /// Units sharing the most widely shared signature the channel left out.
+    ///
+    /// Zero when nothing was left out. The maximum, not a total: it is the size
+    /// of the largest excluded signature, which is what says whether the limit
+    /// was met narrowly or by an order of magnitude.
+    pub largest_skipped_signature_units: u64,
     /// Whether the candidate-pair budget ran out, making results
     /// potentially incomplete.
     pub pair_budget_exhausted: bool,
@@ -1115,6 +1133,9 @@ pub struct Guardrails {
     pub signature_sibling_per_group_cap: usize,
     /// Maximum signature siblings retained by the whole run.
     pub signature_sibling_total_cap: usize,
+    /// Largest number of units that may share a signature before that
+    /// signature stops counting as sibling evidence.
+    pub signature_sibling_max_units_per_signature: usize,
     /// Largest related unit component refined as one group.
     pub max_component: usize,
 }

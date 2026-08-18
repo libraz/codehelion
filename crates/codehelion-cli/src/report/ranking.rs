@@ -58,6 +58,12 @@ impl Guardrails {
             signature_sibling_total_cap: limits.signature_sibling_total_cap.unwrap_or_else(|| {
                 codehelion_core::structural::SignatureSiblingConfig::default().total_cap
             }),
+            signature_sibling_max_units_per_signature: limits
+                .signature_sibling_max_units_per_signature
+                .unwrap_or_else(|| {
+                    codehelion_core::structural::SignatureSiblingConfig::default()
+                        .max_units_per_signature
+                }),
             max_component: limits.max_component,
         }
     }
@@ -88,6 +94,10 @@ impl From<&GuardrailsRow> for Guardrails {
                 .unwrap_or(usize::MAX),
             signature_sibling_total_cap: usize::try_from(row.signature_sibling_total_cap)
                 .unwrap_or(usize::MAX),
+            signature_sibling_max_units_per_signature: usize::try_from(
+                row.signature_sibling_max_units_per_signature,
+            )
+            .unwrap_or(usize::MAX),
             max_component: usize::try_from(row.max_component).unwrap_or(usize::MAX),
         }
     }
@@ -524,6 +534,8 @@ pub fn restored(stored: &SummaryRow, groups: &[Group], analysis_mode: &str) -> S
         unapplied_suppression_policies: unapplied_suppression_policies(analysis_mode),
         funnel,
         split_components: stored.split_components,
+        common_signatures_skipped: stored.common_signatures_skipped,
+        largest_skipped_signature_units: stored.largest_skipped_signature_units,
         pair_budget_exhausted: stored.pair_budget_exhausted,
         search_truncated,
         identity_collapsed: stored_identity_collapsed(&stored.funnel),

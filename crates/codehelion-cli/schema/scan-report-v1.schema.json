@@ -205,6 +205,8 @@
         "unused_suppressions",
         "funnel",
         "split_components",
+        "common_signatures_skipped",
+        "largest_skipped_signature_units",
         "pair_budget_exhausted",
         "search_truncated"
       ],
@@ -594,6 +596,16 @@
           "type": "integer",
           "description": "Sets of related units too large to compare as one piece, which grouping cut so its cost stays bounded. Every reported group is still cohesive; what the cut costs is the chance that two members on opposite sides of it would have been reported together."
         },
+        "common_signatures_skipped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Signature keys the sibling channel left out of its candidate index because more units in the tree share them than the rarity limit admits. A signature is evidence only while it is rare."
+        },
+        "largest_skipped_signature_units": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Units sharing the most widely shared signature the channel left out, or zero when nothing was left out. A maximum rather than a total, so it says whether the rarity limit was met narrowly or by an order of magnitude."
+        },
         "pair_budget_exhausted": {
           "type": "boolean",
           "description": "True when the candidate-pair budget ran out and results may be incomplete."
@@ -700,6 +712,11 @@
               "type": "integer",
               "minimum": 0,
               "description": "Maximum signature siblings retained by the whole run."
+            },
+            "signature_sibling_max_units_per_signature": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Largest number of units that may share one signature before that signature stops counting as sibling evidence."
             }
           }
         },

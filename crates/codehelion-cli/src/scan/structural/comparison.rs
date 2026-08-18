@@ -306,6 +306,8 @@ pub(super) fn copy_guardrails(guardrails: &report::Guardrails) -> report::Guardr
         signature_sibling_candidate_budget: guardrails.signature_sibling_candidate_budget,
         signature_sibling_per_group_cap: guardrails.signature_sibling_per_group_cap,
         signature_sibling_total_cap: guardrails.signature_sibling_total_cap,
+        signature_sibling_max_units_per_signature: guardrails
+            .signature_sibling_max_units_per_signature,
         max_component: guardrails.max_component,
     }
 }

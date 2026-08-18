@@ -96,6 +96,9 @@ pub(super) fn structural_config(cfg: &Config) -> StructuralConfig {
     if let Some(cap) = cfg.limits.signature_sibling_total_cap {
         config.signature_siblings.total_cap = cap;
     }
+    if let Some(limit) = cfg.limits.signature_sibling_max_units_per_signature {
+        config.signature_siblings.max_units_per_signature = limit;
+    }
     config.literals = literal_norm(cfg.literal_normalization);
     config
 }

@@ -57,6 +57,33 @@ fn signature_context_fixture() -> tempfile::TempDir {
     dir
 }
 
+/// The signature fixture plus enough same-signature units to let a configured
+/// rarity limit sit between "rare enough to be evidence" and "shared by too
+/// much of the tree". Every added body differs, so the extra units are
+/// signature company rather than clones.
+fn crowded_signature_fixture(extra_units: usize) -> tempfile::TempDir {
+    let dir = signature_context_fixture();
+    for index in 0..extra_units {
+        let source = format!(
+            "pub fn crowded_{index}(input: &[u32]) -> u32 {{
+    let seed = input.first().copied().unwrap_or({index});
+    let mixed = seed.rotate_left({}) ^ {};
+    mixed.wrapping_add({})
+}}
+",
+            index % 7 + 1,
+            index * 13 + 3,
+            index * 29 + 5
+        );
+        std::fs::write(
+            dir.path().join(format!("src/primary/crowded_{index}.rs")),
+            source,
+        )
+        .unwrap();
+    }
+    dir
+}
+
 #[test]
 fn actual_frontend_signature_context_is_same_directory_scoped() {
     let dir = signature_context_fixture();
@@ -411,15 +438,121 @@ fn signature_siblings_keep_exact_json_funnel_guardrail_and_sarif_parity_across_r
             "{name} diagnostics lines differ"
         );
     }
-    assert!(fresh_text.contains("[same signature]"), "{fresh_text}");
+    let shared_units = signature_sibling["signature_units"]
+        .as_u64()
+        .expect("signature sibling records how many units share its signature");
+    let signature_marker = format!("[same signature, {shared_units} units share it]");
+    assert!(fresh_text.contains(&signature_marker), "{fresh_text}");
     let composite = signature_sibling["similarity"]["composite"]
         .as_f64()
         .expect("signature sibling composite score");
-    let composite_marker = format!("({composite:.2}) [same signature]");
+    let composite_marker = format!("({composite:.2}) {signature_marker}");
     assert!(
         fresh_text.contains(&composite_marker),
         "signature sibling keeps composite score marker {composite_marker}: {fresh_text}"
     );
+}
+
+/// A signature is evidence only while it is rare, and how rare is a project
+/// decision: the same tree keeps or loses its signature siblings depending on
+/// the configured sharing limit, and the run records the limit it worked under.
+#[test]
+fn the_configured_sharing_limit_decides_whether_a_signature_is_still_evidence() {
+    let dir = crowded_signature_fixture(2);
+    let root = dir.path();
+    let scan_json = || -> serde_json::Value {
+        let output = cmd()
+            .current_dir(root)
+            .args([
+                "scan",
+                ".",
+                "--mode",
+                "structural",
+                "--untrusted",
+                "--siblings-by-signature",
+                "--no-reuse",
+                "--format",
+                "json",
+            ])
+            .output()
+            .expect("run crowded signature scan");
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice(&output.stdout).expect("scan output is JSON")
+    };
+
+    let admitted = scan_json();
+    assert_eq!(admitted["summary"]["common_signatures_skipped"], 0);
+    assert_eq!(admitted["summary"]["largest_skipped_signature_units"], 0);
+    assert!(
+        admitted["summary"]["siblings"].as_u64().unwrap_or(0) > 0,
+        "the default limit leaves the crowded signature usable: {admitted:#?}"
+    );
+
+    std::fs::write(
+        root.join("codehelion.toml"),
+        "[limits]\nsignature-sibling-max-units-per-signature = 4\n",
+    )
+    .unwrap();
+    let excluded = scan_json();
+    assert_eq!(excluded["summary"]["common_signatures_skipped"], 1);
+    assert_eq!(excluded["summary"]["largest_skipped_signature_units"], 6);
+    assert_eq!(excluded["summary"]["siblings"], 0);
+    assert_eq!(
+        excluded["summary"]["guardrails"]["signature_sibling_max_units_per_signature"], 4,
+        "the limit the run worked under is recorded beside the channel's caps"
+    );
+    assert_eq!(admitted["groups"], excluded["groups"], "{excluded:#?}");
+}
+
+/// The gate silences the whole channel on a tree whose signatures are common,
+/// which is the report that hides its own explanation unless the run says what
+/// it left out — in the original text and in every replay of it.
+#[test]
+fn a_signature_skipped_for_being_common_is_named_in_text_and_repeated_by_replay() {
+    let dir = crowded_signature_fixture(2);
+    let root = dir.path();
+    std::fs::write(
+        root.join("codehelion.toml"),
+        "[limits]\nsignature-sibling-max-units-per-signature = 4\n",
+    )
+    .unwrap();
+    let output = cmd()
+        .current_dir(root)
+        .args([
+            "scan",
+            ".",
+            "--mode",
+            "structural",
+            "--untrusted",
+            "--siblings-by-signature",
+            "--no-reuse",
+            "--show-siblings",
+        ])
+        .output()
+        .expect("run crowded signature text scan");
+    assert!(output.status.success(), "{output:?}");
+    let scan_text = String::from_utf8(output.stdout).expect("text output is UTF-8");
+    let expected =
+        "signature siblings: 1 signatures skipped as too common (the most common covers 6 units)";
+    assert!(scan_text.contains(expected), "{scan_text}");
+    assert!(
+        !scan_text.contains("supplemental:"),
+        "the gate left no supplemental evidence to total: {scan_text}"
+    );
+
+    let run_id = open_store(root)
+        .latest_run()
+        .unwrap()
+        .expect("the scan recorded a run")
+        .id;
+    let replay = cmd()
+        .current_dir(root)
+        .args(["report", "--run", &run_id.to_string(), "--show-siblings"])
+        .output()
+        .expect("replay crowded signature report");
+    assert!(replay.status.success(), "{replay:?}");
+    let replay_text = String::from_utf8(replay.stdout).expect("replay text is UTF-8");
+    assert!(replay_text.contains(expected), "{replay_text}");
 }
 
 /// Structural and Semantic both copy the shared guardrail model through their
@@ -468,6 +601,7 @@ fn untrusted_structural_scan_reports_all_effective_ceilings() {
             "signature_sibling_candidate_budget": 50_000,
             "signature_sibling_per_group_cap": 8,
             "signature_sibling_total_cap": 1_000,
+            "signature_sibling_max_units_per_signature": 8,
             "max_component": 128,
         })
     );

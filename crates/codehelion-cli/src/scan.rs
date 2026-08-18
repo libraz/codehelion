@@ -585,6 +585,10 @@ pub(crate) fn guardrails_row(guardrails: &report::Guardrails) -> GuardrailsRow {
             .unwrap_or(u64::MAX),
         signature_sibling_total_cap: u64::try_from(guardrails.signature_sibling_total_cap)
             .unwrap_or(u64::MAX),
+        signature_sibling_max_units_per_signature: u64::try_from(
+            guardrails.signature_sibling_max_units_per_signature,
+        )
+        .unwrap_or(u64::MAX),
         max_component: u64::try_from(guardrails.max_component).unwrap_or(u64::MAX),
     }
 }
@@ -769,6 +773,10 @@ fn summary_row(
         folded_runs: 0,
         subsumed_runs: 0,
         split_components: 0,
+        // The signature-sibling channel is structural-only, so a Fast run has
+        // no signature to have judged too common.
+        common_signatures_skipped: 0,
+        largest_skipped_signature_units: 0,
         pair_budget_exhausted: inputs.report.stats.pair_budget_exhausted,
         baseline_digest,
         funnel: funnel(&inputs.report.stats, inputs.report.groups.len()),

@@ -153,6 +153,8 @@ pub(super) fn sample_report() -> Report {
                 FunnelStage::new("verified pairs", 2),
             ],
             split_components: 0,
+            common_signatures_skipped: 0,
+            largest_skipped_signature_units: 0,
             pair_budget_exhausted: false,
             search_truncated: true,
             guardrails: None,
@@ -207,6 +209,7 @@ pub(super) fn sample_siblings() -> GroupSiblings {
             confidence_band: "low".to_string(),
             basis: "similarity".to_string(),
             signature: None,
+            signature_units: None,
             similarity: SiblingSimilarity {
                 weight_version: "structural-verify-v1".to_string(),
                 lexical: 0.72,
@@ -891,6 +894,7 @@ fn signature_siblings_keep_their_identity_and_render_as_exact_matches() {
         signature_sibling_candidate_budget: 12,
         signature_sibling_per_group_cap: 13,
         signature_sibling_total_cap: 14,
+        signature_sibling_max_units_per_signature: 16,
         max_component: 15,
     });
 
@@ -1019,6 +1023,64 @@ fn supplemental_totals_omit_the_summary_line_when_empty() {
         .unwrap();
     let rendered = String::from_utf8(rendered).unwrap();
     assert!(!rendered.contains("supplemental:"), "{rendered}");
+}
+
+/// The rarity gate is the reason a reader's tree gets no signature siblings,
+/// so its two numbers belong in the default body rather than behind a
+/// diagnostic switch.
+#[test]
+fn a_signature_left_out_for_being_common_is_named_with_its_widest_sharing() {
+    let mut report = sample_report();
+    report.summary.common_signatures_skipped = 3;
+    report.summary.largest_skipped_signature_units = 137;
+
+    let mut rendered = Vec::new();
+    report
+        .render_text(TextOptions::default(), &mut rendered)
+        .unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+    assert!(
+        rendered.contains(
+            "signature siblings: 3 signatures skipped as too common (the most common covers 137 units)"
+        ),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn no_signature_line_is_written_when_every_signature_stayed_rare() {
+    let report = sample_report();
+    let mut rendered = Vec::new();
+    report
+        .render_text(TextOptions::default(), &mut rendered)
+        .unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+    assert!(!rendered.contains("signature siblings:"), "{rendered}");
+}
+
+/// A run the gate silenced outright keeps no sibling and no near miss, which
+/// is the shape the supplemental totals skip. That run is exactly the one
+/// whose reader needs the explanation.
+#[test]
+fn the_silenced_signature_channel_still_explains_itself() {
+    let mut report = sample_report();
+    report.summary.siblings = 0;
+    report.summary.near_misses = 0;
+    report.summary.common_signatures_skipped = 1;
+    report.summary.largest_skipped_signature_units = 1_204;
+
+    let mut rendered = Vec::new();
+    report
+        .render_text(TextOptions::default(), &mut rendered)
+        .unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+    assert!(!rendered.contains("supplemental:"), "{rendered}");
+    assert!(
+        rendered.contains(
+            "signature siblings: 1 signatures skipped as too common (the most common covers 1,204 units)"
+        ),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -1698,6 +1760,7 @@ fn current_json_report_validates_against_the_shipped_v1_schema() {
         signature_sibling_candidate_budget: 12,
         signature_sibling_per_group_cap: 13,
         signature_sibling_total_cap: 14,
+        signature_sibling_max_units_per_signature: 16,
         max_component: 15,
     });
     let mut old_v1: serde_json::Value =
@@ -1713,6 +1776,7 @@ fn current_json_report_validates_against_the_shipped_v1_schema() {
     old_guardrails.remove("signature_sibling_candidate_budget");
     old_guardrails.remove("signature_sibling_per_group_cap");
     old_guardrails.remove("signature_sibling_total_cap");
+    old_guardrails.remove("signature_sibling_max_units_per_signature");
     schemas.validate(&old_v1, index).unwrap();
 
     let mut signature_report = sample_report();

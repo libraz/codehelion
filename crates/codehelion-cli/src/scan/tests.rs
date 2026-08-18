@@ -359,6 +359,7 @@ fn distrusting_the_tree_lowers_every_ceiling_and_says_which() {
             signature_sibling_candidate_budget: Some(usize::MAX),
             signature_sibling_per_group_cap: Some(usize::MAX),
             signature_sibling_total_cap: Some(usize::MAX),
+            signature_sibling_max_units_per_signature: Some(usize::MAX),
             verification_budget: Some(usize::MAX),
             max_alignment_cells: Some(usize::MAX),
             max_component: usize::MAX,
@@ -388,6 +389,15 @@ fn distrusting_the_tree_lowers_every_ceiling_and_says_which() {
         Some(profile.max_alignment_cells)
     );
     assert_eq!(tightened.limits.max_component, profile.max_component);
+    // The rarity limit is a detection knob elsewhere, but a tree nobody
+    // vouches for does not get to widen the signatures its own layout made
+    // common, so distrust brings it back to the channel default.
+    assert_eq!(
+        tightened.limits.signature_sibling_max_units_per_signature,
+        Some(
+            codehelion_core::structural::SignatureSiblingConfig::default().max_units_per_signature
+        )
+    );
 
     // `Limits` is serialized with every ceiling as a named key. The
     // guardrail object must be precisely that effective limit set plus its
