@@ -413,6 +413,7 @@ fn doctor_database(args: &DoctorArgs, out: &mut impl Write) -> Result<()> {
         }
     }
     write_lease_status(&db_abs, out)?;
+    doctor_database_directory(&db, &db_abs, args.db.is_some(), out)?;
     if let Some(repo_root) = find_git_root(&cwd) {
         if !is_git_ignored(&repo_root, &db_abs) {
             writeln!(
@@ -423,6 +424,91 @@ fn doctor_database(args: &DoctorArgs, out: &mut impl Write) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Append every audit database beside the selected one, what this build can do
+/// with each, and which one a scan would write.
+///
+/// A database written by another schema version is left exactly where it is and
+/// a scan records beside it, so one directory can end up holding more than one
+/// audit history. Which of them to keep is the reader's decision, and this is
+/// the evidence for it.
+fn doctor_database_directory(
+    db: &Path,
+    db_abs: &Path,
+    explicit: bool,
+    out: &mut impl Write,
+) -> Result<()> {
+    let Some(directory) = db_abs.parent() else {
+        return Ok(());
+    };
+    let databases = audit_databases(directory, db_abs);
+    if databases.is_empty() {
+        return Ok(());
+    }
+    // The selection is made the same way a scan makes it, including the rule
+    // that a named database is used as named however this build reads it.
+    let selected = if explicit {
+        db_abs.to_path_buf()
+    } else {
+        scan::incompatible_database_replacement(db_abs).unwrap_or_else(|| db_abs.to_path_buf())
+    };
+    writeln!(
+        out,
+        "  databases in {}:",
+        db.parent().unwrap_or(directory).display()
+    )?;
+    for path in &databases {
+        let bytes = std::fs::metadata(path).map_or(0, |metadata| metadata.len());
+        writeln!(
+            out,
+            "    {}: {} ({bytes} bytes)",
+            path.file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy(),
+            database_readability(path),
+        )?;
+    }
+    let spelled = match (db.parent(), selected.file_name()) {
+        (Some(parent), Some(name)) => parent.join(name),
+        _ => selected.clone(),
+    };
+    writeln!(out, "  a scan would use {}", spelled.display())?;
+    Ok(())
+}
+
+/// The files in `directory` that are named the way audit databases are.
+///
+/// Matching the selected database's extension keeps `SQLite`'s own sidecars and
+/// the lease file out of a list that is about audit histories.
+fn audit_databases(directory: &Path, like: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension() == like.extension())
+        .collect();
+    found.sort();
+    found
+}
+
+/// What this build can do with one candidate audit database.
+fn database_readability(path: &Path) -> String {
+    match Store::open_existing(path) {
+        Ok(store) => match store.schema_version() {
+            Ok(version) => format!("schema {version}, readable by this build"),
+            Err(error) => format!("unreadable ({error})"),
+        },
+        Err(codehelion_store::StoreError::UnsupportedSchema { found: 0 }) => {
+            "no schema marker, not readable by this build".to_owned()
+        }
+        Err(codehelion_store::StoreError::UnsupportedSchema { found }) => {
+            format!("schema {found}, not readable by this build")
+        }
+        Err(error) => format!("unreadable ({error})"),
+    }
 }
 
 /// Append the point-in-time state of the database writer lease.

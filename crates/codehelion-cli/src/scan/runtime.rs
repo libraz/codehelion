@@ -371,6 +371,80 @@ pub(crate) fn database_path(
     )))
 }
 
+/// Resolve the database a scan writes, stepping around a default database this
+/// build cannot open.
+///
+/// A schema this build does not support is the one recording failure the tool
+/// can settle on its own: nothing about the existing file has to change for a
+/// scan to keep a durable record, so the run writes beside it instead of
+/// finishing with nothing recorded. Every other recording failure — a full
+/// disk, a read-only file, a lease another scan holds — still fails, because
+/// choosing a different file would not fix any of them.
+///
+/// `--db` names one file deliberately. Writing to a different one would be
+/// ignoring that instruction, so an explicit path keeps the error.
+///
+/// # Errors
+///
+/// Returns what [`database_path`] refuses: a repository-controlled
+/// configuration naming storage outside the scanned repository.
+pub(crate) fn scan_database_path(
+    root: &Path,
+    flag: Option<&Path>,
+    config: &ResolvedConfig,
+    untrusted: bool,
+) -> Result<PathBuf> {
+    let path = database_path(root, flag, config, untrusted)?;
+    if flag.is_some() {
+        return Ok(path);
+    }
+    let Some(replacement) = incompatible_database_replacement(&path) else {
+        return Ok(path);
+    };
+    // Announced rather than done quietly: a second audit database is as large
+    // as the first one, and the reader is the only one who can decide what
+    // becomes of the file this run did not touch.
+    eprintln!(
+        "note: {} was written by another schema version and was left unchanged; this run used {}",
+        path.display(),
+        replacement.display()
+    );
+    Ok(replacement)
+}
+
+/// Where a run goes instead of `path`, when `path` holds a database written by
+/// a schema version this build does not support.
+///
+/// `None` for every other state, including a database this build can open and
+/// one that cannot be read at all: those belong to the run's own open, which
+/// reports them where they happen.
+pub(crate) fn incompatible_database_replacement(path: &Path) -> Option<PathBuf> {
+    if !std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
+        return None;
+    }
+    match codehelion_store::Store::open_existing(path) {
+        Err(codehelion_store::StoreError::UnsupportedSchema { .. }) => {
+            schema_versioned_sibling(path)
+        }
+        _ => None,
+    }
+}
+
+/// `path` renamed to carry the schema version this build writes.
+///
+/// Derived from the name actually in use rather than a fixed string, so a
+/// configured database keeps its own name and the two files in one directory
+/// read as what they are: the same audit history under two schema versions.
+pub(crate) fn schema_versioned_sibling(path: &Path) -> Option<PathBuf> {
+    let mut name = path.file_stem()?.to_os_string();
+    name.push(format!("-v{}", codehelion_store::schema::SCHEMA_VERSION));
+    if let Some(extension) = path.extension() {
+        name.push(".");
+        name.push(extension);
+    }
+    Some(path.with_file_name(name))
+}
+
 /// `path` with every component separated the way the platform separates them.
 ///
 /// Where the database is gets recorded in a report and printed by every reader
@@ -476,10 +550,11 @@ fn repository_root(root: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::spelled_natively;
+    use super::{incompatible_database_replacement, schema_versioned_sibling, spelled_natively};
 
     /// Where the database is has to read as one path, whatever mixture of
     /// separators and redundant components the configuration reached it by.
@@ -493,6 +568,42 @@ mod tests {
                 "{configured}"
             );
         }
+    }
+
+    /// The database written beside an unreadable one keeps the name in use,
+    /// so a configured location and its neighbour read as one pair rather than
+    /// as two unrelated files.
+    #[test]
+    fn the_database_written_beside_another_keeps_the_configured_name() {
+        let version = codehelion_store::schema::SCHEMA_VERSION;
+        for (configured, expected) in [
+            (
+                ".codehelion/audit.db",
+                format!(".codehelion/audit-v{version}.db"),
+            ),
+            (
+                "state/history.sqlite",
+                format!("state/history-v{version}.sqlite"),
+            ),
+            ("state/history", format!("state/history-v{version}")),
+        ] {
+            assert_eq!(
+                schema_versioned_sibling(Path::new(configured)),
+                Some(PathBuf::from(&expected)),
+                "{configured}"
+            );
+        }
+    }
+
+    /// A path with no database at it needs no neighbour: a run creates it and
+    /// records there, which is what an absent database is for.
+    #[test]
+    fn an_absent_database_is_left_for_the_run_to_create() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        assert_eq!(
+            incompatible_database_replacement(&directory.path().join("audit.db")),
+            None
+        );
     }
 
     /// Folding the spelling is not folding the path: what climbs out of a

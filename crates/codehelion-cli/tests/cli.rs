@@ -103,6 +103,231 @@ fn doctor_and_cache_status_report_a_live_database_lease() {
     }
 }
 
+/// A tree with one source file and a real database whose recorded schema
+/// version is not the one this build writes.
+///
+/// The version is taken from the build rather than written as a literal, so
+/// the fixture keeps describing "another schema version" after the store's own
+/// version moves.
+fn tree_with_a_database_from_another_schema_version(
+    root: &std::path::Path,
+    database: &std::path::Path,
+) {
+    std::fs::write(root.join("lib.rs"), "pub fn tiny() {}\n").expect("write source");
+    if let Some(parent) = database.parent() {
+        std::fs::create_dir_all(parent).expect("create database directory");
+    }
+    codehelion_store::Store::open(database).expect("create database");
+    let connection = rusqlite::Connection::open(database).expect("open database");
+    connection
+        .execute(
+            "UPDATE schema_meta SET version = ?1",
+            [other_schema_version()],
+        )
+        .expect("record another schema version");
+}
+
+/// A schema version this build does not write.
+const fn other_schema_version() -> i64 {
+    codehelion_store::schema::SCHEMA_VERSION + 1
+}
+
+/// The name a run gives the database it writes beside an incompatible one.
+fn database_name_for_this_schema() -> String {
+    format!("audit-v{}.db", codehelion_store::schema::SCHEMA_VERSION)
+}
+
+#[test]
+fn scan_records_beside_a_default_database_written_by_another_schema_version() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let cache = root.join(".codehelion");
+    tree_with_a_database_from_another_schema_version(&root, &cache.join("audit.db"));
+
+    cmd()
+        .args(["scan", root.to_str().expect("scan path")])
+        .assert()
+        .success();
+
+    let recorded = cache.join(database_name_for_this_schema());
+    let store = codehelion_store::Store::open_existing(&recorded)
+        .expect("the run recorded itself beside the incompatible database");
+    assert_eq!(
+        store.schema_version().expect("recorded schema version"),
+        codehelion_store::schema::SCHEMA_VERSION
+    );
+    assert_eq!(
+        store.table_count("scan_run").expect("recorded runs"),
+        1,
+        "the completed run must be readable from the database it used"
+    );
+}
+
+#[test]
+fn stepping_around_a_default_database_says_so_and_leaves_it_unchanged() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let cache = root.join(".codehelion");
+    let incompatible = cache.join("audit.db");
+    tree_with_a_database_from_another_schema_version(&root, &incompatible);
+    let before = std::fs::read(&incompatible).expect("read database before the scan");
+
+    let output = cmd()
+        .args(["scan", root.to_str().expect("scan path")])
+        .output()
+        .expect("run scan beside an incompatible database");
+
+    assert!(output.status.success(), "scan unexpectedly failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "note: {} was written by another schema version and was left unchanged; this run used {}",
+            incompatible.display(),
+            cache.join(database_name_for_this_schema()).display(),
+        )),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&incompatible).expect("read database after the scan"),
+        before,
+        "the database this build cannot open must be left byte for byte as it was"
+    );
+}
+
+#[test]
+fn an_explicitly_named_incompatible_database_is_still_refused() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let named = root.join("audit.db");
+    tree_with_a_database_from_another_schema_version(&root, &named);
+
+    let output = cmd()
+        .args([
+            "scan",
+            root.to_str().expect("scan path"),
+            "--db",
+            named.to_str().expect("database path"),
+        ])
+        .output()
+        .expect("run scan against a named incompatible database");
+
+    assert!(
+        !output.status.success(),
+        "a named database that could not be written must not report success"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "database schema version {} is not supported",
+            other_schema_version()
+        )),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("this run used"),
+        "a named database must not be traded for another one: {stderr}"
+    );
+    assert!(
+        !root.join(database_name_for_this_schema()).exists(),
+        "a named database must not gain a neighbour nobody asked for"
+    );
+}
+
+#[test]
+fn a_compatible_default_database_is_used_without_creating_a_second_one() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let cache = root.join(".codehelion");
+    std::fs::write(root.join("lib.rs"), "pub fn tiny() {}\n").expect("write source");
+    std::fs::create_dir_all(&cache).expect("create database directory");
+    codehelion_store::Store::open(&cache.join("audit.db")).expect("create database");
+
+    let output = cmd()
+        .args(["scan", root.to_str().expect("scan path")])
+        .output()
+        .expect("run scan against a compatible database");
+
+    assert!(output.status.success(), "scan unexpectedly failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("was written by another schema version"),
+        "{stderr}"
+    );
+    assert!(
+        !cache.join(database_name_for_this_schema()).exists(),
+        "a database this build can open is the one it must keep writing"
+    );
+}
+
+/// The only recording failure a run steps around is the one it can settle by
+/// itself. Everything else still fails, so a gated pipeline cannot go green
+/// against a database it never wrote to.
+#[cfg(unix)]
+#[test]
+fn a_recording_failure_that_is_not_a_schema_mismatch_still_fails_the_scan() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let cache = root.join(".codehelion");
+    let database = cache.join("audit.db");
+    std::fs::write(root.join("lib.rs"), "pub fn tiny() {}\n").expect("write source");
+    std::fs::create_dir_all(&cache).expect("create database directory");
+    codehelion_store::Store::open(&database).expect("create database");
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o444))
+        .expect("make the database read-only");
+
+    let output = cmd()
+        .args(["scan", root.to_str().expect("scan path")])
+        .output()
+        .expect("run scan against a read-only database");
+
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o644))
+        .expect("restore the database permissions");
+    assert!(
+        !output.status.success(),
+        "a run that recorded nothing must not report success"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("this run was not recorded"), "{stderr}");
+    assert!(
+        !cache.join(database_name_for_this_schema()).exists(),
+        "only a schema version this build cannot open is written around"
+    );
+}
+
+#[test]
+fn doctor_lists_the_databases_in_the_directory_and_names_the_one_a_scan_would_use() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let cache = root.join(".codehelion");
+    tree_with_a_database_from_another_schema_version(&root, &cache.join("audit.db"));
+    let recorded = cache.join(database_name_for_this_schema());
+    codehelion_store::Store::open(&recorded).expect("create the database for this build");
+
+    cmd()
+        .args(["doctor", "--path", root.to_str().expect("doctor path")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "  databases in {}:",
+            cache.display()
+        )))
+        .stdout(predicate::str::contains(format!(
+            "audit.db: schema {}, not readable by this build",
+            other_schema_version()
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{}: schema {}, readable by this build",
+            database_name_for_this_schema(),
+            codehelion_store::schema::SCHEMA_VERSION
+        )))
+        .stdout(predicate::str::contains(format!(
+            "  a scan would use {}",
+            recorded.display()
+        )));
+}
+
 #[test]
 fn scan_rejects_an_incompatible_database_without_replacing_it() {
     let directory = tempfile::tempdir().expect("temp dir");
@@ -532,6 +757,49 @@ fn mode_help_describes_measurement_differences_and_safety() {
 }
 
 #[test]
+fn readmes_document_the_rescan_after_refactor_loop() {
+    let english = include_str!("../../../README.md");
+    for snippet in [
+        "Rescanning after a refactor",
+        "replacement you missed",
+        "finishes in seconds",
+        "codehelion artifact analyze path/to/binary",
+    ] {
+        assert!(
+            english.contains(snippet),
+            "English README is missing {snippet}"
+        );
+    }
+
+    let japanese = include_str!("../../../README_ja.md");
+    for snippet in [
+        "リファクタ直後の再スキャン",
+        "その呼び出し元は置換漏れです",
+        "数秒で終わる",
+        "codehelion artifact analyze path/to/binary",
+    ] {
+        assert!(
+            japanese.contains(snippet),
+            "Japanese README is missing {snippet}"
+        );
+    }
+}
+
+/// The relationship between exact and normalized duplication is stated as an
+/// order of magnitude, never as a measured byte count: nothing re-derives a
+/// figure written by hand, so one would drift the moment a build changed.
+#[test]
+fn readmes_scale_identical_code_folding_without_a_measured_byte_count() {
+    let english = include_str!("../../../README.md");
+    assert!(english.contains("thousands of times larger"));
+    assert!(english.contains("exact and the normalized figure"));
+
+    let japanese = include_str!("../../../README_ja.md");
+    assert!(japanese.contains("その数千倍あります"));
+    assert!(japanese.contains("exact と normalized の値"));
+}
+
+#[test]
 fn readmes_explain_artifact_folding_and_size_relevance() {
     let english = include_str!("../../../README.md");
     let japanese = include_str!("../../../README_ja.md");
@@ -915,7 +1183,82 @@ fn artifact_compare_reports_the_measured_byte_delta() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "observed_size_reduction_bytes: +0",
+            "observed size: +0 bytes (no change)",
+        ))
+        .stdout(predicate::str::contains(
+            "duplicated code: +0 bytes (no change)",
+        ));
+}
+
+#[test]
+fn artifact_compare_refuses_a_database_that_selects_no_calibration() {
+    let before = tempfile::NamedTempFile::new().expect("before fixture");
+    let after = tempfile::NamedTempFile::new().expect("after fixture");
+    let database_directory = tempfile::tempdir().expect("database directory");
+    std::fs::write(before.path(), b"\0asm\x01\0\0\0").expect("write before wasm");
+    std::fs::write(after.path(), b"\0asm\x01\0\0\0").expect("write after wasm");
+    cmd()
+        .args([
+            "artifact",
+            "compare",
+            before.path().to_str().expect("utf-8 before path"),
+            after.path().to_str().expect("utf-8 after path"),
+            "--db",
+            database_directory
+                .path()
+                .join("audit.db")
+                .to_str()
+                .expect("utf-8 database path"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--db was given without --source-run and --clone-group; artifact compare uses --db only to record a calibration",
+        ));
+}
+
+#[test]
+fn artifact_compare_calibrates_against_the_configured_database_without_a_database_flag() {
+    let repository = tempfile::tempdir().expect("repository directory");
+    let before = repository.path().join("before.wasm");
+    let after = repository.path().join("after.wasm");
+    let variant = repository.path().join("build-variant.json");
+    std::fs::write(&before, b"\0asm\x01\0\0\0").expect("write before wasm");
+    std::fs::write(&after, b"\0asm\x01\0\0\0").expect("write after wasm");
+    std::fs::write(&variant, b"{}\n").expect("write build variant");
+    let configured = repository.path().join(".codehelion").join("audit.db");
+    cmd()
+        .current_dir(repository.path())
+        .args([
+            "artifact",
+            "analyze",
+            before.to_str().expect("utf-8 before path"),
+            "--db",
+            configured.to_str().expect("utf-8 database path"),
+        ])
+        .assert()
+        .success();
+
+    cmd()
+        .current_dir(repository.path())
+        .args([
+            "artifact",
+            "compare",
+            before.to_str().expect("utf-8 before path"),
+            after.to_str().expect("utf-8 after path"),
+            "--source-run",
+            "1",
+            "--clone-group",
+            &"ab".repeat(16),
+            "--before-build-variant",
+            variant.to_str().expect("utf-8 variant path"),
+            "--after-build-variant",
+            variant.to_str().expect("utf-8 variant path"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "calibration needs exactly one matching saved estimate",
         ));
 }
 

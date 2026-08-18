@@ -178,7 +178,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         bail!("scan path {} is not a directory", root.display());
     }
     let resolved_config = config::load(args.config.as_deref(), &root)?;
-    let db_path = database_path(&root, args.db.as_deref(), &resolved_config, args.untrusted)?;
+    let db_path = scan_database_path(&root, args.db.as_deref(), &resolved_config, args.untrusted)?;
     let _database_lock = crate::scan_lock::acquire(&db_path)?;
     let configuration = configuration_info(
         &resolved_config.source,
@@ -944,7 +944,8 @@ pub(crate) mod runtime;
 
 pub(crate) use runtime::{
     FileOutcome, build_globset, database_path, discover_sources, effective_jobs, filter_globs,
-    guarded, literal_norm, map_sources, parse_work_byte_limit,
+    guarded, incompatible_database_replacement, literal_norm, map_sources, parse_work_byte_limit,
+    scan_database_path,
 };
 use runtime::{engine_config, lex_sources};
 

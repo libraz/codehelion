@@ -53,9 +53,9 @@ use codehelion_store::snapshot::{
 };
 
 use super::{
-    FileOutcome, ScanBaseline, as_u64, database_path, discover_sources, effective_jobs,
-    filter_globs, literal_norm, map_sources, open_store, parse_work_byte_limit, path_key,
-    rfc3339_now, shared, write_partitioned_reports, write_report_without_artifact_guidance,
+    FileOutcome, ScanBaseline, as_u64, discover_sources, effective_jobs, filter_globs,
+    literal_norm, map_sources, open_store, parse_work_byte_limit, path_key, rfc3339_now,
+    scan_database_path, shared, write_partitioned_reports, write_report_without_artifact_guidance,
 };
 
 use crate::Outcome;
@@ -398,7 +398,7 @@ fn run_with(
         bail!("scan path {} is not a directory", root.display());
     }
     let resolved_config = config::load(args.config.as_deref(), &root)?;
-    let db_path = database_path(&root, args.db.as_deref(), &resolved_config, args.untrusted)?;
+    let db_path = scan_database_path(&root, args.db.as_deref(), &resolved_config, args.untrusted)?;
     let _database_lock = crate::scan_lock::acquire(&db_path)?;
     let configuration = crate::scan::configuration_info(
         &resolved_config.source,
