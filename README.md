@@ -364,8 +364,12 @@ explicitly when they are unavailable.
 Completed scans are stored in local SQLite, and text, JSON and SARIF reports
 are exports from those snapshots. An unchanged tree reuses its compatible
 completed run; `--no-reuse` records a fresh run. When a group changes identity
-but retains enough member content, its stored lineage links the two runs. A
-baseline remains the explicit record of findings a project has accepted.
+but retains enough member content, its stored lineage links the two runs, and
+the report says of each group whether it kept the identity it had or inherited
+one, and from which group. The totals say what became of the previous
+comparable run's highest-ranked groups; `report.churn-top` sets how many of them
+are followed, 100 by default. A baseline remains the explicit record of findings
+a project has accepted.
 
 Each scan creates its persistent local audit database at
 `.codehelion/audit.db` by default, placed under the Git repository holding the
@@ -454,16 +458,21 @@ for the Microsoft ABI is still read for size and duplication, but reports no
 source correspondence rather than a guessed one.
 
 **The audit database is not migrated.** A database written under a different
-schema is rejected rather than converted; move it aside and rescan. This will
+schema is never converted, so no history carries across one. At the default
+path a run leaves that database exactly where it is, records into
+`audit-v<schema>.db` beside it, and says which file it used; a database named
+with `--db` is refused instead, since writing somewhere else would ignore the
+path that was asked for. `doctor` lists every audit database in the directory,
+which of them this build can open, and which one a run would take. This will
 change before 1.0.
 
 ## Accuracy
 
-Measured with `make eval` at 0.2.0. Both corpora are committed, so these
+Measured with `make eval` at 0.3.0. Both corpora are committed, so these
 numbers are reproducible from a checkout. `corpus/README.md` explains why each
 half can answer only one of the two questions.
 
-**Recall — nine generated mutation corpora, 42 clone pairs and 11 deliberate
+**Recall — ten generated mutation corpora, 43 clone pairs and 11 deliberate
 non-clones.** A generated corpus knows every clone it contains, so it can be
 scored for recall. It cannot be scored for precision: it labels the clones it
 was built around and nothing else, so an unlabelled true copy would count
@@ -474,6 +483,7 @@ against the detector.
 | rust | 0.7143 | 1.0000 |
 | c | 0.8333 | 1.0000 |
 | cpp | 0.8571 | 1.0000 |
+| cpp-common-signature | 1.0000 | 1.0000 |
 | rust-graded | 1.0000 | 1.0000 |
 | rust-literals | 1.0000 | 1.0000 |
 | rust-replaced | 1.0000 | 1.0000 |
@@ -484,6 +494,9 @@ against the detector.
 Fast mode reaches no type-3 clone at all in `rust`, `c` and `cpp`, which is the
 cost of skipping the structural pass rather than a tuning question.
 `rust-partial` is the one corpus where Structural mode scores below Fast.
+`cpp-common-signature` is there for the signature sibling channel: nine
+functions share one callable shape, and what it fixes is that withholding a
+shape that common as evidence costs the primary result nothing.
 
 The six restricted-semantic corpora are not scored here. Each registered rule
 is asserted by its own tests, which state why a pair matched or was dropped —
