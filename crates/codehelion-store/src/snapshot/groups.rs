@@ -571,10 +571,11 @@ pub(super) fn write_sibling_groups(
     let mut insert = tx.prepare_cached(
         "INSERT INTO clone_group_sibling
              (clone_group_id, scan_run_id, source_unit_id, fragment_fingerprint, finding_id,
-              basis, signature, clone_type, confidence_band, weight_version, lexical, structural,
-              control_flow, type_similarity, api, composite, boilerplate, suppression_id)
+              basis, signature, signature_units, clone_type, confidence_band, weight_version,
+              lexical, structural, control_flow, type_similarity, api, composite, boilerplate,
+              suppression_id)
          VALUES (?1, (SELECT scan_run_id FROM clone_group WHERE id = ?1),
-                 ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                 ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
     )?;
     for siblings in sibling_groups {
         let group_row_id = *group_row_ids
@@ -597,6 +598,9 @@ pub(super) fn write_sibling_groups(
                 sibling.finding.as_bytes().as_slice(),
                 sibling.basis.name(),
                 sibling.signature,
+                sibling
+                    .signature_units
+                    .map(|units| i64::try_from(units).unwrap_or(i64::MAX)),
                 sibling.clone_type.name(),
                 sibling.confidence.name(),
                 sibling.similarity.weight_version,

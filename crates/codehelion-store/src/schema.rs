@@ -1,4 +1,4 @@
-//! Schema definition for the current local v2 baseline.
+//! Schema definition for the current local baseline.
 //!
 //! The schema covers every scan entity: `ScanRun`, `BuildVariant`,
 //! `SourceUnit`, `Fragment`, `Fingerprint`, `CloneGroup`, `Finding`,
@@ -40,7 +40,7 @@
 //! - Savings and confidence live in separate columns; there is no single
 //!   collapsed score column.
 //!
-//! The current local v2 baseline is intentionally self-contained.
+//! The current local baseline is intentionally self-contained.
 //! `schema_meta` records which baseline a database holds. A database from any
 //! other layout is rejected without automatic migration; the operator must
 //! move it aside or choose a fresh database path and scan again.
@@ -54,7 +54,7 @@ use crate::StoreError;
 /// A database recorded under another one is rejected rather than migrated.
 /// The audit database holds derived scan state, so re-running the scan on a
 /// fresh path reproduces it without mutating the incompatible file.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Full current local database layout. Existing incompatible databases are
 /// not transformed; create a fresh database when this contract changes.
@@ -287,6 +287,7 @@ CREATE TABLE clone_group_sibling (
     finding_id           BLOB NOT NULL CHECK (length(finding_id) = 16),
     basis                TEXT NOT NULL CHECK (basis IN ('similarity', 'signature')),
     signature            TEXT,
+    signature_units      INTEGER CHECK (signature_units IS NULL OR signature_units >= 0),
     clone_type           TEXT NOT NULL CHECK (clone_type IN ('type-1', 'type-2', 'type-3')),
     confidence_band      TEXT NOT NULL CHECK (confidence_band IN ('high', 'medium', 'low')),
     weight_version       TEXT NOT NULL,
@@ -298,8 +299,9 @@ CREATE TABLE clone_group_sibling (
     composite            REAL NOT NULL,
     boilerplate          TEXT CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition', 'guarded-dispatch', 'configured-answer')),
     suppression_id       INTEGER REFERENCES suppression (id),
-    CHECK ((basis = 'signature' AND signature IS NOT NULL AND length(signature) > 0)
-        OR (basis = 'similarity' AND signature IS NULL)),
+    CHECK ((basis = 'signature' AND signature IS NOT NULL AND length(signature) > 0
+            AND signature_units IS NOT NULL)
+        OR (basis = 'similarity' AND signature IS NULL AND signature_units IS NULL)),
     PRIMARY KEY (clone_group_id, source_unit_id),
     UNIQUE (scan_run_id, finding_id)
 ) STRICT;

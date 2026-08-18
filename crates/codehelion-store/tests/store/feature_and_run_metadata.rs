@@ -217,7 +217,7 @@ fn on_disk_databases_reopen_and_a_newer_schema_is_refused() {
             .unwrap();
     }
     {
-        // Reopen: the current v2 baseline remains readable and the data is still there.
+        // Reopen: the current baseline remains readable and the data is still there.
         let store = Store::open(&path).unwrap();
         assert_eq!(
             store.schema_version().unwrap(),
@@ -332,12 +332,16 @@ fn stale_wal_schema_rejection_preserves_the_real_database_and_sidecars() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("stale-wal.db");
 
-    // Establish a checkpointed v2 main file first.  The child process then
-    // commits a v1 marker into a genuine WAL and exits without destructors, so
-    // the main file and logical database disagree as they can after a crash.
+    // Establish a checkpointed main file on the current baseline first.  The
+    // child process then commits a v1 marker into a genuine WAL and exits
+    // without destructors, so the main file and logical database disagree as
+    // they can after a crash.
     {
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 2);
+        assert_eq!(
+            store.schema_version().unwrap(),
+            codehelion_store::schema::SCHEMA_VERSION
+        );
     }
     let checkpoint = rusqlite::Connection::open(&path).unwrap();
     checkpoint
@@ -369,9 +373,9 @@ fn stale_wal_schema_rejection_preserves_the_real_database_and_sidecars() {
         "the WAL writer must have a shared-memory file"
     );
 
-    // The main file alone says v2, whereas the same main file with its real
-    // WAL says v1.  This is the boundary the old immutable-main preflight
-    // missed.
+    // The main file alone says the current baseline, whereas the same main file
+    // with its real WAL says v1.  This is the boundary an immutable-main
+    // preflight misses.
     let main_only_directory = tempfile::tempdir().unwrap();
     let main_only = main_only_directory.path().join("main-only.db");
     std::fs::copy(&path, &main_only).unwrap();
@@ -385,7 +389,7 @@ fn stale_wal_schema_rejection_preserves_the_real_database_and_sidecars() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(main_only_version, 2);
+    assert_eq!(main_only_version, codehelion_store::schema::SCHEMA_VERSION);
 
     let private_directory = tempfile::tempdir().unwrap();
     let private = private_directory.path().join("with-wal.db");
@@ -424,7 +428,10 @@ fn a_valid_wal_schema_is_opened_and_its_uncheckpointed_data_survives() {
     let path = directory.path().join("valid-wal.db");
     {
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 2);
+        assert_eq!(
+            store.schema_version().unwrap(),
+            codehelion_store::schema::SCHEMA_VERSION
+        );
     }
 
     let writer = rusqlite::Connection::open(&path).unwrap();

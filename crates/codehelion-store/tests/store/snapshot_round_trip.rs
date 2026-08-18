@@ -90,6 +90,7 @@ fn a_sibling_round_trips_without_becoming_a_primary_member() {
                 finding: finding(203),
                 basis: SiblingBasis::Signature,
                 signature: Some("rust|params=[]|return=()".to_string()),
+                signature_units: Some(4),
                 clone_type: CloneClass::Type3,
                 confidence: Confidence::Low,
                 similarity: SimilarityBreakdownRow {
@@ -112,6 +113,7 @@ fn a_sibling_round_trips_without_becoming_a_primary_member() {
                 finding: finding(204),
                 basis: SiblingBasis::Similarity,
                 signature: None,
+                signature_units: None,
                 clone_type: CloneClass::Type3,
                 confidence: Confidence::Medium,
                 similarity: SimilarityBreakdownRow {
@@ -150,6 +152,7 @@ fn a_sibling_round_trips_without_becoming_a_primary_member() {
         sibling.signature.as_deref(),
         Some("rust|params=[]|return=()")
     );
+    assert_eq!(sibling.signature_units, Some(4));
     assert!((sibling.composite - 0.76).abs() < f64::EPSILON);
     let rule = sibling
         .suppressed_by
@@ -162,6 +165,7 @@ fn a_sibling_round_trips_without_becoming_a_primary_member() {
     assert_eq!(similarity.member.file_path, "src/d.rs");
     assert_eq!(similarity.basis, "similarity");
     assert!(similarity.signature.is_none());
+    assert!(similarity.signature_units.is_none());
     assert!((similarity.composite - 0.42).abs() < f64::EPSILON);
 
     let explained = store
@@ -171,6 +175,15 @@ fn a_sibling_round_trips_without_becoming_a_primary_member() {
     assert_eq!(explained.run_id, run_id);
     assert_eq!(explained.group_fingerprint_hex, group_fp(9).to_hex());
     assert_eq!(&explained.sibling, sibling);
+    assert_eq!(explained.sibling.signature_units, Some(4));
+    // A group looked up by fingerprint has to state the same sharing count as
+    // the run listing and the explained finding.
+    let detail = store
+        .group(&group_fp(9).to_hex())
+        .unwrap()
+        .expect("the group resolves by fingerprint");
+    assert_eq!(detail.group.siblings[0].signature_units, Some(4));
+    assert!(detail.group.siblings[1].signature_units.is_none());
     assert_eq!(
         store.ids_starting_with(&finding(203).to_hex()).unwrap(),
         vec![IdMatch {
@@ -184,6 +197,7 @@ fn a_sibling_round_trips_without_becoming_a_primary_member() {
         .expect("similarity sibling id resolves");
     assert_eq!(explained_similarity.sibling.basis, "similarity");
     assert!(explained_similarity.sibling.signature.is_none());
+    assert!(explained_similarity.sibling.signature_units.is_none());
     assert!((explained_similarity.sibling.composite - 0.42).abs() < f64::EPSILON);
 }
 

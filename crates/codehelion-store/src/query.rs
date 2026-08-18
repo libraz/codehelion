@@ -368,6 +368,9 @@ pub struct StoredSibling {
     pub basis: String,
     /// Exact normalized signature for signature-channel siblings.
     pub signature: Option<String>,
+    /// How many units in the scanned tree share that normalized signature,
+    /// for signature-channel siblings.
+    pub signature_units: Option<i64>,
     /// The ungrouped sibling occurrence.
     pub member: StoredMember,
     /// The rule that hid this supplemental finding in its run.

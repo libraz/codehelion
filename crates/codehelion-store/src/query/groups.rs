@@ -25,7 +25,7 @@ impl Store {
                         s.weight_version, s.lexical, s.structural, s.control_flow,
                         s.type_similarity, s.api, s.composite,
                         sup.scope, sup.pattern, sup.reason, sup.active,
-                        s.basis, s.signature
+                        s.basis, s.signature, s.signature_units
                  FROM clone_group_sibling s
                  JOIN clone_group g ON g.id = s.clone_group_id
                  JOIN fingerprint group_fp ON group_fp.id = g.group_fingerprint_id
@@ -65,6 +65,7 @@ impl Store {
                             suppressed_by: stored_suppression(row, 20)?,
                             basis: row.get(24)?,
                             signature: row.get(25)?,
+                            signature_units: row.get(26)?,
                         },
                     })
                 },
@@ -249,7 +250,7 @@ impl Store {
                         s.weight_version, s.lexical, s.structural, s.control_flow,
                         s.type_similarity, s.api, s.composite,
                         sup.scope, sup.pattern, sup.reason, sup.active,
-                        s.basis, s.signature
+                        s.basis, s.signature, s.signature_units
                  FROM clone_group_sibling s
                  JOIN source_unit u ON u.id = s.source_unit_id
                  LEFT JOIN suppression sup ON sup.id = s.suppression_id
@@ -282,6 +283,7 @@ impl Store {
                     suppressed_by: stored_suppression(row, 18)?,
                     basis: row.get(22)?,
                     signature: row.get(23)?,
+                    signature_units: row.get(24)?,
                 })
             })?
             .collect::<Result<_, _>>()

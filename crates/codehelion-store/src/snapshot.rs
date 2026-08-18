@@ -307,6 +307,10 @@ pub struct SiblingRow {
     /// Exact normalized signature when the sibling came from the signature
     /// channel. Similarity siblings intentionally carry no signature.
     pub signature: Option<String>,
+    /// How many units in the scanned tree share that normalized signature.
+    /// A signature is only evidence while it stays rare, so the count travels
+    /// with the sibling. Similarity siblings intentionally carry no count.
+    pub signature_units: Option<usize>,
     /// The verifier classification.
     pub clone_type: CloneClass,
     /// The verifier confidence band.

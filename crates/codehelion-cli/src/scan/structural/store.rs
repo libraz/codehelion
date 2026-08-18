@@ -261,6 +261,7 @@ fn sibling_rows(
                         ),
                         basis: sibling.basis,
                         signature: sibling.signature.clone(),
+                        signature_units: sibling.signature_units,
                         clone_type: sibling.clone_type,
                         confidence: sibling.confidence,
                         similarity: SimilarityBreakdownRow {

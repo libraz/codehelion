@@ -74,15 +74,16 @@ fn insert_sibling(
     conn: &Connection,
     basis: &str,
     signature: Option<&str>,
+    signature_units: Option<i64>,
 ) -> rusqlite::Result<usize> {
     conn.execute(
         "INSERT INTO clone_group_sibling
              (clone_group_id, scan_run_id, source_unit_id, fragment_fingerprint,
-              finding_id, basis, signature, clone_type, confidence_band, weight_version,
-              lexical, structural, composite)
-         VALUES (1, 1, 1, randomblob(16), randomblob(16), ?1, ?2,
+              finding_id, basis, signature, signature_units, clone_type, confidence_band,
+              weight_version, lexical, structural, composite)
+         VALUES (1, 1, 1, randomblob(16), randomblob(16), ?1, ?2, ?3,
                  'type-3', 'low', 'test-v1', 0.1, 0.2, 0.15)",
-        rusqlite::params![basis, signature],
+        rusqlite::params![basis, signature, signature_units],
     )
 }
 
@@ -90,13 +91,19 @@ fn insert_sibling(
 fn sibling_basis_and_signature_checks_reject_inconsistent_raw_rows() {
     let valid_similarity = sibling_ready();
     assert_eq!(
-        insert_sibling(&valid_similarity, "similarity", None).unwrap(),
+        insert_sibling(&valid_similarity, "similarity", None, None).unwrap(),
         1
     );
 
     let valid_signature = sibling_ready();
     assert_eq!(
-        insert_sibling(&valid_signature, "signature", Some("signature-sentinel")).unwrap(),
+        insert_sibling(
+            &valid_signature,
+            "signature",
+            Some("signature-sentinel"),
+            Some(3)
+        )
+        .unwrap(),
         1
     );
 
@@ -106,11 +113,47 @@ fn sibling_basis_and_signature_checks_reject_inconsistent_raw_rows() {
         ("signature", Some("")),
     ] {
         let conn = sibling_ready();
+        let units = signature.map(|_| 3);
         assert!(
-            insert_sibling(&conn, basis, signature).is_err(),
+            insert_sibling(&conn, basis, signature, units).is_err(),
             "inconsistent sibling row unexpectedly inserted: basis={basis:?}, signature={signature:?}"
         );
     }
+}
+
+/// The sharing count belongs to the signature channel exactly like the
+/// signature itself: required with it, absent without it.
+#[test]
+fn sibling_signature_unit_count_is_tied_to_the_signature_channel() {
+    for (basis, signature, signature_units) in [
+        ("signature", Some("signature-sentinel"), None),
+        ("similarity", None, Some(3)),
+    ] {
+        let conn = sibling_ready();
+        assert!(
+            insert_sibling(&conn, basis, signature, signature_units).is_err(),
+            "sibling row with a mismatched sharing count unexpectedly inserted: \
+             basis={basis:?}, signature_units={signature_units:?}"
+        );
+    }
+}
+
+/// A count of units sharing a signature cannot be negative.
+#[test]
+fn sibling_signature_unit_count_rejects_a_negative_count() {
+    let conn = sibling_ready();
+    assert!(
+        insert_sibling(&conn, "signature", Some("signature-sentinel"), Some(-1)).is_err(),
+        "negative signature sharing count unexpectedly inserted"
+    );
+}
+
+/// A freshly created database records the baseline this build writes.
+#[test]
+fn baseline_creation_records_the_version_this_build_writes() {
+    let conn = seeded();
+    assert_eq!(version(&conn).unwrap(), SCHEMA_VERSION);
+    assert_eq!(SCHEMA_VERSION, 3);
 }
 
 /// Creating the baseline under enforced foreign keys leaves its seeded
