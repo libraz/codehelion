@@ -253,6 +253,26 @@ duplication somebody added.
 If the build variant or detector versions differ, create a fresh baseline for
 the current scan rather than carrying it across.
 
+### Rescanning after a refactor
+
+A scan is also a check on the refactor you have just finished. Run it again on
+the tree you changed, before moving on:
+
+```sh
+codehelion scan --mode structural
+```
+
+Then read the result against one rule: if a helper you have just written comes
+back grouped with a call site you meant to have replaced, that call site is a
+replacement you missed. Nothing else reports it — the code still compiles and
+still behaves the same way, so a passing test suite is not evidence that every
+copy went away. A scan of an ordinary tree finishes in seconds, which is what
+makes running one per refactor practical.
+
+Whether the artifact also got smaller is a separate question: a finding names
+code a reader has to keep in step, not bytes a compiler emits.
+`codehelion artifact analyze path/to/binary` measures that side.
+
 ## Artifact inspection (optional)
 
 The `artifact` commands read WASM, ELF, Mach-O, PE/COFF and static archives
@@ -380,7 +400,13 @@ Identical code folding can already remove same-signature functions with identica
 bodies in C++ and Rust. Type-1 copies are therefore often folded by the linker
 already. Type-2 and Type-3 copies that change identifiers or literals can leave
 distinct machine code, so they can matter more when size is the reason to
-inspect duplication.
+inspect duplication. The two are not the same size of problem: in an optimised
+build, what is still byte-for-byte identical in the artifact is a negligible
+part of it, while the code that matches only after register and immediate
+differences are normalized away is thousands of times larger.
+`codehelion artifact analyze` reports the exact and the normalized figure side
+by side, so the ratio for your own build is something you measure rather than
+assume.
 
 **Fast mode reports more than you want to read.** The suppression policies for
 boilerplate, test code and integer-width families need structural
