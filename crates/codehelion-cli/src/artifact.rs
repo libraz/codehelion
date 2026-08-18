@@ -563,21 +563,24 @@ fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Ou
 }
 
 /// Resolve the database only for the comparison shape that persists a
-/// calibration measurement. A partial calibration request cannot reach the
-/// artifact readers, and a persisted one holds its lease for the whole run.
+/// calibration measurement: `--source-run` together with `--clone-group`,
+/// whose database defaults exactly like every other command's. An incomplete
+/// request is refused by naming the flag that arrived rather than the ones
+/// that did not, and a persisted measurement holds its lease for the whole
+/// run.
 fn calibration_database(args: &ArtifactCompareArgs) -> Result<Option<std::path::PathBuf>> {
-    let supplied = [
-        args.source_run.is_some(),
-        args.clone_group.is_some(),
-        args.db.is_some(),
-    ];
-    if supplied.iter().any(|value| *value) && supplied.iter().any(|value| !*value) {
-        bail!("calibration requires --source-run, --clone-group, and --db together");
-    }
-    if args.source_run.is_some() {
-        Ok(Some(crate::resolve_db(args.db.as_deref())?))
-    } else {
-        Ok(None)
+    match (args.source_run.is_some(), args.clone_group.is_some()) {
+        (true, true) => Ok(Some(crate::resolve_db(args.db.as_deref())?)),
+        (true, false) => bail!(
+            "--source-run was given without --clone-group; artifact compare records a calibration for one clone group of that run"
+        ),
+        (false, true) => bail!(
+            "--clone-group was given without --source-run; artifact compare records a calibration for that group in one scan run"
+        ),
+        (false, false) if args.db.is_some() => bail!(
+            "--db was given without --source-run and --clone-group; artifact compare uses --db only to record a calibration"
+        ),
+        (false, false) => Ok(None),
     }
 }
 

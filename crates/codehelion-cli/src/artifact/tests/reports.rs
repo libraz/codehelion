@@ -490,6 +490,196 @@ fn comparison_reports_individual_duplicate_group_changes() {
     );
 }
 
+/// One symbol whose identity follows its seed, so a fixture can decide on its
+/// own which changed symbols carry a name.
+fn comparison_symbol(
+    name: Option<&str>,
+    seed: &[u8],
+    size: u64,
+) -> codehelion_artifact::ArtifactSymbol {
+    codehelion_artifact::ArtifactSymbol {
+        fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("symbol", seed),
+        name: name.map(ToOwned::to_owned),
+        exported: false,
+        section: None,
+        offset: 0,
+        size,
+        size_inferred: false,
+        code: vec![1; usize::try_from(size).unwrap()],
+        normalized: None,
+        inline_stack: Vec::new(),
+    }
+}
+
+/// A comparison of two artifacts holding the given symbols.
+fn symbol_comparison(
+    before_symbols: Vec<codehelion_artifact::ArtifactSymbol>,
+    after_symbols: Vec<codehelion_artifact::ArtifactSymbol>,
+) -> ArtifactComparisonReport {
+    let mut before = WasmBackend.parse(b"\0asm\x01\0\0\0").unwrap();
+    before.symbols = before_symbols;
+    before.observed_bytes = 64;
+    let mut after = before.clone();
+    after.symbols = after_symbols;
+    after.observed_bytes = 32;
+    ArtifactComparisonReport::new(
+        std::path::Path::new("before.wasm"),
+        &before,
+        None,
+        std::path::Path::new("after.wasm"),
+        &after,
+        None,
+    )
+}
+
+#[test]
+fn comparison_text_folds_every_symbol_change_that_carries_no_name() {
+    let report = symbol_comparison(
+        vec![
+            comparison_symbol(None, b"first", 4),
+            comparison_symbol(None, b"second", 8),
+        ],
+        Vec::new(),
+    );
+    assert_eq!(report.symbol_deltas.len(), 2);
+
+    let mut text = Vec::new();
+    render_compare_text(&report, &mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(
+        text.contains("note: 2 of 2 listed symbol changes have no name"),
+        "{text}"
+    );
+    assert!(text.contains("cannot be paired"), "{text}");
+    assert!(text.contains("keep their symbol names"), "{text}");
+    assert!(!text.contains("<unnamed>"), "{text}");
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.contains("listed symbol changes have no name"))
+            .count(),
+        1,
+        "{text}"
+    );
+}
+
+#[test]
+fn comparison_text_lists_named_symbol_changes_and_folds_only_the_rest() {
+    let report = symbol_comparison(
+        vec![
+            comparison_symbol(Some("named_symbol"), b"first", 4),
+            comparison_symbol(None, b"second", 8),
+            comparison_symbol(None, b"third", 16),
+        ],
+        Vec::new(),
+    );
+    assert_eq!(report.symbol_deltas.len(), 3);
+
+    let mut text = Vec::new();
+    render_compare_text(&report, &mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("removed named_symbol"), "{text}");
+    assert!(
+        text.contains("note: 2 of 3 listed symbol changes have no name"),
+        "{text}"
+    );
+    assert!(!text.contains("<unnamed>"), "{text}");
+}
+
+#[test]
+fn comparison_json_keeps_the_symbol_changes_the_text_folded() {
+    let report = symbol_comparison(
+        vec![
+            comparison_symbol(Some("named_symbol"), b"first", 4),
+            comparison_symbol(None, b"second", 8),
+            comparison_symbol(None, b"third", 16),
+        ],
+        Vec::new(),
+    );
+    let mut text = Vec::new();
+    render_compare_text(&report, &mut text).unwrap();
+    assert!(
+        String::from_utf8(text)
+            .unwrap()
+            .contains("listed symbol changes have no name")
+    );
+
+    let json = serde_json::to_value(&report).unwrap();
+    let deltas = json["symbol_deltas"].as_array().unwrap();
+    assert_eq!(deltas.len(), 3);
+    assert_eq!(
+        deltas
+            .iter()
+            .filter(|delta| delta["name"].is_null())
+            .count(),
+        2
+    );
+    assert_valid_schema(
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v1.schema.json",
+        ARTIFACT_COMPARISON_REPORT_JSON_SCHEMA,
+        &json,
+    );
+
+    let mut csv = Vec::new();
+    render_compare_csv(&report, &mut csv).unwrap();
+    let csv = String::from_utf8(csv).unwrap();
+    assert_eq!(
+        csv.lines()
+            .filter(|row| row.starts_with("symbol-delta,"))
+            .count(),
+        3,
+        "{csv}"
+    );
+}
+
+#[test]
+fn comparison_text_states_which_direction_each_byte_difference_moved() {
+    let report = symbol_comparison(vec![comparison_symbol(None, b"only", 4)], Vec::new());
+    assert_eq!(
+        report.observed_size_reduction_bytes,
+        ObservedSizeReductionBytes(32)
+    );
+
+    let mut text = Vec::new();
+    render_compare_text(&report, &mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(
+        text.contains("observed size: -32 bytes (smaller)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("duplicated code: +0 bytes (no change)"),
+        "{text}"
+    );
+    for line in text.lines() {
+        assert!(
+            !(line.starts_with("observed_size_reduction_bytes")
+                || line.starts_with("duplicated_code_delta_bytes")),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn comparison_text_reads_a_grown_artifact_as_larger() {
+    let mut report = symbol_comparison(Vec::new(), Vec::new());
+    report.observed_size_reduction_bytes = ObservedSizeReductionBytes(-16);
+    report.duplicated_code_delta_bytes = 24;
+    report.duplicated_data_delta_bytes = Some(-8);
+
+    let mut text = Vec::new();
+    render_compare_text(&report, &mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("observed size: +16 bytes (larger)"), "{text}");
+    assert!(
+        text.contains("duplicated code: +24 bytes (more duplicated)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("duplicated data: -8 bytes (less duplicated)"),
+        "{text}"
+    );
+}
+
 #[test]
 fn comparison_warns_when_build_variant_evidence_differs() {
     let artifact = WasmBackend.parse(b"\0asm\x01\0\0\0").unwrap();
@@ -877,6 +1067,99 @@ fn comparison_applies_the_input_format_assertion_to_both_artifacts() {
     };
     let error = compare_direct(&args, &mut Vec::new()).expect_err("format mismatch");
     assert!(error.to_string().contains("conflicts"), "{error:#}");
+}
+
+/// A comparison request carrying only the calibration selectors under test.
+fn calibration_request(
+    source_run: Option<i64>,
+    clone_group: Option<&str>,
+    db: Option<&std::path::Path>,
+) -> ArtifactCompareArgs {
+    ArtifactCompareArgs {
+        before: std::path::PathBuf::from("before.wasm"),
+        after: std::path::PathBuf::from("after.wasm"),
+        input_format: None,
+        arch: None,
+        before_build_variant: None,
+        after_build_variant: None,
+        format: ArtifactFormat::Text,
+        output: None,
+        force: false,
+        max_bytes: DEFAULT_ARTIFACT_MAX_BYTES,
+        timeout_seconds: DEFAULT_ARTIFACT_TIMEOUT_SECONDS,
+        max_memory_bytes: None,
+        untrusted: false,
+        source_run,
+        clone_group: clone_group.map(ToOwned::to_owned),
+        db: db.map(ToOwned::to_owned),
+    }
+}
+
+#[test]
+fn a_database_without_a_calibration_request_is_refused_by_naming_the_database() {
+    let error = calibration_database(&calibration_request(
+        None,
+        None,
+        Some(std::path::Path::new("audit.db")),
+    ))
+    .expect_err("a database alone selects no calibration");
+    assert_eq!(
+        error.to_string(),
+        "--db was given without --source-run and --clone-group; artifact compare uses --db only to record a calibration"
+    );
+}
+
+#[test]
+fn a_source_run_without_a_clone_group_is_refused_by_naming_the_missing_group() {
+    let error = calibration_database(&calibration_request(Some(7), None, None))
+        .expect_err("a source run alone selects no clone group");
+    assert_eq!(
+        error.to_string(),
+        "--source-run was given without --clone-group; artifact compare records a calibration for one clone group of that run"
+    );
+}
+
+#[test]
+fn a_clone_group_without_a_source_run_is_refused_by_naming_the_missing_run() {
+    let error = calibration_database(&calibration_request(None, Some("deadbeef"), None))
+        .expect_err("a clone group alone selects no source run");
+    assert_eq!(
+        error.to_string(),
+        "--clone-group was given without --source-run; artifact compare records a calibration for that group in one scan run"
+    );
+}
+
+#[test]
+fn a_calibration_request_without_a_database_flag_resolves_the_configured_default() {
+    let resolved = calibration_database(&calibration_request(Some(7), Some("deadbeef"), None))
+        .expect("the default database resolves")
+        .expect("a calibration request selects a database");
+    assert_eq!(
+        resolved,
+        crate::resolve_db(None).expect("the configured default database")
+    );
+}
+
+#[test]
+fn an_explicit_calibration_database_is_used_as_given() {
+    let requested = std::path::Path::new("audit.db");
+    let resolved = calibration_database(&calibration_request(
+        Some(7),
+        Some("deadbeef"),
+        Some(requested),
+    ))
+    .expect("an explicit database resolves")
+    .expect("a calibration request selects a database");
+    assert_eq!(resolved, requested);
+}
+
+#[test]
+fn a_comparison_without_calibration_selectors_opens_no_database() {
+    assert!(
+        calibration_database(&calibration_request(None, None, None))
+            .expect("a plain comparison resolves no database")
+            .is_none()
+    );
 }
 
 #[test]

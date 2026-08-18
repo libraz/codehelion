@@ -786,8 +786,12 @@ pub(super) fn render_compare_text(
     }
     writeln!(
         out,
-        "observed_size_reduction_bytes: {:+}",
-        report.observed_size_reduction_bytes.0
+        "observed size: {}",
+        signed_bytes(
+            report.observed_size_reduction_bytes.0.saturating_neg(),
+            "smaller",
+            "larger"
+        )
     )?;
     if let Some(calibration) = &report.calibration {
         writeln!(
@@ -805,15 +809,20 @@ pub(super) fn render_compare_text(
     }
     writeln!(
         out,
-        "duplicated_code_delta_bytes: {:+}",
-        report.duplicated_code_delta_bytes
+        "duplicated code: {}",
+        signed_bytes(
+            report.duplicated_code_delta_bytes,
+            "less duplicated",
+            "more duplicated"
+        )
     )?;
     writeln!(
         out,
-        "duplicated_data_delta_bytes: {}",
-        report
-            .duplicated_data_delta_bytes
-            .map_or_else(|| "unavailable".to_owned(), |value| format!("{value:+}"))
+        "duplicated data: {}",
+        report.duplicated_data_delta_bytes.map_or_else(
+            || "unavailable".to_owned(),
+            |value| signed_bytes(value, "less duplicated", "more duplicated")
+        )
     )?;
     writeln!(
         out,
@@ -822,16 +831,7 @@ pub(super) fn render_compare_text(
         report.symbol_changes.removed,
         report.symbol_changes.modified_named_symbols,
     )?;
-    for delta in &report.symbol_deltas {
-        writeln!(
-            out,
-            "  {} {} {} {:+} bytes",
-            delta.kind,
-            delta.name.as_deref().unwrap_or("<unnamed>"),
-            delta.fingerprint,
-            delta.size_delta_bytes
-        )?;
-    }
+    render_symbol_deltas(&report.symbol_deltas, out)?;
     for delta in &report.duplicate_group_deltas {
         writeln!(
             out,
@@ -843,6 +843,49 @@ pub(super) fn render_compare_text(
         writeln!(out, "assumption: {assumption}")?;
     }
     Ok(())
+}
+
+/// Changed symbols, one line each while a name identifies them.
+///
+/// A stripped artifact leaves every changed symbol nameless, and one line per
+/// content fingerprint then says nothing a reader can act on: the before and
+/// after of one symbol carry different fingerprints, so no two of those lines
+/// can be paired. They become one line stating how many there are and how to
+/// get names into the next comparison. The report keeps every entry.
+fn render_symbol_deltas(deltas: &[super::model::SymbolDelta], out: &mut impl Write) -> Result<()> {
+    let mut nameless = 0_usize;
+    for delta in deltas {
+        let Some(name) = delta.name.as_deref() else {
+            nameless += 1;
+            continue;
+        };
+        writeln!(
+            out,
+            "  {} {} {} {:+} bytes",
+            delta.kind, name, delta.fingerprint, delta.size_delta_bytes
+        )?;
+    }
+    if nameless > 0 {
+        writeln!(
+            out,
+            "  note: {nameless} of {} listed symbol changes have no name; their before and after cannot be paired — compare artifacts that keep their symbol names (an unstripped symbol table or the WASM name section)",
+            deltas.len()
+        )?;
+    }
+    Ok(())
+}
+
+/// One byte difference written so its sign cannot be read backwards: the
+/// number always counts the change from before to after, and a word states
+/// which direction that is. Adjacent lines otherwise mix a reduction with a
+/// delta and invert the meaning of `+` between them.
+fn signed_bytes(delta: i128, decreased: &str, increased: &str) -> String {
+    let direction = match delta.signum() {
+        1 => increased,
+        -1 => decreased,
+        _ => "no change",
+    };
+    format!("{delta:+} bytes ({direction})")
 }
 
 fn render_selected_architecture(
