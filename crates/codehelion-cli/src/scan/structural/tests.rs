@@ -215,6 +215,7 @@ fn supplemental_diagnostics_apply_path_suppression_like_primary_findings() {
                 breakdown: perfect,
                 basis: codehelion_core::structural::SiblingBasis::Similarity,
                 signature: None,
+                signature_units: None,
             }],
         }],
         near_misses: vec![StructuralNearMiss {

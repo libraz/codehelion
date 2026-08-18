@@ -159,6 +159,19 @@ impl Default for SiblingConfig {
 /// other and would make the reason for a dropped candidate unknowable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureSiblingConfig {
+    /// How many units in the tree may share one signature before that
+    /// signature stops being evidence.
+    ///
+    /// A signature only tells a reader something when it is rare. In a layer
+    /// driven by a callback table, hundreds of functions can share one
+    /// signature, and every one of them would then be a sibling of every
+    /// other. Keys held by more units than this are excluded from the
+    /// candidate index entirely.
+    ///
+    /// The limit is an absolute count, never a proportion of the tree: a
+    /// percentage of a large tree is thousands of units, which is exactly the
+    /// state this limit exists to remove.
+    pub max_units_per_signature: usize,
     /// Maximum signature-key candidates examined by the sweep.
     pub candidate_budget: usize,
     /// Maximum signature siblings retained for one primary group.
@@ -170,6 +183,7 @@ pub struct SignatureSiblingConfig {
 impl Default for SignatureSiblingConfig {
     fn default() -> Self {
         Self {
+            max_units_per_signature: 8,
             candidate_budget: 50_000,
             per_group_cap: 8,
             total_cap: 1_000,
@@ -504,6 +518,18 @@ pub struct SiblingSweepStats {
 pub struct SignatureSiblingSweepStats {
     /// Established primary groups considered for signature siblings.
     pub groups_considered: usize,
+    /// Distinct signature keys kept out of the candidate index because more
+    /// units share them than [`SignatureSiblingConfig::max_units_per_signature`]
+    /// allows. Counted over the keys that had at least one indexable ungrouped
+    /// unit, so a key held only by grouped units is not reported as excluded.
+    pub common_signatures_skipped: usize,
+    /// Units sharing the most widely shared excluded key, counted over every
+    /// unit in the tree. Zero when no key was excluded.
+    pub largest_skipped_signature_units: usize,
+    /// Candidates the sweep never saw because their signature key was
+    /// excluded. Kept apart from the cap counters below: a reader has to be
+    /// able to tell whether to move the sharing limit or a cap.
+    pub common_signature_dropped: usize,
     /// Entries in the ungrouped `(signature, directory)` postings considered
     /// eligible before per-unit safety guards. This is counted from posting
     /// lengths, so it does not require materializing a group-by-posting list.
@@ -575,6 +601,11 @@ pub struct StructuralSibling {
     pub basis: SiblingBasis,
     /// Exact normalized signature text when `basis` is `Signature`.
     pub signature: Option<String>,
+    /// How many units in the tree share that signature, when `basis` is
+    /// `Signature`. Rarity is the evidence this channel carries, so it travels
+    /// as a number a reader can weigh; it never moves `confidence`, which
+    /// stays low because a sibling is triage evidence and not membership.
+    pub signature_units: Option<usize>,
 }
 
 /// Siblings of one primary group, addressed by its index in

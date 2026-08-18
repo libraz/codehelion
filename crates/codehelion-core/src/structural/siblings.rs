@@ -190,6 +190,7 @@ fn sweep_similarity_siblings(
                 breakdown: verdict.breakdown,
                 basis: SiblingBasis::Similarity,
                 signature: None,
+                signature_units: None,
             });
             accepted += 1;
             stats.accepted += 1;
@@ -234,7 +235,24 @@ fn sweep_signature_siblings(
         .iter()
         .flat_map(|group| group.members.iter().copied())
         .collect();
+    // How many units share each signature, counted over every unit in the
+    // tree including grouped ones. Counting only ungrouped units would loosen
+    // the sharing limit as grouping succeeds, which is backwards: a signature
+    // held by a whole callback layer stays common however much of that layer
+    // primary grouping already explains.
+    let mut units_per_signature: BTreeMap<SignatureKey, usize> = BTreeMap::new();
+    for data in units {
+        if let Some(signature) = data.signature.as_ref() {
+            *units_per_signature.entry(signature.key).or_default() += 1;
+        }
+    }
+    let max_shared = config.signature_siblings.max_units_per_signature;
     let mut index: BTreeMap<(SignatureKey, DirectoryPartition), Vec<usize>> = BTreeMap::new();
+    // Excluded keys keep their posting sizes but not their members: the sweep
+    // must be able to say how much the sharing limit removed without paying
+    // the memory the limit exists to avoid.
+    let mut excluded: BTreeMap<(SignatureKey, DirectoryPartition), usize> = BTreeMap::new();
+    let mut excluded_keys: BTreeSet<SignatureKey> = BTreeSet::new();
     for (unit, data) in units.iter().enumerate() {
         if grouped.contains(&unit) {
             continue;
@@ -242,11 +260,32 @@ fn sweep_signature_siblings(
         let (Some(signature), Some(directory)) = (data.signature.as_ref(), data.directory) else {
             continue;
         };
+        let shared = units_per_signature
+            .get(&signature.key)
+            .copied()
+            .unwrap_or_default();
+        if shared > max_shared {
+            excluded_keys.insert(signature.key);
+            *excluded.entry((signature.key, directory)).or_default() += 1;
+            stats.largest_skipped_signature_units =
+                stats.largest_skipped_signature_units.max(shared);
+            continue;
+        }
         index
             .entry((signature.key, directory))
             .or_default()
             .push(unit);
     }
+    stats.common_signatures_skipped = excluded_keys.len();
+    stats.common_signature_dropped = groups
+        .groups
+        .iter()
+        .map(|group| {
+            group_posting_total(group, units, |key, directory| {
+                excluded.get(&(key, directory)).copied().unwrap_or_default()
+            })
+        })
+        .sum();
     for candidates in index.values_mut() {
         candidates.sort_by(|left, right| {
             units[*left]
@@ -262,13 +301,38 @@ fn sweep_signature_siblings(
     let group_candidate_counts: Vec<usize> = groups
         .groups
         .iter()
-        .map(|group| signature_candidate_count(group, units, &index))
+        .map(|group| {
+            group_posting_total(group, units, |key, directory| {
+                index.get(&(key, directory)).map_or(0, Vec::len)
+            })
+        })
         .collect();
     stats.eligible_candidates = group_candidate_counts.iter().sum();
 
+    // Every candidate offered to one group carries that group's medoid
+    // signature, so the number of units sharing it is uniform inside a group
+    // and decides only which groups reach the shared caps first. Rarer
+    // signatures go first, then the existing deterministic group order, so a
+    // cap truncates the least informative offers.
+    let mut order: Vec<usize> = (0..groups.groups.len()).collect();
+    order.sort_by_key(|&group_index| {
+        (
+            shared_signature_units(&groups.groups[group_index], units, &units_per_signature),
+            group_index,
+        )
+    });
+    let mut remaining_after = vec![0usize; order.len()];
+    let mut tail = 0usize;
+    for (position, &group_index) in order.iter().enumerate().rev() {
+        remaining_after[position] = tail;
+        tail += group_candidate_counts[group_index];
+    }
+
     let mut accepted = 0usize;
     let mut out = Vec::new();
-    'groups: for (group_index, group) in groups.groups.iter().enumerate() {
+    'groups: for (position, &group_index) in order.iter().enumerate() {
+        let group = &groups.groups[group_index];
+        let shared = shared_signature_units(group, units, &units_per_signature);
         let mut candidates = signature_candidate_stream(group, units, &index);
         let mut remaining = group_candidate_counts[group_index];
         let mut siblings = Vec::new();
@@ -282,12 +346,9 @@ fn sweep_signature_siblings(
             .and_then(|index| existing_similarity.get(index));
         loop {
             if accepted >= config.signature_siblings.total_cap {
-                stats.total_cap_dropped = stats.total_cap_dropped.saturating_add(
-                    remaining
-                        + group_candidate_counts[group_index + 1..]
-                            .iter()
-                            .sum::<usize>(),
-                );
+                stats.total_cap_dropped = stats
+                    .total_cap_dropped
+                    .saturating_add(remaining + remaining_after[position]);
                 if !siblings.is_empty() {
                     out.push(GroupSiblings {
                         group: group_index,
@@ -301,12 +362,9 @@ fn sweep_signature_siblings(
                 break;
             }
             if stats.candidates_examined >= config.signature_siblings.candidate_budget {
-                stats.candidate_budget_dropped = stats.candidate_budget_dropped.saturating_add(
-                    remaining
-                        + group_candidate_counts[group_index + 1..]
-                            .iter()
-                            .sum::<usize>(),
-                );
+                stats.candidate_budget_dropped = stats
+                    .candidate_budget_dropped
+                    .saturating_add(remaining + remaining_after[position]);
                 if !siblings.is_empty() {
                     out.push(GroupSiblings {
                         group: group_index,
@@ -354,6 +412,7 @@ fn sweep_signature_siblings(
                 breakdown,
                 basis: SiblingBasis::Signature,
                 signature: Some(signature.normalized.clone()),
+                signature_units: Some(shared),
             });
             accepted += 1;
             stats.accepted += 1;
@@ -365,16 +424,38 @@ fn sweep_signature_siblings(
             });
         }
     }
+    // Groups were visited rarest signature first; the channel's output stays
+    // in primary group order, as the merge step expects.
+    out.sort_by_key(|group| group.group);
     (out, stats)
 }
 
-/// Count one group's raw `(signature, directory)` posting entries without
-/// copying them. The count is the denominator for exact cap/drop accounting;
-/// per-unit safety guards are applied while the stream is consumed.
-fn signature_candidate_count(
+/// How many units in the tree share one group medoid's signature. Zero when
+/// the medoid has no signature, which is also how such a group sorts first:
+/// it offers no signature candidates at all.
+fn shared_signature_units(
     group: &StructuralGroup,
     units: &[Unit],
-    index: &BTreeMap<(SignatureKey, DirectoryPartition), Vec<usize>>,
+    units_per_signature: &BTreeMap<SignatureKey, usize>,
+) -> usize {
+    units[group.canonical]
+        .signature
+        .as_ref()
+        .and_then(|signature| units_per_signature.get(&signature.key))
+        .copied()
+        .unwrap_or_default()
+}
+
+/// Total the postings one group would traverse, without copying them: the
+/// medoid's signature key in each directory its members occupy. The caller
+/// supplies the posting size, so the same walk serves both the retained index
+/// and the postings the sharing limit excluded. The total is the denominator
+/// for exact cap/drop accounting; per-unit safety guards are applied while the
+/// stream is consumed.
+fn group_posting_total(
+    group: &StructuralGroup,
+    units: &[Unit],
+    mut posting_size: impl FnMut(SignatureKey, DirectoryPartition) -> usize,
 ) -> usize {
     let Some(signature) = units[group.canonical].signature.as_ref() else {
         return 0;
@@ -385,8 +466,7 @@ fn signature_candidate_count(
         .filter_map(|&member| units[member].directory)
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .filter_map(|directory| index.get(&(signature.key, directory)))
-        .map(Vec::len)
+        .map(|directory| posting_size(signature.key, directory))
         .sum()
 }
 
@@ -735,6 +815,286 @@ mod tests {
         (units, files, feature_files, evidence, groups)
     }
 
+    /// Two primary groups in two directories, each with one signature of its
+    /// own and ungrouped units beside it: one signature is shared by four
+    /// units of the tree, the other by three.
+    fn two_signature_inputs() -> (
+        Vec<Unit>,
+        Vec<SyntaxIrFile>,
+        Vec<FileFeatures>,
+        UnitEvidence,
+        GroupingSet,
+    ) {
+        let mut files = vec![
+            file(&["wide_anchor", "wide_first", "wide_second"]),
+            file(&["wide_peer"]),
+            file(&["rare_anchor", "rare_spare"]),
+            file(&["rare_peer"]),
+        ];
+        let wide = Signature::new(Language::Rust, "rust|params=[wide]|return=()");
+        let rare = Signature::new(Language::Rust, "rust|params=[rare]|return=()");
+        for (file_index, file) in files.iter_mut().enumerate() {
+            let signature = if file_index < 2 { &wide } else { &rare };
+            file.signatures = file
+                .roots
+                .iter()
+                .map(|root| (root.range, signature.clone()))
+                .collect();
+        }
+        let feature_files = files.iter().map(features::extract).collect();
+        let partitions = [
+            DirectoryPartition::new(0),
+            DirectoryPartition::new(0),
+            DirectoryPartition::new(1),
+            DirectoryPartition::new(1),
+        ];
+        let (units, _) = flatten_units_with_context(
+            &files,
+            &variant(),
+            LiteralNorm::Full,
+            &ResolvedTypes::default(),
+            Some(&partitions),
+        );
+        let evidence = unit_evidence(&units, &ResolvedTypes::default());
+        let grouping_units = units
+            .iter()
+            .map(|unit| GroupingUnit {
+                key: *unit.fingerprint.as_bytes(),
+            })
+            .collect::<Vec<_>>();
+        let edge = |a: usize, b: usize| SimilarityEdge {
+            a,
+            b,
+            similarity: 1.0,
+            breakdown: None,
+            class: CloneClass::Type1,
+            confidence: Confidence::High,
+        };
+        let groups = grouping::group(
+            &grouping_units,
+            &[edge(0, 3), edge(4, 6)],
+            &GroupingConfig::default(),
+        );
+        (units, files, feature_files, evidence, groups)
+    }
+
+    /// Copy a unit's analysed data. `Unit` is deliberately not `Clone`, so a
+    /// test that needs a second unit spells the copy out.
+    fn duplicate(unit: &Unit) -> Unit {
+        Unit {
+            file: unit.file,
+            local: unit.local,
+            kind: unit.kind,
+            statements: unit.statements.clone(),
+            fingerprint: unit.fingerprint,
+            content: unit.content,
+            normalized_content: unit.normalized_content,
+            signature: unit.signature.clone(),
+            directory: unit.directory,
+            range: unit.range,
+            lines: unit.lines,
+            tokens: unit.tokens,
+            name: unit.name.clone(),
+            boilerplate: unit.boilerplate,
+            test_code: unit.test_code,
+            test_code_evidence: unit.test_code_evidence,
+            arms: unit.arms.clone(),
+        }
+    }
+
+    /// Add units that carry one unit's signature but no directory context, so
+    /// they raise how widely the tree shares that signature without offering
+    /// themselves as candidates.
+    fn widen_signature(units: &mut Vec<Unit>, source: usize, extra: usize) {
+        for _ in 0..extra {
+            let mut copy = duplicate(&units[source]);
+            copy.directory = None;
+            units.push(copy);
+        }
+    }
+
+    #[test]
+    fn a_signature_shared_by_more_units_than_the_limit_offers_no_siblings() {
+        let (units, files, feature_files, evidence, groups) = signature_inputs();
+        let mut gated = config();
+        // Five units of the tree share the one signature in this fixture.
+        gated.signature_siblings.max_units_per_signature = 4;
+        let (siblings, stats) = sweep_signature_siblings(
+            &groups,
+            &units,
+            &files,
+            &feature_files,
+            &evidence,
+            &gated,
+            &[],
+        );
+        assert!(siblings.is_empty());
+        assert_eq!(stats.accepted, 0);
+        assert_eq!(stats.eligible_candidates, 0);
+        assert_eq!(stats.candidates_examined, 0);
+        assert_eq!(stats.common_signatures_skipped, 1);
+        assert_eq!(stats.largest_skipped_signature_units, 5);
+        assert_eq!(stats.common_signature_dropped, 2);
+    }
+
+    #[test]
+    fn the_share_count_covers_grouped_units_so_the_limit_cannot_loosen() {
+        let (units, files, feature_files, evidence, groups) = signature_inputs();
+        let ungrouped_with_signature = units
+            .iter()
+            .enumerate()
+            .filter(|(index, unit)| {
+                unit.signature.is_some()
+                    && !groups
+                        .groups
+                        .iter()
+                        .any(|group| group.members.contains(index))
+            })
+            .count();
+        assert_eq!(ungrouped_with_signature, 3);
+
+        // A limit of four can only exclude this signature if the two units
+        // primary grouping already holds are counted as sharing it too.
+        let mut gated = config();
+        gated.signature_siblings.max_units_per_signature = 4;
+        let (_, stats) = sweep_signature_siblings(
+            &groups,
+            &units,
+            &files,
+            &feature_files,
+            &evidence,
+            &gated,
+            &[],
+        );
+        assert_eq!(stats.accepted, 0);
+        assert_eq!(stats.largest_skipped_signature_units, 5);
+    }
+
+    #[test]
+    fn a_signature_within_the_limit_keeps_its_siblings_and_names_the_share_count() {
+        let (units, files, feature_files, evidence, groups) = signature_inputs();
+        let mut allowed = config();
+        allowed.signature_siblings.max_units_per_signature = 5;
+        let (siblings, stats) = sweep_signature_siblings(
+            &groups,
+            &units,
+            &files,
+            &feature_files,
+            &evidence,
+            &allowed,
+            &[],
+        );
+        assert_eq!(stats.accepted, 2);
+        assert_eq!(stats.common_signatures_skipped, 0);
+        assert_eq!(stats.largest_skipped_signature_units, 0);
+        assert_eq!(stats.common_signature_dropped, 0);
+        for sibling in siblings.iter().flat_map(|group| &group.siblings) {
+            assert_eq!(sibling.basis, SiblingBasis::Signature);
+            assert_eq!(sibling.signature_units, Some(5));
+            assert_eq!(
+                sibling.confidence,
+                Confidence::Low,
+                "rarity travels as a number, never as a stronger confidence band"
+            );
+        }
+
+        // The limit is the caller's, and one unit lower turns the same input
+        // into no siblings at all.
+        let mut refused = config();
+        refused.signature_siblings.max_units_per_signature = 4;
+        let (refused_siblings, refused_stats) = sweep_signature_siblings(
+            &groups,
+            &units,
+            &files,
+            &feature_files,
+            &evidence,
+            &refused,
+            &[],
+        );
+        assert!(refused_siblings.is_empty());
+        assert_eq!(refused_stats.accepted, 0);
+    }
+
+    #[test]
+    fn the_sharing_limit_and_the_caps_are_counted_in_separate_fields() {
+        let (units, files, feature_files, evidence, groups) = two_signature_inputs();
+        let mut limited = config();
+        // Four units share the first signature and three share the second, so
+        // the limit excludes one key and leaves the other to the caps.
+        limited.signature_siblings = SignatureSiblingConfig {
+            max_units_per_signature: 3,
+            candidate_budget: 10,
+            per_group_cap: 0,
+            total_cap: 10,
+        };
+        let (siblings, stats) = sweep_signature_siblings(
+            &groups,
+            &units,
+            &files,
+            &feature_files,
+            &evidence,
+            &limited,
+            &[],
+        );
+        assert!(siblings.is_empty());
+        assert_eq!(stats.common_signatures_skipped, 1);
+        assert_eq!(stats.largest_skipped_signature_units, 4);
+        assert_eq!(stats.common_signature_dropped, 2);
+        assert_eq!(stats.eligible_candidates, 1);
+        assert_eq!(stats.per_group_cap_dropped, 1);
+        assert_eq!(stats.candidate_budget_dropped, 0);
+        assert_eq!(stats.total_cap_dropped, 0);
+    }
+
+    #[test]
+    fn signature_siblings_reaching_a_shared_cap_are_the_rarest_signatures_first() {
+        let (units, files, feature_files, evidence, groups) = two_signature_inputs();
+        let mut capped = config();
+        capped.signature_siblings = SignatureSiblingConfig {
+            max_units_per_signature: 8,
+            candidate_budget: 10,
+            per_group_cap: 8,
+            total_cap: 1,
+        };
+        // The group whose signature four units share owns the lower group
+        // index, so only the share count can put the rarer one first.
+        let (siblings, stats) = sweep_signature_siblings(
+            &groups,
+            &units,
+            &files,
+            &feature_files,
+            &evidence,
+            &capped,
+            &[],
+        );
+        assert_eq!(stats.eligible_candidates, 3);
+        assert_eq!(stats.accepted, 1);
+        assert_eq!(stats.total_cap_dropped, 2);
+        assert_eq!(siblings.len(), 1);
+        assert_eq!(siblings[0].group, 1);
+        assert_eq!(siblings[0].siblings[0].unit, 5);
+        assert_eq!(siblings[0].siblings[0].signature_units, Some(3));
+
+        // Widen the second signature past the first, and the survivor flips.
+        let (mut widened_units, files, feature_files, _, groups) = two_signature_inputs();
+        widen_signature(&mut widened_units, 5, 3);
+        let evidence = unit_evidence(&widened_units, &ResolvedTypes::default());
+        let (widened, widened_stats) = sweep_signature_siblings(
+            &groups,
+            &widened_units,
+            &files,
+            &feature_files,
+            &evidence,
+            &capped,
+            &[],
+        );
+        assert_eq!(widened_stats.accepted, 1);
+        assert_eq!(widened_stats.total_cap_dropped, 2);
+        assert_eq!(widened.len(), 1);
+        assert_eq!(widened[0].group, 0);
+        assert_eq!(widened[0].siblings[0].signature_units, Some(4));
+    }
+
     #[test]
     fn signature_channel_finds_same_directory_ungrouped_units_and_wins_overlap() {
         let (units, files, feature_files, evidence, groups) = signature_inputs();
@@ -861,6 +1221,7 @@ mod tests {
             total_cap: 0,
         };
         signature_limited.signature_siblings = SignatureSiblingConfig {
+            max_units_per_signature: 8,
             candidate_budget: 10,
             per_group_cap: 1,
             total_cap: 10,
@@ -885,6 +1246,7 @@ mod tests {
 
         let mut budget_limited = config();
         budget_limited.signature_siblings = SignatureSiblingConfig {
+            max_units_per_signature: 8,
             candidate_budget: 1,
             per_group_cap: 10,
             total_cap: 10,
@@ -906,6 +1268,7 @@ mod tests {
 
         let mut total_limited = config();
         total_limited.signature_siblings = SignatureSiblingConfig {
+            max_units_per_signature: 8,
             candidate_budget: 10,
             per_group_cap: 10,
             total_cap: 1,
@@ -930,48 +1293,9 @@ mod tests {
     fn high_frequency_signature_posting_stops_at_budget_without_group_materialization() {
         const POSTING_SIZE: usize = 4_096;
         let (mut units, files, feature_files, evidence, groups) = signature_inputs();
-        let prototype = {
-            let source = &units[1];
-            Unit {
-                file: source.file,
-                local: source.local,
-                kind: source.kind,
-                statements: source.statements.clone(),
-                fingerprint: source.fingerprint,
-                content: source.content,
-                normalized_content: source.normalized_content,
-                signature: source.signature.clone(),
-                directory: source.directory,
-                range: source.range,
-                lines: source.lines,
-                tokens: source.tokens,
-                name: source.name.clone(),
-                boilerplate: source.boilerplate,
-                test_code: source.test_code,
-                test_code_evidence: source.test_code_evidence,
-                arms: source.arms.clone(),
-            }
-        };
+        let prototype = duplicate(&units[1]);
         for index in 0..POSTING_SIZE {
-            let mut unit = Unit {
-                file: prototype.file,
-                local: prototype.local,
-                kind: prototype.kind,
-                statements: prototype.statements.clone(),
-                fingerprint: prototype.fingerprint,
-                content: prototype.content,
-                normalized_content: prototype.normalized_content,
-                signature: prototype.signature.clone(),
-                directory: prototype.directory,
-                range: prototype.range,
-                lines: prototype.lines,
-                tokens: prototype.tokens,
-                name: prototype.name.clone(),
-                boilerplate: prototype.boilerplate,
-                test_code: prototype.test_code,
-                test_code_evidence: prototype.test_code_evidence,
-                arms: prototype.arms.clone(),
-            };
+            let mut unit = duplicate(&prototype);
             let mut fingerprint = [0_u8; 16];
             fingerprint[..8]
                 .copy_from_slice(&u64::try_from(index + 10).unwrap_or(u64::MAX).to_le_bytes());
@@ -980,6 +1304,9 @@ mod tests {
         }
         let mut limited = config();
         limited.signature_siblings = SignatureSiblingConfig {
+            // This case is about the budget alone, so the sharing limit is
+            // put out of the way rather than allowed to empty the posting.
+            max_units_per_signature: usize::MAX,
             candidate_budget: 3,
             per_group_cap: POSTING_SIZE + 2,
             total_cap: POSTING_SIZE + 2,
