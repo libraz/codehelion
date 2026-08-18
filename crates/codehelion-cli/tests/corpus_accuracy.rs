@@ -159,6 +159,35 @@ const CORPORA: &[Expected] = &[
         ],
     },
     Expected {
+        name: "cpp-common-signature",
+        measurements: [
+            // One signature covers every function in the corpus, and only one
+            // of them is duplicated. Both modes report that one pair and
+            // nothing else: the shared signature is not by itself a reason to
+            // report anything, in either the primary stream or the side one.
+            Measurements {
+                mode: "fast",
+                by_type: [Some(1.0), None, None],
+                precision: 1.0,
+                findings_per_kloc: 7.5758,
+                false_positives_per_kloc: 0.0,
+                recall: 1.0,
+                non_clone_hits: 0,
+                shortfall: "",
+            },
+            Measurements {
+                mode: "structural",
+                by_type: [Some(1.0), None, None],
+                precision: 1.0,
+                findings_per_kloc: 7.5758,
+                false_positives_per_kloc: 0.0,
+                recall: 1.0,
+                non_clone_hits: 0,
+                shortfall: "",
+            },
+        ],
+    },
+    Expected {
         name: "rust-graded",
         measurements: [
             Measurements {
@@ -456,6 +485,26 @@ fn primary_keys(
         .collect()
 }
 
+/// How many units a report's funnel let through one stage.
+fn funnel_stage(report: &str, name: &str) -> u64 {
+    let json: serde_json::Value = serde_json::from_str(report).expect("report is JSON");
+    json["summary"]["funnel"]
+        .as_array()
+        .expect("the report has a funnel")
+        .iter()
+        .find(|stage| stage["stage"] == name)
+        .and_then(|stage| stage["passed"].as_u64())
+        .unwrap_or_else(|| panic!("the funnel has a {name} stage"))
+}
+
+/// How many units may share one signature before it stops being evidence.
+fn sharing_limit() -> u64 {
+    u64::try_from(
+        codehelion_core::structural::SignatureSiblingConfig::default().max_units_per_signature,
+    )
+    .expect("the sharing limit fits in u64")
+}
+
 #[test]
 fn cpp_signature_mirror_is_measured_outside_primary_accuracy() {
     let root = repo_root();
@@ -554,6 +603,128 @@ fn cpp_signature_mirror_is_measured_outside_primary_accuracy() {
     );
 }
 
+/// A signature earns attention by being rare. When one signature covers a
+/// whole file, the sibling channel has nothing to say about any unit holding
+/// it — not even about the one pair inside it that really is a copy. That pair
+/// is what primary grouping is for, and losing it from the side stream costs
+/// nothing as long as the primary result still reports it, which is the two
+/// halves this pins together.
+#[test]
+fn cpp_common_signature_silences_siblings_while_primary_keeps_the_duplicate() {
+    let root = repo_root();
+    let corpus = root.join("corpus/synthetic/cpp-common-signature");
+    let labels_text = std::fs::read_to_string(corpus.join("labels.json"))
+        .expect("common-signature labels are committed");
+    let labels = LabelSet::from_json(&labels_text).expect("common-signature labels parse");
+    // The corpus expects no sibling at all, so it carries no mirror label: the
+    // duplication it does hold is an ordinary labelled clone pair.
+    assert!(labels.known_siblings.is_empty());
+    assert_eq!(labels.clone_pairs.len(), 1);
+
+    let scratch = tempfile::tempdir().expect("temp dir");
+    let report = scan_with_signature(
+        &corpus,
+        "structural",
+        &scratch.path().join("common-signature-on.db"),
+        true,
+    );
+    let (result, lines, sibling_groups) = detected::from_report_json_with_siblings(&report)
+        .expect("structural report has the current sibling contract");
+
+    // Every function in this corpus takes the same parameters and returns the
+    // same type, so the unit count is also the number of units sharing the one
+    // signature, and it is above what that signature is allowed to cover.
+    let units = funnel_stage(&report, "units");
+    assert_eq!(units, 10);
+    assert!(units > sharing_limit());
+    assert_eq!(funnel_stage(&report, "signature sibling entries"), 0);
+
+    let sibling_metrics = evaluate_siblings(&sibling_groups, &labels, DEFAULT_MATCH_THRESHOLD);
+    assert_eq!(sibling_metrics.signature_siblings_total, 0);
+    assert!(
+        sibling_groups
+            .iter()
+            .flat_map(|group| &group.siblings)
+            .all(|sibling| sibling.basis != SiblingBasis::Signature)
+    );
+
+    // The copied function is recovered by the primary path, which is the half
+    // of the trade that has to hold for the silenced channel to be acceptable.
+    let metrics = evaluate(&result, &labels, lines, DEFAULT_MATCH_THRESHOLD, 10);
+    assert_eq!(metrics.total_findings, 1);
+    assert_eq!(metrics.true_positives, 1);
+    assert_eq!(metrics.false_positives, 0);
+    assert_eq!(metrics.recall_overall, Some(1.0));
+    let files: BTreeSet<&str> = result
+        .findings
+        .iter()
+        .flat_map(|finding| &finding.fragments)
+        .map(|fragment| fragment.file.as_str())
+        .collect();
+    assert_eq!(
+        files,
+        ["copy.cpp", "seed.cpp"]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
+
+    // Asking for signature siblings changed nothing in the primary stream: the
+    // sharing limit belongs to the side channel and stays there.
+    let report_off = scan(
+        &corpus,
+        "structural",
+        &scratch.path().join("common-signature-off.db"),
+    );
+    let (result_off, _) =
+        detected::from_report_json(&report_off).expect("default-off report reads");
+    assert_eq!(primary_keys(&result_off), primary_keys(&result));
+}
+
+/// The silence above is the sharing limit's doing and not an absence of
+/// candidates: the same corpus with few enough functions left in it offers the
+/// remaining same-signature units as siblings of the very same group.
+#[test]
+fn cpp_common_signature_offers_siblings_once_few_enough_units_share_it() {
+    let root = repo_root();
+    let corpus = root.join("corpus/synthetic/cpp-common-signature");
+    let scratch = tempfile::tempdir().expect("temp dir");
+    let thinned = scratch.path().join("cpp-fewer-sharers");
+    std::fs::create_dir(&thinned).expect("thinned corpus directory");
+    // The seed writes one function per blank-line-separated block after its
+    // header comment, so keeping the first blocks keeps whole functions.
+    let seed = std::fs::read_to_string(corpus.join("seed.cpp")).expect("seed is committed");
+    let kept: Vec<&str> = seed.split("\n\n").take(5).collect();
+    std::fs::write(thinned.join("seed.cpp"), kept.join("\n\n")).expect("thinned seed");
+    std::fs::copy(corpus.join("copy.cpp"), thinned.join("copy.cpp")).expect("copied duplicate");
+
+    let report = scan_with_signature(
+        &thinned,
+        "structural",
+        &scratch.path().join("fewer-sharers.db"),
+        true,
+    );
+    let units = funnel_stage(&report, "units");
+    assert_eq!(units, 5);
+    assert!(units <= sharing_limit());
+
+    let (_, _, sibling_groups) = detected::from_report_json_with_siblings(&report)
+        .expect("structural report has the current sibling contract");
+    let signature_siblings: Vec<_> = sibling_groups
+        .iter()
+        .flat_map(|group| &group.siblings)
+        .filter(|sibling| sibling.basis == SiblingBasis::Signature)
+        .collect();
+    // Every ungrouped unit left in the tree holds the signature, and each of
+    // them is offered as evidence about the group that holds it too.
+    assert_eq!(signature_siblings.len(), 3);
+    assert_eq!(funnel_stage(&report, "signature sibling entries"), 3);
+    assert!(
+        signature_siblings
+            .iter()
+            .all(|sibling| sibling.confidence_band == "low")
+    );
+}
+
 #[test]
 fn cpp_mirror_does_not_change_primary_sets_or_stability() {
     let root = repo_root();
@@ -616,9 +787,10 @@ fn every_corpus_stays_at_its_recorded_accuracy_in_each_mode() {
     let root = repo_root();
     let scratch = tempfile::tempdir().expect("temp dir");
     let mut table = String::from(
-        "\nmode       corpus            recall  precision  findings/kLOC  FP/kLOC  non-clone hits\n",
+        "\nmode       corpus                recall  precision  findings/kLOC  FP/kLOC  non-clone hits\n",
     );
-    let mut by_type = String::from("\nmode       corpus              type-1   type-2   type-3\n");
+    let mut by_type =
+        String::from("\nmode       corpus                  type-1   type-2   type-3\n");
     let mut complaints = String::new();
 
     for expected in CORPORA {
@@ -643,7 +815,7 @@ fn every_corpus_stays_at_its_recorded_accuracy_in_each_mode() {
             let metrics = evaluate(&result, &labels, lines, DEFAULT_MATCH_THRESHOLD, 10);
             writeln!(
                 table,
-                "{:<10} {:<16} {:>6} {:>10} {:>14} {:>8} {:>15}",
+                "{:<10} {:<20} {:>6} {:>10} {:>14} {:>8} {:>15}",
                 measurement.mode,
                 expected.name,
                 show_metric(metrics.recall_overall),
@@ -653,7 +825,7 @@ fn every_corpus_stays_at_its_recorded_accuracy_in_each_mode() {
                 metrics.non_clone_hits,
             )
             .expect("writing to a string cannot fail");
-            write!(by_type, "{:<10} {:<16}", measurement.mode, expected.name)
+            write!(by_type, "{:<10} {:<20}", measurement.mode, expected.name)
                 .expect("writing to a string cannot fail");
             let types = [CloneType::Type1, CloneType::Type2, CloneType::Type3];
             for (clone_type, recorded) in types.into_iter().zip(measurement.by_type) {

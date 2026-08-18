@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "language": "cpp",
+  "files": [
+    "seed.cpp",
+    "copy.cpp"
+  ],
+  "clone_pairs": [
+    {
+      "id": "cp-001",
+      "type": "type-1",
+      "fragments": [
+        {
+          "file": "seed.cpp",
+          "start_line": 8,
+          "end_line": 16
+        },
+        {
+          "file": "copy.cpp",
+          "start_line": 5,
+          "end_line": 14
+        }
+      ]
+    }
+  ],
+  "non_clones": []
+}

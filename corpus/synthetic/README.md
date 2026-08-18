@@ -43,6 +43,13 @@ mutation spec, the generated variant sources and the generated `labels.json`:
   `non_clone`. Precision measurement: what must come out is one group per
   function and nothing that mixes two of them.
 - `c/` and `cpp/` — the Rust reference case ported to C and C++.
+- `cpp-common-signature/` — nine C++ functions that take the same parameters
+  and return the same type, so one signature covers the whole file, and a copy
+  of the single duplicated one in a second file. A signature is evidence only
+  while it is rare, so a key held by more units than the sharing limit allows
+  contributes no siblings at all — not even for the pair that really is a copy.
+  What the case fixes is both halves of that trade: nothing comes out of the
+  signature channel, and the primary result still reports the copy.
 - `rust-cpp-semantic/` — a hand-labelled, compiler-backed Rust/C++ porting
   corpus for restricted-semantic rules. It covers a SOURCE/COLLECT
   correspondence, an Option/optional validation correspondence, and a
