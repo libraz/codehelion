@@ -416,19 +416,28 @@ top-down.
 
 **Incomplete or edited copies are harder to detect.** Structural and Semantic
 modes generate the sibling channel only with `--siblings-by-signature`; it is
-off by default because of how much it produces. Run over a 264,860-line C++
-tree in Structural mode, it filled the 1,000-entry report ceiling and dropped
-8,586 further signature candidates — 7,322 to the per-group cap and 1,264 to
-the total cap. The counts are deterministic for a given tree and set of caps,
-so they are a property of the settings rather than of the machine; both caps
-are configurable. When enabled, the channel can retain a
-low-confidence sibling when its normalized signature matches the group’s
-canonical function and the otherwise ungrouped function is in the same directory.
-`--show-siblings` only changes text visibility; JSON and SARIF retain generated
-sibling data. A mirror in another directory, a changed signature, or a
-candidate beyond the sibling-search ceiling can still keep a copy out;
+off by default. When enabled, the channel can retain a low-confidence sibling
+when its normalized signature matches the group's canonical function and the
+otherwise ungrouped function is in the same directory. A shared signature is
+evidence only while it is rare, so a signature that more units share than
+`limits.signature-sibling-max-units-per-signature` allows is left out of the
+search entirely, and the summary names how many signatures were left out and
+how far the widest one reached. Candidates removed by that limit are counted
+apart from those a search ceiling dropped, so a reader can tell which of the
+two to move; both are configurable, and the counts are deterministic for a
+given tree and settings rather than a property of the machine.
+`--show-siblings` only changes text visibility; JSON and SARIF retain
+generated sibling data. A mirror in another directory, a changed signature, or
+a candidate beyond the sibling-search ceiling can still keep a copy out;
 codehelion is not a mirror-consistency checker. It does not prove that every
 mirror has been found or that two same-signature bodies behave alike.
+
+**A layer built on one signature gets nothing from that channel.** Where a
+dispatch or callback table gives a hundred functions the same callable shape,
+the signature separates nothing, and the channel has no evidence to offer
+about that layer at all. Saying so is the point of the sharing limit: the
+alternative is thousands of siblings that each pair one arbitrary function
+with another, which reads like a result until it is examined.
 
 **Large trees hit ceilings.** The candidate budget and the high-frequency
 posting cap bound the search, and a run that hits either reports how much it

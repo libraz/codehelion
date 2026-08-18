@@ -811,6 +811,38 @@ fn readmes_explain_artifact_folding_and_size_relevance() {
     assert!(japanese.contains("Type-2 / Type-3"));
 }
 
+/// The channel's own blind spot is documented, and the counts it produces are
+/// left to the run that produces them: a figure written here has nothing that
+/// re-derives it, and the summary now names both numbers per run.
+#[test]
+fn readmes_name_the_shape_of_code_signature_siblings_cannot_help() {
+    let english = include_str!("../../../README.md");
+    for snippet in [
+        "A layer built on one signature gets nothing from that channel",
+        "dispatch or callback table",
+        "limits.signature-sibling-max-units-per-signature",
+        "how far the widest one reached",
+    ] {
+        assert!(
+            english.contains(snippet),
+            "English README is missing {snippet}"
+        );
+    }
+
+    let japanese = include_str!("../../../README_ja.md");
+    for snippet in [
+        "1 つのシグネチャで駆動する層に、このチャネルは何も与えません",
+        "callback table",
+        "limits.signature-sibling-max-units-per-signature",
+        "いちばん広く共有されていたもの",
+    ] {
+        assert!(
+            japanese.contains(snippet),
+            "Japanese README is missing {snippet}"
+        );
+    }
+}
+
 #[test]
 fn readmes_describe_opt_in_sibling_evidence_limits() {
     let english = include_str!("../../../README.md");
