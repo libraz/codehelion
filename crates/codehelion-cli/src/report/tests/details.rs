@@ -713,6 +713,127 @@ fn a_listing_of_runs_says_what_a_run_is() {
 }
 
 #[test]
+fn a_listing_says_what_the_count_after_the_heading_counts() {
+    let text = rendered(&sample_report(), TextOptions::default());
+    // The mark is on every heading, and reads as a multiple of the code until
+    // the legend says it counts occurrences.
+    assert!(text.contains("×N the number of occurrences"), "{text}");
+}
+
+#[test]
+fn a_listing_of_nothing_explains_no_marks() {
+    let mut report = sample_report();
+    report.groups.clear();
+    let text = rendered(&report, TextOptions::default());
+    assert!(!text.contains("the number of occurrences"), "{text}");
+    assert!(
+        !text.contains("the occurrence a group is measured against"),
+        "{text}"
+    );
+    assert!(!text.contains("codehelion explain"), "{text}");
+}
+
+/// The depth at which the composition of the group total is written.
+fn composition_detail() -> TextOptions {
+    TextOptions {
+        verbosity: 1,
+        ..TextOptions::default()
+    }
+}
+
+#[test]
+fn each_part_of_the_group_total_names_the_total_it_is_part_of() {
+    let mut report = sample_report();
+    report.summary.groups.total = 3;
+    report.summary.groups.fragment_scope = 1;
+    report.summary.groups.folded_runs = 4;
+    report.summary.groups.subsumed_runs = 2;
+    report.summary.groups.test_code = 1;
+    let text = rendered(&report, composition_detail());
+
+    // Three of these counts are read against a different total, so no line
+    // stands in for its total with a pronoun.
+    assert!(!text.contains("of them"), "{text}");
+    let line = |needle: &str| {
+        text.lines()
+            .find(|line| line.contains(needle))
+            .unwrap_or_default()
+            .to_string()
+    };
+    let runs = line("describe a repeated run");
+    assert!(
+        runs.contains("of the 3 listed groups, 1 describe"),
+        "{text}"
+    );
+    let left_out = line("folded into groups that already cover them");
+    assert!(
+        left_out.contains("runs not among the 3 listed groups: 4 folded"),
+        "{text}"
+    );
+    assert!(left_out.contains("2 covered by a longer run"), "{text}");
+    let suite = line("duplication inside test code");
+    assert!(suite.contains("of the 3 listed groups, 1 are"), "{text}");
+
+    // The breakdown shares no total with the suppression split, which stands
+    // after it rather than reading as its heading.
+    let suppressed = text
+        .lines()
+        .position(|line| line.contains("suppressed: "))
+        .expect("the suppression split is written at this depth");
+    let last_part = text
+        .lines()
+        .position(|line| line.contains("duplication inside test code"))
+        .expect("the test-code part is written at this depth");
+    assert!(suppressed > last_part, "{text}");
+}
+
+#[test]
+fn runs_left_out_of_the_listing_are_named_only_when_there_were_some() {
+    let mut report = sample_report();
+    report.summary.groups.fragment_scope = 1;
+    let text = rendered(&report, composition_detail());
+    assert!(!text.contains("runs not among the"), "{text}");
+
+    report.summary.groups.folded_runs = 4;
+    let folded = rendered(&report, composition_detail());
+    assert!(
+        folded.contains(
+            "runs not among the 2 listed groups: 4 folded into groups that already \
+             cover them\n"
+        ),
+        "{folded}"
+    );
+
+    report.summary.groups.folded_runs = 0;
+    report.summary.groups.subsumed_runs = 2;
+    let subsumed = rendered(&report, composition_detail());
+    assert!(
+        subsumed.contains("runs not among the 2 listed groups: 2 covered by a longer run\n"),
+        "{subsumed}"
+    );
+}
+
+#[test]
+fn the_parts_of_the_group_total_are_written_with_thousands_separators() {
+    let mut report = sample_report();
+    report.summary.groups.total = 10_853;
+    report.summary.groups.fragment_scope = 1_036;
+    report.summary.groups.folded_runs = 3_070;
+    report.summary.groups.subsumed_runs = 1_423;
+    report.summary.groups.test_code = 8_087;
+    report.summary.suppressed.noise = 1_811;
+    report.summary.suppressed.by_rule = 1_640;
+    let text = rendered(&report, composition_detail());
+    // A count written one way in the headline and another in the breakdown
+    // reads as a count of something else.
+    for written in [
+        "10,853", "1,036", "3,070", "1,423", "8,087", "1,811", "1,640",
+    ] {
+        assert!(text.contains(written), "{written} in {text}");
+    }
+}
+
+#[test]
 fn a_quiet_listing_is_the_groups_alone() {
     let text = rendered(
         &sample_report(),

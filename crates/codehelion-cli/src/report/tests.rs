@@ -664,11 +664,22 @@ fn a_duplicated_run_states_its_extent_in_every_view() {
         .unwrap();
     let detailed = String::from_utf8(detailed).unwrap();
     assert!(detailed.contains("run of 5 statements"), "{detailed}");
-    // What was folded away is stated rather than silently dropped.
-    assert!(detailed.contains(
-        "1 of them are runs duplicated inside units that are not clones of each other; \
-         4 more were folded into the groups that already cover them and 2 into longer runs"
-    ));
+    // What was folded away is stated rather than silently dropped, and each
+    // count says which total it belongs to.
+    assert!(
+        detailed.contains(
+            "of the 3 listed groups, 1 describe a repeated run inside units that are not clones \
+             of each other"
+        ),
+        "{detailed}"
+    );
+    assert!(
+        detailed.contains(
+            "runs not among the 3 listed groups: 4 folded into groups that already cover them; \
+             2 covered by a longer run"
+        ),
+        "{detailed}"
+    );
 }
 
 #[test]
@@ -1322,10 +1333,13 @@ fn a_group_inside_the_suite_says_so_in_every_view() {
             &mut detailed,
         )
         .unwrap();
+    let detailed = String::from_utf8(detailed).unwrap();
     assert!(
-        String::from_utf8(detailed)
-            .unwrap()
-            .contains("1 of them are duplication inside test code")
+        detailed.contains(
+            "of the 2 listed groups, 1 are duplication inside test code, which repeats itself by \
+             design"
+        ),
+        "{detailed}"
     );
 }
 

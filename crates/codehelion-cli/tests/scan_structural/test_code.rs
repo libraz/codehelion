@@ -51,7 +51,7 @@ fn duplication_inside_a_test_suite_is_reported_and_marked() {
         // it sits where it does.
         .stdout(predicate::str::contains("[test code]"))
         .stdout(predicate::str::contains(
-            "1 of them are duplication inside test code",
+            "of the 1 listed group, 1 are duplication inside test code",
         ));
 
     let value = scan_json(dir.path());

@@ -413,6 +413,13 @@ impl Report {
         if listed.iter().any(|group| group.scope == SCOPE_FRAGMENT) {
             legend.push("\"run\" a repeated stretch of statements, not a whole unit".to_string());
         }
+        // Every listed heading ends in this mark, so a listing existing at all
+        // is what says the report used it. Explained because the mark reads as
+        // a multiple of the code until something says it counts occurrences.
+        legend.push(format!(
+            "{}N the number of occurrences",
+            opts.decoration.times(),
+        ));
         if !legend.is_empty() {
             writeln!(out, "{}", palette.dim(&legend.join(&separator)))?;
         }
@@ -432,33 +439,58 @@ impl Report {
     /// was hidden by a default nobody typed.
     fn render_composition_detail(&self, out: &mut impl Write) -> io::Result<()> {
         let summary = &self.summary;
+        let groups = &summary.groups;
+        // Every line names the total it is a part of. These counts are read
+        // against three different totals — two of them describe groups that
+        // were listed, one describes runs that never reached the listing —
+        // and a pronoun standing in for the total made them read as one.
+        let listed = plural(groups.total, "listed group");
+        if groups.fragment_scope > 0 {
+            writeln!(
+                out,
+                "  of the {listed}, {} describe a repeated run inside units that are not clones \
+                 of each other",
+                thousands(groups.fragment_scope),
+            )?;
+        }
+        let mut left_out = Vec::new();
+        if groups.folded_runs > 0 {
+            left_out.push(format!(
+                "{} folded into groups that already cover them",
+                thousands(groups.folded_runs),
+            ));
+        }
+        if groups.subsumed_runs > 0 {
+            left_out.push(format!(
+                "{} covered by a longer run",
+                thousands(groups.subsumed_runs),
+            ));
+        }
+        if !left_out.is_empty() {
+            writeln!(
+                out,
+                "  runs not among the {listed}: {}",
+                left_out.join("; "),
+            )?;
+        }
+        if groups.test_code > 0 {
+            writeln!(
+                out,
+                "  of the {listed}, {} are duplication inside test code, which repeats itself by \
+                 design; a group spanning a test and what it exercises is not counted here",
+                thousands(groups.test_code),
+            )?;
+        }
         // Which mechanism hid a group is what says whether to argue with a
         // rule or with the detector, so the split is stated even when it is
-        // all zeroes.
+        // all zeroes. Last, because it shares a total with none of the lines
+        // above and reads as their heading when it stands first.
         writeln!(
             out,
             "  suppressed: {} noise, {} by rule",
-            summary.suppressed.noise, summary.suppressed.by_rule,
-        )?;
-        let runs = &summary.groups;
-        if runs.fragment_scope > 0 || runs.folded_runs > 0 || runs.subsumed_runs > 0 {
-            writeln!(
-                out,
-                "  {} of them are runs duplicated inside units that are not clones of each \
-                 other; {} more were folded into the groups that already cover them and {} \
-                 into longer runs",
-                runs.fragment_scope, runs.folded_runs, runs.subsumed_runs,
-            )?;
-        }
-        if summary.groups.test_code > 0 {
-            writeln!(
-                out,
-                "  {} of them are duplication inside test code, which repeats itself by \
-                 design; a group spanning a test and what it exercises is not counted here",
-                summary.groups.test_code,
-            )?;
-        }
-        Ok(())
+            thousands(summary.suppressed.noise),
+            thousands(summary.suppressed.by_rule),
+        )
     }
 
     /// Write what qualifies the whole report rather than any part of it: an

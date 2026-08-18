@@ -140,7 +140,8 @@ fn a_run_shared_by_unrelated_units_is_reported_as_a_run() {
         .stdout(predicate::str::contains("src/render.rs:17-20"))
         .stdout(predicate::str::contains("render_rows"))
         .stdout(predicate::str::contains(
-            "1 of them are runs duplicated inside units that are not clones of each other",
+            "of the 1 listed group, 1 describe a repeated run inside units that are not clones \
+             of each other",
         ));
 
     let value = scan_json(dir.path());
@@ -240,8 +241,10 @@ fn a_run_a_group_already_covers_is_folded_into_it_and_counted() {
         .args(["scan", ".", "--mode", "structural", "-v"])
         .assert()
         .success()
+        // Counted apart from the listed groups, and said to be apart from them.
+        .stdout(predicate::str::contains("runs not among the "))
         .stdout(predicate::str::contains(
-            "were folded into the groups that already cover them",
+            "folded into groups that already cover them",
         ));
 
     let value = scan_json(dir.path());
