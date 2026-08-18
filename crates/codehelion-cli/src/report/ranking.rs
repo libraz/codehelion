@@ -461,6 +461,7 @@ pub fn restored(stored: &SummaryRow, groups: &[Group], analysis_mode: &str) -> S
         .collect();
     let search_truncated = search_truncated(&funnel);
     Summary {
+        top_churn: None,
         files: FileCounts {
             total: stored.analyzed_files.total,
             rust: stored.analyzed_files.rust,

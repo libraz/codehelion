@@ -312,7 +312,14 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
                                             run_id,
                                             predecessor,
                                             &mut model.groups,
-                                        )
+                                        )?;
+                                        model.summary.top_churn = Some(top_group_churn(
+                                            &store,
+                                            run_id,
+                                            predecessor,
+                                            cfg.report.churn_top,
+                                        )?);
+                                        Ok(())
                                     })
                                 })
                         })
@@ -906,9 +913,10 @@ fn fast_group_scope(group: &CloneGroup, lexed: &[LexedSource]) -> CloneScope {
 pub(crate) mod output;
 
 pub(crate) use output::{
-    ReportOutput, hydrate_artifact_savings, hydrate_group_identity, write_partitioned_reports,
-    write_partitioned_reports_without_artifact_guidance, write_report, write_report_options,
-    write_report_options_without_artifact_guidance, write_report_without_artifact_guidance,
+    ReportOutput, hydrate_artifact_savings, hydrate_group_identity, top_group_churn,
+    write_partitioned_reports, write_partitioned_reports_without_artifact_guidance, write_report,
+    write_report_options, write_report_options_without_artifact_guidance,
+    write_report_without_artifact_guidance,
 };
 
 /// One lexed file's units as the suppression rules see them: their line

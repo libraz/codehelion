@@ -454,6 +454,40 @@
             }
           }
         },
+        "top_churn": {
+          "type": "object",
+          "description": "What became of the highest-ranked groups of the run this one was compared with. Absent when there was no such run. A total counts how much duplication a tree holds rather than how much of it anyone has dealt with, so this states the part that was acted on separately.",
+          "required": [
+            "since_run_id",
+            "top",
+            "closed",
+            "entered"
+          ],
+          "properties": {
+            "since_run_id": {
+              "type": "integer",
+              "description": "Completed run used as the comparison point."
+            },
+            "top": {
+              "type": "integer",
+              "description": "How many of each run's highest-ranked groups were compared."
+            },
+            "closed": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/hex"
+              },
+              "description": "Groups of that run's top which this run no longer holds under this fingerprint or any successor that took over their history. A group whose history moved to a successor did not close."
+            },
+            "entered": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/hex"
+              },
+              "description": "Groups of this run's top that the earlier run's top did not hold, and that did not inherit their history from one that it did."
+            }
+          }
+        },
         "groups": {
           "type": "object",
           "required": [

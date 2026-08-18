@@ -409,6 +409,27 @@ pub struct SemanticRules {
     pub disabled: Vec<String>,
 }
 
+/// How much of a run the report states about a run before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ReportSettings {
+    /// How many of each run's highest-ranked groups are compared when saying
+    /// what became of the work worth looking at.
+    ///
+    /// A total counts duplication rather than progress: closing a handful of
+    /// groups out of thousands leaves it almost where it was. Comparing the
+    /// top of each run measures the part anyone acted on.
+    pub churn_top: usize,
+}
+
+impl Default for ReportSettings {
+    fn default() -> Self {
+        // Enough to cover far more than a person works through between two
+        // scans, and small enough that entering it means something.
+        Self { churn_top: 100 }
+    }
+}
+
 /// Explicit compiler-helper locations for environments without a usable PATH.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
@@ -715,6 +736,8 @@ pub struct Config {
     pub helpers: Helpers,
     /// Audit-database location, relative to the repository root unless absolute.
     pub database: PathBuf,
+    /// What a report states about the run before it.
+    pub report: ReportSettings,
     /// Frontend read-and-lex worker count; `None` selects it automatically.
     /// Clone grouping and report rendering remain serial.
     pub jobs: Option<usize>,
@@ -741,6 +764,7 @@ impl Default for Config {
             semantic: SemanticRules::default(),
             helpers: Helpers::default(),
             database: PathBuf::from(".codehelion/audit.db"),
+            report: ReportSettings::default(),
             jobs: None,
         }
     }
@@ -768,6 +792,9 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         if self.min_clone_tokens == 0 {
             bail!("min-clone-tokens must be at least 1");
+        }
+        if self.report.churn_top == 0 {
+            bail!("report.churn-top must be at least 1");
         }
         if self.jobs == Some(0) {
             bail!("jobs must be at least 1 when set");

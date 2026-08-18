@@ -731,7 +731,7 @@ fn json_reports_carry_the_breakdown_and_stay_deterministic() {
         // The second run knows a first run happened. That is the comparison
         // working, not the findings moving.
         let summary = value["summary"].as_object_mut().unwrap();
-        for key in ["changes", "audit"] {
+        for key in ["changes", "audit", "top_churn"] {
             summary.insert(key.to_string(), serde_json::Value::Null);
         }
         // Likewise per group: how a group stands relative to an earlier run is

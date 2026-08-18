@@ -92,6 +92,7 @@ pub(super) fn sample_report() -> Report {
             reused: false,
         },
         summary: Summary {
+            top_churn: None,
             files: FileCounts {
                 total: 2,
                 rust: 2,

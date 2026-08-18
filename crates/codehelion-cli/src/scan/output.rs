@@ -264,6 +264,57 @@ pub(crate) fn hydrate_group_identity(
     Ok(())
 }
 
+/// State what became of the highest-ranked groups of the run this one was
+/// compared with.
+///
+/// Shares its rule with the per-group history: a group whose identity moved
+/// to a successor did not close, so counting it as closed would report the
+/// same edit as both a fix and a regression. Both runs are recorded, so this
+/// is derived rather than stored, and a replayed report answers it the same
+/// way the scan did.
+///
+/// # Errors
+///
+/// Returns any underlying database error.
+pub(crate) fn top_group_churn(
+    store: &Store,
+    run_id: i64,
+    predecessor_run: i64,
+    top: usize,
+) -> Result<report::TopChurn> {
+    let previous_top = store.run_top_group_fingerprints(predecessor_run, top)?;
+    let current_top = store.run_top_group_fingerprints(run_id, top)?;
+    let current_all = store.run_group_fingerprints(run_id)?;
+    let successors: std::collections::BTreeMap<_, _> = store
+        .run_group_origins(run_id)?
+        .into_iter()
+        .filter_map(|origin| {
+            origin
+                .adopted_from
+                .map(|parent| (origin.group_fingerprint_hex, parent.fingerprint_hex))
+        })
+        .collect();
+    let inherited: std::collections::BTreeSet<_> = successors.values().cloned().collect();
+    let previously_ranked: std::collections::BTreeSet<_> = previous_top.iter().cloned().collect();
+    Ok(report::TopChurn {
+        since_run_id: predecessor_run,
+        top: u64::try_from(top).unwrap_or(u64::MAX),
+        closed: previous_top
+            .into_iter()
+            .filter(|group| !current_all.contains(group) && !inherited.contains(group))
+            .collect(),
+        entered: current_top
+            .into_iter()
+            .filter(|group| {
+                !previously_ranked.contains(group)
+                    && !successors
+                        .get(group)
+                        .is_some_and(|parent| previously_ranked.contains(parent))
+            })
+            .collect(),
+    })
+}
+
 /// Restore the artifact estimates that belong to a recorded source run.
 ///
 /// The estimates are not part of the source snapshot because an artifact can

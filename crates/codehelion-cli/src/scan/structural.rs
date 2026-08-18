@@ -833,7 +833,14 @@ fn run_with(
                                     recorded.run_id,
                                     predecessor,
                                     &mut model.groups,
-                                )
+                                )?;
+                                model.summary.top_churn = Some(crate::scan::top_group_churn(
+                                    &store,
+                                    recorded.run_id,
+                                    predecessor,
+                                    cfg.report.churn_top,
+                                )?);
+                                Ok(())
                             })
                         })
                 })

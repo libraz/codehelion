@@ -13,7 +13,8 @@ use super::{
 };
 
 pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<Outcome> {
-    let (root, _resolved_config, path) = report_database(args)?;
+    let (root, resolved_config, path) = report_database(args)?;
+    let churn_top = resolved_config.config.report.churn_top;
     if !path.is_file() {
         bail!(
             "no local database at {}; run `codehelion scan` first",
@@ -104,7 +105,19 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
                 .map_err(Into::into)
                 .and_then(|predecessor| {
                     predecessor.map_or(Ok(()), |predecessor| {
-                        scan::hydrate_group_identity(&store, run.id, predecessor, &mut model.groups)
+                        scan::hydrate_group_identity(
+                            &store,
+                            run.id,
+                            predecessor,
+                            &mut model.groups,
+                        )?;
+                        model.summary.top_churn = Some(scan::top_group_churn(
+                            &store,
+                            run.id,
+                            predecessor,
+                            churn_top,
+                        )?);
+                        Ok(())
                     })
                 })
         })

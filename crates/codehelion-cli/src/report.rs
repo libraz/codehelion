@@ -942,6 +942,9 @@ pub struct Summary {
     /// File-tree delta from the preceding compatible completed run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changes: Option<TreeChanges>,
+    /// What became of the highest-ranked groups of that same run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_churn: Option<TopChurn>,
     /// Clone-group counts by type.
     pub groups: GroupCounts,
     /// Suppressed-group counts by mechanism.
@@ -1033,6 +1036,27 @@ pub struct Summary {
     /// syntactic run would produce.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compiler: Option<CompilerCoverage>,
+}
+
+/// What became of the findings an earlier run put at the top.
+///
+/// A total measures how much duplication a tree holds, not how much work
+/// has landed: closing eighteen groups out of nine thousand moves the total
+/// by a rounding error. What did move is what happened to the groups that
+/// were worth looking at, so that is stated separately.
+#[derive(Debug, Clone, Serialize)]
+pub struct TopChurn {
+    /// Completed run used as the comparison point.
+    pub since_run_id: i64,
+    /// How many of each run's highest-ranked groups were compared.
+    pub top: u64,
+    /// Groups of that run's top that this run no longer holds, under this
+    /// fingerprint or any successor that took over their history. A group
+    /// whose history moved to a successor did not close.
+    pub closed: Vec<String>,
+    /// Groups of this run's top that the earlier run's top did not hold, and
+    /// that did not inherit their history from one that it did.
+    pub entered: Vec<String>,
 }
 
 /// File-content changes since one compatible scan.

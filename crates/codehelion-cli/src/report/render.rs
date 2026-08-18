@@ -332,6 +332,7 @@ impl Report {
             palette.bold(&headline.join(&format!(" {} ", opts.decoration.separator())))
         )?;
         render_supplemental_totals(summary, out)?;
+        render_top_churn(summary, out)?;
         let run_label = self.run.run_id.map_or_else(
             || "run unrecorded".to_string(),
             |run_id| format!("run {run_id}"),
@@ -939,6 +940,29 @@ fn run_status(report: &Report) -> String {
     // A report reconstructed by `report --run` has no invocation-level reuse
     // fact. Naming the replay is precise without inventing one.
     format!(" (replay: codehelion report --run {run_id})")
+}
+
+/// What became of the groups the previous run put at the top.
+///
+/// Written beside the total rather than instead of it. The total is the right
+/// measure of how much duplication a tree holds and the wrong measure of how
+/// much of it anyone has dealt with: closing eighteen groups out of nine
+/// thousand moves it by a rounding error.
+fn render_top_churn(summary: &Summary, out: &mut impl Write) -> io::Result<()> {
+    let Some(churn) = &summary.top_churn else {
+        return Ok(());
+    };
+    if churn.closed.is_empty() && churn.entered.is_empty() {
+        return Ok(());
+    }
+    let top = thousands(churn.top);
+    writeln!(
+        out,
+        "since run {}: {} of its top {top} groups are gone, {} new groups entered the top {top}",
+        churn.since_run_id,
+        thousands(u64::try_from(churn.closed.len()).unwrap_or(u64::MAX)),
+        thousands(u64::try_from(churn.entered.len()).unwrap_or(u64::MAX)),
+    )
 }
 
 /// Totals for serialized supplemental evidence that the default body hides.

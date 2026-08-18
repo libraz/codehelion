@@ -916,3 +916,33 @@ impl Store {
         Ok(fingerprints)
     }
 }
+
+impl Store {
+    /// The `limit` highest-ranked group fingerprints of a completed run, in
+    /// the order that run ranked them.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn run_top_group_fingerprints(
+        &self,
+        run_id: i64,
+        limit: usize,
+    ) -> Result<Vec<String>, StoreError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut statement = self.conn.prepare(
+            "SELECT lower(hex(f.hash))
+             FROM finding n
+             JOIN clone_group g ON g.id = n.clone_group_id
+             JOIN fingerprint f ON f.id = g.group_fingerprint_id
+             JOIN scan_run r ON r.id = g.scan_run_id AND r.status = 'completed'
+             WHERE n.scan_run_id = ?1
+             ORDER BY n.final_priority DESC, lower(hex(f.hash)) ASC
+             LIMIT ?2",
+        )?;
+        let fingerprints = statement
+            .query_map(params![run_id, limit], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(fingerprints)
+    }
+}

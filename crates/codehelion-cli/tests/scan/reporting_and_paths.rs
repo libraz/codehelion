@@ -1441,3 +1441,125 @@ fn a_lookup_explains_a_group_s_history_the_way_the_report_did() {
     );
     assert!(text.contains("new identity (lineage: "), "{text}");
 }
+
+/// The line stating what became of the earlier run's highest-ranked groups.
+fn churn_line(text: &str) -> Option<&str> {
+    text.lines().find(|line| line.starts_with("since run "))
+}
+
+#[test]
+fn a_first_scan_states_nothing_about_an_earlier_run_s_best_groups() {
+    let dir = one_pair();
+    let root = dir.path();
+    let first = scan_json(root);
+    assert!(first["summary"].get("top_churn").is_none(), "{first}");
+    assert!(
+        churn_line(&scan_detailed_text(root)).is_none(),
+        "there is no earlier run to have had a top"
+    );
+}
+
+#[test]
+fn a_closed_group_is_counted_out_of_the_earlier_run_s_top() {
+    let dir = one_pair();
+    let root = dir.path();
+    let first = scan_json(root);
+    let first_run = first["run"]["run_id"].as_i64().expect("a first run");
+    let closed = visible_ids(&first)
+        .into_iter()
+        .next()
+        .expect("the fixture duplicates on purpose");
+
+    // The duplication is removed and an unrelated one takes its place, so one
+    // group leaves the top and another arrives there.
+    std::fs::write(root.join("src/b.rs"), FORMAT_RS).unwrap();
+    std::fs::write(root.join("src/c.rs"), FORMAT_RS).unwrap();
+    let second = scan_json(root);
+
+    let churn = &second["summary"]["top_churn"];
+    assert_eq!(churn["since_run_id"], first_run);
+    assert_eq!(churn["top"], 100);
+    assert_eq!(churn["closed"], serde_json::json!([closed]));
+    assert_eq!(
+        churn["entered"].as_array().expect("entered").len(),
+        1,
+        "{churn}"
+    );
+
+    let text = scan_detailed_text(root);
+    assert_eq!(
+        churn_line(&text),
+        Some(
+            format!("since run {first_run}: 1 of its top 100 groups are gone, 1 new groups entered the top 100")
+                .as_str()
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_group_whose_history_moved_to_a_successor_is_not_counted_as_closed() {
+    let dir = one_pair();
+    let root = dir.path();
+    let previous = visible_ids(&structural_json(root))
+        .into_iter()
+        .next()
+        .expect("the fixture duplicates on purpose");
+
+    // The group answers to another name because it now holds another body.
+    // The work behind it did not close, and counting it as closed would report
+    // one edit as both a fix and a regression.
+    std::fs::write(root.join("src/c.rs"), RENAMED_RS).unwrap();
+    let second = structural_json(root);
+    let churn = &second["summary"]["top_churn"];
+    assert!(
+        !churn["closed"]
+            .as_array()
+            .expect("closed")
+            .contains(&serde_json::json!(previous)),
+        "{churn}"
+    );
+    assert_eq!(
+        churn["entered"],
+        serde_json::json!([]),
+        "a successor that inherited a ranked group's history did not enter"
+    );
+}
+
+#[test]
+fn the_compared_top_is_as_wide_as_the_configuration_asks() {
+    let dir = one_pair();
+    let root = dir.path();
+    // Written before the first scan: the configuration is part of what makes
+    // two runs comparable, so changing it between them leaves nothing to
+    // compare rather than a differently sized comparison.
+    std::fs::write(root.join("codehelion.toml"), "[report]\nchurn-top = 3\n").unwrap();
+    scan_json(root);
+    std::fs::write(root.join("src/c.rs"), FORMAT_RS).unwrap();
+    let second = scan_json(root);
+    assert_eq!(second["summary"]["top_churn"]["top"], 3);
+}
+
+#[test]
+fn a_replayed_report_states_the_same_top_churn_the_scan_did() {
+    let dir = one_pair();
+    let root = dir.path();
+    scan_json(root);
+    std::fs::write(root.join("src/b.rs"), FORMAT_RS).unwrap();
+    std::fs::write(root.join("src/c.rs"), FORMAT_RS).unwrap();
+    let scanned = scan_json(root);
+    let run = scanned["run"]["run_id"].as_i64().expect("a second run");
+
+    let output = cmd()
+        .current_dir(root)
+        .args(["report", "--run", &run.to_string(), "--format", "json"])
+        .output()
+        .expect("run report");
+    assert!(output.status.success(), "{output:?}");
+    let replayed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+    assert_eq!(
+        replayed["summary"]["top_churn"],
+        scanned["summary"]["top_churn"]
+    );
+}
