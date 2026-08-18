@@ -11,9 +11,9 @@
 
 use super::{
     ArtifactSavings, BASELINE_COMPARE, BaselineStatus, Decoration, GONE_LISTED, GROUP_EXPANDED,
-    GROUP_NEW, Group, Member, Report, SCOPE_FRAGMENT, Summary, TextOptions, UnusedRule, Write,
-    budget_note, depth_truncation_files, duplicated_tokens, io, search_truncation_note,
-    severed_note,
+    GROUP_NEW, Group, IDENTITY_ADOPTED, IDENTITY_RETAINED, Member, Report, SCOPE_FRAGMENT, Summary,
+    TextOptions, UnusedRule, Write, budget_note, depth_truncation_files, duplicated_tokens, io,
+    search_truncation_note, severed_note,
 };
 
 /// Ranking value at and above which a group is drawn as the report's own
@@ -1289,6 +1289,35 @@ fn baseline_marker(group: &Group, palette: &Palette) -> String {
 
 /// Say where a group stands relative to the baseline the run was given, in
 /// the sentence the detailed view has room for.
+/// How a group stands relative to the run before it.
+///
+/// Written only where there is a comparison to report: a group with no
+/// predecessor connection says nothing here, and a first scan says nothing at
+/// all. An adoption names the group it took over from and the shared members
+/// the connection was decided on, because that count is the rule itself.
+fn render_group_identity(group: &Group, indent: &str, out: &mut impl Write) -> io::Result<()> {
+    let Some(identity) = &group.identity else {
+        return Ok(());
+    };
+    if identity.origin == IDENTITY_ADOPTED {
+        let from = identity.adopted_from.as_deref().unwrap_or("");
+        let shared = identity.shared_members.unwrap_or(0);
+        return writeln!(
+            out,
+            "{indent}  new identity (lineage: {from}, {shared} of {} members shared)",
+            group.members.len(),
+        );
+    }
+    if identity.origin == IDENTITY_RETAINED {
+        return writeln!(
+            out,
+            "{indent}  identity retained from run {}",
+            identity.compared_with_run,
+        );
+    }
+    Ok(())
+}
+
 fn render_group_baseline(group: &Group, indent: &str, out: &mut impl Write) -> io::Result<()> {
     let Some(baseline) = &group.baseline else {
         return Ok(());
@@ -1427,6 +1456,7 @@ pub(super) fn render_group(
 /// The measures behind one group's placement, for a reader who wants to
 /// disagree with it.
 fn render_group_detail(group: &Group, indent: &str, out: &mut impl Write) -> io::Result<()> {
+    render_group_identity(group, indent, out)?;
     render_group_baseline(group, indent, out)?;
     let priority = &group.priority;
     let spread = match (priority.inputs.files, priority.inputs.directories) {

@@ -266,6 +266,7 @@ pub(super) fn sample_near_miss() -> NearMiss {
 fn visible_group() -> Group {
     ranked(
         Group {
+            identity: None,
             fingerprint: "0b".repeat(16),
             clone_type: "type-1".to_string(),
             scope: "unit".to_string(),
@@ -443,6 +444,7 @@ fn identity_normalization_stage_round_trips_through_stored_summary() {
 fn suppressed_group() -> Group {
     ranked(
         Group {
+            identity: None,
             fingerprint: "0c".repeat(16),
             clone_type: "type-1".to_string(),
             scope: "unit".to_string(),
@@ -506,6 +508,7 @@ fn suppressed_group() -> Group {
 pub(super) fn structural_group() -> Group {
     ranked(
         Group {
+            identity: None,
             fingerprint: "0d".repeat(16),
             clone_type: "type-3".to_string(),
             scope: "unit".to_string(),
@@ -577,6 +580,7 @@ pub(super) fn structural_group() -> Group {
 pub(super) fn fragment_group() -> Group {
     ranked(
         Group {
+            identity: None,
             fingerprint: "0e".repeat(16),
             clone_type: "type-1".to_string(),
             scope: SCOPE_FRAGMENT.to_string(),

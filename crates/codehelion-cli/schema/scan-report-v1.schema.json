@@ -366,7 +366,10 @@
               "type": "integer"
             },
             "mode": {
-              "enum": ["suppress", "compare"],
+              "enum": [
+                "suppress",
+                "compare"
+              ],
               "description": "What the run was told to do with the frozen findings: hide them, or hide nothing and report every group against the baseline instead."
             },
             "matched": {
@@ -406,7 +409,11 @@
               "description": "Every stale entry, so that what was removed can be read rather than only counted.",
               "items": {
                 "type": "object",
-                "required": ["group", "clone_type", "duplicated_tokens"],
+                "required": [
+                  "group",
+                  "clone_type",
+                  "duplicated_tokens"
+                ],
                 "properties": {
                   "group": {
                     "type": "string",
@@ -422,12 +429,24 @@
                   "anchor": {
                     "type": "object",
                     "description": "Where the entry's canonical occurrence sat, as the baseline recorded it. The code is gone, so this says where to remember it from rather than where to look now.",
-                    "required": ["file", "start_line", "end_line"],
+                    "required": [
+                      "file",
+                      "start_line",
+                      "end_line"
+                    ],
                     "properties": {
-                      "file": { "type": "string" },
-                      "start_line": { "type": "integer" },
-                      "end_line": { "type": "integer" },
-                      "unit": { "type": "string" }
+                      "file": {
+                        "type": "string"
+                      },
+                      "start_line": {
+                        "type": "integer"
+                      },
+                      "end_line": {
+                        "type": "integer"
+                      },
+                      "unit": {
+                        "type": "string"
+                      }
                     }
                   }
                 }
@@ -679,10 +698,22 @@
               "minimum": 0,
               "description": "Largest related unit component refined as one group."
             },
-            "near_miss_delta": { "type": "number", "minimum": 0 },
-            "near_miss_cap": { "type": "integer", "minimum": 0 },
-            "verification_budget": { "type": "integer", "minimum": 0 },
-            "max_alignment_cells": { "type": "integer", "minimum": 0 },
+            "near_miss_delta": {
+              "type": "number",
+              "minimum": 0
+            },
+            "near_miss_cap": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "verification_budget": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_alignment_cells": {
+              "type": "integer",
+              "minimum": 0
+            },
             "sibling_candidate_budget": {
               "type": "integer",
               "minimum": 0,
@@ -860,6 +891,35 @@
         "priority": {
           "$ref": "#/$defs/priority"
         },
+        "identity": {
+          "type": "object",
+          "description": "How this group relates to the run it was compared with. Absent when nothing connects it to that run, which is every group of a first scan. Removing part of a group's duplication either leaves the group with its own fingerprint or retires it in favour of a successor that inherits its history; without this, one edit reads as unfinished work and the other as a fix plus a fresh finding.",
+          "required": [
+            "origin",
+            "compared_with_run"
+          ],
+          "properties": {
+            "origin": {
+              "enum": [
+                "retained",
+                "adopted"
+              ],
+              "description": "Whether the compared run already knew this fingerprint, or this fingerprint took over an earlier group's history."
+            },
+            "compared_with_run": {
+              "type": "integer",
+              "description": "The run this was decided against."
+            },
+            "adopted_from": {
+              "$ref": "#/$defs/hex",
+              "description": "The predecessor group whose history an adopted group took over."
+            },
+            "shared_members": {
+              "type": "integer",
+              "description": "Members this group shares with that predecessor. The connection was decided on this quantity, so it is the evidence for it."
+            }
+          }
+        },
         "similarity": {
           "oneOf": [
             {
@@ -880,11 +940,22 @@
         "body_materiality": {
           "type": "object",
           "description": "Conservative syntactic work shared by every member; maintenance evidence, not a generated-code-size prediction.",
-          "required": ["has_loop", "has_dynamic_allocation", "call_count"],
+          "required": [
+            "has_loop",
+            "has_dynamic_allocation",
+            "call_count"
+          ],
           "properties": {
-            "has_loop": {"type": "boolean"},
-            "has_dynamic_allocation": {"type": "boolean"},
-            "call_count": {"type": "integer", "minimum": 0}
+            "has_loop": {
+              "type": "boolean"
+            },
+            "has_dynamic_allocation": {
+              "type": "boolean"
+            },
+            "call_count": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         },
         "boilerplate": {
@@ -903,7 +974,11 @@
           "description": "Whether every member is test code. False for a group spanning a test and the code it exercises: that duplication crosses the boundary."
         },
         "test_code_evidence": {
-          "enum": ["marker", "path", null],
+          "enum": [
+            "marker",
+            "path",
+            null
+          ],
           "description": "Why the group is test code: marker wins when any member has source-marker evidence; path means every member is recognised from a configured test path; null means the group is not wholly test code."
         },
         "width_family": {
@@ -932,10 +1007,16 @@
         "baseline": {
           "type": "object",
           "description": "What the baseline the run was given says about this group. Absent when the run was given none.",
-          "required": ["state"],
+          "required": [
+            "state"
+          ],
           "properties": {
             "state": {
-              "enum": ["continuing", "new", "expanded"],
+              "enum": [
+                "continuing",
+                "new",
+                "expanded"
+              ],
               "description": "Whether the baseline froze this group, or froze it with fewer occurrences."
             },
             "added_instances": {
@@ -945,7 +1026,10 @@
             "derived_from": {
               "type": "object",
               "description": "The entry that has gone from the same places, when one has. Removing a duplication rewrites the code around it, so the groups that come out of the rearrangement are new groups with new ids; this says the new one stands where the old one stood, which is what keeps progress from reading as a regression. A claim about places, not identity.",
-              "required": ["group", "shared_sites"],
+              "required": [
+                "group",
+                "shared_sites"
+              ],
               "properties": {
                 "group": {
                   "$ref": "#/$defs/hex"
@@ -1029,102 +1113,215 @@
     },
     "group_siblings": {
       "type": "object",
-      "required": ["group_fingerprint", "siblings"],
+      "required": [
+        "group_fingerprint",
+        "siblings"
+      ],
       "properties": {
-        "group_fingerprint": { "$ref": "#/$defs/hex" },
+        "group_fingerprint": {
+          "$ref": "#/$defs/hex"
+        },
         "siblings": {
           "type": "array",
-          "items": { "$ref": "#/$defs/sibling" }
+          "items": {
+            "$ref": "#/$defs/sibling"
+          }
         }
       }
     },
     "near_miss": {
       "type": "object",
-      "required": ["estimated_jaccard", "left", "right", "suppressed"],
+      "required": [
+        "estimated_jaccard",
+        "left",
+        "right",
+        "suppressed"
+      ],
       "properties": {
-        "estimated_jaccard": { "type": "number", "minimum": 0, "maximum": 1 },
-        "left": { "$ref": "#/$defs/near_miss_unit" },
-        "right": { "$ref": "#/$defs/near_miss_unit" },
+        "estimated_jaccard": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "left": {
+          "$ref": "#/$defs/near_miss_unit"
+        },
+        "right": {
+          "$ref": "#/$defs/near_miss_unit"
+        },
         "suppressed": {
           "oneOf": [
-            { "$ref": "#/$defs/suppression" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/suppression"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
     },
     "near_miss_unit": {
       "type": "object",
-      "required": ["unit_fingerprint", "language", "file", "start_line", "end_line", "tokens"],
+      "required": [
+        "unit_fingerprint",
+        "language",
+        "file",
+        "start_line",
+        "end_line",
+        "tokens"
+      ],
       "properties": {
-        "unit_fingerprint": { "$ref": "#/$defs/hex" },
-        "language": { "type": "string", "enum": ["rust", "c", "cpp"] },
-        "file": { "type": "string" },
-        "start_line": { "type": "integer", "minimum": 1 },
-        "end_line": { "type": "integer", "minimum": 1 },
-        "unit": { "type": "string" },
-        "tokens": { "type": "integer", "minimum": 0 }
+        "unit_fingerprint": {
+          "$ref": "#/$defs/hex"
+        },
+        "language": {
+          "type": "string",
+          "enum": [
+            "rust",
+            "c",
+            "cpp"
+          ]
+        },
+        "file": {
+          "type": "string"
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "unit": {
+          "type": "string"
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "sibling": {
       "type": "object",
-      "required": ["clone_type", "confidence_band", "similarity", "member", "suppressed"],
+      "required": [
+        "clone_type",
+        "confidence_band",
+        "similarity",
+        "member",
+        "suppressed"
+      ],
       "properties": {
-        "clone_type": { "enum": ["type-1", "type-2", "type-3"] },
-        "confidence_band": { "enum": ["high", "medium", "low"] },
+        "clone_type": {
+          "enum": [
+            "type-1",
+            "type-2",
+            "type-3"
+          ]
+        },
+        "confidence_band": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
         "basis": {
-          "enum": ["similarity", "signature"],
+          "enum": [
+            "similarity",
+            "signature"
+          ],
           "description": "Independent candidate channel that supplied this sibling. Optional for compatibility with older v1 reports."
         },
         "signature": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1,
           "description": "Exact normalized signature for signature-channel siblings."
         },
-        "similarity": { "$ref": "#/$defs/sibling_similarity" },
-        "member": { "$ref": "#/$defs/member" },
+        "similarity": {
+          "$ref": "#/$defs/sibling_similarity"
+        },
+        "member": {
+          "$ref": "#/$defs/member"
+        },
         "suppressed": {
           "oneOf": [
-            { "$ref": "#/$defs/suppression" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/suppression"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },
       "allOf": [
         {
           "if": {
-            "required": ["basis"],
-            "properties": { "basis": { "const": "signature" } }
+            "required": [
+              "basis"
+            ],
+            "properties": {
+              "basis": {
+                "const": "signature"
+              }
+            }
           },
           "then": {
-            "required": ["signature"],
+            "required": [
+              "signature"
+            ],
             "properties": {
-              "signature": { "type": "string", "minLength": 1 }
+              "signature": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         },
         {
           "if": {
-            "required": ["basis"],
-            "properties": { "basis": { "const": "similarity" } }
+            "required": [
+              "basis"
+            ],
+            "properties": {
+              "basis": {
+                "const": "similarity"
+              }
+            }
           },
           "then": {
             "properties": {
-              "signature": { "type": "null" }
+              "signature": {
+                "type": "null"
+              }
             }
           }
         },
         {
           "if": {
-            "required": ["signature"],
+            "required": [
+              "signature"
+            ],
             "properties": {
-              "signature": { "type": "string", "minLength": 1 }
+              "signature": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           },
           "then": {
-            "required": ["basis"],
+            "required": [
+              "basis"
+            ],
             "properties": {
-              "basis": { "const": "signature" }
+              "basis": {
+                "const": "signature"
+              }
             }
           }
         }
@@ -1132,15 +1329,58 @@
     },
     "sibling_similarity": {
       "type": "object",
-      "required": ["weight_version", "lexical", "structural", "control_flow", "type_similarity", "api", "composite"],
+      "required": [
+        "weight_version",
+        "lexical",
+        "structural",
+        "control_flow",
+        "type_similarity",
+        "api",
+        "composite"
+      ],
       "properties": {
-        "weight_version": { "type": "string" },
-        "lexical": { "type": "number", "minimum": 0, "maximum": 1 },
-        "structural": { "type": "number", "minimum": 0, "maximum": 1 },
-        "control_flow": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
-        "type_similarity": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
-        "api": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
-        "composite": { "type": "number", "minimum": 0, "maximum": 1 }
+        "weight_version": {
+          "type": "string"
+        },
+        "lexical": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "structural": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "control_flow": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "type_similarity": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "api": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "composite": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
       }
     },
     "priority": {
@@ -1274,7 +1514,12 @@
     },
     "semantic_evidence": {
       "type": "object",
-      "required": ["schema_version", "rules", "graphs", "node_mappings"],
+      "required": [
+        "schema_version",
+        "rules",
+        "graphs",
+        "node_mappings"
+      ],
       "properties": {
         "schema_version": {
           "type": "string"
@@ -1284,28 +1529,56 @@
           "minItems": 1,
           "items": {
             "type": "object",
-            "required": ["id", "version", "confidence"],
+            "required": [
+              "id",
+              "version",
+              "confidence"
+            ],
             "properties": {
-              "id": { "type": "string" },
-              "version": { "type": "integer", "minimum": 1 },
-              "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+              "id": {
+                "type": "string"
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
             }
           }
         },
         "graphs": {
           "type": "array",
           "minItems": 2,
-          "items": { "$ref": "#/$defs/semantic_graph" }
+          "items": {
+            "$ref": "#/$defs/semantic_graph"
+          }
         },
         "node_mappings": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["corresponding_member", "canonical", "corresponding"],
+            "required": [
+              "corresponding_member",
+              "canonical",
+              "corresponding"
+            ],
             "properties": {
-              "corresponding_member": { "type": "integer", "minimum": 1 },
-              "canonical": { "type": "integer", "minimum": 0 },
-              "corresponding": { "type": "integer", "minimum": 0 }
+              "corresponding_member": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "canonical": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "corresponding": {
+                "type": "integer",
+                "minimum": 0
+              }
             }
           }
         }
@@ -1313,39 +1586,111 @@
     },
     "semantic_graph": {
       "type": "object",
-      "required": ["schema_version", "language", "build_variant_fingerprint", "nodes", "edges"],
+      "required": [
+        "schema_version",
+        "language",
+        "build_variant_fingerprint",
+        "nodes",
+        "edges"
+      ],
       "properties": {
-        "schema_version": { "type": "string" },
-        "language": { "enum": ["rust", "c", "cpp"] },
+        "schema_version": {
+          "type": "string"
+        },
+        "language": {
+          "enum": [
+            "rust",
+            "c",
+            "cpp"
+          ]
+        },
         "build_variant_fingerprint": {
           "type": "array",
           "minItems": 32,
           "maxItems": 32,
-          "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          }
         },
         "nodes": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["kind", "attributes"],
+            "required": [
+              "kind",
+              "attributes"
+            ],
             "properties": {
               "kind": {
-                "enum": ["source", "filter", "map", "reduce", "collect", "validate", "propagate_error", "acquire_resource", "release_resource"]
+                "enum": [
+                  "source",
+                  "filter",
+                  "map",
+                  "reduce",
+                  "collect",
+                  "validate",
+                  "propagate_error",
+                  "acquire_resource",
+                  "release_resource"
+                ]
               },
               "attributes": {
                 "type": "object",
-                "required": ["type_tag", "api_names", "resource_kind", "fallible_kind", "direct_propagation", "structure_fingerprint"],
+                "required": [
+                  "type_tag",
+                  "api_names",
+                  "resource_kind",
+                  "fallible_kind",
+                  "direct_propagation",
+                  "structure_fingerprint"
+                ],
                 "properties": {
-                  "type_tag": { "type": ["string", "null"] },
-                  "api_names": { "type": "array", "items": { "type": "string" } },
-                  "resource_kind": { "type": ["string", "null"] },
-                  "fallible_kind": { "enum": ["option", "result", null] },
-                  "direct_propagation": { "enum": ["result_adapter", "option_adapter", null] },
+                  "type_tag": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "api_names": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "resource_kind": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "fallible_kind": {
+                    "enum": [
+                      "option",
+                      "result",
+                      null
+                    ]
+                  },
+                  "direct_propagation": {
+                    "enum": [
+                      "result_adapter",
+                      "option_adapter",
+                      null
+                    ]
+                  },
                   "structure_fingerprint": {
-                    "type": ["array", "null"],
+                    "type": [
+                      "array",
+                      "null"
+                    ],
                     "minItems": 16,
                     "maxItems": 16,
-                    "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 255
+                    }
                   }
                 }
               }
@@ -1356,11 +1701,27 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["from", "to", "kind"],
+            "required": [
+              "from",
+              "to",
+              "kind"
+            ],
             "properties": {
-              "from": { "type": "integer", "minimum": 0 },
-              "to": { "type": "integer", "minimum": 0 },
-              "kind": { "enum": ["data", "ordering", "resource_lifetime"] }
+              "from": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "to": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "kind": {
+                "enum": [
+                  "data",
+                  "ordering",
+                  "resource_lifetime"
+                ]
+              }
             }
           }
         }

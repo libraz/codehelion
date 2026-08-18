@@ -341,9 +341,23 @@ fn the_weights_change_the_order_and_nothing_else() {
 #[test]
 fn two_runs_of_one_tree_rank_it_identically() {
     let dir = fixture();
-    let first = scan_json(dir.path());
-    let second = scan_json(dir.path());
-    assert_eq!(first["groups"], second["groups"]);
+    let first = without_identity(scan_json(dir.path()));
+    let second = without_identity(scan_json(dir.path()));
+    assert_eq!(first, second);
+}
+
+/// A report's groups with their relation to any earlier run dropped. That
+/// relation is a statement about a pair of runs; a rerun that names one is not
+/// a rerun that ranked anything differently.
+fn without_identity(mut report: serde_json::Value) -> serde_json::Value {
+    let groups = report["groups"].as_array_mut().expect("groups");
+    for group in groups.iter_mut() {
+        group
+            .as_object_mut()
+            .expect("a group object")
+            .remove("identity");
+    }
+    report["groups"].take()
 }
 
 #[test]

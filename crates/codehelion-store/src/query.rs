@@ -593,6 +593,31 @@ pub struct CrossLanguageGroupMember {
     pub graph: SemanticOperationGraph,
 }
 
+/// How a recorded group came by the history it carries.
+///
+/// A group either kept the fingerprint an earlier run knew it by, or took
+/// over an earlier group's history under a different fingerprint. Told apart,
+/// the two read as one piece of work; conflated, the same edit looks like a
+/// fix in one place and an unfixed finding in another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredGroupOrigin {
+    /// The group this describes.
+    pub group_fingerprint_hex: String,
+    /// The predecessor whose history this group took over, absent when the
+    /// group started a history of its own.
+    pub adopted_from: Option<StoredLineageParent>,
+}
+
+/// The predecessor a group took its history from, and the evidence for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredLineageParent {
+    /// Fingerprint the predecessor group was known by.
+    pub fingerprint_hex: String,
+    /// Member contents the two groups have in common. This is the quantity
+    /// the connection was decided on, so it is what explains the decision.
+    pub shared_content: i64,
+}
+
 /// Where a stored run ranked a finding, and what it read to get there.
 ///
 /// Read back rather than recomputed. The rules a run ranked under are the

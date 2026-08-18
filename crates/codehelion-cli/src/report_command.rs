@@ -97,7 +97,18 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
         siblings,
         near_misses,
     };
-    let hydration_error = scan::hydrate_artifact_savings(&store, run.id, &mut model.groups).err();
+    let hydration_error = scan::hydrate_artifact_savings(&store, run.id, &mut model.groups)
+        .and_then(|()| {
+            store
+                .preceding_compatible_run(run.id)
+                .map_err(Into::into)
+                .and_then(|predecessor| {
+                    predecessor.map_or(Ok(()), |predecessor| {
+                        scan::hydrate_group_identity(&store, run.id, predecessor, &mut model.groups)
+                    })
+                })
+        })
+        .err();
     model.order_supplemental();
     model.refresh_supplemental_summary();
     if let Some(error) = hydration_error {
@@ -468,6 +479,7 @@ pub(crate) fn recorded_group(
         fingerprint: group.fingerprint_hex,
         clone_type: group.clone_type,
         scope: group.member_scope,
+        identity: None,
         statements: group.statements.map(count),
         confidence: group.score,
         entropy_bits: group.entropy_bits,
@@ -793,6 +805,17 @@ pub(crate) fn explain_clone_group(
         latest_comparable_run(store, &origin, &found.group.fingerprint_hex)?;
     let mut group = recorded_group(found.group, &priority)?;
     scan::hydrate_artifact_savings(store, found.run_id, std::slice::from_mut(&mut group))?;
+    // Resolved rather than remembered: the run this one was compared with is
+    // recoverable from what it agreed with that run on, so a lookup explains
+    // the decision the same way the report that made it did.
+    if let Some(predecessor) = store.preceding_compatible_run(found.run_id)? {
+        scan::hydrate_group_identity(
+            store,
+            found.run_id,
+            predecessor,
+            std::slice::from_mut(&mut group),
+        )?;
+    }
     let detail = report::CloneGroupDetail {
         database: path.display().to_string(),
         scan_run: origin.id,

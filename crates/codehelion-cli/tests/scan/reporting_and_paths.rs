@@ -1278,3 +1278,166 @@ fn an_identical_second_scan_reuses_the_recorded_history() {
                 .and(predicate::str::contains("reused: tree unchanged")),
         );
 }
+
+/// The detailed text of a scan, where per-group history is written.
+fn scan_detailed_text(root: &Path) -> String {
+    let output = cmd()
+        .current_dir(root)
+        .args(["scan", ".", "-vv"])
+        .output()
+        .expect("run scan");
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).expect("scan text is UTF-8")
+}
+
+/// The recorded history of one group in a report document.
+fn identity_of<'a>(report: &'a serde_json::Value, group: &str) -> &'a serde_json::Value {
+    report["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .find(|entry| entry["fingerprint"] == group)
+        .expect("the report lists the group asked about")
+        .get("identity")
+        .unwrap_or(&serde_json::Value::Null)
+}
+
+#[test]
+fn a_first_scan_claims_no_history_for_any_group() {
+    let dir = one_pair();
+    let root = dir.path();
+    let first = scan_json(root);
+    for group in first["groups"].as_array().expect("groups") {
+        assert!(
+            group.get("identity").is_none(),
+            "a first scan has nothing to compare with: {group}"
+        );
+    }
+    assert!(!scan_detailed_text(root).contains("identity retained"));
+}
+
+#[test]
+fn a_group_the_earlier_run_knew_by_the_same_id_says_it_kept_its_identity() {
+    let dir = one_pair();
+    let root = dir.path();
+    let first = scan_json(root);
+    let first_run = first["run"]["run_id"].as_i64().expect("a first run");
+    let group = visible_ids(&first)
+        .into_iter()
+        .next()
+        .expect("the fixture duplicates on purpose");
+
+    // A file that duplicates nothing, so the tree differs and the scan
+    // analyses again while the pair it finds stays the same pair.
+    std::fs::write(root.join("src/unrelated.rs"), FORMAT_RS).unwrap();
+    let second = scan_json(root);
+
+    let identity = identity_of(&second, &group);
+    assert_eq!(identity["origin"], "retained", "{identity}");
+    assert_eq!(identity["compared_with_run"], first_run);
+    assert!(identity.get("adopted_from").is_none(), "{identity}");
+    assert!(
+        scan_detailed_text(root).contains(&format!("identity retained from run {first_run}")),
+        "the detailed text states what the document states"
+    );
+}
+
+#[test]
+fn a_group_with_nothing_behind_it_states_no_history() {
+    let dir = one_pair();
+    let root = dir.path();
+    let first = scan_json(root);
+    let known = visible_ids(&first);
+
+    // A second, unrelated duplication appears. It descends from nothing the
+    // earlier run held, and a report that said so about every group of an
+    // unfamiliar tree would be its longest and least useful column.
+    std::fs::write(root.join("src/fmt_a.rs"), FORMAT_RS).unwrap();
+    std::fs::write(root.join("src/fmt_b.rs"), FORMAT_RS).unwrap();
+    let second = scan_json(root);
+    let fresh = visible_ids(&second)
+        .into_iter()
+        .find(|group| !known.contains(group))
+        .expect("the new pair is a new group");
+
+    assert!(identity_of(&second, &fresh).is_null());
+}
+
+/// A group whose membership gained a distinct body, changing the identity a
+/// group is known by while most of what it holds stays the same.
+///
+/// A group is named after the distinct contents it holds, so losing one of
+/// several identical copies leaves the name alone. Admitting a body that is
+/// only similar is what renames it, and that is the case a reader has to be
+/// able to tell from a group that simply appeared.
+fn structural_json(root: &Path) -> serde_json::Value {
+    scan_json_with(root, &["--mode", "structural"])
+}
+
+fn structural_detailed_text(root: &Path) -> String {
+    let output = cmd()
+        .current_dir(root)
+        .args(["scan", ".", "--mode", "structural", "-vv"])
+        .output()
+        .expect("run scan");
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).expect("scan text is UTF-8")
+}
+
+#[test]
+fn a_group_renamed_by_a_new_member_names_the_group_whose_history_it_took_over() {
+    let dir = one_pair();
+    let root = dir.path();
+    let previous = visible_ids(&structural_json(root))
+        .into_iter()
+        .next()
+        .expect("the fixture duplicates on purpose");
+
+    // A third copy under a consistent rename. The group now holds two
+    // distinct bodies rather than one, so it answers to a different name
+    // while still holding what the earlier group held.
+    std::fs::write(root.join("src/c.rs"), RENAMED_RS).unwrap();
+    let second = structural_json(root);
+    let successor = visible_ids(&second)
+        .into_iter()
+        .find(|group| *group != previous)
+        .expect("the widened group is known by another id");
+
+    let identity = identity_of(&second, &successor);
+    assert_eq!(identity["origin"], "adopted", "{identity}");
+    assert_eq!(identity["adopted_from"], serde_json::json!(previous));
+    assert!(
+        identity["shared_members"].as_u64().unwrap_or(0) >= 1,
+        "{identity}"
+    );
+
+    let text = structural_detailed_text(root);
+    assert!(
+        text.contains(&format!("new identity (lineage: {previous},")),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_lookup_explains_a_group_s_history_the_way_the_report_did() {
+    let dir = one_pair();
+    let root = dir.path();
+    let previous = visible_ids(&structural_json(root))
+        .into_iter()
+        .next()
+        .expect("the fixture duplicates on purpose");
+    std::fs::write(root.join("src/c.rs"), RENAMED_RS).unwrap();
+    let second = structural_json(root);
+    let successor = visible_ids(&second)
+        .into_iter()
+        .find(|group| *group != previous)
+        .expect("the widened group is known by another id");
+
+    let (text, json) = explain_group(root, &successor);
+    assert_eq!(
+        json["group"]["identity"],
+        *identity_of(&second, &successor),
+        "a lookup and the report it came from give one account"
+    );
+    assert!(text.contains("new identity (lineage: "), "{text}");
+}

@@ -822,6 +822,21 @@ fn run_with(
                     recorded.run_id,
                     &mut model.groups,
                 )
+                .and_then(|()| {
+                    store
+                        .preceding_compatible_run(recorded.run_id)
+                        .map_err(Into::into)
+                        .and_then(|predecessor| {
+                            predecessor.map_or(Ok(()), |predecessor| {
+                                crate::scan::hydrate_group_identity(
+                                    &store,
+                                    recorded.run_id,
+                                    predecessor,
+                                    &mut model.groups,
+                                )
+                            })
+                        })
+                })
                 .err(),
                 Err(error) => Some(error),
             };

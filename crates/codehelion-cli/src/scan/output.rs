@@ -211,6 +211,59 @@ fn write_output(path: &Path, text: &[u8], force: bool) -> Result<()> {
         .with_context(|| format!("writing {}", path.display()))
 }
 
+/// Restore how each group of a freshly recorded run relates to the run it was
+/// compared with.
+///
+/// A scan cannot know this while it builds the report: continuity is decided
+/// inside the store's write, by comparing member contents with the preceding
+/// run. Reading it back afterwards is what lets one report distinguish a group
+/// that kept its identity from one that inherited another group's history —
+/// two outcomes of the same edit that otherwise read as unrelated events.
+///
+/// # Errors
+///
+/// Returns any underlying database error.
+pub(crate) fn hydrate_group_identity(
+    store: &Store,
+    run_id: i64,
+    predecessor_run: i64,
+    groups: &mut [report::Group],
+) -> Result<()> {
+    let adoptions: std::collections::BTreeMap<_, _> = store
+        .run_group_origins(run_id)?
+        .into_iter()
+        .filter_map(|origin| {
+            origin
+                .adopted_from
+                .map(|parent| (origin.group_fingerprint_hex, parent))
+        })
+        .collect();
+    let previous = store.run_group_fingerprints(predecessor_run)?;
+    for group in groups {
+        group.identity = if let Some(parent) = adoptions.get(&group.fingerprint) {
+            Some(report::GroupIdentity {
+                origin: report::IDENTITY_ADOPTED.to_string(),
+                compared_with_run: predecessor_run,
+                adopted_from: Some(parent.fingerprint_hex.clone()),
+                shared_members: u64::try_from(parent.shared_content).ok(),
+            })
+        } else if previous.contains(&group.fingerprint) {
+            Some(report::GroupIdentity {
+                origin: report::IDENTITY_RETAINED.to_string(),
+                compared_with_run: predecessor_run,
+                adopted_from: None,
+                shared_members: None,
+            })
+        } else {
+            // Nothing connects this group to the earlier run. Saying so about
+            // every group of an unfamiliar tree would be the report's longest
+            // and least informative column.
+            None
+        };
+    }
+    Ok(())
+}
+
 /// Restore the artifact estimates that belong to a recorded source run.
 ///
 /// The estimates are not part of the source snapshot because an artifact can

@@ -1,11 +1,12 @@
 use super::common::{COMPLETED_CLONE_GROUP_RUN_JOIN, map_member};
 use super::{
-    BTreeMap, FileCountsRow, FunnelDropRow, FunnelStageRow, GuardrailsRow, IdKind, IdMatch,
-    OptionalExtension, Row, SOG_SCHEMA_VERSION, SemanticOperationGraph, Store, StoreError,
-    StoredFinding, StoredGroup, StoredGroupDetail, StoredMember, StoredNearMiss,
-    StoredNearMissUnit, StoredPriority, StoredSemanticEvidence, StoredSemanticNodeMapping,
-    StoredSibling, StoredSiblingDetail, StoredSimilarity, StoredSuppressionRef, SummaryRow,
-    UnparsedRow, UnusedRuleRow, params, stored_test_code_evidence,
+    BTreeMap, BTreeSet, FileCountsRow, FunnelDropRow, FunnelStageRow, GuardrailsRow, IdKind,
+    IdMatch, OptionalExtension, Row, SOG_SCHEMA_VERSION, SemanticOperationGraph, Store, StoreError,
+    StoredFinding, StoredGroup, StoredGroupDetail, StoredGroupOrigin, StoredLineageParent,
+    StoredMember, StoredNearMiss, StoredNearMissUnit, StoredPriority, StoredSemanticEvidence,
+    StoredSemanticNodeMapping, StoredSibling, StoredSiblingDetail, StoredSimilarity,
+    StoredSuppressionRef, SummaryRow, UnparsedRow, UnusedRuleRow, params,
+    stored_test_code_evidence,
 };
 
 impl Store {
@@ -859,4 +860,59 @@ fn stored_suppression(
             reason,
             active,
         }))
+}
+
+impl Store {
+    /// How each group of a completed run came by its history.
+    ///
+    /// Only groups that connect to a predecessor are returned: a run with no
+    /// predecessor connects nothing, and listing every group of a first scan
+    /// as unconnected states the obvious at the length of the report.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn run_group_origins(&self, run_id: i64) -> Result<Vec<StoredGroupOrigin>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT lower(hex(f.hash)), lower(hex(p.parent_fingerprint)), p.shared_content
+             FROM clone_group g
+             JOIN fingerprint f ON f.id = g.group_fingerprint_id
+             JOIN clone_group_lineage_parent p
+                  ON p.clone_group_id = g.id AND p.is_primary = 1
+             JOIN scan_run r ON r.id = g.scan_run_id AND r.status = 'completed'
+             WHERE g.scan_run_id = ?1
+             ORDER BY lower(hex(f.hash))",
+        )?;
+        let origins = statement
+            .query_map(params![run_id], |row| {
+                Ok(StoredGroupOrigin {
+                    group_fingerprint_hex: row.get(0)?,
+                    adopted_from: Some(StoredLineageParent {
+                        fingerprint_hex: row.get(1)?,
+                        shared_content: row.get(2)?,
+                    }),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(origins)
+    }
+
+    /// Every clone-group fingerprint a completed run recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn run_group_fingerprints(&self, run_id: i64) -> Result<BTreeSet<String>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT lower(hex(f.hash))
+             FROM clone_group g
+             JOIN fingerprint f ON f.id = g.group_fingerprint_id
+             JOIN scan_run r ON r.id = g.scan_run_id AND r.status = 'completed'
+             WHERE g.scan_run_id = ?1",
+        )?;
+        let fingerprints = statement
+            .query_map(params![run_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        Ok(fingerprints)
+    }
 }

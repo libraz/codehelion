@@ -113,6 +113,9 @@ pub(super) fn report_group(core: ReportGroupCore) -> report::Group {
         fingerprint: core.fingerprint,
         clone_type: core.clone_type.name().to_string(),
         scope: core.scope.name().to_string(),
+        // A scan cannot know this until the run is recorded and compared
+        // with its predecessor, so it is filled in afterwards.
+        identity: None,
         statements: core.statements,
         confidence: core.confidence,
         entropy_bits: core.entropy_bits,

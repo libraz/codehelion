@@ -1415,6 +1415,35 @@ pub struct SuppressedCounts {
     pub vendored: u64,
 }
 
+/// How a group relates to the same tree's preceding run.
+///
+/// Removing part of a group's duplication has two possible outcomes that look
+/// nothing alike in a report: the group keeps its fingerprint and shrinks, or
+/// it retires and a successor takes over its history under a new fingerprint.
+/// Without this, one edit reads as unfinished work and the other as a fix
+/// plus a fresh finding.
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupIdentity {
+    /// `retained` when the preceding run knew this same fingerprint,
+    /// `adopted` when a new fingerprint took over an earlier group's history.
+    pub origin: String,
+    /// The run this was decided against.
+    pub compared_with_run: i64,
+    /// The predecessor whose history an `adopted` group took over.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adopted_from: Option<String>,
+    /// Members this group shares with that predecessor. The connection was
+    /// decided on this quantity, so it is the evidence for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_members: Option<u64>,
+}
+
+/// The origin value of a group the preceding run already knew by fingerprint.
+pub const IDENTITY_RETAINED: &str = "retained";
+
+/// The origin value of a group that took over an earlier group's history.
+pub const IDENTITY_ADOPTED: &str = "adopted";
+
 /// One clone group.
 #[derive(Debug, Serialize)]
 #[allow(
@@ -1446,6 +1475,11 @@ pub struct Group {
     pub entropy_bits: f64,
     /// Ranking value with the inputs it was computed from.
     pub priority: Priority,
+    /// How this group came by the history it carries, when there was an
+    /// earlier run to come by one from. `None` when nothing connects it to a
+    /// predecessor, which is every group of a first scan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<GroupIdentity>,
     /// Per-dimension similarity evidence, when the mode measured it; `None`
     /// in modes that match content exactly and score no dimensions.
     pub similarity: Option<Similarity>,

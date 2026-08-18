@@ -514,3 +514,36 @@ fn bytes16(field: &'static str, bytes: Vec<u8>) -> Result<[u8; 16], rusqlite::Er
         )
     })
 }
+
+impl Store {
+    /// The completed run one run was compared with when it was recorded.
+    ///
+    /// A run's continuity decisions were made against the newest completed run
+    /// that agreed with it on root, configuration and build variant. Resolving
+    /// the same run again is what lets a later lookup explain a decision the
+    /// same way the report that recorded it did.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn preceding_compatible_run(&self, run_id: i64) -> Result<Option<i64>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT previous.id
+                 FROM scan_run current
+                 JOIN scan_run previous
+                      ON previous.root_path = current.root_path
+                     AND previous.config_hash = current.config_hash
+                     AND previous.build_variant_id = current.build_variant_id
+                     AND previous.status = 'completed'
+                     AND (previous.started_at, previous.id) < (current.started_at, current.id)
+                 WHERE current.id = ?1
+                 ORDER BY previous.started_at DESC, previous.id DESC
+                 LIMIT 1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+}

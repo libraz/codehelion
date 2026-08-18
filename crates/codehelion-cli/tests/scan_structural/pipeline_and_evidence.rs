@@ -734,6 +734,11 @@ fn json_reports_carry_the_breakdown_and_stay_deterministic() {
         for key in ["changes", "audit"] {
             summary.insert(key.to_string(), serde_json::Value::Null);
         }
+        // Likewise per group: how a group stands relative to an earlier run is
+        // a statement about the pair of runs, not about the finding.
+        for group in value["groups"].as_array_mut().unwrap() {
+            group.as_object_mut().unwrap().remove("identity");
+        }
         documents.push(value);
     }
     assert_eq!(documents[0], documents[1], "reruns agree token for token");

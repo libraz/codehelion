@@ -1,0 +1,27 @@
+# Coverage is a signal to read, not a gate to pass. Without this, Codecov's
+# default patch status compares the diff against the whole-project ratio, so a
+# commit touching only test-support code reports 0% of diff hit and fails even
+# though nothing regressed.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+comment:
+  layout: "reach, diff, flags, files"
+  require_changes: true
+
+# Support crates that exist to drive the tests, not to be covered by them.
+# The conformance mock helper in particular runs as a spawned subprocess, which
+# cargo-llvm-cov does not attribute back to its source.
+ignore:
+  - "crates/codehelion-eval/**"
+  - "crates/codehelion-fixtures/**"
+  - "crates/codehelion-helper-conformance/**"
+  - "corpus/**"
+  - "fixtures/**"
+  - "scripts/**"

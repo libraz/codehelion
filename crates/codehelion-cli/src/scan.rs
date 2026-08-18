@@ -301,6 +301,21 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
             let hydration_error = if let Some(run_id) = model.run.run_id {
                 match open_store(&db_path) {
                     Ok(store) => hydrate_artifact_savings(&store, run_id, &mut model.groups)
+                        .and_then(|()| {
+                            store
+                                .preceding_compatible_run(run_id)
+                                .map_err(Into::into)
+                                .and_then(|predecessor| {
+                                    predecessor.map_or(Ok(()), |predecessor| {
+                                        hydrate_group_identity(
+                                            &store,
+                                            run_id,
+                                            predecessor,
+                                            &mut model.groups,
+                                        )
+                                    })
+                                })
+                        })
                         .err()
                         .map(|error| (run_id, error)),
                     Err(error) => Some((run_id, error)),
@@ -891,7 +906,7 @@ fn fast_group_scope(group: &CloneGroup, lexed: &[LexedSource]) -> CloneScope {
 pub(crate) mod output;
 
 pub(crate) use output::{
-    ReportOutput, hydrate_artifact_savings, write_partitioned_reports,
+    ReportOutput, hydrate_artifact_savings, hydrate_group_identity, write_partitioned_reports,
     write_partitioned_reports_without_artifact_guidance, write_report, write_report_options,
     write_report_options_without_artifact_guidance, write_report_without_artifact_guidance,
 };
