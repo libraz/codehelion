@@ -88,6 +88,8 @@ pub(super) fn sample_report() -> Report {
                 refactoring_ease: 1,
             },
             database: ".codehelion/audit.db".to_string(),
+            timings: None,
+            replay_database: None,
             run_id: Some(1),
             reused: false,
         },

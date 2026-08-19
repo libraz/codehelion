@@ -1145,9 +1145,11 @@ fn clone_group_detail_has_a_discriminated_schema_envelope() {
     assert_eq!(value["build_variant"], "ab".repeat(32));
     assert_valid_finding_detail_schema(&value);
     let mut text = Vec::new();
-    detail.render_text(Decoration::Ascii, &mut text).unwrap();
+    detail
+        .render_text(Decoration::Ascii, false, &mut text)
+        .unwrap();
     let text = String::from_utf8(text).unwrap();
-    assert!(text.contains("run: 17 (structural; build variant"));
+    assert!(text.contains("run: 17 (structural; build variant digest"));
     // Nothing to compare the run with, so the run line makes no claim about
     // what a later scan found.
     assert!(!text.contains("latest"), "{text}");
@@ -1165,7 +1167,9 @@ fn clone_group_detail_says_whether_the_newest_comparable_run_still_holds_the_gro
         group: visible_group(),
     };
     let mut text = Vec::new();
-    detail.render_text(Decoration::Ascii, &mut text).unwrap();
+    detail
+        .render_text(Decoration::Ascii, false, &mut text)
+        .unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains("not present in the latest run 4"), "{text}");
     let value: serde_json::Value = serde_json::from_str(&detail.to_json().unwrap()).unwrap();
@@ -1176,11 +1180,13 @@ fn clone_group_detail_says_whether_the_newest_comparable_run_still_holds_the_gro
     detail.scan_run = 4;
     detail.present_in_latest_run = Some(true);
     let mut text = Vec::new();
-    detail.render_text(Decoration::Ascii, &mut text).unwrap();
+    detail
+        .render_text(Decoration::Ascii, false, &mut text)
+        .unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(
         text.contains(&format!(
-            "run: 4 (structural; build variant {}) — latest",
+            "run: 4 (structural; build variant digest {}) — latest",
             "ab".repeat(32)
         )),
         "{text}"
@@ -1274,8 +1280,11 @@ fn finding_detail_exposes_mapping_evidence_and_separate_estimate_confidences() {
     assert!(text.contains("conflicting evidence retained"));
     assert!(text.contains("refactoring estimates (not guaranteed):"));
     assert!(text.contains("-2 estimated bytes"));
-    assert!(text.contains(&format!("source build variant: {}", "cd".repeat(16))));
-    assert!(text.contains(&format!("artifact build variant: {}", "ef".repeat(16))));
+    assert!(text.contains(&format!("source build variant digest: {}", "cd".repeat(16))));
+    assert!(text.contains(&format!(
+        "artifact build variant digest: {}",
+        "ef".repeat(16)
+    )));
     assert!(text.contains("model schema: refactor-savings-model-v1"));
     assert!(text.contains("shared_implementation_retains_copies"));
 }

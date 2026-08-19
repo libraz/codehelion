@@ -461,7 +461,11 @@
             "since_run_id",
             "top",
             "closed",
-            "entered"
+            "entered",
+            "still_ranked",
+            "outranked",
+            "superseded",
+            "promoted"
           ],
           "properties": {
             "since_run_id": {
@@ -485,6 +489,34 @@
                 "$ref": "#/$defs/hex"
               },
               "description": "Groups of this run's top that the earlier run's top did not hold, and that did not inherit their history from one that it did."
+            },
+            "still_ranked": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/hex"
+              },
+              "description": "Groups of that run's top which this run's top still holds. still_ranked, outranked, superseded and closed partition the earlier run's top exactly, so any one of them can be checked against the others."
+            },
+            "outranked": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/hex"
+              },
+              "description": "Groups of that run's top which this run still holds below its top. Their content is still duplicated; other groups overtook them."
+            },
+            "superseded": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/hex"
+              },
+              "description": "Groups of that run's top whose history a group of this run adopted. Deliberately not counted as closed: an adoption reported as a close would report one edit as both a fix and a fresh finding."
+            },
+            "promoted": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/hex"
+              },
+              "description": "Groups of this run's top that inherited their history from a group of the earlier run's top, which is why they are not in entered."
             }
           }
         },

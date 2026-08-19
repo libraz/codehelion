@@ -117,7 +117,7 @@ fn artifact_container_facts_reach_json_text_and_csv_without_raw_data() {
         csv.lines()
             .next()
             .unwrap()
-            .ends_with("section,executable,module")
+            .ends_with("section,executable,module,duplicated_bytes_normalized")
     );
     for record_type in ["section", "import", "relocation", "data-segment"] {
         assert!(
@@ -206,11 +206,79 @@ fn text_report_says_when_normalized_duplicates_are_unavailable() {
 
     render_text(&report, false, &mut text).unwrap();
 
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("normalized unavailable (no normalizer for this architecture)"));
+    // The size categories say the same thing in the same words rather than
+    // printing a zero that reads as "none found".
     assert!(
-        String::from_utf8(text)
-            .unwrap()
-            .contains("normalized unavailable (no normalizer for this architecture)")
+        text.contains("duplicated_bytes_normalized: unavailable"),
+        "{text}"
     );
+}
+
+/// One symbol that differs from its neighbours only in the bytes a normalizer
+/// rewrites away.
+fn normalizable_symbol(
+    offset: u64,
+    code: &[u8],
+    normalized: &[u8],
+) -> codehelion_artifact::ArtifactSymbol {
+    codehelion_artifact::ArtifactSymbol {
+        fingerprint: codehelion_artifact::ArtifactFingerprint::from_content(
+            "symbol",
+            &offset.to_le_bytes(),
+        ),
+        name: None,
+        exported: false,
+        section: Some(1),
+        offset,
+        size: code.len() as u64,
+        size_inferred: false,
+        code: code.to_vec(),
+        normalized: Some(codehelion_artifact::NormalizedInstructions {
+            version: "test-normal-v1".to_owned(),
+            bytes: normalized.to_vec(),
+        }),
+        inline_stack: Vec::new(),
+    }
+}
+
+/// The size categories report the same normalized total the duplicate listing
+/// does, each naming the evidence behind it.
+///
+/// The two blocks are read by different readers — one came for the groups, one
+/// came for the size — and only one of them saw the larger number.
+#[test]
+fn size_categories_report_the_same_normalized_total_the_duplicate_listing_does() {
+    let mut artifact = ArtifactIr::empty(BinaryFormat::Wasm, b"fixture");
+    artifact.capabilities.normalized_duplicates = true;
+    artifact.observed_bytes = 100;
+    artifact.symbols = vec![
+        normalizable_symbol(10, &[1, 2], &[9]),
+        normalizable_symbol(20, &[1, 3], &[9]),
+        normalizable_symbol(30, &[1, 4], &[9]),
+    ];
+    let report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None);
+    let mut text = Vec::new();
+
+    render_text(&report, false, &mut text).unwrap();
+
+    let text = String::from_utf8(text).unwrap();
+    let normalized = report.duplicates.normalized_duplicated_bytes;
+    assert!(normalized > 0, "the fixture normalizes to one group");
+    assert_eq!(report.sizes.duplicated_bytes_normalized, Some(normalized));
+    assert!(
+        text.contains(&format!(
+            "duplicated_bytes_normalized: {normalized} (weaker evidence: equal after normalization)"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains("duplicated_bytes: 0 (byte-identical groups only)"),
+        "{text}"
+    );
+    // The observation stays out of the bound that claims to be one.
+    assert_eq!(report.sizes.upper_bound_savings_bytes, Some(0));
 }
 
 #[test]
@@ -306,6 +374,7 @@ fn savings_categories_remain_distinct_in_every_artifact_report_format() {
     report.sizes = metrics::SizeClassification {
         observed_bytes: 100,
         duplicated_bytes: 80,
+        duplicated_bytes_normalized: Some(90),
         retained_bytes: Some(60),
         shared_dependency_bytes: Some(40),
         duplicated_data_bytes: Some(30),
@@ -320,6 +389,10 @@ fn savings_categories_remain_distinct_in_every_artifact_report_format() {
     for (field, expected) in [
         ("observed_bytes", 100),
         ("duplicated_bytes", 80),
+        // Normalized duplication stands beside byte-identical duplication and
+        // is added into neither it nor any savings value: it is reached
+        // through a rewriting rule, not observed directly.
+        ("duplicated_bytes_normalized", 90),
         ("retained_bytes", 60),
         ("shared_dependency_bytes", 40),
         ("duplicated_data_bytes", 30),
@@ -338,6 +411,7 @@ fn savings_categories_remain_distinct_in_every_artifact_report_format() {
     for (field, expected) in [
         ("observed_bytes", "100"),
         ("duplicated_bytes", "80"),
+        ("duplicated_bytes_normalized", "90"),
         ("retained_bytes", "60"),
         ("upper_bound_savings_bytes", "20"),
         ("estimated_refactor_savings_bytes", "10"),
@@ -1136,7 +1210,8 @@ fn a_calibration_request_without_a_database_flag_resolves_the_configured_default
         .expect("a calibration request selects a database");
     assert_eq!(
         resolved,
-        crate::resolve_db(None).expect("the configured default database")
+        crate::resolve_db(crate::scan::DatabaseUse::Recording, None)
+            .expect("the configured default database")
     );
 }
 

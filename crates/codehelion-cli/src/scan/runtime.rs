@@ -371,8 +371,31 @@ pub(crate) fn database_path(
     )))
 }
 
-/// Resolve the database a scan writes, stepping around a default database this
-/// build cannot open.
+/// What a command does with the audit database it names, which decides
+/// whether it may step around a default one this build cannot open.
+///
+/// One rule, three answers, because the same step aside is right for a
+/// command that records, half right for one that reads, and wrong for one
+/// that deletes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DatabaseUse {
+    /// The command records: it may write beside an unreadable default, making
+    /// the neighbour if it is not there yet.
+    Recording,
+    /// The command reads: it opens a neighbour that already exists, and never
+    /// makes one. A missing neighbour leaves the default's own error, so
+    /// "nothing has been scanned yet" stays distinguishable from "the scan
+    /// went somewhere else".
+    Reading,
+    /// The command acts on the file it names — deleting or pruning it. It uses
+    /// exactly the path that was resolved, because reading a destructive
+    /// instruction as naming some other file is how the wrong history gets
+    /// erased.
+    Literal,
+}
+
+/// Resolve the audit database one command uses, stepping around a default
+/// database this build cannot open when that command's job allows it.
 ///
 /// A schema this build does not support is the one recording failure the tool
 /// can settle on its own: nothing about the existing file has to change for a
@@ -381,35 +404,71 @@ pub(crate) fn database_path(
 /// disk, a read-only file, a lease another scan holds — still fails, because
 /// choosing a different file would not fix any of them.
 ///
-/// `--db` names one file deliberately. Writing to a different one would be
-/// ignoring that instruction, so an explicit path keeps the error.
+/// The choice lives here rather than in each command so that the reader who
+/// followed a note printed by one of them arrives at the same file. A scan
+/// that records beside an unreadable default and a report that then opens the
+/// default is one tool disagreeing with itself.
+///
+/// `--db` names one file deliberately. Using a different one would be ignoring
+/// that instruction, so an explicit path is never traded, whatever the job.
 ///
 /// # Errors
 ///
 /// Returns what [`database_path`] refuses: a repository-controlled
 /// configuration naming storage outside the scanned repository.
-pub(crate) fn scan_database_path(
+pub(crate) fn database_path_for(
+    intent: DatabaseUse,
     root: &Path,
     flag: Option<&Path>,
     config: &ResolvedConfig,
     untrusted: bool,
 ) -> Result<PathBuf> {
     let path = database_path(root, flag, config, untrusted)?;
-    if flag.is_some() {
+    if flag.is_some() || intent == DatabaseUse::Literal {
         return Ok(path);
     }
     let Some(replacement) = incompatible_database_replacement(&path) else {
         return Ok(path);
     };
-    // Announced rather than done quietly: a second audit database is as large
-    // as the first one, and the reader is the only one who can decide what
-    // becomes of the file this run did not touch.
-    eprintln!(
-        "note: {} was written by another schema version and was left unchanged; this run used {}",
-        path.display(),
-        replacement.display()
-    );
+    if intent == DatabaseUse::Reading && !readable_here(&replacement) {
+        return Ok(path);
+    }
+    announce_stepping_aside(&path, &replacement);
     Ok(replacement)
+}
+
+/// Resolve the database a scan writes.
+///
+/// # Errors
+///
+/// Returns what [`database_path_for`] returns.
+pub(crate) fn scan_database_path(
+    root: &Path,
+    flag: Option<&Path>,
+    config: &ResolvedConfig,
+    untrusted: bool,
+) -> Result<PathBuf> {
+    database_path_for(DatabaseUse::Recording, root, flag, config, untrusted)
+}
+
+/// Say which database was used and which was left alone.
+///
+/// Announced rather than done quietly: a second audit database is as large as
+/// the first one, and the reader is the only one who can decide what becomes
+/// of the file this command did not touch. One wording for every command, so
+/// that meeting the same situation twice does not read as two situations.
+pub(crate) fn announce_stepping_aside(left: &Path, used: &Path) {
+    eprintln!(
+        "note: {} was written by another schema version and was left unchanged; codehelion used {}",
+        left.display(),
+        used.display()
+    );
+}
+
+/// Whether `path` holds a database this build can open.
+pub(crate) fn readable_here(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
+        && codehelion_store::Store::open_existing(path).is_ok()
 }
 
 /// Where a run goes instead of `path`, when `path` holds a database written by
@@ -428,6 +487,31 @@ pub(crate) fn incompatible_database_replacement(path: &Path) -> Option<PathBuf> 
         }
         _ => None,
     }
+}
+
+/// The next command to type, when `path` holds a database written by a schema
+/// version this build does not support.
+///
+/// A refusal that names no way forward leaves the reader to work out that the
+/// tool has a naming rule for this, which they cannot know. Naming the file is
+/// enough: the two ways out are to record beside the old history or to stop
+/// naming it, and both are one flag away.
+///
+/// `None` when `path` is fine, unreadable for some other reason, or has no
+/// name a neighbour could be derived from — nothing to advise in any of those.
+pub(crate) fn incompatible_database_advice(path: &Path) -> Option<String> {
+    let sibling = incompatible_database_replacement(path)?;
+    let already_there = readable_here(&sibling);
+    let sibling = sibling.display();
+    Some(if already_there {
+        format!(
+            "an audit history this build can open is already at {sibling}: read it with --db {sibling}, or drop --db to let codehelion choose it"
+        )
+    } else {
+        format!(
+            "record beside it with --db {sibling}, or drop --db to let codehelion choose a database it can open"
+        )
+    })
 }
 
 /// `path` renamed to carry the schema version this build writes.

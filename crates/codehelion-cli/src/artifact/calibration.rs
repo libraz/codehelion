@@ -18,9 +18,8 @@ use super::{
 /// supplies the concurrent read snapshot, so it deliberately does not take
 /// the writer lease.
 pub fn calibration(args: &ArtifactCalibrationArgs, out: &mut impl Write) -> Result<Outcome> {
-    let db = crate::resolve_db(args.db.as_deref())?;
-    let store = Store::open_existing(&db)
-        .with_context(|| format!("opening calibration database {}", db.display()))?;
+    let db = crate::resolve_db(crate::scan::DatabaseUse::Reading, args.db.as_deref())?;
+    let store = crate::scan::open_recorded_store(&db)?;
     let source_run = args.source_run.map_or_else(
         || {
             store

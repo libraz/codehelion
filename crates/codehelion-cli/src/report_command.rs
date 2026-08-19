@@ -21,7 +21,7 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
             path.display()
         );
     }
-    let store = Store::open_existing(&path)?;
+    let store = scan::open_recorded_store(&path)?;
     let run_id = selected_run_id(&store, args.run, &root)?;
     let run = store
         .run_summary(run_id)?
@@ -87,6 +87,13 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
                 .collect(),
             ranking,
             database: path.display().to_string(),
+            // A replay measured nothing: it reconstructs a document from what
+            // was recorded, and the clock is not part of that.
+            timings: None,
+            replay_database: args
+                .db
+                .is_some()
+                .then(|| scan::spelled_for_a_command(&path)),
             run_id: Some(run.id),
             reused: false,
         },
@@ -417,7 +424,13 @@ pub(crate) fn report_database(
     let root = codehelion_core::paths::canonical(&args.path)
         .with_context(|| format!("resolving path {}", args.path.display()))?;
     let resolved_config = config::load(args.config.as_deref(), &root)?;
-    let path = scan::database_path(&root, args.db.as_deref(), &resolved_config, false)?;
+    let path = scan::database_path_for(
+        scan::DatabaseUse::Reading,
+        &root,
+        args.db.as_deref(),
+        &resolved_config,
+        false,
+    )?;
     Ok((root, resolved_config, path))
 }
 
@@ -670,6 +683,7 @@ pub(crate) fn recorded_ranking(detectors: &[(String, String)]) -> Result<report:
 /// about what is on the screen is a break in the trail the ids exist to keep.
 pub(crate) fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
     let path = resolve_db_at(
+        scan::DatabaseUse::Reading,
         &args.path,
         args.db.as_deref(),
         args.config.as_deref(),
@@ -681,7 +695,7 @@ pub(crate) fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcom
             path.display()
         );
     }
-    let store = Store::open_existing(&path)?;
+    let store = scan::open_recorded_store(&path)?;
     let found = resolve_id(&store, &args.finding_id, &path)?;
     match found.kind {
         IdKind::Occurrence => explain_occurrence(&store, &found.id, args, out),
@@ -840,7 +854,11 @@ pub(crate) fn explain_clone_group(
     };
     match args.format {
         DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
-        DetailFormat::Text => detail.render_text(args.decoration.resolve(), out)?,
+        // `explain` writes to standard output alone, so the terminal test
+        // `auto` makes is the right one without an `--output` to consult.
+        DetailFormat::Text => {
+            detail.render_text(args.decoration.resolve(), args.color.enabled(true), out)?;
+        }
     }
     Ok(Outcome::Success)
 }

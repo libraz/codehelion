@@ -408,11 +408,22 @@ pub struct ArtifactArgs {
     /// Clamp input, time, and supported memory ceilings for an artifact nobody vouches for.
     #[arg(long)]
     pub untrusted: bool,
-    /// JSON manifest describing this artifact's build variant.
+    /// JSON manifest you write describing the conditions this artifact was
+    /// built under.
+    ///
+    /// Its contents are yours to choose: the file is a declaration that only
+    /// artifacts built the same way are compared with one another, and its
+    /// digest is what makes that comparison possible. It is a separate thing
+    /// from a source run's build variant digest and does not have to match
+    /// one; nothing looks for a file that already exists.
     #[arg(long)]
     pub build_variant: Option<PathBuf>,
     /// Completed source scan whose units may be correlated using debug evidence.
-    /// Requires `--build-variant` so artifact and source conditions remain explicit.
+    ///
+    /// Requires `--build-variant` so artifact and source conditions remain
+    /// explicit. The two conditions are recorded side by side rather than
+    /// checked against each other: the source digest is not something to look
+    /// up and write into the manifest.
     #[arg(long, requires = "build_variant")]
     pub source_run: Option<i64>,
     /// Existing local linker map used as additional source-artifact evidence.
@@ -724,6 +735,10 @@ pub struct ScanArgs {
     #[arg(long)]
     pub fail_on_findings: bool,
     /// Analyse even when an identical completed run is available locally.
+    ///
+    /// What reuse saves is the recording half of a run; `-v` prints the two
+    /// halves separately, so how much this costs is measurable rather than
+    /// guessed at.
     #[arg(long)]
     pub no_reuse: bool,
     /// Read the tree under the ceilings for a repository nobody vouches for.
@@ -825,6 +840,13 @@ pub struct ExplainArgs {
     /// Output format for the detail view.
     #[arg(long, value_enum, default_value_t = DetailFormat::Text)]
     pub format: DetailFormat,
+    /// When to colour the detail view.
+    ///
+    /// Spelled and defaulted like the same option on the commands that render
+    /// a report: a display option a reader has learned once should not have to
+    /// be looked up again for the command that shows one group.
+    #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
+    pub color: ColorChoice,
     /// Which glyphs the occurrence list draws its structure with.
     #[arg(long, value_enum, default_value_t = DecorationChoice::Auto)]
     pub decoration: DecorationChoice,

@@ -49,13 +49,21 @@
     "sizes": {
       "type": "object",
       "required": [
-        "observed_bytes", "duplicated_bytes", "retained_bytes", "shared_dependency_bytes",
+        "observed_bytes", "duplicated_bytes", "duplicated_bytes_normalized",
+        "retained_bytes", "shared_dependency_bytes",
         "duplicated_data_bytes", "upper_bound_savings_bytes", "estimated_refactor_savings_bytes",
         "verified_savings_bytes", "clone_confidence", "savings_confidence", "assumptions"
       ],
       "properties": {
         "observed_bytes": { "type": "integer", "minimum": 0 },
-        "duplicated_bytes": { "type": "integer", "minimum": 0 },
+        "duplicated_bytes": {
+          "type": "integer", "minimum": 0,
+          "description": "Excess bytes in byte-identical duplicate code groups. Duplication reached only through normalization is counted separately and is not added here."
+        },
+        "duplicated_bytes_normalized": {
+          "type": ["integer", "null"], "minimum": 0,
+          "description": "Excess bytes in code groups equal only after normalization, or null when no normalizer exists for the architecture. Weaker evidence than duplicated_bytes, so it feeds no savings value."
+        },
         "retained_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "shared_dependency_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "duplicated_data_bytes": { "type": ["integer", "null"], "minimum": 0 },

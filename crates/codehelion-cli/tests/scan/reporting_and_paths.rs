@@ -341,6 +341,158 @@ fn colour_follows_the_destination_the_flag_and_no_color() {
         .stdout(ansi.not());
 }
 
+/// The commands a report prints are commands that run.
+///
+/// The check is to execute what was printed, not to compare it against an
+/// expected string: an instruction that reads correctly and opens the wrong
+/// database is exactly the failure this exists to catch, and a string
+/// comparison agrees with it.
+#[test]
+fn the_commands_a_report_prints_run_as_printed() {
+    let dir = fixture();
+    let root = dir.path();
+    let database = root.join("elsewhere.db");
+    let scan = cmd()
+        .current_dir(root)
+        .args([
+            "scan",
+            ".",
+            "--db",
+            database.to_str().expect("temporary path is UTF-8"),
+        ])
+        .output()
+        .expect("run scan against a named database");
+    assert!(scan.status.success(), "{scan:?}");
+    let text = String::from_utf8(scan.stdout).expect("scan output is UTF-8");
+
+    let printed = printed_commands(&text);
+    assert!(!printed.is_empty(), "{text}");
+    for printed in printed {
+        let arguments: Vec<&str> = printed.split_whitespace().skip(1).collect();
+        assert!(
+            arguments.contains(&"--db"),
+            "a named database has to be repeated or the next command reads elsewhere: {printed}"
+        );
+        let output = cmd()
+            .current_dir(root)
+            .args(&arguments)
+            .output()
+            .expect("run the command the report printed");
+        assert!(
+            output.status.success(),
+            "the report printed a command that does not run: {printed}\n{output:?}"
+        );
+    }
+}
+
+/// A database nobody named needs no flag: every command resolves the same one.
+#[test]
+fn a_report_over_the_default_database_prints_the_short_commands() {
+    let dir = fixture();
+    let root = dir.path();
+    let scan = cmd()
+        .current_dir(root)
+        .args(["scan", "."])
+        .output()
+        .expect("run scan against the default database");
+    assert!(scan.status.success(), "{scan:?}");
+    let text = String::from_utf8(scan.stdout).expect("scan output is UTF-8");
+
+    let printed = printed_commands(&text);
+    assert!(!printed.is_empty(), "{text}");
+    for command in printed {
+        assert!(
+            !command.contains("--db"),
+            "an unnamed database must not be spelled back at the reader: {command}"
+        );
+        let arguments: Vec<&str> = command.split_whitespace().skip(1).collect();
+        let output = cmd()
+            .current_dir(root)
+            .args(&arguments)
+            .output()
+            .expect("run the command the report printed");
+        assert!(output.status.success(), "{command}\n{output:?}");
+    }
+}
+
+/// Every `codehelion ...` the report offers as a next step, as printed.
+fn printed_commands(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    // Each marker's command runs to the glyph that closes it: the replay is
+    // parenthesised, and the next-step line separates its two suggestions with
+    // a middle dot.
+    for (marker, terminator) in [("replay: ", ')'), ("open one: ", '\u{b7}')] {
+        for (at, _) in text.match_indices(marker) {
+            let rest = &text[at + marker.len()..];
+            let end = rest.find([terminator, '\n']).unwrap_or(rest.len());
+            let command = rest[..end].trim();
+            assert!(
+                command.starts_with("codehelion "),
+                "`{marker}` did not introduce a command: {command}"
+            );
+            found.push(command.to_owned());
+        }
+    }
+    found
+}
+
+/// A detail view answers to the same colour flag a report does.
+///
+/// A display option that exists on one command and not the next is one the
+/// reader has to look up again every time, so `explain` takes `--color` with
+/// the spelling, the default and the `NO_COLOR` behaviour the report uses —
+/// and colours what it is asked to, rather than accepting the flag and
+/// ignoring it.
+#[test]
+fn explain_takes_the_same_colour_flag_a_report_does() {
+    let dir = fixture();
+    let root = dir.path();
+    let report = scan_json(root);
+    let group = visible_ids(&report)
+        .into_iter()
+        .next()
+        .expect("the fixture duplicates on purpose");
+    let ansi = predicate::str::contains('\x1b');
+
+    cmd()
+        .current_dir(root)
+        .args(["explain", &group])
+        .assert()
+        .success()
+        .stdout(ansi.clone().not());
+    cmd()
+        .current_dir(root)
+        .args(["explain", &group, "--color", "always"])
+        .assert()
+        .success()
+        .stdout(ansi.clone());
+    cmd()
+        .current_dir(root)
+        .args(["explain", &group, "--color", "always"])
+        .env("NO_COLOR", "1")
+        .assert()
+        .success()
+        .stdout(ansi.clone());
+    cmd()
+        .current_dir(root)
+        .args(["explain", &group, "--color", "never"])
+        .assert()
+        .success()
+        .stdout(ansi.not());
+
+    // A machine-readable document is not a place for terminal escapes,
+    // whatever was asked for.
+    let output = cmd()
+        .current_dir(root)
+        .args(["explain", &group, "--format", "json", "--color", "always"])
+        .output()
+        .expect("run explain");
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    assert!(!text.contains('\x1b'), "{text}");
+    serde_json::from_str::<serde_json::Value>(&text).expect("stdout is one JSON document");
+}
+
 /// Glyphs are chosen apart from colour, and a report written to a file keeps
 /// the ones a terminal would have shown.
 #[test]
@@ -1447,6 +1599,21 @@ fn churn_line(text: &str) -> Option<&str> {
     text.lines().find(|line| line.starts_with("since run "))
 }
 
+/// Every line about the earlier run's highest-ranked groups.
+fn churn_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|line| line.starts_with("since run "))
+        .collect()
+}
+
+/// How many ids one part of the churn breakdown names.
+fn churn_len(churn: &serde_json::Value, part: &str) -> usize {
+    churn[part]
+        .as_array()
+        .expect("every part of the breakdown is a list of ids")
+        .len()
+}
+
 #[test]
 fn a_first_scan_states_nothing_about_an_earlier_run_s_best_groups() {
     let dir = one_pair();
@@ -1480,20 +1647,70 @@ fn a_closed_group_is_counted_out_of_the_earlier_run_s_top() {
     assert_eq!(churn["since_run_id"], first_run);
     assert_eq!(churn["top"], 100);
     assert_eq!(churn["closed"], serde_json::json!([closed]));
-    assert_eq!(
-        churn["entered"].as_array().expect("entered").len(),
-        1,
-        "{churn}"
-    );
+    assert_eq!(churn_len(churn, "entered"), 1, "{churn}");
 
     let text = scan_detailed_text(root);
+    // `gone` says what it means beside itself. Nothing else happened to the
+    // earlier top here, so nothing else is written: a zero would be a number
+    // the eye has to read and then dismiss.
     assert_eq!(
-        churn_line(&text),
-        Some(
-            format!("since run {first_run}: 1 of its top 100 groups are gone, 1 new groups entered the top 100")
-                .as_str()
-        ),
+        churn_lines(&text),
+        vec![
+            format!(
+                "since run {first_run}: 1 of its top 100 groups are gone (no group holds their content now)"
+            ),
+            format!("since run {first_run}: 1 new groups entered the top 100"),
+        ],
         "{text}"
+    );
+}
+
+/// The four ways an earlier top-ranked group can have ended up partition it.
+///
+/// This is the property that lets a reader reconcile what the report says with
+/// what they counted themselves. Without it, a count of what left is a number
+/// with nothing to check it against, and the arithmetic reads as broken when
+/// every part of it is right.
+#[test]
+fn the_earlier_run_s_top_is_accounted_for_exactly_once_per_group() {
+    let dir = one_pair();
+    let root = dir.path();
+    std::fs::write(root.join("codehelion.toml"), "[report]\nchurn-top = 2\n").unwrap();
+    let first = structural_json(root);
+    let previously_ranked = visible_ids(&first).len().min(2);
+    assert!(previously_ranked > 0, "{first}");
+
+    // One pair is renamed — its history moves to a successor — and another
+    // duplication is added, which pushes groups around the top.
+    std::fs::write(root.join("src/c.rs"), RENAMED_RS).unwrap();
+    std::fs::write(root.join("src/d.rs"), FORMAT_RS).unwrap();
+    std::fs::write(root.join("src/e.rs"), FORMAT_RS).unwrap();
+    let second = structural_json(root);
+    let churn = &second["summary"]["top_churn"];
+
+    let parts = ["still_ranked", "outranked", "superseded", "closed"];
+    let total: usize = parts.iter().map(|part| churn_len(churn, part)).sum();
+    assert_eq!(
+        total, previously_ranked,
+        "the four parts must cover the earlier top exactly once each: {churn}"
+    );
+    // Exactly once: no id may appear in two of them.
+    let mut seen = std::collections::BTreeSet::new();
+    for part in parts {
+        for id in churn[part].as_array().expect("a list of ids") {
+            let id = id.as_str().expect("an id is a string");
+            assert!(
+                seen.insert(id.to_owned()),
+                "{id} appears in more than one part: {churn}"
+            );
+        }
+    }
+    // And the arriving side splits the same way.
+    let arrived = churn_len(churn, "entered") + churn_len(churn, "promoted");
+    let currently_ranked = visible_ids(&second).len().min(2);
+    assert!(
+        arrived + churn_len(churn, "still_ranked") == currently_ranked,
+        "what is in this run's top either was in the earlier one or arrived: {churn}"
     );
 }
 
@@ -1510,7 +1727,11 @@ fn a_group_whose_history_moved_to_a_successor_is_not_counted_as_closed() {
     // The work behind it did not close, and counting it as closed would report
     // one edit as both a fix and a regression.
     std::fs::write(root.join("src/c.rs"), RENAMED_RS).unwrap();
-    let second = structural_json(root);
+    // One scan, read twice: rescanning an unchanged tree is reused, and a
+    // reused run compares with nothing, so the text and the document have to
+    // come from the same run.
+    let text = structural_detailed_text(root);
+    let second = replayed_json(root);
     let churn = &second["summary"]["top_churn"];
     assert!(
         !churn["closed"]
@@ -1519,11 +1740,114 @@ fn a_group_whose_history_moved_to_a_successor_is_not_counted_as_closed() {
             .contains(&serde_json::json!(previous)),
         "{churn}"
     );
+    // Not closed, and said to be where it actually went. The reader who
+    // counted one group leaving the top can now find it.
+    assert_eq!(
+        churn["superseded"],
+        serde_json::json!([previous]),
+        "{churn}"
+    );
     assert_eq!(
         churn["entered"],
         serde_json::json!([]),
         "a successor that inherited a ranked group's history did not enter"
     );
+    assert_eq!(
+        churn_len(churn, "promoted"),
+        1,
+        "the successor is named rather than left out of both sides: {churn}"
+    );
+
+    let lines = churn_lines(&text);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("1 of its top 100 groups live on in a successor group")),
+        "{text}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("1 entered by taking over a group that was already there")),
+        "{text}"
+    );
+    // Nothing closed and nothing new arrived, so neither is mentioned at all:
+    // a part that did not happen is left out rather than written as a zero.
+    assert!(
+        !lines.iter().any(|line| line.contains("are gone")),
+        "{text}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("new groups entered")),
+        "{text}"
+    );
+}
+
+/// The two halves of a run are timed apart, in the detailed view only.
+///
+/// Which half dominates is what decides whether reuse is worth arranging, and
+/// one elapsed time answers neither question. It is left out of the default
+/// view because it is not part of what the scan found, and out of the JSON
+/// because a duration is not reproducible: a replay reconstructs a document
+/// from what was recorded, and no clock reading is.
+#[test]
+fn a_detailed_scan_times_analysis_and_recording_apart() {
+    let dir = one_pair();
+    let root = dir.path();
+    let timing = regex_free_timing_line;
+
+    let detailed = scan_detailed_text(root);
+    let line = timing(&detailed).expect("a detailed scan times its two halves");
+    assert!(line.contains("recorded in "), "{line}");
+
+    // Rescanning an unchanged tree writes nothing, and the line says that
+    // rather than reporting a recording that did not happen.
+    let reused = scan_detailed_text(root);
+    let line = timing(&reused).expect("a reused run still times its analysis");
+    assert!(line.contains("recorded: reused, nothing written"), "{line}");
+
+    // The default view stays as short as it was.
+    let output = cmd()
+        .current_dir(root)
+        .args(["scan", "."])
+        .output()
+        .expect("run scan");
+    assert!(output.status.success(), "{output:?}");
+    let plain = String::from_utf8(output.stdout).expect("scan text is UTF-8");
+    assert!(timing(&plain).is_none(), "{plain}");
+
+    // A replay measured nothing and says nothing.
+    let output = cmd()
+        .current_dir(root)
+        .args(["report", "-v"])
+        .output()
+        .expect("run report");
+    assert!(output.status.success(), "{output:?}");
+    let replayed = String::from_utf8(output.stdout).expect("report text is UTF-8");
+    assert!(timing(&replayed).is_none(), "{replayed}");
+
+    // And no timing reaches the document a consumer parses.
+    let document = replayed_json(root).to_string();
+    assert!(!document.contains("timings"), "{document}");
+    assert!(!document.contains("analysis\":"), "{document}");
+}
+
+/// The line stating how long each half of the run took.
+fn regex_free_timing_line(text: &str) -> Option<&str> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("analysis ") && line.contains('s'))
+}
+
+/// The latest recorded run of `root`, as a report document.
+fn replayed_json(root: &Path) -> serde_json::Value {
+    let output = cmd()
+        .current_dir(root)
+        .args(["report", "--format", "json"])
+        .output()
+        .expect("run report");
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice(&output.stdout).expect("stdout is one JSON document")
 }
 
 #[test]

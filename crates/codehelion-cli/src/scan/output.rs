@@ -296,22 +296,49 @@ pub(crate) fn top_group_churn(
         .collect();
     let inherited: std::collections::BTreeSet<_> = successors.values().cloned().collect();
     let previously_ranked: std::collections::BTreeSet<_> = previous_top.iter().cloned().collect();
+    let currently_ranked: std::collections::BTreeSet<_> = current_top.iter().cloned().collect();
+    // One pass, four buckets, every group of the earlier top in exactly one of
+    // them: still ranked, ranked no longer, succeeded by another group, or
+    // gone. A reader who counts one of them can reach the others.
+    let mut still_ranked = Vec::new();
+    let mut outranked = Vec::new();
+    let mut superseded = Vec::new();
+    let mut closed = Vec::new();
+    for group in previous_top {
+        if currently_ranked.contains(&group) {
+            still_ranked.push(group);
+        } else if current_all.contains(&group) {
+            outranked.push(group);
+        } else if inherited.contains(&group) {
+            superseded.push(group);
+        } else {
+            closed.push(group);
+        }
+    }
+    let mut entered = Vec::new();
+    let mut promoted = Vec::new();
+    for group in current_top {
+        if previously_ranked.contains(&group) {
+            continue;
+        }
+        if successors
+            .get(&group)
+            .is_some_and(|parent| previously_ranked.contains(parent))
+        {
+            promoted.push(group);
+        } else {
+            entered.push(group);
+        }
+    }
     Ok(report::TopChurn {
         since_run_id: predecessor_run,
         top: u64::try_from(top).unwrap_or(u64::MAX),
-        closed: previous_top
-            .into_iter()
-            .filter(|group| !current_all.contains(group) && !inherited.contains(group))
-            .collect(),
-        entered: current_top
-            .into_iter()
-            .filter(|group| {
-                !previously_ranked.contains(group)
-                    && !successors
-                        .get(group)
-                        .is_some_and(|parent| previously_ranked.contains(parent))
-            })
-            .collect(),
+        closed,
+        entered,
+        still_ranked,
+        outranked,
+        superseded,
+        promoted,
     })
 }
 

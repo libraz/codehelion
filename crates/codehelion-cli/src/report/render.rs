@@ -426,7 +426,8 @@ impl Report {
         }
         let guidance = if self.run.run_id.is_some() {
             format!(
-                "open one: codehelion explain {}{separator}list every group: --limit 0",
+                "open one: codehelion explain{} {}{separator}list every group: --limit 0",
+                database_flag(self),
                 opts.id(&first.fingerprint),
             )
         } else {
@@ -694,7 +695,28 @@ impl Report {
         if let Some(baseline) = &summary.baseline {
             render_baseline_detail(baseline, out)?;
         }
+        self.render_timings(out)?;
         Ok(())
+    }
+
+    /// How long the run spent analysing and how long it spent recording.
+    ///
+    /// Written here rather than on the default line because it is not part of
+    /// what the scan found. It is here at all because the two halves can be
+    /// wildly different sizes, and which of them dominates is what decides
+    /// whether reuse is worth arranging.
+    fn render_timings(&self, out: &mut impl Write) -> io::Result<()> {
+        let Some(timings) = self.run.timings else {
+            return Ok(());
+        };
+        let recorded = match (timings.recording, self.run.reused) {
+            (Some(elapsed), _) => format!("recorded in {}", seconds(elapsed)),
+            // Nothing was written because there was nothing new to write. The
+            // saving is the point of saying so.
+            (None, true) => "recorded: reused, nothing written".to_owned(),
+            (None, false) => "not recorded".to_owned(),
+        };
+        writeln!(out, "  analysis {}, {recorded}", seconds(timings.analysis))
     }
 
     fn render_configuration(&self, out: &mut impl Write) -> io::Result<()> {
@@ -923,8 +945,11 @@ fn run_status(report: &Report) -> String {
     let Some(run_id) = report.run.run_id else {
         return " (replay and baseline comparison unavailable)".to_string();
     };
+    let database = database_flag(report);
     if report.run.reused {
-        return format!(" (reused: tree unchanged; replay: codehelion report --run {run_id})");
+        return format!(
+            " (reused: tree unchanged; replay: codehelion report{database} --run {run_id})"
+        );
     }
     if let Some(changes) = &report.summary.changes {
         let changed = changes
@@ -932,14 +957,27 @@ fn run_status(report: &Report) -> String {
             .saturating_add(changes.added)
             .saturating_add(changes.removed);
         return format!(
-            " ({} file(s) changed; replay: codehelion report --run {})",
+            " ({} file(s) changed; replay: codehelion report{database} --run {run_id})",
             thousands(changed),
-            run_id
         );
     }
     // A report reconstructed by `report --run` has no invocation-level reuse
     // fact. Naming the replay is precise without inventing one.
-    format!(" (replay: codehelion report --run {run_id})")
+    format!(" (replay: codehelion report{database} --run {run_id})")
+}
+
+/// The `--db` every command this report prints has to carry, ready to be
+/// pasted into one, or nothing when a bare invocation finds the same database.
+///
+/// A next step the reader cannot take is worse than no next step at all: they
+/// paste it, it opens somewhere else, and the report that sent them there is
+/// the thing they stop trusting.
+fn database_flag(report: &Report) -> String {
+    report
+        .run
+        .replay_database
+        .as_deref()
+        .map_or_else(String::new, |path| format!(" --db {path}"))
 }
 
 /// What became of the groups the previous run put at the top.
@@ -948,21 +986,94 @@ fn run_status(report: &Report) -> String {
 /// measure of how much duplication a tree holds and the wrong measure of how
 /// much of it anyone has dealt with: closing eighteen groups out of nine
 /// thousand moves it by a rounding error.
+///
+/// `gone` says what it means on the same line, and the rest of the earlier top
+/// is accounted for beside it. A number that names a subset without naming the
+/// rule that selected it cannot be reconciled with a number the reader counted
+/// themselves, and a reader who cannot reconcile two numbers trusts neither.
 fn render_top_churn(summary: &Summary, out: &mut impl Write) -> io::Result<()> {
     let Some(churn) = &summary.top_churn else {
         return Ok(());
     };
-    if churn.closed.is_empty() && churn.entered.is_empty() {
+    let top = thousands(churn.top);
+    // Only the parts that happened are written: a zero here is a clause the
+    // eye has to read and then dismiss. `more` is used only after a first
+    // clause has established what it is more than.
+    let mut left = Vec::new();
+    if !churn.closed.is_empty() {
+        left.push(format!(
+            "{} of its top {top} groups are gone (no group holds their content now)",
+            count(&churn.closed)
+        ));
+    }
+    if !churn.superseded.is_empty() {
+        left.push(if left.is_empty() {
+            format!(
+                "{} of its top {top} groups live on in a successor group",
+                count(&churn.superseded)
+            )
+        } else {
+            format!(
+                "{} more live on in a successor group",
+                count(&churn.superseded)
+            )
+        });
+    }
+    if !churn.outranked.is_empty() {
+        left.push(if left.is_empty() {
+            format!(
+                "{} of its top {top} groups fell out of it",
+                count(&churn.outranked)
+            )
+        } else {
+            format!("{} only fell out of the top {top}", count(&churn.outranked))
+        });
+    }
+    if !left.is_empty() {
+        writeln!(out, "since run {}: {}", churn.since_run_id, left.join("; "))?;
+    }
+    let mut arrived = Vec::new();
+    if !churn.entered.is_empty() {
+        arrived.push(format!(
+            "{} new groups entered the top {top}",
+            count(&churn.entered)
+        ));
+    }
+    if !churn.promoted.is_empty() {
+        arrived.push(format!(
+            "{} {}entered by taking over a group that was already there",
+            count(&churn.promoted),
+            if arrived.is_empty() { "" } else { "more " },
+        ));
+    }
+    if arrived.is_empty() {
         return Ok(());
     }
-    let top = thousands(churn.top);
     writeln!(
         out,
-        "since run {}: {} of its top {top} groups are gone, {} new groups entered the top {top}",
+        "since run {}: {}",
         churn.since_run_id,
-        thousands(u64::try_from(churn.closed.len()).unwrap_or(u64::MAX)),
-        thousands(u64::try_from(churn.entered.len()).unwrap_or(u64::MAX)),
+        arrived.join("; ")
     )
+}
+
+/// How many things are in a list, written the way every other count is.
+fn count(entries: &[String]) -> String {
+    thousands(u64::try_from(entries.len()).unwrap_or(u64::MAX))
+}
+
+/// An elapsed time, at the precision a reader can act on.
+///
+/// Tenths below a minute and whole seconds above it: nobody arranges reuse
+/// over a hundredth of a second, and nobody reads four significant figures of
+/// a five-minute scan.
+fn seconds(elapsed: std::time::Duration) -> String {
+    let value = elapsed.as_secs_f64();
+    if value < 60.0 {
+        format!("{value:.1}s")
+    } else {
+        format!("{}s", thousands(elapsed.as_secs()))
+    }
 }
 
 /// Totals for serialized supplemental evidence that the default body hides.
@@ -1633,12 +1744,12 @@ fn render_artifact_savings(savings: &[ArtifactSavings], out: &mut impl Write) ->
         )?;
         writeln!(
             out,
-            "        source build variant: {}",
+            "        source build variant digest: {}",
             savings.source_build_variant_fingerprint
         )?;
         writeln!(
             out,
-            "        artifact build variant: {}",
+            "        artifact build variant digest: {}",
             savings.artifact_build_variant_fingerprint
         )?;
         writeln!(

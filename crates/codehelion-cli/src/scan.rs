@@ -172,6 +172,11 @@ pub(crate) fn new_database_directory_hint(
 pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     validate_fast_args(args)?;
     let started_at = rfc3339_now();
+    // Measured with a monotonic clock rather than by subtracting the recorded
+    // timestamps: those are RFC 3339 strings whose resolution is the report's,
+    // and a run that takes two seconds has to be reported as taking two
+    // seconds rather than as taking some number of whole ones.
+    let analysis_began = std::time::Instant::now();
     let root = codehelion_core::paths::canonical(&args.path)
         .with_context(|| format!("resolving scan path {}", args.path.display()))?;
     if !root.is_dir() {
@@ -179,6 +184,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     }
     let resolved_config = config::load(args.config.as_deref(), &root)?;
     let db_path = scan_database_path(&root, args.db.as_deref(), &resolved_config, args.untrusted)?;
+    let replay_database = args.db.is_some().then(|| spelled_for_a_command(&db_path));
     let _database_lock = crate::scan_lock::acquire(&db_path)?;
     let configuration = configuration_info(
         &resolved_config.source,
@@ -238,9 +244,11 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     } = suppression;
 
     let finished_at = rfc3339_now();
+    let analysis_took = analysis_began.elapsed();
     let mut inputs = BuildInputs {
         root: &root,
         db_path: &db_path,
+        replay_database: replay_database.as_deref(),
         configuration: &configuration,
         // Filled in only after the snapshot has been recorded. A provisional
         // report therefore cannot accidentally publish a fake database id.
@@ -285,6 +293,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         .as_ref()
         .map(|baseline| apply_baseline(baseline, &mut model.groups));
     model.refresh_supplemental_summary();
+    let recording_began = std::time::Instant::now();
     let record_result = record_ranked(
         &mut inputs,
         &cfg,
@@ -293,10 +302,15 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         &stored,
         &model.groups,
     );
+    let recording_took = recording_began.elapsed();
     match record_result {
         Ok(()) => {
             model.run.run_id = inputs.run_id;
             model.run.reused = inputs.reused;
+            model.run.timings = Some(report::RunTimings {
+                analysis: analysis_took,
+                recording: (!inputs.reused).then_some(recording_took),
+            });
             model.summary.changes.clone_from(&inputs.changes);
             let hydration_error = if let Some(run_id) = model.run.run_id {
                 match open_store(&db_path) {
@@ -351,6 +365,10 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
             // guidance for this provisional report.
             model.run.run_id = None;
             model.run.reused = false;
+            model.run.timings = Some(report::RunTimings {
+                analysis: analysis_took,
+                recording: None,
+            });
             model.summary.changes = None;
             for group in &mut model.groups {
                 group.artifact_savings.clear();
@@ -515,6 +533,8 @@ fn evaluate_suppression(
 struct BuildInputs<'a> {
     root: &'a Path,
     db_path: &'a Path,
+    /// The `--db` the commands this report prints have to repeat.
+    replay_database: Option<&'a str>,
     configuration: &'a report::ConfigurationInfo,
     run_id: Option<i64>,
     started_at: &'a str,
@@ -621,6 +641,12 @@ pub(crate) struct RunInfoInputs<'a> {
     pub root: &'a Path,
     /// Local audit database path.
     pub db_path: &'a Path,
+    /// The `--db` the commands this report prints have to repeat.
+    ///
+    /// A database nobody named is the one every other command resolves for
+    /// itself, so those commands leave `--db` off. A named one has to be
+    /// repeated, or the next command reads somewhere else.
+    pub replay_database: Option<&'a str>,
     /// Effective configuration recorded with the scan.
     pub configuration: &'a report::ConfigurationInfo,
     /// Persisted scan run identifier.
@@ -675,9 +701,26 @@ pub(crate) fn common_run_info(mut inputs: RunInfoInputs<'_>) -> report::RunInfo 
             refactoring_ease: inputs.weights.refactoring_ease,
         },
         database: inputs.db_path.display().to_string(),
+        replay_database: inputs.replay_database.map(ToOwned::to_owned),
+        // Filled in after recording, which is the half this cannot know about
+        // yet, by the same code that fills in the run id.
+        timings: None,
         run_id: inputs.run_id,
         reused: false,
     }
+}
+
+/// `path`, spelled the way it is shortest to type from here.
+///
+/// A printed command is read on one line beside everything else the report
+/// says, and an absolute path in the middle of it costs more width than it
+/// carries meaning. Anything outside the current directory keeps its full
+/// spelling, because a relative path to it would be the longer of the two.
+pub(crate) fn spelled_for_a_command(path: &Path) -> String {
+    let relative = std::env::current_dir()
+        .ok()
+        .and_then(|current| path.strip_prefix(current).ok().map(Path::to_path_buf));
+    relative.as_deref().unwrap_or(path).display().to_string()
 }
 
 /// Renderable settings that explain the identity of a resolved build variant.
@@ -818,6 +861,7 @@ fn build_report(
         common_run_info(RunInfoInputs {
             root: inputs.root,
             db_path: inputs.db_path,
+            replay_database: inputs.replay_database,
             configuration: inputs.configuration,
             run_id: inputs.run_id,
             started_at: inputs.started_at,
@@ -974,9 +1018,9 @@ pub(crate) const fn priority_row(priority: &report::Priority) -> PriorityRow {
 pub(crate) mod runtime;
 
 pub(crate) use runtime::{
-    FileOutcome, build_globset, database_path, discover_sources, effective_jobs, filter_globs,
-    guarded, incompatible_database_replacement, literal_norm, map_sources, parse_work_byte_limit,
-    scan_database_path,
+    DatabaseUse, FileOutcome, build_globset, database_path, database_path_for, discover_sources,
+    effective_jobs, filter_globs, guarded, incompatible_database_replacement, literal_norm,
+    map_sources, parse_work_byte_limit, readable_here, scan_database_path,
 };
 use runtime::{engine_config, lex_sources};
 
@@ -988,7 +1032,7 @@ pub(crate) mod store;
 
 pub(crate) use codehelion_store::{display_path, path_key};
 use store::{detector_versions, rank_groups, record_ranked};
-pub(crate) use store::{file_rows, open_store, reuse_config_hash};
+pub(crate) use store::{file_rows, open_recorded_store, open_store, reuse_config_hash};
 
 /// The current time as fixed-width RFC 3339 UTC with microsecond precision.
 ///

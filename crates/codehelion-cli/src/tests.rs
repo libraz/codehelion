@@ -1,6 +1,6 @@
 use super::report_command::*;
 use super::*;
-use crate::cli::{BaselineMode, DecorationChoice, SortAxis};
+use crate::cli::{BaselineMode, ColorChoice, DecorationChoice, SortAxis};
 use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::Language;
 use codehelion_core::semantic::{
@@ -214,6 +214,7 @@ fn explain_reads_a_cross_variant_group_from_the_id_the_report_prints() {
         config: None,
         finding_id: "50".repeat(16),
         format: DetailFormat::Json,
+        color: ColorChoice::Never,
         decoration: DecorationChoice::Ascii,
         db: Some(database),
         untrusted: false,
@@ -306,6 +307,7 @@ fn explain_reads_a_cross_language_group_without_turning_it_into_a_finding() {
         config: None,
         finding_id: "48".repeat(16),
         format: DetailFormat::Text,
+        color: ColorChoice::Never,
         decoration: DecorationChoice::Ascii,
         db: Some(database),
         untrusted: false,
@@ -381,14 +383,26 @@ fn untrusted_reading_commands_confine_a_configured_database_but_not_explicit_db(
     let config = repository.path().join("untrusted.toml");
     std::fs::write(&config, "database = \"../outside.db\"").expect("write configuration");
 
-    let error = resolve_db_at(repository.path(), None, Some(&config), true)
-        .expect_err("untrusted configuration must not escape the selected repository");
+    let error = resolve_db_at(
+        scan::DatabaseUse::Reading,
+        repository.path(),
+        None,
+        Some(&config),
+        true,
+    )
+    .expect_err("untrusted configuration must not escape the selected repository");
     assert!(error.to_string().contains("`..` can escape"));
 
     let explicit = PathBuf::from("../operator-selected.db");
     assert_eq!(
-        resolve_db_at(repository.path(), Some(&explicit), Some(&config), true)
-            .expect("an explicit database remains an operator choice"),
+        resolve_db_at(
+            scan::DatabaseUse::Reading,
+            repository.path(),
+            Some(&explicit),
+            Some(&config),
+            true,
+        )
+        .expect("an explicit database remains an operator choice"),
         explicit
     );
 }

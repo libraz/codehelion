@@ -212,12 +212,39 @@ pub(crate) fn open_store(path: &Path) -> Result<Store> {
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
     }
-    Store::open(path).with_context(|| {
-        format!(
-            "opening audit database {}; incompatible databases are not migrated or deleted; use a fresh path for a new scan",
-            path.display()
-        )
-    })
+    Store::open(path).with_context(|| database_open_context(path))
+}
+
+/// Open a recorded database for reading, refusing an unsupported schema with
+/// the same way out a recording command offers.
+///
+/// # Errors
+///
+/// Returns whatever opening the database returns.
+pub(crate) fn open_recorded_store(path: &Path) -> Result<Store> {
+    Store::open_existing(path).with_context(|| database_open_context(path))
+}
+
+/// What to say about `path` when opening it fails.
+///
+/// The way out is spelled out only when there is one to spell: this build has
+/// a naming rule for a database it cannot open, and a reader who does not know
+/// the rule cannot follow it.
+fn database_open_context(path: &Path) -> String {
+    super::runtime::incompatible_database_advice(path).map_or_else(
+        || {
+            format!(
+                "opening audit database {}; incompatible databases are not migrated or deleted; use a fresh path for a new scan",
+                path.display()
+            )
+        },
+        |advice| {
+            format!(
+                "opening audit database {}; it was left unchanged — {advice}",
+                path.display()
+            )
+        },
+    )
 }
 
 /// The `(component, version)` pairs recorded with every snapshot.

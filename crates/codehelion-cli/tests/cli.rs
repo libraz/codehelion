@@ -181,7 +181,7 @@ fn stepping_around_a_default_database_says_so_and_leaves_it_unchanged() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains(&format!(
-            "note: {} was written by another schema version and was left unchanged; this run used {}",
+            "note: {} was written by another schema version and was left unchanged; codehelion used {}",
             incompatible.display(),
             cache.join(database_name_for_this_schema()).display(),
         )),
@@ -224,11 +224,22 @@ fn an_explicitly_named_incompatible_database_is_still_refused() {
         "{stderr}"
     );
     assert!(
-        !stderr.contains("this run used"),
+        !stderr.contains("codehelion used"),
         "a named database must not be traded for another one: {stderr}"
     );
+    // Refusing is right; refusing without naming a way forward is not. The
+    // reader cannot guess the neighbour's name, because the naming rule is
+    // this build's, so the refusal spells it and both ways out of it.
+    let sibling = root.join(database_name_for_this_schema());
     assert!(
-        !root.join(database_name_for_this_schema()).exists(),
+        stderr.contains(&format!(
+            "record beside it with --db {}, or drop --db to let codehelion choose a database it can open",
+            sibling.display()
+        )),
+        "{stderr}"
+    );
+    assert!(
+        !sibling.exists(),
         "a named database must not gain a neighbour nobody asked for"
     );
 }
@@ -257,6 +268,119 @@ fn a_compatible_default_database_is_used_without_creating_a_second_one() {
         !cache.join(database_name_for_this_schema()).exists(),
         "a database this build can open is the one it must keep writing"
     );
+}
+
+/// Every reader arrives at the database the scan recorded into.
+///
+/// The scan settling on a neighbour and the next command opening the original
+/// is one tool disagreeing with itself: the report the scan just printed names
+/// findings the reader is then told do not exist.
+#[test]
+fn readers_open_the_database_the_scan_recorded_into() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let cache = root.join(".codehelion");
+    tree_with_a_database_from_another_schema_version(&root, &cache.join("audit.db"));
+    cmd()
+        .args(["scan", root.to_str().expect("scan path")])
+        .assert()
+        .success();
+    let recorded = cache.join(database_name_for_this_schema());
+    assert!(recorded.is_file(), "the scan recorded beside the old one");
+
+    for arguments in [
+        vec!["report".to_owned()],
+        vec!["baseline".to_owned(), "create".to_owned()],
+        vec!["cache".to_owned(), "status".to_owned()],
+    ] {
+        let output = cmd()
+            .current_dir(&root)
+            .args(&arguments)
+            .output()
+            .expect("run a reader beside an incompatible database");
+        assert!(
+            output.status.success(),
+            "{arguments:?} did not find the recorded run: {output:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "was written by another schema version and was left unchanged; codehelion used {}",
+                recorded.display()
+            )),
+            "{arguments:?} stepped aside without saying so: {stderr}"
+        );
+    }
+}
+
+/// A reader makes no database. Being unable to open the one that is there and
+/// having nothing scanned yet are different situations, and inventing an empty
+/// neighbour would report the second when the first is true.
+#[test]
+fn a_reader_does_not_create_the_neighbour_a_scan_would() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let cache = root.join(".codehelion");
+    tree_with_a_database_from_another_schema_version(&root, &cache.join("audit.db"));
+
+    let output = cmd()
+        .current_dir(&root)
+        .arg("report")
+        .output()
+        .expect("run report before any scan");
+
+    assert!(
+        !output.status.success(),
+        "there is no recorded run to report on"
+    );
+    assert!(
+        !cache.join(database_name_for_this_schema()).exists(),
+        "a reader must not leave an empty audit database behind"
+    );
+    // Refused, and told where the two ways forward are.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--db"), "{stderr}");
+}
+
+/// `cache clear` and `cache prune` act on the file they were pointed at.
+///
+/// Following the step-aside rule here would delete the history in use while
+/// leaving the stale file the reader meant to be rid of.
+#[test]
+fn clearing_the_cache_does_not_follow_the_step_aside_rule() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let cache = root.join(".codehelion");
+    let incompatible = cache.join("audit.db");
+    tree_with_a_database_from_another_schema_version(&root, &incompatible);
+    cmd()
+        .args(["scan", root.to_str().expect("scan path")])
+        .assert()
+        .success();
+    let recorded = cache.join(database_name_for_this_schema());
+    assert!(recorded.is_file());
+
+    cmd()
+        .current_dir(&root)
+        .args(["cache", "clear", "--force"])
+        .assert()
+        .success();
+
+    assert!(
+        !incompatible.exists(),
+        "the database that was named is the one that goes"
+    );
+    assert!(
+        recorded.is_file(),
+        "the history this build actually writes must survive a clear aimed elsewhere"
+    );
+    // And doctor said as much before anyone typed --force.
+    cmd()
+        .current_dir(&root)
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a read would use"));
 }
 
 /// The only recording failure a run steps around is the one it can settle by
@@ -611,13 +735,20 @@ fn structural_scan_does_not_report_different_binary_operators_as_type2() {
 
 #[test]
 fn artifact_worker_failure_has_one_user_facing_error_prefix() {
-    let file = tempfile::NamedTempFile::new().expect("invalid artifact file");
-    std::fs::write(file.path(), b"not an artifact").expect("write invalid artifact");
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let file = directory.path().join("not-an-artifact");
+    let database = directory.path().join("artifact.sqlite");
+    std::fs::write(&file, b"not an artifact").expect("write invalid artifact");
+    // A database of its own: a run that names none takes the lease on the
+    // one belonging to whatever directory the test happened to start in,
+    // which two tests running at once cannot both hold.
     cmd()
         .args([
             "artifact",
             "analyze",
-            file.path().to_str().expect("artifact path"),
+            file.to_str().expect("artifact path"),
+            "--db",
+            database.to_str().expect("database path"),
         ])
         .assert()
         .failure()
@@ -629,16 +760,21 @@ fn artifact_worker_failure_has_one_user_facing_error_prefix() {
 
 #[test]
 fn debug_companion_is_accepted_without_a_source_run() {
-    let artifact = tempfile::NamedTempFile::new().expect("wasm artifact file");
-    let debug_file = tempfile::NamedTempFile::new().expect("debug companion file");
-    std::fs::write(artifact.path(), b"\0asm\x01\0\0\0").expect("write wasm fixture");
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let artifact = directory.path().join("module.wasm");
+    let debug_file = directory.path().join("module.debug");
+    let database = directory.path().join("artifact.sqlite");
+    std::fs::write(&artifact, b"\0asm\x01\0\0\0").expect("write wasm fixture");
+    std::fs::write(&debug_file, b"").expect("write debug companion");
     cmd()
         .args([
             "artifact",
             "analyze",
-            artifact.path().to_str().expect("artifact path"),
+            artifact.to_str().expect("artifact path"),
             "--debug-file",
-            debug_file.path().to_str().expect("debug companion path"),
+            debug_file.to_str().expect("debug companion path"),
+            "--db",
+            database.to_str().expect("database path"),
         ])
         .assert()
         .failure()
@@ -721,6 +857,184 @@ fn readmes_document_canonical_build_variant_json_identities() {
     }
     assert!(include_str!("../../../README.md").contains("whitespace and object-member ordering"));
     assert!(include_str!("../../../README_ja.md").contains("空白や object member の順序"));
+}
+
+/// Compression is explained as a mechanism, never as a measured ratio.
+///
+/// The size a compressor charges for a second copy of a byte sequence is
+/// nearly nothing, which is exactly the redundancy deduplication removes. A
+/// figure written by hand would be right for one build and wrong for the next,
+/// and nothing here re-derives it, so both READMEs say why rather than how
+/// much.
+#[test]
+fn readmes_explain_compressed_size_without_quoting_a_measured_ratio() {
+    let english = include_str!("../../../README.md");
+    for snippet in [
+        "Compressed size moves less than uncompressed size does",
+        "repeated byte sequence is the first thing a compressor folds away",
+        "If your size budget is a compressed number, deduplication",
+        "Measure both before and after your own refactor",
+    ] {
+        assert!(
+            english.contains(snippet),
+            "English README is missing {snippet}"
+        );
+    }
+
+    let japanese = include_str!("../../../README_ja.md");
+    for snippet in [
+        "圧縮後のサイズは、非圧縮のサイズほどには動きません",
+        "圧縮器が真っ先に畳むもの",
+        "サイズの上限が圧縮後の値であるプロジェクトにとって、重複の解消はそのための手段ではありません",
+        "自分のリファクタの前後で両方を測ってください",
+    ] {
+        assert!(
+            japanese.contains(snippet),
+            "Japanese README is missing {snippet}"
+        );
+    }
+}
+
+/// A baseline is for CI; following your own progress needs no baseline.
+#[test]
+fn readmes_tell_the_two_baseline_uses_apart() {
+    let english = include_str!("../../../README.md");
+    for snippet in [
+        "A baseline is for freezing a threshold and defending it in CI",
+        "own progress through a refactor does not need one",
+        "nothing has to be created, kept in step, or committed",
+    ] {
+        assert!(
+            english.contains(snippet),
+            "English README is missing {snippet}"
+        );
+    }
+
+    let japanese = include_str!("../../../README_ja.md");
+    for snippet in [
+        "baseline は閾値を凍結して CI で守るためのもの",
+        "リファクタの進み具合を自分で追うだけなら baseline は要りません",
+        "コミットするものもありません",
+    ] {
+        assert!(
+            japanese.contains(snippet),
+            "Japanese README is missing {snippet}"
+        );
+    }
+}
+
+/// How to read a similarity breakdown, stated as a reading and not a rule.
+///
+/// The tool reports what the occurrences have in common; deciding that two of
+/// them collapse into one function is outside what it claims to know, so the
+/// paragraph has to say so in as many words.
+#[test]
+fn readmes_read_a_similarity_breakdown_without_claiming_to_decide_it() {
+    let english = include_str!("../../../README.md");
+    for snippet in [
+        "A group whose structure and control flow agree exactly",
+        "function taking an argument for whatever differs",
+        "of reading the numbers, not a rule the tool applies",
+    ] {
+        assert!(
+            english.contains(snippet),
+            "English README is missing {snippet}"
+        );
+    }
+
+    let japanese = include_str!("../../../README_ja.md");
+    for snippet in [
+        "構造と制御フローが完全に一致していて識別子だけが一致しない",
+        "違う部分を引数に取る 1 つの関数に畳めます",
+        "数値の読み方であって、ツールが適用する規則ではありません",
+    ] {
+        assert!(
+            japanese.contains(snippet),
+            "Japanese README is missing {snippet}"
+        );
+    }
+}
+
+/// A build-variant manifest is written, not found.
+///
+/// The word names two things — the file describing how an artifact was built,
+/// and the digest qualifying how sources were read — and a reader who takes
+/// them for one thing goes looking for a source digest to copy into the file.
+/// There is none, so both READMEs say so and show the file being written.
+#[test]
+fn readmes_say_a_build_variant_manifest_is_written_rather_than_found() {
+    let english = include_str!("../../../README.md");
+    for snippet in [
+        "takes a file you write, not one to go looking for",
+        "echo '{\"profile\":\"release\",\"target\":\"wasm32\",\"toolchain\":\"emcc-5.0.2\"}' > build-variant.json",
+        "no source digest to find and copy into the manifest",
+    ] {
+        assert!(
+            english.contains(snippet),
+            "English README is missing {snippet}"
+        );
+    }
+
+    let japanese = include_str!("../../../README_ja.md");
+    for snippet in [
+        "自分で書くファイルで、どこかにある既存のファイルを探すものではありません",
+        "echo '{\"profile\":\"release\",\"target\":\"wasm32\",\"toolchain\":\"emcc-5.0.2\"}' > build-variant.json",
+        "manifest に書き写すべき source 側の digest は存在しません",
+    ] {
+        assert!(
+            japanese.contains(snippet),
+            "Japanese README is missing {snippet}"
+        );
+    }
+}
+
+/// The manifest the README writes is a manifest the tool accepts.
+#[test]
+fn the_build_variant_manifest_the_readme_writes_is_accepted() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let manifest = directory.path().join("build-variant.json");
+    let artifact = directory.path().join("app.wasm");
+    let database = directory.path().join("artifact.sqlite");
+    std::fs::write(
+        &manifest,
+        r#"{"profile":"release","target":"wasm32","toolchain":"emcc-5.0.2"}"#,
+    )
+    .expect("write the manifest the README writes");
+    std::fs::write(&artifact, b"\0asm\x01\0\0\0").expect("write wasm fixture");
+
+    cmd()
+        .args([
+            "artifact",
+            "analyze",
+            artifact.to_str().expect("artifact path"),
+            "--build-variant",
+            manifest.to_str().expect("manifest path"),
+            "--db",
+            database.to_str().expect("database path"),
+        ])
+        .assert()
+        .success()
+        // The manifest path and its digest are told apart on the line that
+        // prints both.
+        .stdout(predicate::str::contains("build variant: "))
+        .stdout(predicate::str::contains("(digest "));
+}
+
+/// The flag's own help says the same thing the README does.
+#[test]
+fn build_variant_help_says_the_two_conditions_are_not_matched_against_each_other() {
+    let output = cmd()
+        .args(["artifact", "analyze", "--help"])
+        .output()
+        .expect("artifact analyze help");
+    assert!(output.status.success(), "{output:?}");
+    let help = String::from_utf8(output.stdout).expect("help output");
+    assert!(help.contains("JSON manifest you write"), "{help}");
+    assert!(help.contains("does not have to match"), "{help}");
+    assert!(
+        help.contains("recorded side by side rather than checked against each other"),
+        "{help}"
+    );
 }
 
 #[test]

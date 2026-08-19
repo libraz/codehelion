@@ -62,6 +62,11 @@ pub(super) fn run_semantic_partition(
     asking: Option<&[&Installed]>,
     partition: &SemanticPartition,
 ) -> Result<PartitionOutcome> {
+    let analysis_began = std::time::Instant::now();
+    let replay_database = args
+        .db
+        .is_some()
+        .then(|| crate::scan::spelled_for_a_command(db_path));
     let timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
     let (parsed, unreadable, timed_out) = map_sources(sources, jobs, |source| {
         parse_one(source, cfg.limits.max_file_bytes, timeout)
@@ -137,9 +142,11 @@ pub(super) fn run_semantic_partition(
         &partition.variant,
     );
     let finished_at = rfc3339_now();
+    let analysis_took = analysis_began.elapsed();
     let inputs = ReportInputs {
         root,
         db_path,
+        replay_database: replay_database.as_deref(),
         configuration,
         started_at,
         finished_at: &finished_at,
@@ -205,6 +212,7 @@ pub(super) fn run_semantic_partition(
         &analysis,
         &semantic,
     );
+    let recording_began = std::time::Instant::now();
     let record_result = record(
         cfg,
         &inputs,
@@ -214,14 +222,25 @@ pub(super) fn run_semantic_partition(
         asked.as_ref(),
         false,
     );
+    let recording_took = recording_began.elapsed();
     let (recording_error, staged) = match record_result {
         Ok(recorded) => {
             model.run.run_id = Some(recorded.run_id);
             model.run.reused = recorded.reused;
+            model.run.timings = Some(report::RunTimings {
+                analysis: analysis_took,
+                recording: (!recorded.reused).then_some(recording_took),
+            });
             model.summary.changes = recorded.changes;
             (None, recorded.staged)
         }
-        Err(error) => (Some(error), None),
+        Err(error) => {
+            model.run.timings = Some(report::RunTimings {
+                analysis: analysis_took,
+                recording: None,
+            });
+            (Some(error), None)
+        }
     };
     let outcome = crate::scan::outcome(args, &model);
     Ok(PartitionOutcome {

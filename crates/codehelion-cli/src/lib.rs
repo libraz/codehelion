@@ -370,7 +370,12 @@ fn install_channel(exe: &Path) -> &'static str {
 fn doctor_database(args: &DoctorArgs, out: &mut impl Write) -> Result<()> {
     let cwd = codehelion_core::paths::canonical(&args.path)
         .with_context(|| format!("resolving {}", args.path.display()))?;
+    // Literal on purpose: doctor reports the state of the directory, so it has
+    // to name the database that was configured rather than the one another
+    // command would fall back to. Which file each of them would use is the
+    // next few lines' subject.
     let db = resolve_db_at(
+        scan::DatabaseUse::Literal,
         &cwd,
         args.db.as_deref(),
         args.config.as_deref(),
@@ -448,11 +453,17 @@ fn doctor_database_directory(
     }
     // The selection is made the same way a scan makes it, including the rule
     // that a named database is used as named however this build reads it.
-    let selected = if explicit {
-        db_abs.to_path_buf()
+    let replacement = if explicit {
+        None
     } else {
-        scan::incompatible_database_replacement(db_abs).unwrap_or_else(|| db_abs.to_path_buf())
+        scan::incompatible_database_replacement(db_abs)
     };
+    let recorded_into = replacement.clone().unwrap_or_else(|| db_abs.to_path_buf());
+    // A reader takes a neighbour that is already there and makes none, so the
+    // two answers differ exactly when the scan has not been run yet.
+    let read_from = replacement
+        .filter(|path| scan::readable_here(path))
+        .unwrap_or_else(|| db_abs.to_path_buf());
     writeln!(
         out,
         "  databases in {}:",
@@ -469,12 +480,38 @@ fn doctor_database_directory(
             database_readability(path),
         )?;
     }
-    let spelled = match (db.parent(), selected.file_name()) {
-        (Some(parent), Some(name)) => parent.join(name),
-        _ => selected.clone(),
-    };
-    writeln!(out, "  a scan would use {}", spelled.display())?;
+    writeln!(
+        out,
+        "  a scan would use {}",
+        spelled_beside(db, &recorded_into).display()
+    )?;
+    writeln!(
+        out,
+        "  a read would use {}",
+        spelled_beside(db, &read_from).display()
+    )?;
+    // `cache clear` and `cache prune` act on the file they were pointed at, so
+    // a second history in the same directory outlives them. Saying so here is
+    // cheaper than discovering it after a --force.
+    if databases.len() > 1 {
+        writeln!(
+            out,
+            "  `cache clear` and `cache prune` act on the configured database alone; the other database(s) here are left as they are"
+        )?;
+    }
     Ok(())
+}
+
+/// `selected`, spelled the way the configured database was spelled.
+///
+/// The configured path is what the reader typed or read out of a
+/// configuration; an absolute neighbour of it in the same line would read as
+/// somewhere else.
+fn spelled_beside(configured: &Path, selected: &Path) -> PathBuf {
+    match (configured.parent(), selected.file_name()) {
+        (Some(parent), Some(name)) => parent.join(name),
+        _ => selected.to_path_buf(),
+    }
 }
 
 /// The files in `directory` that are named the way audit databases are.
@@ -570,14 +607,22 @@ fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<Outcome> {
     let root = codehelion_core::paths::canonical(&args.path)
         .with_context(|| format!("resolving path {}", args.path.display()))?;
     let resolved_config = config::load(args.config.as_deref(), &root)?;
-    let db_path = scan::database_path(&root, args.db.as_deref(), &resolved_config, false)?;
+    // Reading: a baseline is taken from runs that are already recorded, so a
+    // neighbour this build just created would hold nothing to take one from.
+    let db_path = scan::database_path_for(
+        scan::DatabaseUse::Reading,
+        &root,
+        args.db.as_deref(),
+        &resolved_config,
+        false,
+    )?;
     if !db_path.is_file() {
         bail!(
             "no local database at {}; run `codehelion scan` first",
             db_path.display()
         );
     }
-    let store = Store::open_existing(&db_path)?;
+    let store = scan::open_recorded_store(&db_path)?;
     let root_path = scan::path_key(&root);
     let invocation = store.latest_completed_invocation(&root_path)?;
     if invocation.is_empty() {
@@ -707,6 +752,21 @@ fn config_command(action: &ConfigAction, out: &mut impl Write) -> Result<Outcome
     }
 }
 
+/// The database one `cache` action works on.
+///
+/// The three actions resolve it the same way and differ only in what they are
+/// allowed to do about a default this build cannot open; see
+/// [`scan::DatabaseUse`].
+fn cache_database(
+    intent: scan::DatabaseUse,
+    path: &Path,
+    db: Option<&Path>,
+    config: Option<&Path>,
+    untrusted: bool,
+) -> Result<PathBuf> {
+    resolve_db_at(intent, path, db, config, untrusted)
+}
+
 fn cache_command(action: &CacheAction, out: &mut impl Write) -> Result<Outcome> {
     match action {
         CacheAction::Status {
@@ -714,29 +774,16 @@ fn cache_command(action: &CacheAction, out: &mut impl Write) -> Result<Outcome> 
             config,
             db,
             untrusted,
-        } => {
-            let path = resolve_db_at(path, db.as_deref(), config.as_deref(), *untrusted)?;
-            let files = database_files(&path);
-            if let Some(size) = database_storage_bytes(&files)? {
-                writeln!(out, "database: {} ({} bytes)", path.display(), size)?;
-                match Store::open_existing(&path) {
-                    Ok(store) => {
-                        writeln!(out, "schema: {}", store.schema_version()?)?;
-                        writeln!(out, "scan runs: {}", store.table_count("scan_run")?)?;
-                        writeln!(out, "abandoned runs: {}", store.abandoned_runs()?.len())?;
-                        writeln!(out, "table storage:")?;
-                        for table in store.table_storage()? {
-                            writeln!(out, "  {}: {} bytes", table.table, table.bytes)?;
-                        }
-                    }
-                    Err(error) => writeln!(out, "database health: unreadable ({error})")?,
-                }
-            } else {
-                writeln!(out, "database: {} (absent)", path.display())?;
-            }
-            write_lease_status(&path, out)?;
-            Ok(Outcome::Success)
-        }
+        } => cache_status(
+            &cache_database(
+                scan::DatabaseUse::Reading,
+                path,
+                db.as_deref(),
+                config.as_deref(),
+                *untrusted,
+            )?,
+            out,
+        ),
         CacheAction::Prune {
             path,
             config,
@@ -749,27 +796,20 @@ fn cache_command(action: &CacheAction, out: &mut impl Write) -> Result<Outcome> 
             if !force {
                 bail!("`cache prune` deletes retained local history; pass --force to confirm");
             }
-            let path = resolve_db_at(path, db.as_deref(), config.as_deref(), *untrusted)?;
-            if !path.is_file() {
-                bail!(
-                    "no local database at {}; run `codehelion scan` first",
-                    path.display()
-                );
-            }
-            let _lock = scan_lock::acquire(&path)?;
-            let mut store = Store::open_existing(&path)
-                .with_context(|| format!("opening audit database {}", path.display()))?;
-            let pruned = store.prune(*keep_artifacts, *keep_comparisons)?;
-            writeln!(
+            // Literal: a command that deletes acts on the file it was pointed
+            // at, whatever this build can make of it.
+            cache_prune(
+                &cache_database(
+                    scan::DatabaseUse::Literal,
+                    path,
+                    db.as_deref(),
+                    config.as_deref(),
+                    *untrusted,
+                )?,
+                *keep_artifacts,
+                *keep_comparisons,
                 out,
-                "pruned {} abandoned run(s), {} artifact analysis(es), {} cross-variant comparison(s), {} cross-language comparison(s), and {} orphaned fingerprint(s)",
-                pruned.abandoned_runs,
-                pruned.artifact_analyses,
-                pruned.cross_variant_comparisons,
-                pruned.cross_language_comparisons,
-                pruned.orphaned_fingerprints
-            )?;
-            Ok(Outcome::Success)
+            )
         }
         CacheAction::Clear {
             path,
@@ -783,27 +823,94 @@ fn cache_command(action: &CacheAction, out: &mut impl Write) -> Result<Outcome> 
                     "`cache clear` permanently deletes the local audit database; pass --force to confirm"
                 );
             }
-            let path = resolve_db_at(path, db.as_deref(), config.as_deref(), *untrusted)?;
-            if !database_files(&path).iter().any(|file| file.exists()) {
-                writeln!(out, "nothing to remove at {}", path.display())?;
-                return Ok(Outcome::Success);
-            }
-            let _lock = scan_lock::acquire(&path)?;
-            let removed = database_files(&path)
-                .iter()
-                .map(|file| remove_database_file(file))
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .filter(|removed| *removed)
-                .count();
-            if removed > 0 {
-                writeln!(out, "removed {}", path.display())?;
-            } else {
-                writeln!(out, "nothing to remove at {}", path.display())?;
-            }
-            Ok(Outcome::Success)
+            cache_clear(
+                &cache_database(
+                    scan::DatabaseUse::Literal,
+                    path,
+                    db.as_deref(),
+                    config.as_deref(),
+                    *untrusted,
+                )?,
+                out,
+            )
         }
     }
+}
+
+/// Report where the local database is, what this build makes of it, and
+/// whether anything holds its lease.
+fn cache_status(path: &Path, out: &mut impl Write) -> Result<Outcome> {
+    let files = database_files(path);
+    if let Some(size) = database_storage_bytes(&files)? {
+        writeln!(out, "database: {} ({} bytes)", path.display(), size)?;
+        match Store::open_existing(path) {
+            Ok(store) => {
+                writeln!(out, "schema: {}", store.schema_version()?)?;
+                writeln!(out, "scan runs: {}", store.table_count("scan_run")?)?;
+                writeln!(out, "abandoned runs: {}", store.abandoned_runs()?.len())?;
+                writeln!(out, "table storage:")?;
+                for table in store.table_storage()? {
+                    writeln!(out, "  {}: {} bytes", table.table, table.bytes)?;
+                }
+            }
+            Err(error) => writeln!(out, "database health: unreadable ({error})")?,
+        }
+    } else {
+        writeln!(out, "database: {} (absent)", path.display())?;
+    }
+    write_lease_status(path, out)?;
+    Ok(Outcome::Success)
+}
+
+/// Drop the retained history the flags do not ask to keep.
+fn cache_prune(
+    path: &Path,
+    keep_artifacts: usize,
+    keep_comparisons: usize,
+    out: &mut impl Write,
+) -> Result<Outcome> {
+    if !path.is_file() {
+        bail!(
+            "no local database at {}; run `codehelion scan` first",
+            path.display()
+        );
+    }
+    let _lock = scan_lock::acquire(path)?;
+    let mut store = Store::open_existing(path)
+        .with_context(|| format!("opening audit database {}", path.display()))?;
+    let pruned = store.prune(keep_artifacts, keep_comparisons)?;
+    writeln!(
+        out,
+        "pruned {} abandoned run(s), {} artifact analysis(es), {} cross-variant comparison(s), {} cross-language comparison(s), and {} orphaned fingerprint(s)",
+        pruned.abandoned_runs,
+        pruned.artifact_analyses,
+        pruned.cross_variant_comparisons,
+        pruned.cross_language_comparisons,
+        pruned.orphaned_fingerprints
+    )?;
+    Ok(Outcome::Success)
+}
+
+/// Remove the named database and the sidecars WAL mode created beside it.
+fn cache_clear(path: &Path, out: &mut impl Write) -> Result<Outcome> {
+    if !database_files(path).iter().any(|file| file.exists()) {
+        writeln!(out, "nothing to remove at {}", path.display())?;
+        return Ok(Outcome::Success);
+    }
+    let _lock = scan_lock::acquire(path)?;
+    let removed = database_files(path)
+        .iter()
+        .map(|file| remove_database_file(file))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|removed| *removed)
+        .count();
+    if removed > 0 {
+        writeln!(out, "removed {}", path.display())?;
+    } else {
+        writeln!(out, "nothing to remove at {}", path.display())?;
+    }
+    Ok(Outcome::Success)
 }
 
 /// The main `SQLite` database and the two sidecars created by WAL mode.
@@ -853,18 +960,21 @@ fn remove_database_file(path: &Path) -> Result<bool> {
 
 /// Resolve the local-database path: an explicit flag wins, otherwise the
 /// configured location (discovered `codehelion.toml` or defaults).
-fn resolve_db(flag: Option<&Path>) -> Result<PathBuf> {
+fn resolve_db(intent: scan::DatabaseUse, flag: Option<&Path>) -> Result<PathBuf> {
     let current = std::env::current_dir().context("resolving the current directory")?;
     let root =
         codehelion_core::paths::canonical(&current).context("resolving the current directory")?;
-    resolve_db_at(&root, flag, None, false)
+    resolve_db_at(intent, &root, flag, None, false)
 }
 
 /// Resolve a local-database path for the repository selected by one command.
 ///
 /// All source-audit commands use this path so an explicit database, a named
 /// configuration, and a discovered configuration receive identical handling.
+/// What the command then does with the file decides whether a default this
+/// build cannot open is stepped around; see [`scan::DatabaseUse`].
 fn resolve_db_at(
+    intent: scan::DatabaseUse,
     root: &Path,
     flag: Option<&Path>,
     config_path: Option<&Path>,
@@ -873,7 +983,7 @@ fn resolve_db_at(
     let root = codehelion_core::paths::canonical(root)
         .with_context(|| format!("resolving path {}", root.display()))?;
     let resolved_config = config::load(config_path, &root)?;
-    scan::database_path(&root, flag, &resolved_config, untrusted)
+    scan::database_path_for(intent, &root, flag, &resolved_config, untrusted)
 }
 
 #[cfg(test)]

@@ -392,6 +392,10 @@ fn run_with(
         bail!("--compare-languages requires --mode semantic");
     }
     let started_at = rfc3339_now();
+    // Monotonic, because the recorded timestamps are strings at the report's
+    // resolution and the difference between them loses everything under a
+    // second.
+    let analysis_began = std::time::Instant::now();
     let root = codehelion_core::paths::canonical(&args.path)
         .with_context(|| format!("resolving scan path {}", args.path.display()))?;
     if !root.is_dir() {
@@ -399,6 +403,10 @@ fn run_with(
     }
     let resolved_config = config::load(args.config.as_deref(), &root)?;
     let db_path = scan_database_path(&root, args.db.as_deref(), &resolved_config, args.untrusted)?;
+    let replay_database = args
+        .db
+        .is_some()
+        .then(|| crate::scan::spelled_for_a_command(&db_path));
     let _database_lock = crate::scan_lock::acquire(&db_path)?;
     let configuration = crate::scan::configuration_info(
         &resolved_config.source,
@@ -738,9 +746,11 @@ fn run_with(
     );
 
     let finished_at = rfc3339_now();
+    let analysis_took = analysis_began.elapsed();
     let inputs = ReportInputs {
         root: &root,
         db_path: &db_path,
+        replay_database: replay_database.as_deref(),
         configuration: &configuration,
         started_at: &started_at,
         finished_at: &finished_at,
@@ -802,6 +812,7 @@ fn run_with(
         .as_ref()
         .map(|baseline| crate::scan::apply_baseline(baseline, &mut model.groups));
     model.refresh_supplemental_summary();
+    let recording_began = std::time::Instant::now();
     let record_result = record(
         &cfg,
         &inputs,
@@ -811,10 +822,15 @@ fn run_with(
         asked.as_ref(),
         true,
     );
+    let recording_took = recording_began.elapsed();
     match record_result {
         Ok(recorded) => {
             model.run.run_id = Some(recorded.run_id);
             model.run.reused = recorded.reused;
+            model.run.timings = Some(report::RunTimings {
+                analysis: analysis_took,
+                recording: (!recorded.reused).then_some(recording_took),
+            });
             model.summary.changes = recorded.changes;
             let hydration_error = match open_store(&db_path) {
                 Ok(store) => crate::scan::hydrate_artifact_savings(
@@ -879,6 +895,10 @@ fn run_with(
         Err(error) => {
             model.run.run_id = None;
             model.run.reused = false;
+            model.run.timings = Some(report::RunTimings {
+                analysis: analysis_took,
+                recording: None,
+            });
             model.summary.changes = None;
             for group in &mut model.groups {
                 group.artifact_savings.clear();
@@ -1081,6 +1101,8 @@ use suppression::{pair_shape_suppression, unanimous_boilerplate};
 struct ReportInputs<'a> {
     root: &'a Path,
     db_path: &'a Path,
+    /// The `--db` the commands this report prints have to repeat.
+    replay_database: Option<&'a str>,
     configuration: &'a report::ConfigurationInfo,
     started_at: &'a str,
     finished_at: &'a str,

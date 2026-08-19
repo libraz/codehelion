@@ -831,6 +831,23 @@ pub struct CrossLanguageMember {
     pub graph: SemanticOperationGraph,
 }
 
+/// How long a run spent analysing and how long it spent recording.
+///
+/// Kept apart because they answer different questions: analysis time is what
+/// a wider tree or a heavier mode costs, and recording time is what reuse
+/// saves. A single elapsed time answers neither, and the two are far enough
+/// apart in practice that guessing which dominates is guessing.
+#[derive(Debug, Clone, Copy)]
+pub struct RunTimings {
+    /// Wall time from the start of discovery to the end of detection.
+    pub analysis: std::time::Duration,
+    /// Wall time spent writing the snapshot, when one was written.
+    ///
+    /// `None` when nothing was recorded, which is either a reused run — see
+    /// [`RunInfo::reused`] — or a run whose recording failed.
+    pub recording: Option<std::time::Duration>,
+}
+
 /// Metadata identifying one scan run.
 #[derive(Debug, Serialize)]
 pub struct RunInfo {
@@ -854,6 +871,26 @@ pub struct RunInfo {
     pub ranking: RankingInfo,
     /// Path of the local database the snapshot was recorded in.
     pub database: String,
+    /// How long analysis took and how long recording took.
+    ///
+    /// Not serialized, and deliberately so: a duration is not reproducible, and
+    /// `report --run` reconstructs a document from what was recorded rather
+    /// than from what a clock said at the time. Publishing it would make a
+    /// replay differ from the scan it replays in a field neither of them can
+    /// do anything about, and would put a non-deterministic value in a schema
+    /// whose other values are all derived from content.
+    #[serde(skip)]
+    pub timings: Option<RunTimings>,
+    /// The `--db` a printed follow-up command has to repeat, when running one
+    /// without it would open a different database.
+    ///
+    /// Not serialized: [`Self::database`] already publishes where the run was
+    /// recorded, and a consumer reading JSON is not the one pasting a command
+    /// back into a shell. This exists so that the commands the text report
+    /// prints are commands that run — a report that names a next step the
+    /// reader cannot take is worse than one that names none.
+    #[serde(skip)]
+    pub replay_database: Option<String>,
     /// Row id of the recorded scan run.
     ///
     /// Not a counter and not an ordering: a scan replaces the snapshot before
@@ -1057,6 +1094,27 @@ pub struct TopChurn {
     /// Groups of this run's top that the earlier run's top did not hold, and
     /// that did not inherit their history from one that it did.
     pub entered: Vec<String>,
+    /// Groups of that run's top that this run's top still holds.
+    ///
+    /// Listed for the same reason the others are: the four ways an earlier
+    /// top-ranked group can have ended up partition it exactly, so a reader
+    /// can check any one number against the rest and the size of the top.
+    /// Without that, a count of what left is a number with nothing to
+    /// reconcile it against, and the arithmetic looks broken when it is not.
+    pub still_ranked: Vec<String>,
+    /// Groups of that run's top that this run still holds, below its top.
+    ///
+    /// Nothing happened to these but the ranking: their content is still
+    /// duplicated, and other groups overtook them.
+    pub outranked: Vec<String>,
+    /// Groups of that run's top whose history a group of this run adopted.
+    ///
+    /// Kept out of [`Self::closed`] on purpose. Counting an adoption as a
+    /// close would report one edit as both a fix and a fresh finding.
+    pub superseded: Vec<String>,
+    /// Groups of this run's top that inherited their history from a group of
+    /// the earlier run's top, which is why they are not in [`Self::entered`].
+    pub promoted: Vec<String>,
 }
 
 /// File-content changes since one compatible scan.

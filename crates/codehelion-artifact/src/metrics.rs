@@ -61,6 +61,14 @@ pub struct SizeClassification {
     pub observed_bytes: u64,
     /// Excess bytes in exact duplicate code groups.
     pub duplicated_bytes: u64,
+    /// Excess bytes in code groups that are equal only after normalization,
+    /// when a normalizer exists for this architecture.
+    ///
+    /// Kept apart from [`Self::duplicated_bytes`] rather than added to it:
+    /// normalized equality is reached through a rewriting rule, so it is
+    /// weaker evidence than byte equality and cannot stand in the same
+    /// column. It feeds no savings value for the same reason.
+    pub duplicated_bytes_normalized: Option<u64>,
     /// Bytes retained by call-graph reachability, when calculated.
     pub retained_bytes: Option<u64>,
     /// Bytes shared by several dependency closures, when calculated.
@@ -200,6 +208,13 @@ pub fn classify_sizes_from_duplicates(
         .iter()
         .map(|group| group.duplicated_bytes)
         .sum();
+    let duplicated_bytes_normalized = artifact.capabilities.normalized_duplicates.then(|| {
+        duplicates
+            .normalized
+            .iter()
+            .map(|group| group.duplicated_bytes)
+            .sum()
+    });
     let duplicated_data_bytes = artifact.capabilities.independent_data_segments.then(|| {
         duplicate_data
             .iter()
@@ -209,7 +224,15 @@ pub fn classify_sizes_from_duplicates(
     let mut assumptions = vec![
         "upper_bound_savings_bytes is not a guaranteed reduction".to_owned(),
         "estimated_refactor_savings_bytes needs source-artifact mapping".to_owned(),
+        // Stated even when both numbers are present, because the difference
+        // between them is the whole reason there are two of them.
+        "duplicated_bytes counts byte-identical groups only".to_owned(),
     ];
+    if duplicated_bytes_normalized.is_none() {
+        assumptions.push(
+            "duplicated_bytes_normalized needs a normalizer for this architecture".to_owned(),
+        );
+    }
     if duplicated_data_bytes.is_none() {
         assumptions
             .push("duplicated_data_bytes needs independently established data regions".to_owned());
@@ -241,6 +264,7 @@ pub fn classify_sizes_from_duplicates(
     SizeClassification {
         observed_bytes: artifact.observed_bytes,
         duplicated_bytes,
+        duplicated_bytes_normalized,
         retained_bytes,
         shared_dependency_bytes,
         duplicated_data_bytes,
@@ -721,6 +745,69 @@ mod tests {
         assert_eq!(find_duplicates(&artifact), duplicates);
     }
 
+    /// The size categories carry both duplicate totals, and the savings value
+    /// stays built from the byte-identical one alone.
+    ///
+    /// A reader who came for size reads the categories and stops there, so a
+    /// total that only appears in the duplicate listing above is a total they
+    /// never see. Adding it into the upper bound instead would put an
+    /// inference behind a number that says it is an observation.
+    #[test]
+    fn size_categories_carry_normalized_duplication_without_folding_it_into_savings() {
+        let mut artifact = ArtifactIr::empty(ArtifactFormat::Wasm, b"input");
+        artifact.capabilities.normalized_duplicates = true;
+        artifact.observed_bytes = 100;
+        artifact.symbols = vec![
+            symbol(30, &[1, 2], Some(&[9])),
+            symbol(10, &[1, 2], Some(&[9])),
+            symbol(20, &[1, 3], Some(&[9])),
+            symbol(40, &[5], None),
+        ];
+
+        let duplicates = find_duplicates(&artifact);
+        let sizes = classify_sizes(&artifact);
+
+        assert_eq!(sizes.duplicated_bytes, duplicates.exact[0].duplicated_bytes);
+        assert_eq!(
+            sizes.duplicated_bytes_normalized,
+            Some(duplicates.normalized[0].duplicated_bytes)
+        );
+        assert_eq!(
+            sizes.upper_bound_savings_bytes,
+            Some(sizes.duplicated_bytes),
+            "the upper bound stays built from byte-identical duplication alone"
+        );
+        assert!(
+            sizes
+                .assumptions
+                .iter()
+                .any(|line| line == "duplicated_bytes counts byte-identical groups only"),
+            "{:?}",
+            sizes.assumptions
+        );
+    }
+
+    /// Without a normalizer the total is absent rather than zero, and says so.
+    #[test]
+    fn normalized_duplication_is_unavailable_rather_than_zero_without_a_normalizer() {
+        let mut artifact = ArtifactIr::empty(ArtifactFormat::Elf, b"input");
+        artifact.observed_bytes = 100;
+        artifact.symbols = vec![
+            symbol(10, &[1, 2], Some(&[9])),
+            symbol(20, &[3, 4], Some(&[9])),
+        ];
+
+        let sizes = classify_sizes(&artifact);
+
+        assert_eq!(sizes.duplicated_bytes_normalized, None);
+        assert!(
+            sizes.assumptions.iter().any(|line| line
+                == "duplicated_bytes_normalized needs a normalizer for this architecture"),
+            "{:?}",
+            sizes.assumptions
+        );
+    }
+
     #[test]
     fn normalized_groups_are_unavailable_without_a_supported_normalizer() {
         let mut artifact = ArtifactIr::empty(ArtifactFormat::Elf, b"input");
@@ -799,6 +886,7 @@ mod tests {
             artifact.observed_bytes = offset;
             let sizes = classify_sizes(&artifact);
             prop_assert!(sizes.duplicated_bytes <= sizes.observed_bytes);
+            prop_assert!(sizes.duplicated_bytes_normalized.is_none_or(|value| value <= sizes.observed_bytes));
             prop_assert!(sizes.duplicated_data_bytes.is_some_and(|value| value <= sizes.observed_bytes));
             prop_assert_eq!(
                 sizes.upper_bound_savings_bytes,

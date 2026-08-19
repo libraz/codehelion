@@ -74,7 +74,10 @@ pub const ARTIFACT_CALIBRATION_REPORT_JSON_SCHEMA: &str =
 const ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION: &str = "artifact-calibration-report-v1";
 
 /// Number of fields in every artifact CSV record.
-const ARTIFACT_CSV_COLUMNS: usize = 33;
+///
+/// Columns are only ever appended, so a consumer that reads by position keeps
+/// reading the same values after a release adds one.
+const ARTIFACT_CSV_COLUMNS: usize = 34;
 
 /// A direct before-minus-after artifact-size observation.
 ///
@@ -113,7 +116,7 @@ pub fn run(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
 /// Run the artifact pipeline in the already isolated worker process.
 fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
     worker::set_stage("persistence setup");
-    let database = crate::resolve_db(args.db.as_deref())?;
+    let database = crate::resolve_db(crate::scan::DatabaseUse::Recording, args.db.as_deref())?;
     let _database_lock = crate::scan_lock::acquire(&database)?;
     let started_at = crate::scan::rfc3339_now();
     worker::set_stage("parsing");
@@ -190,9 +193,8 @@ use calibration::{csv, optional_f64};
 pub fn report(args: &ArtifactReportArgs, out: &mut impl Write) -> Result<Outcome> {
     // A report only reads a committed SQLite snapshot. WAL lets this proceed
     // alongside one writer, so it deliberately does not take the writer lease.
-    let db = crate::resolve_db(args.db.as_deref())?;
-    let store = Store::open_existing(&db)
-        .with_context(|| format!("opening artifact database {}", db.display()))?;
+    let db = crate::resolve_db(crate::scan::DatabaseUse::Reading, args.db.as_deref())?;
+    let store = crate::scan::open_recorded_store(&db)?;
     let analysis_id = args.analysis.map_or_else(
         || {
             store
@@ -570,7 +572,10 @@ fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Ou
 /// run.
 fn calibration_database(args: &ArtifactCompareArgs) -> Result<Option<std::path::PathBuf>> {
     match (args.source_run.is_some(), args.clone_group.is_some()) {
-        (true, true) => Ok(Some(crate::resolve_db(args.db.as_deref())?)),
+        (true, true) => Ok(Some(crate::resolve_db(
+            crate::scan::DatabaseUse::Recording,
+            args.db.as_deref(),
+        )?)),
         (true, false) => bail!(
             "--source-run was given without --clone-group; artifact compare records a calibration for one clone group of that run"
         ),

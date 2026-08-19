@@ -192,15 +192,25 @@ impl CloneGroupDetail {
 
     /// Render the group the way a report lists it, with every member.
     ///
+    /// Colour is the caller's decision for the same reason decoration is: a
+    /// detail view is read beside the report that named the group, and the two
+    /// disagreeing about whether to emit ANSI is a difference the reader did
+    /// not ask for. Nothing here is coloured that a listing does not colour.
+    ///
     /// # Errors
     ///
     /// Returns any error from the writer.
-    pub fn render_text(&self, decoration: Decoration, out: &mut impl Write) -> io::Result<()> {
+    pub fn render_text(
+        &self,
+        decoration: Decoration,
+        color: bool,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
         writeln!(out, "clone group {}", self.group.fingerprint)?;
         writeln!(out, "  database: {}", self.database)?;
         write!(
             out,
-            "  run: {} ({}; build variant {})",
+            "  run: {} ({}; build variant digest {})",
             self.scan_run, self.analysis_mode, self.build_variant
         )?;
         // Whether the group survived is the question a lookup is usually
@@ -229,7 +239,7 @@ impl CloneGroupDetail {
             &self.group,
             None,
             opts,
-            &Palette { enabled: false },
+            &Palette { enabled: color },
             &GroupColumns::single(&self.group, opts),
             out,
         )
@@ -497,12 +507,12 @@ impl FindingDetail {
                 )?;
                 writeln!(
                     out,
-                    "      source build variant: {}",
+                    "      source build variant digest: {}",
                     savings.source_build_variant_fingerprint
                 )?;
                 writeln!(
                     out,
-                    "      artifact build variant: {}",
+                    "      artifact build variant digest: {}",
                     savings.artifact_build_variant_fingerprint
                 )?;
                 writeln!(out, "      model schema: {}", savings.model_schema_version)?;

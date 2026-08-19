@@ -164,20 +164,28 @@ pub(super) fn run_isolated_request(
             )));
         }
     };
+    // A worker says two kinds of thing, and only one of them is a failure. A
+    // note it wrote on the way — which database it used, say — is relayed as
+    // itself whether the run then failed or not; folding it into the error
+    // would report a successful decision as part of an unrelated fault.
+    let (notes, detail) = split_worker_diagnostics(&stderr);
+    if !notes.is_empty() {
+        std::io::stderr()
+            .lock()
+            .write_all(notes.as_bytes())
+            .context("relaying isolated artifact worker diagnostics")?;
+    }
     if !status.success() {
-        let detail = stderr
-            .trim()
-            .strip_prefix("error: ")
-            .unwrap_or_else(|| stderr.trim());
         if detail.is_empty() {
             bail!("artifact worker exited with {status}");
         }
         bail!("artifact worker failed: {detail}");
     }
-    if !stderr.trim().is_empty() {
+    if !detail.is_empty() {
         std::io::stderr()
             .lock()
-            .write_all(stderr.as_bytes())
+            .write_all(detail.as_bytes())
+            .and_then(|()| std::io::stderr().lock().write_all(b"\n"))
             .context("relaying isolated artifact worker diagnostics")?;
     }
     let rendered = fs::read(&report_path).context("reading isolated artifact worker report")?;
@@ -187,6 +195,29 @@ pub(super) fn run_isolated_request(
         out.write_all(&rendered)?;
     }
     Ok(Outcome::Success)
+}
+
+/// Split a worker's diagnostics into the notes to pass through unchanged and
+/// what is left to describe a failure with.
+///
+/// The notes keep their own lines and their trailing newline, so relaying them
+/// reproduces exactly what the worker wrote. The remainder is trimmed and has
+/// one `error: ` prefix removed, because the caller adds its own.
+fn split_worker_diagnostics(stderr: &str) -> (String, String) {
+    let mut notes = String::new();
+    let mut rest = String::new();
+    for line in stderr.lines() {
+        if line.starts_with("note: ") {
+            notes.push_str(line);
+            notes.push('\n');
+        } else {
+            rest.push_str(line);
+            rest.push('\n');
+        }
+    }
+    let rest = rest.trim();
+    let rest = rest.strip_prefix("error: ").unwrap_or(rest);
+    (notes, rest.to_owned())
 }
 
 /// Drain a worker pipe completely while retaining only a bounded prefix.

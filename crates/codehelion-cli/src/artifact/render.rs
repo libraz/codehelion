@@ -29,7 +29,7 @@ pub(super) fn render_text(
     if let Some(variant) = &report.build_variant {
         writeln!(
             out,
-            "build variant: {} ({})",
+            "build variant: {} (digest {})",
             variant.manifest_path, variant.fingerprint
         )?;
     }
@@ -247,7 +247,19 @@ pub(super) fn render_text(
     }
     writeln!(out, "size categories:")?;
     writeln!(out, "  observed_bytes: {}", report.sizes.observed_bytes)?;
-    writeln!(out, "  duplicated_bytes: {}", report.sizes.duplicated_bytes)?;
+    // Both duplicate counts appear here, each naming the evidence behind it.
+    // A reader who came for size reads this block and nothing else, and the
+    // normalized total was previously only three lines above, unlabelled.
+    writeln!(
+        out,
+        "  duplicated_bytes: {} (byte-identical groups only)",
+        report.sizes.duplicated_bytes
+    )?;
+    writeln!(
+        out,
+        "  duplicated_bytes_normalized: {} (weaker evidence: equal after normalization)",
+        optional_bytes(report.sizes.duplicated_bytes_normalized)
+    )?;
     writeln!(
         out,
         "  retained_bytes: {}",
@@ -456,7 +468,7 @@ fn optional_verified_savings(value: Option<VerifiedSavingsBytes>) -> String {
 pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Result<()> {
     writeln!(
         out,
-        "record_type,path,format,kind,fingerprint,name,offset,size,duplicated_bytes,retained_bytes,dead_code_status,observed_bytes,source_run,mappings,mapped_symbols,unmapped_symbols,upper_bound_savings_bytes,estimated_refactor_savings_bytes,verified_savings_bytes,origin_build_variant_fingerprint,instantiations,translation_units,source_build_variant_fingerprint,artifact_build_variant_fingerprint,mapping_confidence,clone_confidence,model_confidence,savings_confidence,model_schema_version,estimate_assumptions_json,section,executable,module"
+        "record_type,path,format,kind,fingerprint,name,offset,size,duplicated_bytes,retained_bytes,dead_code_status,observed_bytes,source_run,mappings,mapped_symbols,unmapped_symbols,upper_bound_savings_bytes,estimated_refactor_savings_bytes,verified_savings_bytes,origin_build_variant_fingerprint,instantiations,translation_units,source_build_variant_fingerprint,artifact_build_variant_fingerprint,mapping_confidence,clone_confidence,model_confidence,savings_confidence,model_schema_version,estimate_assumptions_json,section,executable,module,duplicated_bytes_normalized"
     )?;
     let correlation = report.correlation.as_ref();
     let mut summary = artifact_csv_row();
@@ -474,6 +486,7 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
     summary[16] = optional_bytes(report.sizes.upper_bound_savings_bytes);
     summary[17] = optional_estimated_savings(report.sizes.estimated_refactor_savings_bytes);
     summary[18] = optional_verified_savings(report.sizes.verified_savings_bytes);
+    summary[33] = optional_bytes(report.sizes.duplicated_bytes_normalized);
     write_artifact_csv_row(out, &summary)?;
     if let Some(variant) = &report.build_variant {
         let mut row = artifact_csv_row();
@@ -770,14 +783,14 @@ pub(super) fn render_compare_text(
     if let Some(variant) = &report.before.build_variant {
         writeln!(
             out,
-            "before build variant: {} ({})",
+            "before build variant: {} (digest {})",
             variant.manifest_path, variant.fingerprint
         )?;
     }
     if let Some(variant) = &report.after.build_variant {
         writeln!(
             out,
-            "after build variant: {} ({})",
+            "after build variant: {} (digest {})",
             variant.manifest_path, variant.fingerprint
         )?;
     }
