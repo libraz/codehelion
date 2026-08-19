@@ -169,10 +169,14 @@ written over shape alone cannot be the arbiter. The `cjson` case holds the
 demonstration: `cJSON_CreateNull` and `cJSON_CreateTrue` are refuted, while
 `cJSON_AddNullToObject` and its siblings are confirmed, and both families are
 one local acquired by a call, populated, and handed back — same syntax tree,
-same substitution between the two sides, same author, same file. What separates
-them is how much they repeat besides the constant that varies, and that is a
-question about length, which the ranges above say cannot be filtered on. Weigh
-a proposed suppression rule against this pair before measuring anything else.
+same substitution between the two sides, same author, same file. Read as how
+much they repeat besides the constant that varies, the difference is a question
+about length, which the ranges above say cannot be filtered on. What does
+separate them is what the extra length is: the confirmed family reaches a
+second `return`, and that second exit is the pair saying what to do when the
+value could not be made. A policy two units repeat is a finding; naming a kind
+is not. Weigh a proposed suppression rule against this pair before measuring
+anything else — a rule that cannot keep the two apart is measuring length.
 
 A group can only be refuted when it is distinguishable from the groups around
 it. Where a redundant report overlaps a real one by more than the match
