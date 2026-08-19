@@ -420,11 +420,19 @@ fn printed_commands(text: &str) -> Vec<String> {
     let mut found = Vec::new();
     // Each marker's command runs to the glyph that closes it: the replay is
     // parenthesised, and the next-step line separates its two suggestions with
-    // a middle dot.
-    for (marker, terminator) in [("replay: ", ')'), ("open one: ", '\u{b7}')] {
+    // the decoration's separator — a middle dot where the terminal takes
+    // Unicode and a vertical bar where it does not, so both close the command
+    // and a fixture that knows only one of them reads the rest of the line as
+    // arguments.
+    for (marker, closers) in [
+        ("replay: ", &[')'][..]),
+        ("open one: ", &['\u{b7}', '|'][..]),
+    ] {
         for (at, _) in text.match_indices(marker) {
             let rest = &text[at + marker.len()..];
-            let end = rest.find([terminator, '\n']).unwrap_or(rest.len());
+            let end = rest
+                .find(|character: char| closers.contains(&character) || character == '\n')
+                .unwrap_or(rest.len());
             let command = rest[..end].trim();
             assert!(
                 command.starts_with("codehelion "),
