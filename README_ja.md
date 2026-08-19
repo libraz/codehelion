@@ -19,29 +19,30 @@ codehelion は 1.0 前です。コマンドラインの形・レポート形式�
 
 ## レポートの見え方
 
-codehelion 自身のツリーに対する Structural モードの実行結果です（ヘッダの数行は省いています）。
+codehelion 自身のツリーに対する Structural モードの実行結果です（先頭 3 グループ）。
 
 ```text
 codehelion scan · structural mode · ~/src/codehelion
 
- #1  0.62  type-1 ×2  188 tokens  f7f71e71
-     ├─ ◆ crates/codehelion-cli/src/scan/structural/reporting.rs:698-719
-     └─   crates/codehelion-cli/src/scan/structural/reporting.rs:802-823
+ #1  0.67  type-1 ×2  240 tokens  0f5065d5
+     ├─ ◆ crates/codehelion-cli/src/scan/store.rs:177-205       tree_changes
+     └─   crates/codehelion-cli/src/scan/structural/store.rs:145-173  tree_changes
 
- #2  0.59  type-1 ×2  128 tokens  814ddea4
-     ├─ ◆ crates/codehelion-frontend-c/src/ir.rs:437-451        line_column
-     └─   crates/codehelion-frontend-rust/src/ir.rs:379-393     line_column
+ #2  0.62  type-1 ×2  188 tokens  f7f71e71
+     ├─ ◆ crates/codehelion-cli/src/scan/structural/reporting.rs:749-770
+     └─   crates/codehelion-cli/src/scan/structural/reporting.rs:853-874
 
- #3  0.59  type-1 ×2  115 tokens  e6b021f2
-     ├─ ◆ crates/codehelion-core/src/engine/segment.rs:20-35    brace_pairs
-     └─   crates/codehelion-frontend-rust/src/units.rs:66-81    match_braces
+ #3  0.59  type-1 ×2  128 tokens  814ddea4
+     ├─ ◆ crates/codehelion-frontend-c/src/ir.rs:1822-1836      line_column
+     └─   crates/codehelion-frontend-rust/src/ir.rs:887-901     line_column
 
-... and 760 more groups (--limit 0 lists every one)
+... and 956 more groups (--limit 0 lists every one)
 
-968 groups (type-1 71, type-2 126, type-3 771) · 205 suppressed · sorted by priority
-361 files, 136,345 lines, 723,964 tokens · run 1 (replay: codehelion report --run 1)
-◆ the occurrence a group is measured against
-open one: codehelion explain f7f71e71 · list every group: --limit 0
+1,226 groups (type-1 76, type-2 190, type-3 960) · 267 suppressed · sorted by priority
+supplemental: 515 siblings (--show-siblings; 80 dropped by search ceilings), 1,000 near misses (--show-near-misses; 3,800 dropped by the retention cap)
+369 files, 154,952 lines, 826,558 tokens · run 1 (replay: codehelion report --run 1)
+◆ the occurrence a group is measured against · ×N the number of occurrences
+open one: codehelion explain 0f5065d5 · list every group: --limit 0
 ```
 
 見出しの先頭に来るのは順位づけの値です。一覧はこの値の順に並んでいるので、並び順をそのまま縦に読めます。`◆` はそのグループの基準になっている出現箇所、つまり最初に開くべき一件を指します。見出しの末尾にある識別子は `codehelion explain` が受け付ける最短の prefix なので、一覧からそのままグループを開けます。
@@ -55,14 +56,14 @@ open one: codehelion explain f7f71e71 · list every group: --limit 0
 `-v` は各グループの順位づけの根拠を追加します。このモードでは測れなかった similarity の次元も含みます。
 
 ```text
- #1  0.62  type-1 ×2  188 tokens  f7f71e71
-     within one file, identifiers 0.95
-     confidence 0.82, maintenance risk 0.36, refactoring difficulty 0.17 (2 instances, 188-188 tokens, 188 repeated, 1.00 similarity, 1 file(s))
+ #1  0.67  type-1 ×2  240 tokens  0f5065d5
+     across directories, identifiers 1.00
+     confidence 0.86, maintenance risk 0.44, refactoring difficulty 0.19 (2 instances, 240-240 tokens, 240 repeated, 1.00 similarity, 2 file(s))
      similarity: composite 1.00 (lexical 1.00, structural 1.00, control-flow 1.00, type n/a, api 1.00); cohesion 1.00; confidence high [structural-verify-v1]
-     content entropy: 5.02 bits
-     body evidence: loop no, recognised allocation no, at least 15 call site(s)
-     ├─ ◆ crates/codehelion-cli/src/scan/structural/reporting.rs:698-719    [finding 0300f485]
-     └─   crates/codehelion-cli/src/scan/structural/reporting.rs:802-823    [finding 18957a06]
+     content entropy: 4.91 bits
+     body evidence: loop no, recognised allocation no, at least 26 call site(s)
+     ├─ ◆ crates/codehelion-cli/src/scan/store.rs:177-205       tree_changes  [finding c8c5aae7]
+     └─   crates/codehelion-cli/src/scan/structural/store.rs:145-173  tree_changes  [finding 63fd17f8]
 ```
 
 `-vv` は実行そのものの記録を追加します。候補パイプラインの段階ごとの通過数、適用された上限、そして完全な識別子です。
