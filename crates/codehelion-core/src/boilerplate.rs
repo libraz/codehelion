@@ -27,13 +27,14 @@
 //!
 //! Every rule below is a function of what the body counts, and that is a
 //! coarse reading: how many calls, not which; how many locals, not what they
-//! hold. The labelled corpora have reached the end of it. Bodies ruled
-//! opposite ways come out counted identically, and not in far-apart projects —
-//! one logging library declares a helper that takes a time point, converts it
-//! and hands the result to a call, and declares an overload that takes the
-//! current time, and hands that to a call. The first is copied into two sinks
-//! and is duplication worth removing; the second wraps its own sibling and is
-//! not. Two statements each, one delegation each, the same counts.
+//! hold. Some of the labelled corpora's bodies have reached the end of it.
+//! Bodies ruled opposite ways come out counted identically, and not in
+//! far-apart projects — one logging library declares a helper that takes a
+//! time point, converts it and hands the result to a call, and declares an
+//! overload that takes the current time, and hands that to a call. The first
+//! is copied into two sinks and is duplication worth removing; the second
+//! wraps its own sibling and is not. Two statements each, one delegation each,
+//! the same counts.
 //!
 //! Nor is it only the far apart that collide. An XML parser declares four
 //! integer parsers and two floating-point ones next to each other, each a
@@ -42,14 +43,20 @@
 //! policy lives inside an argument expression. Counted, all six are the same
 //! body.
 //!
-//! So a rule reaching further than these does not buy coverage at the cost of
-//! accuracy — it trades a lookalike for a real finding, one for one. The
-//! categories here are the shapes no confirmed duplication was found in, and
-//! reaching past them needs something these counts do not carry: which callee
-//! is called, where a local's value goes, or what an argument holds. Another
-//! bound on the same numbers will not do it. The `boilerplate-screen` example
-//! prints the counts for every labelled unit, which is how a proposed rule is
-//! weighed against what it would cost before it is written.
+//! A rule that reaches into a shape where those collisions live does not buy
+//! coverage at the cost of accuracy — it trades a lookalike for a real
+//! finding, one for one. Telling such bodies apart needs something these
+//! counts do not carry: which callee is called, where a local's value goes, or
+//! what an argument holds.
+//!
+//! What the counts can still do is name a shape the collisions do not reach,
+//! and the two most recent categories were found that way rather than
+//! reasoned into. The `boilerplate-screen` example prints the counts for every
+//! labelled unit, which is how a proposed rule is weighed against what it
+//! would cost before it is written: a shape is worth a category when the
+//! screen finds refuted labels in it, no confirmed one, and more than one
+//! project's code. A shape supported by a single project is that project's
+//! habits, not a category.
 
 use crate::ir::{IrNode, Shape};
 
@@ -58,7 +65,7 @@ use crate::ir::{IrNode, Shape};
 /// Recorded alongside the other detector versions: a change in what counts as
 /// boilerplate changes which findings a report shows, so results from two
 /// versions are not comparable without saying so.
-pub const BOILERPLATE_VERSION: &str = "boilerplate-v1";
+pub const BOILERPLATE_VERSION: &str = "boilerplate-v2";
 
 /// A recognised boilerplate shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -80,6 +87,13 @@ pub enum Boilerplate {
     /// Several answers with nothing in the code choosing between them: the
     /// build configuration picks one and the rest are never compiled.
     ConfiguredAnswer,
+    /// One handed-back expression and nothing else, reaching more than one
+    /// callee. The `Forwarding` shape with a second call in the expression:
+    /// still nowhere for a value to be put and nothing done with one.
+    ComposedAnswer,
+    /// One local, one guard and one exit: the body makes a single value and
+    /// hands it back, and the guard decides how rather than what.
+    BuiltAnswer,
 }
 
 impl Boilerplate {
@@ -92,18 +106,22 @@ impl Boilerplate {
             Self::MacroRepetition => "macro-repetition",
             Self::GuardedDispatch => "guarded-dispatch",
             Self::ConfiguredAnswer => "configured-answer",
+            Self::ComposedAnswer => "composed-answer",
+            Self::BuiltAnswer => "built-answer",
         }
     }
 
     /// Every category, in the order reports and configuration list them.
     #[must_use]
-    pub const fn all() -> [Self; 5] {
+    pub const fn all() -> [Self; 7] {
         [
             Self::TrivialBody,
             Self::Forwarding,
             Self::MacroRepetition,
             Self::GuardedDispatch,
             Self::ConfiguredAnswer,
+            Self::ComposedAnswer,
+            Self::BuiltAnswer,
         ]
     }
 
@@ -174,7 +192,7 @@ pub struct BoilerplateCounts {
 pub fn classify(unit: &IrNode) -> Option<Boilerplate> {
     let body = counts(unit);
     if body.control > 0 {
-        return dispatch(&body);
+        return dispatch(&body).or_else(|| built(&body).then_some(Boilerplate::BuiltAnswer));
     }
     if body.macros >= 2 && body.calls == 0 && body.statements == 0 {
         return Some(Boilerplate::MacroRepetition);
@@ -190,8 +208,65 @@ pub fn classify(unit: &IrNode) -> Option<Boilerplate> {
         0 if body.statements <= 1 => Some(Boilerplate::TrivialBody),
         // One delegation, with nothing around it but the names it needs.
         1 if body.work == 0 => Some(Boilerplate::Forwarding),
+        // Several, with nothing around them at all.
+        _ if composed(&body) => Some(Boilerplate::ComposedAnswer),
         _ => None,
     }
+}
+
+/// Whether the body is one handed-back expression that reaches more than one
+/// callee.
+///
+/// [`Boilerplate::Forwarding`] names the one-call spelling of this, and the
+/// shape does not stop being punctuation because the expression names a second
+/// callee. A trace call before the delegation, a default beside it, a
+/// conditional picking between two readers, a predicate oring two tests
+/// together — each is the shortest spelling its operation has, and two of them
+/// are alike in having taken it.
+///
+/// Bounded by the statement count, not by the call count. One statement which
+/// is the `return` leaves no local to carry a value between the calls and no
+/// assignment to put one anywhere: the body has nowhere to do something with
+/// what a call handed back. How many callees the expression names is not what
+/// makes it boilerplate, so it is not what the rule counts.
+///
+/// What this cannot see is the expression itself, so a `return` that combines
+/// two calls arithmetically reaches here as the same shape as one that picks
+/// between them. Across the labelled projects the shape held lookalikes only,
+/// in three of them by different authors, which is the evidence the category
+/// rests on rather than a claim that the expression was read.
+const fn composed(body: &BoilerplateCounts) -> bool {
+    body.calls >= 2 && body.statements == 1 && body.returns == 1
+}
+
+/// Whether the body makes one value and hands it back, with a guard around it.
+///
+/// One local, one guard, one exit, and at least one call and one write. The
+/// local is what the body produces and what leaves it; the guard protects the
+/// writes or fixes what they are made from. Written once per constructed kind
+/// it is the language standing in for a parameter: the same acquisition, the
+/// same guard and the same hand-back, differing in which kind is asked for and
+/// which field is filled.
+///
+/// The single exit is what separates it from a factory worth reading. A second
+/// `return` is an error path, and an error path is a policy — what to do when
+/// the value could not be made is a decision two units genuinely share, and
+/// where they share it the repetition is a finding. With one exit there is no
+/// policy to share: the guard covers the writes and the local leaves either
+/// way. That is the difference between a family of creators that only name
+/// their kind, and a family that also repeats what happens when creating it
+/// fails.
+///
+/// [`dispatch`] holds the two-exit shapes and is tried first, so nothing here
+/// competes with it.
+const fn built(body: &BoilerplateCounts) -> bool {
+    body.branches == 1
+        && body.control == body.branches
+        && body.macros == 0
+        && body.declarations == 1
+        && body.returns == 1
+        && body.work >= 1
+        && body.calls >= 1
 }
 
 /// Whether the body hands back more than one answer with nothing choosing
@@ -727,6 +802,130 @@ mod tests {
             }],
         });
         assert_eq!(classify(&node), None);
+    }
+
+    #[test]
+    fn a_returned_expression_of_calls_is_composed_however_many_it_names() {
+        // `DEBUGLOG(5, "..."); return decompress_generic(...);` — a trace call
+        // beside the delegation, in a body that is otherwise the wrapper the
+        // one-call rule already recognises.
+        let traced = vec![
+            leaf(Shape::Call),
+            nest(Shape::Return, vec![leaf(Shape::Call)]),
+        ];
+        assert_eq!(
+            classify(&unit_of(traced)),
+            Some(Boilerplate::ComposedAnswer)
+        );
+
+        // `return little_endian() ? swap(read(p)) : read(p);` — one answer,
+        // picked between two spellings, and the nesting inside each is part of
+        // the spelling.
+        let picked = vec![nest(
+            Shape::Return,
+            vec![
+                nest(Shape::Call, vec![leaf(Shape::Call)]),
+                leaf(Shape::Call),
+            ],
+        )];
+        assert_eq!(
+            classify(&unit_of(picked)),
+            Some(Boilerplate::ComposedAnswer)
+        );
+    }
+
+    #[test]
+    fn somewhere_to_put_a_value_stops_the_expression_being_the_body() {
+        // A local means a call's answer went somewhere before the `return`,
+        // and what happened to it there is what the counts cannot see.
+        let held = vec![
+            leaf(Shape::VarDecl),
+            leaf(Shape::Call),
+            nest(Shape::Return, vec![leaf(Shape::Call)]),
+        ];
+        assert_eq!(classify(&unit_of(held)), None);
+
+        // So does an assignment, for the same reason.
+        let stored = vec![
+            leaf(Shape::Call),
+            leaf(Shape::Assign),
+            nest(Shape::Return, vec![leaf(Shape::Call)]),
+        ];
+        assert_eq!(classify(&unit_of(stored)), None);
+    }
+
+    #[test]
+    fn one_local_built_behind_a_guard_and_handed_back_is_built() {
+        // `item = new_item(); if (item) { item->kind = KIND; } return item;` —
+        // the guard covers the write, and the local leaves either way.
+        let created = vec![
+            nest(Shape::VarDecl, vec![leaf(Shape::Call)]),
+            nest(Shape::Branch, vec![leaf(Shape::Assign)]),
+            leaf(Shape::Return),
+        ];
+        assert_eq!(classify(&unit_of(created)), Some(Boilerplate::BuiltAnswer));
+
+        // `if (!doc) { doc = _document; } node = doc->NewComment(v); return
+        // node;` — the guard fixes what the local is made from instead, which
+        // is the same shape read the other way round.
+        let adjusted = vec![
+            nest(Shape::Branch, vec![leaf(Shape::Assign)]),
+            nest(Shape::VarDecl, vec![leaf(Shape::Call)]),
+            leaf(Shape::Return),
+        ];
+        assert_eq!(classify(&unit_of(adjusted)), Some(Boilerplate::BuiltAnswer));
+    }
+
+    #[test]
+    fn a_second_exit_is_a_policy_the_two_bodies_share() {
+        // `item = new_item(); if (item) { item->s = dup(s); if (!item->s) {
+        // delete(item); return NULL; } } return item;` — what to do when the
+        // value could not be made is a decision, and two creators repeating it
+        // repeat something worth reading. Reached here as a second guard and a
+        // second exit.
+        let recovering = vec![
+            leaf(Shape::VarDecl),
+            nest(
+                Shape::Branch,
+                vec![
+                    leaf(Shape::Assign),
+                    nest(Shape::Branch, vec![leaf(Shape::Call), leaf(Shape::Return)]),
+                ],
+            ),
+            leaf(Shape::Return),
+        ];
+        assert_eq!(classify(&unit_of(recovering)), None);
+
+        // `x = create(); if (add(o, n, x)) { return x; } delete(x); return
+        // NULL;` — one guard, but two exits and a shared error path.
+        let handing_back = vec![
+            nest(Shape::VarDecl, vec![leaf(Shape::Call)]),
+            nest(Shape::Branch, vec![leaf(Shape::Call), leaf(Shape::Return)]),
+            leaf(Shape::Call),
+            leaf(Shape::Return),
+        ];
+        assert_eq!(classify(&unit_of(handing_back)), None);
+    }
+
+    #[test]
+    fn a_built_answer_needs_a_call_and_a_write() {
+        // Without a call nothing was acquired, and a local's initialiser is
+        // invisible: `int v = a * b; if (c) { v = 0; } return v;` reaches here
+        // as arithmetic the counts cannot read, so it is left alone.
+        let computed = vec![
+            leaf(Shape::VarDecl),
+            nest(Shape::Branch, vec![leaf(Shape::Assign)]),
+            leaf(Shape::Return),
+        ];
+        assert_eq!(classify(&unit_of(computed)), None);
+
+        // Without a write the guard chooses nothing and covers nothing.
+        let idle = vec![
+            nest(Shape::VarDecl, vec![leaf(Shape::Call)]),
+            nest(Shape::Branch, vec![leaf(Shape::Call)]),
+            leaf(Shape::Return),
+        ];
+        assert_eq!(classify(&unit_of(idle)), None);
     }
 
     #[test]

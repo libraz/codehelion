@@ -54,7 +54,7 @@ use crate::StoreError;
 /// A database recorded under another one is rejected rather than migrated.
 /// The audit database holds derived scan state, so re-running the scan on a
 /// fresh path reproduces it without mutating the incompatible file.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Full current local database layout. Existing incompatible databases are
 /// not transformed; create a fresh database when this contract changes.
@@ -233,7 +233,7 @@ CREATE TABLE clone_group (
     score                REAL NOT NULL,
     entropy_bits         REAL NOT NULL,
     suppress_reason      TEXT CHECK (suppress_reason IN ('low-entropy', 'high-frequency')),
-    boilerplate          TEXT CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition', 'guarded-dispatch', 'configured-answer')),
+    boilerplate          TEXT CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition', 'guarded-dispatch', 'configured-answer', 'composed-answer', 'built-answer')),
     member_scope         TEXT NOT NULL DEFAULT 'unit' CHECK (member_scope IN ('unit', 'fragment')),
     test_code            INTEGER NOT NULL DEFAULT 0 CHECK (test_code IN (0, 1)),
     test_code_evidence   TEXT CHECK (test_code_evidence IN ('marker', 'path')),
@@ -263,7 +263,7 @@ CREATE TABLE clone_group_member (
     fragment_id    INTEGER NOT NULL REFERENCES fragment (id) ON DELETE CASCADE,
     finding_id     BLOB NOT NULL CHECK (length(finding_id) = 16),
     is_canonical   INTEGER NOT NULL CHECK (is_canonical IN (0, 1)),
-    boilerplate    TEXT CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition', 'guarded-dispatch', 'configured-answer')),
+    boilerplate    TEXT CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition', 'guarded-dispatch', 'configured-answer', 'composed-answer', 'built-answer')),
     PRIMARY KEY (clone_group_id, fragment_id),
     UNIQUE (scan_run_id, finding_id)
 ) STRICT;
@@ -297,7 +297,7 @@ CREATE TABLE clone_group_sibling (
     type_similarity      REAL,
     api                  REAL,
     composite            REAL NOT NULL,
-    boilerplate          TEXT CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition', 'guarded-dispatch', 'configured-answer')),
+    boilerplate          TEXT CHECK (boilerplate IN ('trivial-body', 'forwarding', 'macro-repetition', 'guarded-dispatch', 'configured-answer', 'composed-answer', 'built-answer')),
     suppression_id       INTEGER REFERENCES suppression (id),
     CHECK ((basis = 'signature' AND signature IS NOT NULL AND length(signature) > 0
             AND signature_units IS NOT NULL)

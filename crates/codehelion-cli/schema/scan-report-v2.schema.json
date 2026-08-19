@@ -1031,6 +1031,8 @@
             "macro-repetition",
             "guarded-dispatch",
             "configured-answer",
+            "composed-answer",
+            "built-answer",
             null
           ],
           "description": "The boilerplate shape matching at least four fifths of members; null when no shape is dominant. Individual member classifications retain the exceptions."
@@ -1873,7 +1875,9 @@
             "forwarding",
             "macro-repetition",
             "guarded-dispatch",
-            "configured-answer"
+            "configured-answer",
+            "composed-answer",
+            "built-answer"
           ],
           "description": "Structural classification of the enclosing whole unit. Omitted for fragments and for units that match no conservative boilerplate shape."
         },

@@ -150,6 +150,13 @@ pub struct BoilerplatePolicy {
     /// what two of them share is a platform split or a feature flag, which is
     /// not duplication anyone can remove.
     pub configured_answer: CategoryAction,
+    /// Bodies that are one handed-back expression naming more than one callee.
+    /// Hidden by default, on the same evidence as the wrappers they extend.
+    pub composed_answer: CategoryAction,
+    /// Bodies that make one value behind a guard and hand it back. Hidden by
+    /// default; a creator that also says what to do when creating fails has a
+    /// second exit and is not this shape.
+    pub built_answer: CategoryAction,
 }
 
 impl Default for BoilerplatePolicy {
@@ -176,6 +183,18 @@ impl Default for BoilerplatePolicy {
             // languages. None of them is a duplicate a reader could remove,
             // and none was ever ruled a clone worth reporting.
             configured_answer: CategoryAction::Hide,
+            // The wrapper rule with a second callee in the expression. Across
+            // three of the labelled projects, by different authors, the shape
+            // reached lookalikes only: a trace call beside a delegation, a
+            // conditional between two readers, a predicate oring two tests.
+            // Hidden on the evidence that put the one-call spelling here.
+            composed_answer: CategoryAction::Hide,
+            // A creator that names its kind and nothing else. Where two of
+            // them also repeat what to do when creating fails, the body has a
+            // second exit and this rule does not reach it, so what is hidden
+            // is the family a reader cannot collapse without a way to write it
+            // once.
+            built_answer: CategoryAction::Hide,
         }
     }
 }
@@ -190,6 +209,8 @@ impl BoilerplatePolicy {
             Boilerplate::MacroRepetition => self.macro_repetition,
             Boilerplate::GuardedDispatch => self.guarded_dispatch,
             Boilerplate::ConfiguredAnswer => self.configured_answer,
+            Boilerplate::ComposedAnswer => self.composed_answer,
+            Boilerplate::BuiltAnswer => self.built_answer,
         }
     }
 }
@@ -1079,6 +1100,8 @@ pub const TEMPLATE: &str = "\
 # macro-repetition = \"rank-down\"
 # guarded-dispatch = \"hide\"
 # configured-answer = \"hide\"
+# composed-answer = \"hide\"
+# built-answer = \"hide\"
 
 # What to do with a verified clone pair that no clone group can hold: \"hide\",
 # \"rank-down\" or \"report\". Clone similarity is not transitive, so this is a

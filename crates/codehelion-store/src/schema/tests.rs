@@ -153,7 +153,7 @@ fn sibling_signature_unit_count_rejects_a_negative_count() {
 fn baseline_creation_records_the_version_this_build_writes() {
     let conn = seeded();
     assert_eq!(version(&conn).unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 3);
+    assert_eq!(SCHEMA_VERSION, 4);
 }
 
 /// Creating the baseline under enforced foreign keys leaves its seeded

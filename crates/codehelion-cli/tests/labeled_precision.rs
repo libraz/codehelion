@@ -140,9 +140,13 @@ const CORPORA: &[Expected] = &[
         name: "cjson",
         has_origin: true,
         confirmed: 14,
-        refuted: 6,
+        // Two creator families fewer than this corpus used to produce. Both
+        // name their kind and nothing else, and neither says what to do when
+        // creating fails — the shape the report now sets aside. The families
+        // that do carry that error path are still here and still confirmed.
+        refuted: 4,
         forward_confirmed: 14,
-        forward_refuted: 6,
+        forward_refuted: 4,
         fast: Verdicts {
             confirmed: 12,
             refuted: 6,
@@ -156,9 +160,9 @@ const CORPORA: &[Expected] = &[
         name: "lz4",
         has_origin: true,
         confirmed: 15,
-        refuted: 14,
+        refuted: 13,
         forward_confirmed: 15,
-        forward_refuted: 14,
+        forward_refuted: 13,
         fast: Verdicts {
             confirmed: 12,
             refuted: 9,
@@ -193,9 +197,9 @@ const CORPORA: &[Expected] = &[
         // only in identifiers, so the report stated one relation twice. The
         // surviving finding still covers both labelled fragments and is still
         // refuted, so what left the count is the repetition, not the verdict.
-        refuted: 17,
+        refuted: 15,
         forward_confirmed: 21,
-        forward_refuted: 16,
+        forward_refuted: 14,
         fast: Verdicts {
             confirmed: 23,
             refuted: 1,
@@ -225,9 +229,9 @@ const CORPORA: &[Expected] = &[
         name: "tinyxml2",
         has_origin: true,
         confirmed: 10,
-        refuted: 11,
+        refuted: 9,
         forward_confirmed: 9,
-        forward_refuted: 11,
+        forward_refuted: 9,
         fast: Verdicts {
             confirmed: 3,
             refuted: 8,
@@ -268,13 +272,13 @@ const ORDERINGS: &[Ordering] = &[
         name: "priority",
         at_10: 1.0,
         at_50: 0.96,
-        map: 0.9231,
+        map: 0.9274,
     },
     Ordering {
         name: "size",
         at_10: 1.0,
         at_50: 0.94,
-        map: 0.8725,
+        map: 0.8774,
     },
 ];
 
@@ -285,9 +289,9 @@ const ORDERINGS: &[Ordering] = &[
 /// one silently redistributes every finding here. What the numbers say about
 /// the bands themselves is argued from the table, not from this assertion.
 const BANDS: &[(&str, usize, usize)] = &[
-    ("high", 43, 22),
-    ("medium", 44, 41),
-    ("low", 14, 22),
+    ("high", 43, 20),
+    ("medium", 44, 38),
+    ("low", 14, 20),
     ("(unscored)", 18, 5),
 ];
 
@@ -304,7 +308,7 @@ const REASONS: &[(&str, usize, usize, usize)] = &[
     ("dispatch-table-entry", 1, 1, 1),
     ("exhaustive-match-table", 1, 1, 3),
     ("field-mapping-boilerplate", 0, 0, 1),
-    ("forwarding-wrapper", 10, 13, 24),
+    ("forwarding-wrapper", 8, 11, 24),
     ("getter-boilerplate", 4, 4, 5),
     ("guarded-forwarding", 3, 3, 5),
     ("lifecycle-teardown", 2, 2, 6),
@@ -315,9 +319,9 @@ const REASONS: &[(&str, usize, usize, usize)] = &[
     ("parameterised-dispatch", 2, 2, 2),
     ("single-expression-return", 0, 0, 1),
     ("trivial-accessor-pair", 1, 1, 1),
-    ("trivial-factory", 10, 10, 10),
+    ("trivial-factory", 7, 7, 10),
     ("type-dispatch-accessor", 6, 25, 27),
-    ("type-specialised-variant", 16, 18, 35),
+    ("type-specialised-variant", 14, 16, 35),
     ("unrolled-repetition", 0, 0, 4),
     ("validated-setter", 1, 1, 1),
 ];

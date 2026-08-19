@@ -218,6 +218,17 @@ fn boilerplate_policy_defaults_set_aside_the_shapes_that_say_nothing() {
         policy.action(Boilerplate::MacroRepetition),
         CategoryAction::RankDown
     );
+    // The two shapes that extend the wrapper and the creator are set aside on
+    // the evidence that put those there: refuted labels in more than one
+    // project, and no confirmed one.
+    assert_eq!(
+        policy.action(Boilerplate::ComposedAnswer),
+        CategoryAction::Hide
+    );
+    assert_eq!(
+        policy.action(Boilerplate::BuiltAnswer),
+        CategoryAction::Hide
+    );
 }
 
 #[test]
