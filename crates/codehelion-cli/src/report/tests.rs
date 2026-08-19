@@ -705,6 +705,12 @@ fn text_names_the_run_required_for_replay() {
         text.contains("run 1 (replay: codehelion report --run 1)"),
         "{text}"
     );
+    // The run label is the last field of the counts line, and a field is
+    // separated the way every other one on that line is.
+    assert!(
+        text.contains("tokens · run 1"),
+        "the run label lost the spacing its separator carries: {text}"
+    );
 
     let mut detailed = Vec::new();
     report

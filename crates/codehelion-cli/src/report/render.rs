@@ -339,7 +339,7 @@ impl Report {
         );
         writeln!(
             out,
-            "{} files, {} lines, {} tokens {separator}{}{}",
+            "{} files, {} lines, {} tokens {separator} {}{}",
             thousands(summary.files.total),
             thousands(summary.lines),
             thousands(summary.tokens),
