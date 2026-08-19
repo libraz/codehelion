@@ -9,8 +9,8 @@ homepage.workspace = true
 description = "C++ Fast-mode lexer and unit-boundary frontend for the codehelion source-audit tool."
 
 [dependencies]
-codehelion-core = { version = "0.3.0", path = "../codehelion-core" }
-codehelion-frontend-c = { version = "0.3.0", path = "../codehelion-frontend-c" }
+codehelion-core = { version = "0.4.0", path = "../codehelion-core" }
+codehelion-frontend-c = { version = "0.4.0", path = "../codehelion-frontend-c" }
 tree-sitter = "0.25"
 tree-sitter-cpp = "0.23"
 

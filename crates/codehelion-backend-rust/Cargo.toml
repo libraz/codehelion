@@ -14,7 +14,7 @@ homepage.workspace = true
 description = "Out-of-process Rust compiler helper for codehelion."
 
 [dependencies]
-codehelion-helper = { version = "0.3.0", path = "../codehelion-helper" }
+codehelion-helper = { version = "0.4.0", path = "../codehelion-helper" }
 # rust-analyzer as a library. Published from the same tree as the editor
 # server, on a stable toolchain, and resolved by cargo like any other
 # dependency — which is what a version bump costs here, instead of a nightly

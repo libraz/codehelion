@@ -9,7 +9,7 @@ homepage.workspace = true
 description = "Out-of-process C and C++ compiler helper for codehelion."
 
 [dependencies]
-codehelion-helper = { version = "0.3.0", path = "../codehelion-helper" }
+codehelion-helper = { version = "0.4.0", path = "../codehelion-helper" }
 # Clang through libclang's stable C ABI, loaded at run time rather than linked.
 # Loading it means this program builds on a machine that has no Clang and says
 # so when started, which is what an optional component has to be able to do;

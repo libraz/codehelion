@@ -510,7 +510,7 @@ change before 1.0.
 
 ## Accuracy
 
-Measured with `make eval` at 0.3.0. Both corpora are committed, so these
+Measured with `make eval` at 0.4.0. Both corpora are committed, so these
 numbers are reproducible from a checkout. `corpus/README.md` explains why each
 half can answer only one of the two questions.
 
@@ -555,24 +555,24 @@ enumerated the clones in those projects first.
 | fast-yaml | 1.0000 | 1 | 0 |
 | codehelion-store | 1.0000 | 2 | 0 |
 | bitflags | 0.7857 | 11 | 3 |
-| cjson | 0.7000 | 14 | 6 |
-| spdlog | 0.5526 | 21 | 17 |
+| cjson | 0.7778 | 14 | 4 |
+| spdlog | 0.5833 | 21 | 15 |
 | serde-json | 0.5357 | 45 | 39 |
-| lz4 | 0.5172 | 15 | 14 |
-| tinyxml2 | 0.4762 | 10 | 11 |
-| **all cases** | **0.5694** | **119** | **90** |
+| lz4 | 0.5357 | 15 | 13 |
+| tinyxml2 | 0.5263 | 10 | 9 |
+| **all cases** | **0.5891** | **119** | **83** |
 
 Two of the eight are this author's own projects, and both score 1.0000.
-Dropping them moves the aggregate to 0.5631 — they carry 3 of the 209
+Dropping them moves the aggregate to 0.5829 — they carry 3 of the 202
 verdicts, so the figure is the other six projects' either way.
 
-0.5694 is the figure for the whole report read end to end, which is not how a
-duplication report is read. Over the same 209 judged findings:
+0.5891 is the figure for the whole report read end to end, which is not how a
+duplication report is read. Over the same 202 judged findings:
 
 | ordered by | p@10 | p@50 | MAP |
 |---|---|---|---|
-| priority | 1.0000 | 0.9600 | 0.9231 |
-| size | 1.0000 | 0.9400 | 0.8725 |
+| priority | 1.0000 | 0.9600 | 0.9274 |
+| size | 1.0000 | 0.9400 | 0.8774 |
 
 Nothing false reaches the first ten either way. What the aggregate says is that
 the tail is close to half noise, which is why the priority ordering and
