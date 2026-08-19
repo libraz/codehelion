@@ -253,6 +253,13 @@ duplication somebody added.
 If the build variant or detector versions differ, create a fresh baseline for
 the current scan rather than carrying it across.
 
+A baseline is for freezing a threshold and defending it in CI. Following your
+own progress through a refactor does not need one: rescan, and read the
+summary line saying what became of the previous run's highest-ranked groups
+together with `codehelion explain <id>`, which says whether a group is still
+in the latest run. Both are derived from the runs already in the local
+database, so nothing has to be created, kept in step, or committed.
+
 ### Rescanning after a refactor
 
 A scan is also a check on the refactor you have just finished. Run it again on
@@ -272,6 +279,15 @@ makes running one per refactor practical.
 Whether the artifact also got smaller is a separate question: a finding names
 code a reader has to keep in step, not bytes a compiler emits.
 `codehelion artifact analyze path/to/binary` measures that side.
+
+The similarity breakdown a group prints under `-v` is worth reading before
+opening the files. A group whose structure and control flow agree exactly
+while its identifiers do not is usually the same routine written twice with
+different names for the same things — the kind that collapses into one
+function taking an argument for whatever differs. A group whose identifiers
+agree as well is usually a copy, where one side can simply go. This is a way
+of reading the numbers, not a rule the tool applies: codehelion reports what
+the occurrences have in common and leaves the refactoring to you.
 
 ## Artifact inspection (optional)
 
@@ -294,6 +310,20 @@ or PE CodeView/PDB identity has been verified. `artifact analyze --debug-file co
 can inspect a native debug companion without a source scan; add
 `--source-run` and `--build-variant` only when requesting source-artifact
 correlation. When an artifact command receives `--build-variant manifest.json`, its identity uses the canonical JSON value, so whitespace and object-member ordering do not change the build variant.
+
+`--build-variant` takes a file you write, not one to go looking for. Its
+contents are yours to choose; what they buy is that only artifacts built the
+same way are compared with one another:
+
+```sh
+echo '{"profile":"release","target":"wasm32","toolchain":"emcc-5.0.2"}' > build-variant.json
+codehelion artifact analyze dist/app.wasm --build-variant build-variant.json --source-run 2
+```
+
+A source run also has a build variant, and reports print its digest. The two
+are separate conditions — how the sources were read, and how the artifact was
+built — recorded side by side rather than checked against each other. There is
+no source digest to find and copy into the manifest.
 
 Artifact operations reject inputs above 512 MiB by default and run parsing,
 correlation, persistence, and rendering in a worker with one 30-second
@@ -411,6 +441,17 @@ differences are normalized away is thousands of times larger.
 `codehelion artifact analyze` reports the exact and the normalized figure side
 by side, so the ratio for your own build is something you measure rather than
 assume.
+
+**Compressed size moves less than uncompressed size does.** What removing
+duplication takes out of an artifact is a repeated byte sequence, and a
+repeated byte sequence is the first thing a compressor folds away. The
+uncompressed binary shrinks by roughly what was removed; the compressed one
+shrinks by much less, because the compressor was already paying almost nothing
+for the second copy. If your size budget is a compressed number, deduplication
+is not the tool for it. If it is an uncompressed number — a memory-mapped
+image, an embedded firmware image, a WASM module measured before transport
+encoding — it is. Measure both before and after your own refactor rather than
+taking a ratio from anywhere else; nothing here re-derives one for you.
 
 **Fast mode reports more than you want to read.** The suppression policies for
 boilerplate, test code and integer-width families need structural
