@@ -9,7 +9,7 @@
 //!
 //! JSON reports carry a top-level `schema_version` field, currently
 //! [`SCHEMA_VERSION`]. The JSON Schema document shipped with this crate
-//! ([`JSON_SCHEMA`], `schema/scan-report-v1.schema.json`) describes the
+//! ([`JSON_SCHEMA`], `schema/scan-report-v2.schema.json`) describes the
 //! complete current format.
 //!
 //! [`sarif`] renders the same value as a SARIF 2.1.0 log for static-analysis

@@ -3,10 +3,10 @@
 use serde::Serialize;
 
 /// Version of the JSON report format.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The JSON Schema document describing the scan report JSON form.
-pub const JSON_SCHEMA: &str = include_str!("../../schema/scan-report-v1.schema.json");
+pub const JSON_SCHEMA: &str = include_str!("../../schema/scan-report-v2.schema.json");
 
 /// Version shared by every machine-readable `codehelion explain` response.
 pub const FINDING_DETAIL_SCHEMA_VERSION: &str = "finding-detail-v1";

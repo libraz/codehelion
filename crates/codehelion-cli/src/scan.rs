@@ -48,10 +48,10 @@ use crate::suppress;
 
 /// Version of the JSON envelope used when a scan contains multiple build
 /// variants or an explicit comparison report.
-pub(crate) const PARTITIONED_REPORT_SCHEMA_VERSION: &str = "partitioned-scan-report-v1";
+pub(crate) const PARTITIONED_REPORT_SCHEMA_VERSION: &str = "partitioned-scan-report-v2";
 
 /// URI of the schema that describes [`PARTITIONED_REPORT_SCHEMA_VERSION`].
-pub(crate) const PARTITIONED_REPORT_SCHEMA_URI: &str = "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/partitioned-scan-report-v1.schema.json";
+pub(crate) const PARTITIONED_REPORT_SCHEMA_URI: &str = "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/partitioned-scan-report-v2.schema.json";
 
 /// Turn configuration selection into durable report provenance.
 #[must_use]

@@ -20,7 +20,7 @@
         "latest_scan_run": { "type": ["integer", "null"] },
         "present_in_latest_run": { "type": ["boolean", "null"] },
         "group": {
-          "$ref": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v1.schema.json#/$defs/group"
+          "$ref": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v2.schema.json#/$defs/group"
         }
       }
     },

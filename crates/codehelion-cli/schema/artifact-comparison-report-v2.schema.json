@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v1.schema.json",
-  "title": "codehelion artifact comparison report v1",
+  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v2.schema.json",
+  "title": "codehelion artifact comparison report v2",
   "description": "Machine-readable before/after comparison of two locally read artifacts. The direct before-minus-after measurement is named observed_size_reduction_bytes; verified savings occurs only in a controlled calibration.",
   "type": "object",
   "required": [
@@ -11,7 +11,7 @@
     "build_variant_warning", "assumptions"
   ],
   "properties": {
-    "schema_version": { "const": "artifact-comparison-report-v1" },
+    "schema_version": { "const": "artifact-comparison-report-v2" },
     "before": { "$ref": "#/$defs/artifact" },
     "after": { "$ref": "#/$defs/artifact" },
     "observed_size_reduction_bytes": { "type": "integer" },

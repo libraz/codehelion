@@ -16,7 +16,7 @@ fn prints_sibling_metrics_after_primary_metrics() {
     let report_path = temporary.path().join("report.json");
     let labels_path = temporary.path().join("labels.json");
     let report = json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "summary": {
             "files": {"rust": 0, "c": 0, "cpp": 3},
             "lines": 12,

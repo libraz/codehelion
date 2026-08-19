@@ -10,12 +10,12 @@ fn assert_valid_partitioned_schema(value: &Value) {
     let mut compiler = Compiler::new();
     for (uri, source) in [
         (
-            "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v1.schema.json",
+            "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v2.schema.json",
             report::JSON_SCHEMA,
         ),
         (
             PARTITIONED_REPORT_SCHEMA_URI,
-            include_str!("../../schema/partitioned-scan-report-v1.schema.json"),
+            include_str!("../../schema/partitioned-scan-report-v2.schema.json"),
         ),
     ] {
         compiler

@@ -134,7 +134,7 @@ fn artifact_and_calibration_json_reports_validate_against_shipped_schemas() {
     let artifact_report =
         ArtifactReport::from_ir(std::path::Path::new("fixture.wasm"), &artifact, None, None);
     assert_valid_schema(
-        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v1.schema.json",
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v2.schema.json",
         ARTIFACT_REPORT_JSON_SCHEMA,
         &serde_json::to_value(artifact_report).unwrap(),
     );
@@ -507,7 +507,7 @@ fn comparison_uses_fingerprint_for_additions_and_names_for_modifications() {
     let json = serde_json::to_value(&report).unwrap();
     assert_eq!(json["calibration"]["absolute_error_bytes"], 3);
     assert_valid_schema(
-        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v1.schema.json",
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v2.schema.json",
         ARTIFACT_COMPARISON_REPORT_JSON_SCHEMA,
         &json,
     );
@@ -688,7 +688,7 @@ fn comparison_json_keeps_the_symbol_changes_the_text_folded() {
         2
     );
     assert_valid_schema(
-        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v1.schema.json",
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v2.schema.json",
         ARTIFACT_COMPARISON_REPORT_JSON_SCHEMA,
         &json,
     );

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v1.schema.json",
+  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v2.schema.json",
   "title": "codehelion scan report",
-  "description": "Machine-readable result of one codehelion scan. The complete current report contract for the unreleased product.",
+  "description": "Machine-readable result of one codehelion scan. The complete current report contract.",
   "type": "object",
   "required": [
     "schema_version",
@@ -12,7 +12,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 1
+      "const": 2
     },
     "run": {
       "$ref": "#/$defs/run"

@@ -12,7 +12,7 @@ fn assert_valid_finding_detail_schema(value: &serde_json::Value) {
     let mut compiler = Compiler::new();
     compiler
         .add_resource(
-            "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v1.schema.json",
+            "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v2.schema.json",
             serde_json::from_str(JSON_SCHEMA).expect("valid scan schema"),
         )
         .expect("scan schema resource");
@@ -1696,11 +1696,11 @@ fn structural_shape_label_keeps_the_rule_judgement() {
     clippy::too_many_lines,
     reason = "one schema test keeps the complete current, legacy-additive, and invalid sibling contracts together"
 )]
-fn current_json_report_validates_against_the_shipped_v1_schema() {
+fn current_json_report_validates_against_the_shipped_schema() {
     let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA).unwrap();
     let mut schemas = Schemas::new();
     let mut compiler = Compiler::new();
-    let uri = "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v1.schema.json";
+    let uri = "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/scan-report-v2.schema.json";
     compiler.add_resource(uri, schema).unwrap();
     let index = compiler.compile(uri, &mut schemas).unwrap();
     let value: serde_json::Value =
@@ -1874,7 +1874,7 @@ fn current_json_report_validates_against_the_shipped_v1_schema() {
     assert!(schemas.validate(&similarity_with_signature, index).is_err());
 
     let mut unsupported = value;
-    unsupported["schema_version"] = serde_json::json!(2);
+    unsupported["schema_version"] = serde_json::json!(3);
     assert!(schemas.validate(&unsupported, index).is_err());
 }
 

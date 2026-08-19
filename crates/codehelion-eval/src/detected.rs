@@ -2,7 +2,7 @@
 //!
 //! The harness scores a [`DetectionResult`]: a flat list of findings, each
 //! relating the fragments it claims are copies of one another. What the tool
-//! emits is `scan-report-v1`, a far richer document written for people and for
+//! emits is `scan-report-v2`, a far richer document written for people and for
 //! static-analysis consumers. This module is the one place that knows how to
 //! read the second as the first.
 //!
@@ -26,7 +26,7 @@ use crate::schema::{Axes, CloneType, DetectionResult, Finding, Fragment, Sibling
 /// The report's version covers its shape, not its content: findings move with
 /// every detector change, and that is what the harness exists to measure. Only
 /// a change to the document's structure lands here.
-pub const SUPPORTED_REPORT_SCHEMA: u32 = 1;
+pub const SUPPORTED_REPORT_SCHEMA: u32 = 2;
 
 /// What went wrong turning a report into a scorable result.
 #[derive(Debug)]
@@ -65,7 +65,7 @@ impl fmt::Display for Error {
                  adapter has not followed it"
             ),
             Self::MissingField { path } => {
-                write!(f, "scan report v1 omits required field {path}")
+                write!(f, "scan report omits required field {path}")
             }
             Self::InvalidSibling { path, reason } => {
                 write!(f, "invalid scan report sibling {path}: {reason}")
@@ -806,7 +806,7 @@ mod tests {
 
     /// A report with one reported group and one the tool suppressed.
     const REPORT: &str = r#"{
-      "schema_version": 1,
+      "schema_version": 2,
       "run": {"id": 1},
       "summary": {
         "files": {"total": 2, "rust": 2, "c": 0, "cpp": 0},
@@ -1005,21 +1005,21 @@ mod tests {
         // The failure this rejects is the one that costs the most: a report
         // whose shape moved on, read as though it had not, quietly scoring
         // whatever still happened to parse.
-        let moved_on = REPORT.replace("\"schema_version\": 1", "\"schema_version\": 2");
+        let moved_on = REPORT.replace("\"schema_version\": 2", "\"schema_version\": 3");
         let error = from_report_json(&moved_on).expect_err("a later version is refused");
-        assert!(matches!(error, Error::Version { found: 2 }));
+        assert!(matches!(error, Error::Version { found: 3 }));
     }
 
     #[test]
     fn a_document_that_is_not_a_report_is_a_parse_error() {
-        let error = from_report_json("{\"schema_version\": 1}").expect_err("no summary");
+        let error = from_report_json("{\"schema_version\": 2}").expect_err("no summary");
         assert!(matches!(error, Error::MissingField { .. }));
     }
 
     #[test]
-    fn a_v1_report_missing_a_current_contract_field_is_refused() {
+    fn a_report_missing_a_current_contract_field_is_refused() {
         let stale = REPORT.replacen("\"width_family\": false,", "", 1);
-        let error = from_report_json(&stale).expect_err("missing v1 field is refused");
+        let error = from_report_json(&stale).expect_err("a missing field is refused");
         assert!(matches!(
             error,
             Error::MissingField { ref path } if path == "groups[0].width_family"
@@ -1027,7 +1027,7 @@ mod tests {
     }
 
     #[test]
-    fn a_v1_report_missing_the_sibling_section_is_refused() {
+    fn a_report_missing_the_sibling_section_is_refused() {
         let stale = REPORT.replace(",\n      \"siblings\": []", "");
         let error = from_report_json(&stale).expect_err("missing siblings must be refused");
         assert!(matches!(

@@ -744,7 +744,7 @@ fn json_reports_carry_the_breakdown_and_stay_deterministic() {
     assert_eq!(documents[0], documents[1], "reruns agree token for token");
 
     let value = &documents[0];
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     assert_eq!(value["run"]["mode"], "structural");
     assert_eq!(value["run"]["build_variant"]["mode"], "structural");
     assert!(

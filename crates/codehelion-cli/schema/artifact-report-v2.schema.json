@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v1.schema.json",
+  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v2.schema.json",
   "title": "codehelion artifact report",
   "description": "Machine-readable analysis of one locally read compiled artifact.",
   "type": "object",
@@ -22,7 +22,7 @@
     "data_segment_details"
   ],
   "properties": {
-    "schema_version": { "const": "artifact-report-v1" },
+    "schema_version": { "const": "artifact-report-v2" },
     "path": { "type": "string" },
     "format": { "type": "string", "enum": ["wasm", "elf", "macho", "pe-coff", "archive"] },
     "architecture": { "type": ["string", "null"] },

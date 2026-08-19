@@ -131,7 +131,7 @@ fn dwarf_locations_map_only_units_in_the_explicit_source_run() {
             7, &artifact, &rows,
         )));
     let json = serde_json::to_string(&report).unwrap();
-    assert!(json.contains("\"schema_version\":\"artifact-report-v1\""));
+    assert!(json.contains("\"schema_version\":\"artifact-report-v2\""));
     assert!(json.contains("\"source_run\":7"));
     let mut text = Vec::new();
     render_text(&report, false, &mut text).unwrap();
