@@ -12,6 +12,19 @@ fn cmd() -> Command {
     Command::cargo_bin("codehelion").expect("binary should build")
 }
 
+/// A temporary directory, spelled the way the commands under test spell it.
+///
+/// [`std::fs::canonicalize`] answers a Windows path in the verbatim `\\?\`
+/// form. No command prints that form: each resolves the path it was given
+/// through [`codehelion_core::paths::canonical`], which drops the prefix
+/// wherever the ordinary spelling names the same file. A fixture built from
+/// the other form therefore expects a path that appears in no output, and the
+/// test fails on Windows for a reason that has nothing to do with what it is
+/// checking.
+fn resolved_root(directory: &tempfile::TempDir) -> std::path::PathBuf {
+    codehelion_core::paths::canonical(directory.path()).expect("resolve temp dir")
+}
+
 fn macho_fixture() -> Vec<u8> {
     let mut object = WriteObject::new(
         BinaryFormat::MachO,
@@ -140,7 +153,7 @@ fn database_name_for_this_schema() -> String {
 #[test]
 fn scan_records_beside_a_default_database_written_by_another_schema_version() {
     let directory = tempfile::tempdir().expect("temp dir");
-    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let root = resolved_root(&directory);
     let cache = root.join(".codehelion");
     tree_with_a_database_from_another_schema_version(&root, &cache.join("audit.db"));
 
@@ -166,7 +179,7 @@ fn scan_records_beside_a_default_database_written_by_another_schema_version() {
 #[test]
 fn stepping_around_a_default_database_says_so_and_leaves_it_unchanged() {
     let directory = tempfile::tempdir().expect("temp dir");
-    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let root = resolved_root(&directory);
     let cache = root.join(".codehelion");
     let incompatible = cache.join("audit.db");
     tree_with_a_database_from_another_schema_version(&root, &incompatible);
@@ -197,7 +210,7 @@ fn stepping_around_a_default_database_says_so_and_leaves_it_unchanged() {
 #[test]
 fn an_explicitly_named_incompatible_database_is_still_refused() {
     let directory = tempfile::tempdir().expect("temp dir");
-    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let root = resolved_root(&directory);
     let named = root.join("audit.db");
     tree_with_a_database_from_another_schema_version(&root, &named);
 
@@ -247,7 +260,7 @@ fn an_explicitly_named_incompatible_database_is_still_refused() {
 #[test]
 fn a_compatible_default_database_is_used_without_creating_a_second_one() {
     let directory = tempfile::tempdir().expect("temp dir");
-    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let root = resolved_root(&directory);
     let cache = root.join(".codehelion");
     std::fs::write(root.join("lib.rs"), "pub fn tiny() {}\n").expect("write source");
     std::fs::create_dir_all(&cache).expect("create database directory");
@@ -278,7 +291,7 @@ fn a_compatible_default_database_is_used_without_creating_a_second_one() {
 #[test]
 fn readers_open_the_database_the_scan_recorded_into() {
     let directory = tempfile::tempdir().expect("temp dir");
-    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let root = resolved_root(&directory);
     let cache = root.join(".codehelion");
     tree_with_a_database_from_another_schema_version(&root, &cache.join("audit.db"));
     cmd()
@@ -319,7 +332,7 @@ fn readers_open_the_database_the_scan_recorded_into() {
 #[test]
 fn a_reader_does_not_create_the_neighbour_a_scan_would() {
     let directory = tempfile::tempdir().expect("temp dir");
-    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let root = resolved_root(&directory);
     let cache = root.join(".codehelion");
     tree_with_a_database_from_another_schema_version(&root, &cache.join("audit.db"));
 
@@ -349,7 +362,7 @@ fn a_reader_does_not_create_the_neighbour_a_scan_would() {
 #[test]
 fn clearing_the_cache_does_not_follow_the_step_aside_rule() {
     let directory = tempfile::tempdir().expect("temp dir");
-    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let root = resolved_root(&directory);
     let cache = root.join(".codehelion");
     let incompatible = cache.join("audit.db");
     tree_with_a_database_from_another_schema_version(&root, &incompatible);
@@ -392,7 +405,7 @@ fn a_recording_failure_that_is_not_a_schema_mismatch_still_fails_the_scan() {
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().expect("temp dir");
-    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let root = resolved_root(&directory);
     let cache = root.join(".codehelion");
     let database = cache.join("audit.db");
     std::fs::write(root.join("lib.rs"), "pub fn tiny() {}\n").expect("write source");
@@ -423,7 +436,7 @@ fn a_recording_failure_that_is_not_a_schema_mismatch_still_fails_the_scan() {
 #[test]
 fn doctor_lists_the_databases_in_the_directory_and_names_the_one_a_scan_would_use() {
     let directory = tempfile::tempdir().expect("temp dir");
-    let root = directory.path().canonicalize().expect("resolve temp dir");
+    let root = resolved_root(&directory);
     let cache = root.join(".codehelion");
     tree_with_a_database_from_another_schema_version(&root, &cache.join("audit.db"));
     let recorded = cache.join(database_name_for_this_schema());
