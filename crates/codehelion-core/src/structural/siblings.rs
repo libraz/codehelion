@@ -7,6 +7,13 @@
 //! members. Both channels compare only to the group's medoid, never emit a
 //! primary edge, and never edit a group, so neither can turn a local
 //! incomplete copy into transitive group membership.
+//!
+//! The two channels differ only in which index they read and what they make
+//! of a candidate. Both keep one posting index over ungrouped units and walk
+//! each group's postings through the same bounded cursor, so the work spent
+//! selecting candidates is a function of the caps rather than of the index,
+//! and both reach every exit through one traversal that emits a group's
+//! accepted siblings before it stops.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -75,10 +82,6 @@ pub(super) fn sweep_siblings_with_context(
 }
 
 /// Sweep the existing file-scoped verifier-similarity channel.
-#[allow(
-    clippy::too_many_lines,
-    reason = "the bounded sweep keeps its ordered caps and accounting together for auditability"
-)]
 fn sweep_similarity_siblings(
     groups: &GroupingSet,
     units: &[Unit],
@@ -89,12 +92,14 @@ fn sweep_similarity_siblings(
 ) -> (Vec<GroupSiblings>, SiblingSweepStats) {
     let verify_config = &config.verify;
     let sibling_config = &config.siblings;
-    let mut stats = SiblingSweepStats::default();
     let grouped: BTreeSet<usize> = groups
         .groups
         .iter()
         .flat_map(|group| group.members.iter().copied())
         .collect();
+    // One posting index over the ungrouped units, keyed by host file. Group
+    // candidates are traversed below with a bounded cursor over these
+    // postings; no group-by-file candidate list is materialized.
     let mut ungrouped_by_file: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (index, unit) in units.iter().enumerate() {
         if !grouped.contains(&index) {
@@ -102,80 +107,42 @@ fn sweep_similarity_siblings(
         }
     }
     for candidates in ungrouped_by_file.values_mut() {
-        candidates.sort_by(|left, right| {
-            units[*left]
-                .fingerprint
-                .cmp(&units[*right].fingerprint)
-                .then(left.cmp(right))
-        });
+        candidates.sort_by(|left, right| candidate_order(units, *left, *right));
     }
-
-    // Form the file-scoped work lists before spending the budget. This makes
-    // every dropped count exact while comparison work itself remains bounded.
-    let candidate_lists: Vec<Vec<usize>> = groups
-        .groups
-        .iter()
-        .map(|group| {
-            let files: BTreeSet<usize> = group
-                .members
-                .iter()
-                .map(|&member| units[member].file)
-                .collect();
-            files
-                .into_iter()
-                .flat_map(|file| ungrouped_by_file.get(&file).into_iter().flatten().copied())
-                .filter(|&candidate| {
-                    sibling_candidate_allowed(
-                        group.canonical,
-                        candidate,
-                        units,
-                        feature_files,
-                        config,
-                    )
-                })
-                .collect()
-        })
-        .collect();
-    stats.groups_considered = groups.groups.len();
-    stats.eligible_candidates = candidate_lists.iter().map(Vec::len).sum();
 
     let relaxed_threshold = (verify_config.type3_min_composite
         - sibling_config
             .similarity_delta
             .clamp(0.0, verify_config.type3_min_composite))
     .max(0.0);
-    let mut accepted = 0usize;
-    let mut out = Vec::new();
-    'groups: for (group_index, (group, group_candidates)) in
-        groups.groups.iter().zip(&candidate_lists).enumerate()
-    {
-        let mut siblings = Vec::new();
-        for (position, &unit) in group_candidates.iter().enumerate() {
-            if accepted >= sibling_config.total_cap {
-                stats.total_cap_dropped = stats.total_cap_dropped.saturating_add(
-                    group_candidates.len().saturating_sub(position)
-                        + candidate_lists[group_index + 1..]
-                            .iter()
-                            .map(Vec::len)
-                            .sum::<usize>(),
-                );
-                break 'groups;
+    // No candidate is more informative than another here, so the groups keep
+    // their existing deterministic order.
+    let order: Vec<usize> = (0..groups.groups.len()).collect();
+    let caps = SweepCaps {
+        candidate_budget: sibling_config.candidate_budget,
+        per_group_cap: sibling_config.per_group_cap,
+        total_cap: sibling_config.total_cap,
+    };
+    let (out, ledger) = sweep_group_candidates(
+        units,
+        &order,
+        &caps,
+        |group_index| {
+            group_postings(
+                file_posting_keys(&groups.groups[group_index], units),
+                &ungrouped_by_file,
+            )
+        },
+        |group_index, unit| {
+            let canonical = groups.groups[group_index].canonical;
+            if !sibling_candidate_allowed(canonical, unit, units, feature_files, config) {
+                return None;
             }
-            if siblings.len() >= sibling_config.per_group_cap {
-                stats.per_group_cap_dropped = stats
-                    .per_group_cap_dropped
-                    .saturating_add(group_candidates.len().saturating_sub(position));
-                break;
-            }
-            if stats.candidates_examined >= sibling_config.candidate_budget {
-                break 'groups;
-            }
-            let canonical = view(group.canonical, units, files, feature_files, evidence);
-            let sibling = view(unit, units, files, feature_files, evidence);
-            let verdict = verify::verify(&canonical, &sibling, verify_config);
-            stats.candidates_examined += 1;
+            let canonical_view = view(canonical, units, files, feature_files, evidence);
+            let sibling_view = view(unit, units, files, feature_files, evidence);
+            let verdict = verify::verify(&canonical_view, &sibling_view, verify_config);
             if verdict.breakdown.composite < relaxed_threshold {
-                continue;
+                return None;
             }
             let (clone_type, confidence) = sibling_classification(
                 verdict.class,
@@ -183,7 +150,7 @@ fn sweep_similarity_siblings(
                 verdict.breakdown.composite,
                 verify_config.type3_min_composite,
             );
-            siblings.push(StructuralSibling {
+            Some(StructuralSibling {
                 unit,
                 clone_type,
                 confidence,
@@ -191,22 +158,18 @@ fn sweep_similarity_siblings(
                 basis: SiblingBasis::Similarity,
                 signature: None,
                 signature_units: None,
-            });
-            accepted += 1;
-            stats.accepted += 1;
-        }
-        if !siblings.is_empty() {
-            out.push(GroupSiblings {
-                group: group_index,
-                siblings,
-            });
-        }
-    }
-    stats.candidate_budget_dropped = stats
-        .eligible_candidates
-        .saturating_sub(stats.candidates_examined)
-        .saturating_sub(stats.per_group_cap_dropped)
-        .saturating_sub(stats.total_cap_dropped);
+            })
+        },
+    );
+    let stats = SiblingSweepStats {
+        groups_considered: groups.groups.len(),
+        eligible_candidates: ledger.eligible_candidates,
+        candidates_examined: ledger.candidates_examined,
+        accepted: ledger.accepted,
+        candidate_budget_dropped: ledger.candidate_budget_dropped,
+        per_group_cap_dropped: ledger.per_group_cap_dropped,
+        total_cap_dropped: ledger.total_cap_dropped,
+    };
     (out, stats)
 }
 
@@ -281,33 +244,15 @@ fn sweep_signature_siblings(
         .groups
         .iter()
         .map(|group| {
-            group_posting_total(group, units, |key, directory| {
-                excluded.get(&(key, directory)).copied().unwrap_or_default()
-            })
+            signature_posting_keys(group, units)
+                .into_iter()
+                .filter_map(|key| excluded.get(&key))
+                .sum::<usize>()
         })
         .sum();
     for candidates in index.values_mut() {
-        candidates.sort_by(|left, right| {
-            units[*left]
-                .fingerprint
-                .cmp(&units[*right].fingerprint)
-                .then(left.cmp(right))
-        });
+        candidates.sort_by(|left, right| candidate_order(units, *left, *right));
     }
-
-    // Keep only one posting index over ungrouped units. Group-specific
-    // candidates are traversed below with a bounded k-way cursor; no
-    // group-by-posting `Vec<Vec<usize>>` is materialized.
-    let group_candidate_counts: Vec<usize> = groups
-        .groups
-        .iter()
-        .map(|group| {
-            group_posting_total(group, units, |key, directory| {
-                index.get(&(key, directory)).map_or(0, Vec::len)
-            })
-        })
-        .collect();
-    stats.eligible_candidates = group_candidate_counts.iter().sum();
 
     // Every candidate offered to one group carries that group's medoid
     // signature, so the number of units sharing it is uniform inside a group
@@ -321,66 +266,24 @@ fn sweep_signature_siblings(
             group_index,
         )
     });
-    let mut remaining_after = vec![0usize; order.len()];
-    let mut tail = 0usize;
-    for (position, &group_index) in order.iter().enumerate().rev() {
-        remaining_after[position] = tail;
-        tail += group_candidate_counts[group_index];
-    }
-
-    let mut accepted = 0usize;
-    let mut out = Vec::new();
-    'groups: for (position, &group_index) in order.iter().enumerate() {
-        let group = &groups.groups[group_index];
-        let shared = shared_signature_units(group, units, &units_per_signature);
-        let mut candidates = signature_candidate_stream(group, units, &index);
-        let mut remaining = group_candidate_counts[group_index];
-        let mut siblings = Vec::new();
-        // Similarity output is emitted in primary group order. Keep the
-        // signature channel's existing-breakdown lookup logarithmic in the
-        // number of similarity groups rather than scanning that output for
-        // every signature candidate.
-        let existing_group = existing_similarity
-            .binary_search_by_key(&group_index, |existing| existing.group)
-            .ok()
-            .and_then(|index| existing_similarity.get(index));
-        loop {
-            if accepted >= config.signature_siblings.total_cap {
-                stats.total_cap_dropped = stats
-                    .total_cap_dropped
-                    .saturating_add(remaining + remaining_after[position]);
-                if !siblings.is_empty() {
-                    out.push(GroupSiblings {
-                        group: group_index,
-                        siblings,
-                    });
-                }
-                break 'groups;
-            }
-            if siblings.len() >= config.signature_siblings.per_group_cap {
-                stats.per_group_cap_dropped = stats.per_group_cap_dropped.saturating_add(remaining);
-                break;
-            }
-            if stats.candidates_examined >= config.signature_siblings.candidate_budget {
-                stats.candidate_budget_dropped = stats
-                    .candidate_budget_dropped
-                    .saturating_add(remaining + remaining_after[position]);
-                if !siblings.is_empty() {
-                    out.push(GroupSiblings {
-                        group: group_index,
-                        siblings,
-                    });
-                }
-                break 'groups;
-            }
-            let Some(unit) = candidates.next() else {
-                break;
-            };
-            remaining = remaining.saturating_sub(1);
-            stats.candidates_examined += 1;
-            let Some(signature) = units[group.canonical].signature.as_ref() else {
-                continue;
-            };
+    let caps = SweepCaps {
+        candidate_budget: config.signature_siblings.candidate_budget,
+        per_group_cap: config.signature_siblings.per_group_cap,
+        total_cap: config.signature_siblings.total_cap,
+    };
+    let (out, ledger) = sweep_group_candidates(
+        units,
+        &order,
+        &caps,
+        |group_index| {
+            group_postings(
+                signature_posting_keys(&groups.groups[group_index], units),
+                &index,
+            )
+        },
+        |group_index, unit| {
+            let group = &groups.groups[group_index];
+            let signature = units[group.canonical].signature.as_ref()?;
             if units[unit]
                 .signature
                 .as_ref()
@@ -389,9 +292,16 @@ fn sweep_signature_siblings(
                 })
                 || !signature_sibling_candidate_allowed(group.canonical, unit, units, config)
             {
-                continue;
+                return None;
             }
-            let breakdown = existing_group
+            // Similarity output is emitted in primary group order. Keep the
+            // existing-breakdown lookup logarithmic in the number of
+            // similarity groups rather than scanning that output for every
+            // signature candidate.
+            let breakdown = existing_similarity
+                .binary_search_by_key(&group_index, |existing| existing.group)
+                .ok()
+                .and_then(|position| existing_similarity.get(position))
                 .and_then(|existing| {
                     existing
                         .siblings
@@ -405,29 +315,180 @@ fn sweep_signature_siblings(
                     let candidate_view = view(unit, units, files, feature_files, evidence);
                     verify::verify(&canonical_view, &candidate_view, &config.verify).breakdown
                 });
-            siblings.push(StructuralSibling {
+            Some(StructuralSibling {
                 unit,
                 clone_type: CloneClass::Type3,
                 confidence: Confidence::Low,
                 breakdown,
                 basis: SiblingBasis::Signature,
                 signature: Some(signature.normalized.clone()),
-                signature_units: Some(shared),
-            });
-            accepted += 1;
-            stats.accepted += 1;
-        }
-        if !siblings.is_empty() {
-            out.push(GroupSiblings {
-                group: group_index,
-                siblings,
-            });
-        }
-    }
-    // Groups were visited rarest signature first; the channel's output stays
-    // in primary group order, as the merge step expects.
-    out.sort_by_key(|group| group.group);
+                signature_units: Some(shared_signature_units(group, units, &units_per_signature)),
+            })
+        },
+    );
+    stats.eligible_candidates = ledger.eligible_candidates;
+    stats.candidates_examined = ledger.candidates_examined;
+    stats.accepted = ledger.accepted;
+    stats.candidate_budget_dropped = ledger.candidate_budget_dropped;
+    stats.per_group_cap_dropped = ledger.per_group_cap_dropped;
+    stats.total_cap_dropped = ledger.total_cap_dropped;
     (out, stats)
+}
+
+/// The resource ceilings one channel's traversal runs under.
+struct SweepCaps {
+    /// Maximum candidates inspected over the whole traversal.
+    candidate_budget: usize,
+    /// Maximum siblings retained for one group.
+    per_group_cap: usize,
+    /// Maximum siblings retained over the whole traversal.
+    total_cap: usize,
+}
+
+/// Candidate accounting for one channel's traversal, in the vocabulary both
+/// channels' published counters share.
+#[derive(Default)]
+struct SweepLedger {
+    eligible_candidates: usize,
+    candidates_examined: usize,
+    accepted: usize,
+    candidate_budget_dropped: usize,
+    per_group_cap_dropped: usize,
+    total_cap_dropped: usize,
+}
+
+/// Walk each group's candidates in fingerprint order under one set of caps.
+///
+/// `order` lists group indices in visiting order, `postings` borrows one
+/// group's posting lists from the channel's index, and `accept` decides what
+/// an inspected candidate becomes. Candidates are pulled one at a time, so the
+/// work spent selecting and guarding them is bounded by the caps rather than
+/// by the size of the index, and a group's candidate total comes from posting
+/// lengths rather than from a materialized list.
+///
+/// Both channels reach every exit here, which is what keeps a cap from
+/// discarding siblings a group has already accepted: whichever cap stops the
+/// traversal, the group's accumulated siblings are recorded first. Output is
+/// returned in primary group order whatever order the groups were visited in.
+fn sweep_group_candidates<'a>(
+    units: &'a [Unit],
+    order: &[usize],
+    caps: &SweepCaps,
+    mut postings: impl FnMut(usize) -> Vec<&'a [usize]>,
+    mut accept: impl FnMut(usize, usize) -> Option<StructuralSibling>,
+) -> (Vec<GroupSiblings>, SweepLedger) {
+    let counts: Vec<usize> = order
+        .iter()
+        .map(|&group_index| {
+            postings(group_index)
+                .iter()
+                .map(|posting| posting.len())
+                .sum()
+        })
+        .collect();
+    let mut ledger = SweepLedger {
+        eligible_candidates: counts.iter().sum(),
+        ..SweepLedger::default()
+    };
+    // What the groups after each position still offer, so a shared cap can
+    // report everything it dropped without visiting those groups.
+    let mut remaining_after = vec![0usize; order.len()];
+    let mut tail = 0usize;
+    for (position, count) in counts.iter().enumerate().rev() {
+        remaining_after[position] = tail;
+        tail += *count;
+    }
+
+    let mut out = Vec::new();
+    'groups: for (position, &group_index) in order.iter().enumerate() {
+        let mut candidates = CandidateStream::new(units, postings(group_index));
+        let mut remaining = counts[position];
+        let mut siblings = Vec::new();
+        loop {
+            #[cfg(test)]
+            observe_retained_candidates(candidates.retained() + siblings.len());
+            if ledger.accepted >= caps.total_cap {
+                ledger.total_cap_dropped = ledger
+                    .total_cap_dropped
+                    .saturating_add(remaining + remaining_after[position]);
+                record_group(&mut out, group_index, siblings);
+                break 'groups;
+            }
+            if siblings.len() >= caps.per_group_cap {
+                ledger.per_group_cap_dropped =
+                    ledger.per_group_cap_dropped.saturating_add(remaining);
+                break;
+            }
+            if ledger.candidates_examined >= caps.candidate_budget {
+                ledger.candidate_budget_dropped = ledger
+                    .candidate_budget_dropped
+                    .saturating_add(remaining + remaining_after[position]);
+                record_group(&mut out, group_index, siblings);
+                break 'groups;
+            }
+            let Some(unit) = candidates.next() else {
+                break;
+            };
+            remaining = remaining.saturating_sub(1);
+            ledger.candidates_examined += 1;
+            if let Some(sibling) = accept(group_index, unit) {
+                siblings.push(sibling);
+                ledger.accepted += 1;
+            }
+        }
+        record_group(&mut out, group_index, siblings);
+    }
+    out.sort_by_key(|group| group.group);
+    (out, ledger)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The most candidate slots one traversal held at once, recorded per
+    /// thread and so per test. What a traversal keeps for candidates it has
+    /// not reached is the cost the streaming index exists to avoid, and a
+    /// counter is the only way to hold an implementation to it: one that
+    /// rebuilds the offer as a list and guards it lazily spends the same
+    /// comparisons.
+    static RETAINED_CANDIDATE_PEAK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Begin recording retained candidate slots afresh.
+#[cfg(test)]
+fn reset_retained_candidate_peak() {
+    RETAINED_CANDIDATE_PEAK.set(0);
+}
+
+/// The most candidate slots held at once since the last reset.
+#[cfg(test)]
+fn retained_candidate_peak() -> usize {
+    RETAINED_CANDIDATE_PEAK.get()
+}
+
+/// Record what one traversal is holding at this point.
+#[cfg(test)]
+fn observe_retained_candidates(retained: usize) {
+    RETAINED_CANDIDATE_PEAK.set(retained.max(RETAINED_CANDIDATE_PEAK.get()));
+}
+
+/// Record what one group accepted, if it accepted anything.
+fn record_group(out: &mut Vec<GroupSiblings>, group: usize, siblings: Vec<StructuralSibling>) {
+    if !siblings.is_empty() {
+        out.push(GroupSiblings { group, siblings });
+    }
+}
+
+/// The total order both channels traverse and truncate their candidates by.
+///
+/// The unit fingerprint covers the candidate's raw content, so a cap keeps the
+/// same content wherever the tree puts it. Only candidates whose content is
+/// identical reach the index tie-break, and nothing but their location tells
+/// those apart.
+fn candidate_order(units: &[Unit], left: usize, right: usize) -> std::cmp::Ordering {
+    units[left]
+        .fingerprint
+        .cmp(&units[right].fingerprint)
+        .then(left.cmp(&right))
 }
 
 /// How many units in the tree share one group medoid's signature. Zero when
@@ -446,19 +507,40 @@ fn shared_signature_units(
         .unwrap_or_default()
 }
 
-/// Total the postings one group would traverse, without copying them: the
-/// medoid's signature key in each directory its members occupy. The caller
-/// supplies the posting size, so the same walk serves both the retained index
-/// and the postings the sharing limit excluded. The total is the denominator
-/// for exact cap/drop accounting; per-unit safety guards are applied while the
-/// stream is consumed.
-fn group_posting_total(
+/// Borrow the postings one group traverses, without copying them. Both the
+/// group's candidate total and the candidates it inspects come from these
+/// slices, so a reported total and an actual traversal cannot drift apart.
+fn group_postings<Key: Ord>(
+    keys: impl IntoIterator<Item = Key>,
+    index: &BTreeMap<Key, Vec<usize>>,
+) -> Vec<&[usize]> {
+    keys.into_iter()
+        .filter_map(|key| index.get(&key))
+        .map(Vec::as_slice)
+        .collect()
+}
+
+/// The files one group's members occupy, which is the similarity channel's
+/// candidate scope.
+fn file_posting_keys(group: &StructuralGroup, units: &[Unit]) -> BTreeSet<usize> {
+    group
+        .members
+        .iter()
+        .map(|&member| units[member].file)
+        .collect()
+}
+
+/// The `(signature, directory)` postings one group's medoid signature occupies
+/// across its members' directories. Empty when the medoid has no signature,
+/// which is also how such a group offers no signature candidates at all. The
+/// same keys serve the retained index and the postings the sharing limit
+/// excluded, so both are counted over one walk.
+fn signature_posting_keys(
     group: &StructuralGroup,
     units: &[Unit],
-    mut posting_size: impl FnMut(SignatureKey, DirectoryPartition) -> usize,
-) -> usize {
+) -> Vec<(SignatureKey, DirectoryPartition)> {
     let Some(signature) = units[group.canonical].signature.as_ref() else {
-        return 0;
+        return Vec::new();
     };
     group
         .members
@@ -466,19 +548,46 @@ fn group_posting_total(
         .filter_map(|&member| units[member].directory)
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .map(|directory| posting_size(signature.key, directory))
-        .sum()
+        .map(|directory| (signature.key, directory))
+        .collect()
 }
 
-/// A deterministic, bounded-memory merge over the posting lists occupied by
-/// one group's medoid signature and member directories.
-struct SignatureCandidateStream<'a> {
+/// A deterministic, bounded-memory merge over the posting lists one group
+/// occupies. Only one cursor per posting is held, so the candidates a group
+/// never reaches are never materialized.
+struct CandidateStream<'a> {
     units: &'a [Unit],
     postings: Vec<&'a [usize]>,
     heap: BinaryHeap<Reverse<(UnitFingerprint, usize, usize, usize)>>,
 }
 
-impl Iterator for SignatureCandidateStream<'_> {
+impl<'a> CandidateStream<'a> {
+    fn new(units: &'a [Unit], postings: Vec<&'a [usize]>) -> Self {
+        let heap = postings
+            .iter()
+            .enumerate()
+            .filter_map(|(posting, candidates)| {
+                candidates
+                    .first()
+                    .map(|&unit| Reverse((units[unit].fingerprint, unit, posting, 0)))
+            })
+            .collect();
+        Self {
+            units,
+            postings,
+            heap,
+        }
+    }
+
+    /// Candidate slots held at once: one cursor per posting that still offers
+    /// a candidate, whatever the postings hold behind those cursors.
+    #[cfg(test)]
+    fn retained(&self) -> usize {
+        self.heap.len()
+    }
+}
+
+impl Iterator for CandidateStream<'_> {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -493,42 +602,6 @@ impl Iterator for SignatureCandidateStream<'_> {
             )));
         }
         Some(unit)
-    }
-}
-
-fn signature_candidate_stream<'a>(
-    group: &StructuralGroup,
-    units: &'a [Unit],
-    index: &'a BTreeMap<(SignatureKey, DirectoryPartition), Vec<usize>>,
-) -> SignatureCandidateStream<'a> {
-    let signature = units[group.canonical].signature.as_ref();
-    let directories: BTreeSet<DirectoryPartition> = group
-        .members
-        .iter()
-        .filter_map(|&member| units[member].directory)
-        .collect();
-    let postings: Vec<&[usize]> = signature
-        .into_iter()
-        .flat_map(|signature| {
-            directories
-                .iter()
-                .filter_map(|&directory| index.get(&(signature.key, directory)))
-                .map(Vec::as_slice)
-        })
-        .collect();
-    let heap = postings
-        .iter()
-        .enumerate()
-        .filter_map(|(posting, candidates)| {
-            candidates
-                .first()
-                .map(|&unit| Reverse((units[unit].fingerprint, unit, posting, 0)))
-        })
-        .collect();
-    SignatureCandidateStream {
-        units,
-        postings,
-        heap,
     }
 }
 
@@ -585,7 +658,7 @@ fn sibling_candidate_allowed(
     if !unit_meets_minimum(canonical, config.min_clone_tokens)
         || !unit_meets_minimum(candidate, config.min_clone_tokens)
         || encloses(canonical, candidate)
-        || canonical.arms.excludes(&candidate.arms)
+        || !canonical.arms.can_coexist(&candidate.arms)
     {
         return false;
     }
@@ -610,7 +683,7 @@ fn signature_sibling_candidate_allowed(
     unit_meets_minimum(canonical, config.min_clone_tokens)
         && unit_meets_minimum(candidate, config.min_clone_tokens)
         && !encloses(canonical, candidate)
-        && !canonical.arms.excludes(&candidate.arms)
+        && canonical.arms.can_coexist(&candidate.arms)
 }
 
 /// Apply the sibling contract to a verifier result.
@@ -638,6 +711,8 @@ fn sibling_classification(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::cmp::Ordering;
+
     use crate::conditional::{ArmTracker, StaticCondition};
     use crate::discovery::{BuildVariant, Language, LanguageSelection};
     use crate::engine::LiteralNorm;
@@ -1398,6 +1473,15 @@ mod tests {
         units[0].arms = crate::conditional::ArmPath::default();
         units[1].arms = crate::conditional::ArmPath::default();
 
+        let mut dead = ArmTracker::default();
+        dead.begin(StaticCondition::False);
+        units[1].arms = dead.current();
+        assert!(
+            !sibling_candidate_allowed(0, 1, &units, &feature_files, &default),
+            "a unit under an arm no build takes is half of no pair"
+        );
+        units[1].arms = crate::conditional::ArmPath::default();
+
         feature_files[0].units[1].vector.counts.fill(0);
         feature_files[0].units[1].vector.node_count = 1;
         assert!(!sibling_candidate_allowed(
@@ -1407,6 +1491,32 @@ mod tests {
             &feature_files,
             &default
         ));
+    }
+
+    #[test]
+    fn signature_sibling_candidates_ask_the_same_build_membership_question() {
+        let (mut units, _files, _feature_files, _evidence, _groups) = inputs();
+        let default = config();
+        assert!(signature_sibling_candidate_allowed(0, 1, &units, &default));
+
+        let mut tracker = ArmTracker::default();
+        tracker.begin(StaticCondition::Unknown);
+        units[0].arms = tracker.current();
+        tracker.next_arm(StaticCondition::Unknown);
+        units[1].arms = tracker.current();
+        assert!(
+            !signature_sibling_candidate_allowed(0, 1, &units, &default),
+            "alternative arms of one conditional"
+        );
+
+        let mut dead = ArmTracker::default();
+        dead.begin(StaticCondition::False);
+        units[0].arms = dead.current();
+        units[1].arms = crate::conditional::ArmPath::default();
+        assert!(
+            !signature_sibling_candidate_allowed(0, 1, &units, &default),
+            "an arm no build takes"
+        );
     }
 
     #[test]
@@ -1455,72 +1565,248 @@ mod tests {
         assert_eq!(again_stats, stats);
     }
 
+    /// Every sibling one sweep retained, in the order it reported them.
+    fn retained_units(siblings: &[GroupSiblings]) -> Vec<usize> {
+        siblings
+            .iter()
+            .flat_map(|group| group.siblings.iter().map(|sibling| sibling.unit))
+            .collect()
+    }
+
+    /// The properties every exit of the similarity sweep owes its caller: each
+    /// group is reported once in group order, every accepted sibling reaches
+    /// the caller in fingerprint order, and every offered candidate is either
+    /// inspected or attributed to exactly one cap.
+    fn assert_sweep_accounting(
+        units: &[Unit],
+        siblings: &[GroupSiblings],
+        stats: &SiblingSweepStats,
+    ) {
+        let owners: Vec<usize> = siblings.iter().map(|group| group.group).collect();
+        assert!(
+            owners.windows(2).all(|pair| pair[0] < pair[1]),
+            "groups are reported once each, in group order"
+        );
+        assert_eq!(
+            retained_units(siblings).len(),
+            stats.accepted,
+            "the accepted count and the reported siblings are the same siblings"
+        );
+        for group in siblings {
+            assert!(
+                group.siblings.windows(2).all(|pair| {
+                    candidate_order(units, pair[0].unit, pair[1].unit) == Ordering::Less
+                }),
+                "retained siblings stay in fingerprint order"
+            );
+        }
+        assert_eq!(
+            stats.candidates_examined
+                + stats.candidate_budget_dropped
+                + stats.per_group_cap_dropped
+                + stats.total_cap_dropped,
+            stats.eligible_candidates,
+            "no offered candidate is lost between the counters"
+        );
+    }
+
     #[test]
     fn sweep_caps_bound_comparisons_and_retained_siblings() {
         let (units, files, feature_files, evidence, groups) = inputs();
-        let mut ordered = vec![1, 2, 3];
-        ordered.sort_by(|left, right| {
-            units[*left]
-                .fingerprint
-                .cmp(&units[*right].fingerprint)
-                .then(left.cmp(right))
-        });
-        let expected_first = ordered.remove(0);
+        let mut ordered = [1, 2, 3];
+        ordered.sort_by(|left, right| candidate_order(&units, *left, *right));
 
-        let mut per_group_config = config();
-        per_group_config.siblings = SiblingConfig {
+        let sweep = |siblings| {
+            let mut tuned = config();
+            tuned.siblings = siblings;
+            sweep_siblings(&groups, &units, &files, &feature_files, &evidence, &tuned)
+        };
+
+        let (per_group, per_group_stats) = sweep(SiblingConfig {
             similarity_delta: 0.10,
             candidate_budget: 10,
             per_group_cap: 1,
             total_cap: 10,
-        };
-        let (per_group, per_group_stats) = sweep_siblings(
-            &groups,
-            &units,
-            &files,
-            &feature_files,
-            &evidence,
-            &per_group_config,
-        );
-        assert_eq!(per_group[0].siblings[0].unit, expected_first);
+        });
+        assert_eq!(retained_units(&per_group), ordered[..1].to_vec());
         assert_eq!(per_group_stats.candidates_examined, 1);
         assert_eq!(per_group_stats.per_group_cap_dropped, 2);
+        assert_sweep_accounting(&units, &per_group, &per_group_stats);
 
-        let mut total_config = config();
-        total_config.siblings = SiblingConfig {
+        let (total, total_stats) = sweep(SiblingConfig {
             similarity_delta: 0.10,
             candidate_budget: 10,
             per_group_cap: 8,
             total_cap: 1,
-        };
-        let (_, total_stats) = sweep_siblings(
-            &groups,
-            &units,
-            &files,
-            &feature_files,
-            &evidence,
-            &total_config,
+        });
+        assert_eq!(
+            retained_units(&total),
+            ordered[..1].to_vec(),
+            "a sibling accepted before the total cap fired is still reported"
         );
         assert_eq!(total_stats.candidates_examined, 1);
         assert_eq!(total_stats.total_cap_dropped, 2);
+        assert_sweep_accounting(&units, &total, &total_stats);
 
-        let mut budget_config = config();
-        budget_config.siblings = SiblingConfig {
+        let (budget, budget_stats) = sweep(SiblingConfig {
             similarity_delta: 0.10,
             candidate_budget: 1,
             per_group_cap: 8,
             total_cap: 10,
-        };
-        let (_, budget_stats) = sweep_siblings(
-            &groups,
-            &units,
-            &files,
-            &feature_files,
-            &evidence,
-            &budget_config,
+        });
+        assert_eq!(
+            retained_units(&budget),
+            ordered[..1].to_vec(),
+            "a sibling accepted before the budget ran out is still reported"
         );
         assert_eq!(budget_stats.candidates_examined, 1);
         assert_eq!(budget_stats.candidate_budget_dropped, 2);
+        assert_sweep_accounting(&units, &budget, &budget_stats);
+    }
+
+    #[test]
+    fn a_crowded_file_stops_at_the_budget_without_group_materialization() {
+        const EXTRA_CANDIDATES: usize = 4_096;
+        let (mut units, files, feature_files, evidence, groups) = inputs();
+        let prototype = duplicate(&units[1]);
+        for _ in 0..EXTRA_CANDIDATES {
+            let mut unit = duplicate(&prototype);
+            // These sort last, so the budget is spent on the three candidates
+            // the fixture already had, and they are too small to pass the
+            // candidate guards: their share of the offer can only be counted
+            // by a sweep that counts before it guards.
+            unit.fingerprint = UnitFingerprint::from_bytes([0xFF; 16]);
+            unit.tokens = (0, 0);
+            units.push(unit);
+        }
+        let mut limited = config();
+        limited.siblings = SiblingConfig {
+            similarity_delta: 0.10,
+            candidate_budget: 3,
+            per_group_cap: EXTRA_CANDIDATES + 3,
+            total_cap: EXTRA_CANDIDATES + 3,
+        };
+        reset_retained_candidate_peak();
+        let (siblings, stats) =
+            sweep_siblings(&groups, &units, &files, &feature_files, &evidence, &limited);
+        let eligible = EXTRA_CANDIDATES + 3;
+        let postings = groups
+            .groups
+            .iter()
+            .map(|group| file_posting_keys(group, &units).len())
+            .max()
+            .unwrap_or_default();
+        assert!(
+            retained_candidate_peak() <= postings + limited.siblings.candidate_budget,
+            "one cursor per posting and the siblings kept, not the {eligible} candidates offered"
+        );
+        assert_eq!(
+            stats.eligible_candidates, eligible,
+            "the offer is counted from posting lengths, not from a built list"
+        );
+        assert_eq!(
+            stats.candidates_examined, 3,
+            "candidate guarding and verification both stop at the budget"
+        );
+        assert_eq!(stats.accepted, 3);
+        assert_eq!(stats.candidate_budget_dropped, eligible - 3);
+        assert_eq!(stats.per_group_cap_dropped, 0);
+        assert_eq!(stats.total_cap_dropped, 0);
+        assert_sweep_accounting(&units, &siblings, &stats);
+    }
+
+    /// A group whose two members sit in different files, each file holding
+    /// more ungrouped candidates than the group may retain. `host_first`
+    /// selects which file the tree presents first, which is what renaming a
+    /// directory does to the file order.
+    fn cross_file_inputs(
+        host_first: bool,
+    ) -> (
+        Vec<Unit>,
+        Vec<SyntaxIrFile>,
+        Vec<FileFeatures>,
+        UnitEvidence,
+        GroupingSet,
+    ) {
+        let host = file(&["shared_anchor", "host_spare_one", "host_spare_two"]);
+        let peer = file(&["shared_anchor", "peer_spare_one", "peer_spare_two"]);
+        let files = if host_first {
+            vec![host, peer]
+        } else {
+            vec![peer, host]
+        };
+        let feature_files = files.iter().map(features::extract).collect();
+        let (units, _) = flatten_units(
+            &files,
+            &variant(),
+            LiteralNorm::Full,
+            &ResolvedTypes::default(),
+        );
+        let evidence = unit_evidence(&units, &ResolvedTypes::default());
+        let grouping_units = units
+            .iter()
+            .map(|unit| GroupingUnit {
+                key: *unit.fingerprint.as_bytes(),
+            })
+            .collect::<Vec<_>>();
+        let groups = grouping::group(
+            &grouping_units,
+            &[SimilarityEdge {
+                a: 0,
+                b: 3,
+                similarity: 1.0,
+                breakdown: None,
+                class: CloneClass::Type1,
+                confidence: Confidence::High,
+            }],
+            &GroupingConfig::default(),
+        );
+        (units, files, feature_files, evidence, groups)
+    }
+
+    #[test]
+    fn the_per_group_cap_keeps_the_same_candidates_whatever_order_the_files_arrive_in() {
+        let capped = || {
+            let mut tuned = config();
+            tuned.siblings = SiblingConfig {
+                similarity_delta: 0.10,
+                candidate_budget: 100,
+                per_group_cap: 2,
+                total_cap: 100,
+            };
+            tuned
+        };
+        let survivors = |host_first: bool| {
+            let (units, files, feature_files, evidence, groups) = cross_file_inputs(host_first);
+            let (siblings, stats) = sweep_siblings(
+                &groups,
+                &units,
+                &files,
+                &feature_files,
+                &evidence,
+                &capped(),
+            );
+            assert_eq!(stats.eligible_candidates, 4);
+            assert_eq!(stats.accepted, 2);
+            assert_eq!(stats.per_group_cap_dropped, 2);
+            assert_sweep_accounting(&units, &siblings, &stats);
+
+            // The retained candidates are the fingerprint-order prefix of
+            // everything the two files offered, whichever file came first.
+            let mut expected = vec![1, 2, 4, 5];
+            expected.sort_by(|left, right| candidate_order(&units, *left, *right));
+            expected.truncate(2);
+            assert_eq!(retained_units(&siblings), expected);
+            retained_units(&siblings)
+                .into_iter()
+                .map(|unit| units[unit].fingerprint)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            survivors(true),
+            survivors(false),
+            "a content-preserving reordering of the tree keeps the same siblings"
+        );
     }
 
     #[test]

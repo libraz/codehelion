@@ -388,3 +388,54 @@ fn registered_windows_reject_reversed_source_ranges() {
         Err(SemanticGraphError::InvalidSourceRange)
     );
 }
+
+/// Two units can both come back with nothing comparable for opposite reasons,
+/// and an account of what a run analysed has to say which. A lone sequence
+/// operation is a graph the registry built and no registered rule claims,
+/// which is a gap in rule coverage; a unit whose calls are all outside the
+/// vocabulary never became a graph at all.
+#[test]
+fn a_registered_operation_no_rule_claims_still_produces_a_graph() {
+    let single_map = normalize_registered_apis(
+        Language::Rust,
+        [21; 32],
+        vec![OperationObservation {
+            source_offset: 4,
+            api_name: "rust::Iterator::map".to_owned(),
+            type_tag: None,
+        }],
+    )
+    .expect("a registered API normalizes");
+    assert!(
+        single_map.graph.is_some(),
+        "the operation is registered, so the unit is representable"
+    );
+    assert_eq!(single_map.excluded_observations, 0);
+    assert!(
+        registered_semantic_windows(&single_map)
+            .expect("windows rebase safely")
+            .is_empty(),
+        "every sequence rule states a minimum of two operations"
+    );
+
+    let unregistered = normalize_registered_apis(
+        Language::Rust,
+        [21; 32],
+        vec![OperationObservation {
+            source_offset: 4,
+            api_name: "project::do_the_thing".to_owned(),
+            type_tag: None,
+        }],
+    )
+    .expect("an unregistered API normalizes to nothing");
+    assert!(
+        unregistered.graph.is_none(),
+        "nothing the compiler resolved was in the registered vocabulary"
+    );
+    assert_eq!(unregistered.excluded_observations, 1);
+    assert!(
+        registered_semantic_windows(&unregistered)
+            .expect("windows rebase safely")
+            .is_empty()
+    );
+}

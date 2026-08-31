@@ -307,7 +307,11 @@ pub struct GroupDetail {
     pub cohesion_breakdown: SimilarityBreakdown,
     /// Smallest raw-identifier Jaccard agreement against the canonical unit.
     /// It is evidence only: detection, clone class, and priority ignore it.
-    pub identifier_jaccard: f64,
+    ///
+    /// Absent where no member and the canonical unit between them held an
+    /// identifier to compare, which is a dimension this group was not measured
+    /// on rather than one it scored perfectly on.
+    pub identifier_jaccard: Option<f64>,
     /// Conservative evidence that every member carries a material body.
     ///
     /// This is not a code-size estimate. It records only syntactic work that
@@ -432,10 +436,20 @@ pub struct StructuralStats {
     pub maximal: RegionStats,
     /// Duplicated runs confirmed against the source tokens.
     pub regions: usize,
+    /// Occurrences the confirmed runs hold. Counted apart from `regions`
+    /// because the reasons an occurrence was set aside are about occurrences,
+    /// and a count of runs is not something they can be subtracted from.
+    pub region_occurrences: usize,
     /// Occurrences dropped for holding content no other occurrence of their
     /// candidate run shared: the statement summaries agreed but the code did
     /// not.
     pub region_singletons: usize,
+    /// Occurrences dropped because their tokens could never be established:
+    /// the file they name is outside the analysed set, or their byte range
+    /// covers no whole token. Kept apart from `region_singletons` because
+    /// nothing about their content was ever compared, so reading them as a
+    /// disagreement would send an investigation to the wrong stage.
+    pub region_unresolved: usize,
     /// Occurrences dropped for covering source a kept occurrence of the same
     /// run already covers, which makes them one stretch of code rather than
     /// two instances of it.
@@ -498,10 +512,13 @@ pub struct StructuralStats {
 pub struct SiblingSweepStats {
     /// Established primary groups considered for local siblings.
     pub groups_considered: usize,
-    /// Canonical-to-ungrouped comparisons eligible under the file, minimum,
-    /// nesting, conditional-arm, and shape-divergence rules.
+    /// Entries in the ungrouped per-file postings considered eligible before
+    /// the per-unit safety guards. This is counted from posting lengths, so it
+    /// does not require materializing a group-by-posting list.
     pub eligible_candidates: usize,
-    /// Candidates handed to the verifier.
+    /// Posting entries inspected in deterministic order, including entries
+    /// rejected by the file, minimum, nesting, conditional-arm, and
+    /// shape-divergence rules before reaching the verifier.
     pub candidates_examined: usize,
     /// Siblings retained after the relaxed verifier threshold.
     pub accepted: usize,

@@ -312,6 +312,16 @@ fn coincident_operation(
 /// partial matching before candidate indexing and preserves a concise rule
 /// explanation for every returned fragment.
 ///
+/// An empty result is two different facts, and a caller that accounts for what
+/// it analysed has to keep them apart. When
+/// [`ApiNormalization::graph`] is absent, nothing the compiler resolved landed
+/// in the registered vocabulary and the unit was never representable as a
+/// graph. When a graph is present and no window comes back, the operations are
+/// registered and no registered *rule* explains any fragment of them — a gap in
+/// rule coverage rather than in what a compiler could speak for. A single
+/// sequence operation is the ordinary case of the second: every sequence rule
+/// states a minimum of two operations, so one alone is a graph no rule claims.
+///
 /// # Errors
 ///
 /// Returns [`SemanticGraphError`] only if a validated graph cannot be rebased

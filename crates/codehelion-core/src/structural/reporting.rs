@@ -1,19 +1,106 @@
 use super::{
     BTreeMap, BTreeSet, BodyMateriality, Boilerplate, BuildVariant, CloneGroupFingerprint,
-    FileFeatures, FragmentFingerprint, GroupDetail, Lexeme, SourceTokenSpan, StructuralConfig,
-    SyntaxIrFile, Token, TokenKind, Unit, UnitEvidence, features, grouping, stable_id,
-    substitution, test_code, verify, view,
+    FileFeatures, FragmentFingerprint, GroupDetail, Lexeme, SimilarityBreakdown, SimilarityEdge,
+    SourceTokenSpan, StructuralConfig, SyntaxIrFile, Token, TokenKind, Unit, UnitEvidence,
+    UnitView, VerifyConfig, features, grouping, stable_id, substitution, test_code, verify, view,
 };
+
+/// The verified pair evidence, addressable by unordered endpoint pair.
+///
+/// Grouping already weighed every pair inside a group against the same
+/// verdicts, so reporting reads them back instead of measuring them again:
+/// re-verifying is a statement alignment per pair, which is quadratic in group
+/// size and would dominate a tree of interchangeable units (AGENTS.md §2-10).
+/// A pair listed more than once collapses to its strongest verdict, the rule
+/// grouping applied when it built its own similarity lookup, so both stages
+/// read one pair the same way.
+pub(super) struct PairEvidence<'a> {
+    edges: &'a [SimilarityEdge],
+    /// Endpoint pairs in `(low, high, edge index)` form, ordered by endpoints.
+    index: Vec<(usize, usize, usize)>,
+}
+
+impl<'a> PairEvidence<'a> {
+    /// Index verified edges for lookup. Endpoints are unit indices, as in
+    /// [`SimilarityEdge`].
+    pub(super) fn index(edges: &'a [SimilarityEdge]) -> Self {
+        let mut index: Vec<(usize, usize, usize)> = edges
+            .iter()
+            .enumerate()
+            .filter(|(_, edge)| edge.a != edge.b)
+            .map(|(position, edge)| {
+                let (low, high) = if edge.a <= edge.b {
+                    (edge.a, edge.b)
+                } else {
+                    (edge.b, edge.a)
+                };
+                (low, high, position)
+            })
+            .collect();
+        index.sort_by(|left, right| {
+            (left.0, left.1).cmp(&(right.0, right.1)).then_with(|| {
+                edges[right.2]
+                    .similarity
+                    .total_cmp(&edges[left.2].similarity)
+            })
+        });
+        // The strongest listing of a pair sorts first, so dropping the later
+        // duplicates keeps it.
+        index.dedup_by(|left, right| (left.0, left.1) == (right.0, right.1));
+        Self { edges, index }
+    }
+
+    /// The verdict recorded for a pair, or `None` for a pair no edge names.
+    fn edge(&self, a: usize, b: usize) -> Option<&SimilarityEdge> {
+        let key = if a <= b { (a, b) } else { (b, a) };
+        self.index
+            .binary_search_by(|probe| (probe.0, probe.1).cmp(&key))
+            .ok()
+            .map(|position| &self.edges[self.index[position].2])
+    }
+
+    /// A pair's grouping similarity. An absent pair reads as zero, which is
+    /// how grouping itself reads one.
+    fn similarity(&self, a: usize, b: usize) -> f64 {
+        self.edge(a, b).map_or(0.0, |edge| edge.similarity)
+    }
+
+    /// A pair's per-dimension evidence, when the verifier's own breakdown
+    /// travelled with the edge.
+    fn breakdown(&self, a: usize, b: usize) -> Option<SimilarityBreakdown> {
+        self.edge(a, b).and_then(|edge| edge.breakdown)
+    }
+}
+
+/// Verify one pair for its breakdown alone.
+///
+/// Reporting reaches for this only where no verified edge can answer: a unit
+/// against itself, or a pair whose edge carried a bare similarity.
+fn measure(a: &UnitView<'_>, b: &UnitView<'_>, config: &VerifyConfig) -> SimilarityBreakdown {
+    #[cfg(test)]
+    verifier_calls::record();
+    verify::verify(a, b, config).breakdown
+}
 
 /// Compute one group's reporting detail: its stable clone fingerprint (anchored
 /// on the medoid's content, folding the member set) and the medoid-to-member
 /// similarity breakdowns.
+///
+/// The similarity evidence comes from the verified edges grouping settled the
+/// group with, so the detail costs a lookup per pair rather than an alignment.
+/// The medoid's own entry has no pair to read — a unit is not an edge against
+/// itself — so a group whose edges carry their breakdowns is one verifier call.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one group's detail is read from the whole analysed corpus"
+)]
 pub(super) fn group_detail(
     group: &grouping::StructuralGroup,
     units: &[Unit],
     files: &[SyntaxIrFile],
     feature_files: &[FileFeatures],
     evidence: &UnitEvidence,
+    pairs: &PairEvidence<'_>,
     variant: &BuildVariant,
     config: &StructuralConfig,
 ) -> GroupDetail {
@@ -22,32 +109,33 @@ pub(super) fn group_detail(
         .members
         .iter()
         .map(|&member| {
-            verify::verify(
-                &medoid_view,
-                &view(member, units, files, feature_files, evidence),
-                &config.verify,
-            )
-            .breakdown
+            if member == group.canonical {
+                return measure(&medoid_view, &medoid_view, &config.verify);
+            }
+            pairs.breakdown(group.canonical, member).unwrap_or_else(|| {
+                measure(
+                    &medoid_view,
+                    &view(member, units, files, feature_files, evidence),
+                    &config.verify,
+                )
+            })
         })
         .collect();
-    let cohesion_breakdown = group
-        .members
-        .iter()
-        .enumerate()
-        .flat_map(|(left, &a)| group.members[left + 1..].iter().map(move |&b| (a, b)))
-        .map(|(a, b)| {
-            verify::verify(
-                &view(a, units, files, feature_files, evidence),
-                &view(b, units, files, feature_files, evidence),
-                &config.verify,
-            )
-            .breakdown
-        })
-        .min_by(|left, right| left.composite.total_cmp(&right.composite))
+    let cohesion_breakdown = weakest_pair(group, pairs).map_or_else(
         // Grouping emits only multi-member groups. Preserve a total report
         // function for a malformed externally-constructed group as well:
         // its medoid's self-comparison is the only available evidence.
-        .unwrap_or_else(|| verify::verify(&medoid_view, &medoid_view, &config.verify).breakdown);
+        || measure(&medoid_view, &medoid_view, &config.verify),
+        |(a, b)| {
+            pairs.breakdown(a, b).unwrap_or_else(|| {
+                measure(
+                    &view(a, units, files, feature_files, evidence),
+                    &view(b, units, files, feature_files, evidence),
+                    &config.verify,
+                )
+            })
+        },
+    );
 
     let fingerprint = group_fingerprint(group, units, variant);
 
@@ -67,6 +155,32 @@ pub(super) fn group_detail(
         ),
         width_family: written_once_per_width(group, units, files),
     }
+}
+
+/// The group's weakest internal pair: the one whose similarity is
+/// `min_pairwise`, and whose evidence is therefore what establishes it.
+///
+/// Ties keep the pair the member order reaches first, and an absent pair reads
+/// as zero, so the pair named here is the one grouping's own minimum settled
+/// on. `None` only for a group holding fewer than two members, which grouping
+/// does not emit.
+fn weakest_pair(
+    group: &grouping::StructuralGroup,
+    pairs: &PairEvidence<'_>,
+) -> Option<(usize, usize)> {
+    let mut weakest: Option<((usize, usize), f64)> = None;
+    for (position, &a) in group.members.iter().enumerate() {
+        for &b in &group.members[position + 1..] {
+            let similarity = pairs.similarity(a, b);
+            let lower = weakest.is_none_or(|(_, lowest)| {
+                similarity.total_cmp(&lowest) == std::cmp::Ordering::Less
+            });
+            if lower {
+                weakest = Some(((a, b), similarity));
+            }
+        }
+    }
+    weakest.map(|(pair, _)| pair)
 }
 
 /// Compose a structural group id from the content domain its class promises.
@@ -145,25 +259,29 @@ pub(super) fn is_allocation_api(name: &Lexeme) -> bool {
 }
 
 /// The weakest raw identifier-set agreement between a canonical span and its
-/// corresponding spans.
+/// corresponding spans, or `None` where there was nothing to agree about.
 ///
 /// This is reporting and triage evidence only. In particular, a duplicated
 /// run may have exact normalized content while this value is low because its
 /// names differ; the value is a proxy for whether a shared refactoring target
 /// may exist, not a similarity measurement and never an input to detection or
 /// grouping.
+///
+/// A comparison where neither span holds an identifier is absent rather than
+/// perfect: a duplicated literal table names nothing, and reporting a 1.00 for
+/// it would let the strongest possible reading of this evidence rest on none of
+/// it. Comparisons that were measurable still decide the value.
 #[must_use]
 pub fn span_identifier_jaccard(
     files: &[SyntaxIrFile],
     canonical: SourceTokenSpan,
     corresponding: impl IntoIterator<Item = SourceTokenSpan>,
-) -> f64 {
+) -> Option<f64> {
     let canonical = identifier_set(files, canonical);
     corresponding
         .into_iter()
-        .map(|span| set_jaccard(&canonical, &identifier_set(files, span)))
+        .filter_map(|span| set_jaccard(&canonical, &identifier_set(files, span)))
         .min_by(f64::total_cmp)
-        .unwrap_or(1.0)
 }
 
 /// The weakest identifier-set agreement between a canonical unit and its
@@ -172,7 +290,7 @@ fn group_identifier_jaccard(
     group: &grouping::StructuralGroup,
     units: &[Unit],
     files: &[SyntaxIrFile],
-) -> f64 {
+) -> Option<f64> {
     span_identifier_jaccard(
         files,
         unit_token_span(&units[group.canonical]),
@@ -200,16 +318,18 @@ fn identifier_set(files: &[SyntaxIrFile], span: SourceTokenSpan) -> BTreeSet<&st
         .collect()
 }
 
+/// The agreement of two identifier sets, or `None` where neither side holds an
+/// identifier and there is therefore nothing the ratio could be about.
 #[allow(clippy::cast_precision_loss)]
-pub(super) fn set_jaccard(left: &BTreeSet<&str>, right: &BTreeSet<&str>) -> f64 {
+pub(super) fn set_jaccard(left: &BTreeSet<&str>, right: &BTreeSet<&str>) -> Option<f64> {
     let union = left.union(right).count();
     if union == 0 {
-        return 1.0;
+        return None;
     }
     // One set entry requires one input token; discovery's file-size ceiling
     // bounds this far below the integer range where a report ratio loses a
     // meaningful displayed digit.
-    left.intersection(right).count() as f64 / union as f64
+    Some(left.intersection(right).count() as f64 / union as f64)
 }
 
 /// Whether every member differs from the medoid by one integer width and
@@ -289,4 +409,32 @@ pub(super) fn dominant_boilerplate_members(
         .into_iter()
         .max_by_key(|(category, count)| (*count, *category))?;
     (count.saturating_mul(5) >= members.len().saturating_mul(4)).then_some(category)
+}
+
+/// How many pairs reporting has measured itself on this thread.
+///
+/// The per-group ceiling on that work is a property the crate's own tests hold
+/// this module to; nothing a caller sees observes it.
+#[cfg(test)]
+pub(super) mod verifier_calls {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Start counting again from zero.
+    pub(in crate::structural) fn reset() {
+        COUNT.with(|count| count.set(0));
+    }
+
+    /// Measurements counted since the last reset.
+    pub(in crate::structural) fn count() -> usize {
+        COUNT.with(Cell::get)
+    }
+
+    /// Count one measurement.
+    pub(super) fn record() {
+        COUNT.with(|count| count.set(count.get().saturating_add(1)));
+    }
 }

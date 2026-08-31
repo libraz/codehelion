@@ -308,6 +308,80 @@ fn semantic_grouping_accounts_for_invalid_and_duplicate_pairs() {
     assert_eq!(grouping.stats.invalid_pairs, 2);
 }
 
+/// The counters are an account of what the stage was given, so they have to
+/// add up: a reader who sums them must arrive back at the input.
+#[test]
+fn every_input_pair_leaves_semantic_grouping_through_exactly_one_counter() {
+    let units = semantic_grouping_units(4);
+    let rule = registered_rules()[0];
+    let verified = [
+        // Grouped: 0 and 1 hold each other.
+        verified_semantic_pair(0, 1, rule),
+        // The same relation stated again, and stated the other way round.
+        verified_semantic_pair(1, 0, rule),
+        // Ungrouped: a chain no single cohesive set can hold.
+        verified_semantic_pair(1, 2, rule),
+        verified_semantic_pair(2, 3, rule),
+        // Neither endpoint names a unit the caller supplied.
+        verified_semantic_pair(0, 9, rule),
+        verified_semantic_pair(3, 3, rule),
+    ];
+    let grouping = group_verified_semantic_pairs(&units, &verified, &GroupingConfig::default());
+    let stats = &grouping.stats;
+
+    assert_eq!(stats.considered_pairs(), verified.len());
+    assert_eq!(
+        stats.grouped_pairs + stats.ungrouped_pairs,
+        stats.verified_pairs
+    );
+    assert_eq!(stats.ungrouped_pairs, grouping.ungrouped.len());
+    assert_eq!(
+        stats.declined_pairs() + stats.ceiling_severed_pairs,
+        stats.ungrouped_pairs
+    );
+    assert_eq!(stats.invalid_pairs, 2);
+    assert_eq!(stats.duplicate_pairs, 1);
+}
+
+/// Severed pairs are part of the ungrouped population and not a second one
+/// beside it. A caller stating both reasons has to take the remainder, or the
+/// pairs the ceiling cut are subtracted twice from the same total.
+#[test]
+fn ceiling_severed_pairs_are_part_of_the_ungrouped_population() {
+    let profile = crate::execution::Limits::untrusted();
+    let count = profile.max_component + 8;
+    let units = semantic_grouping_units(count);
+    let rule = registered_rules()[0];
+    let verified: Vec<_> = (0..count)
+        .flat_map(|left| {
+            (left + 1..count).map(move |right| verified_semantic_pair(left, right, rule))
+        })
+        .collect();
+
+    let grouping = group_verified_semantic_pairs(
+        &units,
+        &verified,
+        &crate::config::StageLimits::of(&profile).grouping.grouping(),
+    );
+    let stats = &grouping.stats;
+
+    assert!(stats.ceiling_severed_pairs > 0);
+    assert!(stats.ceiling_severed_pairs <= stats.ungrouped_pairs);
+    assert_eq!(
+        stats.declined_pairs() + stats.ceiling_severed_pairs,
+        stats.ungrouped_pairs
+    );
+    assert_eq!(
+        stats.declined_pairs(),
+        grouping
+            .ungrouped
+            .iter()
+            .filter(|entry| !entry.severed_by_the_ceiling)
+            .count()
+    );
+    assert_eq!(stats.considered_pairs(), verified.len());
+}
+
 fn cross_language_pipeline(
     language: Language,
     variant: [u8; 32],
@@ -508,4 +582,86 @@ fn verifier_rejects_type_mismatch_and_out_of_range_candidate() {
         )
         .is_empty()
     );
+}
+
+/// A profile that states a posting ceiling states it for every pairing path,
+/// and the registered-rule bucket index is one of them. Taken from the same
+/// mapping the other stages take theirs from, so the number a run reports is
+/// the number the buckets are cut at.
+#[test]
+fn the_registered_bucket_index_cuts_at_the_stated_posting_ceiling() {
+    let profile = crate::execution::Limits::untrusted();
+    let bucket: Vec<_> = (0..=profile.posting_cap)
+        .map(|_| {
+            pipeline(
+                Language::Rust,
+                [12; 32],
+                &[OperationKind::Filter, OperationKind::Collect],
+            )
+        })
+        .collect();
+    let stated = crate::config::StageLimits::of(&profile)
+        .pairing
+        .semantic_candidates();
+    assert_eq!(stated.max_bucket_members, profile.posting_cap);
+
+    let contained = extract_registered_candidates(&bucket, stated);
+    assert!(contained.pairs.is_empty());
+    assert_eq!(contained.stats.oversized_buckets, 1);
+
+    let default_profile = crate::execution::Limits::default();
+    let admitted = extract_registered_candidates(
+        &bucket,
+        crate::config::StageLimits::of(&default_profile)
+            .pairing
+            .semantic_candidates(),
+    );
+    assert_eq!(admitted.stats.oversized_buckets, 0);
+    assert!(!admitted.pairs.is_empty());
+}
+
+/// Refinement is quadratic in the size of the set it refines, so a profile that
+/// lowers the component ceiling has to lower what semantic grouping refines.
+/// Everything here matches everything else, which is the shape that makes the
+/// ceiling the only thing standing between the profile and that cost.
+#[test]
+fn semantic_grouping_refines_no_more_than_the_stated_component_ceiling() {
+    let profile = crate::execution::Limits::untrusted();
+    let count = profile.max_component + 72;
+    let units = semantic_grouping_units(count);
+    let rule = registered_rules()[0];
+    let verified: Vec<_> = (0..count)
+        .flat_map(|left| {
+            (left + 1..count).map(move |right| verified_semantic_pair(left, right, rule))
+        })
+        .collect();
+
+    let contained = group_verified_semantic_pairs(
+        &units,
+        &verified,
+        &crate::config::StageLimits::of(&profile).grouping.grouping(),
+    );
+    assert!(
+        contained
+            .groups
+            .iter()
+            .all(|group| group.members.len() <= profile.max_component),
+        "{:?}",
+        contained
+            .groups
+            .iter()
+            .map(|group| group.members.len())
+            .collect::<Vec<_>>()
+    );
+    assert!(contained.stats.ceiling_severed_pairs > 0);
+
+    let whole = group_verified_semantic_pairs(
+        &units,
+        &verified,
+        &crate::config::StageLimits::of(&crate::execution::Limits::default())
+            .grouping
+            .grouping(),
+    );
+    assert_eq!(whole.groups.len(), 1);
+    assert_eq!(whole.groups[0].members.len(), count);
 }

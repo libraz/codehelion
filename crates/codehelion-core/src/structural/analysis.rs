@@ -1,3 +1,4 @@
+use super::reporting::PairEvidence;
 use super::{
     BTreeMap, BTreeSet, BuildVariant, DirectoryPartition, FileFeatures, GroupDetail, GroupingUnit,
     ResolvedTypes, SimilarityEdge, StructuralConfig, StructuralNearMiss, StructuralReport,
@@ -96,7 +97,7 @@ fn analyze_resolved_inner(
 ) -> StructuralReport {
     let feature_files: Vec<FileFeatures> = files.iter().map(features::extract).collect();
 
-    let (units, offsets) = flatten_units_with_context(
+    let (units, index) = flatten_units_with_context(
         files,
         variant,
         config.literals,
@@ -110,13 +111,17 @@ fn analyze_resolved_inner(
     let candidate = candidate::generate(&feature_files, &config.candidate);
     let near = near_match::generate(&feature_files, &config.near_match);
     let skeleton = control_flow::generate(&feature_files, &config.control_flow);
+    // A diagnostic naming a walk position that produced no unit describes
+    // nothing a reader could look at, so it is not carried out.
     let near_misses = near
         .near_misses
         .iter()
-        .map(|near_miss| StructuralNearMiss {
-            a: offsets[near_miss.a.file] + near_miss.a.unit,
-            b: offsets[near_miss.b.file] + near_miss.b.unit,
-            estimated_jaccard: near_miss.estimated_jaccard,
+        .filter_map(|near_miss| {
+            Some(StructuralNearMiss {
+                a: index.global(near_miss.a.file, near_miss.a.unit)?,
+                b: index.global(near_miss.b.file, near_miss.b.unit)?,
+                estimated_jaccard: near_miss.estimated_jaccard,
+            })
         })
         .collect();
     let lifted = lift_to_unit_pairs(
@@ -124,7 +129,7 @@ fn analyze_resolved_inner(
         &near,
         &skeleton,
         &units,
-        &offsets,
+        &index,
         &feature_files,
         config.max_shape_divergence,
     );
@@ -142,7 +147,7 @@ fn analyze_resolved_inner(
     let (mut confirmed, mut dropped) = confirm_regions(
         &candidate_regions.shared,
         files,
-        &offsets,
+        &index,
         variant,
         config.literals,
     );
@@ -150,7 +155,7 @@ fn analyze_resolved_inner(
         &mut confirmed,
         &mut dropped,
         files,
-        &offsets,
+        &index,
         variant,
         config.literals,
     );
@@ -197,22 +202,27 @@ fn analyze_resolved_inner(
     let groups = grouping::group(&grouping_units, &edges, &config.grouping);
 
     // Per-group reporting detail: the stable clone id and the medoid-to-member
-    // similarity breakdowns (re-run against the chosen medoid, deterministic).
-    let details: Vec<GroupDetail> = groups
-        .groups
-        .iter()
-        .map(|group| {
-            group_detail(
-                group,
-                &units,
-                files,
-                &feature_files,
-                &evidence,
-                variant,
-                config,
-            )
-        })
-        .collect();
+    // similarity breakdowns, read back from the verified edges grouping
+    // settled each group with rather than measured a second time.
+    let details: Vec<GroupDetail> = {
+        let pair_evidence = PairEvidence::index(&edges);
+        groups
+            .groups
+            .iter()
+            .map(|group| {
+                group_detail(
+                    group,
+                    &units,
+                    files,
+                    &feature_files,
+                    &evidence,
+                    &pair_evidence,
+                    variant,
+                    config,
+                )
+            })
+            .collect()
+    };
 
     let (unrepresented, described_pairs, severed_pairs) =
         unrepresented_pairs(&edges, &groups, &units, files, variant);
@@ -237,7 +247,12 @@ fn analyze_resolved_inner(
         control_flow: skeleton.stats,
         maximal: candidate_regions.stats,
         regions: regions.len(),
+        region_occurrences: regions
+            .iter()
+            .map(|region| region.occurrences.len())
+            .sum::<usize>(),
         region_singletons: dropped.singletons,
+        region_unresolved: dropped.unresolved,
         region_overlapping: dropped.overlapping,
         region_adjoining: dropped.adjoining,
         region_subsumed: subsumed,

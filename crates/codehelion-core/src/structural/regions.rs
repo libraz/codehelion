@@ -1,3 +1,4 @@
+use super::units::UnitIndex;
 use super::{
     BTreeMap, BTreeSet, BuildVariant, ByteRange, CloneClass, CloneGroupFingerprint, ContentNorm,
     FileContext, FragmentFingerprint, LiteralNorm, RegionOccurrence, RegionSide, SharedRegion,
@@ -9,7 +10,7 @@ use super::{
 pub(super) fn confirm_regions(
     candidates: &[SharedRegion],
     files: &[SyntaxIrFile],
-    offsets: &[usize],
+    index: &UnitIndex,
     variant: &BuildVariant,
     literals: LiteralNorm,
 ) -> (Vec<Confirmed>, Dropped) {
@@ -22,9 +23,9 @@ pub(super) fn confirm_regions(
             BTreeMap::new();
         for &side in &candidate.occurrences {
             let Some((occurrence, normalized)) =
-                resolve_occurrence(side, files, offsets, variant, literals)
+                resolve_occurrence(side, files, index, variant, literals)
             else {
-                dropped.singletons += 1;
+                dropped.unresolved += 1;
                 continue;
             };
             classes
@@ -91,7 +92,15 @@ pub(super) fn confirm_regions(
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Dropped {
     /// Occurrences left without a partner holding the same content.
+    ///
+    /// Only content settles this counter. An occurrence whose content was
+    /// never established is not a run whose content disagreed with its
+    /// neighbours', and is counted as [`Self::unresolved`] instead.
     pub(super) singletons: usize,
+    /// Occurrences whose tokens could not be established at all: the file they
+    /// name is outside the analysed set, or their byte range covers no whole
+    /// token. Nothing was compared, so nothing was found to disagree.
+    pub(super) unresolved: usize,
     /// Occurrences covering source a kept occurrence already covers.
     pub(super) overlapping: usize,
     /// Occurrences continuing a kept occurrence, statement for statement.
@@ -164,7 +173,7 @@ pub(super) fn grow_runs(
     confirmed: &mut Vec<Confirmed>,
     dropped: &mut Dropped,
     files: &[SyntaxIrFile],
-    offsets: &[usize],
+    index: &UnitIndex,
     variant: &BuildVariant,
     literals: LiteralNorm,
 ) -> usize {
@@ -172,8 +181,9 @@ pub(super) fn grow_runs(
     if candidates.is_empty() {
         return 0;
     }
-    let (grown, again) = confirm_regions(&candidates, files, offsets, variant, literals);
+    let (grown, again) = confirm_regions(&candidates, files, index, variant, literals);
     dropped.singletons += again.singletons;
+    dropped.unresolved += again.unresolved;
     dropped.overlapping += again.overlapping;
     dropped.adjoining += again.adjoining;
     let before = confirmed.len();
@@ -558,11 +568,12 @@ pub(super) fn covers_run(outer: &StructuralRegion, inner: &StructuralRegion) -> 
 fn resolve_occurrence(
     side: RegionSide,
     files: &[SyntaxIrFile],
-    offsets: &[usize],
+    index: &UnitIndex,
     variant: &BuildVariant,
     literals: LiteralNorm,
 ) -> Option<(RegionOccurrence, FragmentFingerprint)> {
     let file = files.get(side.file)?;
+    let unit = index.global(side.file, side.unit)?;
     let (start, end) = token_span(&file.tokens, side.range);
     if start >= end {
         return None;
@@ -574,14 +585,14 @@ fn resolve_occurrence(
     };
     let fingerprint =
         |norm| stable_id::fragment_fingerprint(variant, &context, "statement-run", tokens, norm);
-    let lines = line_range(tokens);
+    let (start_line, end_line) = line_range(tokens)?;
     Some((
         RegionOccurrence {
             file: side.file,
-            unit: offsets[side.file] + side.unit,
+            unit,
             range: side.range,
-            start_line: lines.0,
-            end_line: lines.1,
+            start_line,
+            end_line,
             token_start: start,
             token_end: end,
             content: fingerprint(ContentNorm::Raw),

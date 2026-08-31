@@ -109,9 +109,25 @@ pub struct UngroupedSemanticPair {
 }
 
 /// Accounting for registered semantic grouping.
+///
+/// The counters are a partition of what the stage was given, and a caller
+/// reporting them has to know which of them nest. Every input pair leaves
+/// through exactly one of [`Self::invalid_pairs`], [`Self::duplicate_pairs`]
+/// and [`Self::verified_pairs`], so those three sum to the input slice; every
+/// verified pair then leaves through exactly one of [`Self::grouped_pairs`]
+/// and [`Self::ungrouped_pairs`]. [`Self::ceiling_severed_pairs`] is the only
+/// counter that does not stand on its own: it names part of
+/// [`Self::ungrouped_pairs`] rather than a further population, and
+/// [`Self::declined_pairs`] is the rest of it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SemanticGroupingStats {
-    /// Input pairs whose endpoints were in range and non-identical.
+    /// Distinct rule-and-endpoint relations left after deduplication.
+    ///
+    /// An input pair whose endpoints are in range and non-identical is counted
+    /// here only when no earlier input already claimed the same rule and the
+    /// same endpoints; a repeat is counted in [`Self::duplicate_pairs`]
+    /// instead. This is the population [`Self::grouped_pairs`] and
+    /// [`Self::ungrouped_pairs`] then divide.
     pub verified_pairs: usize,
     /// Duplicate copies of one rule-and-endpoint relation ignored
     /// deterministically.
@@ -122,11 +138,45 @@ pub struct SemanticGroupingStats {
     /// Pairs expressed by an emitted cohesive group.
     pub grouped_pairs: usize,
     /// Verified pairs that no emitted group jointly represents.
+    ///
+    /// This is the whole of that population, the ceiling-severed pairs
+    /// included. Reporting it beside [`Self::ceiling_severed_pairs`] as though
+    /// the two were separate reasons counts the severed pairs twice; see
+    /// [`Self::declined_pairs`].
     pub ungrouped_pairs: usize,
     /// Ungrouped pairs separated only by the grouping ceiling.
+    ///
+    /// A subset of [`Self::ungrouped_pairs`], never a population beside it.
     pub ceiling_severed_pairs: usize,
     /// Cohesive rule groups emitted.
     pub groups: usize,
+}
+
+impl SemanticGroupingStats {
+    /// Verified relations the stage was given.
+    ///
+    /// This is the denominator the other counters divide: the length of the
+    /// slice passed to [`group_verified_semantic_pairs`].
+    #[must_use]
+    pub const fn considered_pairs(&self) -> usize {
+        self.invalid_pairs
+            .saturating_add(self.duplicate_pairs)
+            .saturating_add(self.verified_pairs)
+    }
+
+    /// Ungrouped pairs that refinement weighed and declined to hold.
+    ///
+    /// A pair reaches no group for one of two reasons, and they are not the
+    /// same fact about the code: complete-linkage refinement saw the two sides
+    /// together and would not put them in one set, or the component ceiling
+    /// cut the set before anything could weigh them. This is the first of
+    /// those, so that the two can be stated side by side without either pair
+    /// being counted twice.
+    #[must_use]
+    pub const fn declined_pairs(&self) -> usize {
+        self.ungrouped_pairs
+            .saturating_sub(self.ceiling_severed_pairs)
+    }
 }
 
 /// Cohesive semantic groups and the verified pairs they do not represent.

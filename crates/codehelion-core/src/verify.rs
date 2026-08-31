@@ -48,19 +48,31 @@
 //! Two properties of that gap are worth stating, because they decide where
 //! future accuracy work belongs.
 //!
-//! First, **lexical is the dimension that discriminates**. Lookalikes agree on
-//! shape by construction — that is what makes them lookalikes — so structural
-//! and control-flow agreement is high for both populations and only lexical
-//! agreement pulls them apart. Weighting shape more heavily than text therefore
-//! costs precision rather than buying it, and no reweighting of these five
-//! dimensions separates the two populations by more than a hair unless lexical
-//! is the one carrying the weight.
+//! First, **shape carries the weight and lexical is what discriminates**.
+//! [`Weights`] defaults to 0.45 on structural against 0.20 on lexical, because
+//! a renamed copy is still a copy: Type-2 and Type-3 pairs agree on shape and
+//! disagree on text by definition, and a text-heavy composite would score them
+//! under the acceptance threshold. What that buys in recall it gives up at the
+//! boundary. Lookalikes agree on shape by construction — that is what makes
+//! them lookalikes — so among pairs that already reach the threshold only
+//! lexical agreement pulls the two populations apart: they reach 0.77 lexical
+//! against the weakest real copy's 0.91, a distance the shape-weighted
+//! composite compresses to 0.69 against 0.71. Moving further onto shape narrows
+//! what is left of that margin rather than widening it.
 //!
 //! Second, **a unit can be a genuine clone and still not be worth reporting**.
 //! Two one-line accessors are copies of each other by every measure in this
 //! module, and they score accordingly. Suppressing them is
 //! [`crate::boilerplate`]'s job, not this one's: lowering a similarity score to
 //! hide a triviality would corrupt the evidence the score exists to carry.
+//!
+//! Both readings are calibrated under the default weights.
+//! [`VerifyConfig::type3_min_composite`], [`VerifyConfig::high_confidence`] and
+//! [`VerifyConfig::medium_confidence`] are compared against the composite, so a
+//! caller supplying its own [`Weights`] moves every composite and carries none
+//! of the calibration with it. [`VerifyConfig::type2_min_lexical`] is compared
+//! against the lexical dimension itself and is the one threshold a reweighting
+//! leaves where it was.
 
 use crate::clone_class::CloneClass;
 use crate::features::{ApiCallFeature, CfgFeature, SubtreeFeature, UnitFeatures};
@@ -705,7 +717,7 @@ fn subtree_jaccard(a: &[SubtreeFeature], b: &[SubtreeFeature]) -> Option<f64> {
     sa.dedup();
     sb.sort_unstable();
     sb.dedup();
-    (!sa.is_empty() || !sb.is_empty()).then(|| set_jaccard(&sa, &sb))
+    set_jaccard(&sa, &sb)
 }
 
 /// Api agreement: Jaccard of the two call-name multisets, treated as sets of
@@ -725,20 +737,21 @@ fn api_similarity(a: &ApiCallFeature, b: &ApiCallFeature) -> Option<f64> {
         .iter()
         .map(crate::frontend::Lexeme::as_str)
         .collect();
-    if sa.is_empty() && sb.is_empty() {
-        return None;
-    }
     sa.sort_unstable();
     sa.dedup();
     sb.sort_unstable();
     sb.dedup();
-    Some(set_jaccard(&sa, &sb))
+    set_jaccard(&sa, &sb)
 }
 
-/// Jaccard of two sorted, deduplicated slices. `1.0` when both are empty.
-fn set_jaccard<T: Ord>(a: &[T], b: &[T]) -> f64 {
+/// Jaccard of two sorted, deduplicated slices, absent when both are empty.
+///
+/// Two sets that hold nothing agree about nothing. Scoring that as `1.0` would
+/// let a pair that carries none of the dimension's evidence outrank one that
+/// carries most of it, so the dimension is reported as unmeasured instead.
+fn set_jaccard<T: Ord>(a: &[T], b: &[T]) -> Option<f64> {
     if a.is_empty() && b.is_empty() {
-        return 1.0;
+        return None;
     }
     let (mut i, mut j, mut inter) = (0, 0, 0usize);
     while i < a.len() && j < b.len() {
@@ -753,7 +766,7 @@ fn set_jaccard<T: Ord>(a: &[T], b: &[T]) -> f64 {
         }
     }
     let union = a.len() + b.len() - inter;
-    ratio(inter, union)
+    Some(ratio(inter, union))
 }
 
 /// Arithmetic mean of three scores.

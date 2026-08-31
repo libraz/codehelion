@@ -652,11 +652,26 @@ fn empty_cfg_and_subtree_sets_are_unmeasured_not_perfect() {
     assert_eq!(subtree_jaccard(&[], &[]), None);
 }
 
+/// Two sets holding nothing agree about nothing, so the dimension is reported
+/// as unmeasured rather than as perfect agreement. A pair carrying none of the
+/// evidence would otherwise outscore one carrying most of it.
 #[test]
-fn set_jaccard_handles_empty_and_partial_overlap() {
-    assert!((set_jaccard::<u8>(&[], &[]) - 1.0).abs() < 1e-9);
-    assert!((set_jaccard(&[1, 2, 3], &[2, 3, 4]) - 0.5).abs() < 1e-9);
-    assert!(set_jaccard(&[1, 2], &[3, 4]).abs() < 1e-9);
+fn set_jaccard_reports_no_score_for_two_empty_sets() {
+    assert_eq!(set_jaccard::<u8>(&[], &[]), None);
+    assert_eq!(set_jaccard::<u8>(&[], &[1]), Some(0.0));
+    assert!(set_jaccard(&[1, 2, 3], &[2, 3, 4]).is_some_and(|value| (value - 0.5).abs() < 1e-9));
+    assert!(set_jaccard(&[1, 2], &[3, 4]).is_some_and(|value| value.abs() < 1e-9));
+}
+
+/// The module documentation quotes both numbers when it explains why the
+/// default composite leans on shape and what that costs at the acceptance
+/// threshold, so the weights and that explanation move together.
+#[test]
+fn the_default_composite_weights_shape_over_text() {
+    let weights = Weights::default();
+    assert!((weights.structural - 0.45).abs() < 1e-9);
+    assert!((weights.lexical - 0.20).abs() < 1e-9);
+    assert!(weights.structural > weights.lexical);
 }
 
 #[test]

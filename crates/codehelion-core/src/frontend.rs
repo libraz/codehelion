@@ -14,6 +14,12 @@
 //! Source positions are recorded for reporting only. They are never used as
 //! stable identifiers: fingerprints are built from token kinds and normalized
 //! text, never from a line number or token offset.
+//!
+//! The module also owns [`IrAssembly`], the parser-independent half of a
+//! Structural frontend: line mapping, token interning, byte-to-token lookup
+//! and the recovery data a depth-limited walk produces. Every Structural
+//! frontend assembles its file through it, so a fix to any of those concerns
+//! reaches all languages at once instead of one grammar at a time.
 
 use std::borrow::Borrow;
 use std::collections::HashSet;
@@ -22,6 +28,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use crate::discovery::Language;
+use crate::ir::{ByteRange, IrNode, Shape};
 
 /// A shared, immutable lexeme.
 ///
@@ -291,6 +298,198 @@ pub struct LexedFile {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// The token stream and recovery data of one assembled Structural file.
+///
+/// Produced by [`IrAssembly::finish`]; the error ranges are sorted by start
+/// then end and deduplicated, which is the order every frontend records them
+/// in.
+#[derive(Debug, Clone)]
+pub struct AssembledIr {
+    /// Tokens in source order, comments and whitespace removed.
+    pub tokens: Vec<Token>,
+    /// Byte ranges the frontend could not map onto shapes.
+    pub error_ranges: Vec<ByteRange>,
+    /// Whether any subtree was cut short by the IR depth budget.
+    pub depth_truncated: bool,
+}
+
+/// The parser-independent half of a Structural frontend.
+///
+/// A frontend owns its grammar cursor and its node-classification table; the
+/// rest — interning lexemes, converting byte offsets to line/column, mapping a
+/// node's byte range onto token indices, and recording what a depth-limited
+/// walk had to leave out — is the same work in every language and lives here.
+///
+/// Token indices address the stream this type accumulates, so nodes must be
+/// built after the file's tokens have been pushed.
+#[derive(Debug)]
+pub struct IrAssembly<'s> {
+    source: &'s str,
+    /// Byte offset of the start of each source line.
+    line_starts: Vec<usize>,
+    interner: LexemeInterner,
+    tokens: Vec<Token>,
+    /// Byte start of each emitted token, for mapping node byte ranges onto
+    /// token index ranges by binary search.
+    token_starts: Vec<usize>,
+    error_ranges: Vec<ByteRange>,
+    depth_truncated: bool,
+}
+
+impl<'s> IrAssembly<'s> {
+    /// Start assembling the file `source`.
+    #[must_use]
+    pub fn new(source: &'s str) -> Self {
+        let mut line_starts = vec![0];
+        for (index, byte) in source.bytes().enumerate() {
+            if byte == b'\n' {
+                line_starts.push(index + 1);
+            }
+        }
+        Self {
+            source,
+            line_starts,
+            interner: LexemeInterner::new(),
+            tokens: Vec::new(),
+            token_starts: Vec::new(),
+            error_ranges: Vec::new(),
+            depth_truncated: false,
+        }
+    }
+
+    /// The source text being assembled.
+    #[must_use]
+    pub const fn source(&self) -> &'s str {
+        self.source
+    }
+
+    /// Return the shared lexeme for `text`, allocating it once per file.
+    pub fn intern(&mut self, text: &str) -> Lexeme {
+        self.interner.intern(text)
+    }
+
+    /// 1-based line and character column of a byte offset.
+    #[must_use]
+    pub fn line_column(&self, byte: usize) -> (u32, u32) {
+        let line_index = self
+            .line_starts
+            .partition_point(|&start| start <= byte)
+            .saturating_sub(1);
+        let line_start = self.line_starts.get(line_index).copied().unwrap_or(0);
+        let column_chars = self
+            .source
+            .get(line_start..byte)
+            .map_or(0, |prefix| prefix.chars().count());
+        (
+            u32::try_from(line_index + 1).unwrap_or(u32::MAX),
+            u32::try_from(column_chars + 1).unwrap_or(u32::MAX),
+        )
+    }
+
+    /// The reporting span of `start_byte..end_byte` in this source.
+    #[must_use]
+    pub fn span(&self, start_byte: usize, end_byte: usize) -> SourceSpan {
+        let (start_line, start_column) = self.line_column(start_byte);
+        SourceSpan {
+            start_byte,
+            end_byte,
+            start_line,
+            start_column,
+        }
+    }
+
+    /// Append a token covering `start_byte..end_byte`, computing its position.
+    ///
+    /// Tokens must be pushed in source order: the byte-to-token lookup binary
+    /// searches the starts recorded here.
+    pub fn push_token(&mut self, kind: TokenKind, text: &str, start_byte: usize, end_byte: usize) {
+        let span = self.span(start_byte, end_byte);
+        self.push_spanned_token(kind, text, span);
+    }
+
+    /// Append a token whose span was established elsewhere.
+    ///
+    /// Used where the positions come from a stream lexed over the whole file
+    /// while the assembly itself only covers a prefix of it.
+    pub fn push_spanned_token(&mut self, kind: TokenKind, text: &str, span: SourceSpan) {
+        let text = self.interner.intern(text);
+        self.token_starts.push(span.start_byte);
+        self.tokens.push(Token { kind, text, span });
+    }
+
+    /// Number of tokens appended so far, which is also the index the next one
+    /// will take.
+    #[must_use]
+    pub fn token_count(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// Index of the first appended token starting at or after `byte`.
+    #[must_use]
+    pub fn token_index_at(&self, byte: usize) -> usize {
+        self.token_starts.partition_point(|&start| start < byte)
+    }
+
+    /// The token index range a node's byte range covers.
+    #[must_use]
+    pub fn token_bounds(&self, range: ByteRange) -> (usize, usize) {
+        (
+            self.token_index_at(range.start),
+            self.token_index_at(range.end),
+        )
+    }
+
+    /// Record a byte range the frontend could not map onto shapes.
+    pub fn record_error_range(&mut self, range: ByteRange) {
+        self.error_ranges.push(range);
+    }
+
+    /// Whether a subtree was cut short by the IR depth budget.
+    #[must_use]
+    pub const fn depth_truncated(&self) -> bool {
+        self.depth_truncated
+    }
+
+    /// Preserve an unvisited subtree as recoverable truncation data.
+    ///
+    /// Marks the file truncated, records `range` as an error range, and
+    /// returns the [`Shape::Error`] leaf that stands in for the subtree. The
+    /// leaf's token range covers the tokens the omitted subtree contributed,
+    /// so a truncated file still addresses its own token stream correctly.
+    pub fn truncate_at_depth(&mut self, range: ByteRange) -> IrNode {
+        self.depth_truncated = true;
+        self.record_error_range(range);
+        self.error_node(range)
+    }
+
+    /// A childless [`Shape::Error`] leaf over `range`.
+    #[must_use]
+    pub fn error_node(&self, range: ByteRange) -> IrNode {
+        let (token_start, token_end) = self.token_bounds(range);
+        IrNode {
+            shape: Shape::Error,
+            name: None,
+            token_start,
+            token_end,
+            range,
+            children: Vec::new(),
+        }
+    }
+
+    /// Finish the file: take the token stream and normalize the error ranges.
+    #[must_use]
+    pub fn finish(mut self) -> AssembledIr {
+        self.error_ranges
+            .sort_unstable_by_key(|range| (range.start, range.end));
+        self.error_ranges.dedup();
+        AssembledIr {
+            tokens: self.tokens,
+            error_ranges: self.error_ranges,
+            depth_truncated: self.depth_truncated,
+        }
+    }
+}
+
 /// A Fast-mode lexer for one language.
 pub trait Frontend {
     /// The language this frontend lexes.
@@ -360,6 +559,105 @@ mod tests {
         assert_eq!(lexeme.as_str(), "fn");
         assert_eq!(lexeme.to_string(), "fn");
         assert_eq!(lexeme.as_bytes(), b"fn");
+    }
+
+    #[test]
+    fn assembly_columns_count_characters_not_bytes() {
+        let source = "let é = 1;\nlet b = 2;\n";
+        let assembly = IrAssembly::new(source);
+        let e_acute = source.find('é').unwrap_or_default();
+        assert_eq!(assembly.line_column(0), (1, 1));
+        assert_eq!(assembly.line_column(e_acute), (1, 5));
+        // The token after the two-byte character is one column further right,
+        // not two.
+        assert_eq!(assembly.line_column(e_acute + 'é'.len_utf8()), (1, 6));
+        let second_line = source.find("let b").unwrap_or_default();
+        assert_eq!(assembly.line_column(second_line), (2, 1));
+    }
+
+    #[test]
+    fn assembly_maps_byte_ranges_onto_token_indices() {
+        let source = "a bb ccc";
+        let mut assembly = IrAssembly::new(source);
+        for (start, end) in [(0, 1), (2, 4), (5, 8)] {
+            let text = source.get(start..end).unwrap_or_default();
+            assembly.push_token(TokenKind::Identifier, text, start, end);
+        }
+        assert_eq!(assembly.token_count(), 3);
+        // A range starting inside a token begins at the next whole token.
+        assert_eq!(assembly.token_index_at(1), 1);
+        assert_eq!(
+            assembly.token_bounds(ByteRange { start: 2, end: 8 }),
+            (1, 3)
+        );
+        assert_eq!(
+            assembly.token_bounds(ByteRange {
+                start: 0,
+                end: source.len()
+            }),
+            (0, 3)
+        );
+    }
+
+    #[test]
+    fn assembly_records_a_depth_limited_subtree_as_an_error_leaf() {
+        let source = "a bb ccc";
+        let mut assembly = IrAssembly::new(source);
+        for (start, end) in [(0, 1), (2, 4), (5, 8)] {
+            let text = source.get(start..end).unwrap_or_default();
+            assembly.push_token(TokenKind::Identifier, text, start, end);
+        }
+        assert!(!assembly.depth_truncated());
+        let omitted = ByteRange { start: 2, end: 8 };
+        let leaf = assembly.truncate_at_depth(omitted);
+        assert_eq!(leaf.shape, Shape::Error);
+        assert_eq!(leaf.name, None);
+        assert_eq!((leaf.token_start, leaf.token_end), (1, 3));
+        assert_eq!(leaf.range, omitted);
+        assert!(leaf.children.is_empty());
+        assert!(assembly.depth_truncated());
+        let assembled = assembly.finish();
+        assert!(assembled.depth_truncated);
+        assert_eq!(assembled.error_ranges, vec![omitted]);
+    }
+
+    #[test]
+    fn assembly_finishes_with_ordered_unique_error_ranges() {
+        let mut assembly = IrAssembly::new("abc");
+        for range in [(2, 3), (0, 1), (2, 3), (0, 2)] {
+            assembly.record_error_range(ByteRange {
+                start: range.0,
+                end: range.1,
+            });
+        }
+        let assembled = assembly.finish();
+        assert_eq!(
+            assembled.error_ranges,
+            vec![
+                ByteRange { start: 0, end: 1 },
+                ByteRange { start: 0, end: 2 },
+                ByteRange { start: 2, end: 3 },
+            ]
+        );
+        assert!(!assembled.depth_truncated);
+    }
+
+    #[test]
+    fn assembly_keeps_spans_established_elsewhere() {
+        // Tokens of a region the assembly's own source does not cover carry
+        // the positions the whole-file stream gave them.
+        let mut assembly = IrAssembly::new("fn a() {}");
+        let span = SourceSpan {
+            start_byte: 900,
+            end_byte: 901,
+            start_line: 42,
+            start_column: 7,
+        };
+        assembly.push_spanned_token(TokenKind::Punctuation, "}", span);
+        let assembled = assembly.finish();
+        assert_eq!(assembled.tokens.len(), 1);
+        assert_eq!(assembled.tokens[0].span, span);
+        assert_eq!(assembled.tokens[0].text, "}");
     }
 
     #[test]

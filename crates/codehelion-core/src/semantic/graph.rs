@@ -133,11 +133,16 @@ pub struct OperationAttributes {
     pub fallible_kind: Option<FallibleKind>,
     /// Closed direct-propagation spelling the compiler confirmed, when any.
     pub direct_propagation: Option<DirectPropagation>,
-    /// Position-free source structure retained by the Structural frontend.
+    /// Position-free source structure of the window this operation came from,
+    /// as retained by the Structural frontend.
     ///
-    /// This keeps same-variant rules from treating different predicates or
-    /// transformations as interchangeable when their compiler-resolved API
-    /// sequence is otherwise identical. It is absent for graphs assembled by
+    /// This is per-window source evidence, not a rule input: registered rules
+    /// compare operations and never read it, so two windows whose
+    /// compiler-resolved API sequence agrees still correspond when the
+    /// expressions handed to those APIs differ. Its only consumer is
+    /// [`semantic_fragment_fingerprint`](crate::stable_id::semantic_fragment_fingerprint),
+    /// where it separates occurrences so that windows with distinct source keep
+    /// distinct fragment identities. It is absent for graphs assembled by
     /// adapters that cannot provide a source window.
     pub structure_fingerprint: Option<[u8; 16]>,
 }

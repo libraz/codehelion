@@ -138,11 +138,15 @@ impl Witness {
 /// The substitutions turning `left` into `right`, or `None` when the pair is
 /// too large to align.
 ///
-/// The alignment is the one that pairs off the most tokens, counting an
-/// identical token for twice what a merely same-kind one is worth, so a name
-/// that did not change is never passed over in favour of one that did. Tokens
-/// left unpaired are counted in [`Witness::edits`]; paired tokens whose text
-/// differs are the substitutions.
+/// The alignment is the one scoring highest over the tokens it pairs off. A
+/// pairing is worth nothing unless the two tokens are the same kind, three when
+/// their text is identical as well and two when it is not. Three against two
+/// leaves the number of pairings deciding first, since two same-kind pairings
+/// outscore one identical pairing; identical text only settles which of two
+/// alignments pairing off equally many tokens is read, so a name that did not
+/// change is never passed over in favour of one that did. Tokens left unpaired
+/// are counted in [`Witness::edits`]; paired tokens whose text differs are the
+/// substitutions.
 #[must_use]
 pub fn witness(left: &[Token], right: &[Token]) -> Option<Witness> {
     let (rows, columns) = (left.len(), right.len());
@@ -327,6 +331,17 @@ mod tests {
         let witness = witness(&left, &right).unwrap();
         assert_eq!(witness.one_width_apart(), Some(("32", "64")));
         assert_eq!(witness.edits, 1);
+    }
+
+    #[test]
+    fn a_pairing_is_worth_three_when_identical_and_two_when_only_the_kind_agrees() {
+        let run = tokens(&[name("a"), name("b"), number("7")]);
+        assert_eq!(pairing(&run[0], &run[0]), 3);
+        assert_eq!(pairing(&run[0], &run[1]), 2);
+        assert_eq!(pairing(&run[0], &run[2]), 0);
+        // Two same-kind pairings have to outscore one identical pairing, or the
+        // count of pairings would stop deciding before the text does.
+        assert!(pairing(&run[0], &run[1]) * 2 > pairing(&run[0], &run[0]));
     }
 
     #[test]

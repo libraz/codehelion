@@ -1,3 +1,4 @@
+use super::units::UnitIndex;
 use super::{
     BTreeMap, BTreeSet, BuildVariant, CloneClass, FileFeatures, FragmentFingerprint, GroupingSet,
     SimilarityEdge, SyntaxIrFile, Unit, VerifiedPair, candidate, control_flow,
@@ -10,8 +11,9 @@ use super::{
 enum NotAPair {
     /// One unit encloses the other: one stretch of code seen at two levels.
     Nested,
-    /// The two sit under different arms of one preprocessor conditional, so
-    /// no build contains both.
+    /// No build contains both: they sit under different arms of one
+    /// preprocessor conditional, or one of them sits under an arm no build
+    /// takes at all.
     Alternatives,
     /// The two hold too different a mix of shapes to be a clone of each other,
     /// which the shape-count vectors settle without reading either tree.
@@ -19,14 +21,20 @@ enum NotAPair {
 }
 
 /// What the candidate stages proposed, reduced to unit pairs.
+///
+/// Every count here is in the same unit as [`Self::pairs`]: one distinct
+/// ordered pair of unit indices. The three stages propose the same two units
+/// many times over, and the verdict on a pair is a property of the two units
+/// rather than of the stage that named them, so a pair is counted once by
+/// whichever reason first applied to it.
 pub(super) struct LiftedPairs {
     /// Distinct unit pairs for verification to judge.
     pub(super) pairs: BTreeSet<(usize, usize)>,
-    /// Proposals dropped for nesting.
+    /// Distinct pairs dropped for nesting.
     pub(super) nested: usize,
-    /// Proposals dropped for being alternative arms of one conditional.
+    /// Distinct pairs dropped because no build holds both units.
     pub(super) alternatives: usize,
-    /// Proposals dropped for holding too different a mix of shapes.
+    /// Distinct pairs dropped for holding too different a mix of shapes.
     pub(super) divergent: usize,
 }
 
@@ -38,16 +46,22 @@ pub(super) struct LiftedPairs {
 /// real code. What verification needs is neither the evidence nor the
 /// duplicates, only which two units to compare, so all three are reduced to
 /// that here and deduplicated through an ordered set.
+///
+/// The rejected proposals are deduplicated by the same key, so that a pair
+/// three stages each proposed is one pair whichever side of the gate it lands
+/// on. Without that, one pair rejected three times would read as three pairs
+/// the run considered and never examined.
 pub(super) fn lift_to_unit_pairs(
     candidate: &candidate::CandidateSet,
     near: &near_match::NearMatchSet,
     skeleton: &control_flow::ControlFlowSet,
     units: &[Unit],
-    offsets: &[usize],
+    index: &UnitIndex,
     feature_files: &[FileFeatures],
     max_shape_divergence: f64,
 ) -> LiftedPairs {
     let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut rejected: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut nested = 0usize;
     let mut alternatives = 0usize;
     let mut divergent = 0usize;
@@ -69,15 +83,21 @@ pub(super) fn lift_to_unit_pairs(
     for (file_a, unit_a, file_b, unit_b) in places {
         let proposal = Proposal {
             units,
-            offsets,
+            index,
             feature_files,
             max_shape_divergence,
         };
-        match proposal.insert(&mut pairs, file_a, unit_a, file_b, unit_b) {
-            Some(NotAPair::Nested) => nested += 1,
-            Some(NotAPair::Alternatives) => alternatives += 1,
-            Some(NotAPair::DivergentShapes) => divergent += 1,
-            None => {}
+        let Some((pair, reason)) = proposal.insert(&mut pairs, file_a, unit_a, file_b, unit_b)
+        else {
+            continue;
+        };
+        if !rejected.insert(pair) {
+            continue;
+        }
+        match reason {
+            NotAPair::Nested => nested += 1,
+            NotAPair::Alternatives => alternatives += 1,
+            NotAPair::DivergentShapes => divergent += 1,
         }
     }
     LiftedPairs {
@@ -91,14 +111,18 @@ pub(super) fn lift_to_unit_pairs(
 /// What a candidate stage proposed is judged against.
 struct Proposal<'a> {
     units: &'a [Unit],
-    offsets: &'a [usize],
+    index: &'a UnitIndex,
     feature_files: &'a [FileFeatures],
     max_shape_divergence: f64,
 }
 
 impl Proposal<'_> {
     /// Insert a `(file, unit)` pair as a global, ordered unit pair, dropping
-    /// self-pairs and returning why a proposal did not survive.
+    /// self-pairs and returning the pair identity a rejected proposal names
+    /// together with why it did not survive.
+    ///
+    /// A walk position the analysis recorded no unit for names nothing this
+    /// stage can compare, so a proposal reaching for one is not a pair.
     fn insert(
         &self,
         pairs: &mut BTreeSet<(usize, usize)>,
@@ -106,26 +130,31 @@ impl Proposal<'_> {
         unit_a: usize,
         file_b: usize,
         unit_b: usize,
-    ) -> Option<NotAPair> {
-        let a = self.offsets[file_a] + unit_a;
-        let b = self.offsets[file_b] + unit_b;
+    ) -> Option<((usize, usize), NotAPair)> {
+        let (Some(a), Some(b)) = (
+            self.index.global(file_a, unit_a),
+            self.index.global(file_b, unit_b),
+        ) else {
+            return None;
+        };
         if a == b {
             return None;
         }
+        let pair = if a <= b { (a, b) } else { (b, a) };
         if encloses(&self.units[a], &self.units[b]) {
-            return Some(NotAPair::Nested);
+            return Some((pair, NotAPair::Nested));
         }
-        if self.units[a].arms.excludes(&self.units[b].arms) {
-            return Some(NotAPair::Alternatives);
+        if !self.units[a].arms.can_coexist(&self.units[b].arms) {
+            return Some((pair, NotAPair::Alternatives));
         }
         let (vector_a, vector_b) = (
             &self.feature_files[file_a].units[unit_a].vector,
             &self.feature_files[file_b].units[unit_b].vector,
         );
         if vector_a.shape_divergence(vector_b) > self.max_shape_divergence {
-            return Some(NotAPair::DivergentShapes);
+            return Some((pair, NotAPair::DivergentShapes));
         }
-        pairs.insert(if a <= b { (a, b) } else { (b, a) });
+        pairs.insert(pair);
         None
     }
 }
@@ -205,14 +234,13 @@ pub(super) fn unrepresented_pairs(
         } else {
             (content(edge.b), content(edge.a))
         };
+        let crossing = Crossing::of(edge);
         let entry = folded
             .entry((low, high, edge.class))
             .or_insert_with(|| Folded {
                 members: BTreeSet::new(),
                 crossings: 0,
-                similarity: edge.similarity,
-                breakdown: edge.breakdown,
-                confidence: edge.confidence,
+                weakest: crossing,
                 described: true,
             });
         entry.members.insert(edge.a);
@@ -227,11 +255,7 @@ pub(super) fn unrepresented_pairs(
         // Using the strongest crossing here made split pairs look more
         // certain than cohesive groups, which already report their minimum
         // pairwise evidence.
-        if edge.similarity < entry.similarity {
-            entry.similarity = edge.similarity;
-            entry.breakdown = edge.breakdown;
-            entry.confidence = edge.confidence;
-        }
+        entry.weakest = entry.weakest.weaker(crossing);
     }
     // Counted in verified pairs, not in the entries they folded into, because
     // that is what the funnel row it lands in is measured in: an entry stands
@@ -275,10 +299,10 @@ pub(super) fn unrepresented_pairs(
                     &units[canonical].group_content(class),
                     &identity_contents,
                 ),
-                similarity: entry.similarity,
-                breakdown: entry.breakdown,
+                similarity: entry.weakest.similarity,
+                breakdown: entry.weakest.breakdown,
                 class,
-                confidence: entry.confidence,
+                confidence: entry.weakest.confidence,
                 boilerplate,
                 width_family,
             }
@@ -302,10 +326,66 @@ struct Folded {
     /// that dropping this entry can be accounted for in the unit the funnel
     /// reports.
     crossings: usize,
+    /// The crossing the entry reports its evidence from.
+    weakest: Crossing,
+    described: bool,
+}
+
+/// One accepted crossing, ordered by what it says rather than by where it was
+/// listed.
+///
+/// The endpoints travel with the judgement only so that two crossings agreeing
+/// on every dimension still have an order. Keeping whichever arrived first
+/// would let a caller that states one relation twice decide which evidence the
+/// entry carries, and the same input in another order would then produce
+/// another report.
+#[derive(Debug, Clone, Copy)]
+struct Crossing {
     similarity: f64,
     breakdown: Option<verify::SimilarityBreakdown>,
     confidence: verify::Confidence,
-    described: bool,
+    endpoints: (usize, usize),
+}
+
+impl Crossing {
+    /// The crossing an edge states, with its endpoints in a fixed order so
+    /// that which side was written first is not part of the judgement.
+    const fn of(edge: &SimilarityEdge) -> Self {
+        Self {
+            similarity: edge.similarity,
+            breakdown: edge.breakdown,
+            confidence: edge.confidence,
+            endpoints: if edge.a <= edge.b {
+                (edge.a, edge.b)
+            } else {
+                (edge.b, edge.a)
+            },
+        }
+    }
+
+    /// Whichever of the two says less: the lower similarity, then the lower
+    /// confidence, then the lower endpoints.
+    fn weaker(self, other: Self) -> Self {
+        let order = self
+            .similarity
+            .total_cmp(&other.similarity)
+            .then_with(|| confidence_rank(other.confidence).cmp(&confidence_rank(self.confidence)))
+            .then_with(|| self.endpoints.cmp(&other.endpoints));
+        if order.is_lt() { self } else { other }
+    }
+}
+
+/// How far a verdict sits from the threshold, ascending: a larger rank is the
+/// weaker claim.
+///
+/// [`verify::Confidence`] is a closed vocabulary of bands rather than a scale,
+/// so the order this fold needs is stated where it is used.
+const fn confidence_rank(confidence: verify::Confidence) -> u8 {
+    match confidence {
+        verify::Confidence::High => 0,
+        verify::Confidence::Medium => 1,
+        verify::Confidence::Low => 2,
+    }
 }
 
 /// Whether a group the report already states puts the crossing's two sides in
