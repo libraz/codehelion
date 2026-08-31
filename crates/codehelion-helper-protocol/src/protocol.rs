@@ -222,11 +222,25 @@ pub struct Analyze {
     /// recorded command identity rather than a database index, because an
     /// index changes when an unrelated command is inserted or reordered.
     pub compile_command: Option<CompileCommandSelector>,
-    /// Canonical scan-root boundary for paths a compilation command may read.
+    /// Canonical scan-root boundary for the paths this request may be answered
+    /// from.
     ///
-    /// Set only for an untrusted scan. Helpers must refuse path-bearing
-    /// compiler arguments that resolve outside this directory; omitting it
-    /// preserves the configured, trusted compilation-database behaviour.
+    /// Set only for an untrusted scan; omitting it preserves the configured,
+    /// trusted behaviour. What it holds is what a helper decides to read out of
+    /// the project it was pointed at: a C or C++ helper refuses a path-bearing
+    /// compiler argument that resolves outside this directory, and a Rust
+    /// helper refuses a unit, a manifest or a workspace root found outside it.
+    ///
+    /// It is not a sandbox, and reading it as one would claim more than any
+    /// helper delivers. A toolchain reads a great deal that no request named —
+    /// its own sysroot, a registry of downloaded dependencies, the standard
+    /// library headers an include search path reaches — and the boundary
+    /// constrains none of that. It says which of the project's files may be
+    /// chosen, not which files the compiler behind the helper then opens.
+    /// Confining the reads themselves is the sandbox's job.
+    ///
+    /// It also covers a unit and nothing else: [`DescribeBuild`] carries no
+    /// boundary, so describing a tree is unconstrained however this was set.
     pub read_boundary: Option<String>,
     /// What to spend time on.
     ///

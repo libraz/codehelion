@@ -56,6 +56,12 @@ use self::type_table::TypeTable;
 mod semantic;
 mod type_table;
 
+/// Say why `unit` went unanswered, naming it so a reader can tell which of a
+/// project's files this is about.
+fn refused(unit: &UnitRef, why: &str) {
+    crate::refused(&format!("{}: {why}", unit.unit));
+}
+
 /// What came of being asked about one unit.
 pub(crate) enum Outcome {
     /// It was read, and this is what the compiler knew.
@@ -76,36 +82,75 @@ pub(crate) fn analyze(
     let Some(entry) = database.unit(&unit.unit, selector) else {
         // Nothing in the database is this unit. Analysing the file under some
         // other unit's command would answer about a program this one is not.
+        refused(
+            unit,
+            if selector.is_some() {
+                "the compilation database has no command matching the one this unit was \
+                 recorded with"
+            } else {
+                "the compilation database lists no command for this unit"
+            },
+        );
         return Outcome::Unavailable(Unavailability::NoBuildInformation);
     };
-    let Ok(arguments) = entry.arguments() else {
-        // Validation happens before constructing a libclang index. A command
-        // with an unknown or executable option is not a partial reading: it is
-        // a build variant this helper cannot safely answer about.
-        return Outcome::Unavailable(Unavailability::NoBuildInformation);
+    let arguments = match entry.arguments() {
+        Ok(arguments) => arguments,
+        Err(why) => {
+            // Validation happens before constructing a libclang index. A
+            // command with an unknown or executable option is not a partial
+            // reading: it is a build variant this helper cannot safely answer
+            // about. Which option it was is the whole of what somebody can act
+            // on, so it is said rather than counted.
+            refused(unit, why);
+            return Outcome::Unavailable(Unavailability::NoBuildInformation);
+        }
     };
-    if read_boundary.is_some_and(|boundary| !arguments.reads_within(boundary)) {
+    if let Some(boundary) = read_boundary
+        && !arguments.reads_within(boundary)
+    {
+        refused(
+            unit,
+            &format!(
+                "the recorded command reads a file outside the scanned tree at {}",
+                boundary.display()
+            ),
+        );
         return Outcome::Unavailable(Unavailability::NoBuildInformation);
     }
     let index = Index::new(clang, false, false);
-    let Ok(parsed) = index
+    let parsed = match index
         .parser(&entry.file)
         .arguments(arguments.as_slice())
         .detailed_preprocessing_record(true)
         .skip_function_bodies(false)
         .parse()
-    else {
-        // The recorded command did not yield a translation unit at all. A file
-        // read with no command is a different program from the one the project
-        // builds, so it is reported as having no build information rather than
-        // analysed under whatever would parse.
-        return Outcome::Unavailable(Unavailability::NoBuildInformation);
+    {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            // The recorded command did not yield a translation unit at all. A
+            // file read with no command is a different program from the one the
+            // project builds, so it is reported as having no build information
+            // rather than analysed under whatever would parse.
+            refused(
+                unit,
+                &format!("clang read no translation unit from the recorded command: {error}"),
+            );
+            return Outcome::Unavailable(Unavailability::NoBuildInformation);
+        }
     };
     let file = canonical(Path::new(&unit.file));
     if parsed.get_file(&file).is_none() {
         // The unit was read and this file is no part of what it read, so the
         // pair the request named does not exist. Answering anyway would report
         // one unit's contents against a file that unit never opened.
+        refused(
+            unit,
+            &format!(
+                "the unit was read and does not include {}, so there is no such pair to answer \
+                 about",
+                file.display()
+            ),
+        );
         return Outcome::Unavailable(Unavailability::NoBuildInformation);
     }
     let mut reading = Reading::new(&database.root);
@@ -128,6 +173,27 @@ pub(crate) fn analyze(
 
 /// What one pass over a translation unit has found so far.
 struct Reading<'a> {
+    /// How the files the unit reached are named in the answer.
+    files: Files<'a>,
+    /// Macro invocations paired with the definitions they expanded.
+    macros: Vec<MacroStamp>,
+    types: TypeTable,
+    symbols: Vec<ResolvedSymbol>,
+    calls: Vec<CallSite>,
+    semantic_constructs: Vec<SemanticConstruct>,
+    instantiations: Vec<Instantiation>,
+    /// Function definitions whose compiler CFG dump can be anchored without
+    /// guessing from a line number or AST node ID.
+    functions: Vec<cfg_dump::FunctionAnchor>,
+}
+
+/// How every file one reading reaches is named, worked out once each.
+///
+/// Shared rather than reached through the walk, because the walk is not the
+/// only thing that names a file: an identity a compiler cannot spell falls back
+/// to where it was declared, and one built from the path this machine has would
+/// be an identity only this machine can arrive at.
+pub(super) struct Files<'a> {
     /// What paths are spelled against.
     root: &'a Path,
     /// What is known about each file the unit has reached so far.
@@ -139,16 +205,27 @@ struct Reading<'a> {
     /// rather than once per name — a unit holds thousands of names and tens of
     /// files.
     known: BTreeMap<(u64, u64, u64), Spelled>,
-    /// Macro invocations paired with the definitions they expanded.
-    macros: Vec<MacroStamp>,
-    types: TypeTable,
-    symbols: Vec<ResolvedSymbol>,
-    calls: Vec<CallSite>,
-    semantic_constructs: Vec<SemanticConstruct>,
-    instantiations: Vec<Instantiation>,
-    /// Function definitions whose compiler CFG dump can be anchored without
-    /// guessing from a line number or AST node ID.
-    functions: Vec<cfg_dump::FunctionAnchor>,
+}
+
+impl<'a> Files<'a> {
+    const fn new(root: &'a Path) -> Self {
+        Self {
+            root,
+            known: BTreeMap::new(),
+        }
+    }
+
+    /// What is known about `file`, working it out the first time it is seen.
+    fn of(&mut self, file: &clang::source::File<'_>) -> &Spelled {
+        let root = self.root;
+        self.known.entry(file.get_id()).or_insert_with(|| {
+            let path = canonical(&file.get_path());
+            Spelled {
+                inside: path.starts_with(root),
+                name: spell(Some(root), &path),
+            }
+        })
+    }
 }
 
 /// One file the unit read, as this analysis reports it.
@@ -181,8 +258,7 @@ struct MacroStamp {
 impl<'a> Reading<'a> {
     fn new(root: &'a Path) -> Self {
         Self {
-            root,
-            known: BTreeMap::new(),
+            files: Files::new(root),
             macros: Vec::new(),
             types: TypeTable::default(),
             symbols: Vec::new(),
@@ -195,14 +271,7 @@ impl<'a> Reading<'a> {
 
     /// What is known about `file`, working it out the first time it is seen.
     fn known(&mut self, file: &clang::source::File<'_>) -> &Spelled {
-        let root = self.root;
-        self.known.entry(file.get_id()).or_insert_with(|| {
-            let path = canonical(&file.get_path());
-            Spelled {
-                inside: path.starts_with(root),
-                name: spell(Some(root), &path),
-            }
-        })
+        self.files.of(file)
     }
 
     /// Visit every entity of the unit, keeping the ones written in the tree.
@@ -401,11 +470,12 @@ impl<'a> Reading<'a> {
         };
         anchor.definition = Some(origin_range);
         let arguments = argument_type.map_or_else(Vec::new, |ty| {
+            let (types, files) = (&mut self.types, &mut self.files);
             ty.get_template_argument_types()
                 .unwrap_or_default()
                 .into_iter()
                 .flatten()
-                .map(|argument| self.types.intern(argument))
+                .map(|argument| types.intern(argument, files))
                 .collect()
         });
         // The unversioned libclang surface exposed by clang 2.0/runtime can
@@ -502,10 +572,13 @@ impl<'a> Reading<'a> {
         let Some(name) = entity.get_name().or_else(|| named.get_name()) else {
             return;
         };
-        let type_index = named.get_type().map(|ty| self.types.intern(ty));
+        let type_index = named
+            .get_type()
+            .map(|ty| self.types.intern(ty, &mut self.files));
         let external = self.is_external(named);
+        let id = identity(named, &mut self.files);
         self.symbols.push(ResolvedSymbol {
-            id: identity(named),
+            id,
             name,
             kind,
             anchor,
@@ -695,6 +768,35 @@ fn call_target_order(left: &CallTarget, right: &CallTarget) -> std::cmp::Orderin
     }
 }
 
+/// The identity of what a name resolved to.
+///
+/// A USR where Clang has one: it is the compiler's own answer to "are these the
+/// same declaration", stable across translation units, and it already
+/// distinguishes overloads that share a name. Locals and parameters have none —
+/// they are not externally nameable — so they fall back to where they were
+/// declared, because two neighbouring functions each declaring `total` are two
+/// bindings and an identity they shared would say otherwise.
+///
+/// Where they were declared is spelled the way every other path in the answer
+/// is: against the project root. An identity carrying the path this filesystem
+/// has would be one only this machine can arrive at, so the same tree read from
+/// another directory would name one binding two ways and nothing about it could
+/// be compared across the two readings.
+pub(super) fn identity(entity: Entity<'_>, files: &mut Files<'_>) -> String {
+    if let Some(usr) = entity.get_usr() {
+        return usr.0;
+    }
+    let name = entity.get_name().unwrap_or_default();
+    let Some(location) = entity.get_location() else {
+        return name;
+    };
+    let at = location.get_expansion_location();
+    let Some(file) = at.file else {
+        return name;
+    };
+    format!("{name}@{}:{}", files.of(&file).name, at.offset)
+}
+
 /// Whether a declaration has a concrete body that Clang can dump as one CFG.
 ///
 /// Template definitions are not concrete functions: one source definition can
@@ -727,29 +829,6 @@ const fn callable(kind: EntityKind) -> bool {
             | EntityKind::Destructor
             | EntityKind::ConversionFunction
             | EntityKind::FunctionTemplate
-    )
-}
-
-/// The identity of what a name resolved to.
-///
-/// A USR where Clang has one: it is the compiler's own answer to "are these the
-/// same declaration", stable across translation units, and it already
-/// distinguishes overloads that share a name. Locals and parameters have none —
-/// they are not externally nameable — so they fall back to where they were
-/// declared, because two neighbouring functions each declaring `total` are two
-/// bindings and an identity they shared would say otherwise.
-fn identity(entity: Entity<'_>) -> String {
-    if let Some(usr) = entity.get_usr() {
-        return usr.0;
-    }
-    let name = entity.get_name().unwrap_or_default();
-    let Some(location) = entity.get_location() else {
-        return name;
-    };
-    let at = location.get_expansion_location();
-    at.file.map_or_else(
-        || name.clone(),
-        |file| format!("{name}@{}:{}", file.get_path().display(), at.offset),
     )
 }
 

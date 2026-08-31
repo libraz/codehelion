@@ -33,6 +33,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::protocol::Capability;
+
 /// The compiler-IR schema identifier.
 ///
 /// The product has not been released, so the complete current shape is the
@@ -568,6 +570,21 @@ pub struct EffectSummary {
     pub interactions: Vec<String>,
 }
 
+/// The interaction an acquired resource kind stands for, when it names one.
+///
+/// This is the one definition of that closed vocabulary. Producers filling an
+/// [`EffectSummary`] and consumers comparing one both read it here, so the two
+/// sides cannot drift into disagreeing about what a resource kind means. An
+/// unlisted kind maps to nothing rather than to a guessed interaction.
+#[must_use]
+pub fn resource_interaction(resource_kind: &str) -> Option<&'static str> {
+    match resource_kind {
+        "file" => Some("file_io"),
+        "lock" => Some("synchronization"),
+        _ => None,
+    }
+}
+
 /// How values move through a unit.
 ///
 /// The deliberately small initial vocabulary records only direct, resolved
@@ -677,6 +694,46 @@ impl CompilerIr {
     pub fn spelling(&self, absolute: &Path) -> String {
         spell(self.anchored_at.as_ref().map(Path::new), absolute)
     }
+
+    /// Drop every fact no capability in `want` covers.
+    ///
+    /// A helper may compute more than it was asked for — one pass over a
+    /// translation unit produces several kinds of fact at once, and walking it
+    /// again per kind would cost more and risk disagreeing with itself. What it
+    /// may not do is answer with facts nobody asked for: two analyses are
+    /// comparable only when what was measured is what was requested, and a
+    /// reply that carries an unrequested kind cannot be told apart from one
+    /// where the capability was asked for and found empty.
+    pub fn keep_only(&mut self, want: &[Capability]) {
+        if !want.contains(&Capability::Types) {
+            self.types.clear();
+            self.expressions.clear();
+            for symbol in &mut self.symbols {
+                symbol.type_index = None;
+            }
+            for instantiation in &mut self.instantiations {
+                instantiation.arguments.clear();
+            }
+        }
+        if !want.contains(&Capability::NameResolution) {
+            self.symbols.clear();
+        }
+        if !want.contains(&Capability::CallTargets) {
+            self.calls.clear();
+            self.semantic_constructs.clear();
+            self.effects = EffectSummary::default();
+            self.data_flow = DataFlowSummary::default();
+        }
+        if !want.contains(&Capability::MacroExpansion) {
+            self.unexpanded_macros.clear();
+        }
+        if !want.contains(&Capability::TemplateInstantiation) {
+            self.instantiations.clear();
+        }
+        if !want.contains(&Capability::MirCfg) {
+            self.cfg = None;
+        }
+    }
 }
 
 /// How a path is spelled against `root`.
@@ -769,6 +826,55 @@ pub enum Unavailability {
 }
 
 impl Unavailability {
+    /// Every reason a shipping build can report, in declaration order.
+    ///
+    /// A store that keeps these under a controlled vocabulary builds that
+    /// vocabulary from this list rather than restating it, so a reason cannot
+    /// exist in one place and be rejected in the other. A new variant belongs
+    /// here as well as in [`Self::name`], which the compiler already requires.
+    pub const ALL: [Self; 10] = [
+        Self::RequiresExecution,
+        Self::MetadataUnavailable,
+        Self::NoBuildInformation,
+        Self::ToolchainMismatch,
+        Self::HelperTimedOut,
+        Self::HelperDied,
+        Self::UnreadableSchema,
+        Self::ResponseTooLarge,
+        Self::RestartBudgetExhausted,
+        Self::NotSupported,
+    ];
+
+    /// Where `self` sits in [`Self::ALL`].
+    ///
+    /// The match is exhaustive, so a variant added without a place in the list
+    /// has nowhere to point and the crate stops compiling.
+    #[must_use]
+    pub const fn position(self) -> usize {
+        match self {
+            Self::RequiresExecution => 0,
+            Self::MetadataUnavailable => 1,
+            Self::NoBuildInformation => 2,
+            Self::ToolchainMismatch => 3,
+            Self::HelperTimedOut => 4,
+            Self::HelperDied => 5,
+            Self::UnreadableSchema => 6,
+            Self::ResponseTooLarge => 7,
+            Self::RestartBudgetExhausted => 8,
+            Self::NotSupported => 9,
+        }
+    }
+
+    /// The reason spelled `name`, or `None` for a spelling this build has no
+    /// reason for.
+    ///
+    /// Resolved against [`Self::ALL`] rather than a second hand-written match,
+    /// so reading and writing a reason can only ever agree.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|reason| reason.name() == name)
+    }
+
     /// Stable lowercase identifier, the same spelling this serializes as.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -797,6 +903,17 @@ impl Unavailability {
     }
 }
 
+/// `Unavailability::ALL` lists each reason once, at the place the exhaustive
+/// match gives it. Checked while compiling, because a list that has drifted
+/// from the enum is what makes a stored reason unwritable.
+const _: () = {
+    let mut at = 0;
+    while at < Unavailability::ALL.len() {
+        assert!(Unavailability::ALL[at].position() == at);
+        at += 1;
+    }
+};
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -809,6 +926,15 @@ mod tests {
             end_byte: 40,
             start_line: 2,
         }
+    }
+
+    #[test]
+    fn resource_kinds_outside_the_closed_vocabulary_name_no_interaction() {
+        assert_eq!(resource_interaction("file"), Some("file_io"));
+        assert_eq!(resource_interaction("lock"), Some("synchronization"));
+        assert_eq!(resource_interaction("socket"), None);
+        assert_eq!(resource_interaction(""), None);
+        assert_eq!(resource_interaction("File"), None);
     }
 
     #[test]
@@ -878,6 +1004,30 @@ mod tests {
             Unavailability::NotSupported,
         ] {
             assert!(!settled.worth_retrying(), "{settled:?}");
+        }
+    }
+
+    #[test]
+    fn every_reason_is_listed_once_and_answers_to_its_own_spelling() {
+        let mut spellings = std::collections::BTreeSet::new();
+        for reason in Unavailability::ALL {
+            assert!(
+                spellings.insert(reason.name()),
+                "{reason:?} shares a spelling with an earlier reason"
+            );
+            assert_eq!(Unavailability::from_name(reason.name()), Some(reason));
+        }
+        assert_eq!(spellings.len(), Unavailability::ALL.len());
+        assert_eq!(Unavailability::from_name("no_such_reason"), None);
+    }
+
+    #[test]
+    fn a_reason_serializes_as_the_spelling_it_is_named_by() {
+        for reason in Unavailability::ALL {
+            let text = serde_json::to_string(&reason).unwrap();
+            assert_eq!(text, format!("\"{}\"", reason.name()));
+            let read: Unavailability = serde_json::from_str(&text).unwrap();
+            assert_eq!(read, reason);
         }
     }
 
@@ -1021,5 +1171,66 @@ mod tests {
             ir.spelling(&native(&["home", "project", "src", "lib.rs"])),
             "src/lib.rs"
         );
+    }
+
+    /// What a helper computed on the way to the answer is not what it may
+    /// answer with. A reply carrying an unrequested kind is indistinguishable
+    /// from one where that kind was asked for and found empty.
+    #[test]
+    fn an_answer_carries_only_the_facts_that_were_asked_for() {
+        let mut ir = CompilerIr::empty(UnitRef {
+            unit: "crate".into(),
+            file: "src/lib.rs".into(),
+            variant: "v1".into(),
+        });
+        ir.types.push(ResolvedType {
+            display: "String".into(),
+            category: TypeCategory::Text,
+            arguments: Vec::new(),
+            definition: None,
+        });
+        ir.symbols.push(ResolvedSymbol {
+            id: "crate::render".into(),
+            name: "render".into(),
+            kind: SymbolKind::Function,
+            anchor: Anchor::written_here(range("src/lib.rs")),
+            type_index: Some(0),
+            external: false,
+        });
+        ir.calls.push(CallSite {
+            anchor: Anchor::written_here(range("src/lib.rs")),
+            target: CallTarget::Unresolved,
+            api_name: None,
+        });
+        ir.instantiations.push(Instantiation {
+            anchor: Anchor::written_here(range("src/lib.rs")),
+            definition: "crate::render".into(),
+            definition_end_line: None,
+            artifact_match_key: None,
+            instantiation_key: "crate::render".into(),
+            arguments: vec![0],
+        });
+        ir.cfg = Some(ControlFlowGraph {
+            blocks: vec![BasicBlock {
+                anchor: Anchor::written_here(range("src/lib.rs")),
+                length: 3,
+            }],
+            edges: Vec::new(),
+        });
+
+        let mut narrowed = ir.clone();
+        narrowed.keep_only(&[Capability::NameResolution]);
+        assert_eq!(narrowed.symbols.len(), 1);
+        // The symbol stays, and what it says about a type it was not asked
+        // about does not: an index into a table that is gone reaches nothing.
+        assert_eq!(narrowed.symbols[0].type_index, None);
+        assert!(narrowed.types.is_empty());
+        assert!(narrowed.calls.is_empty());
+        assert!(narrowed.instantiations.is_empty());
+        assert!(narrowed.cfg.is_none());
+
+        let mut whole = ir.clone();
+        whole.keep_only(&Capability::ALL);
+        assert_eq!(whole, ir);
     }
 }

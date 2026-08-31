@@ -210,6 +210,94 @@ fn project_arguments_cannot_reparse_options_from_config_or_response_files() {
     }
 }
 
+/// What the helper has said so far, waited for rather than raced.
+///
+/// The reason travels on one stream and the answer on another, and the client
+/// collects the first on a thread of its own. A check that read them in the
+/// order they were written would be reading a coincidence, so this waits for
+/// the sentence to arrive and gives up long before a stuck helper could stall
+/// the suite.
+fn said_by(asked: &Helper) -> Vec<String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let said = asked.diagnostics();
+        if !said.is_empty() || std::time::Instant::now() >= deadline {
+            return said;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A unit is refused for a reason, and this side is the only side that knows
+/// it. Kept here, a report says how many units went unanswered and nothing
+/// about whether the fix is a compiler argument this helper will not forward,
+/// a database that is not there, or a header no command compiles — which have
+/// different answers.
+#[test]
+fn a_unit_that_cannot_be_analysed_says_why_on_standard_error() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().canonicalize().expect("temp dir exists");
+    let source = root.join("unit.cpp");
+    std::fs::write(&source, "int answer() { return 1; }\n").expect("write source");
+    let unit = UnitRef {
+        unit: source.display().to_string(),
+        file: source.display().to_string(),
+        variant: "host".to_string(),
+    };
+
+    // No database anywhere above the file, which is one thing that can be
+    // wrong with it.
+    let mut without_a_database = helper();
+    let analysis = without_a_database
+        .analyze(&unit, &[Capability::Types])
+        .expect("the helper should answer without crashing");
+    assert_eq!(
+        analysis,
+        Analysis::Missing(Unavailability::NoBuildInformation)
+    );
+    let said = said_by(&without_a_database);
+    without_a_database
+        .shutdown()
+        .expect("the helper should stop cleanly");
+    assert!(
+        said.iter()
+            .any(|line| line.contains("no compilation database") && line.contains("unit.cpp")),
+        "{said:?}"
+    );
+
+    // And a database that does list the unit, under a command carrying an
+    // option this helper will not hand a compiler. The same enum comes back
+    // for both, and only the sentence tells them apart.
+    let database = serde_json::json!([{
+        "directory": root,
+        "arguments": ["clang++", "-std=c++20", "-Xclang", "-load", source],
+        "file": source,
+    }]);
+    std::fs::write(
+        root.join("compile_commands.json"),
+        serde_json::to_vec_pretty(&database).expect("serialize database"),
+    )
+    .expect("write database");
+
+    let mut with_a_refused_argument = helper();
+    let analysis = with_a_refused_argument
+        .analyze(&unit, &[Capability::Types])
+        .expect("the helper should answer without crashing");
+    assert_eq!(
+        analysis,
+        Analysis::Missing(Unavailability::NoBuildInformation)
+    );
+    let said = said_by(&with_a_refused_argument);
+    with_a_refused_argument
+        .shutdown()
+        .expect("the helper should stop cleanly");
+    assert!(
+        said.iter()
+            .any(|line| line.contains("-Xclang") && line.contains("unit.cpp")),
+        "{said:?}"
+    );
+}
+
 /// The resolved type of the first symbol called `name`.
 fn type_of<'a>(ir: &'a CompilerIr, name: &str) -> &'a ResolvedType {
     let symbol = ir

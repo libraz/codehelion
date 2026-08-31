@@ -50,10 +50,29 @@ use codehelion_helper::protocol::{
 use codehelion_helper::server::{Answer, Backend, Description, serve};
 
 use crate::analysis::Outcome;
-use crate::database::Database;
+use crate::database::Databases;
 
 /// The name this helper is known by, in `doctor` and in the audit database.
 const NAME: &str = "codehelion-backend-clang";
+
+/// Say on standard error why a request could not be answered.
+///
+/// The client keeps what a helper printed while a unit went unanswered and
+/// reports it beside that unit, so a reason worked out here and kept here is a
+/// reason nobody can act on: a count of units with no build information says
+/// how many were refused and nothing about whether the fix is a compiler
+/// argument this program will not forward, a database that is not there, or a
+/// header that no command in the project compiles. Those have different
+/// answers, and only this side knows which one happened.
+///
+/// One line per refusal, because what the client keeps is bounded by lines: a
+/// reason spread over several would cost the reasons after it.
+pub(crate) fn refused(why: &str) {
+    // Standard error, for the reason the whole stream exists here: standard
+    // output is the protocol, and a sentence written there is read as a
+    // malformed frame.
+    eprintln!("{NAME}: {why}");
+}
 
 fn main() -> std::process::ExitCode {
     if let Err(error) = codehelion_helper::enforce_current_process_limit_from_environment() {
@@ -77,6 +96,7 @@ fn main() -> std::process::ExitCode {
     let mut backend = ClangBackend {
         clang: &clang,
         cfg_available: cfg_dump::available(),
+        databases: Databases::default(),
     };
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
@@ -97,6 +117,11 @@ fn main() -> std::process::ExitCode {
 struct ClangBackend<'c> {
     clang: &'c clang::Clang,
     cfg_available: bool,
+    /// The compilation databases this process has already looked for, kept for
+    /// as long as it lives: every unit of one project is governed by the same
+    /// database, and reading it per request would make analysing a tree cost
+    /// one parse of it per file.
+    databases: Databases,
 }
 
 impl Backend for ClangBackend<'_> {
@@ -139,37 +164,49 @@ impl Backend for ClangBackend<'_> {
         // describe, which is an answer rather than a failure: a project that is
         // entirely Rust is not missing one, and refusing here would stop a scan
         // of it because a helper it never needed happened to be installed.
-        let described = Database::nearest(Path::new(&request.root)).map_or_else(
-            BuildDescription::default,
-            |database| BuildDescription {
+        let described = self
+            .databases
+            .nearest(Path::new(&request.root))
+            .map_or_else(BuildDescription::default, |database| BuildDescription {
                 features: Vec::new(),
                 // The macros a translation unit is compiled with decide which
                 // declarations its headers contain at all, which is what a cfg
                 // is — the same question C answers with `#if`.
                 cfgs: database.definitions(),
-            },
-        );
+            });
         Description::Build(described)
     }
 
     fn analyze(&mut self, request: &Analyze) -> Answer {
-        let Some(database) = Database::nearest(Path::new(&request.unit.file)) else {
+        let clang = self.clang;
+        let Some(database) = self.databases.nearest(Path::new(&request.unit.file)) else {
             // Nothing above this file says how it is compiled. Reported per
             // file rather than as a failed run: a scan of a mixed tree reads
             // the half that does have a build, and the half nobody could speak
             // for is what a coverage report is for.
+            refused(&format!(
+                "{}: no compilation database above this file says how it is compiled",
+                request.unit.unit
+            ));
             return Answer::Unavailable(Unavailability::NoBuildInformation);
         };
         match analysis::analyze(
-            self.clang,
+            clang,
             &request.unit,
-            &database,
+            database,
             request.compile_command.as_ref(),
             request.read_boundary.as_deref().map(Path::new),
             &request.want,
         ) {
             Outcome::Analyzed(mut ir) => {
                 ir.schema_version = COMPILER_IR_SCHEMA_VERSION.to_string();
+                // One walk of a translation unit produces several kinds of
+                // fact at once, and walking it again per kind would cost more
+                // and risk disagreeing with itself. What was not asked for is
+                // dropped before the answer leaves: a reply carrying an
+                // unrequested kind cannot be told apart from one where that
+                // capability was asked for and found nothing.
+                ir.keep_only(&request.want);
                 Answer::Analyzed(ir)
             }
             Outcome::Unavailable(reason) => Answer::Unavailable(reason),

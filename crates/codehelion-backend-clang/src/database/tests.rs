@@ -1,24 +1,33 @@
 use super::*;
 
-fn words(command: &str) -> Vec<String> {
-    split(command)
-}
-
+/// The selector this side compares against is built from the words the shared
+/// reader produces, which is the same reader the scanner names the entry with.
+/// A split of this helper's own would leave an entry the scanner can name and
+/// this side cannot find, and nothing would say so.
 #[test]
-fn a_command_written_as_one_line_is_split_the_way_a_shell_would() {
-    assert_eq!(words("clang++ -c a.cpp"), ["clang++", "-c", "a.cpp"]);
+fn a_recorded_command_is_split_by_the_reader_both_sides_share() {
+    let command = "clang++ -DTEXT='a b'\t-I/o/inc\n-c /w/a.cpp";
+    let entry = RecordedCommand {
+        file: "/w/a.cpp".to_string(),
+        directory: Some("/w".to_string()),
+        arguments: None,
+        command: Some(command.to_string()),
+    }
+    .entry()
+    .expect("the entry carries a command");
     assert_eq!(
-        words(r#"clang++ -I"/o p/inc" -DA=\"x\" a.cpp"#),
-        ["clang++", "-I/o p/inc", r#"-DA="x""#, "a.cpp"]
+        entry.selector.arguments,
+        codehelion_helper_protocol::split_command(command)
     );
-    // An empty quoted argument is an argument, not nothing: `-DA=` and no
-    // `-D` at all are different commands.
-    assert_eq!(words(r#"clang++ "" a.cpp"#), ["clang++", "", "a.cpp"]);
+    assert_eq!(
+        entry.selector.arguments,
+        ["clang++", "-DTEXT=a b", "-I/o/inc", "-c", "/w/a.cpp"]
+    );
 }
 
 #[test]
 fn what_a_unit_is_compiled_with_is_kept_and_where_it_writes_is_not() {
-    let entry = RawEntry {
+    let entry = RecordedCommand {
         file: "src/a.cpp".to_string(),
         directory: Some("/work/build".to_string()),
         arguments: Some(
@@ -54,6 +63,115 @@ fn what_a_unit_is_compiled_with_is_kept_and_where_it_writes_is_not() {
         ]
     );
     assert_eq!(entry.definitions, ["-DWIDE=64"]);
+}
+
+/// What a build generator writes by default. None of it changes which code is
+/// read, so none of it may cost the unit its analysis: a project that builds a
+/// shared library, targets an SDK version, or turns its warnings up is the
+/// ordinary case rather than an exotic one.
+#[test]
+fn an_ordinary_generated_command_is_analysed_rather_than_refused() {
+    let entry = RecordedCommand {
+        file: "/w/src/a.cpp".to_string(),
+        directory: Some("/w/build".to_string()),
+        arguments: Some(
+            [
+                "/usr/bin/ccache",
+                "/usr/bin/clang++",
+                "-DPROJECT_EXPORTS",
+                "-I/w/include",
+                "-isystem",
+                "/opt/sdk/include",
+                "-std=gnu++20",
+                "-fPIC",
+                "-fvisibility=hidden",
+                "-fvisibility-inlines-hidden",
+                "-fcolor-diagnostics",
+                "-fno-omit-frame-pointer",
+                "-ffunction-sections",
+                "-fstack-protector-strong",
+                "-mmacosx-version-min=11.0",
+                "-mavx2",
+                "-O2",
+                "-g",
+                "-gdwarf-4",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "--coverage",
+                "-pipe",
+                "-MD",
+                "-MT",
+                "src/a.cpp.o",
+                "-MF",
+                "src/a.cpp.o.d",
+                "-o",
+                "src/a.cpp.o",
+                "-c",
+                "/w/src/a.cpp",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+        ),
+        command: None,
+    }
+    .entry()
+    .expect("the entry carries a command");
+
+    assert_eq!(
+        entry
+            .arguments()
+            .expect("a generated command is analysable")
+            .as_slice(),
+        [
+            "-working-directory=/w/build",
+            "-DPROJECT_EXPORTS",
+            "-I/w/include",
+            "-isystem",
+            "/opt/sdk/include",
+            "-std=gnu++20",
+            // Kept because they decide what is read: a header asking about
+            // `__PIC__` or `__SSP_STRONG__` declares different things with and
+            // without them, and the deployment target decides which SDK
+            // declarations exist at all. The rest of this command decides only
+            // what the compiler would have produced.
+            "-fPIC",
+            "-fvisibility=hidden",
+            "-fstack-protector-strong",
+            "-mmacosx-version-min=11.0",
+        ]
+    );
+}
+
+/// A project that interposes a compiler cache records it in front of the
+/// compiler. Reading only the first word as the program that ran leaves the
+/// real compiler behind as an operand no allow list can account for, and the
+/// unit is refused for naming its own compiler.
+#[test]
+fn a_compiler_launcher_in_front_of_the_compiler_is_not_read_as_an_operand() {
+    for command in [
+        "ccache clang++ -DA -c /w/a.cpp",
+        "/usr/lib/ccache/bin/sccache /usr/bin/clang++ -DA -c /w/a.cpp",
+        "distcc icecc clang++ -DA -c /w/a.cpp",
+        "clang++ -DA -c /w/a.cpp",
+    ] {
+        let entry = RecordedCommand {
+            file: "/w/a.cpp".to_string(),
+            directory: Some("/w".to_string()),
+            arguments: None,
+            command: Some(command.to_string()),
+        }
+        .entry()
+        .expect("the entry carries a command");
+        assert_eq!(
+            entry
+                .arguments()
+                .expect("the compiler is not one of its own operands")
+                .as_slice(),
+            ["-working-directory=/w", "-DA"],
+            "{command}"
+        );
+    }
 }
 
 #[test]
@@ -208,7 +326,7 @@ fn option_operands_are_consumed_once_and_missing_operands_are_rejected() {
 
 #[test]
 fn both_compilation_database_command_forms_reach_the_same_allow_list() {
-    let from_arguments = RawEntry {
+    let from_arguments = RecordedCommand {
         file: "/work/src/a.cpp".to_string(),
         directory: Some("/work/build".to_string()),
         arguments: Some(
@@ -237,7 +355,7 @@ fn both_compilation_database_command_forms_reach_the_same_allow_list() {
     .expect("arguments entry");
     assert!(from_arguments.arguments().is_ok());
 
-    let from_command = RawEntry {
+    let from_command = RecordedCommand {
         file: "/work/src/a.cpp".to_string(),
         directory: Some("/work/build".to_string()),
         arguments: None,
@@ -253,7 +371,7 @@ fn both_compilation_database_command_forms_reach_the_same_allow_list() {
     assert!(from_command.arguments().is_ok());
 
     for unsafe_entry in [
-        RawEntry {
+        RecordedCommand {
             file: "/work/src/a.cpp".to_string(),
             directory: Some("/work/build".to_string()),
             arguments: Some(
@@ -263,7 +381,7 @@ fn both_compilation_database_command_forms_reach_the_same_allow_list() {
             ),
             command: None,
         },
-        RawEntry {
+        RecordedCommand {
             file: "/work/src/a.cpp".to_string(),
             directory: Some("/work/build".to_string()),
             arguments: None,
@@ -286,7 +404,7 @@ fn both_compilation_database_command_forms_reach_the_same_allow_list() {
 /// scan happened to be started and read a different header, or none.
 #[test]
 fn a_command_is_read_from_the_directory_it_was_to_run_in() {
-    let entry = RawEntry {
+    let entry = RecordedCommand {
         file: "/work/src/a.cpp".to_string(),
         directory: Some("/work/build".to_string()),
         arguments: Some(
@@ -324,7 +442,7 @@ fn a_unit_is_found_by_where_it_is_as_well_as_by_how_the_project_spells_it() {
     let database = Database {
         root: PathBuf::from("/work"),
         entries: vec![
-            RawEntry {
+            RecordedCommand {
                 file: "/work/src/a.cpp".to_string(),
                 directory: Some("/work/build".to_string()),
                 arguments: Some(
@@ -349,7 +467,7 @@ fn a_unit_is_found_by_where_it_is_as_well_as_by_how_the_project_spells_it() {
 
 #[test]
 fn an_exact_selector_never_falls_back_to_another_command_for_the_same_file() {
-    let narrow = RawEntry {
+    let narrow = RecordedCommand {
         file: "/work/src/a.cpp".to_string(),
         directory: Some("/work".to_string()),
         arguments: Some(
@@ -361,7 +479,7 @@ fn an_exact_selector_never_falls_back_to_another_command_for_the_same_file() {
     }
     .entry()
     .expect("the entry carries a command");
-    let wide = RawEntry {
+    let wide = RecordedCommand {
         file: "/work/src/a.cpp".to_string(),
         directory: Some("/work".to_string()),
         arguments: Some(
@@ -394,7 +512,7 @@ fn an_exact_selector_never_falls_back_to_another_command_for_the_same_file() {
 /// comparison of the two spellings as text says it is not.
 #[test]
 fn a_source_named_through_the_directory_above_is_the_file_it_names() {
-    let entry = RawEntry {
+    let entry = RecordedCommand {
         file: "../src/a.cpp".to_string(),
         directory: Some("/work/build".to_string()),
         arguments: Some(
@@ -424,7 +542,7 @@ fn a_source_named_through_the_directory_above_is_the_file_it_names() {
 #[test]
 fn an_entry_that_records_no_command_is_not_a_translation_unit() {
     assert!(
-        RawEntry {
+        RecordedCommand {
             file: "src/a.cpp".to_string(),
             directory: None,
             arguments: None,
@@ -433,4 +551,92 @@ fn an_entry_that_records_no_command_is_not_a_translation_unit() {
         .entry()
         .is_none()
     );
+}
+
+/// One project's units are all governed by one database, so the parse is a
+/// cost of the project rather than of each of its files. Rewriting the file
+/// after the first lookup is how a second read would show itself.
+#[test]
+fn a_database_is_read_once_however_many_units_ask_about_it() {
+    let project = tempfile::tempdir().expect("a directory to hold the project");
+    let root = project.path();
+    std::fs::write(
+        root.join("compile_commands.json"),
+        serde_json::to_string(&[serde_json::json!({
+            "file": "a.cpp",
+            "directory": root,
+            "arguments": ["clang++", "-DFIRST=1", "-c", "a.cpp"],
+        })])
+        .expect("the database serializes"),
+    )
+    .expect("the database is written");
+
+    let mut databases = Databases::default();
+    assert_eq!(
+        databases
+            .nearest(&root.join("a.cpp"))
+            .expect("the database is beside the unit")
+            .definitions(),
+        ["-DFIRST=1"]
+    );
+
+    std::fs::write(root.join("compile_commands.json"), b"not a database at all")
+        .expect("the database is replaced");
+
+    for unit in ["a.cpp", "b.cpp", "c.cpp"] {
+        assert_eq!(
+            databases
+                .nearest(&root.join(unit))
+                .expect("the database read for the first unit answers for the rest")
+                .definitions(),
+            ["-DFIRST=1"],
+            "{unit} paid for a second read of the database"
+        );
+    }
+}
+
+/// A directory with no database above it is answered without walking the tree
+/// again for every file in it.
+#[test]
+fn a_tree_with_no_database_is_searched_once_per_directory() {
+    let project = tempfile::tempdir().expect("a directory to hold the project");
+    let root = project.path();
+    let mut databases = Databases::default();
+
+    assert!(databases.nearest(&root.join("a.rs")).is_none());
+    std::fs::write(
+        root.join("compile_commands.json"),
+        serde_json::to_string(&[serde_json::json!({
+            "file": "a.cpp",
+            "directory": root,
+            "arguments": ["clang++", "-c", "a.cpp"],
+        })])
+        .expect("the database serializes"),
+    )
+    .expect("the database is written");
+
+    assert!(
+        databases.nearest(&root.join("b.rs")).is_none(),
+        "the search from one directory was walked twice"
+    );
+}
+
+/// A database that is there and unreadable refuses each unit that asks, not
+/// only the first: the sentence explaining it is what a coverage report shows
+/// beside that unit, and a unit reported with no sentence reads as a unit
+/// nobody looked at.
+#[test]
+fn an_unreadable_database_refuses_every_unit_that_asks_about_it() {
+    let project = tempfile::tempdir().expect("a directory to hold the project");
+    let root = project.path();
+    std::fs::write(root.join("compile_commands.json"), b"{ not json")
+        .expect("the database is written");
+
+    let mut databases = Databases::default();
+    for unit in ["a.cpp", "b.cpp", "c.cpp"] {
+        assert!(
+            databases.nearest(&root.join(unit)).is_none(),
+            "{unit} was answered from a database that could not be read"
+        );
+    }
 }

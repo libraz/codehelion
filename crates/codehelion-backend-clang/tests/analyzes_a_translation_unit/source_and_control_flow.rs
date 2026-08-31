@@ -169,6 +169,79 @@ fn a_type_is_reported_as_the_shape_another_language_would_recognise() {
     assert_eq!(ir.types[element as usize].category, TypeCategory::Sequence);
 }
 
+/// Not every declaration is externally nameable, and for the ones Clang has no
+/// identity for this helper builds one out of where they were declared. Built
+/// from the path the filesystem has, that identity would be one only the
+/// machine that produced it can arrive at: two runs over one tree reached by
+/// different paths would disagree about a declaration neither of them changed,
+/// and a comparison across them would find nothing.
+///
+/// Asserted over every identity the answer carries rather than over one that is
+/// known to fall back, because which declarations a given libclang can spell is
+/// its business and not something a fixture can pin down.
+#[test]
+fn no_identity_carries_the_path_this_tree_happens_to_sit_at() {
+    let planted = plant("header-only");
+    let ir = analyzed(&planted.unit("src/narrow.cpp", "include/accumulate.hpp"));
+    let elsewhere = planted.root.display().to_string();
+    let leaked = ir
+        .symbols
+        .iter()
+        .map(|symbol| symbol.id.as_str())
+        .chain(ir.types.iter().filter_map(|ty| ty.definition.as_deref()))
+        .filter(|id| id.contains(&elsewhere))
+        .collect::<Vec<_>>();
+    assert!(leaked.is_empty(), "{leaked:?}");
+}
+
+/// The category the Rust helper reports for the counterpart of these types,
+/// which is the whole reason it is named rather than derived: a function taking
+/// `std::optional<T>` and one taking the optional of another language are the
+/// same shape, and a comparison that saw two shapes would score a real clone
+/// down for a disagreement between the two helpers rather than a difference
+/// between the two programs.
+#[test]
+fn a_standard_optional_and_a_standard_fallible_are_one_category() {
+    let planted = plant("overload-resolution");
+    let path = planted.root.join("src/calls.cpp");
+    let source = std::fs::read_to_string(&path).expect("read C++ fixture");
+    std::fs::write(
+        &path,
+        format!(
+            "#include <optional>\n{EXPECTED_AVAILABILITY}{source}\n\
+             namespace shapes {{\n\
+             long optional_shape(std::optional<long> maybe_total) {{\n\
+               return maybe_total.value_or(0);\n\
+             }}\n\
+             #ifdef CODEHELION_EXPECTED\n\
+             long fallible_shape(std::expected<long, int> maybe_result) {{\n\
+               return maybe_result.value_or(0);\n\
+             }}\n\
+             #endif\n\
+             }}  // namespace shapes\n"
+        ),
+    )
+    .expect("extend C++ fixture");
+    let database_path = planted.root.join("compile_commands.json");
+    let database = std::fs::read_to_string(&database_path).expect("read compilation database");
+    std::fs::write(&database_path, database.replace("-std=c++17", "-std=c++23"))
+        .expect("compile the fixture under the standard that has the fallible type");
+
+    let ir = analyzed(&planted.unit("src/calls.cpp", "src/calls.cpp"));
+    assert_eq!(
+        type_of(&ir, "maybe_total").category,
+        TypeCategory::Enumeration
+    );
+    // The other half only where the standard library behind this build has the
+    // type at all; where it does not, the fixture compiled it out.
+    if standard_expected_available(&ir) {
+        assert_eq!(
+            type_of(&ir, "maybe_result").category,
+            TypeCategory::Enumeration
+        );
+    }
+}
+
 /// What the normalizer asks the compiler for: whether a name is this project's
 /// own or one it shares with everything else that includes the same header.
 #[test]

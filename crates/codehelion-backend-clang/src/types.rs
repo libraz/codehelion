@@ -109,10 +109,16 @@ fn standard_shape(declaration: Entity<'_>) -> Option<TypeCategory> {
         "map" | "multimap" | "set" | "multiset" | "unordered_map" | "unordered_multimap"
         | "unordered_set" | "unordered_multiset" => TypeCategory::Mapping,
         "pair" | "tuple" => TypeCategory::Tuple,
-        "unique_ptr" | "shared_ptr" | "weak_ptr" | "reference_wrapper" | "optional" => {
-            TypeCategory::Handle
-        }
+        "unique_ptr" | "shared_ptr" | "weak_ptr" | "reference_wrapper" => TypeCategory::Handle,
         "function" => TypeCategory::Callable,
+        // Named because the other side of a cross-language comparison has to
+        // arrive at the same category. A function returning `std::optional<T>`
+        // and one returning the optional of another language are the same
+        // shape, and the construct layer already reads them as one; two
+        // backends disagreeing here would lower the score of the clones that
+        // agreement exists to find. A class template is what these are in C++,
+        // so without this they would be records.
+        "optional" | "expected" => TypeCategory::Enumeration,
         _ => return None,
     })
 }

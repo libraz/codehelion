@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use codehelion_helper_protocol::compile_commands::RecordedCommand;
 
 use super::{BuildConfiguration, CppBuild};
 
@@ -37,19 +37,6 @@ pub enum CompileCommandsError {
     /// The file was not valid JSON in the expected shape.
     #[error("parsing compile_commands.json: {0}")]
     Parse(#[source] serde_json::Error),
-}
-
-#[derive(Debug, Deserialize)]
-struct RawEntry {
-    file: String,
-    directory: Option<String>,
-    /// The invocation already split into arguments, which is the spelling that
-    /// needs no guessing about quoting.
-    #[serde(default)]
-    arguments: Option<Vec<String>>,
-    /// The invocation as one line, which generators still write.
-    #[serde(default)]
-    command: Option<String>,
 }
 
 /// A single translation unit from the compilation database.
@@ -151,24 +138,25 @@ impl CompileCommands {
     }
 
     fn parse(text: &str) -> Result<Self, CompileCommandsError> {
-        let raw: Vec<RawEntry> = serde_json::from_str(text).map_err(CompileCommandsError::Parse)?;
+        let raw: Vec<RecordedCommand> =
+            serde_json::from_str(text).map_err(CompileCommandsError::Parse)?;
         let mut seen = BTreeSet::new();
         let mut entries = Vec::new();
         for entry in raw {
+            // The words come from the reader both sides share, so the helper
+            // that has to find this entry again splits its recorded command
+            // exactly where this does.
+            let arguments = entry.words().unwrap_or_default();
+            // Both paths come from the reader both sides share for the same
+            // reason the words do: where a recorded path is relative to is the
+            // command's own directory, and one rule decides that.
+            let resolved = entry.source();
             let directory = entry.directory.map(PathBuf::from);
-            let file_path = PathBuf::from(&entry.file);
-            let resolved = match (&directory, file_path.is_relative()) {
-                (Some(dir), true) => dir.join(&file_path),
-                _ => file_path,
-            };
-            let arguments = entry.arguments.unwrap_or_else(|| {
-                entry
-                    .command
-                    .as_deref()
-                    .map(split_command)
-                    .unwrap_or_default()
-            });
-            if seen.insert((resolved.clone(), arguments.clone())) {
+            // The directory is part of what makes two commands one, because the
+            // relative paths in them are read against it: one command run from
+            // two build directories reads two sets of headers, and dropping the
+            // second would leave a translation unit the run never accounts for.
+            if seen.insert((resolved.clone(), directory.clone(), arguments.clone())) {
                 entries.push(CompileEntry {
                     file: resolved,
                     directory,
@@ -220,46 +208,6 @@ impl CompileCommands {
         }
         partitions
     }
-}
-
-/// Splits a recorded command line the way a POSIX shell would.
-///
-/// Generators that write `command` rather than `arguments` leave the quoting
-/// in, and a path with a space in it is common enough that splitting on
-/// whitespace alone would silently produce two arguments where the compiler saw
-/// one.
-fn split_command(command: &str) -> Vec<String> {
-    let mut arguments = Vec::new();
-    let mut current = String::new();
-    let mut started = false;
-    let mut quote: Option<char> = None;
-    let mut characters = command.chars();
-    while let Some(character) = characters.next() {
-        match (character, quote) {
-            ('\\', Some('\'')) => current.push('\\'),
-            ('\\', _) => {
-                if let Some(escaped) = characters.next() {
-                    current.push(escaped);
-                }
-            }
-            ('\'' | '"', None) => {
-                quote = Some(character);
-                started = true;
-            }
-            (c, Some(open)) if c == open => quote = None,
-            (c, None) if c.is_whitespace() => {
-                if started || !current.is_empty() {
-                    arguments.push(std::mem::take(&mut current));
-                    started = false;
-                }
-            }
-            (c, _) => current.push(c),
-        }
-    }
-    if started || !current.is_empty() {
-        arguments.push(current);
-    }
-    arguments
 }
 
 #[cfg(test)]
@@ -389,6 +337,28 @@ mod tests {
         assert_eq!(partitions.values().next().map(Vec::len), Some(2));
     }
 
+    /// Two commands written word for word alike, run from two build
+    /// directories, reading two different `include` directories. Reported as
+    /// one partition, every clone found in it would be a claim about code that
+    /// the project does not compile the same way.
+    #[test]
+    fn one_command_run_from_two_build_directories_is_two_builds() {
+        let db = CompileCommands::parse(
+            r#"[
+                {"directory": "/w/one", "file": "/w/src/a.cpp",
+                 "arguments": ["clang++", "-Iinclude", "-c", "/w/src/a.cpp"]},
+                {"directory": "/w/two", "file": "/w/src/a.cpp",
+                 "arguments": ["clang++", "-Iinclude", "-c", "/w/src/a.cpp"]}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(db.translation_unit_count(), 2);
+        let fingerprint =
+            |entry: &CompileEntry| BuildConfiguration::Cpp(Box::new(entry.build())).fingerprint();
+        assert_ne!(fingerprint(&db.entries[0]), fingerprint(&db.entries[1]));
+        assert_eq!(db.build_partitions().len(), 2);
+    }
+
     #[test]
     fn a_recorded_command_line_is_split_the_way_a_shell_would_split_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -404,6 +374,26 @@ mod tests {
             db.entries[0].arguments,
             vec!["cc", "-I/w/inc dir", "-DTEXT=a b", "-c", "/w/a.c"]
         );
+    }
+
+    /// The selector a helper is sent carries these words, and the helper finds
+    /// the entry by comparing them exactly. They are produced by the shared
+    /// reader on both sides, so a separator one side treats as spacing cannot
+    /// leave the entry unfindable from the other.
+    #[test]
+    fn the_words_a_selector_carries_come_from_the_shared_reader() {
+        let command = "cc -DTEXT='a b'\t-I/w/inc\n-c /w/a.c";
+        let quoted = serde_json::to_string(command).unwrap();
+        let db = CompileCommands::parse(&format!(
+            r#"[{{"directory": "/w", "file": "/w/a.c", "command": {quoted}}}]"#
+        ))
+        .unwrap();
+        let (_, _, arguments) = db.entries[0].selector_fields();
+        assert_eq!(
+            arguments,
+            codehelion_helper_protocol::split_command(command)
+        );
+        assert_eq!(arguments, ["cc", "-DTEXT=a b", "-I/w/inc", "-c", "/w/a.c"]);
     }
 
     /// The database is where every unit's arguments come from, so two runs that

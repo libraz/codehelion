@@ -18,10 +18,11 @@
 //! configure step is a program the project ships. A tree with no database is a
 //! tree this helper cannot answer about, which it says rather than fixes.
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use codehelion_helper::CompileCommandSelector;
-use serde::Deserialize;
+use codehelion_helper_protocol::compile_commands::RecordedCommand;
 
 /// Where a database can sit relative to the directory a project is rooted at.
 ///
@@ -59,9 +60,20 @@ impl Entry {
 /// Compiler arguments that the helper may give to either frontend.
 ///
 /// Construction is private so an unchecked compilation-database argument
-/// cannot accidentally reach libclang or the subprocess. The parser is an
-/// allow list: an option added by a future compiler is unavailable until its
-/// operand shape and read-only behaviour are reviewed here.
+/// cannot accidentally reach libclang or the subprocess. What is forwarded is
+/// an allow list: an option added by a future compiler is not passed on until
+/// its operand shape and read-only behaviour are reviewed here.
+///
+/// An unrecognized argument is refused only where letting it through would
+/// change what is read rather than what is produced. A build's ordinary code
+/// generation, diagnostics and target selection — the `-f`, `-m`, `-O`, `-g`
+/// and `-W` families a generator writes by default — is dropped where it is not
+/// on the allow list, because dropping it costs at most a predefined macro
+/// while refusing it costs the whole translation unit. That is not a licence to
+/// drop anything: an option that names a file to read, loads code, re-expands a
+/// command line or redirects an output is refused by name, and an unrecognized
+/// word from no such family is refused because it may carry a separate operand
+/// that would be read as a second input file.
 pub(crate) struct ValidatedArguments(Vec<String>);
 
 impl ValidatedArguments {
@@ -72,10 +84,6 @@ impl ValidatedArguments {
             let argument = &arguments[index];
             if explicitly_forbidden(argument) {
                 return Err(format!("compiler argument is not allowed: {argument}"));
-            }
-            if discard_without_value(argument) {
-                index += 1;
-                continue;
             }
             if SAFE_FLAGS.contains(&argument.as_str()) {
                 accepted.push(argument.clone());
@@ -104,6 +112,10 @@ impl ValidatedArguments {
                 accepted.push(argument.clone());
                 accepted.push(value.clone());
                 index += 2;
+                continue;
+            }
+            if discard_without_value(argument) {
+                index += 1;
                 continue;
             }
             return Err(format!("compiler argument is not allowed: {argument}"));
@@ -158,8 +170,16 @@ impl ValidatedArguments {
 }
 
 /// Read-only switches whose meaning does not consume another argument.
+///
+/// Several of these decide nothing about the code that is generated and
+/// everything about the code that is read: `-fPIC` and its relatives define a
+/// predefined macro, and a header that asks about it declares different things
+/// with and without. Those are forwarded rather than dropped for that reason.
 const SAFE_FLAGS: &[&str] = &[
     "-ansi",
+    "-fPIC",
+    "-fPIE",
+    "-fasynchronous-unwind-tables",
     "-fblocks",
     "-fborland-extensions",
     "-fdeclspec",
@@ -171,6 +191,8 @@ const SAFE_FLAGS: &[&str] = &[
     "-fno-blocks",
     "-fno-builtin",
     "-fno-exceptions",
+    "-fno-pic",
+    "-fno-pie",
     "-fno-rtti",
     "-fno-signed-char",
     "-fno-threadsafe-statics",
@@ -180,13 +202,19 @@ const SAFE_FLAGS: &[&str] = &[
     "-fobjc-arc",
     "-fobjc-weak",
     "-fopenmp",
+    "-fpic",
+    "-fpie",
     "-frtti",
     "-fshort-enums",
     "-fshort-wchar",
     "-fsigned-char",
+    "-fstack-protector",
+    "-fstack-protector-all",
+    "-fstack-protector-strong",
     "-fsyntax-only",
     "-fthreadsafe-statics",
     "-funsigned-char",
+    "-funwind-tables",
     "-fuse-cxa-atexit",
     "-fwchar",
     "-m32",
@@ -256,7 +284,15 @@ fn joined_long_value(argument: &str) -> Option<&str> {
         "-mcpu=",
         "-mfloat-abi=",
         "-mfpu=",
+        // The deployment target, which decides which declarations an Apple SDK
+        // header makes available at all. Written by every Xcode build.
+        "-miphoneos-version-min=",
+        "-mios-simulator-version-min=",
+        "-mmacosx-version-min=",
+        "-mtargetos=",
         "-mtune=",
+        "-mtvos-version-min=",
+        "-mwatchos-version-min=",
         "-std=",
         "-stdlib=",
         "-target=",
@@ -275,43 +311,41 @@ fn require_nonempty(argument: &str, value: &str) -> Result<(), String> {
     }
 }
 
-/// Diagnostics and optimization controls that cannot affect the parsed
-/// program and are intentionally not forwarded to either frontend.
+/// Code generation and diagnostics controls that decide what a compiler
+/// produces rather than what it reads, and are therefore neither forwarded to a
+/// frontend nor grounds for refusing the translation unit.
+///
+/// The families named here are the ones a build generator writes by default —
+/// optimization, debug information, warnings, remarks, and the `-f` and `-m`
+/// switches whose meaning is code generation. None of them carries a separate
+/// operand in Clang, so dropping the word cannot leave a stray value behind to
+/// be read as an input file. The ones among them that do change what is read
+/// are on the allow list above and never reach here; the ones that would read
+/// or write a file of their own are refused before it.
 fn discard_without_value(argument: &str) -> bool {
-    argument == "-pedantic"
-        || argument == "-pedantic-errors"
-        || argument == "-Qunused-arguments"
-        || matches!(
-            argument,
-            "-O" | "-O0"
-                | "-O1"
-                | "-O2"
-                | "-O3"
-                | "-O4"
-                | "-Ofast"
-                | "-Og"
-                | "-Os"
-                | "-Oz"
-                | "-g"
-                | "-g0"
-                | "-g1"
-                | "-g2"
-                | "-g3"
-                | "-ggdb"
-                | "-ggdb0"
-                | "-ggdb1"
-                | "-ggdb2"
-                | "-ggdb3"
-                | "-gline-tables-only"
-        )
+    matches!(
+        argument,
+        "-pedantic" | "-pedantic-errors" | "-Qunused-arguments" | "-w"
+    ) || argument == "--coverage"
+        || argument == "-pipe"
+        || argument.starts_with("-O")
         || argument.starts_with("-R")
         || argument.starts_with("-W")
+        || argument.starts_with("-f")
+        || argument.starts_with("-g")
+        || argument.starts_with("-m")
 }
 
-/// Known command-line re-parsing and pass-through families are named here as
-/// a defence-in-depth boundary before broad diagnostic namespaces are dropped.
-/// Everything else still has to match the allow list and therefore fails
-/// closed without relying on this list being exhaustive.
+/// Options that make a compiler load code, read a file the source does not
+/// name, re-expand a command line, or write something.
+///
+/// Refused rather than dropped, and refused first. Dropping one of these would
+/// answer about a program the project does not build — a unit compiled against
+/// a prebuilt module carries declarations that arrive from nowhere else — and
+/// forwarding one would let a compilation database decide what this process
+/// runs and where it writes. This list is what makes the code-generation
+/// families below safe to drop wholesale: those families' file-bearing members
+/// are all named here.
 fn explicitly_forbidden(argument: &str) -> bool {
     argument.starts_with('@')
         || matches!(
@@ -320,15 +354,11 @@ fn explicitly_forbidden(argument: &str) -> bool {
                 | "--config-user-dir"
                 | "--config-system-dir"
                 | "-B"
-                | "-Xanalyzer"
-                | "-Xassembler"
-                | "-Xclang"
-                | "-Xlinker"
-                | "-Xpreprocessor"
                 | "-Wa"
                 | "-Wl"
                 | "-Wp"
                 | "-add-plugin"
+                | "-gcc-toolchain"
                 | "-load"
                 | "-mllvm"
                 | "-plugin"
@@ -337,17 +367,39 @@ fn explicitly_forbidden(argument: &str) -> bool {
             "--config=",
             "--config-user-dir=",
             "--config-system-dir=",
+            "--gcc-toolchain",
             "-B",
             "-Wa,",
             "-Wl,",
             "-Wp,",
-            "-Xanalyzer=",
-            "-Xassembler=",
-            "-Xclang=",
-            "-Xlinker=",
-            "-Xpreprocessor=",
+            // Every `-X` option hands its operand to a stage of the compiler
+            // unread, which is the whole of what makes it dangerous.
+            "-X",
+            "-fbuild-session-file",
+            "-fcrash-diagnostics-dir",
+            "-fcuda-include-gpubinary",
+            "-fembed-offload-object",
+            "-fimplicit-module",
+            "-fmemory-profile-use",
+            "-fmodule",
             "-fpass-plugin",
             "-fplugin",
+            "-fprebuilt-module-path",
+            "-fprofile-instr-use",
+            "-fprofile-list",
+            "-fprofile-remapping-file",
+            "-fprofile-sample-use",
+            "-fprofile-use",
+            "-fsanitize-blacklist",
+            "-fsanitize-coverage-allowlist",
+            "-fsanitize-coverage-ignorelist",
+            "-fsanitize-ignorelist",
+            "-fsanitize-system-ignorelist",
+            "-fsave-optimization-record",
+            "-fthinlto-index",
+            "-ftime-trace",
+            "-fxray-attr-list",
+            "-gcc-toolchain=",
         ]
         .into_iter()
         .any(|prefix| argument.starts_with(prefix))
@@ -365,36 +417,101 @@ pub(crate) struct Database {
     pub(crate) entries: Vec<Entry>,
 }
 
-impl Database {
+/// Where a search for a compilation database ended.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Location {
+    /// The database file itself.
+    file: PathBuf,
+    /// The directory it was found from, which the project spells its files
+    /// against.
+    root: PathBuf,
+}
+
+/// The compilation databases one helper process has looked for.
+///
+/// A helper answers about every unit of a project, and every unit of a project
+/// is governed by the same database. Searching and parsing it per request would
+/// make the cost of analysing a tree grow with the square of its size, all of
+/// it inside a process whose caller can see only how long it took.
+///
+/// Both halves of the answer are kept: where the search ended for a directory,
+/// and what reading that file produced. Failures are kept too, but as the
+/// sentence that explains them rather than as silence — a unit refused because
+/// its database is unreadable has to be told so, whether it is the first unit
+/// to ask or the thousandth.
+#[derive(Default)]
+pub(crate) struct Databases {
+    /// Where the search from one directory ended, or that it ended nowhere.
+    located: BTreeMap<PathBuf, Option<Location>>,
+    /// What reading each located file produced.
+    read: BTreeMap<Location, Result<Database, String>>,
+}
+
+impl Databases {
     /// The database governing `path`, found by walking up from it.
     ///
     /// `None` when there is none, which is a tree this helper has nothing to
     /// say about rather than a failure: a project that is entirely Rust has no
     /// compilation database and is not missing one.
-    pub(crate) fn nearest(path: &Path) -> Option<Self> {
+    pub(crate) fn nearest(&mut self, path: &Path) -> Option<&Database> {
         let start = if path.is_dir() { path } else { path.parent()? };
-        for ancestor in start.ancestors() {
-            for location in LOCATIONS {
-                let candidate = ancestor.join(location);
-                if !candidate.is_file() {
-                    continue;
-                }
-                // A database that is there and unreadable stops the search
-                // rather than letting it walk further up: the answer for this
-                // project is the file that was found, and finding somebody
-                // else's higher up would analyse this tree under another
-                // project's commands.
-                return Self::read(&candidate, ancestor).ok();
+        let location = self.locate(start)?;
+        let read = self
+            .read
+            .entry(location)
+            .or_insert_with_key(|location| Database::read(&location.file, &location.root));
+        match read {
+            Ok(database) => Some(database),
+            // Why it could not be read is said rather than folded into the
+            // same silence as a project that has no database at all: one of
+            // those is fixed by writing a database and the other by repairing
+            // the one that is there. It is said for every unit that asks,
+            // because each of them is refused for this reason.
+            Err(why) => {
+                crate::refused(why);
+                None
             }
         }
-        None
     }
 
+    /// Where the search from `start` ends, walking up only the first time.
+    fn locate(&mut self, start: &Path) -> Option<Location> {
+        if let Some(known) = self.located.get(start) {
+            return known.clone();
+        }
+        let found = search(start);
+        self.located.insert(start.to_path_buf(), found.clone());
+        found
+    }
+}
+
+/// Walk up from `start` for the database that governs it.
+///
+/// A database that is there stops the search rather than letting it walk
+/// further up, readable or not: the answer for this project is the file that
+/// was found, and finding somebody else's higher up would analyse this tree
+/// under another project's commands.
+fn search(start: &Path) -> Option<Location> {
+    for ancestor in start.ancestors() {
+        for location in LOCATIONS {
+            let candidate = ancestor.join(location);
+            if candidate.is_file() {
+                return Some(Location {
+                    file: candidate,
+                    root: ancestor.to_path_buf(),
+                });
+            }
+        }
+    }
+    None
+}
+
+impl Database {
     /// Read the database at `path`, spelling its answers against `root`.
     fn read(path: &Path, root: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|error| format!("reading {}: {error}", path.display()))?;
-        let raw: Vec<RawEntry> = serde_json::from_str(&text)
+        let raw: Vec<RecordedCommand> = serde_json::from_str(&text)
             .map_err(|error| format!("parsing {}: {error}", path.display()))?;
         Ok(Self {
             // Resolved for the same reason the entries are: the root is what
@@ -402,7 +519,7 @@ impl Database {
             // the caller reached another way is a set of relative paths that
             // point somewhere else.
             root: canonical(root),
-            entries: raw.iter().filter_map(RawEntry::entry).collect(),
+            entries: raw.iter().filter_map(Recorded::entry).collect(),
         })
     }
 
@@ -452,31 +569,23 @@ impl Database {
     }
 }
 
-/// One entry as the format writes it.
-#[derive(Debug, Deserialize)]
-struct RawEntry {
-    file: String,
-    directory: Option<String>,
-    /// The invocation already split, which is the spelling that needs no
-    /// guessing about quoting.
-    #[serde(default)]
-    arguments: Option<Vec<String>>,
-    /// The invocation as one line, which generators still write.
-    #[serde(default)]
-    command: Option<String>,
-}
-
-impl RawEntry {
+/// Reading one recorded entry into what this helper analyses with.
+///
+/// What an entry is made of is shared with the scanner, because the two sides
+/// name one entry by the words it records. What is made of those words is this
+/// helper's own: the scanner partitions builds with them and this program hands
+/// them to a compiler, which is why only one of the two has an allow list.
+trait Recorded {
     /// This entry in the shape the rest of the helper uses, or nothing when it
     /// carries no command to read.
+    fn entry(&self) -> Option<Entry>;
+}
+
+impl Recorded for RecordedCommand {
     fn entry(&self) -> Option<Entry> {
         let directory = self.directory.as_ref().map(PathBuf::from);
         let written = resolve(directory.as_deref(), Path::new(&self.file));
-        let words = match (&self.arguments, &self.command) {
-            (Some(arguments), _) => arguments.clone(),
-            (None, Some(command)) => split(command),
-            (None, None) => return None,
-        };
+        let words = self.words()?;
         // Resolved, because a generator run from a build directory writes its
         // sources as `../src/a.cpp` while a caller naming the same file names
         // it as it is. The two are one file and no plain string comparison
@@ -493,7 +602,7 @@ impl RawEntry {
                 directory: directory
                     .as_ref()
                     .map(|path| canonical(path).display().to_string()),
-                arguments: words.clone(),
+                arguments: words,
             },
         })
     }
@@ -540,11 +649,12 @@ pub(crate) fn lexical(path: &Path) -> PathBuf {
 }
 
 /// `path` made absolute against `directory` when it is not already.
+///
+/// The shared rule, because the scanner resolves the same paths to decide which
+/// build a unit belongs to: a relative path read one way here and another way
+/// there would analyse a unit under a command the scanner filed elsewhere.
 fn resolve(directory: Option<&Path>, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        return path.to_path_buf();
-    }
-    directory.map_or_else(|| path.to_path_buf(), |directory| directory.join(path))
+    codehelion_helper_protocol::compile_commands::resolve_in_directory(directory, path)
 }
 
 /// The recorded invocation as arguments a parser can be given.
@@ -562,7 +672,7 @@ fn parse_arguments(words: &[String], file: &Path, directory: Option<&Path>) -> V
     if let Some(directory) = directory {
         arguments.push(format!("-working-directory={}", directory.display()));
     }
-    let mut index = 1;
+    let mut index = compiler_words(words, file, directory);
     while index < words.len() {
         let word = words[index].as_str();
         index += 1;
@@ -579,6 +689,30 @@ fn parse_arguments(words: &[String], file: &Path, directory: Option<&Path>) -> V
         arguments.push(word.to_string());
     }
     arguments
+}
+
+/// How many leading words name the program that was run rather than how it
+/// read the unit.
+///
+/// Usually one. A project that interposes a compiler cache or a distributing
+/// wrapper records it in front of the compiler, and every word up to the first
+/// option or the unit's own source belongs to that prefix: taking only the
+/// first would leave the real compiler behind as a word no allow list can
+/// account for, and the whole unit would be refused for naming its own
+/// compiler.
+/// The prefix ends at the first word that is not a program name: an option, a
+/// response file, or the unit's own source. A response file ends it because it
+/// is a command line rather than a program, and skipping it as part of the
+/// prefix would let a database re-expand this helper's arguments unread.
+fn compiler_words(words: &[String], file: &Path, directory: Option<&Path>) -> usize {
+    words
+        .iter()
+        .position(|word| {
+            word.starts_with('-')
+                || word.starts_with('@')
+                || resolve(directory, Path::new(word.as_str())) == file
+        })
+        .unwrap_or(words.len())
 }
 
 /// Flags that say where output goes rather than how input is read.
@@ -608,45 +742,6 @@ fn definitions(words: &[String]) -> Vec<String> {
         }
     }
     found
-}
-
-/// Split a recorded command line into words.
-///
-/// Quoting and backslash escaping only. A database that writes its commands as
-/// one string has already lost whatever the shell would have done with them,
-/// and guessing at expansion here would invent arguments no compiler was given.
-fn split(command: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut started = false;
-    let mut quote = None;
-    let mut escaped = false;
-    for character in command.chars() {
-        if escaped {
-            word.push(character);
-            escaped = false;
-            continue;
-        }
-        match (character, quote) {
-            ('\\', None | Some('"')) => escaped = true,
-            ('"' | '\'', None) => {
-                quote = Some(character);
-                started = true;
-            }
-            (_, Some(open)) if character == open => quote = None,
-            (' ' | '\t', None) => {
-                if started || !word.is_empty() {
-                    words.push(std::mem::take(&mut word));
-                    started = false;
-                }
-            }
-            _ => word.push(character),
-        }
-    }
-    if started || !word.is_empty() {
-        words.push(word);
-    }
-    words
 }
 
 #[cfg(test)]

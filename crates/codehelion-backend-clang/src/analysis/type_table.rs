@@ -5,7 +5,7 @@ use codehelion_helper::ir::ResolvedType;
 
 use crate::types::category;
 
-use super::identity;
+use super::{Files, identity};
 
 /// The types one analysis mentions, each recorded once.
 ///
@@ -31,7 +31,7 @@ pub(super) struct TypeTable {
 
 impl TypeTable {
     /// The index of `ty`, recording it if this is the first mention.
-    pub(super) fn intern(&mut self, ty: Type<'_>) -> u32 {
+    pub(super) fn intern(&mut self, ty: Type<'_>, files: &mut Files<'_>) -> u32 {
         let canonical = ty.get_canonical_type();
         let display = canonical.get_display_name();
         if let Some(index) = self.at.get(&display) {
@@ -46,9 +46,11 @@ impl TypeTable {
             display,
             category: category(ty),
             arguments: Vec::new(),
-            definition: canonical.get_declaration().map(identity),
+            definition: canonical
+                .get_declaration()
+                .map(|declaration| identity(declaration, files)),
         });
-        let arguments = self.arguments(canonical);
+        let arguments = self.arguments(canonical, files);
         if let Some(recorded) = self.resolved.get_mut(index as usize) {
             recorded.arguments = arguments;
         }
@@ -57,18 +59,18 @@ impl TypeTable {
 
     /// The types `ty` is built from: what it points at, what it holds, what it
     /// was instantiated with.
-    fn arguments(&mut self, ty: Type<'_>) -> Vec<u32> {
+    fn arguments(&mut self, ty: Type<'_>, files: &mut Files<'_>) -> Vec<u32> {
         if let Some(pointee) = ty.get_pointee_type() {
-            return vec![self.intern(pointee)];
+            return vec![self.intern(pointee, files)];
         }
         if let Some(element) = ty.get_element_type() {
-            return vec![self.intern(element)];
+            return vec![self.intern(element, files)];
         }
         ty.get_template_argument_types()
             .unwrap_or_default()
             .into_iter()
             .flatten()
-            .map(|argument| self.intern(argument))
+            .map(|argument| self.intern(argument, files))
             .collect()
     }
 

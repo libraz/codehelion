@@ -440,6 +440,7 @@ dependencies = [
  "clang",
  "codehelion-fixtures",
  "codehelion-helper",
+ "codehelion-helper-protocol",
  "serde",
  "serde_json",
  "tempfile",
@@ -467,6 +468,7 @@ version = "0.4.0"
 dependencies = [
  "blake3",
  "codehelion-fixtures",
+ "codehelion-helper-protocol",
  "ignore",
  "serde",
  "serde_json",

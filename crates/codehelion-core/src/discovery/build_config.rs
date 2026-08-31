@@ -31,6 +31,15 @@
 //! keep their order too, because last-one-wins options like `-O1 -O2` are
 //! common and nothing here can tell which flags those are.
 //!
+//! # Paths
+//!
+//! A path an argument names is resolved against the directory the command was
+//! recorded to run in before it counts towards anything. A build generator
+//! writes `-Iinclude` from each of its build directories, and those are as many
+//! include directories as there are directories: taken as the word it is
+//! written as, one identity would cover compilations that read different
+//! headers under one name, which is the merge this file exists to prevent.
+//!
 //! # Encoding
 //!
 //! The canonical form is length-prefixed rather than delimiter-separated.
@@ -53,6 +62,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+
+use codehelion_helper_protocol::compile_commands::resolve_in_directory;
 
 /// Arguments dropped from a compilation before it becomes an identity.
 ///
@@ -184,9 +195,11 @@ impl CppBuild {
     /// The identity of one entry of a compilation database whose command ran
     /// from `directory`.
     ///
-    /// Relative input arguments are resolved from that directory before they
-    /// are compared with `file`, so translation-unit paths do not accidentally
-    /// become variant settings.
+    /// Every relative path in the command is resolved from that directory: the
+    /// input paths before they are compared with `file`, so translation-unit
+    /// paths do not accidentally become variant settings, and the paths the
+    /// compiler reads before they become part of the identity, so two commands
+    /// spelled alike from two directories stay the two builds they are.
     #[must_use]
     pub fn from_command_in_directory(
         arguments: &[String],
@@ -218,7 +231,12 @@ impl CppBuild {
                     index += usize::from(consumed);
                 }
                 Some(Separated::Include(path, consumed)) => {
-                    build.include_paths.push(path);
+                    build.include_paths.push(resolved_path(&path, directory));
+                    index += usize::from(consumed);
+                }
+                Some(Separated::Reads(option, path, consumed)) => {
+                    build.flags.push(option.to_string());
+                    build.flags.push(resolved_path(&path, directory));
                     index += usize::from(consumed);
                 }
                 None => build.flags.push(argument.to_string()),
@@ -254,16 +272,34 @@ impl CppBuild {
 }
 
 fn source_argument_matches(argument: &str, file: &Path, directory: Option<&Path>) -> bool {
-    let argument = Path::new(argument);
-    let resolved = if argument.is_relative() {
-        directory.map_or_else(
-            || argument.to_path_buf(),
-            |directory| directory.join(argument),
-        )
-    } else {
-        argument.to_path_buf()
-    };
+    let resolved = resolve_in_directory(directory, Path::new(argument));
     normalize_path(&resolved) == normalize_path(file)
+}
+
+/// A path an argument names, in the form it contributes to the identity.
+///
+/// Resolved against the directory the command ran in, then reduced to the one
+/// spelling the filesystem gives it so that two commands reaching one directory
+/// by two routes are one build. A path that names nothing on this machine keeps
+/// the spelling it was resolved to: two spellings of one absent directory then
+/// count as two builds, which costs recall where a merge would have cost the
+/// truth of the finding.
+fn resolved_path(path: &str, directory: Option<&Path>) -> String {
+    let path = Path::new(path);
+    // An option written with nothing after it names no path, and inventing the
+    // command's own directory for it would be an include directory the compiler
+    // was never given.
+    if path.as_os_str().is_empty() {
+        return String::new();
+    }
+    if path.is_relative() && directory.is_none() {
+        // Nothing here says what this is relative to, and this process's own
+        // working directory is not it.
+        return path.display().to_string();
+    }
+    normalize_path(&resolve_in_directory(directory, path))
+        .display()
+        .to_string()
 }
 
 fn normalize_path(path: &Path) -> std::path::PathBuf {
@@ -422,16 +458,42 @@ impl BuildConfiguration {
     }
 }
 
+/// Options whose value names a place the compiler reads, in the spelling that
+/// puts the value in the following word.
+///
+/// Here so that the value is resolved rather than kept as the word it was
+/// written as. `-I` is absent because an include directory has a field of its
+/// own, where its place in the search order is meaning.
+const READS_PATH: [&str; 9] = [
+    "--sysroot",
+    "-F",
+    "-idirafter",
+    "-iframework",
+    "-imacros",
+    "-include",
+    "-iquote",
+    "-isysroot",
+    "-isystem",
+];
+
 /// An argument that may carry its value in the next position.
 enum Separated {
     /// A macro setting, and whether the next argument was consumed.
     Macro(String, bool),
     /// An include directory, and whether the next argument was consumed.
     Include(String, bool),
+    /// An option naming a place the compiler reads: the option, the path it
+    /// names, and whether the next argument was consumed.
+    Reads(&'static str, String, bool),
 }
 
 /// Classifies `argument`, reading `next` only for the separated spellings
 /// (`-D NAME` beside `-DNAME`), which both compilers accept.
+///
+/// An option and its value come back apart however they were written, so the
+/// joined and separated spellings of one option are one identity — they are one
+/// compilation, and a build that differs from another only in where its
+/// generator put a space is not a second build.
 fn separated(argument: &str, next: Option<&str>) -> Option<Separated> {
     for prefix in ["-D", "-U"] {
         if let Some(rest) = argument.strip_prefix(prefix) {
@@ -449,7 +511,18 @@ fn separated(argument: &str, next: Option<&str>) -> Option<Separated> {
             Separated::Include(rest.to_string(), false)
         });
     }
-    None
+    if let Some(rest) = argument.strip_prefix("--sysroot=") {
+        return Some(Separated::Reads("--sysroot", rest.to_string(), false));
+    }
+    if let Some(rest) = argument.strip_prefix("-F")
+        && !rest.is_empty()
+    {
+        return Some(Separated::Reads("-F", rest.to_string(), false));
+    }
+    READS_PATH
+        .into_iter()
+        .find(|option| *option == argument)
+        .map(|option| Separated::Reads(option, next.unwrap_or_default().to_string(), true))
 }
 
 /// One entry per macro, keeping the last mention and sorting by name.
@@ -521,6 +594,18 @@ mod tests {
 
     fn cpp(arguments: &[&str], file: &str) -> CppBuild {
         CppBuild::from_command(&command(arguments), Path::new(file))
+    }
+
+    fn cpp_in(arguments: &[&str], file: &str, directory: &str) -> CppBuild {
+        CppBuild::from_command_in_directory(
+            &command(arguments),
+            Path::new(file),
+            Some(Path::new(directory)),
+        )
+    }
+
+    fn spelled(directory: &str, path: &str) -> String {
+        Path::new(directory).join(path).display().to_string()
     }
 
     #[test]
@@ -629,6 +714,97 @@ mod tests {
         let local_first = cpp(&["cc", "-I/local", "-I/vendor", "/w/a.c"], "/w/a.c");
         assert_ne!(vendor_first, local_first);
         assert_eq!(vendor_first.include_paths, vec!["/vendor", "/local"]);
+    }
+
+    /// A generator writes one command per build directory, and spells the
+    /// include path relative to the directory it runs in. Counted as the word
+    /// it is written as, two compilations that reach different headers under
+    /// one name become one identity, and every clone reported from it is a
+    /// claim about code that was not compiled the same way.
+    #[test]
+    fn one_relative_include_from_two_directories_is_two_builds() {
+        let unit = ["clang++", "-Iinclude", "-c", "a.cpp"];
+        let one = cpp_in(&unit, "/w/one/a.cpp", "/w/one");
+        let other = cpp_in(&unit, "/w/two/a.cpp", "/w/two");
+        assert_eq!(one.include_paths, [spelled("/w/one", "include")]);
+        assert_eq!(other.include_paths, [spelled("/w/two", "include")]);
+        assert_ne!(
+            BuildConfiguration::Cpp(Box::new(one)).fingerprint(),
+            BuildConfiguration::Cpp(Box::new(other)).fingerprint()
+        );
+
+        // And the directory splits nothing on its own: one command run twice
+        // from one place is one build.
+        assert_eq!(
+            cpp_in(&unit, "/w/one/a.cpp", "/w/one"),
+            cpp_in(&unit, "/w/one/a.cpp", "/w/one")
+        );
+    }
+
+    /// The rest of the options that name somewhere to read from. A sysroot or a
+    /// system include directory reached from two build directories is two sets
+    /// of headers, exactly as an `-I` is.
+    #[test]
+    fn a_relative_path_in_any_reading_option_is_resolved_where_the_command_ran() {
+        for option in ["--sysroot", "-isystem", "-iquote", "-idirafter", "-include"] {
+            let unit = ["cc", option, "sdk/thing", "-c", "a.c"];
+            let one = cpp_in(&unit, "/w/one/a.c", "/w/one");
+            let other = cpp_in(&unit, "/w/two/a.c", "/w/two");
+            assert_eq!(
+                one.flags,
+                [option.to_string(), spelled("/w/one", "sdk/thing")],
+                "{option}"
+            );
+            assert_ne!(one, other, "{option}");
+        }
+    }
+
+    /// One compilation written two ways. A build that differs from another only
+    /// in where its generator put a space is not a second build.
+    #[test]
+    fn the_joined_and_separated_spellings_of_a_path_option_are_one_build() {
+        let joined = cpp_in(&["cc", "--sysroot=/sdk", "-F/sdk/f", "a.c"], "/w/a.c", "/w");
+        let apart = cpp_in(
+            &["cc", "--sysroot", "/sdk", "-F", "/sdk/f", "a.c"],
+            "/w/a.c",
+            "/w",
+        );
+        assert_eq!(joined, apart);
+    }
+
+    /// Two routes to one directory are one include path, which is what asking
+    /// the filesystem is for: the build reads the same headers either way.
+    #[test]
+    fn two_routes_to_one_include_directory_are_one_build() {
+        let project = tempfile::tempdir().unwrap();
+        let include = project.path().join("include");
+        std::fs::create_dir(&include).unwrap();
+        let build_directory = project.path().join("build");
+        std::fs::create_dir(&build_directory).unwrap();
+        let unit = project.path().join("a.c");
+
+        let relative = CppBuild::from_command_in_directory(
+            &command(&["cc", "-I../include"]),
+            &unit,
+            Some(&build_directory),
+        );
+        let joined = format!("-I{}", include.display());
+        let absolute = CppBuild::from_command_in_directory(
+            &command(&["cc", &joined]),
+            &unit,
+            Some(&build_directory),
+        );
+        assert_eq!(relative, absolute);
+    }
+
+    /// Nothing says what this is relative to, and this process's own directory
+    /// is not it: resolving it there would file the build under a path no
+    /// compiler read.
+    #[test]
+    fn a_relative_path_with_no_directory_stands_as_it_was_written() {
+        let build = cpp(&["cc", "-Iinclude", "-isystem", "sdk", "/w/a.c"], "/w/a.c");
+        assert_eq!(build.include_paths, ["include"]);
+        assert_eq!(build.flags, ["-isystem", "sdk"]);
     }
 
     /// A delimiter-joined encoding reports these two as the same build. The
