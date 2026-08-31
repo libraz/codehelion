@@ -1,6 +1,6 @@
 //! Human-readable and CSV artifact report rendering.
 
-use super::correlation::RefactorSavingsAssumption;
+use super::correlation::{AttributionBasis, RefactorSavingsAssumption};
 use super::model::{ArtifactComparisonReport, ArtifactReport, SourceMapResolutionStatus};
 use super::{
     ARTIFACT_CSV_COLUMNS, Context, EstimatedRefactorSavingsBytes, Result, VerifiedSavingsBytes,
@@ -145,12 +145,13 @@ pub(super) fn render_text(
             for attribution in &correlation.clone_group_attributions {
                 writeln!(
                     out,
-                    "  {} ({}): {} / {} noncanonical members attributed, duplicated bytes: {}",
+                    "  {} ({}): {} / {} noncanonical members attributed, observed duplicated bytes: {}, line-proportional duplicated bytes: {} (estimated)",
                     attribution.clone_group_fingerprint,
                     attribution.source_build_variant_fingerprint,
                     attribution.attributed_noncanonical_members,
                     attribution.members.saturating_sub(1),
                     optional_bytes(attribution.duplicated_bytes),
+                    optional_bytes(attribution.estimated_duplicated_bytes),
                 )?;
             }
         }
@@ -159,12 +160,13 @@ pub(super) fn render_text(
             for estimate in &correlation.estimated_refactor_savings {
                 writeln!(
                     out,
-                    "  {} (source {}, artifact {}): {} estimated bytes from {} attributed duplicate bytes; mapping {:?}, clone {:.3}, model {:?}, savings {:?}",
+                    "  {} (source {}, artifact {}): {} estimated bytes from {} {} duplicate bytes; mapping {:?}, clone {:.3}, model {:?}, savings {:?}",
                     estimate.clone_group_fingerprint,
                     estimate.source_build_variant_fingerprint,
                     estimate.artifact_build_variant_fingerprint,
                     estimate.estimated_refactor_savings_bytes.0,
                     estimate.duplicated_bytes,
+                    attribution_basis_label(estimate.duplicated_bytes_basis),
                     estimate.mapping_confidence,
                     estimate.clone_confidence,
                     estimate.model_confidence,
@@ -435,6 +437,22 @@ fn render_groups(
     Ok(())
 }
 
+/// Name the evidence behind one attributed byte count wherever it is printed.
+const fn attribution_basis_label(basis: AttributionBasis) -> &'static str {
+    match basis {
+        AttributionBasis::Observed => "observed attributed",
+        AttributionBasis::LineProportional => "line-proportional estimated",
+    }
+}
+
+/// The CSV spelling of the same evidence class.
+const fn attribution_basis_field(basis: AttributionBasis) -> &'static str {
+    match basis {
+        AttributionBasis::Observed => "observed",
+        AttributionBasis::LineProportional => "line_proportional_estimate",
+    }
+}
+
 fn refactor_savings_assumption_text(assumption: &RefactorSavingsAssumption) -> String {
     match assumption {
         RefactorSavingsAssumption::SharedImplementationRetainsCopies { copies } => {
@@ -448,6 +466,9 @@ fn refactor_savings_assumption_text(assumption: &RefactorSavingsAssumption) -> S
         }
         RefactorSavingsAssumption::LinkerIcfOutcomeUnknown => {
             "linker ICF outcome is unknown".to_owned()
+        }
+        RefactorSavingsAssumption::AttributionIsLineProportional => {
+            "at least one member's bytes were divided across its symbol's source lines rather than observed".to_owned()
         }
     }
 }
@@ -468,7 +489,7 @@ fn optional_verified_savings(value: Option<VerifiedSavingsBytes>) -> String {
 pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Result<()> {
     writeln!(
         out,
-        "record_type,path,format,kind,fingerprint,name,offset,size,duplicated_bytes,retained_bytes,dead_code_status,observed_bytes,source_run,mappings,mapped_symbols,unmapped_symbols,upper_bound_savings_bytes,estimated_refactor_savings_bytes,verified_savings_bytes,origin_build_variant_fingerprint,instantiations,translation_units,source_build_variant_fingerprint,artifact_build_variant_fingerprint,mapping_confidence,clone_confidence,model_confidence,savings_confidence,model_schema_version,estimate_assumptions_json,section,executable,module,duplicated_bytes_normalized"
+        "record_type,path,format,kind,fingerprint,name,offset,size,duplicated_bytes,retained_bytes,dead_code_status,observed_bytes,source_run,mappings,mapped_symbols,unmapped_symbols,upper_bound_savings_bytes,estimated_refactor_savings_bytes,verified_savings_bytes,origin_build_variant_fingerprint,instantiations,translation_units,source_build_variant_fingerprint,artifact_build_variant_fingerprint,mapping_confidence,clone_confidence,model_confidence,savings_confidence,model_schema_version,estimate_assumptions_json,section,executable,module,duplicated_bytes_normalized,estimated_duplicated_bytes,attribution_basis"
     )?;
     let correlation = report.correlation.as_ref();
     let mut summary = artifact_csv_row();
@@ -620,6 +641,40 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
         }
     }
     if let Some(correlation) = correlation {
+        // Observed and line-proportional bytes occupy separate columns, so a
+        // reader taking either one by position never receives the other kind
+        // of number.
+        for attribution in &correlation.clone_group_attributions {
+            let mut row = artifact_csv_row();
+            "clone-group-attribution".clone_into(&mut row[0]);
+            row[1] = csv(&report.path);
+            row[2] = report.format.to_string();
+            "clone-group-attribution".clone_into(&mut row[3]);
+            row[4].clone_from(&attribution.clone_group_fingerprint);
+            row[8] = attribution
+                .duplicated_bytes
+                .map_or_else(String::new, |bytes| bytes.to_string());
+            row[20] = attribution.attributed_noncanonical_members.to_string();
+            row[22].clone_from(&attribution.source_build_variant_fingerprint);
+            row[25] = format!("{:.3}", attribution.clone_confidence);
+            row[34] = attribution
+                .estimated_duplicated_bytes
+                .map_or_else(String::new, |bytes| bytes.to_string());
+            // A group whose members were not all attributed carries no byte
+            // total at all, so it names no evidence class either.
+            row[35] = attribution
+                .duplicated_bytes
+                .map(|_| AttributionBasis::Observed)
+                .or_else(|| {
+                    attribution
+                        .estimated_duplicated_bytes
+                        .map(|_| AttributionBasis::LineProportional)
+                })
+                .map_or_else(String::new, |basis| {
+                    attribution_basis_field(basis).to_owned()
+                });
+            write_artifact_csv_row(out, &row)?;
+        }
         for estimate in &correlation.estimated_refactor_savings {
             let mut row = artifact_csv_row();
             "clone-group-savings".clone_into(&mut row[0]);
@@ -627,7 +682,13 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
             row[2] = report.format.to_string();
             "refactor-estimate".clone_into(&mut row[3]);
             row[4].clone_from(&estimate.clone_group_fingerprint);
-            row[8] = estimate.duplicated_bytes.to_string();
+            let attributed = estimate.duplicated_bytes.to_string();
+            if estimate.duplicated_bytes_basis.is_estimated() {
+                row[34] = attributed;
+            } else {
+                row[8] = attributed;
+            }
+            attribution_basis_field(estimate.duplicated_bytes_basis).clone_into(&mut row[35]);
             row[17] = estimate.estimated_refactor_savings_bytes.0.to_string();
             row[22].clone_from(&estimate.source_build_variant_fingerprint);
             row[23].clone_from(&estimate.artifact_build_variant_fingerprint);

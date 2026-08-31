@@ -12,6 +12,7 @@ use super::{
     SourceResolvedCall, SourceResolvedSymbol, SourceUnitIdentity, Store, bail, fingerprint_hex, fs,
     metrics,
 };
+use codehelion_store::artifact::ArtifactAnalysisMappingConfidence;
 
 /// Mapping rows established by one explicit source-run correlation request.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -23,6 +24,12 @@ pub(super) struct CorrelationRows {
 }
 
 /// Correlation outcome for an explicit source scan.
+///
+/// The symbol counts and byte sums are all taken over the artifact's
+/// symbol-table entries, so `mapped_symbols + unmapped_symbols` equals
+/// `artifact_symbols` and the two byte sums add up to the observed symbol
+/// bytes. Persisted unmapped rows are deduplicated by stable identity instead,
+/// which is a property of the storage schema rather than of this coverage.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ArtifactCorrelationReport {
     pub(super) source_run: i64,
@@ -55,19 +62,34 @@ pub(super) struct CloneGroupAttributionReport {
     pub(super) members: usize,
     /// Noncanonical members with at least one exact, unambiguous byte split.
     pub(super) attributed_noncanonical_members: usize,
-    /// Observed bytes attributable to all noncanonical members, when complete.
+    /// Observed bytes attributable to all noncanonical members, when every one
+    /// of those members covers its whole artifact symbol.
     ///
     /// This is an attribution observation, not an estimated refactoring saving.
+    /// A member whose share was divided across a symbol's source lines carries
+    /// no observation of its own bytes, so one such member leaves this absent
+    /// and moves the group's total to [`Self::estimated_duplicated_bytes`].
     pub(super) duplicated_bytes: Option<u64>,
+    /// Bytes attributed to all noncanonical members when at least one share was
+    /// divided by source lines.
+    ///
+    /// Line-proportional division is a construction, not a measurement: the
+    /// lines say which fragment wrote a symbol, never how many of its bytes
+    /// each line became. The value is therefore reported apart from the
+    /// observed bucket and never added to it.
+    pub(super) estimated_duplicated_bytes: Option<u64>,
     /// Source clone score kept separate from mapping and model confidence.
     pub(super) clone_confidence: f64,
 }
 
 /// Versioned, deliberately conservative refactoring-cost assumptions.
+///
+/// Every coefficient here is one the estimate arithmetic reads. A coefficient
+/// the report states but never spends would let an edit move the stated model
+/// without moving the number derived from it.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct RefactorSavingsModel {
     pub(super) schema_version: &'static str,
-    pub(super) retained_copies: u64,
     pub(super) call_overhead_per_replaced_member_bytes: i64,
     pub(super) assumptions: Vec<RefactorSavingsAssumption>,
     pub(super) confidence: EvidenceConfidence,
@@ -78,28 +100,34 @@ pub(super) struct RefactorSavingsModel {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RefactorSavingsModelSpec {
     pub(super) schema_version: &'static str,
-    pub(super) retained_copies: u64,
     pub(super) call_overhead_per_replaced_member_bytes: i64,
     pub(super) assumptions: &'static [RefactorSavingsAssumptionSpec],
     pub(super) confidence: EvidenceConfidence,
 }
 
 /// Serializable assumptions have a compact static-table counterpart.
+///
+/// A variant that restates a model coefficient carries no value of its own:
+/// it is filled from the coefficient the estimate spends, so the two cannot be
+/// edited apart.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum RefactorSavingsAssumptionSpec {
-    SharedImplementationRetainsCopies { copies: u64 },
-    CallOverheadPerReplacedMember { bytes: i64 },
+    /// The estimate is built from the bytes of the noncanonical members alone,
+    /// so this many implementations survive the merge it describes.
+    SharedImplementationRetainsCopies {
+        copies: u64,
+    },
+    CallOverheadPerReplacedMember,
     InliningOutcomeUnknown,
     LinkerIcfOutcomeUnknown,
 }
 
 const REFACTOR_SAVINGS_MODELS: &[RefactorSavingsModelSpec] = &[RefactorSavingsModelSpec {
     schema_version: "refactor-savings-model-v1",
-    retained_copies: 1,
     call_overhead_per_replaced_member_bytes: 0,
     assumptions: &[
         RefactorSavingsAssumptionSpec::SharedImplementationRetainsCopies { copies: 1 },
-        RefactorSavingsAssumptionSpec::CallOverheadPerReplacedMember { bytes: 0 },
+        RefactorSavingsAssumptionSpec::CallOverheadPerReplacedMember,
         RefactorSavingsAssumptionSpec::InliningOutcomeUnknown,
         RefactorSavingsAssumptionSpec::LinkerIcfOutcomeUnknown,
     ],
@@ -110,10 +138,38 @@ const REFACTOR_SAVINGS_MODELS: &[RefactorSavingsModelSpec] = &[RefactorSavingsMo
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum RefactorSavingsAssumption {
-    SharedImplementationRetainsCopies { copies: u64 },
-    CallOverheadPerReplacedMember { bytes: i64 },
+    SharedImplementationRetainsCopies {
+        copies: u64,
+    },
+    CallOverheadPerReplacedMember {
+        bytes: i64,
+    },
     InliningOutcomeUnknown,
     LinkerIcfOutcomeUnknown,
+    /// At least one member's bytes were divided across the source lines of its
+    /// artifact symbol rather than observed for the member alone.
+    AttributionIsLineProportional,
+}
+
+/// Which evidence established the bytes one estimate was derived from.
+///
+/// The number alone cannot say this, and the two are not interchangeable: one
+/// is a measurement of a member's own bytes, the other a division of a symbol's
+/// bytes across its source lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum AttributionBasis {
+    /// Every contributing member covered its whole artifact symbol.
+    Observed,
+    /// At least one member's share was divided across its symbol's source lines.
+    LineProportional,
+}
+
+impl AttributionBasis {
+    /// Whether these bytes were divided rather than observed.
+    pub(super) const fn is_estimated(self) -> bool {
+        matches!(self, Self::LineProportional)
+    }
 }
 
 /// A source/artifact-correlated refactoring estimate for one clone group.
@@ -123,6 +179,9 @@ pub(super) struct CloneGroupSavingsReport {
     pub(super) source_build_variant_fingerprint: String,
     pub(super) artifact_build_variant_fingerprint: String,
     pub(super) duplicated_bytes: u64,
+    /// Evidence class of [`Self::duplicated_bytes`], so a reader never has to
+    /// infer from the model assumptions whether the number was measured.
+    pub(super) duplicated_bytes_basis: AttributionBasis,
     pub(super) estimated_refactor_savings_bytes: EstimatedRefactorSavingsBytes,
     pub(super) mapping_confidence: EvidenceConfidence,
     pub(super) clone_confidence: f64,
@@ -263,33 +322,34 @@ impl ArtifactCorrelationReport {
             .iter()
             .map(|symbol| symbol.size)
             .sum::<u64>();
-        let mapped_symbols = artifact
-            .symbols
-            .iter()
-            .filter(|symbol| mapped_fingerprints.contains(&symbol.fingerprint.as_bytes()))
-            .count();
-        let mapped_symbol_bytes = artifact
-            .symbols
-            .iter()
-            .filter(|symbol| mapped_fingerprints.contains(&symbol.fingerprint.as_bytes()))
-            .map(|symbol| symbol.size)
-            .sum::<u64>();
-        let unmapped_fingerprints = rows
+        // Coverage counts one population: the artifact's symbol-table entries.
+        // Storage records one unmapped outcome per stable identity, but that
+        // deduplication belongs to the write path; letting it reach these
+        // fields would report a mapped and an unmapped count that do not add
+        // up to the symbols the binary actually contains.
+        let unmapped_reasons = rows
             .unmapped_symbols
             .iter()
-            .map(|unmapped| unmapped.artifact_symbol_fingerprint)
-            .collect::<BTreeSet<_>>();
-        let unmapped_symbol_bytes = artifact
-            .symbols
-            .iter()
-            .filter(|symbol| unmapped_fingerprints.contains(&symbol.fingerprint.as_bytes()))
-            .map(|symbol| symbol.size)
-            .sum::<u64>();
+            .map(|unmapped| (unmapped.artifact_symbol_fingerprint, unmapped.reason))
+            .collect::<BTreeMap<_, _>>();
+        let mut mapped_symbols = 0;
+        let mut mapped_symbol_bytes = 0_u64;
+        let mut unmapped_symbols = 0;
+        let mut unmapped_symbol_bytes = 0_u64;
         let mut unmapped_symbol_reasons = BTreeMap::new();
-        for unmapped in &rows.unmapped_symbols {
-            *unmapped_symbol_reasons
-                .entry(unmapped_reason_label(unmapped.reason).to_owned())
-                .or_default() += 1;
+        for symbol in &artifact.symbols {
+            if mapped_fingerprints.contains(&symbol.fingerprint.as_bytes()) {
+                mapped_symbols += 1;
+                mapped_symbol_bytes = mapped_symbol_bytes.saturating_add(symbol.size);
+                continue;
+            }
+            unmapped_symbols += 1;
+            unmapped_symbol_bytes = unmapped_symbol_bytes.saturating_add(symbol.size);
+            if let Some(reason) = unmapped_reasons.get(&symbol.fingerprint.as_bytes()) {
+                *unmapped_symbol_reasons
+                    .entry(unmapped_reason_label(*reason).to_owned())
+                    .or_default() += 1;
+            }
         }
         let source_entities = rows
             .mappings
@@ -468,7 +528,7 @@ impl ArtifactCorrelationReport {
             mapping_coverage: ratio(mapped_symbols, artifact_symbols),
             mapped_symbol_bytes,
             mapped_symbol_bytes_ratio: ratio_u64(mapped_symbol_bytes, total_symbol_bytes),
-            unmapped_symbols: rows.unmapped_symbols.len(),
+            unmapped_symbols,
             unmapped_symbol_bytes,
             unmapped_symbol_reasons,
             source_entities,
@@ -513,30 +573,37 @@ pub(super) fn clone_group_attributions(rows: &CorrelationRows) -> Vec<CloneGroup
                 .filter(|member| !member.is_canonical)
                 .map(|member| member.finding_id)
                 .collect::<BTreeSet<_>>();
-            let mut bytes_by_member: BTreeMap<[u8; 16], u64> = BTreeMap::new();
-            for mapping in &rows.mappings {
-                if mapping.source_kind != ArtifactAnalysisSourceKind::Fragment
-                    || mapping.source_build_variant_fingerprint != source_variant
-                    || !noncanonical.contains(&mapping.source_instance_fingerprint)
-                {
-                    continue;
-                }
+            let mut bytes_by_member: BTreeMap<[u8; 16], MemberAttribution> = BTreeMap::new();
+            for mapping in group_mappings(rows, source_variant, &noncanonical) {
                 if let Some(bytes) = mapping.attributed_bytes {
-                    let total = bytes_by_member
+                    let member = bytes_by_member
                         .entry(mapping.source_instance_fingerprint)
                         .or_default();
-                    *total = total.saturating_add(bytes);
+                    member.total = member.total.saturating_add(bytes);
+                    member.whole_symbol_only &= mapping
+                        .evidence
+                        .attribution_is_whole_symbol()
+                        .unwrap_or(false);
                 }
             }
             let attributed_noncanonical_members = bytes_by_member.len();
-            let duplicated_bytes = (attributed_noncanonical_members == noncanonical.len())
-                .then(|| bytes_by_member.values().copied().sum());
+            let complete = attributed_noncanonical_members == noncanonical.len();
+            let total = || {
+                bytes_by_member
+                    .values()
+                    .map(|member| member.total)
+                    .fold(0_u64, u64::saturating_add)
+            };
+            let whole_symbol_only = bytes_by_member
+                .values()
+                .all(|member| member.whole_symbol_only);
             CloneGroupAttributionReport {
                 clone_group_fingerprint: fingerprint_hex(group_fingerprint),
                 source_build_variant_fingerprint: fingerprint_hex(source_variant),
                 members: members.len(),
                 attributed_noncanonical_members,
-                duplicated_bytes,
+                duplicated_bytes: (complete && whole_symbol_only).then(total),
+                estimated_duplicated_bytes: (complete && !whole_symbol_only).then(total),
                 clone_confidence: members
                     .first()
                     .map_or(0.0, |member| member.clone_confidence),
@@ -545,20 +612,48 @@ pub(super) fn clone_group_attributions(rows: &CorrelationRows) -> Vec<CloneGroup
         .collect()
 }
 
+/// Bytes attributed to one noncanonical member, with the evidence class that
+/// established them.
+#[derive(Debug)]
+struct MemberAttribution {
+    total: u64,
+    whole_symbol_only: bool,
+}
+
+impl Default for MemberAttribution {
+    fn default() -> Self {
+        Self {
+            total: 0,
+            whole_symbol_only: true,
+        }
+    }
+}
+
+/// Mappings whose attributed bytes belong to one group under one source variant.
+fn group_mappings<'rows>(
+    rows: &'rows CorrelationRows,
+    source_variant: [u8; 16],
+    noncanonical: &'rows BTreeSet<[u8; 16]>,
+) -> impl Iterator<Item = &'rows ArtifactAnalysisMapping> + Clone {
+    rows.mappings.iter().filter(move |mapping| {
+        mapping.source_kind == ArtifactAnalysisSourceKind::Fragment
+            && mapping.source_build_variant_fingerprint == source_variant
+            && noncanonical.contains(&mapping.source_instance_fingerprint)
+    })
+}
+
 pub(super) fn refactor_savings_model() -> RefactorSavingsModel {
     let spec = REFACTOR_SAVINGS_MODELS
         .first()
         .copied()
         .unwrap_or(RefactorSavingsModelSpec {
             schema_version: "refactor-savings-model-unavailable",
-            retained_copies: 0,
             call_overhead_per_replaced_member_bytes: 0,
             assumptions: &[],
             confidence: EvidenceConfidence::Unavailable,
         });
     RefactorSavingsModel {
         schema_version: spec.schema_version,
-        retained_copies: spec.retained_copies,
         call_overhead_per_replaced_member_bytes: spec.call_overhead_per_replaced_member_bytes,
         assumptions: spec
             .assumptions
@@ -567,8 +662,10 @@ pub(super) fn refactor_savings_model() -> RefactorSavingsModel {
                 RefactorSavingsAssumptionSpec::SharedImplementationRetainsCopies { copies } => {
                     RefactorSavingsAssumption::SharedImplementationRetainsCopies { copies: *copies }
                 }
-                RefactorSavingsAssumptionSpec::CallOverheadPerReplacedMember { bytes } => {
-                    RefactorSavingsAssumption::CallOverheadPerReplacedMember { bytes: *bytes }
+                RefactorSavingsAssumptionSpec::CallOverheadPerReplacedMember => {
+                    RefactorSavingsAssumption::CallOverheadPerReplacedMember {
+                        bytes: spec.call_overhead_per_replaced_member_bytes,
+                    }
                 }
                 RefactorSavingsAssumptionSpec::InliningOutcomeUnknown => {
                     RefactorSavingsAssumption::InliningOutcomeUnknown
@@ -587,7 +684,14 @@ pub(super) fn clone_group_savings(rows: &CorrelationRows) -> Vec<CloneGroupSavin
     clone_group_attributions(rows)
         .into_iter()
         .filter_map(|attribution| {
-            let duplicated_bytes = attribution.duplicated_bytes?;
+            let basis = if attribution.duplicated_bytes.is_some() {
+                AttributionBasis::Observed
+            } else {
+                AttributionBasis::LineProportional
+            };
+            let duplicated_bytes = attribution
+                .duplicated_bytes
+                .or(attribution.estimated_duplicated_bytes)?;
             let group_fingerprint = hex_fingerprint(&attribution.clone_group_fingerprint)?;
             let source_variant = hex_fingerprint(&attribution.source_build_variant_fingerprint)?;
             let members = rows
@@ -600,15 +704,10 @@ pub(super) fn clone_group_savings(rows: &CorrelationRows) -> Vec<CloneGroupSavin
                 })
                 .map(|fragment| fragment.finding_id)
                 .collect::<BTreeSet<_>>();
-            let artifact_variants = rows
-                .mappings
-                .iter()
-                .filter(|mapping| {
-                    mapping.source_kind == ArtifactAnalysisSourceKind::Fragment
-                        && mapping.source_build_variant_fingerprint == source_variant
-                        && members.contains(&mapping.source_instance_fingerprint)
-                        && mapping.attributed_bytes.is_some()
-                })
+            let contributing = group_mappings(rows, source_variant, &members)
+                .filter(|mapping| mapping.attributed_bytes.is_some());
+            let artifact_variants = contributing
+                .clone()
                 .map(|mapping| mapping.build_variant_fingerprint)
                 .collect::<BTreeSet<_>>();
             let mut artifact_variants = artifact_variants.into_iter();
@@ -616,24 +715,68 @@ pub(super) fn clone_group_savings(rows: &CorrelationRows) -> Vec<CloneGroupSavin
             if artifact_variants.next().is_some() {
                 return None;
             }
+            let mapping_confidence = weakest_mapping_confidence(contributing)?;
             let estimated_refactor_savings_bytes = EstimatedRefactorSavingsBytes(
                 estimate_refactor_savings_bytes(duplicated_bytes, members.len(), &model),
             );
+            let mut assumptions = model.assumptions.clone();
+            if basis.is_estimated() {
+                assumptions.push(RefactorSavingsAssumption::AttributionIsLineProportional);
+            }
             Some(CloneGroupSavingsReport {
                 clone_group_fingerprint: attribution.clone_group_fingerprint,
                 source_build_variant_fingerprint: attribution.source_build_variant_fingerprint,
                 artifact_build_variant_fingerprint: fingerprint_hex(artifact_variant),
                 duplicated_bytes,
+                duplicated_bytes_basis: basis,
                 estimated_refactor_savings_bytes,
-                mapping_confidence: EvidenceConfidence::High,
+                mapping_confidence,
                 clone_confidence: attribution.clone_confidence,
                 model_confidence: model.confidence,
                 savings_confidence: model.confidence,
-                assumptions: model.assumptions.clone(),
+                assumptions,
                 model_schema_version: model.schema_version,
             })
         })
         .collect()
+}
+
+/// Grade one savings row by the weakest mapping that contributed bytes to it.
+///
+/// A row that reports the strongest grade its correlation reached would say
+/// the same thing for a group whose bytes were split exactly and for one whose
+/// bytes were divided by source lines, and the two are not the same evidence.
+/// A contributing mapping that is ambiguous or unusable removes the row: no
+/// grade describes bytes attributed to a candidate that was never chosen.
+fn weakest_mapping_confidence<'rows>(
+    mappings: impl Iterator<Item = &'rows ArtifactAnalysisMapping>,
+) -> Option<EvidenceConfidence> {
+    let mut weakest: Option<EvidenceConfidence> = None;
+    for mapping in mappings {
+        let confidence = match mapping.evidence.confidence()? {
+            ArtifactAnalysisMappingConfidence::Exact => EvidenceConfidence::High,
+            ArtifactAnalysisMappingConfidence::Strong => EvidenceConfidence::Medium,
+            ArtifactAnalysisMappingConfidence::Weak => EvidenceConfidence::Low,
+            ArtifactAnalysisMappingConfidence::Ambiguous => return None,
+        };
+        weakest = Some(match weakest {
+            Some(current) if confidence_strength(current) <= confidence_strength(confidence) => {
+                current
+            }
+            _ => confidence,
+        });
+    }
+    weakest
+}
+
+/// Rank of one confidence grade, highest grade last.
+const fn confidence_strength(confidence: EvidenceConfidence) -> u8 {
+    match confidence {
+        EvidenceConfidence::Unavailable => 0,
+        EvidenceConfidence::Low => 1,
+        EvidenceConfidence::Medium => 2,
+        EvidenceConfidence::High => 3,
+    }
 }
 
 pub(super) fn estimate_refactor_savings_bytes(
@@ -786,7 +929,7 @@ const fn unmapped_source_reason_label(
     }
 }
 
-const fn source_kind_order(kind: ArtifactAnalysisSourceKind) -> u8 {
+pub(in crate::artifact) const fn source_kind_order(kind: ArtifactAnalysisSourceKind) -> u8 {
     match kind {
         ArtifactAnalysisSourceKind::Unit => 0,
         ArtifactAnalysisSourceKind::Fragment => 1,
@@ -825,3 +968,58 @@ use mapping::generic_origin_fingerprint;
 pub(super) use mapping::{correlate_source_run, read_linker_map};
 
 pub(in crate::artifact) mod matching;
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// A model row states the coefficients its estimate spends, and only those.
+    ///
+    /// A stated coefficient the arithmetic never reads would move on its own
+    /// when the row is edited, so what a reader reads and what the estimate
+    /// returns would drift apart without either one looking wrong.
+    #[test]
+    fn every_stated_model_coefficient_reaches_the_estimate() {
+        let mut model = refactor_savings_model();
+
+        let stated = model
+            .assumptions
+            .iter()
+            .find_map(|assumption| match assumption {
+                RefactorSavingsAssumption::CallOverheadPerReplacedMember { bytes } => Some(*bytes),
+                _ => None,
+            })
+            .expect("the model states its call overhead");
+        assert_eq!(stated, model.call_overhead_per_replaced_member_bytes);
+
+        let baseline = estimate_refactor_savings_bytes(100, 3, &model);
+        assert_eq!(baseline, 100 - stated * 3);
+        model.call_overhead_per_replaced_member_bytes = stated + 4;
+        assert_eq!(
+            estimate_refactor_savings_bytes(100, 3, &model),
+            baseline - 12,
+            "editing the coefficient moves the estimate it is stated for"
+        );
+    }
+
+    /// The retained-copy count is declared once, by the assumption that reports
+    /// it, because the estimate's input already excludes exactly those copies.
+    #[test]
+    fn the_retained_copy_count_is_declared_once() {
+        let model = refactor_savings_model();
+
+        let declared: Vec<_> = model
+            .assumptions
+            .iter()
+            .filter_map(|assumption| match assumption {
+                RefactorSavingsAssumption::SharedImplementationRetainsCopies { copies } => {
+                    Some(*copies)
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(declared, vec![1]);
+    }
+}

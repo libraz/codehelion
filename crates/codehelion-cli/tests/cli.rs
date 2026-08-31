@@ -521,12 +521,18 @@ fn scan_rejects_an_incompatible_database_without_replacing_it() {
         std::fs::read(&database).expect("read database after rejection"),
         before_main
     );
-    for (path, before) in sidecars.iter().zip(before_sidecars) {
-        assert_eq!(
-            std::fs::read(path).expect("read sidecar after rejection"),
-            before
-        );
-    }
+    // The write-ahead log is durable state and has to survive byte for byte.
+    // The shared-memory index beside it is not: SQLite rebuilds it whenever it
+    // opens the database, including the read-only open the version check uses,
+    // so only its presence is a fact about the rejection.
+    assert_eq!(
+        std::fs::read(&sidecars[0]).expect("read write-ahead log after rejection"),
+        before_sidecars[0]
+    );
+    assert!(
+        sidecars[1].exists(),
+        "the shared-memory index was removed rather than left in place"
+    );
     let verification = directory.path().join("verification.db");
     std::fs::copy(&database, &verification).expect("copy main database for verification");
     let verification_connection = rusqlite::Connection::open(&verification)
@@ -1373,6 +1379,51 @@ fn artifact_reports_a_minimal_wasm_without_executing_it() {
 }
 
 #[test]
+fn the_artifact_schema_declares_each_field_where_the_report_writes_it() {
+    let file = tempfile::NamedTempFile::new().expect("fixture file");
+    let db_dir = tempfile::tempdir().expect("database directory");
+    let db = db_dir.path().join("artifact.db");
+    std::fs::write(file.path(), b"\0asm\x01\0\0\0").expect("write wasm fixture");
+    let output = cmd()
+        .args([
+            "artifact",
+            "analyze",
+            file.path().to_str().expect("utf-8 fixture path"),
+            "--format",
+            "json",
+            "--db",
+            db.to_str().expect("utf-8 database path"),
+        ])
+        .output()
+        .expect("run artifact analyze");
+    assert!(output.status.success(), "{output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("artifact report is JSON");
+    let schema: serde_json::Value =
+        serde_json::from_str(codehelion::artifact::ARTIFACT_REPORT_JSON_SCHEMA)
+            .expect("shipped artifact schema is JSON");
+
+    let declared = &schema["properties"];
+
+    // Attributing a symbol to the definition it was instantiated from needs a
+    // correlated source run, so the report writes those origins inside the
+    // correlation. A top-level declaration would describe a document no run
+    // produces.
+    assert!(
+        !report
+            .as_object()
+            .expect("report is an object")
+            .contains_key("generic_origins"),
+        "{report}"
+    );
+    assert!(declared.get("generic_origins").is_none(), "{declared}");
+    assert!(
+        schema["$defs"]["correlation"]["properties"]["generic_origins"].is_object(),
+        "{schema}"
+    );
+}
+
+#[test]
 fn artifact_analysis_refuses_a_database_held_by_another_writer() {
     let artifact = tempfile::NamedTempFile::new().expect("artifact fixture");
     let database_directory = tempfile::tempdir().expect("database directory");
@@ -1480,6 +1531,117 @@ fn artifact_report_rerenders_a_saved_analysis_after_its_input_is_removed() {
         .stdout(predicate::str::contains("artifact-report-v2"))
         .stdout(predicate::str::contains("\"analysis_id\": 1"))
         .stdout(predicate::str::contains("\"format\": \"wasm\""));
+}
+
+/// Analysing against a scan records a correlation, and the documented
+/// workflow is to analyse once and re-render later. A re-render therefore has
+/// to show the correlation the analysis recorded, in every format: a script
+/// reading a saved analysis must not receive a structurally poorer document
+/// than the analysis it names printed.
+#[test]
+fn artifact_report_renders_the_correlation_its_analysis_recorded() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = resolved_root(&directory);
+    std::fs::write(
+        root.join("ledger.rs"),
+        "pub fn total(values: &[u32]) -> u32 {\n    values.iter().copied().sum()\n}\n",
+    )
+    .expect("write source fixture");
+    let artifact = root.join("ledger.wasm");
+    std::fs::write(&artifact, b"\0asm\x01\0\0\0").expect("write wasm fixture");
+    let variant = root.join("artifact-build-variant.json");
+    std::fs::write(&variant, "{\"target\":\"fixture\"}\n").expect("write build variant");
+    let db = root.join("audit.db");
+    let db_path = db.to_str().expect("utf-8 database path");
+
+    let scanned = cmd()
+        .args([
+            "scan",
+            root.to_str().expect("utf-8 fixture root"),
+            "--format",
+            "json",
+            "--db",
+            db_path,
+        ])
+        .output()
+        .expect("scan the fixture tree");
+    assert!(
+        scanned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&scanned.stderr)
+    );
+    let source: serde_json::Value =
+        serde_json::from_slice(&scanned.stdout).expect("scan report is JSON");
+    let source_run = source["run"]["run_id"]
+        .as_i64()
+        .expect("the scan recorded a run")
+        .to_string();
+
+    let analyzed = cmd()
+        .args([
+            "artifact",
+            "analyze",
+            artifact.to_str().expect("utf-8 artifact path"),
+            "--format",
+            "json",
+            "--build-variant",
+            variant.to_str().expect("utf-8 build variant path"),
+            "--source-run",
+            &source_run,
+            "--db",
+            db_path,
+        ])
+        .output()
+        .expect("analyse the artifact against the scan");
+    assert!(
+        analyzed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&analyzed.stderr)
+    );
+    let analysis: serde_json::Value =
+        serde_json::from_slice(&analyzed.stdout).expect("analysis report is JSON");
+    assert!(
+        !analysis["correlation"].is_null(),
+        "the analysis recorded no correlation to re-render: {analysis}"
+    );
+
+    let rendered = cmd()
+        .args(["artifact", "report", "--format", "json", "--db", db_path])
+        .output()
+        .expect("re-render the saved analysis");
+    assert!(
+        rendered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rendered.stderr)
+    );
+    let saved: serde_json::Value =
+        serde_json::from_slice(&rendered.stdout).expect("saved report is JSON");
+    assert_eq!(
+        saved["correlation"], analysis["correlation"],
+        "the re-rendered correlation differs from the recorded one: {saved}"
+    );
+    assert_eq!(
+        saved["correlation"]["source_run"]
+            .as_i64()
+            .map(|run| run.to_string()),
+        Some(source_run.clone()),
+        "the re-render names another scan than the analysis did: {saved}"
+    );
+
+    let csv = cmd()
+        .args(["artifact", "report", "--format", "csv", "--db", db_path])
+        .output()
+        .expect("re-render the saved analysis as CSV");
+    assert!(
+        csv.status.success(),
+        "{}",
+        String::from_utf8_lossy(&csv.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&csv.stdout).contains(source_run.as_str()),
+        "the CSV re-render names the correlated scan: {}",
+        String::from_utf8_lossy(&csv.stdout)
+    );
 }
 
 #[cfg(target_os = "linux")]

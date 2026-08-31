@@ -77,7 +77,7 @@ const ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION: &str = "artifact-calibration-r
 ///
 /// Columns are only ever appended, so a consumer that reads by position keeps
 /// reading the same values after a release adds one.
-const ARTIFACT_CSV_COLUMNS: usize = 34;
+const ARTIFACT_CSV_COLUMNS: usize = 36;
 
 /// A direct before-minus-after artifact-size observation.
 ///
@@ -90,6 +90,15 @@ struct ObservedSizeReductionBytes(i128);
 
 /// Largest accepted local linker-map input.
 const MAX_LINKER_MAP_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Largest JSON document accepted from a path named on the command line.
+///
+/// A build-variant manifest and a calibration report are both small structured
+/// documents, so a real one is orders of magnitude below this. The ceiling is
+/// here because the file behind a named path is read whole: one that turns out
+/// to be enormous is refused with a sentence rather than allocated until the
+/// machine gives out.
+const MAX_JSON_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
 
 mod worker;
 
@@ -230,7 +239,8 @@ pub fn report(args: &ArtifactReportArgs, out: &mut impl Write) -> Result<Outcome
         &artifact,
         Some(analysis.analysis_id),
         build_variant,
-    );
+    )
+    .with_correlation(recorded_correlation(&store, analysis_id, &artifact)?);
     let mut rendered = Vec::new();
     match args.format {
         ArtifactFormat::Json => serde_json::to_writer_pretty(&mut rendered, &report)?,
@@ -244,6 +254,70 @@ pub fn report(args: &ArtifactReportArgs, out: &mut impl Write) -> Result<Outcome
         out.write_all(&rendered)?;
     }
     Ok(Outcome::Success)
+}
+
+/// The correlation one saved analysis recorded, read back from its own rows.
+///
+/// An analysis run without `--source-run` recorded no correlation at all and
+/// keeps `None`; the summary row is what says which of the two it was, and it
+/// also names the source scan the rows are about.
+///
+/// Nothing here is correlated again: the correspondences, the symbols and
+/// sources left unmatched, and the clone members they were matched against are
+/// each read from the database, and the same projection the analysis rendered
+/// with turns them into the report. Re-deriving them from the artifact instead
+/// would let a re-render disagree with the analysis it claims to show.
+fn recorded_correlation(
+    store: &Store,
+    analysis_id: i64,
+    artifact: &ArtifactIr,
+) -> Result<Option<ArtifactCorrelationReport>> {
+    let Some(summary) = store.artifact_correlation(analysis_id)? else {
+        return Ok(None);
+    };
+    let source_run = summary.source_scan_run_id;
+    let rows = CorrelationRows {
+        mappings: store
+            .artifact_mappings(analysis_id)?
+            .into_iter()
+            .map(|mapping| ArtifactAnalysisMapping {
+                schema_version: mapping.schema_version,
+                artifact_symbol_fingerprint: mapping.artifact_symbol_fingerprint,
+                source_kind: mapping.source_kind,
+                source_fingerprint: mapping.source_fingerprint,
+                source_instance_fingerprint: mapping.source_instance_fingerprint,
+                source_build_variant_fingerprint: mapping.source_build_variant_fingerprint,
+                evidence: mapping.evidence,
+                attributed_bytes: mapping.attributed_bytes,
+                build_variant_fingerprint: mapping.build_variant_fingerprint,
+            })
+            .collect(),
+        unmapped_symbols: store
+            .artifact_unmapped_symbols(analysis_id)?
+            .into_iter()
+            .map(|unmapped| ArtifactAnalysisUnmappedSymbol {
+                artifact_symbol_fingerprint: unmapped.artifact_symbol_fingerprint,
+                reason: unmapped.reason,
+            })
+            .collect(),
+        unmapped_sources: store
+            .artifact_unmapped_sources(analysis_id)?
+            .into_iter()
+            .map(|unmapped| ArtifactAnalysisUnmappedSource {
+                source_kind: unmapped.source_kind,
+                source_fingerprint: unmapped.source_fingerprint,
+                source_instance_fingerprint: unmapped.source_instance_fingerprint,
+                source_build_variant_fingerprint: unmapped.source_build_variant_fingerprint,
+                reason: unmapped.reason,
+            })
+            .collect(),
+        clone_fragments: store
+            .source_clone_fragments(source_run)
+            .with_context(|| format!("loading clone fragments for scan {source_run}"))?,
+    };
+    Ok(Some(ArtifactCorrelationReport::from_rows(
+        source_run, artifact, &rows,
+    )))
 }
 
 fn write_output(path: &FilePath, bytes: &[u8], force: bool) -> Result<()> {
@@ -475,7 +549,8 @@ impl Write for CappedArtifactIrBuffer {
 mod correlation;
 
 use correlation::{
-    ArtifactCorrelationReport, correlate_source_run, read_linker_map, stored_clone_group_savings,
+    ArtifactCorrelationReport, CorrelationRows, correlate_source_run, read_linker_map,
+    stored_clone_group_savings,
 };
 /// Compare two artifacts by their content-derived symbol identities.
 ///
@@ -682,8 +757,7 @@ fn read_build_variant(path: Option<&std::path::Path>) -> Result<Option<BuildVari
     let Some(path) = path else {
         return Ok(None);
     };
-    let bytes =
-        fs::read(path).with_context(|| format!("reading build variant {}", path.display()))?;
+    let bytes = read_artifact_input(path, MAX_JSON_DOCUMENT_BYTES, "build variant")?;
     let value = serde_json::from_slice::<serde_json::Value>(&bytes)
         .with_context(|| format!("parsing build variant {} as JSON", path.display()))?;
     let normalized = serde_json::to_vec(&value)

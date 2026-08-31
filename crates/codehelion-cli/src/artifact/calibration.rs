@@ -6,7 +6,7 @@ use super::{
     BTreeSet, CalibrationBaselineReport, CalibrationComparisonReport, CalibrationStatisticsDelta,
     CalibrationStratumComparison, CalibrationStratumReport, CalibrationSummaryReport, Context,
     FilePath, Outcome, Result, Store, Write, artifact_savings_calibration_statistics, bail,
-    fingerprint_hex, fs,
+    fingerprint_hex,
 };
 
 /// Summarize controlled before/after calibration measurements for one run.
@@ -66,8 +66,11 @@ pub(super) fn calibration_comparison(
     current: &CalibrationSummaryReport,
     baseline_path: &FilePath,
 ) -> Result<CalibrationComparisonReport> {
-    let bytes = fs::read(baseline_path)
-        .with_context(|| format!("reading calibration baseline {}", baseline_path.display()))?;
+    let bytes = super::read_artifact_input(
+        baseline_path,
+        super::MAX_JSON_DOCUMENT_BYTES,
+        "calibration baseline",
+    )?;
     let baseline: CalibrationBaselineReport = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing calibration baseline {}", baseline_path.display()))?;
     if baseline.schema_version != ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION {

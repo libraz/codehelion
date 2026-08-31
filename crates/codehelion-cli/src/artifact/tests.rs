@@ -22,7 +22,41 @@ fn worker_deadline_terminates_a_nonresponsive_parser_process() {
             .contains("exceeded the configured timeout"),
         "unexpected error: {error}"
     );
-    assert!(child.try_wait().expect("query terminated worker").is_some());
+    let status = child
+        .try_wait()
+        .expect("query terminated worker")
+        .expect("the worker was reaped before the deadline was reported");
+    assert!(
+        status.code().is_none(),
+        "the worker was signalled rather than left to finish: {status}"
+    );
+}
+
+/// A wait that fails before it can poll still owns the worker it was handed.
+/// Returning while the process runs on would leave it holding the audit
+/// database lease with nothing left to reap it.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::disallowed_types)] // Exercises the actual worker-kill path.
+fn a_wait_that_cannot_start_still_terminates_the_worker() {
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "sleep 30"])
+        .spawn()
+        .expect("start a worker that outlives the wait");
+    let error = wait_for_worker(&mut child, Duration::from_secs(u64::MAX))
+        .expect_err("an unrepresentable deadline must be an error");
+    assert!(
+        error.to_string().contains("timeout is too large"),
+        "unexpected error: {error}"
+    );
+    let status = child
+        .try_wait()
+        .expect("query terminated worker")
+        .expect("the worker was reaped before the error was returned");
+    assert!(
+        status.code().is_none(),
+        "the worker was signalled rather than left running: {status}"
+    );
 }
 
 #[test]
@@ -101,6 +135,46 @@ fn untrusted_artifact_limits_clamp_every_enforceable_resource() {
     assert_eq!(lower_memory, Some(2048));
 }
 
+/// Every path an `artifact` subcommand accepts is read whole into memory, so
+/// its size is settled against an explicit ceiling before the read. The build
+/// variant reaches that read through the analysis worker, and the calibration
+/// baseline reaches it with no worker, timeout, or address-space limit in
+/// front of it at all.
+#[test]
+fn documents_named_on_the_command_line_are_refused_above_the_size_ceiling() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let oversized = directory.path().join("oversized.json");
+    fs::File::create(&oversized)
+        .expect("create the oversized document")
+        .set_len(MAX_JSON_DOCUMENT_BYTES.saturating_add(1))
+        .expect("give the document its size");
+
+    let variant =
+        read_build_variant(Some(&oversized)).expect_err("an oversized build variant is refused");
+    assert!(
+        variant
+            .to_string()
+            .contains("exceeds the configured maximum"),
+        "unexpected error: {variant}"
+    );
+
+    let summary = CalibrationSummaryReport {
+        schema_version: ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION,
+        source_run: 7,
+        statistics: artifact_savings_calibration_statistics(&[]),
+        strata: Vec::new(),
+        comparison: None,
+    };
+    let baseline = calibration_comparison(&summary, &oversized)
+        .expect_err("an oversized calibration baseline is refused");
+    assert!(
+        baseline
+            .to_string()
+            .contains("exceeds the configured maximum"),
+        "unexpected error: {baseline}"
+    );
+}
+
 fn assert_valid_schema(schema_uri: &str, schema: &str, value: &serde_json::Value) {
     let mut schemas = Schemas::new();
     let mut compiler = Compiler::new();
@@ -108,6 +182,30 @@ fn assert_valid_schema(schema_uri: &str, schema: &str, value: &serde_json::Value
     compiler.add_resource(schema_uri, schema).unwrap();
     let index = compiler.compile(schema_uri, &mut schemas).unwrap();
     schemas.validate(value, index).unwrap();
+}
+
+/// Split one rendered CSV record into its fields.
+///
+/// A record carries a quoted field whose own content holds commas, so reading
+/// a column by position needs the quoting rule [`csv`] writes with.
+fn artifact_csv_fields(record: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut characters = record.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '"' if quoted && characters.peek() == Some(&'"') => {
+                field.push('"');
+                characters.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => fields.push(std::mem::take(&mut field)),
+            _ => field.push(character),
+        }
+    }
+    fields.push(field);
+    fields
 }
 
 fn assert_clone_group_savings_are_in_json_and_csv(report: &ArtifactReport) {
@@ -121,13 +219,15 @@ fn assert_clone_group_savings_are_in_json_and_csv(report: &ArtifactReport) {
     render_csv(report, &mut csv).unwrap();
     let csv = String::from_utf8(csv).unwrap();
     let mut csv_rows = csv.lines();
-    let header: Vec<_> = csv_rows.next().unwrap().split(',').collect();
+    let header = artifact_csv_fields(csv_rows.next().unwrap());
     let savings = csv_rows
-        .map(|row| row.split(',').collect::<Vec<_>>())
+        .map(artifact_csv_fields)
         .find(|row| row[0] == "clone-group-savings")
         .unwrap();
     for (field, expected) in [
         ("duplicated_bytes", "9"),
+        ("estimated_duplicated_bytes", ""),
+        ("attribution_basis", "observed"),
         ("estimated_refactor_savings_bytes", "9"),
     ] {
         let index = header

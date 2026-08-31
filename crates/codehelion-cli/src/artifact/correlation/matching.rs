@@ -8,6 +8,275 @@ use super::{
     SourceUnitIdentity, source_kind_order,
 };
 
+/// The scan's source occurrences, prepared once for repeated lookups.
+///
+/// Every correlation pass asks the same two questions for each artifact symbol,
+/// inline frame, resolved call, and source-map token: which units and which
+/// clone fragments does this file and line name. Answering them by walking the
+/// whole scan each time makes the work the product of the artifact size and the
+/// scan size. The lists are therefore grouped by file once, and each lookup
+/// narrows to one file before the exact predicates below decide.
+///
+/// The grouping is only a narrowing step: a file group is a superset of the
+/// matches, and membership is still settled by the same `source_*_matches`
+/// predicates every other caller uses, so no comparison rule exists twice.
+pub(in crate::artifact) struct SourceLocationIndex<'source> {
+    scan_root: &'source FilePath,
+    units: &'source [SourceUnitIdentity],
+    fragments: &'source [SourceFragmentIdentity],
+    scan_root_prefix: String,
+    units_by_file: BTreeMap<String, Vec<usize>>,
+    units_by_name: BTreeMap<String, Vec<usize>>,
+    fragments_by_file: BTreeMap<String, Vec<usize>>,
+}
+
+impl<'source> SourceLocationIndex<'source> {
+    pub(in crate::artifact) fn new(
+        scan_root: &'source FilePath,
+        units: &'source [SourceUnitIdentity],
+        fragments: &'source [SourceFragmentIdentity],
+    ) -> Self {
+        let mut units_by_file: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let mut units_by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (position, unit) in units.iter().enumerate() {
+            units_by_file
+                .entry(uniformly_separated(&unit.file_path))
+                .or_default()
+                .push(position);
+            if let Some(name) = unit.name.as_deref().and_then(canonical_symbol_name) {
+                units_by_name.entry(name).or_default().push(position);
+            }
+        }
+        let mut fragments_by_file: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (position, fragment) in fragments.iter().enumerate() {
+            fragments_by_file
+                .entry(uniformly_separated(&fragment.file_path))
+                .or_default()
+                .push(position);
+        }
+        let mut scan_root_prefix = uniformly_separated(&scan_root.to_string_lossy());
+        if scan_root_prefix.ends_with('/') {
+            scan_root_prefix.pop();
+        }
+        Self {
+            scan_root,
+            units,
+            fragments,
+            scan_root_prefix,
+            units_by_file,
+            units_by_name,
+            fragments_by_file,
+        }
+    }
+
+    /// The two spellings under which a scanned file can be recorded.
+    ///
+    /// Debug information names a file either the way the project spells it or
+    /// with the scan root in front, and [`paths_match`] accepts both readings.
+    fn file_keys(&self, source_path: &str) -> (String, Option<String>) {
+        let direct = uniformly_separated(source_path);
+        let inside_root = direct
+            .strip_prefix(self.scan_root_prefix.as_str())
+            .and_then(|inside| inside.strip_prefix('/'))
+            .map(ToOwned::to_owned);
+        (direct, inside_root)
+    }
+
+    /// Positions recorded for one file, in the order the scan reported them.
+    fn positions(
+        index: &BTreeMap<String, Vec<usize>>,
+        keys: &(String, Option<String>),
+    ) -> Vec<usize> {
+        let mut positions = index.get(&keys.0).cloned().unwrap_or_default();
+        if let Some(inside_root) = &keys.1 {
+            positions.extend(index.get(inside_root).into_iter().flatten().copied());
+        }
+        positions.sort_unstable();
+        positions
+    }
+
+    fn units_in_file(
+        &self,
+        source_path: &str,
+    ) -> impl Iterator<Item = &'source SourceUnitIdentity> {
+        let keys = self.file_keys(source_path);
+        Self::positions(&self.units_by_file, &keys)
+            .into_iter()
+            .filter_map(|position| self.units.get(position))
+    }
+
+    fn fragments_in_file(
+        &self,
+        source_path: &str,
+    ) -> impl Iterator<Item = &'source SourceFragmentIdentity> {
+        let keys = self.file_keys(source_path);
+        Self::positions(&self.fragments_by_file, &keys)
+            .into_iter()
+            .filter_map(|position| self.fragments.get(position))
+    }
+
+    /// Units whose file and line extent contain one artifact-side location.
+    pub(in crate::artifact) fn units_at(
+        &self,
+        source_path: &str,
+        source_line: Option<u32>,
+    ) -> Vec<&'source SourceUnitIdentity> {
+        self.units_in_file(source_path)
+            .filter(|unit| source_unit_matches(source_path, source_line, self.scan_root, unit))
+            .collect()
+    }
+
+    /// Clone fragments whose file and line extent contain one location.
+    pub(in crate::artifact) fn fragments_at(
+        &self,
+        source_path: &str,
+        source_line: Option<u32>,
+    ) -> Vec<&'source SourceFragmentIdentity> {
+        self.fragments_in_file(source_path)
+            .filter(|fragment| {
+                source_fragment_matches(source_path, source_line, self.scan_root, fragment)
+            })
+            .collect()
+    }
+
+    /// Units a compiler's generic-definition anchor names.
+    fn generic_units_at(
+        &self,
+        instantiation: &SourceInstantiation,
+        include_definition_extent: bool,
+    ) -> Vec<&'source SourceUnitIdentity> {
+        self.units_in_file(&instantiation.file_path)
+            .filter(|unit| {
+                source_generic_unit_matches(
+                    &instantiation.file_path,
+                    Some(instantiation.line),
+                    self.scan_root,
+                    unit,
+                ) || include_definition_extent
+                    && source_template_definition_contains_unit(instantiation, self.scan_root, unit)
+            })
+            .collect()
+    }
+
+    /// Units whose declared name matches one artifact symbol name.
+    fn units_named(&self, artifact_name: &str) -> Vec<&'source SourceUnitIdentity> {
+        self.units_by_name
+            .get(artifact_name)
+            .into_iter()
+            .flatten()
+            .filter_map(|position| self.units.get(*position))
+            .collect()
+    }
+}
+
+/// Compiler-reported specializations, prepared for per-symbol lookups.
+///
+/// The three normalized spellings an artifact symbol can be compared against
+/// are derived once per specialization instead of once per symbol pairing.
+pub(in crate::artifact) struct InstantiationIndex<'source> {
+    instantiations: &'source [SourceInstantiation],
+    by_instantiation_key: BTreeMap<String, Vec<usize>>,
+    by_template_display: BTreeMap<String, Vec<usize>>,
+    by_template_owner: BTreeMap<String, Vec<usize>>,
+}
+
+impl<'source> InstantiationIndex<'source> {
+    pub(in crate::artifact) fn new(instantiations: &'source [SourceInstantiation]) -> Self {
+        let mut by_instantiation_key: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let mut by_template_display: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let mut by_template_owner: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (position, instantiation) in instantiations.iter().enumerate() {
+            if let Some(key) =
+                normalized_generic_instantiation_key(&instantiation.instantiation_key)
+            {
+                by_instantiation_key.entry(key).or_default().push(position);
+            }
+            let Some(match_key) = instantiation.artifact_match_key.as_deref() else {
+                continue;
+            };
+            if let Some(key) = normalized_clang_template_display_name(match_key) {
+                by_template_display.entry(key).or_default().push(position);
+            }
+            if let Some(key) = normalized_clang_template_owner_name(match_key) {
+                by_template_owner.entry(key).or_default().push(position);
+            }
+        }
+        Self {
+            instantiations,
+            by_instantiation_key,
+            by_template_display,
+            by_template_owner,
+        }
+    }
+
+    /// Specializations one artifact symbol name can be compared against.
+    ///
+    /// Each answer carries whether it was reached through a class-template
+    /// owner, which is the only evidence that lets a member body be attributed
+    /// through the compiler's definition extent.
+    fn matching(
+        &self,
+        rust_key: Option<&str>,
+        template_display_key: Option<&str>,
+        template_owner_key: Option<&str>,
+    ) -> Vec<(&'source SourceInstantiation, bool)> {
+        let mut matched: BTreeMap<usize, bool> = BTreeMap::new();
+        for (index, key) in [
+            (&self.by_instantiation_key, rust_key),
+            (&self.by_template_display, template_display_key),
+        ] {
+            for position in key.and_then(|key| index.get(key)).into_iter().flatten() {
+                matched.entry(*position).or_insert(false);
+            }
+        }
+        for position in template_owner_key
+            .and_then(|key| self.by_template_owner.get(key))
+            .into_iter()
+            .flatten()
+        {
+            matched.insert(*position, true);
+        }
+        matched
+            .into_iter()
+            .filter_map(|(position, owner)| {
+                self.instantiations
+                    .get(position)
+                    .map(|instantiation| (instantiation, owner))
+            })
+            .collect()
+    }
+}
+
+/// Compiler-resolved definitions, grouped by the name they can be matched on.
+pub(in crate::artifact) struct ResolvedSymbolIndex<'source> {
+    resolved_symbols: &'source [SourceResolvedSymbol],
+    by_name: BTreeMap<String, Vec<usize>>,
+}
+
+impl<'source> ResolvedSymbolIndex<'source> {
+    pub(in crate::artifact) fn new(resolved_symbols: &'source [SourceResolvedSymbol]) -> Self {
+        let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (position, resolved) in resolved_symbols.iter().enumerate() {
+            if let Some(name) = canonical_symbol_name(&resolved.name) {
+                by_name.entry(name).or_default().push(position);
+            }
+        }
+        Self {
+            resolved_symbols,
+            by_name,
+        }
+    }
+
+    fn named(&self, artifact_name: &str) -> Vec<&'source SourceResolvedSymbol> {
+        self.by_name
+            .get(artifact_name)
+            .into_iter()
+            .flatten()
+            .filter_map(|position| self.resolved_symbols.get(*position))
+            .collect()
+    }
+}
+
 /// Attribute a symbol's observed bytes only when one exact fragment mapping
 /// accounts for it. Units can contain fragments, so unit mappings neither
 /// create nor block this fragment-level split.
@@ -72,6 +341,13 @@ pub(in crate::artifact) fn assign_unambiguous_fragment_bytes(
 /// persisted clone fragment covers. Source bytes are deliberately not guessed
 /// from line numbers: the line extent is the only common evidence available
 /// from both the source snapshot and DWARF frames.
+///
+/// The extent is counted over every source file the symbol's inline stack
+/// names, not only the file the fragment lives in. A symbol built from
+/// inlined bodies carries lines the fragment cannot contain, so covering the
+/// fragment's own file is a share of the symbol rather than all of it. The
+/// whole-symbol conclusion therefore stays reserved for a symbol whose frames
+/// all name the fragment's file.
 fn symbol_line_coverage(
     symbol: &codehelion_artifact::ArtifactSymbol,
     scan_root: &FilePath,
@@ -79,26 +355,49 @@ fn symbol_line_coverage(
 ) -> Option<(u32, u32, bool)> {
     let fragment_start = fragment.start_line?;
     let fragment_end = fragment.end_line?;
-    let mut lines = symbol
-        .inline_stack
-        .iter()
-        .filter(|frame| frame_path_matches(&frame.source, scan_root, fragment))
-        .filter_map(|frame| frame.line);
-    let symbol_start = lines.next()?;
-    let (symbol_start, symbol_end) = lines.fold((symbol_start, symbol_start), |range, line| {
-        (range.0.min(line), range.1.max(line))
-    });
+    let mut extents: BTreeMap<String, Option<(u32, u32)>> = BTreeMap::new();
+    for frame in &symbol.inline_stack {
+        let extent = extents
+            .entry(uniformly_separated(&frame.source))
+            .or_default();
+        if let Some(line) = frame.line {
+            *extent = Some(extent.map_or((line, line), |(start, end)| {
+                (start.min(line), end.max(line))
+            }));
+        }
+    }
+    let mut fragment_file_extent: Option<(u32, u32)> = None;
+    let mut symbol_lines = 0_u32;
+    let mut other_files = false;
+    for (source, extent) in &extents {
+        if frame_path_matches(source, scan_root, fragment) {
+            if let Some((start, end)) = *extent {
+                fragment_file_extent = Some(
+                    fragment_file_extent
+                        .map_or((start, end), |range| (range.0.min(start), range.1.max(end))),
+                );
+            }
+        } else {
+            // Any other file names source the fragment does not hold, so the
+            // symbol is more than this fragment even when those frames carry
+            // no line of their own to divide by.
+            other_files = true;
+        }
+        if let Some((start, end)) = *extent {
+            symbol_lines = symbol_lines.saturating_add(end.saturating_sub(start).saturating_add(1));
+        }
+    }
+    let (symbol_start, symbol_end) = fragment_file_extent?;
     let covered_start = fragment_start.max(symbol_start);
     let covered_end = fragment_end.min(symbol_end);
     if covered_start > covered_end {
         return None;
     }
     let covered_lines = covered_end.saturating_sub(covered_start).saturating_add(1);
-    let symbol_lines = symbol_end.saturating_sub(symbol_start).saturating_add(1);
     Some((
         covered_lines,
         symbol_lines,
-        fragment_start <= symbol_start && fragment_end >= symbol_end,
+        !other_files && fragment_start <= symbol_start && fragment_end >= symbol_end,
     ))
 }
 
@@ -107,16 +406,12 @@ fn frame_path_matches(
     scan_root: &FilePath,
     fragment: &SourceFragmentIdentity,
 ) -> bool {
-    let source_path = FilePath::new(source_path);
-    let fragment_path = FilePath::new(&fragment.file_path);
-    source_path == fragment_path || source_path == scan_root.join(fragment_path)
+    paths_match(source_path, scan_root, &fragment.file_path)
 }
 
 pub(in crate::artifact) fn enrich_call_graph_evidence(
     artifact: &ArtifactIr,
-    scan_root: &FilePath,
-    units: &[SourceUnitIdentity],
-    fragments: &[SourceFragmentIdentity],
+    sources: &SourceLocationIndex<'_>,
     resolved_calls: &[SourceResolvedCall],
     mappings: &mut [ArtifactAnalysisMapping],
 ) {
@@ -149,10 +444,7 @@ pub(in crate::artifact) fn enrich_call_graph_evidence(
         let Some(target) = canonical_symbol_name(&call.target_name) else {
             continue;
         };
-        for unit in units
-            .iter()
-            .filter(|unit| source_unit_matches(&call.file_path, Some(call.line), scan_root, unit))
-        {
+        for unit in sources.units_at(&call.file_path, Some(call.line)) {
             source_targets
                 .entry((
                     source_kind_order(ArtifactAnalysisSourceKind::Unit),
@@ -162,9 +454,7 @@ pub(in crate::artifact) fn enrich_call_graph_evidence(
                 .or_default()
                 .insert(target.clone());
         }
-        for fragment in fragments.iter().filter(|fragment| {
-            source_fragment_matches(&call.file_path, Some(call.line), scan_root, fragment)
-        }) {
+        for fragment in sources.fragments_at(&call.file_path, Some(call.line)) {
             source_targets
                 .entry((
                     source_kind_order(ArtifactAnalysisSourceKind::Fragment),
@@ -209,10 +499,8 @@ pub(in crate::artifact) fn enrich_call_graph_evidence(
 )]
 pub(in crate::artifact) fn correlate_generic_origin(
     symbol: &codehelion_artifact::ArtifactSymbol,
-    scan_root: &FilePath,
-    units: &[SourceUnitIdentity],
-    fragments: &[SourceFragmentIdentity],
-    instantiations: &[SourceInstantiation],
+    sources: &SourceLocationIndex<'_>,
+    instantiations: &InstantiationIndex<'_>,
     artifact_variant: [u8; 16],
 ) -> Vec<ArtifactAnalysisMapping> {
     let Some(artifact_name) = symbol.name.as_deref() else {
@@ -226,42 +514,15 @@ pub(in crate::artifact) fn correlate_generic_origin(
     }
     let mut unit_candidates = BTreeMap::new();
     let mut fragment_candidates = BTreeMap::new();
-    for instantiation in instantiations {
-        let matches_rust_key = rust_key.as_deref().is_some_and(|artifact_key| {
-            normalized_generic_instantiation_key(&instantiation.instantiation_key).as_deref()
-                == Some(artifact_key)
-        });
-        let matches_clang_key = clang_key.as_deref().is_some_and(|artifact_key| {
-            instantiation
-                .artifact_match_key
-                .as_deref()
-                .and_then(normalized_clang_template_display_name)
-                .as_deref()
-                == Some(artifact_key)
-        });
-        let matches_clang_owner_key = clang_owner_key.as_deref().is_some_and(|artifact_key| {
-            instantiation
-                .artifact_match_key
-                .as_deref()
-                .and_then(normalized_clang_template_owner_name)
-                .as_deref()
-                == Some(artifact_key)
-        });
-        if !matches_rust_key && !matches_clang_key && !matches_clang_owner_key {
-            continue;
-        }
-        for unit in units.iter().filter(|unit| {
-            source_generic_unit_matches(
-                &instantiation.file_path,
-                Some(instantiation.line),
-                scan_root,
-                unit,
-            ) || matches_clang_owner_key
-                && source_template_definition_contains_unit(instantiation, scan_root, unit)
-        }) {
+    for (instantiation, matches_clang_owner_key) in instantiations.matching(
+        rust_key.as_deref(),
+        clang_key.as_deref(),
+        clang_owner_key.as_deref(),
+    ) {
+        for unit in sources.generic_units_at(instantiation, matches_clang_owner_key) {
             unit_candidates
                 .entry((
-                    unit.fingerprint,
+                    source_unit_instance_fingerprint(unit),
                     unit.build_variant_fingerprint,
                     instantiation.instantiation_key.clone(),
                     instantiation.definition.clone(),
@@ -270,14 +531,7 @@ pub(in crate::artifact) fn correlate_generic_origin(
                 .1
                 .insert(instantiation.translation_unit.clone());
         }
-        for fragment in fragments.iter().filter(|fragment| {
-            source_fragment_matches(
-                &instantiation.file_path,
-                Some(instantiation.line),
-                scan_root,
-                fragment,
-            )
-        }) {
+        for fragment in sources.fragments_at(&instantiation.file_path, Some(instantiation.line)) {
             fragment_candidates
                 .entry((
                     fragment.finding_id,
@@ -360,10 +614,8 @@ pub(in crate::artifact) fn correlate_generic_origin(
 )]
 pub(in crate::artifact) fn correlate_symbol_name(
     symbol: &codehelion_artifact::ArtifactSymbol,
-    scan_root: &FilePath,
-    units: &[SourceUnitIdentity],
-    fragments: &[SourceFragmentIdentity],
-    resolved_symbols: &[SourceResolvedSymbol],
+    sources: &SourceLocationIndex<'_>,
+    resolved_symbols: &ResolvedSymbolIndex<'_>,
     artifact_variant: [u8; 16],
 ) -> Vec<ArtifactAnalysisMapping> {
     let Some(artifact_name) = symbol.name.as_deref().and_then(canonical_symbol_name) else {
@@ -371,24 +623,21 @@ pub(in crate::artifact) fn correlate_symbol_name(
     };
     let mut unit_candidates = Vec::new();
     let mut fragment_candidates = Vec::new();
+    // Candidates are collected per occurrence, never per content identity.
+    // Content-identical declarations are exactly what this tool reports, and
+    // keying on the shared content fingerprint would keep one of them and
+    // report the rest as reached by no artifact evidence.
     let mut seen_units = BTreeSet::new();
     let mut seen_fragments = BTreeSet::new();
-    for source_symbol in resolved_symbols {
-        let Some(source_name) = canonical_symbol_name(&source_symbol.name) else {
-            continue;
-        };
-        if source_name != artifact_name {
-            continue;
-        }
-        for unit in units.iter().filter(|unit| {
-            source_unit_matches(
-                &source_symbol.file_path,
-                Some(source_symbol.line),
-                scan_root,
-                unit,
-            )
-        }) {
-            if seen_units.insert((unit.fingerprint, unit.build_variant_fingerprint)) {
+    // The index answers with the definitions whose canonical spelling is this
+    // symbol's, so the name comparison is already settled here.
+    for source_symbol in resolved_symbols.named(&artifact_name) {
+        let source_name = artifact_name.clone();
+        for unit in sources.units_at(&source_symbol.file_path, Some(source_symbol.line)) {
+            if seen_units.insert((
+                source_unit_instance_fingerprint(unit),
+                unit.build_variant_fingerprint,
+            )) {
                 unit_candidates.push((
                     unit,
                     source_name.clone(),
@@ -399,14 +648,7 @@ pub(in crate::artifact) fn correlate_symbol_name(
                 ));
             }
         }
-        for fragment in fragments.iter().filter(|fragment| {
-            source_fragment_matches(
-                &source_symbol.file_path,
-                Some(source_symbol.line),
-                scan_root,
-                fragment,
-            )
-        }) {
+        for fragment in sources.fragments_at(&source_symbol.file_path, Some(source_symbol.line)) {
             if seen_fragments.insert((fragment.finding_id, fragment.build_variant_fingerprint)) {
                 fragment_candidates.push((
                     fragment,
@@ -420,13 +662,12 @@ pub(in crate::artifact) fn correlate_symbol_name(
         }
     }
     if unit_candidates.is_empty() && fragment_candidates.is_empty() {
-        unit_candidates.extend(units.iter().filter_map(|unit| {
-            unit.name
-                .as_deref()
-                .and_then(canonical_symbol_name)
-                .filter(|source_name| source_name == &artifact_name)
-                .map(|source_name| (unit, source_name, None))
-        }));
+        unit_candidates.extend(
+            sources
+                .units_named(&artifact_name)
+                .into_iter()
+                .map(|unit| (unit, artifact_name.clone(), None)),
+        );
     }
     let unit_candidate_count = u32::try_from(unit_candidates.len()).unwrap_or(u32::MAX);
     let fragment_candidate_count = u32::try_from(fragment_candidates.len()).unwrap_or(u32::MAX);
@@ -684,15 +925,50 @@ pub(in crate::artifact) fn normalize_cpp_template_owner(owner: &str) -> String {
     normalized
 }
 
+/// Restate a path so its components are separated by `/`.
+///
+/// The two sides of every comparison below are written by different programs:
+/// debug information produced on Windows names a file with `\`, while the scan
+/// records the path the way the project spells it. Whether a separator is a
+/// separator is not a question either side's spelling gets to answer
+/// differently.
+pub(in crate::artifact) fn uniformly_separated(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+/// Whether the artifact-side `source_path` names the scanned file
+/// `recorded_path`.
+///
+/// One rule for every path identity question this module asks, so the same
+/// pair of paths cannot be a match where a symbol is being placed and a
+/// mismatch where its bytes are being attributed. The recorded path is relative
+/// to the scan root, and debug information carries it either way, so both
+/// readings are accepted.
+pub(in crate::artifact) fn paths_match(
+    source_path: &str,
+    scan_root: &FilePath,
+    recorded_path: &str,
+) -> bool {
+    let source_path = uniformly_separated(source_path);
+    let recorded_path = uniformly_separated(recorded_path);
+    if source_path == recorded_path {
+        return true;
+    }
+    let scan_root = uniformly_separated(&scan_root.to_string_lossy());
+    let scan_root = scan_root.strip_suffix('/').unwrap_or(&scan_root);
+    source_path
+        .strip_prefix(scan_root)
+        .and_then(|inside| inside.strip_prefix('/'))
+        .is_some_and(|inside| inside == recorded_path)
+}
+
 pub(in crate::artifact) fn source_unit_matches(
     source_path: &str,
     source_line: Option<u32>,
     scan_root: &FilePath,
     unit: &SourceUnitIdentity,
 ) -> bool {
-    let source_path = FilePath::new(source_path);
-    let unit_path = FilePath::new(&unit.file_path);
-    if source_path != unit_path && source_path != scan_root.join(unit_path) {
+    if !paths_match(source_path, scan_root, &unit.file_path) {
         return false;
     }
     match (source_line, unit.start_line, unit.end_line) {
@@ -719,10 +995,7 @@ pub(in crate::artifact) fn source_generic_unit_matches(
     let (Some(line), Some(start_line)) = (source_line, unit.start_line) else {
         return false;
     };
-    let source_path = FilePath::new(source_path);
-    let unit_path = FilePath::new(&unit.file_path);
-    (source_path == unit_path || source_path == scan_root.join(unit_path))
-        && line.checked_add(1) == Some(start_line)
+    paths_match(source_path, scan_root, &unit.file_path) && line.checked_add(1) == Some(start_line)
 }
 
 /// Whether a source unit is wholly inside a class-template definition.
@@ -744,9 +1017,7 @@ pub(in crate::artifact) fn source_template_definition_contains_unit(
     ) else {
         return false;
     };
-    let source_path = FilePath::new(&instantiation.file_path);
-    let unit_path = FilePath::new(&unit.file_path);
-    (source_path == unit_path || source_path == scan_root.join(unit_path))
+    paths_match(&instantiation.file_path, scan_root, &unit.file_path)
         && instantiation.line <= unit_start_line
         && unit_end_line <= definition_end_line
 }
@@ -757,9 +1028,7 @@ pub(in crate::artifact) fn source_fragment_matches(
     scan_root: &FilePath,
     fragment: &SourceFragmentIdentity,
 ) -> bool {
-    let source_path = FilePath::new(source_path);
-    let fragment_path = FilePath::new(&fragment.file_path);
-    if source_path != fragment_path && source_path != scan_root.join(fragment_path) {
+    if !paths_match(source_path, scan_root, &fragment.file_path) {
         return false;
     }
     match (source_line, fragment.start_line, fragment.end_line) {

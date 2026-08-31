@@ -1,9 +1,10 @@
 //! Source-run loading, linker-map evidence, and debug-location correlation.
 
 use super::matching::{
+    InstantiationIndex, ResolvedSymbolIndex, SourceLocationIndex,
     assign_unambiguous_fragment_bytes, canonical_symbol_name, combine_fallback_mappings,
     correlate_generic_origin, correlate_symbol_name, enrich_call_graph_evidence,
-    source_fragment_matches, source_unit_matches,
+    uniformly_separated,
 };
 use super::{
     ArtifactAnalysisMapping, ArtifactAnalysisSourceKind, ArtifactAnalysisUnmappedReason,
@@ -12,9 +13,138 @@ use super::{
     CorrelationRows, FilePath, MAX_LINKER_MAP_BYTES, MappingEvidence, MappingEvidenceFact, Result,
     SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION, SourceFragmentIdentity, SourceInstantiation,
     SourceResolvedCall, SourceResolvedSymbol, SourceUnitIdentity, Store, bail, fs,
-    unmapped_reason_label,
+    source_kind_order, unmapped_reason_label,
 };
 use crate::artifact::SourceMapLocation;
+
+/// Storage identity of one source-to-artifact correspondence.
+///
+/// The correlation table is unique over exactly these columns, so they are the
+/// key every pass accumulates into.
+type MappingKey = ([u8; 16], u8, [u8; 16], [u8; 16]);
+
+/// The single accumulate-or-insert path for correlation mappings.
+///
+/// Artifact fingerprints describe stable symbol content rather than a
+/// symbol-table slot, so content-identical functions — the duplication this
+/// tool reports — reach the same key from separate entries. Every pass
+/// therefore merges evidence into the existing row instead of appending a
+/// second row that storage would reject, and both the lookup and the insert
+/// stay logarithmic in the number of retained correspondences.
+#[derive(Debug, Default)]
+pub(in crate::artifact) struct MappingLedger {
+    rows: Vec<ArtifactAnalysisMapping>,
+    positions: BTreeMap<MappingKey, usize>,
+}
+
+impl MappingLedger {
+    /// Start an empty ledger.
+    pub(in crate::artifact) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adopt already established rows, collapsing any equal keys among them.
+    pub(in crate::artifact) fn from_rows(rows: Vec<ArtifactAnalysisMapping>) -> Self {
+        let mut ledger = Self::new();
+        ledger.extend(rows);
+        ledger
+    }
+
+    /// Record one candidate correspondence under its storage identity.
+    pub(in crate::artifact) fn insert(&mut self, mapping: ArtifactAnalysisMapping) {
+        let key = mapping_key(&mapping);
+        let Some(position) = self.positions.get(&key).copied() else {
+            self.positions.insert(key, self.rows.len());
+            self.rows.push(mapping);
+            return;
+        };
+        let Some(existing) = self.rows.get_mut(position) else {
+            return;
+        };
+        let variant_disagrees =
+            existing.source_build_variant_fingerprint != mapping.source_build_variant_fingerprint;
+        for fact in mapping.evidence.facts {
+            if !existing.evidence.facts.contains(&fact) {
+                existing.evidence.facts.push(fact);
+            }
+        }
+        existing.evidence.candidate_count = existing
+            .evidence
+            .candidate_count
+            .max(mapping.evidence.candidate_count);
+        existing.evidence.has_conflict |= mapping.evidence.has_conflict || variant_disagrees;
+        if existing.attributed_bytes.is_none() {
+            existing.attributed_bytes = mapping.attributed_bytes;
+        }
+    }
+
+    /// Record several candidates in order.
+    pub(in crate::artifact) fn extend(
+        &mut self,
+        mappings: impl IntoIterator<Item = ArtifactAnalysisMapping>,
+    ) {
+        for mapping in mappings {
+            self.insert(mapping);
+        }
+    }
+
+    /// Positions of the retained correspondences for one symbol and source kind.
+    pub(in crate::artifact) fn symbol_positions(
+        &self,
+        artifact_symbol_fingerprint: [u8; 16],
+        source_kind: ArtifactAnalysisSourceKind,
+    ) -> Vec<usize> {
+        let kind = source_kind_order(source_kind);
+        let low = (
+            artifact_symbol_fingerprint,
+            kind,
+            [u8::MIN; 16],
+            [u8::MIN; 16],
+        );
+        let high = (
+            artifact_symbol_fingerprint,
+            kind,
+            [u8::MAX; 16],
+            [u8::MAX; 16],
+        );
+        self.positions
+            .range(low..=high)
+            .map(|(_, position)| *position)
+            .collect()
+    }
+
+    /// Read access to one retained correspondence.
+    pub(in crate::artifact) fn row(&self, position: usize) -> Option<&ArtifactAnalysisMapping> {
+        self.rows.get(position)
+    }
+
+    /// Mutable access to one retained correspondence.
+    pub(in crate::artifact) fn row_mut(
+        &mut self,
+        position: usize,
+    ) -> Option<&mut ArtifactAnalysisMapping> {
+        self.rows.get_mut(position)
+    }
+
+    /// The retained correspondences, in the order they were first established.
+    pub(in crate::artifact) fn rows_mut(&mut self) -> &mut [ArtifactAnalysisMapping] {
+        &mut self.rows
+    }
+
+    /// Release the retained correspondences.
+    pub(in crate::artifact) fn into_rows(self) -> Vec<ArtifactAnalysisMapping> {
+        self.rows
+    }
+}
+
+const fn mapping_key(mapping: &ArtifactAnalysisMapping) -> MappingKey {
+    (
+        mapping.artifact_symbol_fingerprint,
+        source_kind_order(mapping.source_kind),
+        mapping.source_fingerprint,
+        mapping.source_instance_fingerprint,
+    )
+}
 
 pub(in crate::artifact) fn correlate_source_run(
     artifact: &ArtifactIr,
@@ -74,7 +204,65 @@ pub(in crate::artifact) fn correlate_source_run(
         artifact_variant.fingerprint.as_bytes(),
         &mut rows,
     );
+    // Every pass that can still establish a correspondence has run, so the
+    // source side is split exactly once, from the final mapping set. Deciding
+    // it earlier would report a unit that only source-map or linker-map
+    // evidence reaches as both mapped and without artifact evidence.
+    reconcile_unmapped_sources(&units, &fragments, &mut rows);
     Ok(rows)
+}
+
+/// Split the scan's source identities into mapped and unmapped, once.
+///
+/// Each discovered source occurrence belongs to exactly one side: it is either
+/// named by a retained correspondence or recorded as reached by no artifact
+/// evidence.
+pub(in crate::artifact) fn reconcile_unmapped_sources(
+    units: &[SourceUnitIdentity],
+    fragments: &[SourceFragmentIdentity],
+    rows: &mut CorrelationRows,
+) {
+    let mapped = rows
+        .mappings
+        .iter()
+        .map(|mapping| {
+            (
+                source_kind_order(mapping.source_kind),
+                mapping.source_fingerprint,
+                mapping.source_instance_fingerprint,
+                mapping.source_build_variant_fingerprint,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    rows.unmapped_sources = units
+        .iter()
+        .map(|unit| ArtifactAnalysisUnmappedSource {
+            source_kind: ArtifactAnalysisSourceKind::Unit,
+            source_fingerprint: unit.fingerprint,
+            source_instance_fingerprint: source_unit_instance_fingerprint(unit),
+            source_build_variant_fingerprint: unit.build_variant_fingerprint,
+            reason: ArtifactAnalysisUnmappedSourceReason::NoArtifactEvidence,
+        })
+        .chain(
+            fragments
+                .iter()
+                .map(|fragment| ArtifactAnalysisUnmappedSource {
+                    source_kind: ArtifactAnalysisSourceKind::Fragment,
+                    source_fingerprint: fragment.fingerprint,
+                    source_instance_fingerprint: fragment.finding_id,
+                    source_build_variant_fingerprint: fragment.build_variant_fingerprint,
+                    reason: ArtifactAnalysisUnmappedSourceReason::NoArtifactEvidence,
+                }),
+        )
+        .filter(|source| {
+            !mapped.contains(&(
+                source_kind_order(source.source_kind),
+                source.source_fingerprint,
+                source.source_instance_fingerprint,
+                source.source_build_variant_fingerprint,
+            ))
+        })
+        .collect();
 }
 
 /// Add exact local source-map evidence for WASM symbols whose generated byte
@@ -92,22 +280,38 @@ pub(in crate::artifact) fn enrich_source_map_evidence(
     artifact_variant: [u8; 16],
     rows: &mut CorrelationRows,
 ) {
+    let sources = SourceLocationIndex::new(scan_root, units, fragments);
+    // Tokens are visited through one offset-ordered view, so a symbol reads the
+    // tokens inside its own generated range instead of the whole map.
+    let mut ordered_locations: Vec<usize> = (0..locations.len()).collect();
+    ordered_locations.sort_by_key(|position| {
+        (
+            locations
+                .get(*position)
+                .map(|location| location.generated_offset),
+            *position,
+        )
+    });
+    let mut ledger = MappingLedger::from_rows(std::mem::take(&mut rows.mappings));
     for symbol in &artifact.symbols {
         let end = symbol.offset.saturating_add(symbol.size);
         let mut mapped = false;
-        for location in locations.iter().filter(|location| {
-            symbol.offset <= location.generated_offset && location.generated_offset < end
-        }) {
-            let units: Vec<_> = units
-                .iter()
-                .filter(|unit| {
-                    source_unit_matches(&location.source_url, location.source_line, scan_root, unit)
-                })
-                .collect();
+        let first = ordered_locations.partition_point(|position| {
+            locations
+                .get(*position)
+                .is_some_and(|location| location.generated_offset < symbol.offset)
+        });
+        for location in ordered_locations
+            .get(first..)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|position| locations.get(*position))
+            .take_while(|location| location.generated_offset < end)
+        {
+            let units = sources.units_at(&location.source_url, location.source_line);
             let candidate_count = u32::try_from(units.len()).unwrap_or(u32::MAX);
             for unit in units {
-                insert_source_map_mapping(
-                    rows,
+                ledger.insert(source_map_mapping(
                     symbol.fingerprint.as_bytes(),
                     ArtifactAnalysisSourceKind::Unit,
                     unit.fingerprint,
@@ -116,24 +320,13 @@ pub(in crate::artifact) fn enrich_source_map_evidence(
                     &location.source_url,
                     candidate_count,
                     artifact_variant,
-                );
+                ));
                 mapped = true;
             }
-            let fragments: Vec<_> = fragments
-                .iter()
-                .filter(|fragment| {
-                    source_fragment_matches(
-                        &location.source_url,
-                        location.source_line,
-                        scan_root,
-                        fragment,
-                    )
-                })
-                .collect();
+            let fragments = sources.fragments_at(&location.source_url, location.source_line);
             let candidate_count = u32::try_from(fragments.len()).unwrap_or(u32::MAX);
             for fragment in fragments {
-                insert_source_map_mapping(
-                    rows,
+                ledger.insert(source_map_mapping(
                     symbol.fingerprint.as_bytes(),
                     ArtifactAnalysisSourceKind::Fragment,
                     fragment.fingerprint,
@@ -142,7 +335,7 @@ pub(in crate::artifact) fn enrich_source_map_evidence(
                     &location.source_url,
                     candidate_count,
                     artifact_variant,
-                );
+                ));
                 mapped = true;
             }
         }
@@ -152,14 +345,14 @@ pub(in crate::artifact) fn enrich_source_map_evidence(
             });
         }
     }
+    rows.mappings = ledger.into_rows();
 }
 
 #[allow(
     clippy::too_many_arguments,
     reason = "one mapping record has all identity dimensions"
 )]
-fn insert_source_map_mapping(
-    rows: &mut CorrelationRows,
+fn source_map_mapping(
     artifact_symbol_fingerprint: [u8; 16],
     source_kind: ArtifactAnalysisSourceKind,
     source_fingerprint: [u8; 16],
@@ -168,33 +361,23 @@ fn insert_source_map_mapping(
     source_url: &str,
     candidate_count: u32,
     artifact_variant: [u8; 16],
-) {
-    let fact = MappingEvidenceFact::SourceMap {
-        source_url: source_url.to_owned(),
-    };
-    if let Some(mapping) = rows.mappings.iter_mut().find(|mapping| {
-        mapping.artifact_symbol_fingerprint == artifact_symbol_fingerprint
-            && mapping.source_kind == source_kind
-            && mapping.source_fingerprint == source_fingerprint
-            && mapping.source_instance_fingerprint == source_instance_fingerprint
-            && mapping.source_build_variant_fingerprint == source_build_variant_fingerprint
-    }) {
-        if !mapping.evidence.facts.contains(&fact) {
-            mapping.evidence.facts.push(fact);
-        }
-        mapping.evidence.candidate_count = mapping.evidence.candidate_count.max(candidate_count);
-    } else {
-        rows.mappings.push(ArtifactAnalysisMapping {
-            schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
-            artifact_symbol_fingerprint,
-            source_kind,
-            source_fingerprint,
-            source_instance_fingerprint,
-            source_build_variant_fingerprint,
-            evidence: MappingEvidence::new(vec![fact], candidate_count, false),
-            attributed_bytes: None,
-            build_variant_fingerprint: artifact_variant,
-        });
+) -> ArtifactAnalysisMapping {
+    ArtifactAnalysisMapping {
+        schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
+        artifact_symbol_fingerprint,
+        source_kind,
+        source_fingerprint,
+        source_instance_fingerprint,
+        source_build_variant_fingerprint,
+        evidence: MappingEvidence::new(
+            vec![MappingEvidenceFact::SourceMap {
+                source_url: source_url.to_owned(),
+            }],
+            candidate_count,
+            false,
+        ),
+        attributed_bytes: None,
+        build_variant_fingerprint: artifact_variant,
     }
 }
 
@@ -305,23 +488,39 @@ pub(in crate::artifact) fn enrich_linker_map_evidence(
     artifact_variant: [u8; 16],
     rows: &mut CorrelationRows,
 ) {
+    // Both sides of this join are grouped by the name they are matched on, so
+    // one symbol reads the entries and units that can name it rather than the
+    // whole map and the whole scan.
+    let mut entries_by_symbol: BTreeMap<String, Vec<&LinkerMapEntry>> = BTreeMap::new();
+    for entry in entries {
+        if let Some(name) = canonical_symbol_name(&entry.symbol) {
+            entries_by_symbol.entry(name).or_default().push(entry);
+        }
+    }
+    let mut units_by_name: BTreeMap<String, Vec<&SourceUnitIdentity>> = BTreeMap::new();
+    for unit in units {
+        if let Some(name) = unit.name.as_deref().and_then(canonical_symbol_name) {
+            units_by_name.entry(name).or_default().push(unit);
+        }
+    }
+    let mut ledger = MappingLedger::from_rows(std::mem::take(&mut rows.mappings));
     for symbol in &artifact.symbols {
         let Some(symbol_name) = symbol.name.as_deref().and_then(canonical_symbol_name) else {
             continue;
         };
+        let named_units = units_by_name.get(&symbol_name);
         let mut candidates = BTreeMap::new();
-        for entry in entries.iter().filter(|entry| {
-            canonical_symbol_name(&entry.symbol).as_deref() == Some(symbol_name.as_str())
-        }) {
-            for unit in units.iter().filter(|unit| {
-                linker_object_matches_source(&entry.object_path, &unit.file_path)
-                    && unit
-                        .name
-                        .as_deref()
-                        .and_then(canonical_symbol_name)
-                        .as_deref()
-                        == Some(symbol_name.as_str())
-            }) {
+        for entry in entries_by_symbol
+            .get(&symbol_name)
+            .into_iter()
+            .flatten()
+            .copied()
+        {
+            for unit in
+                named_units.into_iter().flatten().copied().filter(|unit| {
+                    linker_object_matches_source(&entry.object_path, &unit.file_path)
+                })
+            {
                 candidates
                     .entry((
                         unit.fingerprint,
@@ -336,20 +535,14 @@ pub(in crate::artifact) fn enrich_linker_map_evidence(
             continue;
         }
         let candidate_keys: BTreeSet<_> = candidates.keys().copied().collect();
-        let existing_indices: Vec<_> = rows
-            .mappings
+        let existing_positions = ledger.symbol_positions(
+            symbol.fingerprint.as_bytes(),
+            ArtifactAnalysisSourceKind::Unit,
+        );
+        let existing_keys: BTreeSet<_> = existing_positions
             .iter()
-            .enumerate()
-            .filter(|(_, mapping)| {
-                mapping.artifact_symbol_fingerprint == symbol.fingerprint.as_bytes()
-                    && mapping.source_kind == ArtifactAnalysisSourceKind::Unit
-            })
-            .map(|(index, _)| index)
-            .collect();
-        let existing_keys: BTreeSet<_> = existing_indices
-            .iter()
-            .map(|index| {
-                let mapping = &rows.mappings[*index];
+            .filter_map(|position| ledger.row(*position))
+            .map(|mapping| {
                 (
                     mapping.source_fingerprint,
                     mapping.source_instance_fingerprint,
@@ -359,54 +552,38 @@ pub(in crate::artifact) fn enrich_linker_map_evidence(
             .collect();
         let has_conflict = !existing_keys.is_empty() && existing_keys.is_disjoint(&candidate_keys);
         if has_conflict {
-            for index in &existing_indices {
-                rows.mappings[*index].evidence.has_conflict = true;
+            for position in &existing_positions {
+                if let Some(mapping) = ledger.row_mut(*position) {
+                    mapping.evidence.has_conflict = true;
+                }
             }
         }
-        for ((fingerprint, instance_fingerprint, build_variant_fingerprint), (unit, object_path)) in
-            candidates
-        {
-            let existing = existing_indices.iter().copied().find(|index| {
-                let mapping = &rows.mappings[*index];
-                mapping.source_fingerprint == fingerprint
-                    && mapping.source_instance_fingerprint == instance_fingerprint
-                    && mapping.source_build_variant_fingerprint == build_variant_fingerprint
-            });
-            if let Some(index) = existing {
-                let mapping = &mut rows.mappings[index];
-                if !mapping.evidence.facts.iter().any(|fact| {
-                    matches!(fact, MappingEvidenceFact::LinkerMap { object_path: existing } if existing == &object_path)
-                }) {
-                    mapping
-                        .evidence
-                        .facts
-                        .push(MappingEvidenceFact::LinkerMap { object_path });
-                }
-                mapping.evidence.candidate_count =
-                    mapping.evidence.candidate_count.max(candidate_count);
-                mapping.evidence.has_conflict |= has_conflict;
+        for (candidate_key, (unit, object_path)) in candidates {
+            // Name agreement is only new evidence where the linker map itself
+            // established the correspondence. An already established mapping
+            // gains the object-file placement alone.
+            let facts = if existing_keys.contains(&candidate_key) {
+                vec![MappingEvidenceFact::LinkerMap { object_path }]
             } else {
-                rows.mappings.push(ArtifactAnalysisMapping {
-                    schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
-                    artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
-                    source_kind: ArtifactAnalysisSourceKind::Unit,
-                    source_fingerprint: unit.fingerprint,
-                    source_instance_fingerprint: source_unit_instance_fingerprint(unit),
-                    source_build_variant_fingerprint: unit.build_variant_fingerprint,
-                    evidence: MappingEvidence::new(
-                        linker_map_facts(unit, &symbol_name, object_path),
-                        candidate_count,
-                        has_conflict,
-                    ),
-                    attributed_bytes: None,
-                    build_variant_fingerprint: artifact_variant,
-                });
-            }
+                linker_map_facts(unit, &symbol_name, object_path)
+            };
+            ledger.insert(ArtifactAnalysisMapping {
+                schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
+                artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
+                source_kind: ArtifactAnalysisSourceKind::Unit,
+                source_fingerprint: unit.fingerprint,
+                source_instance_fingerprint: source_unit_instance_fingerprint(unit),
+                source_build_variant_fingerprint: unit.build_variant_fingerprint,
+                evidence: MappingEvidence::new(facts, candidate_count, has_conflict),
+                attributed_bytes: None,
+                build_variant_fingerprint: artifact_variant,
+            });
         }
         rows.unmapped_symbols.retain(|unmapped| {
             unmapped.artifact_symbol_fingerprint != symbol.fingerprint.as_bytes()
         });
     }
+    rows.mappings = ledger.into_rows();
 }
 
 pub(in crate::artifact) fn linker_map_facts(
@@ -428,8 +605,8 @@ pub(in crate::artifact) fn linker_object_matches_source(
     object_path: &str,
     source_path: &str,
 ) -> bool {
-    let object_path = object_path.replace('\\', "/");
-    let source_path = source_path.replace('\\', "/");
+    let object_path = uniformly_separated(object_path);
+    let source_path = uniformly_separated(source_path);
     let Some(object_without_suffix) = object_path.strip_suffix(".o") else {
         return false;
     };
@@ -456,26 +633,17 @@ pub(in crate::artifact) fn correlate_debug_locations(
         clone_fragments: fragments.to_vec(),
         ..CorrelationRows::default()
     };
+    let sources = SourceLocationIndex::new(scan_root, units, fragments);
+    let instantiation_index = InstantiationIndex::new(instantiations);
+    let resolved_symbol_index = ResolvedSymbolIndex::new(resolved_symbols);
+    let mut ledger = MappingLedger::new();
     for symbol in &artifact.symbols {
         let mut mapped = false;
-        let mut seen_units = BTreeSet::new();
-        let mut seen_fragments = BTreeSet::new();
         for frame in &symbol.inline_stack {
-            let candidates: Vec<_> = units
-                .iter()
-                .filter(|unit| {
-                    source_unit_matches(frame.source.as_str(), frame.line, scan_root, unit)
-                })
-                .collect();
+            let candidates = sources.units_at(frame.source.as_str(), frame.line);
             let candidate_count = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
             for unit in candidates {
-                if !seen_units.insert((
-                    source_unit_instance_fingerprint(unit),
-                    unit.build_variant_fingerprint,
-                )) {
-                    continue;
-                }
-                rows.mappings.push(ArtifactAnalysisMapping {
+                ledger.insert(ArtifactAnalysisMapping {
                     schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
                     artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
                     source_kind: ArtifactAnalysisSourceKind::Unit,
@@ -492,19 +660,10 @@ pub(in crate::artifact) fn correlate_debug_locations(
                 });
                 mapped = true;
             }
-            let candidates: Vec<_> = fragments
-                .iter()
-                .filter(|fragment| {
-                    source_fragment_matches(frame.source.as_str(), frame.line, scan_root, fragment)
-                })
-                .collect();
+            let candidates = sources.fragments_at(frame.source.as_str(), frame.line);
             let candidate_count = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
             for fragment in candidates {
-                if !seen_fragments.insert((fragment.finding_id, fragment.build_variant_fingerprint))
-                {
-                    continue;
-                }
-                rows.mappings.push(ArtifactAnalysisMapping {
+                ledger.insert(ArtifactAnalysisMapping {
                     schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
                     artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
                     source_kind: ArtifactAnalysisSourceKind::Fragment,
@@ -523,25 +682,13 @@ pub(in crate::artifact) fn correlate_debug_locations(
             }
         }
         if !mapped {
-            let generic_mappings = correlate_generic_origin(
-                symbol,
-                scan_root,
-                units,
-                fragments,
-                instantiations,
-                artifact_variant,
-            );
-            let name_mappings = correlate_symbol_name(
-                symbol,
-                scan_root,
-                units,
-                fragments,
-                resolved_symbols,
-                artifact_variant,
-            );
+            let generic_mappings =
+                correlate_generic_origin(symbol, &sources, &instantiation_index, artifact_variant);
+            let name_mappings =
+                correlate_symbol_name(symbol, &sources, &resolved_symbol_index, artifact_variant);
             let fallback_mappings = combine_fallback_mappings(generic_mappings, name_mappings);
             mapped = !fallback_mappings.is_empty();
-            rows.mappings.extend(fallback_mappings);
+            ledger.extend(fallback_mappings);
         }
         if !mapped {
             let reason = if artifact.capabilities.debug_info_unreadable {
@@ -557,15 +704,9 @@ pub(in crate::artifact) fn correlate_debug_locations(
             });
         }
     }
-    enrich_call_graph_evidence(
-        artifact,
-        scan_root,
-        units,
-        fragments,
-        resolved_calls,
-        &mut rows.mappings,
-    );
-    assign_unambiguous_fragment_bytes(artifact, scan_root, fragments, &mut rows.mappings);
+    enrich_call_graph_evidence(artifact, &sources, resolved_calls, ledger.rows_mut());
+    assign_unambiguous_fragment_bytes(artifact, scan_root, fragments, ledger.rows_mut());
+    rows.mappings = ledger.into_rows();
     // Artifact fingerprints deliberately describe stable symbol content rather
     // than a linker-local slot. A container can consequently expose the same
     // content identity through multiple symbol-table entries. The persistence
@@ -581,65 +722,7 @@ pub(in crate::artifact) fn correlate_debug_locations(
     });
     rows.unmapped_symbols
         .dedup_by_key(|unmapped| unmapped.artifact_symbol_fingerprint);
-    let mapped_units = rows
-        .mappings
-        .iter()
-        .filter(|mapping| mapping.source_kind == ArtifactAnalysisSourceKind::Unit)
-        .map(|mapping| {
-            (
-                mapping.source_fingerprint,
-                mapping.source_instance_fingerprint,
-                mapping.source_build_variant_fingerprint,
-            )
-        })
-        .collect::<BTreeSet<_>>();
-    rows.unmapped_sources = units
-        .iter()
-        .filter(|unit| {
-            !mapped_units.contains(&(
-                unit.fingerprint,
-                source_unit_instance_fingerprint(unit),
-                unit.build_variant_fingerprint,
-            ))
-        })
-        .map(|unit| ArtifactAnalysisUnmappedSource {
-            source_kind: ArtifactAnalysisSourceKind::Unit,
-            source_fingerprint: unit.fingerprint,
-            source_instance_fingerprint: source_unit_instance_fingerprint(unit),
-            source_build_variant_fingerprint: unit.build_variant_fingerprint,
-            reason: ArtifactAnalysisUnmappedSourceReason::NoArtifactEvidence,
-        })
-        .collect();
-    let mapped_fragments = rows
-        .mappings
-        .iter()
-        .filter(|mapping| mapping.source_kind == ArtifactAnalysisSourceKind::Fragment)
-        .map(|mapping| {
-            (
-                mapping.source_fingerprint,
-                mapping.source_instance_fingerprint,
-                mapping.source_build_variant_fingerprint,
-            )
-        })
-        .collect::<BTreeSet<_>>();
-    rows.unmapped_sources.extend(
-        fragments
-            .iter()
-            .filter(|fragment| {
-                !mapped_fragments.contains(&(
-                    fragment.fingerprint,
-                    fragment.finding_id,
-                    fragment.build_variant_fingerprint,
-                ))
-            })
-            .map(|fragment| ArtifactAnalysisUnmappedSource {
-                source_kind: ArtifactAnalysisSourceKind::Fragment,
-                source_fingerprint: fragment.fingerprint,
-                source_instance_fingerprint: fragment.finding_id,
-                source_build_variant_fingerprint: fragment.build_variant_fingerprint,
-                reason: ArtifactAnalysisUnmappedSourceReason::NoArtifactEvidence,
-            }),
-    );
+    reconcile_unmapped_sources(units, fragments, &mut rows);
     rows
 }
 

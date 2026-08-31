@@ -282,7 +282,20 @@ fn enforce_memory_limit(max_memory_bytes: Option<u64>) -> Result<()> {
 }
 
 /// Wait for an isolated worker, forcefully terminating it after `timeout`.
+///
+/// Every path out of here leaves the worker reaped: on success because it
+/// exited on its own, and on every failure because it is killed first. A
+/// worker that outlives the process waiting for it keeps the audit database
+/// leased, so the next scan fails on a run nobody is watching.
 pub(super) fn wait_for_worker(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus> {
+    watch_worker(child, timeout).inspect_err(|_| terminate_worker(child))
+}
+
+/// Poll `child` until it exits or `timeout` elapses.
+fn watch_worker(
     child: &mut std::process::Child,
     timeout: Duration,
 ) -> Result<std::process::ExitStatus> {
@@ -295,10 +308,6 @@ pub(super) fn wait_for_worker(
             return Ok(status);
         }
         if Instant::now() >= deadline {
-            let kill_result = child.kill();
-            let reap_result = child.wait();
-            kill_result.context("terminating timed-out artifact worker")?;
-            let _ = reap_result.context("reaping timed-out artifact worker")?;
             bail!(
                 "artifact analysis exceeded the configured timeout of {}s",
                 timeout.as_secs()
@@ -306,6 +315,16 @@ pub(super) fn wait_for_worker(
         }
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Kill `child` and reap it.
+///
+/// Neither step is reported: the failure that brought the wait here is what
+/// the caller acts on, and a signal that cannot be delivered to a process this
+/// one owns leaves nothing else to try.
+fn terminate_worker(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Reject a deadline that the host's monotonic clock cannot represent.

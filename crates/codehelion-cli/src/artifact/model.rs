@@ -693,3 +693,64 @@ pub(super) fn modified_named_symbols(before: &ArtifactIr, after: &ArtifactIr) ->
 pub(super) fn difference(after: u64, before: u64) -> i128 {
     i128::from(after) - i128::from(before)
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use codehelion_artifact::{ArtifactCall, ArtifactFingerprint, ArtifactSymbol};
+
+    fn symbol(fingerprint: ArtifactFingerprint, exported: bool, offset: u64) -> ArtifactSymbol {
+        ArtifactSymbol {
+            fingerprint,
+            name: None,
+            exported,
+            section: None,
+            offset,
+            size: 2,
+            size_inferred: false,
+            code: vec![1, 2],
+            normalized: None,
+            inline_stack: Vec::new(),
+        }
+    }
+
+    /// Reachability caveats are stated by the metric that computes them, so a
+    /// report must pass them through rather than restate them: an artifact that
+    /// is ambiguous twice over would otherwise print each caveat twice.
+    #[test]
+    fn a_reachability_caveat_is_stated_once_per_report() {
+        let mut artifact = ArtifactIr::empty(BinaryFormat::Wasm, b"\0asm\x01\0\0\0");
+        artifact.capabilities.call_graph = true;
+        let shared = ArtifactFingerprint::from_content("symbol", b"same");
+        artifact.symbols = vec![symbol(shared, true, 0), symbol(shared, false, 4)];
+        artifact.calls.push(ArtifactCall {
+            caller: shared,
+            target: Some(ArtifactFingerprint::from_content("symbol", b"absent")),
+            unresolved: None,
+        });
+
+        let report =
+            ArtifactReport::from_ir(std::path::Path::new("fixture.wasm"), &artifact, None, None);
+
+        let dead_code = report.dead_code.as_ref().expect("an exported root exists");
+        assert!(!dead_code.definitive);
+        let mut stated = dead_code.assumptions.clone();
+        stated.sort();
+        let unique = stated.len();
+        stated.dedup();
+        assert_eq!(stated.len(), unique, "{:?}", dead_code.assumptions);
+        assert!(
+            stated
+                .iter()
+                .any(|assumption| assumption.contains("share one content fingerprint")),
+            "{stated:?}"
+        );
+        assert!(
+            stated
+                .iter()
+                .any(|assumption| assumption.contains("matches no symbol")),
+            "{stated:?}"
+        );
+    }
+}

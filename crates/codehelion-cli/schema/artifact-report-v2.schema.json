@@ -33,7 +33,42 @@
     "sizes": { "$ref": "#/$defs/sizes" },
     "correlation": { "$ref": "#/$defs/correlation" },
     "containment": { "$ref": "#/$defs/containment" },
-    "generic_origins": { "type": "array" },
+    "observed_bytes": {
+      "type": "integer", "minimum": 0,
+      "description": "Bytes read for this artifact, repeated from sizes.observed_bytes."
+    },
+    "code_section_bytes": { "type": "integer", "minimum": 0 },
+    "data_segment_bytes": { "type": "integer", "minimum": 0 },
+    "symbols": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/symbol" }
+    },
+    "entry_points": {
+      "type": "integer", "minimum": 0,
+      "description": "Number of parser-established entry points."
+    },
+    "calls": {
+      "type": "integer", "minimum": 0,
+      "description": "Number of recorded call edges, resolved or not."
+    },
+    "source_mappings": {
+      "type": "integer", "minimum": 0,
+      "description": "Number of source-map references the artifact declares."
+    },
+    "source_maps": {
+      "type": "array",
+      "description": "Outcome of each declared reference; nothing is fetched and no source text is retained.",
+      "items": { "$ref": "#/$defs/source_map" }
+    },
+    "capabilities": { "$ref": "#/$defs/capabilities" },
+    "dead_code": { "$ref": "#/$defs/dead_code" },
+    "retained_sizes": {
+      "type": ["array", "null"],
+      "description": "Overlapping dominator regions, or null when the call graph is incomplete or ambiguous. The entries must never be added together as a total.",
+      "items": { "$ref": "#/$defs/retained_size" }
+    },
+    "duplicates": { "$ref": "#/$defs/duplicate_summary" },
+    "duplicate_groups": { "$ref": "#/$defs/duplicate_groups" },
     "sections": { "type": "integer", "minimum": 0 },
     "section_details": {
       "type": "array",
@@ -61,6 +96,13 @@
   },
   "$defs": {
     "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "fingerprint_bytes": {
+      "type": "array",
+      "description": "The same content identity written as its raw bytes, which is how the metric records nested inside this report spell it.",
+      "minItems": 16,
+      "maxItems": 16,
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+    },
     "build_variant": {
       "type": ["object", "null"],
       "required": ["manifest_path", "fingerprint"],
@@ -124,6 +166,120 @@
         "parse_error": { "type": ["string", "null"] }
       }
     },
+    "symbol": {
+      "type": "object",
+      "required": ["fingerprint", "name", "exported", "offset", "size", "size_inferred"],
+      "properties": {
+        "fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "name": { "type": ["string", "null"] },
+        "exported": { "type": "boolean" },
+        "offset": { "type": "integer", "minimum": 0 },
+        "size": { "type": "integer", "minimum": 0 },
+        "size_inferred": {
+          "type": "boolean",
+          "description": "Whether the size was derived from neighbouring boundaries rather than declared."
+        }
+      }
+    },
+    "source_map": {
+      "type": "object",
+      "required": ["uri", "status"],
+      "properties": {
+        "uri": { "type": "string" },
+        "status": { "type": "string", "enum": ["resolved", "unavailable"] },
+        "local_path": { "type": "string" },
+        "sources": { "type": "array", "items": { "type": "string" } },
+        "reason": { "type": "string" }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "description": "What the parser could establish for this artifact. A false entry means the evidence is absent, never that the answer is zero.",
+      "required": [
+        "symbols", "call_graph", "source_mapping", "debug_info_unreadable",
+        "normalized_duplicates", "independent_data_segments", "relocations", "data_segments"
+      ],
+      "properties": {
+        "symbols": { "type": "boolean" },
+        "call_graph": { "type": "boolean" },
+        "source_mapping": { "type": "boolean" },
+        "debug_info_unreadable": { "type": "boolean" },
+        "normalized_duplicates": { "type": "boolean" },
+        "independent_data_segments": { "type": "boolean" },
+        "relocations": { "type": "boolean" },
+        "data_segments": { "type": "boolean" }
+      }
+    },
+    "dead_code": {
+      "type": ["object", "null"],
+      "description": "Symbols not reached from a parser-established root set, or null when no trustworthy root set exists.",
+      "required": ["symbols", "definitive", "assumptions"],
+      "properties": {
+        "symbols": { "type": "array", "items": { "$ref": "#/$defs/fingerprint_bytes" } },
+        "definitive": {
+          "type": "boolean",
+          "description": "True only when every call endpoint resolved and every symbol carries a distinct content fingerprint. Shared identities or a missing endpoint leave a candidate list and an assumption naming the reason."
+        },
+        "assumptions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "retained_size": {
+      "type": "object",
+      "required": ["symbol", "retained_bytes"],
+      "properties": {
+        "symbol": { "$ref": "#/$defs/fingerprint_bytes" },
+        "retained_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "duplicate_summary": {
+      "type": "object",
+      "required": [
+        "exact_groups", "exact_duplicated_bytes",
+        "normalized_groups", "normalized_duplicated_bytes"
+      ],
+      "properties": {
+        "exact_groups": { "type": "integer", "minimum": 0 },
+        "exact_duplicated_bytes": { "type": "integer", "minimum": 0 },
+        "normalized_groups": { "type": "integer", "minimum": 0 },
+        "normalized_duplicated_bytes": {
+          "type": "integer", "minimum": 0,
+          "description": "Excess bytes in groups equal only after normalization, counted apart from the exact total."
+        }
+      }
+    },
+    "duplicate_groups": {
+      "type": "object",
+      "description": "Full equality groups, each equality relation kept separate so a normalized match is never read as a byte-for-byte match.",
+      "required": ["exact", "normalized", "data"],
+      "properties": {
+        "exact": { "type": "array", "items": { "$ref": "#/$defs/duplicate_group" } },
+        "normalized": { "type": "array", "items": { "$ref": "#/$defs/duplicate_group" } },
+        "data": { "type": "array", "items": { "$ref": "#/$defs/duplicate_group" } }
+      }
+    },
+    "duplicate_group": {
+      "type": "object",
+      "required": ["fingerprint", "duplicated_bytes", "members"],
+      "properties": {
+        "fingerprint": { "$ref": "#/$defs/fingerprint_bytes" },
+        "duplicated_bytes": {
+          "type": "integer", "minimum": 0,
+          "description": "Observed excess bytes in this group, not a claimed size saving."
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["symbol", "offset", "size"],
+            "properties": {
+              "symbol": { "$ref": "#/$defs/fingerprint_bytes" },
+              "offset": { "type": "integer", "minimum": 0 },
+              "size": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
     "sizes": {
       "type": "object",
       "required": [
@@ -168,21 +324,155 @@
       "properties": {
         "source_run": { "type": "integer" },
         "mappings": { "type": "integer", "minimum": 0 },
+        "artifact_symbols": { "type": "integer", "minimum": 0 },
+        "mapped_symbols": { "type": "integer", "minimum": 0 },
         "mapping_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+        "mapped_symbol_bytes": { "type": "integer", "minimum": 0 },
         "mapped_symbol_bytes_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+        "unmapped_symbols": { "type": "integer", "minimum": 0 },
+        "unmapped_symbol_bytes": { "type": "integer", "minimum": 0 },
+        "unmapped_symbol_reasons": {
+          "type": "object",
+          "description": "Count per reason, over the same symbol-table population as the mapped and unmapped counts.",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "source_entities": { "type": "integer", "minimum": 0 },
+        "unmapped_sources": { "type": "integer", "minimum": 0 },
+        "unmapped_source_reasons": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "clone_group_attributions": {
+          "type": "array",
+          "description": "Bytes attributed to clone groups. Observed and line-proportional bytes are reported in separate fields and are never added together.",
+          "items": {
+            "type": "object",
+            "required": [
+              "clone_group_fingerprint", "source_build_variant_fingerprint", "members",
+              "attributed_noncanonical_members", "duplicated_bytes",
+              "estimated_duplicated_bytes", "clone_confidence"
+            ],
+            "properties": {
+              "clone_group_fingerprint": { "$ref": "#/$defs/fingerprint" },
+              "source_build_variant_fingerprint": { "$ref": "#/$defs/fingerprint" },
+              "members": { "type": "integer", "minimum": 0 },
+              "attributed_noncanonical_members": { "type": "integer", "minimum": 0 },
+              "duplicated_bytes": {
+                "type": ["integer", "null"], "minimum": 0,
+                "description": "Observed bytes, present only when every noncanonical member covers its whole artifact symbol."
+              },
+              "estimated_duplicated_bytes": {
+                "type": ["integer", "null"], "minimum": 0,
+                "description": "Total attributed bytes when at least one member's share was divided across its symbol's source lines. That division is a construction, so this value is an estimate and is never reported as observed."
+              },
+              "clone_confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        },
         "estimated_refactor_savings": {
           "type": "array",
           "items": {
             "type": "object",
             "required": [
               "clone_group_fingerprint", "source_build_variant_fingerprint",
-              "artifact_build_variant_fingerprint", "estimated_refactor_savings_bytes"
+              "artifact_build_variant_fingerprint", "estimated_refactor_savings_bytes",
+              "duplicated_bytes_basis"
             ],
             "properties": {
               "clone_group_fingerprint": { "$ref": "#/$defs/fingerprint" },
               "source_build_variant_fingerprint": { "$ref": "#/$defs/fingerprint" },
               "artifact_build_variant_fingerprint": { "$ref": "#/$defs/fingerprint" },
-              "estimated_refactor_savings_bytes": { "type": "integer" }
+              "duplicated_bytes": {
+                "type": "integer", "minimum": 0,
+                "description": "Attributed bytes this estimate was derived from. duplicated_bytes_basis states which evidence established them."
+              },
+              "duplicated_bytes_basis": {
+                "type": "string",
+                "description": "Evidence class of duplicated_bytes: observed means every contributing member covered its whole artifact symbol, line_proportional means at least one member's share was divided across its symbol's source lines and the total is therefore an estimate.",
+                "enum": ["observed", "line_proportional"]
+              },
+              "estimated_refactor_savings_bytes": { "type": "integer" },
+              "mapping_confidence": {
+                "type": "string",
+                "description": "Weakest grade among the mappings that contributed bytes to this row.",
+                "enum": ["high", "medium", "low", "unavailable"]
+              },
+              "clone_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+              "model_confidence": { "type": "string", "enum": ["high", "medium", "low", "unavailable"] },
+              "savings_confidence": { "type": "string", "enum": ["high", "medium", "low", "unavailable"] },
+              "assumptions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["kind"],
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "shared_implementation_retains_copies",
+                        "call_overhead_per_replaced_member",
+                        "inlining_outcome_unknown",
+                        "linker_icf_outcome_unknown",
+                        "attribution_is_line_proportional"
+                      ]
+                    },
+                    "copies": { "type": "integer", "minimum": 0 },
+                    "bytes": { "type": "integer" }
+                  }
+                }
+              },
+              "model_schema_version": { "type": "string" }
+            }
+          }
+        },
+        "generic_origins": {
+          "type": "array",
+          "description": "Generic definitions whose instantiations were attributed to artifact symbols. Reported under the correlation because attributing a symbol to the definition it came from needs a correlated source run.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "definition": { "type": "string" },
+              "origin_fingerprint": { "$ref": "#/$defs/fingerprint" },
+              "origin_build_variant_fingerprint": { "$ref": "#/$defs/fingerprint" },
+              "instantiations": { "type": "integer", "minimum": 0 },
+              "translation_units": { "type": "integer", "minimum": 0 },
+              "artifact_symbols": { "type": "integer", "minimum": 0 },
+              "observed_symbol_bytes": { "type": "integer", "minimum": 0 },
+              "normalized_instruction_duplicated_bytes": {
+                "type": "integer", "minimum": 0,
+                "description": "Excess observed bytes in equal normalized instruction groups for this origin, which is a duplicate observation and not a claimed saving."
+              },
+              "retained_size_sum": {
+                "type": ["integer", "null"], "minimum": 0,
+                "description": "Sum of per-symbol retained sizes when the call graph supports them. Retained regions overlap, so this is not a removable total."
+              },
+              "specializations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "instantiation_key": { "type": "string" },
+                    "type_arguments": { "type": "array", "items": { "type": "string" } },
+                    "artifact_symbols": { "type": "integer", "minimum": 0 },
+                    "translation_units": { "type": "integer", "minimum": 0 },
+                    "observed_symbol_bytes": { "type": "integer", "minimum": 0 }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "macro_origins": {
+          "type": "array",
+          "description": "Macro definitions whose expansions were attributed to artifact symbols, on the same correlated evidence as generic_origins.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "origin_fingerprint": { "$ref": "#/$defs/fingerprint" },
+              "origin_build_variant_fingerprint": { "$ref": "#/$defs/fingerprint" },
+              "definition_paths": { "type": "array", "items": { "type": "string" } },
+              "artifact_symbols": { "type": "integer", "minimum": 0 },
+              "observed_symbol_bytes": { "type": "integer", "minimum": 0 }
             }
           }
         }
