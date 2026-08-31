@@ -20,9 +20,7 @@
 //! truncation data.
 
 use codehelion_core::discovery::Language;
-use codehelion_core::frontend::{
-    Lexeme, LexemeInterner, LiteralKind, SourceSpan, Token, TokenKind,
-};
+use codehelion_core::frontend::{IrAssembly, Lexeme, LiteralKind, Token, TokenKind};
 use codehelion_core::ir::{
     ByteRange, IR_SCHEMA_VERSION, IrNode, MAX_IR_DEPTH, Shape, Signature, StructuralFrontend,
     SyntaxIrFile, canonicalize_signatures,
@@ -84,6 +82,11 @@ fn delimiter_nesting_overflow(tokens: &[Token], source_len: usize) -> Option<Byt
 
 /// Build the explicit partial result returned when preflight blocks CST
 /// construction for excessive delimiter nesting.
+///
+/// `tokens` is the preflight stream over the whole file. Node token indices
+/// address the stream this returns, so the prefix's own parse supplies every
+/// token a node can cover, and the omitted region contributes its tokens after
+/// them under one Error leaf.
 fn depth_error_file(source: &str, tokens: Vec<Token>, range: ByteRange) -> SyntaxIrFile {
     // The delimiter preflight tells us where recursive parsing must stop, but
     // it does not make the source before that point unusable. Parse that
@@ -105,37 +108,38 @@ fn depth_error_file(source: &str, tokens: Vec<Token>, range: ByteRange) -> Synta
     }
     for error in parse.errors() {
         let error_range = error.range();
-        builder.error_ranges.push(ByteRange {
+        builder.assembly.record_error_range(ByteRange {
             start: usize::from(error_range.start()),
             end: usize::from(error_range.end()),
         });
     }
-    builder.error_ranges.push(omitted_range);
-    builder
-        .error_ranges
-        .sort_unstable_by_key(|error_range| (error_range.start, error_range.end));
-    builder.error_ranges.dedup();
 
-    let token_start = tokens.partition_point(|token| token.span.start_byte < omitted_range.start);
-    let token_end = tokens.partition_point(|token| token.span.start_byte < omitted_range.end);
-    roots.push(IrNode {
-        shape: Shape::Error,
-        name: None,
-        token_start,
-        token_end,
-        range: omitted_range,
-        children: Vec::new(),
-    });
+    // The prefix parse produced the tokens the nodes above were indexed
+    // against; the omitted region has no parse, so its tokens are appended
+    // from the preflight stream and covered by the Error leaf alone. Their
+    // positions come from the whole-file preflight, not from the prefix the
+    // assembly was given, so they are appended with the spans they carry.
+    for token in tokens {
+        if token.span.start_byte >= omitted_range.start {
+            builder
+                .assembly
+                .push_spanned_token(token.kind, &token.text, token.span);
+        }
+    }
+    roots.push(builder.assembly.truncate_at_depth(omitted_range));
+
+    let signatures = canonicalize_signatures(builder.signatures);
+    let assembled = builder.assembly.finish();
     SyntaxIrFile {
         language: Language::Rust,
         frontend_version: STRUCTURAL_FRONTEND_VERSION,
         ir_schema_version: IR_SCHEMA_VERSION,
-        tokens,
-        signatures: canonicalize_signatures(builder.signatures),
+        tokens: assembled.tokens,
+        signatures,
         roots,
         diagnostics: Vec::new(),
-        error_ranges: builder.error_ranges,
-        depth_truncated: true,
+        error_ranges: assembled.error_ranges,
+        depth_truncated: assembled.depth_truncated,
         test_module: false,
     }
 }
@@ -199,30 +203,27 @@ impl StructuralFrontend for RustStructuralFrontend {
 
         for error in parse.errors() {
             let range = error.range();
-            builder.error_ranges.push(ByteRange {
+            builder.assembly.record_error_range(ByteRange {
                 start: usize::from(range.start()),
                 end: usize::from(range.end()),
             });
         }
-        builder
-            .error_ranges
-            .sort_unstable_by_key(|range| (range.start, range.end));
-        builder.error_ranges.dedup();
 
         let signatures = canonicalize_signatures(builder.signatures);
+        let assembled = builder.assembly.finish();
 
         SyntaxIrFile {
             language: Language::Rust,
             frontend_version: STRUCTURAL_FRONTEND_VERSION,
             ir_schema_version: IR_SCHEMA_VERSION,
-            tokens: builder.tokens,
+            tokens: assembled.tokens,
             signatures,
             roots,
             // Lexical diagnostics are a Fast-lexer concept; the structural
             // frontend reports problems through `error_ranges` only.
             diagnostics: Vec::new(),
-            error_ranges: builder.error_ranges,
-            depth_truncated: builder.depth_truncated,
+            error_ranges: assembled.error_ranges,
+            depth_truncated: assembled.depth_truncated,
             test_module: false,
         }
     }
@@ -244,8 +245,8 @@ enum Mapping {
 
 /// Decide how `node` maps onto the IR. This table is the granularity
 /// contract of the Rust structural frontend; changing it changes fingerprint
-/// input, which invalidates every result recorded under the old table. Before
-/// the first release that is settled by rescanning rather than by raising
+/// input, which invalidates every result recorded under the old table. Such a
+/// change is settled by rescanning the recorded results, not by raising
 /// [`STRUCTURAL_FRONTEND_VERSION`], which stays at v1.
 fn classify(node: &SyntaxNode) -> Mapping {
     match node.kind() {
@@ -801,7 +802,10 @@ fn inner_expression_emits(stmt: &SyntaxNode) -> bool {
 fn map_token_kind(kind: SyntaxKind) -> TokenKind {
     match kind {
         SyntaxKind::IDENT => TokenKind::Identifier,
-        SyntaxKind::TRUE_KW | SyntaxKind::FALSE_KW => TokenKind::Literal(LiteralKind::Bool),
+        // The Fast lexer lists both spellings among the keywords, so reading
+        // them as literals here would make a pair that differs only in a
+        // boolean survive one mode and not the other.
+        SyntaxKind::TRUE_KW | SyntaxKind::FALSE_KW => TokenKind::Keyword,
         SyntaxKind::INT_NUMBER => TokenKind::Literal(LiteralKind::Integer),
         SyntaxKind::FLOAT_NUMBER => TokenKind::Literal(LiteralKind::Float),
         // Raw strings have no kind of their own: the parser reports `r"..."`
@@ -819,37 +823,20 @@ fn map_token_kind(kind: SyntaxKind) -> TokenKind {
 }
 
 /// Accumulates the token stream and IR tree for one file.
+///
+/// Everything that does not read the Rust CST — interning, line mapping,
+/// byte-to-token lookup, depth-budget recovery — is delegated to the shared
+/// [`IrAssembly`], so those behaviours cannot drift from the other languages.
 struct IrBuilder<'s> {
-    source: &'s str,
-    interner: LexemeInterner,
-    tokens: Vec<Token>,
-    /// Byte start of each emitted token, for mapping node byte ranges onto
-    /// token index ranges by binary search.
-    token_starts: Vec<usize>,
-    /// Byte offset of the start of each source line.
-    line_starts: Vec<usize>,
-    error_ranges: Vec<ByteRange>,
+    assembly: IrAssembly<'s>,
     signatures: Vec<(ByteRange, Signature)>,
-    depth_truncated: bool,
 }
 
 impl<'s> IrBuilder<'s> {
     fn new(source: &'s str) -> Self {
-        let mut line_starts = vec![0];
-        for (index, byte) in source.bytes().enumerate() {
-            if byte == b'\n' {
-                line_starts.push(index + 1);
-            }
-        }
         Self {
-            source,
-            interner: LexemeInterner::new(),
-            tokens: Vec::new(),
-            token_starts: Vec::new(),
-            line_starts,
-            error_ranges: Vec::new(),
+            assembly: IrAssembly::new(source),
             signatures: Vec::new(),
-            depth_truncated: false,
         }
     }
 
@@ -865,39 +852,13 @@ impl<'s> IrBuilder<'s> {
                 continue;
             }
             let range = token.text_range();
-            let start_byte = usize::from(range.start());
-            let end_byte = usize::from(range.end());
-            let (start_line, start_column) = self.line_column(start_byte);
-            let text = self.interner.intern(token.text());
-            self.token_starts.push(start_byte);
-            self.tokens.push(Token {
-                kind: map_token_kind(kind),
-                text,
-                span: SourceSpan {
-                    start_byte,
-                    end_byte,
-                    start_line,
-                    start_column,
-                },
-            });
+            self.assembly.push_token(
+                map_token_kind(kind),
+                token.text(),
+                usize::from(range.start()),
+                usize::from(range.end()),
+            );
         }
-    }
-
-    /// 1-based line and character column of a byte offset.
-    fn line_column(&self, byte: usize) -> (u32, u32) {
-        let line_index = self
-            .line_starts
-            .partition_point(|&start| start <= byte)
-            .saturating_sub(1);
-        let line_start = self.line_starts.get(line_index).copied().unwrap_or(0);
-        let column_chars = self
-            .source
-            .get(line_start..byte)
-            .map_or(0, |prefix| prefix.chars().count());
-        (
-            u32::try_from(line_index + 1).unwrap_or(u32::MAX),
-            u32::try_from(column_chars + 1).unwrap_or(u32::MAX),
-        )
     }
 
     /// Map one CST node onto the IR, appending zero or more nodes to `out`.
@@ -920,7 +881,7 @@ impl<'s> IrBuilder<'s> {
                 out.push(node);
             }
             Mapping::Native(kind) => {
-                let shape = Shape::Native(self.interner.intern(kind));
+                let shape = Shape::Native(self.assembly.intern(kind));
                 let node = self.build_node(shape, None, cst, depth);
                 out.push(node);
             }
@@ -936,7 +897,7 @@ impl<'s> IrBuilder<'s> {
                 }
             }
             Mapping::Error => {
-                self.error_ranges.push(byte_range(cst));
+                self.assembly.record_error_range(byte_range(cst));
                 // Recurse anyway: real parsers wrap intact regions in error
                 // nodes, and those descendants must still be recovered.
                 let node = self.build_node(Shape::Error, None, cst, depth);
@@ -963,11 +924,12 @@ impl<'s> IrBuilder<'s> {
             self.visit(&child, &mut children, depth + 1);
         }
         let range = byte_range(cst);
+        let (token_start, token_end) = self.assembly.token_bounds(range);
         IrNode {
             shape,
             name,
-            token_start: self.token_index_at(range.start),
-            token_end: self.token_index_at(range.end),
+            token_start,
+            token_end,
             range,
             children,
         }
@@ -975,22 +937,8 @@ impl<'s> IrBuilder<'s> {
 
     /// Preserve an unvisited CST subtree as recoverable truncation data.
     fn emit_depth_error(&mut self, cst: &SyntaxNode, out: &mut Vec<IrNode>) {
-        let range = byte_range(cst);
-        self.depth_truncated = true;
-        self.error_ranges.push(range);
-        out.push(IrNode {
-            shape: Shape::Error,
-            name: None,
-            token_start: self.token_index_at(range.start),
-            token_end: self.token_index_at(range.end),
-            range,
-            children: Vec::new(),
-        });
-    }
-
-    /// Index of the first emitted token starting at or after `byte`.
-    fn token_index_at(&self, byte: usize) -> usize {
-        self.token_starts.partition_point(|&start| start < byte)
+        let node = self.assembly.truncate_at_depth(byte_range(cst));
+        out.push(node);
     }
 
     /// Recover a declared name where the grammar provides one: the `NAME`
@@ -1008,7 +956,7 @@ impl<'s> IrBuilder<'s> {
         };
         cst.children()
             .find(|child| child.kind() == name_kind)
-            .map(|child| self.interner.intern(&child.text().to_string()))
+            .map(|child| self.assembly.intern(&child.text().to_string()))
     }
 }
 
@@ -1093,6 +1041,54 @@ mod tests {
         drop(file);
         drop(builder_guard_file);
         drop(control);
+    }
+
+    #[test]
+    fn a_truncated_file_indexes_the_stream_it_returns() {
+        // Nested generics close as one `>>` token for the preflight lexer and
+        // as two `>` tokens for the parser, so every node after them resolves
+        // to the wrong token unless the stream returned is the one the node
+        // ranges were measured against.
+        let mut source = String::from(
+            "fn healthy(v: Vec<Vec<u8>>) -> usize { let total = v.len(); total }\nfn generated() ",
+        );
+        source.push_str(&"{".repeat(10_000));
+        source.push_str("()");
+        source.push_str(&"}".repeat(10_000));
+
+        let file = parse(&source);
+        assert!(file.depth_truncated);
+        let mut nodes = 0;
+        file.walk(&mut |node| {
+            nodes += 1;
+            assert!(
+                node.token_start <= node.token_end && node.token_end <= file.tokens.len(),
+                "node token range {}..{} is not a range of the file's {} tokens",
+                node.token_start,
+                node.token_end,
+                file.tokens.len()
+            );
+            if node.token_start < node.token_end {
+                assert_eq!(
+                    file.tokens[node.token_start].span.start_byte, node.range.start,
+                    "node of shape {:?} starts at a token from another stream",
+                    node.shape
+                );
+                assert!(file.tokens[node.token_end - 1].span.end_byte <= node.range.end);
+            }
+        });
+        assert!(nodes > 1, "the healthy prefix must survive truncation");
+
+        let omitted = file
+            .roots
+            .last()
+            .expect("a truncated file keeps the omitted region as a root");
+        assert_eq!(omitted.shape, Shape::Error);
+        assert_eq!(omitted.token_end, file.tokens.len());
+        assert!(
+            omitted.token_start < omitted.token_end,
+            "the omitted region's tokens stay in the stream it is indexed against"
+        );
     }
 
     fn shape_label(shape: &Shape) -> String {
@@ -1433,7 +1429,7 @@ trait T {
             kind_of("\"s\""),
             Some(TokenKind::Literal(LiteralKind::String))
         );
-        assert_eq!(kind_of("true"), Some(TokenKind::Literal(LiteralKind::Bool)));
+        assert_eq!(kind_of("true"), Some(TokenKind::Keyword));
         assert_eq!(kind_of("->"), Some(TokenKind::Punctuation));
         assert_eq!(kind_of("("), Some(TokenKind::Punctuation));
 

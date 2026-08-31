@@ -299,12 +299,12 @@ fn the_two_arms_of_one_conditional_are_not_a_clone_pair() {
     let (guarded, otherwise) = (unit_at_line(2), unit_at_line(9));
     let (open_a, open_b) = (unit_at_line(17), unit_at_line(24));
 
-    // Three, not one: the funnel counts proposals, and all three candidate
-    // stages propose this pair — it shares fragments, shingles and a
-    // control-flow skeleton. The `nested` counter beside it counts the same
-    // way.
+    // One, not three: the funnel counts distinct unit pairs. All three
+    // candidate stages propose this pair — it shares fragments, shingles and a
+    // control-flow skeleton — and a rejection is attributed to the two units
+    // once. The `nested` counter beside it counts the same way.
     assert_eq!(
-        report.stats.alternative_pairs, 3,
+        report.stats.alternative_pairs, 1,
         "the guarded pair is dropped, and the funnel says so"
     );
     for group in &report.groups.groups {
@@ -320,6 +320,76 @@ fn the_two_arms_of_one_conditional_are_not_a_clone_pair() {
             .iter()
             .any(|group| group.members.contains(&open_a) && group.members.contains(&open_b)),
         "the same code outside any conditional is still a clone"
+    );
+}
+
+/// A function under a literally false condition, beside the same code twice
+/// under no condition at all.
+const DISABLED: &str = "\
+#if 0
+int wait_ticks(int ms) {
+    int ticks = ms * 10;
+    int capped = ticks > 1000 ? 1000 : ticks;
+    int slept = capped;
+    return slept;
+}
+#endif
+
+int scale_a(int v) {
+    int ticks = v * 10;
+    int capped = ticks > 1000 ? 1000 : ticks;
+    int slept = capped;
+    return slept;
+}
+
+int scale_b(int v) {
+    int ticks = v * 10;
+    int capped = ticks > 1000 ? 1000 : ticks;
+    int slept = capped;
+    return slept;
+}
+";
+
+#[test]
+fn a_function_no_build_compiles_is_a_clone_of_nothing() {
+    // The disabled function is in the IR like any other arm and measures
+    // identical to the pair below it. No build holds it, so reporting it would
+    // point a reader at code no compiler reads — and the lexical modes reject
+    // the same proposal, which is the agreement that makes the verdict a
+    // property of the code rather than of the mode that looked at it. The pair
+    // below it is the same code and is still reported, so the drop is about
+    // the condition and not about the similarity.
+    let files = vec![CStructuralFrontend.parse(DISABLED)];
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let report = structural::analyze(&files, &variant, &StructuralConfig::default());
+
+    let unit_at_line = |line: u32| {
+        report
+            .units
+            .iter()
+            .position(|unit| unit.start_line == line)
+            .unwrap_or_else(|| panic!("no unit starts at line {line}"))
+    };
+    let disabled = unit_at_line(2);
+    let (open_a, open_b) = (unit_at_line(10), unit_at_line(17));
+
+    for group in &report.groups.groups {
+        assert!(
+            !group.members.contains(&disabled),
+            "no group names code no build compiles"
+        );
+    }
+    assert!(
+        report
+            .groups
+            .groups
+            .iter()
+            .any(|group| group.members.contains(&open_a) && group.members.contains(&open_b)),
+        "the same code under no condition is still a clone"
+    );
+    assert_eq!(
+        report.stats.alternative_pairs, 2,
+        "one per distinct pair naming the disabled function"
     );
 }
 

@@ -36,8 +36,9 @@ impl Frontend for RustFrontend {
     }
 
     fn lex(&self, source: &str) -> LexedFile {
-        let (tokens, diagnostics) = lexer::lex(source);
-        let units = units::detect(&tokens);
+        let (tokens, mut diagnostics) = lexer::lex(source);
+        let (units, unit_diagnostics) = units::detect(&tokens);
+        diagnostics.extend(unit_diagnostics);
         LexedFile {
             language: Language::Rust,
             frontend_version: FRONTEND_VERSION,

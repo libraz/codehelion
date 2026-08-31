@@ -397,7 +397,21 @@ fn make_function(
 }
 
 /// Try to recognise the `[` at `i` as the start of a block-bodied lambda.
+///
+/// Two shapes look like a capture list without being one. An attribute
+/// specifier opens with a second `[`, which a capture list never does, and is
+/// followed by whatever it decorates — left alone, `[[nodiscard]] int f() {}`
+/// reads as a lambda whose body is the function's. The other is a declarator
+/// that follows the capture list: a name and its parameter list are not
+/// trailer material, so the search for the body brace stops there rather than
+/// swallowing the declaration behind the brackets.
 fn lambda_unit(tokens: &[Token], pairs: &DelimPairs, i: usize) -> Option<Unit> {
+    if tokens
+        .get(i + 1)
+        .is_some_and(|next| next.kind == TokenKind::Punctuation && next.text == "[")
+    {
+        return None;
+    }
     if let Some(prev) = i.checked_sub(1).map(|p| &tokens[p]) {
         let allowed = match prev.kind {
             TokenKind::Punctuation => LAMBDA_PRECEDER_PUNCT.contains(&prev.text.as_str()),
@@ -435,7 +449,18 @@ fn lambda_unit(tokens: &[Token], pairs: &DelimPairs, i: usize) -> Option<Unit> {
                 // `noexcept(...)` or a parenthesised return-type part.
                 k = pairs.close_of.get(&k)? + 1;
             }
-            TokenKind::Identifier => k += 1,
+            // A name followed by a parameter list is a function declarator,
+            // not trailer material: the brackets before it decorate a
+            // declaration and open no lambda.
+            TokenKind::Identifier => {
+                if tokens
+                    .get(k + 1)
+                    .is_some_and(|next| next.kind == TokenKind::Punctuation && next.text == "(")
+                {
+                    return None;
+                }
+                k += 1;
+            }
             TokenKind::Keyword if LAMBDA_TRAILER_KEYWORDS.contains(&token.text.as_str()) => k += 1,
             _ => return None,
         }

@@ -39,9 +39,7 @@
 //! spanning the whole file.
 
 use codehelion_core::discovery::Language;
-use codehelion_core::frontend::{
-    Lexeme, LexemeInterner, LiteralKind, SourceSpan, Token, TokenKind,
-};
+use codehelion_core::frontend::{IrAssembly, Lexeme, LiteralKind, TokenKind};
 use codehelion_core::ir::{
     ByteRange, IR_SCHEMA_VERSION, IrNode, MAX_IR_DEPTH, Shape, Signature, StructuralFrontend,
     SyntaxIrFile, canonicalize_signatures,
@@ -93,7 +91,7 @@ pub trait IrMapping {
     /// Decide how one CST node maps onto the IR. This table is the
     /// granularity contract of a frontend; changing it changes fingerprint
     /// input, which invalidates every result recorded under the old table.
-    /// Before the first release that is settled by rescanning rather than by
+    /// Such a change is settled by rescanning the recorded results, not by
     /// raising the frontend version, which stays at v1.
     fn classify(&self, node: &Node<'_>) -> Mapping;
 
@@ -183,7 +181,16 @@ pub fn classify_token(kind: &str, is_named: bool, text: &str) -> TokenKind {
         // Type-naming leaves (`int`, `unsigned long`) and the C++ keyword
         // leaves the grammar exposes as named nodes (`auto`, `this`) are
         // lexically keywords, matching the Fast lexer's classification.
-        "primitive_type" | "sized_type_specifier" | "auto" | "this" => TokenKind::Keyword,
+        //
+        // `true` and `false` belong here for the same reason: they are
+        // reserved words of both dialects and the Fast lexer reads them off
+        // the same keyword set. Calling them boolean literals instead would
+        // hand the shared literal normalization a difference it is meant to
+        // erase, so two units disagreeing only in a boolean constant would
+        // normalize alike in Structural mode while Fast mode kept them apart.
+        "primitive_type" | "sized_type_specifier" | "auto" | "this" | "true" | "false" => {
+            TokenKind::Keyword
+        }
         // `null` covers both spellings: `nullptr` is a keyword while `NULL`
         // is a macro identifier, matching the Fast lexer.
         "null" => {
@@ -198,7 +205,6 @@ pub fn classify_token(kind: &str, is_named: bool, text: &str) -> TokenKind {
             TokenKind::Literal(LiteralKind::String)
         }
         "char_literal" => TokenKind::Literal(LiteralKind::Char),
-        "true" | "false" => TokenKind::Literal(LiteralKind::Bool),
         _ if !is_named => {
             if !kind.is_empty() && kind.chars().all(|c| c.is_ascii_alphabetic() || c == '_') {
                 TokenKind::Keyword
@@ -1704,65 +1710,45 @@ pub fn parse_to_ir(
     // fills `roots` with the file's top-level nodes.
     builder.visit(root, &mut roots, 0);
 
-    builder
-        .error_ranges
-        .sort_unstable_by_key(|range| (range.start, range.end));
-    builder.error_ranges.dedup();
-
     let signatures = canonicalize_signatures(builder.signatures);
+    let assembled = builder.assembly.finish();
 
     SyntaxIrFile {
         language,
         frontend_version,
         ir_schema_version: IR_SCHEMA_VERSION,
-        tokens: builder.tokens,
+        tokens: assembled.tokens,
         signatures,
         roots,
         // Lexical diagnostics are a Fast-lexer concept; the structural
         // frontend reports problems through `error_ranges` only.
         diagnostics: Vec::new(),
-        error_ranges: builder.error_ranges,
-        depth_truncated: builder.depth_truncated,
+        error_ranges: assembled.error_ranges,
+        depth_truncated: assembled.depth_truncated,
         test_module: false,
     }
 }
 
 /// Accumulates the token stream and IR tree for one file.
+///
+/// Everything that does not read the tree-sitter CST — interning, line
+/// mapping, byte-to-token lookup, depth-budget recovery — is delegated to the
+/// shared [`IrAssembly`], so those behaviours cannot drift from the other
+/// languages.
 struct IrBuilder<'s, 'm> {
-    source: &'s str,
+    assembly: IrAssembly<'s>,
     mapping: &'m dyn IrMapping,
     language: Language,
-    interner: LexemeInterner,
-    tokens: Vec<Token>,
-    /// Byte start of each emitted token, for mapping node byte ranges onto
-    /// token index ranges by binary search.
-    token_starts: Vec<usize>,
-    /// Byte offset of the start of each source line.
-    line_starts: Vec<usize>,
-    error_ranges: Vec<ByteRange>,
     signatures: Vec<(ByteRange, Signature)>,
-    depth_truncated: bool,
 }
 
 impl<'s, 'm> IrBuilder<'s, 'm> {
     fn new(source: &'s str, mapping: &'m dyn IrMapping, language: Language) -> Self {
-        let mut line_starts = vec![0];
-        for (index, byte) in source.bytes().enumerate() {
-            if byte == b'\n' {
-                line_starts.push(index + 1);
-            }
-        }
         Self {
-            source,
+            assembly: IrAssembly::new(source),
             mapping,
             language,
-            interner: LexemeInterner::new(),
-            tokens: Vec::new(),
-            token_starts: Vec::new(),
-            line_starts,
-            error_ranges: Vec::new(),
             signatures: Vec::new(),
-            depth_truncated: false,
         }
     }
 
@@ -1782,7 +1768,7 @@ impl<'s, 'm> IrBuilder<'s, 'm> {
             }
             if !descend && kind != COMMENT_KIND {
                 if node.is_missing() {
-                    self.error_ranges.push(node_range(&node));
+                    self.assembly.record_error_range(node_range(&node));
                 } else if node.end_byte() > node.start_byte() {
                     self.emit_token(&node);
                 }
@@ -1799,40 +1785,10 @@ impl<'s, 'm> IrBuilder<'s, 'm> {
     }
 
     fn emit_token(&mut self, node: &Node<'_>) {
-        let start_byte = node.start_byte();
-        let end_byte = node.end_byte();
-        let text = node_text(node, self.source).unwrap_or("");
+        let text = node_text(node, self.assembly.source()).unwrap_or("");
         let kind = self.mapping.token_kind(node.kind(), node.is_named(), text);
-        let (start_line, start_column) = self.line_column(start_byte);
-        let text = self.interner.intern(text);
-        self.token_starts.push(start_byte);
-        self.tokens.push(Token {
-            kind,
-            text,
-            span: SourceSpan {
-                start_byte,
-                end_byte,
-                start_line,
-                start_column,
-            },
-        });
-    }
-
-    /// 1-based line and character column of a byte offset.
-    fn line_column(&self, byte: usize) -> (u32, u32) {
-        let line_index = self
-            .line_starts
-            .partition_point(|&start| start <= byte)
-            .saturating_sub(1);
-        let line_start = self.line_starts.get(line_index).copied().unwrap_or(0);
-        let column_chars = self
-            .source
-            .get(line_start..byte)
-            .map_or(0, |prefix| prefix.chars().count());
-        (
-            u32::try_from(line_index + 1).unwrap_or(u32::MAX),
-            u32::try_from(column_chars + 1).unwrap_or(u32::MAX),
-        )
+        self.assembly
+            .push_token(kind, text, node.start_byte(), node.end_byte());
     }
 
     /// Map one CST node onto the IR, appending zero or more nodes to `out`.
@@ -1844,14 +1800,14 @@ impl<'s, 'm> IrBuilder<'s, 'm> {
 
         match self.mapping.classify(&cst) {
             Mapping::Emit(shape) => {
+                let source = self.assembly.source();
                 let name = self
                     .mapping
-                    .node_name(&cst, self.source)
-                    .map(|text| self.interner.intern(text));
+                    .node_name(&cst, source)
+                    .map(|text| self.assembly.intern(text));
                 if matches!(shape, Shape::Function | Shape::Method)
                     && cst.kind() == "function_definition"
-                    && let Some(signature) =
-                        self.mapping.signature(&cst, self.source, self.language)
+                    && let Some(signature) = self.mapping.signature(&cst, source, self.language)
                 {
                     self.signatures.push((node_range(&cst), signature));
                 }
@@ -1859,7 +1815,7 @@ impl<'s, 'm> IrBuilder<'s, 'm> {
                 out.push(node);
             }
             Mapping::Native(kind) => {
-                let shape = Shape::Native(self.interner.intern(kind));
+                let shape = Shape::Native(self.assembly.intern(kind));
                 let node = self.build_node(shape, None, cst, depth);
                 out.push(node);
             }
@@ -1873,7 +1829,7 @@ impl<'s, 'm> IrBuilder<'s, 'm> {
                 }
             }
             Mapping::Error => {
-                self.error_ranges.push(node_range(&cst));
+                self.assembly.record_error_range(node_range(&cst));
                 // Recurse anyway: tree-sitter wraps intact regions in error
                 // nodes, and those descendants must still be recovered.
                 let node = self.build_node(Shape::Error, None, cst, depth);
@@ -1902,11 +1858,12 @@ impl<'s, 'm> IrBuilder<'s, 'm> {
         let mut children = Vec::new();
         self.visit_children(cst, &mut children, depth);
         let range = node_range(&cst);
+        let (token_start, token_end) = self.assembly.token_bounds(range);
         IrNode {
             shape,
             name,
-            token_start: self.token_index_at(range.start),
-            token_end: self.token_index_at(range.end),
+            token_start,
+            token_end,
             range,
             children,
         }
@@ -1914,22 +1871,8 @@ impl<'s, 'm> IrBuilder<'s, 'm> {
 
     /// Preserve an unvisited CST subtree as recoverable truncation data.
     fn emit_depth_error(&mut self, cst: Node<'_>, out: &mut Vec<IrNode>) {
-        let range = node_range(&cst);
-        self.depth_truncated = true;
-        self.error_ranges.push(range);
-        out.push(IrNode {
-            shape: Shape::Error,
-            name: None,
-            token_start: self.token_index_at(range.start),
-            token_end: self.token_index_at(range.end),
-            range,
-            children: Vec::new(),
-        });
-    }
-
-    /// Index of the first emitted token starting at or after `byte`.
-    fn token_index_at(&self, byte: usize) -> usize {
-        self.token_starts.partition_point(|&start| start < byte)
+        let node = self.assembly.truncate_at_depth(node_range(&cst));
+        out.push(node);
     }
 
     /// Whether a statement's inner expression maps to a shape of its own,

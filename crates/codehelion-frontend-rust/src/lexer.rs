@@ -75,8 +75,26 @@ impl<'s> Lexer<'s> {
         &self.source[start.byte..self.byte]
     }
 
+    /// The character `ahead` characters past the cursor.
+    ///
+    /// Decoding costs one step per character skipped, so only fixed, small
+    /// lookaheads go through here. A delimiter whose length the source
+    /// controls is measured with [`Self::bytes_ahead`] instead.
     fn peek(&self, ahead: usize) -> Option<char> {
         self.chars.clone().nth(ahead)
+    }
+
+    /// The remaining source, `offset` bytes past the cursor.
+    ///
+    /// Raw-string delimiters are made of `#` and `"`, and the prefixes that
+    /// precede them (`r`, `b`, `c`) are ASCII, so a delimiter is measured over
+    /// bytes: character lookahead would rescan the run once per position and
+    /// turn a long delimiter into quadratic work.
+    fn bytes_ahead(&self, offset: usize) -> &'s [u8] {
+        self.source
+            .as_bytes()
+            .get(self.byte + offset..)
+            .unwrap_or_default()
     }
 
     const fn mark(&self) -> Mark {
@@ -249,17 +267,16 @@ impl<'s> Lexer<'s> {
         }
     }
 
-    /// Whether `offset` begins the hash delimiter of a raw string literal.
+    /// Whether the hash delimiter of a raw string literal begins `offset`
+    /// bytes past the cursor.
     ///
     /// The delimiter contains zero or more `#` characters followed by `"`.
     /// Checking its full shape here keeps multi-hash raw strings separate from
     /// raw identifiers such as `r#type`.
     fn raw_string_opens_at(&self, offset: usize) -> bool {
-        let mut index = offset;
-        while self.peek(index) == Some('#') {
-            index += 1;
-        }
-        self.peek(index) == Some('"')
+        let rest = self.bytes_ahead(offset);
+        let hashes = rest.iter().take_while(|&&b| b == b'#').count();
+        rest.get(hashes) == Some(&b'"')
     }
 
     /// A `'`: either a character literal or a lifetime/label.
@@ -368,7 +385,11 @@ impl<'s> Lexer<'s> {
                 }
                 Some('"') => {
                     // A closing quote followed by `hashes` `#`s ends the string.
-                    if (1..=hashes).all(|k| self.peek(k) == Some('#')) {
+                    if self
+                        .bytes_ahead(1)
+                        .get(..hashes)
+                        .is_some_and(|delimiter| delimiter.iter().all(|&b| b == b'#'))
+                    {
                         self.bump();
                         for _ in 0..hashes {
                             self.bump();
@@ -510,6 +531,14 @@ pub(crate) fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use codehelion_core::execution::Limits;
+    use std::time::{Duration, Instant};
+
+    /// The largest file the strictest profile accepts, which is the size a
+    /// hostile input may reach before discovery drops it.
+    fn untrusted_file_bytes() -> usize {
+        usize::try_from(Limits::untrusted().max_file_bytes).expect("file limit fits in usize")
+    }
 
     fn kinds(source: &str) -> Vec<TokenKind> {
         lex(source).0.into_iter().map(|t| t.kind).collect()
@@ -630,6 +659,56 @@ mod tests {
             ]
         );
         assert!(tokens.iter().any(|token| token.text.as_str() == "tail"));
+    }
+
+    #[test]
+    fn a_hash_heavy_raw_string_lexes_in_bounded_time() {
+        // The source controls how long a raw-string delimiter is, and every
+        // quote inside the body is a candidate closing delimiter. Both are
+        // measured over bytes, so a file of this shape costs its size rather
+        // than the square of its delimiter.
+        let hashes = "#".repeat(1024);
+        let near_miss = format!("\"{}", "#".repeat(1023));
+        let body = near_miss.repeat(untrusted_file_bytes() / near_miss.len());
+        let source = format!("let a = r{hashes}\"{body}\"{hashes}; let tail = 1;");
+
+        let started = Instant::now();
+        let (tokens, diagnostics) = lex(&source);
+        let elapsed = started.elapsed();
+
+        assert!(diagnostics.is_empty());
+        let strings: Vec<_> = tokens
+            .iter()
+            .filter(|token| token.kind == TokenKind::Literal(LiteralKind::String))
+            .map(|token| token.text.as_str())
+            .collect();
+        assert_eq!(
+            strings,
+            vec![format!("r{hashes}\"{body}\"{hashes}").as_str()]
+        );
+        assert!(tokens.iter().any(|token| token.text.as_str() == "tail"));
+        assert!(elapsed < Duration::from_secs(1), "lexing took {elapsed:?}");
+    }
+
+    #[test]
+    fn a_hash_run_that_opens_nothing_lexes_in_bounded_time() {
+        // `r` followed by hashes that never reach a quote is a raw identifier,
+        // not a raw string. Deciding that must not cost one pass per hash.
+        let hashes = "#".repeat(untrusted_file_bytes());
+        let source = format!("let a = r{hashes}; let tail = 1;");
+
+        let started = Instant::now();
+        let (tokens, _diagnostics) = lex(&source);
+        let elapsed = started.elapsed();
+
+        assert!(
+            !tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Literal(LiteralKind::String)),
+            "an unclosed hash run is not a raw string"
+        );
+        assert!(tokens.iter().any(|token| token.text.as_str() == "tail"));
+        assert!(elapsed < Duration::from_secs(1), "lexing took {elapsed:?}");
     }
 
     #[test]

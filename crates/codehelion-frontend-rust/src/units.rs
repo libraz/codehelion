@@ -5,11 +5,23 @@
 //! tokens, not a parse; in Fast mode no syntax tree is built. The heuristic is
 //! deliberately conservative for closures (which a lexer cannot tell apart from
 //! bitwise-or with certainty) so that a spurious anchor is preferred against
-//! rather than invented.
+//! rather than invented. A body whose brace never closes yields no unit and a
+//! recovery diagnostic, so a file dropping out of unit analysis is visible in
+//! scan reports rather than silent.
 
 use std::collections::HashMap;
 
-use codehelion_core::frontend::{SourceSpan, Token, TokenKind, Unit, UnitKind};
+use codehelion_core::frontend::{
+    Diagnostic, DiagnosticKind, SourceSpan, Token, TokenKind, Unit, UnitKind,
+};
+
+/// Punctuation after which `impl` names an anonymous type rather than opening
+/// an item: `-> impl Trait`, `&impl Trait`, `Vec<impl Trait>`, `(impl A, B)`,
+/// `x: impl Trait`.
+const TYPE_POSITION_PUNCT: &[&str] = &["->", "&", "&&", "<", ",", "(", ":"];
+
+/// Keywords after which `impl` names an anonymous type: `dyn`, `as`.
+const TYPE_POSITION_KEYWORDS: &[&str] = &["dyn", "as"];
 
 /// Tokens that may immediately precede a closure's first `|`.
 const CLOSURE_PRECEDERS: &[&str] = &[
@@ -24,31 +36,33 @@ const CLOSURE_PARAM_PUNCT: &[&str] = &[",", ":", "&", "<", ">", "(", ")", "::", 
 /// tokens from turning every `fn`/`impl` marker into a full-file scan.
 const MAX_DECLARATION_LOOKAHEAD: usize = 256;
 
-/// Detect unit boundaries in `tokens`, in source order.
+/// Detect unit boundaries and recoverable boundary errors in `tokens`, in
+/// source order.
 ///
 /// Crate-internal: the public entry point is
 /// [`RustFrontend`](crate::RustFrontend).
 #[must_use]
 #[allow(clippy::redundant_pub_crate)] // crate-internal API reached from the crate root
-pub(crate) fn detect(tokens: &[Token]) -> Vec<Unit> {
+pub(crate) fn detect(tokens: &[Token]) -> (Vec<Unit>, Vec<Diagnostic>) {
     let braces = match_braces(tokens);
     let impl_bodies = impl_body_ranges(tokens, &braces);
 
     let mut units = Vec::new();
+    let mut diagnostics = Vec::new();
     let mut closure_bars = std::collections::HashSet::new();
 
     for i in 0..tokens.len() {
         let token = &tokens[i];
         match token.kind {
             TokenKind::Keyword if token.text == "impl" => {
-                if let Some(unit) = impl_unit(tokens, &braces, i) {
-                    units.push(unit);
-                }
+                record(impl_unit(tokens, &braces, i), &mut units, &mut diagnostics);
             }
             TokenKind::Keyword if token.text == "fn" => {
-                if let Some(unit) = fn_unit(tokens, &braces, &impl_bodies, i) {
-                    units.push(unit);
-                }
+                record(
+                    fn_unit(tokens, &braces, &impl_bodies, i),
+                    &mut units,
+                    &mut diagnostics,
+                );
             }
             _ => {
                 if let Some(unit) = closure_unit(tokens, &braces, i, &mut closure_bars) {
@@ -59,7 +73,23 @@ pub(crate) fn detect(tokens: &[Token]) -> Vec<Unit> {
     }
 
     units.sort_by_key(|u| u.token_start);
-    units
+    (units, diagnostics)
+}
+
+/// Route one boundary attempt: a unit, a recovery event, or neither.
+fn record(
+    outcome: Option<Result<Unit, SourceSpan>>,
+    units: &mut Vec<Unit>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match outcome {
+        Some(Ok(unit)) => units.push(unit),
+        Some(Err(span)) => diagnostics.push(Diagnostic {
+            kind: DiagnosticKind::UnmatchedDelimiter,
+            span,
+        }),
+        None => {}
+    }
 }
 
 /// Map each `{` token index to its matching `}` token index.
@@ -84,7 +114,7 @@ fn match_braces(tokens: &[Token]) -> HashMap<usize, usize> {
 fn impl_body_ranges(tokens: &[Token], braces: &HashMap<usize, usize>) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     for (i, token) in tokens.iter().enumerate() {
-        if token.kind == TokenKind::Keyword && token.text == "impl" {
+        if token.kind == TokenKind::Keyword && token.text == "impl" && opens_impl_item(tokens, i) {
             if let Some(open) = first_brace_after(tokens, i) {
                 if let Some(&close) = braces.get(&open) {
                     ranges.push((open, close));
@@ -93,6 +123,24 @@ fn impl_body_ranges(tokens: &[Token], braces: &HashMap<usize, usize>) -> Vec<(us
         }
     }
     ranges
+}
+
+/// Whether the `impl` keyword at `i` opens an `impl` item.
+///
+/// In type position the keyword names an anonymous type implementing a trait
+/// (`-> impl Iterator<Item = u8>`, `x: &impl Display`), and the next brace
+/// belongs to the enclosing declaration. Anchoring an `impl` unit there would
+/// take a function's body away from the function's own name and report its
+/// clones under the trait's.
+fn opens_impl_item(tokens: &[Token], i: usize) -> bool {
+    let Some(previous) = i.checked_sub(1).map(|p| &tokens[p]) else {
+        return true;
+    };
+    match previous.kind {
+        TokenKind::Punctuation => !TYPE_POSITION_PUNCT.contains(&previous.text.as_str()),
+        TokenKind::Keyword => !TYPE_POSITION_KEYWORDS.contains(&previous.text.as_str()),
+        _ => true,
+    }
 }
 
 /// Index of the first declaration-body `{` at or after `from`, stopping at a
@@ -120,20 +168,31 @@ fn first_brace_after(tokens: &[Token], from: usize) -> Option<usize> {
     None
 }
 
-fn impl_unit(tokens: &[Token], braces: &HashMap<usize, usize>, i: usize) -> Option<Unit> {
+fn impl_unit(
+    tokens: &[Token],
+    braces: &HashMap<usize, usize>,
+    i: usize,
+) -> Option<Result<Unit, SourceSpan>> {
+    if !opens_impl_item(tokens, i) {
+        return None;
+    }
     let open = first_brace_after(tokens, i)?;
-    let close = *braces.get(&open)?;
+    // Do not turn a body that never closes into a unit reaching EOF. The
+    // caller records the recovery event as a lexical diagnostic.
+    let Some(&close) = braces.get(&open) else {
+        return Some(Err(span_of(tokens, open, open)));
+    };
     let name = tokens[i + 1..open]
         .iter()
         .find(|t| t.kind == TokenKind::Identifier)
         .map(|t| t.text.to_string());
-    Some(Unit {
+    Some(Ok(Unit {
         kind: UnitKind::Impl,
         name,
         token_start: i,
         token_end: close + 1,
         span: span_of(tokens, i, close),
-    })
+    }))
 }
 
 fn fn_unit(
@@ -141,9 +200,11 @@ fn fn_unit(
     braces: &HashMap<usize, usize>,
     impl_bodies: &[(usize, usize)],
     i: usize,
-) -> Option<Unit> {
+) -> Option<Result<Unit, SourceSpan>> {
     let open = first_brace_after(tokens, i)?;
-    let close = *braces.get(&open)?;
+    let Some(&close) = braces.get(&open) else {
+        return Some(Err(span_of(tokens, open, open)));
+    };
     let name = tokens
         .get(i + 1)
         .filter(|t| t.kind == TokenKind::Identifier)
@@ -156,13 +217,13 @@ fn fn_unit(
     } else {
         UnitKind::Function
     };
-    Some(Unit {
+    Some(Ok(Unit {
         kind,
         name,
         token_start: i,
         token_end: close + 1,
         span: span_of(tokens, i, close),
-    })
+    }))
 }
 
 fn closure_unit(
@@ -265,7 +326,11 @@ mod tests {
     use crate::lexer::lex;
 
     fn units_of(source: &str) -> Vec<Unit> {
-        detect(&lex(source).0)
+        detect(&lex(source).0).0
+    }
+
+    fn diagnostics_of(source: &str) -> Vec<Diagnostic> {
+        detect(&lex(source).0).1
     }
 
     #[test]
@@ -335,5 +400,78 @@ mod tests {
         let source = format!("fn {} {{}}", "name ".repeat(MAX_DECLARATION_LOOKAHEAD));
         let tokens = lex(&source).0;
         assert_eq!(first_brace_after(&tokens, 0), None);
+    }
+
+    #[test]
+    fn an_opaque_return_type_does_not_anchor_the_function_body() {
+        let units = units_of("fn produce() -> impl Iterator<Item = u8> { std::iter::empty() }");
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].kind, UnitKind::Function);
+        assert_eq!(units[0].name.as_deref(), Some("produce"));
+    }
+
+    #[test]
+    fn an_opaque_parameter_type_does_not_anchor_the_function_body() {
+        for source in [
+            "fn show(value: &impl Display) { print(value) }",
+            "fn show(value: impl Display) { print(value) }",
+            "fn show(value: (impl Display, impl Debug)) { print(value) }",
+            "fn show(values: Vec<impl Display>) { print(values) }",
+        ] {
+            let units = units_of(source);
+            assert!(
+                units.iter().all(|u| u.kind != UnitKind::Impl),
+                "an opaque parameter type became a unit in {source}"
+            );
+            assert_eq!(units[0].kind, UnitKind::Function);
+            assert_eq!(units[0].name.as_deref(), Some("show"));
+        }
+    }
+
+    #[test]
+    fn a_function_nested_under_an_opaque_return_type_is_not_a_method() {
+        let units = units_of("fn outer() -> impl Debug { fn helper() -> u8 { 1 } helper() }");
+        let kinds: Vec<_> = units.iter().map(|u| u.kind).collect();
+        assert_eq!(kinds, vec![UnitKind::Function, UnitKind::Function]);
+        assert_eq!(units[0].name.as_deref(), Some("outer"));
+        assert_eq!(units[1].name.as_deref(), Some("helper"));
+    }
+
+    #[test]
+    fn impl_items_after_an_opaque_type_are_still_units() {
+        let units = units_of("fn show(v: impl Display) { v } impl Foo { fn g(&self) {} }");
+        let impl_unit = units.iter().find(|u| u.kind == UnitKind::Impl).unwrap();
+        assert_eq!(impl_unit.name.as_deref(), Some("Foo"));
+        assert_eq!(
+            units.iter().filter(|u| u.kind == UnitKind::Method).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn an_unclosed_function_body_is_reported_and_yields_no_unit() {
+        let source = "fn broken() { let x = 1;";
+        assert!(units_of(source).is_empty());
+        let diagnostics = diagnostics_of(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].kind, DiagnosticKind::UnmatchedDelimiter);
+        assert_eq!(diagnostics[0].span.start_byte, 12);
+    }
+
+    #[test]
+    fn an_unclosed_impl_body_is_reported() {
+        let diagnostics = diagnostics_of("impl Foo {");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.kind == DiagnosticKind::UnmatchedDelimiter)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn well_formed_boundaries_report_nothing() {
+        assert!(diagnostics_of("impl Foo { fn a(&self) -> impl Debug { 1 } }").is_empty());
     }
 }

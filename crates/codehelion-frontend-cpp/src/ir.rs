@@ -1150,7 +1150,8 @@ int S::out_of_class() { return 2; }
             Some(TokenKind::Literal(LiteralKind::String)),
             "the raw string is one atomic token, delimiters included"
         );
-        assert_eq!(kind_of("true"), Some(TokenKind::Literal(LiteralKind::Bool)));
+        // A reserved word, exactly as the Fast lexer reads it.
+        assert_eq!(kind_of("true"), Some(TokenKind::Keyword));
         assert_eq!(kind_of("'x'"), Some(TokenKind::Literal(LiteralKind::Char)));
         assert_eq!(
             kind_of("\"lit\""),
@@ -1211,6 +1212,29 @@ int S::out_of_class() { return 2; }
         let file = parse("int f(int x) { return g(x); }\n");
         let g = file.tokens.iter().find(|token| token.text == "g").unwrap();
         assert_eq!(g.kind, TokenKind::Identifier);
+    }
+
+    #[test]
+    fn both_modes_read_a_boolean_constant_as_the_same_token() {
+        // A pair of units differing only in a boolean constant must be told
+        // apart the same way whichever mode read them, so the two frontends
+        // have to agree on what kind of token the constant is.
+        let source = "bool f() { return g(true) && h(false); }";
+        let file = parse(source);
+        let (fast, _) = codehelion_frontend_c::lexer::lex(source, &crate::CPP);
+        for word in ["true", "false"] {
+            let structural_kind = file
+                .tokens
+                .iter()
+                .find(|token| token.text == word)
+                .map(|token| token.kind);
+            let fast_kind = fast
+                .iter()
+                .find(|token| token.text == word)
+                .map(|token| token.kind);
+            assert_eq!(structural_kind, Some(TokenKind::Keyword), "{word}");
+            assert_eq!(fast_kind, structural_kind, "{word} in both modes");
+        }
     }
 
     #[test]

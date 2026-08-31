@@ -12,10 +12,11 @@
 
 pub mod ir;
 
+use codehelion_core::conditional::ArmPath;
 use codehelion_core::discovery::Language;
 use codehelion_core::frontend::{Frontend, LexedFile};
 use codehelion_frontend_c::dialect::Dialect;
-use codehelion_frontend_c::{lexer, units};
+use codehelion_frontend_c::{fast_pass, lexer, units};
 
 /// Version tag of this frontend, used as a fingerprint input. The C++ dialect
 /// revision and the shared C-family lexer revision are both part of it.
@@ -137,6 +138,14 @@ pub const CPP: Dialect = Dialect {
 /// The C++ Fast-mode frontend.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CppFrontend;
+
+impl CppFrontend {
+    /// Lex `source` and record the preprocessor arm each token sits in.
+    #[must_use]
+    pub fn lex_with_arm_paths(&self, source: &str) -> (LexedFile, Vec<ArmPath>) {
+        fast_pass(source, &CPP, Language::Cpp, FRONTEND_VERSION)
+    }
+}
 
 impl Frontend for CppFrontend {
     fn language(&self) -> Language {
@@ -268,8 +277,7 @@ mod tests {
     #[test]
     fn raw_string_pseudo_directives_do_not_make_code_unreachable() {
         let source = "const char* note = R\"(#if 0\n#endif)\";\nint still_live;\n";
-        let file = lexed(source);
-        let paths = lexer::conditional_paths(source, &file.tokens, &CPP);
+        let (file, paths) = CppFrontend.lex_with_arm_paths(source);
         let index = file
             .tokens
             .iter()
@@ -379,6 +387,28 @@ mod tests {
             "{:#?}",
             out.units
         );
+    }
+
+    #[test]
+    fn attribute_specifiers_do_not_open_a_closure() {
+        let src = "[[nodiscard]] int f(int x) { return x; }\n\
+                   [[nodiscard]] [[deprecated]] int g() { return 0; }\n\
+                   struct S { [[nodiscard]] bool empty() const { return true; } };";
+        let out = lexed(src);
+        assert!(
+            out.units.iter().all(|u| u.kind != UnitKind::Closure),
+            "an attribute is not a capture list: {:#?}",
+            out.units
+        );
+        // Each decorated declaration is still anchored once, by the rule that
+        // owns it, so nothing is visited twice.
+        let functions: Vec<_> = out
+            .units
+            .iter()
+            .filter(|u| matches!(u.kind, UnitKind::Function | UnitKind::Method))
+            .map(|u| u.name.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(functions, vec!["f", "g", "empty"], "{:#?}", out.units);
     }
 
     #[test]

@@ -17,8 +17,11 @@ pub mod ir;
 pub mod lexer;
 pub mod units;
 
+use codehelion_core::conditional::ArmPath;
 use codehelion_core::discovery::Language;
 use codehelion_core::frontend::{Frontend, LexedFile};
+
+use dialect::Dialect;
 
 /// Version of the lexer and unit-boundary machinery shared by C and C++.
 ///
@@ -30,9 +33,46 @@ pub const C_FAMILY_LEXER_VERSION: &str = "c-family-lexer-v1";
 /// revision and the shared C-family lexer revision are both part of it.
 pub const FRONTEND_VERSION: &str = "c-lexer-v1+c-family-lexer-v1";
 
+/// Run one Fast-mode pass over a C-family source: the lexed file plus the
+/// preprocessor arm each of its tokens sits in.
+///
+/// Both halves come out of a single lex, so a pipeline that needs arm paths
+/// reads the text once. This is the shared entry point of the C-family Fast
+/// frontends, as [`ir::parse_to_ir`] is of the structural ones.
+#[must_use]
+pub fn fast_pass(
+    source: &str,
+    dialect: &Dialect,
+    language: Language,
+    frontend_version: &'static str,
+) -> (LexedFile, Vec<ArmPath>) {
+    let (tokens, mut diagnostics, directives) = lexer::lex_with_directives(source, dialect);
+    let (units, unit_diagnostics) = units::detect(&tokens, dialect);
+    diagnostics.extend(unit_diagnostics);
+    let arm_paths = lexer::conditional_paths(&tokens, &directives);
+    (
+        LexedFile {
+            language,
+            frontend_version,
+            tokens,
+            units,
+            diagnostics,
+        },
+        arm_paths,
+    )
+}
+
 /// The C Fast-mode frontend.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CFrontend;
+
+impl CFrontend {
+    /// Lex `source` and record the preprocessor arm each token sits in.
+    #[must_use]
+    pub fn lex_with_arm_paths(&self, source: &str) -> (LexedFile, Vec<ArmPath>) {
+        fast_pass(source, &dialect::C, Language::C, FRONTEND_VERSION)
+    }
+}
 
 impl Frontend for CFrontend {
     fn language(&self) -> Language {

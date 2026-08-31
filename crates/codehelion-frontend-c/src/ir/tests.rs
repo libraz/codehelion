@@ -575,7 +575,8 @@ fn token_stream_classification_and_spans() {
         Some(TokenKind::Literal(LiteralKind::String)),
         "the string is one atomic token, escape sequence included"
     );
-    assert_eq!(kind_of("true"), Some(TokenKind::Literal(LiteralKind::Bool)));
+    // A reserved word, exactly as the Fast lexer reads it.
+    assert_eq!(kind_of("true"), Some(TokenKind::Keyword));
     assert_eq!(kind_of("{"), Some(TokenKind::Punctuation));
     assert_eq!(kind_of("="), Some(TokenKind::Punctuation));
 
@@ -598,6 +599,29 @@ fn token_stream_classification_and_spans() {
     assert_eq!(double.span.end_byte, double.span.start_byte + 6);
     assert_eq!(double.span.start_line, 3);
     assert_eq!(double.span.start_column, 13);
+}
+
+#[test]
+fn both_modes_read_a_boolean_constant_as_the_same_token() {
+    // A pair of units differing only in a boolean constant must be told apart
+    // the same way whichever mode read them, so the two frontends have to
+    // agree on what kind of token the constant is.
+    let source = "int f(void) { return g(true) + h(false); }";
+    let structural = parse(source);
+    let (fast, _) = crate::lexer::lex(source, &crate::dialect::C);
+    for word in ["true", "false"] {
+        let structural_kind = structural
+            .tokens
+            .iter()
+            .find(|token| token.text == word)
+            .map(|token| token.kind);
+        let fast_kind = fast
+            .iter()
+            .find(|token| token.text == word)
+            .map(|token| token.kind);
+        assert_eq!(structural_kind, Some(TokenKind::Keyword), "{word}");
+        assert_eq!(fast_kind, structural_kind, "{word} in both modes");
+    }
 }
 
 #[test]

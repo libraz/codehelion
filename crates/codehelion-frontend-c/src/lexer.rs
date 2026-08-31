@@ -58,6 +58,19 @@ fn is_ident_continue(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Lexer runs performed on the calling thread. Each test owns its thread,
+    /// so this counts only the work that test asked for.
+    static LEXES_RUN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of lexer runs performed on the calling thread so far.
+#[cfg(test)]
+fn lexes_run() -> usize {
+    LEXES_RUN.with(std::cell::Cell::get)
+}
+
 struct Lexer<'d, 's> {
     dialect: &'d Dialect,
     source: &'s str,
@@ -212,6 +225,8 @@ impl<'d, 's> Lexer<'d, 's> {
         Vec<Diagnostic>,
         Vec<(usize, ConditionalDirective)>,
     ) {
+        #[cfg(test)]
+        LEXES_RUN.with(|count| count.set(count.get() + 1));
         while let Some(c) = self.peek(0) {
             // A UTF-8 BOM is an encoding marker, not source text. Consume it
             // only at byte zero. Keep its byte width in spans without letting
@@ -631,16 +646,41 @@ pub fn lex(source: &str, dialect: &Dialect) -> (Vec<Token>, Vec<Diagnostic>) {
     Lexer::new(source, dialect).run()
 }
 
+/// Lex `source` under `dialect`, keeping the conditional directives it passed.
+///
+/// The directives are a by-product of the same scan that produces the tokens,
+/// so a caller that needs both takes them from here rather than lexing the
+/// text a second time.
+#[must_use]
+pub fn lex_with_directives(
+    source: &str,
+    dialect: &Dialect,
+) -> (Vec<Token>, Vec<Diagnostic>, ConditionalDirectives) {
+    let (tokens, diagnostics, directives) = Lexer::new(source, dialect).run_with_directives();
+    (tokens, diagnostics, ConditionalDirectives(directives))
+}
+
+/// The conditional-compilation directives one lex passed, in source order.
+///
+/// Produced by [`lex_with_directives`] and consumed by [`conditional_paths`];
+/// the arm paths of a file are derived from the lex that already ran, never
+/// from a fresh one over the same text.
+#[derive(Debug, Clone, Default)]
+pub struct ConditionalDirectives(Vec<(usize, ConditionalDirective)>);
+
 /// Record the preprocessor arm active at each token.
 ///
 /// Directives never become clone content, but their nesting determines whether
 /// two otherwise-equal C-family snippets can coexist in one build. This pass
 /// intentionally recognises only literal `0` / `1` conditions; macro and
 /// expression evaluation belongs to a compiler frontend, not Fast mode.
+///
+/// `tokens` and `directives` must come from the same lex, which is what makes
+/// the byte offsets of the two comparable.
 #[must_use]
-pub fn conditional_paths(source: &str, tokens: &[Token], dialect: &Dialect) -> Vec<ArmPath> {
-    let (_, _, directives) = Lexer::new(source, dialect).run_with_directives();
-    if !directives_are_balanced(&directives) {
+pub fn conditional_paths(tokens: &[Token], directives: &ConditionalDirectives) -> Vec<ArmPath> {
+    let directives = &directives.0;
+    if !directives_are_balanced(directives) {
         return vec![ArmPath::default(); tokens.len()];
     }
     let mut next_directive = 0usize;
@@ -677,7 +717,7 @@ fn directives_are_balanced(directives: &[(usize, ConditionalDirective)]) -> bool
 }
 
 /// One directive that changes the active conditional arm.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum ConditionalDirective {
     /// Enter an `#if`-style condition.
     Begin(StaticCondition),
@@ -807,9 +847,9 @@ mod tests {
     #[test]
     fn conditional_paths_separate_alternative_arms_and_literal_dead_code() {
         let src = "#ifdef _WIN32\nint windows_value;\n#else\nint unix_value;\n#endif\n#if 0\nint dead_value;\n#else\nint live_value;\n#endif\n";
-        let (tokens, diagnostics) = lex_c(src);
+        let (tokens, diagnostics, directives) = lex_with_directives(src, &dialect::C);
         assert!(diagnostics.is_empty());
-        let paths = conditional_paths(src, &tokens, &dialect::C);
+        let paths = conditional_paths(&tokens, &directives);
         let path_for = |name: &str| {
             let index = tokens
                 .iter()
@@ -826,9 +866,9 @@ mod tests {
     #[test]
     fn unclosed_conditionals_do_not_invent_an_exclusion() {
         let src = "#ifdef MAYBE\nint first_value;\n#else\nint second_value;\n";
-        let (tokens, diagnostics) = lex_c(src);
+        let (tokens, diagnostics, directives) = lex_with_directives(src, &dialect::C);
         assert!(diagnostics.is_empty());
-        let paths = conditional_paths(src, &tokens, &dialect::C);
+        let paths = conditional_paths(&tokens, &directives);
         let path_for = |name: &str| {
             let index = tokens
                 .iter()
@@ -846,14 +886,39 @@ mod tests {
     #[test]
     fn comment_pseudo_directives_do_not_make_code_unreachable() {
         let src = "// #if 0\nint still_live;\n// #endif\n";
-        let (tokens, diagnostics) = lex_c(src);
+        let (tokens, diagnostics, directives) = lex_with_directives(src, &dialect::C);
         assert!(diagnostics.is_empty());
-        let paths = conditional_paths(src, &tokens, &dialect::C);
+        let paths = conditional_paths(&tokens, &directives);
         let index = tokens
             .iter()
             .position(|token| token.text == "still_live")
             .unwrap_or_else(|| panic!("missing still_live"));
         assert!(!paths[index].is_unreachable());
+    }
+
+    #[test]
+    fn a_fast_pass_over_one_source_lexes_it_once() {
+        let src = "#if 0\nint dead_value;\n#else\nint live_value;\n#endif\n";
+        let before = lexes_run();
+        let (tokens, diagnostics, directives) = lex_with_directives(src, &dialect::C);
+        let paths = conditional_paths(&tokens, &directives);
+        assert_eq!(
+            lexes_run() - before,
+            1,
+            "arm paths come from the lex that already ran, not from a second one"
+        );
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(paths.len(), tokens.len());
+        let path_for = |name: &str| {
+            let index = tokens
+                .iter()
+                .position(|token| token.text == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            &paths[index]
+        };
+        assert!(path_for("dead_value").is_unreachable());
+        assert!(!path_for("live_value").is_unreachable());
     }
 
     #[test]
