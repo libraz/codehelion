@@ -101,6 +101,13 @@ fn standard_shape(adt: Adt, db: &RootDatabase) -> Option<TypeCategory> {
         "Vec" | "VecDeque" | "BinaryHeap" | "LinkedList" => TypeCategory::Sequence,
         "HashMap" | "BTreeMap" | "HashSet" | "BTreeSet" => TypeCategory::Mapping,
         "Box" | "Rc" | "Arc" | "RefCell" | "Cell" | "Mutex" | "RwLock" => TypeCategory::Handle,
+        // The category an enum would get anyway, named because the other side
+        // of a cross-language comparison has to arrive at the same one. A
+        // function returning `Option<T>` and one returning the optional of
+        // another language are the same shape, and the construct layer already
+        // reads them as one; two backends disagreeing here would lower the
+        // score of the clones that agreement exists to find.
+        "Option" | "Result" => TypeCategory::Enumeration,
         _ => return None,
     })
 }

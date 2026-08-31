@@ -14,6 +14,16 @@
 //! permits it is told rather than left with a thinner answer than they asked
 //! for.
 //!
+//! # And an untrusted request is answered from inside its boundary or not at
+//! all
+//!
+//! A request may carry a [`ReadBoundary`], and then every path this analysis
+//! resolves for itself has to land under it: the file, its package manifest,
+//! and the workspace manifest the package is read through. What each of those
+//! costs to check is what deciding to decline costs; nothing outside the
+//! boundary reaches an answer. See [`crate::boundary`] for what a boundary does
+//! not cover.
+//!
 //! The cost of refusing is visible rather than hidden. A crate with a build
 //! script nobody permitted is reported as
 //! [`Unavailability::RequiresExecution`] instead of being analysed with
@@ -43,6 +53,7 @@ use ra_ap_ide_db::base_db::SourceDatabase;
 use ra_ap_syntax::AstNode;
 use ra_ap_vfs::Vfs;
 
+use crate::boundary::ReadBoundary;
 use crate::types::category;
 use crate::{calls, constructs, expansions, instantiations, occurrences};
 
@@ -73,6 +84,24 @@ fn helper_toolchain() -> Result<HelperToolchain, String> {
     HELPER_TOOLCHAIN
         .get_or_init(discover_helper_toolchain)
         .clone()
+}
+
+/// Find the toolchain this helper analyses with, before it offers to.
+///
+/// Every capability this program names at the handshake is answered by a
+/// compiler it locates rather than links, so locating one is part of being able
+/// to make the offer. A helper that shook hands and then declined each request
+/// for want of a toolchain would have `doctor` report a working semantic
+/// analysis on a machine where no scan can get one, and leave the scan to
+/// discover it.
+///
+/// The result is kept, so a request pays nothing for having been checked here.
+///
+/// # Errors
+///
+/// Returns why the toolchain could not be located or could not answer.
+pub(crate) fn require_toolchain() -> Result<(), String> {
+    helper_toolchain().map(|_| ())
 }
 
 #[allow(
@@ -210,7 +239,28 @@ pub(crate) enum Outcome {
     /// What the compiler knows.
     Analyzed(Box<CompilerIr>),
     /// Nothing can be known, and why.
-    Unavailable(Unavailability),
+    Unavailable {
+        /// The reason a run files the unit under, which travels on the wire.
+        reason: Unavailability,
+        /// Which of the situations behind that reason this was.
+        ///
+        /// Several of them stand for more than one: a file with no project
+        /// above it, a project outside the boundary the request set and a
+        /// crate the workspace does not build all arrive as
+        /// [`Unavailability::NoBuildInformation`], and a run that sees only
+        /// the reason cannot tell somebody which happened.
+        why: String,
+    },
+}
+
+impl Outcome {
+    /// A unit that cannot be analysed, for `why`.
+    fn unavailable(reason: Unavailability, why: impl Into<String>) -> Self {
+        Self::Unavailable {
+            reason,
+            why: why.into(),
+        }
+    }
 }
 
 impl Workspaces {
@@ -225,7 +275,7 @@ impl Workspaces {
     /// loading the workspace, so a request with no project can be declined
     /// without constructing compiler state.
     pub(crate) fn describe(&mut self, root: &Path) -> Result<Option<BuildDescription>, String> {
-        let Some(manifest) = nearest_manifest(root) else {
+        let Some(manifest) = nearest_manifest(root, None) else {
             return Ok(None);
         };
         let workspace = workspace_manifest(&manifest);
@@ -236,16 +286,44 @@ impl Workspaces {
             .map(Some)
     }
 
-    /// Analyse one crate of one workspace, running only what `permitted` says.
-    pub(crate) fn analyze(&mut self, unit: &UnitRef, permitted: Permissions) -> Outcome {
+    /// Analyse one crate of one workspace, running only what `permitted` says
+    /// and reading only inside `boundary`.
+    pub(crate) fn analyze(
+        &mut self,
+        unit: &UnitRef,
+        permitted: Permissions,
+        boundary: Option<&Path>,
+    ) -> Outcome {
+        let boundary = boundary.map(ReadBoundary::new);
+        let boundary = boundary.as_ref();
         let anchor = Path::new(&unit.file);
-        let Some(manifest) = nearest_manifest(anchor) else {
-            return Outcome::Unavailable(Unavailability::NoBuildInformation);
+        // The file itself, before anything is resolved from it: a request for a
+        // file outside the boundary has no answer that respects the boundary.
+        if !within(anchor, boundary) {
+            return Outcome::unavailable(
+                Unavailability::NoBuildInformation,
+                format!(
+                    "{} is outside the directory this request confined reading to",
+                    unit.file
+                ),
+            );
+        }
+        let Some(manifest) = nearest_manifest(anchor, boundary) else {
+            return Outcome::unavailable(
+                Unavailability::NoBuildInformation,
+                format!("no Cargo manifest governs {}", unit.file),
+            );
         };
         // The package's own manifest decides this, not the workspace's: one
         // member having a build script says nothing about its neighbours.
         if !permitted.build_scripts && has_build_script(&manifest) {
-            return Outcome::Unavailable(Unavailability::RequiresExecution);
+            return Outcome::unavailable(
+                Unavailability::RequiresExecution,
+                format!(
+                    "{} declares a build script, and nothing permitted running it",
+                    manifest.display()
+                ),
+            );
         }
         // Loaded and cached by workspace rather than by package. Reading a
         // member reads the whole workspace anyway, so keying on the member
@@ -253,24 +331,55 @@ impl Workspaces {
         // path relative to the member it was asked through, which is not how
         // the project spells it.
         let root = workspace_manifest(&manifest);
+        // A package whose workspace sits outside the boundary is declined
+        // rather than read: the workspace manifest names the members, the
+        // profiles and the patched dependencies the package is compiled with,
+        // so an answer about this package is an answer about that file too.
+        if !within(&root, boundary) {
+            return Outcome::unavailable(
+                Unavailability::NoBuildInformation,
+                format!(
+                    "the workspace manifest {} is outside the directory this request confined reading to",
+                    root.display()
+                ),
+            );
+        }
         let loaded = self
             .loaded
             .entry((root.clone(), permitted))
             .or_insert_with(|| load(&root, permitted));
         match loaded {
-            Err(_) => Outcome::Unavailable(Unavailability::MetadataUnavailable),
+            Err(why) => Outcome::unavailable(
+                Unavailability::MetadataUnavailable,
+                format!("{}: {why}", root.display()),
+            ),
             Ok(loaded) => ra_ap_hir::attach_db(&loaded.db, || analyze_crate(loaded, unit)),
         }
     }
 }
 
+/// Whether an answer may be built from `path`.
+///
+/// True for every path when no boundary was set, which is what a trusted scan
+/// asks for: the project decides where its own manifests are.
+fn within(path: &Path, boundary: Option<&ReadBoundary>) -> bool {
+    boundary.is_none_or(|boundary| boundary.holds(path))
+}
+
 /// The `Cargo.toml` governing `path`, found by walking up from it.
-fn nearest_manifest(path: &Path) -> Option<PathBuf> {
+///
+/// The walk stops at `boundary` rather than climbing past it and being refused
+/// afterwards. The two decline the same requests; only this one leaves the
+/// directories above a boundary unread.
+fn nearest_manifest(path: &Path, boundary: Option<&ReadBoundary>) -> Option<PathBuf> {
     let start = if path.is_dir() { path } else { path.parent()? };
-    start.ancestors().find_map(|directory| {
-        let manifest = directory.join("Cargo.toml");
-        manifest.is_file().then_some(manifest)
-    })
+    start
+        .ancestors()
+        .take_while(|directory| within(directory, boundary))
+        .find_map(|directory| {
+            let manifest = directory.join("Cargo.toml");
+            manifest.is_file().then_some(manifest)
+        })
 }
 
 /// The manifest of the workspace `manifest` belongs to, or `manifest` itself
@@ -280,6 +389,11 @@ fn nearest_manifest(path: &Path) -> Option<PathBuf> {
 /// the outermost instead would attach a project to whatever workspace happens
 /// to sit above it on this machine — a checkout under another repository would
 /// be read as part of it.
+///
+/// Not bounded, because this is the search whose result decides whether a
+/// request under a boundary can be answered at all: Cargo performs the same
+/// walk when it loads a member, so a workspace above the boundary is one the
+/// caller has to be told about rather than one that can be pretended away.
 fn workspace_manifest(manifest: &Path) -> PathBuf {
     manifest
         .parent()
@@ -297,19 +411,100 @@ fn declares_workspace(manifest: &Path) -> bool {
 
 /// Whether the package at `manifest` builds something before it compiles.
 ///
-/// Deliberately coarse. The claim being made is "this crate has a build script
-/// and nothing ran it", which is exactly what a `build.rs` beside the manifest
-/// or a `build =` key inside it establishes; how much of the crate depends on
-/// what that script would have produced is not knowable without running it,
-/// which is the thing being declined.
+/// The claim being made is "this crate has a build script and nothing ran it",
+/// and the package's own manifest is what settles it: a `build` key names the
+/// script, or turns off the `build.rs` beside the manifest that would otherwise
+/// be one. How much of the crate depends on what that script would have
+/// produced is not knowable without running it, which is the thing being
+/// declined.
+///
+/// Both halves of getting it wrong cost something. A script missed here is a
+/// crate analysed against types that were never generated, reported as a
+/// complete reading; a script imagined here is a crate refused for needing a
+/// permission that would buy nothing.
 fn has_build_script(manifest: &Path) -> bool {
-    if manifest.with_file_name("build.rs").is_file() {
-        return true;
+    let declared = std::fs::read_to_string(manifest)
+        .map_or(Declared::Unsaid, |text| declared_build_script(&text));
+    match declared {
+        Declared::Script => true,
+        Declared::None => false,
+        Declared::Unsaid => manifest.with_file_name("build.rs").is_file(),
     }
-    std::fs::read_to_string(manifest).is_ok_and(|text| {
-        text.lines()
-            .any(|line| line.trim_start().starts_with("build ="))
-    })
+}
+
+/// What a manifest's own `[package]` table says about a build script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Declared {
+    /// A script: named, or a list of names, or the default file asked for.
+    Script,
+    /// None, whatever sits beside the manifest.
+    None,
+    /// Nothing, so the file beside the manifest is the whole of the answer.
+    Unsaid,
+}
+
+/// What `manifest` declares about its build script.
+///
+/// Read line by line rather than parsed, because the question is small and the
+/// answer must not depend on a manifest being well-formed enough to load. What
+/// the reading does have to survive is how TOML lets the same declaration be
+/// spelled — either quoting style, spaces around the `=` or none — and which
+/// table a key sits in: a `build` under `[package.metadata]` belongs to
+/// whatever reads that table, and is not this package declaring a script.
+fn declared_build_script(manifest: &str) -> Declared {
+    let mut table = "";
+    for line in manifest.lines() {
+        let line = line.trim();
+        if let Some(header) = line.strip_prefix('[') {
+            table = header
+                .split(']')
+                .next()
+                .unwrap_or_default()
+                .trim_start_matches('[')
+                .trim();
+            continue;
+        }
+        if table != "package" {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !names_the_build_key(key.trim()) {
+            continue;
+        }
+        return declared_by(value.trim());
+    }
+    Declared::Unsaid
+}
+
+/// Whether `key` is the `build` key itself.
+///
+/// Quoted or bare, which TOML treats as one key. Nothing else counts: a line of
+/// an array elsewhere in the table can begin with the letters of a key and an
+/// `=`, and only the closing quote tells the two apart.
+fn names_the_build_key(key: &str) -> bool {
+    matches!(key, "build" | "\"build\"" | "'build'")
+}
+
+/// What a `build` key set to `value` says.
+fn declared_by(value: &str) -> Declared {
+    if value.starts_with('"') || value.starts_with('\'') || value.starts_with('[') {
+        // A script path, or a list of them.
+        return Declared::Script;
+    }
+    if value.starts_with("false") {
+        return Declared::None;
+    }
+    if value.starts_with("true") {
+        // The default file, which is the one beside the manifest.
+        return Declared::Unsaid;
+    }
+    // A spelling this does not know. Read as a declaration rather than as
+    // silence: the key is there, and a crate refused for a script it may not
+    // have costs a permission prompt, where one analysed without a script it
+    // does have costs a wrong answer that looks right.
+    Declared::Script
 }
 
 /// How this process reads a project, wherever it reads one.
@@ -520,7 +715,14 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
     let db = &loaded.db;
     let requested_path = Path::new(&unit.file);
     let Some(requested_id) = file_of(loaded, requested_path) else {
-        return Outcome::Unavailable(Unavailability::NoBuildInformation);
+        return Outcome::unavailable(
+            Unavailability::NoBuildInformation,
+            format!(
+                "the workspace at {} holds no file called {}",
+                loaded.root.display(),
+                unit.file
+            ),
+        );
     };
     // Spelled from the file the workspace resolved the request to, not from the
     // path the request arrived as. Every anchor below is spelled from the
@@ -539,7 +741,14 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
             .display_name(db)
             .is_some_and(|name| name.to_string() == unit.unit)
     }) else {
-        return Outcome::Unavailable(Unavailability::NoBuildInformation);
+        return Outcome::unavailable(
+            Unavailability::NoBuildInformation,
+            format!(
+                "the workspace at {} builds no crate called {}",
+                loaded.root.display(),
+                unit.unit
+            ),
+        );
     };
 
     let mut ir = CompilerIr::empty(unit.clone());
@@ -907,7 +1116,118 @@ fn display_of(ty: &ra_ap_hir::Type<'_>, db: &RootDatabase) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cargo_config, helper_toolchain};
+    use super::{
+        Declared, cargo_config, declared_build_script, has_build_script, helper_toolchain,
+    };
+
+    fn package(body: &str) -> String {
+        format!("[package]\nname = \"p\"\nversion = \"0.1.0\"\n{body}")
+    }
+
+    #[test]
+    fn a_named_build_script_is_declared_however_it_is_quoted() {
+        assert_eq!(
+            declared_build_script(&package("build = \"b.rs\"\n")),
+            Declared::Script
+        );
+        assert_eq!(
+            declared_build_script(&package("build='custom.rs'\n")),
+            Declared::Script
+        );
+        assert_eq!(
+            declared_build_script(&package("  build   =   \"b.rs\"  # named\n")),
+            Declared::Script
+        );
+        assert_eq!(
+            declared_build_script(&package("build = [\"first.rs\", \"second.rs\"]\n")),
+            Declared::Script
+        );
+    }
+
+    #[test]
+    fn a_build_key_set_to_false_declares_no_build_script() {
+        assert_eq!(
+            declared_build_script(&package("build = false\n")),
+            Declared::None
+        );
+        assert_eq!(
+            declared_build_script(&package("build=false\n")),
+            Declared::None
+        );
+    }
+
+    /// `true` asks for the default file rather than naming one, so what is
+    /// beside the manifest is still what decides.
+    #[test]
+    fn a_build_key_set_to_true_leaves_the_file_beside_the_manifest_to_decide() {
+        assert_eq!(
+            declared_build_script(&package("build = true\n")),
+            Declared::Unsaid
+        );
+    }
+
+    /// The key belongs to `[package]`. Another table's `build` is that table's
+    /// own word, and a package refused over it would be refused for something
+    /// it never said.
+    #[test]
+    fn a_build_key_in_another_table_is_not_this_packages_declaration() {
+        assert_eq!(
+            declared_build_script(&package(
+                "\n[package.metadata.release]\nbuild = \"cross\"\n"
+            )),
+            Declared::Unsaid
+        );
+        assert_eq!(
+            declared_build_script(&package("\n[dependencies]\nbuild = \"1\"\n")),
+            Declared::Unsaid
+        );
+    }
+
+    /// A value elsewhere in `[package]` can hold the letters of the key and an
+    /// `=`, and does not make the package declare anything.
+    #[test]
+    fn a_string_that_reads_like_the_build_key_is_not_the_build_key() {
+        assert_eq!(
+            declared_build_script(&package(
+                "keywords = [\n  \"build = false\",\n]\ndescription = \"build = false\"\n"
+            )),
+            Declared::Unsaid
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Test setup requires a writable temporary directory.
+    fn a_declaration_of_none_outranks_the_file_beside_the_manifest() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let manifest = directory.path().join("Cargo.toml");
+        std::fs::write(directory.path().join("build.rs"), "fn main() {}\n")
+            .expect("writing a build script");
+
+        std::fs::write(&manifest, package("")).expect("writing a manifest");
+        assert!(
+            has_build_script(&manifest),
+            "a build.rs beside an unsaying manifest is a build script"
+        );
+
+        std::fs::write(&manifest, package("build = false\n")).expect("writing a manifest");
+        assert!(
+            !has_build_script(&manifest),
+            "the package turned the file beside it off"
+        );
+
+        std::fs::remove_file(directory.path().join("build.rs")).expect("removing the script");
+        std::fs::write(&manifest, package("build = \"b.rs\"\n")).expect("writing a manifest");
+        assert!(
+            has_build_script(&manifest),
+            "a named script is declared whether or not it is the default name"
+        );
+
+        std::fs::write(&manifest, package("")).expect("writing a manifest");
+        assert!(
+            !has_build_script(&manifest),
+            "nothing said and nothing beside it is no build script"
+        );
+    }
 
     /// A located tool keeps the name it was found under, links and all.
     ///

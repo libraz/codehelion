@@ -20,6 +20,7 @@
 #![allow(clippy::redundant_pub_crate)]
 
 mod analysis;
+mod boundary;
 mod calls;
 mod constructs;
 mod data_flow;
@@ -29,9 +30,7 @@ mod occurrences;
 mod types;
 
 use codehelion_helper::PROTOCOL_VERSION;
-use codehelion_helper::ir::{
-    COMPILER_IR_SCHEMA_VERSION, CompilerIr, DataFlowSummary, EffectSummary,
-};
+use codehelion_helper::ir::COMPILER_IR_SCHEMA_VERSION;
 use codehelion_helper::protocol::{
     Analyze, BuildDescription, Capability, DescribeBuild, Execution, Failure, HelperIdentity,
 };
@@ -44,6 +43,15 @@ const NAME: &str = "codehelion-backend-rust";
 
 fn main() -> std::process::ExitCode {
     if let Err(error) = codehelion_helper::enforce_current_process_limit_from_environment() {
+        eprintln!("{NAME}: {error}");
+        return std::process::ExitCode::FAILURE;
+    }
+    // Before the handshake, because the handshake is where this program
+    // promises what it can do and the toolchain it locates is what would do it.
+    // A helper that offered its capabilities and then declined every request
+    // for want of one would have a diagnostic report a working semantic
+    // analysis on a machine where no scan can get one.
+    if let Err(error) = analysis::require_toolchain() {
         eprintln!("{NAME}: {error}");
         return std::process::ExitCode::FAILURE;
     }
@@ -119,49 +127,33 @@ impl Backend for RustBackend {
 
     fn analyze(&mut self, request: &Analyze) -> Answer {
         let permitted = Permissions::of(&request.permitted);
-        match self.workspaces.analyze(&request.unit, permitted) {
+        match self.workspaces.analyze(
+            &request.unit,
+            permitted,
+            request.read_boundary.as_deref().map(std::path::Path::new),
+        ) {
             Outcome::Analyzed(mut ir) => {
                 ir.schema_version = COMPILER_IR_SCHEMA_VERSION.to_string();
-                Answer::Analyzed(only_requested(ir, &request.want))
+                // Rust-analyzer shares work between these facts, so reading a
+                // source file once and trimming the reply is safer than several
+                // partial walks that can disagree. The narrowing itself is the
+                // protocol's own, so a fact this helper starts producing cannot
+                // be one it forgets to withhold.
+                ir.keep_only(&request.want);
+                Answer::Analyzed(ir)
             }
-            Outcome::Unavailable(reason) => Answer::Unavailable(reason),
+            Outcome::Unavailable { reason, why } => {
+                // On standard error, because standard output is the protocol.
+                // The reason travels on the wire and the sentence behind it
+                // does not: the client collects this stream per request and
+                // files it against the unit that was refused, which is the
+                // only place a run can be told which of the situations behind
+                // a reason it met.
+                eprintln!("{NAME}: {}: {}: {why}", request.unit.unit, reason.name());
+                Answer::Unavailable(reason)
+            }
         }
     }
-}
-
-/// Remove compiler facts the request did not ask this helper to supply.
-///
-/// Rust-analyzer shares work between these facts, so collecting a source file
-/// once and trimming the reply is safer than running several inconsistent
-/// partial walks. The wire contract remains precise: an omitted capability
-/// never appears as if it had been requested and measured.
-fn only_requested(mut ir: Box<CompilerIr>, want: &[Capability]) -> Box<CompilerIr> {
-    if !want.contains(&Capability::Types) {
-        ir.types.clear();
-        ir.expressions.clear();
-        for symbol in &mut ir.symbols {
-            symbol.type_index = None;
-        }
-        for instantiation in &mut ir.instantiations {
-            instantiation.arguments.clear();
-        }
-    }
-    if !want.contains(&Capability::NameResolution) {
-        ir.symbols.clear();
-    }
-    if !want.contains(&Capability::CallTargets) {
-        ir.calls.clear();
-        ir.semantic_constructs.clear();
-        ir.effects = EffectSummary::default();
-        ir.data_flow = DataFlowSummary::default();
-    }
-    if !want.contains(&Capability::MacroExpansion) {
-        ir.unexpanded_macros.clear();
-    }
-    if !want.contains(&Capability::TemplateInstantiation) {
-        ir.instantiations.clear();
-    }
-    ir
 }
 
 /// The analysis library's version, which is the compiler's version here.
@@ -172,8 +164,8 @@ const RA_VERSION: &str = "0.0.344";
 mod tests {
     use super::*;
     use codehelion_helper::ir::{
-        Anchor, CallSite, CallTarget, ResolvedType, SourceRange, TypeCategory, UnexpandedMacro,
-        UnexpandedMacroReason, UnitRef,
+        Anchor, BasicBlock, CallSite, CallTarget, CompilerIr, ControlFlowGraph, ResolvedType,
+        SourceRange, TypeCategory, UnexpandedMacro, UnexpandedMacroReason, UnitRef,
     };
 
     fn unit() -> UnitRef {
@@ -193,8 +185,11 @@ mod tests {
         })
     }
 
+    /// The narrowing this helper's replies go through, including the kinds of
+    /// fact it does not yet produce: what it may answer with is decided by the
+    /// request rather than by which walks happen to be implemented.
     #[test]
-    fn analyze_reply_contains_only_requested_capability_facts() {
+    fn a_reply_carries_only_the_facts_the_request_asked_for() {
         let mut ir = CompilerIr::empty(unit());
         ir.types.push(ResolvedType {
             display: "String".to_string(),
@@ -216,13 +211,24 @@ mod tests {
             },
             reason: UnexpandedMacroReason::RequiresExecution,
         });
+        ir.cfg = Some(ControlFlowGraph {
+            blocks: vec![BasicBlock {
+                anchor: anchor(),
+                length: 3,
+            }],
+            edges: Vec::new(),
+        });
 
-        let reply = only_requested(Box::new(ir), &[Capability::CallTargets]);
+        let mut reply = ir.clone();
+        reply.keep_only(&[Capability::CallTargets]);
         assert!(reply.types.is_empty());
         assert_eq!(reply.calls.len(), 1);
         assert!(reply.unexpanded_macros.is_empty());
+        assert!(reply.cfg.is_none());
 
-        let reply = only_requested(reply, &[Capability::Types, Capability::MacroExpansion]);
+        let mut reply = ir;
+        reply.keep_only(&[Capability::Types, Capability::MacroExpansion]);
         assert!(reply.calls.is_empty());
+        assert!(reply.cfg.is_none());
     }
 }
