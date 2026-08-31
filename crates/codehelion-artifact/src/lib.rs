@@ -501,6 +501,17 @@ pub trait ArtifactBackend: Send + Sync {
     fn parse(&self, bytes: &[u8]) -> Result<ArtifactIr, ArtifactError>;
 
     /// Facts this backend can potentially provide for a well-formed input.
+    ///
+    /// The answer is an upper bound over every parse entry point the backend
+    /// offers: a field is true when some well-formed input makes [`parse`] or
+    /// any public `parse_with_*` set it, including the paths that take a debug
+    /// companion or infer a region for a stripped image. A caller branching on
+    /// it therefore never skips evidence a parse would have produced. The
+    /// answer does not depend on any input, and
+    /// [`ArtifactCapabilities::debug_info_unreadable`] is an observation about
+    /// one parse rather than a declared ability, so it stays false here.
+    ///
+    /// [`parse`]: ArtifactBackend::parse
     fn capabilities(&self) -> ArtifactCapabilities;
 }
 
@@ -534,10 +545,7 @@ pub fn detect_format(bytes: &[u8]) -> Option<ArtifactFormat> {
 /// would promise a backend for bytes the parser cannot read. COFF has no DOS
 /// header; its file-header machine value is the only inexpensive dispatch fact.
 fn is_pe_coff(bytes: &[u8]) -> bool {
-    if matches!(
-        bytes.get(..2),
-        Some([0x4c, 0x01] | [0x64, 0x86 | 0xaa] | [0xaa, 0x64])
-    ) {
+    if is_coff_machine(bytes) {
         return true;
     }
     let Some(offset_bytes) = bytes.get(0x3c..0x40) else {
@@ -548,6 +556,46 @@ fn is_pe_coff(bytes: &[u8]) -> bool {
         .ok()
         .and_then(|offset| bytes.get(offset..offset.saturating_add(4)))
         == Some(b"PE\0\0".as_slice())
+}
+
+/// Whether the input opens with a COFF file header this crate dispatches on.
+///
+/// The machine field is one little-endian word, so only a byte pair that
+/// decodes to an assigned `IMAGE_FILE_MACHINE_*` value is COFF evidence. A
+/// reversed pair such as `AA 64` decodes to the unassigned `0x64aa` and names
+/// no machine, so it stays unrecognised instead of being claimed and then
+/// rejected by the parser.
+///
+/// This predicate is the single definition behind both format dispatch and
+/// [`ArtifactBackend::detects`], so the two never disagree about a pair.
+pub(crate) fn is_coff_machine(bytes: &[u8]) -> bool {
+    // 0x014c i386, 0x8664 x86-64, 0xaa64 AArch64.
+    matches!(bytes.get(..2), Some([0x4c, 0x01] | [0x64, 0x86 | 0xaa]))
+}
+
+/// Check that `backend` answers for `bytes` instead of unwinding.
+///
+/// Every backend promises an answer for any byte string: either an IR for its
+/// own format, or a refusal that says whether the input belongs to it. This
+/// returns the failure text a property test reports, so generated input whose
+/// result is discarded cannot make the property pass by accident.
+#[cfg(test)]
+pub(crate) fn check_parse_answers(
+    backend: &impl ArtifactBackend,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| backend.parse(bytes)));
+    match outcome {
+        Ok(Ok(ir)) if ir.format == backend.format() => Ok(()),
+        Ok(Ok(ir)) => Err(format!(
+            "{} backend answered with {} IR",
+            backend.format(),
+            ir.format
+        )),
+        Ok(Err(ArtifactError::WrongFormat { .. } | ArtifactError::Malformed { .. })) => Ok(()),
+        Ok(Err(error)) => Err(format!("{} backend answered: {error}", backend.format())),
+        Err(_) => Err(format!("{} backend panicked", backend.format())),
+    }
 }
 
 #[cfg(test)]
@@ -576,10 +624,27 @@ mod tests {
         );
         assert_eq!(detect_format(&pe), Some(ArtifactFormat::PeCoff));
         assert_eq!(detect_format(&[0x64, 0x86]), Some(ArtifactFormat::PeCoff));
+        assert_eq!(detect_format(&[0x64, 0xaa]), Some(ArtifactFormat::PeCoff));
+        assert_eq!(detect_format(&[0x4c, 0x01]), Some(ArtifactFormat::PeCoff));
         assert_eq!(detect_format(b"MZ\x90\0"), None);
         assert_eq!(detect_format(b"!<arch>\n"), Some(ArtifactFormat::Archive));
         assert_eq!(detect_format(b"!<thin>\n"), Some(ArtifactFormat::Archive));
         assert_eq!(detect_format(b"not an artifact"), None);
+    }
+
+    /// A machine word is little-endian, so a reversed pair names no machine.
+    ///
+    /// Claiming such a pair would let any file that happens to start with it
+    /// be announced as PE/COFF and then rejected by the parser, and would put
+    /// that same wrong format on an archive member's provenance.
+    #[test]
+    fn a_reversed_machine_word_is_not_claimed_as_a_coff_header() {
+        assert_eq!(detect_format(&[0xaa, 0x64]), None);
+        assert_eq!(detect_format(&[0x86, 0x64]), None);
+        assert_eq!(detect_format(&[0x01, 0x4c]), None);
+        assert!(!is_coff_machine(&[0xaa, 0x64]));
+        assert!(!is_coff_machine(&[0x64]));
+        assert!(!is_coff_machine(&[]));
     }
 
     #[test]

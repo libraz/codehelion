@@ -115,7 +115,8 @@ pub enum EvidenceConfidence {
 pub struct DeadCodeReport {
     /// Symbols not reached from a parser-established export.
     pub symbols: Vec<ArtifactFingerprint>,
-    /// Whether every relevant dispatch edge was resolved.
+    /// Whether every relevant dispatch edge was resolved and every symbol
+    /// identity was unique, which is what a reachability proof needs.
     pub definitive: bool,
     /// Why the result is conservative or unavailable.
     pub assumptions: Vec<String>,
@@ -282,6 +283,13 @@ pub fn classify_sizes_from_duplicates(
 /// An unresolved dispatch can target any local function, so it changes the
 /// result from a definitive dead-code finding into a candidate list. No
 /// exports means no trustworthy root set and therefore returns no finding.
+///
+/// Reachability is followed over content-derived identities, so two symbols
+/// built from the same bytes are one node in that graph: an unreachable copy
+/// is then absorbed by an exported twin and drops out of the result. A call
+/// whose endpoint matches no symbol leaves the same graph incomplete. Either
+/// condition keeps the answer a candidate list and names itself among the
+/// assumptions, because neither is visible in the symbol list it returns.
 #[must_use]
 pub fn dead_code_candidates(artifact: &ArtifactIr) -> Option<DeadCodeReport> {
     if !artifact.capabilities.call_graph {
@@ -311,7 +319,6 @@ pub fn dead_code_candidates(artifact: &ArtifactIr) -> Option<DeadCodeReport> {
             break;
         }
     }
-    let unresolved = artifact.calls.iter().any(|call| call.unresolved.is_some());
     let mut symbols: Vec<_> = artifact
         .symbols
         .iter()
@@ -320,14 +327,41 @@ pub fn dead_code_candidates(artifact: &ArtifactIr) -> Option<DeadCodeReport> {
         .collect();
     symbols.sort();
     symbols.dedup();
+    let mut assumptions = Vec::new();
+    if artifact.calls.iter().any(|call| call.unresolved.is_some()) {
+        assumptions
+            .push("unresolved dispatch prevents proving unreachable symbols are dead".to_owned());
+    }
+    let identities: BTreeSet<_> = artifact
+        .symbols
+        .iter()
+        .map(|symbol| symbol.fingerprint)
+        .collect();
+    if identities.len() != artifact.symbols.len() {
+        assumptions.push(
+            "two symbols share one content fingerprint, so reachability cannot separate them"
+                .to_owned(),
+        );
+    }
+    if artifact.calls.iter().any(|call| {
+        !identities.contains(&call.caller)
+            || call
+                .target
+                .is_some_and(|target| !identities.contains(&target))
+    }) {
+        assumptions.push(
+            "a recorded call endpoint matches no symbol, so the local call graph is incomplete"
+                .to_owned(),
+        );
+    }
+    let definitive = assumptions.is_empty();
+    if definitive {
+        assumptions.push("all recorded call edges were resolved locally".to_owned());
+    }
     Some(DeadCodeReport {
         symbols,
-        definitive: !unresolved,
-        assumptions: if unresolved {
-            vec!["unresolved dispatch prevents proving unreachable symbols are dead".to_owned()]
-        } else {
-            vec!["all recorded call edges were resolved locally".to_owned()]
-        },
+        definitive,
+        assumptions,
     })
 }
 
@@ -612,7 +646,10 @@ fn groups<'a>(
     }
     let mut result: Vec<DuplicateGroup> = buckets
         .into_iter()
-        .filter(|(_, members)| members.len() > 1)
+        // Symbols with no observed content share the empty key without sharing
+        // anything: bucketing them would count aliases as a duplicate group
+        // whose removable size is zero.
+        .filter(|((_, content), members)| members.len() > 1 && !content.is_empty())
         .map(|((version, content), members)| group(version, content, members))
         .collect();
     result.sort_by(|left, right| {
@@ -743,6 +780,49 @@ mod tests {
         assert_eq!(duplicates.normalized[0].members.len(), 3);
         assert_eq!(duplicates.normalized[0].duplicated_bytes, 4);
         assert_eq!(find_duplicates(&artifact), duplicates);
+    }
+
+    /// Symbols with no observed content are aliases of nothing in particular,
+    /// so they may not form a group of their own: a group whose members share
+    /// zero bytes offers no removable size, and letting the alias count vary
+    /// the group count makes every comparison report a difference of zero.
+    #[test]
+    fn symbols_sharing_no_observed_content_form_no_duplicate_group() {
+        let mut artifact = ArtifactIr::empty(ArtifactFormat::Wasm, b"input");
+        artifact.capabilities.normalized_duplicates = true;
+        artifact.symbols = vec![
+            symbol(10, &[], Some(&[])),
+            symbol(20, &[], Some(&[])),
+            symbol(30, &[], Some(&[])),
+        ];
+
+        let duplicates = find_duplicates(&artifact);
+
+        assert!(duplicates.exact.is_empty());
+        assert!(duplicates.normalized.is_empty());
+        assert_eq!(classify_sizes(&artifact).duplicated_bytes, 0);
+
+        artifact.symbols.push(symbol(40, &[1, 2], Some(&[9])));
+        artifact.symbols.push(symbol(50, &[1, 2], Some(&[9])));
+        let with_content = find_duplicates(&artifact);
+
+        assert_eq!(with_content.exact.len(), 1);
+        assert_eq!(with_content.exact[0].members.len(), 2);
+        assert_eq!(with_content.exact[0].duplicated_bytes, 2);
+        assert_eq!(with_content.normalized.len(), 1);
+        assert_eq!(with_content.normalized[0].members.len(), 2);
+
+        // The same artifact without the aliases answers identically, which is
+        // what keeps two builds differing only in how many zero-size aliases
+        // they carry from comparing as a change.
+        let mut sized_only = ArtifactIr::empty(ArtifactFormat::Wasm, b"input");
+        sized_only.capabilities.normalized_duplicates = true;
+        sized_only.symbols = vec![
+            symbol(40, &[1, 2], Some(&[9])),
+            symbol(50, &[1, 2], Some(&[9])),
+        ];
+        assert_eq!(find_duplicates(&sized_only), with_content);
+        assert_eq!(classify_sizes(&sized_only), classify_sizes(&artifact));
     }
 
     /// The size categories carry both duplicate totals, and the savings value
@@ -922,6 +1002,82 @@ mod tests {
             unresolved: Some(crate::UnresolvedCall::IndirectTable),
         });
         assert!(!dead_code_candidates(&artifact).unwrap().definitive);
+    }
+
+    /// An unreachable function with a byte-identical exported twin is one node
+    /// in a graph keyed by content, so it disappears into that twin. The answer
+    /// stays a candidate list and says which identity question it could not
+    /// answer.
+    #[test]
+    fn shared_symbol_identities_downgrade_reachability_to_candidates() {
+        let mut artifact = ArtifactIr::empty(ArtifactFormat::Wasm, b"input");
+        let exported = symbol(1, &[1], None);
+        let mut twin = exported.clone();
+        twin.offset = 8;
+        artifact.symbols = vec![exported, twin];
+        artifact.symbols[0].exported = true;
+        artifact.capabilities.call_graph = true;
+
+        let report = dead_code_candidates(&artifact).unwrap();
+
+        assert!(!report.definitive);
+        assert!(
+            report
+                .assumptions
+                .iter()
+                .any(|assumption| assumption.contains("share one content fingerprint")),
+            "{:?}",
+            report.assumptions
+        );
+        assert!(
+            !report
+                .assumptions
+                .iter()
+                .any(|assumption| assumption.contains("all recorded call edges were resolved")),
+            "{:?}",
+            report.assumptions
+        );
+    }
+
+    /// A call endpoint that is none of the artifact's symbols leaves the local
+    /// graph incomplete, and an incomplete graph proves nothing unreachable.
+    #[test]
+    fn a_call_endpoint_without_a_symbol_downgrades_reachability_to_candidates() {
+        let mut artifact = ArtifactIr::empty(ArtifactFormat::Wasm, b"input");
+        let entry = symbol(1, &[1], None);
+        let absent = symbol(99, &[9], None);
+        artifact.symbols = vec![entry.clone()];
+        artifact.symbols[0].exported = true;
+        artifact.capabilities.call_graph = true;
+        artifact.calls = vec![crate::ArtifactCall {
+            caller: entry.fingerprint,
+            target: Some(absent.fingerprint),
+            unresolved: None,
+        }];
+
+        let report = dead_code_candidates(&artifact).unwrap();
+
+        assert!(!report.definitive);
+        assert!(
+            report
+                .assumptions
+                .iter()
+                .any(|assumption| assumption.contains("matches no symbol")),
+            "{:?}",
+            report.assumptions
+        );
+    }
+
+    /// Without a call graph there is no reachability answer to qualify, so
+    /// repeated member identities produce no report at all.
+    #[test]
+    fn repeated_identities_without_a_call_graph_report_no_reachability() {
+        let mut artifact = ArtifactIr::empty(ArtifactFormat::Archive, b"input");
+        let member = symbol(1, &[1], None);
+        artifact.symbols = vec![member.clone(), member];
+        artifact.symbols[0].exported = true;
+
+        assert!(dead_code_candidates(&artifact).is_none());
     }
 
     #[test]

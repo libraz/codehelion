@@ -1,4 +1,5 @@
 use super::*;
+use crate::native::symbol_fingerprint;
 use crate::symbols::demangle;
 use crate::x86::normalize_x86;
 use object::write::{Object as WriteObject, Relocation, StandardSection, Symbol, SymbolSection};

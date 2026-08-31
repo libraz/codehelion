@@ -9,9 +9,9 @@ reads one format links no parser for the others.
 | Format | Module and feature | Detection | Potential capabilities | Status |
 | --- | --- | --- | --- | --- |
 | WebAssembly | `wasm` | `\0asm` | symbols, direct calls, data segments | implemented |
-| ELF | `elf` | `\x7fELF` | symbols, relocations, direct calls, data segments | implemented |
-| Mach-O | `macho` | Mach-O magic values | symbols, relocations, data segments; source mappings with a matching dSYM DWARF image | implemented; call graph is unavailable |
-| PE/COFF | `pe` | DOS `MZ` header or recognised COFF machine | symbols, relocations, data segments; PE source mappings with a matching PDB | implemented; call graph is unavailable |
+| ELF | `elf` | `\x7fELF` | symbols, relocations, direct calls, data segments, normalized duplicates; source mappings from embedded DWARF or a build-ID-matched debug companion | implemented |
+| Mach-O | `macho` | Mach-O magic values | symbols, relocations, data segments, normalized duplicates; source mappings with a matching dSYM DWARF image | implemented; call graph is unavailable |
+| PE/COFF | `pe` | DOS `MZ` header or recognised COFF machine | symbols, relocations, data segments, normalized duplicates; PE source mappings with a matching PDB | implemented; call graph is unavailable |
 | Archive | `archive` | `!<arch>\n` or `!<thin>\n` | member enumeration, then the delegated local-member capabilities | implemented; thin members are not followed outside the archive |
 
 An archive is modelled as a collection of object members. The backend

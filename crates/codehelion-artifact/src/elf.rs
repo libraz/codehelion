@@ -4,9 +4,7 @@
 //! executes the artifact.
 
 use crate::dwarf::attach_dwarf_frames;
-use crate::native::{
-    collect_sections, collect_text_symbols, collect_undefined_imports, symbol_fingerprint,
-};
+use crate::native::{collect_sections, collect_text_symbol_ranges, collect_undefined_imports};
 use crate::x86::X86_NORMALIZATION_VERSION;
 use crate::{
     ArtifactBackend, ArtifactCall, ArtifactCapabilities, ArtifactError, ArtifactFingerprint,
@@ -43,11 +41,11 @@ impl ArtifactBackend for ElfBackend {
         ArtifactCapabilities {
             symbols: true,
             call_graph: true,
-            source_mapping: false,
+            source_mapping: true,
             debug_info_unreadable: false,
-            normalized_duplicates: false,
+            normalized_duplicates: true,
             independent_data_segments: false,
-            relocations: false,
+            relocations: true,
             data_segments: true,
         }
     }
@@ -97,13 +95,12 @@ impl ElfBackend {
         let mut symbol_fingerprints = HashMap::new();
         let mut symbol_addresses = HashMap::new();
         let mut symbol_addresses_by_section = HashMap::new();
-        let mut symbol_addresses_by_fingerprint = HashMap::new();
         collect_sections(&file, &mut ir).map_err(|error| malformed(error.to_string()))?;
         collect_undefined_imports(file.symbols().chain(file.dynamic_symbols()), &mut ir);
         let supports_global_address_join = file.kind() != ObjectKind::Relocatable;
-        for symbol in
-            collect_text_symbols(&file, &mut ir).map_err(|error| malformed(error.to_string()))?
-        {
+        let text = collect_text_symbol_ranges(&file, &mut ir)
+            .map_err(|error| malformed(error.to_string()))?;
+        for symbol in &text.symbols {
             symbol_fingerprints.insert(symbol.index, Some(symbol.fingerprint));
             symbol_addresses_by_section
                 .insert((symbol.section, symbol.address), symbol.fingerprint);
@@ -112,11 +109,6 @@ impl ElfBackend {
                     .entry(symbol.address)
                     .or_insert(symbol.fingerprint);
             }
-            symbol_addresses_by_fingerprint
-                .insert(symbol.fingerprint, (symbol.address, symbol.size));
-        }
-        if ir.symbols.is_empty() {
-            infer_text_regions(&file, &mut ir)?;
         }
         record_entry_point(file.entry(), &symbol_addresses, &mut ir);
         record_init_fini_roots(&file, &symbol_fingerprints, &symbol_addresses, &mut ir);
@@ -128,7 +120,7 @@ impl ElfBackend {
         );
         attach_dwarf_frames(
             debug_file.as_ref().unwrap_or(&file),
-            &symbol_addresses_by_fingerprint,
+            &text.addresses,
             &mut ir,
         );
         ir.capabilities = ArtifactCapabilities {
@@ -249,16 +241,6 @@ fn pointer_value(bytes: &[u8], endianness: Endianness) -> Option<u64> {
         }
         _ => None,
     }
-}
-
-/// Copy section, read-only-data, and relocation facts into format-neutral IR.
-/// Add one explicitly inferred region per executable section of a stripped ELF.
-fn infer_text_regions(file: &object::File<'_>, ir: &mut ArtifactIr) -> Result<(), ArtifactError> {
-    crate::native::infer_text_regions(file, ir, |section, normalized, data| {
-        symbol_fingerprint(None, section, normalized, data)
-    })
-    .map_err(|error| malformed(error.to_string()))?;
-    Ok(())
 }
 
 fn x86_direct_calls(

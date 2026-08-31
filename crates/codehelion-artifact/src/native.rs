@@ -1,6 +1,6 @@
 //! Shared native-object collection helpers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use object::{Object, ObjectSection, ObjectSymbol, SymbolKind};
 
@@ -172,6 +172,63 @@ pub fn trim_inferred_symbol_padding(code: &[u8], architecture: object::Architect
     crate::x86::trim_inferred_padding(code, architecture)
 }
 
+/// Alias and boundary facts for one entry of an address-sorted symbol list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SymbolBoundary {
+    /// Whether an equal-address definition makes this symbol an alias.
+    alias: bool,
+    /// First address in the list that is strictly greater, when one exists.
+    next_greater_address: Option<u64>,
+}
+
+/// Derive alias and boundary facts for an address-sorted symbol list in one
+/// pass over it.
+///
+/// Sorting puts symbols sharing an address in one contiguous run, so both facts
+/// are run-local: a zero-size symbol is an alias when its run holds an earlier
+/// member or any sized member, and the only address that can delimit an
+/// inferred range is the next run's. Answering either question per symbol would
+/// rescan the whole section instead, which a format reporting every symbol as
+/// zero-sized turns into a scan of the section per symbol.
+fn symbol_boundaries(sorted: &[(u64, u64)]) -> Vec<SymbolBoundary> {
+    boundaries_and_reads(sorted).0
+}
+
+/// [`symbol_boundaries`] beside the number of entries it read.
+///
+/// The count is what separates this from the whole-list rescan it replaced: a
+/// reader that consults every earlier symbol is quadratic in the number of
+/// symbols sharing a section, which a wall clock only reveals on a machine
+/// that happens to be idle. Callers outside the tests take the boundaries and
+/// drop the count.
+fn boundaries_and_reads(sorted: &[(u64, u64)]) -> (Vec<SymbolBoundary>, usize) {
+    let mut boundaries = Vec::with_capacity(sorted.len());
+    let mut reads = 0_usize;
+    let mut start = 0;
+    while let Some(&(address, _)) = sorted.get(start) {
+        let run = sorted.get(start..).unwrap_or_default();
+        let end = start.saturating_add(run.partition_point(|(candidate, _)| *candidate == address));
+        let run = sorted.get(start..end).unwrap_or_default();
+        let has_sized_member = run.iter().any(|(_, size)| *size != 0);
+        let next_greater_address = sorted.get(end).map(|(address, _)| *address);
+        boundaries.extend(
+            run.iter()
+                .enumerate()
+                .map(|(offset, (_, size))| SymbolBoundary {
+                    alias: *size == 0 && (offset > 0 || has_sized_member),
+                    next_greater_address,
+                }),
+        );
+        // Each run is read once to find its extent, once for a sized member
+        // and once to emit, plus the binary search that located its end.
+        reads = reads
+            .saturating_add(run.len().saturating_mul(3))
+            .saturating_add(run.len().max(1).ilog2() as usize);
+        start = end;
+    }
+    (boundaries, reads)
+}
+
 /// Transient native-symbol data used only by format-specific join code.
 #[derive(Debug, Clone, Copy)]
 pub struct NativeSymbolRange {
@@ -213,24 +270,21 @@ pub fn collect_text_symbols(
             })
             .collect();
         symbols.sort_by_key(ObjectSymbol::address);
-        for (position, symbol) in symbols.iter().enumerate() {
+        let boundaries = symbol_boundaries(
+            &symbols
+                .iter()
+                .map(|symbol| (symbol.address(), symbol.size()))
+                .collect::<Vec<_>>(),
+        );
+        for (symbol, boundary) in symbols.iter().zip(boundaries) {
             let Some(relative) = symbol.address().checked_sub(section.address()) else {
                 continue;
             };
-            let alias = symbol.size() == 0
-                && (symbols[..position]
-                    .iter()
-                    .any(|prior| prior.address() == symbol.address())
-                    || symbols
-                        .iter()
-                        .any(|other| other.address() == symbol.address() && other.size() != 0));
             let size = symbol_size(
                 symbol.address(),
                 symbol.size(),
-                alias,
-                symbols[position.saturating_add(1)..]
-                    .iter()
-                    .map(ObjectSymbol::address),
+                boundary.alias,
+                boundary.next_greater_address,
                 section
                     .address()
                     .saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX)),
@@ -289,6 +343,49 @@ pub fn collect_text_symbols(
         }
     }
     Ok(ranges)
+}
+
+/// Every code record of a native object with the address that joins it to
+/// debug information.
+#[derive(Debug, Default)]
+pub struct NativeTextSymbols {
+    /// Symbol-table entries, empty for an object without code symbols.
+    pub symbols: Vec<NativeSymbolRange>,
+    /// Join address and retained length of each appended code record, whether
+    /// it came from the symbol table or from an inferred region.
+    pub addresses: HashMap<ArtifactFingerprint, (u64, u64)>,
+}
+
+/// Collect a native object's code records, inferring one region per text
+/// section when the object carries no code symbols.
+///
+/// Both origins land in `addresses`, so a debug join reaches every record the
+/// IR holds instead of only the named ones — which is exactly the stripped
+/// image whose separate debug file is the only source evidence there is. The
+/// addresses are transient join evidence and never become identities.
+///
+/// # Errors
+///
+/// Returns an object-reader error when a text section cannot be read.
+pub fn collect_text_symbol_ranges(
+    file: &object::File<'_>,
+    ir: &mut ArtifactIr,
+) -> Result<NativeTextSymbols, object::Error> {
+    let symbols = collect_text_symbols(file, ir)?;
+    let mut addresses: HashMap<_, _> = symbols
+        .iter()
+        .map(|range| (range.fingerprint, (range.address, range.size)))
+        .collect();
+    if ir.symbols.is_empty() {
+        addresses.extend(
+            infer_text_regions(file, ir, |section, normalized, data| {
+                symbol_fingerprint(None, section, normalized, data)
+            })?
+            .into_iter()
+            .map(|(fingerprint, address, size)| (fingerprint, (address, size))),
+        );
+    }
+    Ok(NativeTextSymbols { symbols, addresses })
 }
 
 fn append_field(identity: &mut Vec<u8>, value: &[u8]) {
@@ -358,9 +455,74 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::{symbol_fingerprint, symbol_size};
-    use crate::NormalizedInstructions;
+
+    use object::write::{Object as WriteObject, StandardSection, Symbol, SymbolSection};
+    use object::{
+        Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope,
+        write::SectionId,
+    };
+    use proptest::prelude::*;
+
+    use super::{
+        SymbolBoundary, boundaries_and_reads, collect_text_symbols, symbol_boundaries,
+        symbol_fingerprint, symbol_size,
+    };
+    use crate::{ArtifactFormat, ArtifactIr, NormalizedInstructions};
+
+    /// Alias and boundary facts written the way a reader of the rule states
+    /// them: scan the whole symbol list for every symbol.
+    fn boundaries_by_direct_scan(sorted: &[(u64, u64)]) -> Vec<SymbolBoundary> {
+        sorted
+            .iter()
+            .enumerate()
+            .map(|(position, (address, size))| SymbolBoundary {
+                alias: *size == 0
+                    && (sorted[..position].iter().any(|(prior, _)| prior == address)
+                        || sorted
+                            .iter()
+                            .any(|(other, other_size)| other == address && *other_size != 0)),
+                next_greater_address: sorted[position.saturating_add(1)..]
+                    .iter()
+                    .map(|(candidate, _)| *candidate)
+                    .find(|candidate| *candidate > *address),
+            })
+            .collect()
+    }
+
+    fn text_symbol(name: String, section: SectionId, value: u64, size: u64) -> Symbol {
+        Symbol {
+            name: name.into_bytes(),
+            value,
+            size,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Dynamic,
+            weak: false,
+            section: SymbolSection::Section(section),
+            flags: SymbolFlags::None,
+        }
+    }
+
+    /// A Mach-O whose text section holds one two-byte function per symbol.
+    ///
+    /// Mach-O reports no symbol size, so every symbol takes the inferred
+    /// boundary path.
+    fn macho_fixture_with_text_symbols(count: usize) -> Vec<u8> {
+        let mut object = WriteObject::new(
+            BinaryFormat::MachO,
+            Architecture::X86_64,
+            Endianness::Little,
+        );
+        let text = object.section_id(StandardSection::Text);
+        let offsets: Vec<_> = (0..count)
+            .map(|_| object.append_section_data(text, &[0x90, 0xc3], 1))
+            .collect();
+        for (index, offset) in offsets.into_iter().enumerate() {
+            object.add_symbol(text_symbol(format!("_body{index}"), text, offset, 0));
+        }
+        object.write().expect("write dense Mach-O fixture")
+    }
 
     #[test]
     fn normalized_and_raw_payloads_with_the_same_bytes_have_distinct_identities() {
@@ -394,5 +556,75 @@ mod tests {
     #[test]
     fn zero_size_alias_remains_an_explicit_empty_region() {
         assert_eq!(symbol_size(10, 0, true, [14], 20), 0);
+    }
+
+    #[test]
+    fn only_a_shared_address_makes_a_zero_size_symbol_an_alias() {
+        let boundaries = symbol_boundaries(&[(10, 4), (10, 0), (14, 0), (14, 0), (20, 8)]);
+        assert_eq!(
+            boundaries
+                .iter()
+                .map(|entry| entry.alias)
+                .collect::<Vec<_>>(),
+            vec![false, true, false, true, false]
+        );
+        assert_eq!(
+            boundaries
+                .iter()
+                .map(|entry| entry.next_greater_address)
+                .collect::<Vec<_>>(),
+            vec![Some(14), Some(14), Some(20), Some(20), None]
+        );
+    }
+
+    #[test]
+    fn a_symbol_dense_text_section_is_analyzed_within_the_deadline() {
+        let bytes = macho_fixture_with_text_symbols(100_000);
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        let mut ir = ArtifactIr::empty(ArtifactFormat::MachO, &bytes);
+
+        let ranges = collect_text_symbols(&file, &mut ir).unwrap();
+
+        assert_eq!(ranges.len(), 100_000);
+        assert_eq!(ir.symbols.len(), 100_000);
+        assert!(
+            ir.symbols
+                .iter()
+                .all(|symbol| symbol.size == 2 && symbol.size_inferred),
+            "every inferred boundary ends at the next symbol"
+        );
+    }
+
+    /// The boundaries are read out of the sorted list rather than rescanned
+    /// against it, so the reads stay proportional to the symbol count however
+    /// many symbols share an address.
+    #[test]
+    fn boundaries_are_read_proportionally_to_the_symbol_count() {
+        for aliases_per_address in [1_usize, 8, 100_000] {
+            let count = 100_000_usize;
+            let sorted = (0..count)
+                .map(|index| ((index / aliases_per_address) as u64, 0))
+                .collect::<Vec<_>>();
+
+            let (boundaries, reads) = boundaries_and_reads(&sorted);
+
+            assert_eq!(boundaries.len(), count);
+            assert!(
+                reads <= count.saturating_mul(4),
+                "{aliases_per_address} aliases per address read {reads} entries \
+                 for {count} symbols"
+            );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn run_local_boundaries_agree_with_a_scan_of_the_whole_symbol_list(
+            symbols in proptest::collection::vec((0_u64..16, 0_u64..3), 0..64)
+        ) {
+            let mut sorted = symbols;
+            sorted.sort_by_key(|(address, _)| *address);
+            prop_assert_eq!(symbol_boundaries(&sorted), boundaries_by_direct_scan(&sorted));
+        }
     }
 }

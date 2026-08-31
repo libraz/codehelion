@@ -14,7 +14,7 @@ use crate::native::{
 use crate::x86::X86_NORMALIZATION_VERSION;
 use crate::{
     ArtifactBackend, ArtifactCapabilities, ArtifactError, ArtifactFingerprint, ArtifactFormat,
-    ArtifactIr,
+    ArtifactIr, is_coff_machine,
 };
 use object::Object;
 use pdb::{FallibleIterator, PDB};
@@ -49,9 +49,9 @@ impl ArtifactBackend for PeCoffBackend {
         ArtifactCapabilities {
             symbols: true,
             call_graph: false,
-            source_mapping: false,
+            source_mapping: true,
             debug_info_unreadable: false,
-            normalized_duplicates: false,
+            normalized_duplicates: true,
             independent_data_segments: false,
             relocations: true,
             data_segments: true,
@@ -139,13 +139,6 @@ struct SymbolRange {
     fingerprint: ArtifactFingerprint,
     start: u64,
     end: u64,
-}
-
-fn is_coff_machine(bytes: &[u8]) -> bool {
-    matches!(
-        bytes.get(..2),
-        Some([0x4c, 0x01] | [0x64, 0x86 | 0xaa] | [0xaa, 0x64])
-    )
 }
 
 fn collect_symbols(
@@ -515,6 +508,30 @@ mod tests {
         ));
     }
 
+    /// Dispatch and this backend read a machine word the same way.
+    #[test]
+    fn a_reversed_machine_word_claims_neither_dispatch_nor_this_backend() {
+        for prefix in [
+            [0x4c, 0x01].as_slice(),
+            [0x64, 0x86].as_slice(),
+            [0x64, 0xaa].as_slice(),
+            [0xaa, 0x64].as_slice(),
+            [0x86, 0x64].as_slice(),
+            b"unrelated bytes".as_slice(),
+        ] {
+            assert_eq!(
+                PeCoffBackend.detects(prefix),
+                crate::detect_format(prefix) == Some(ArtifactFormat::PeCoff),
+                "{prefix:02x?}"
+            );
+        }
+        assert!(!PeCoffBackend.detects(&[0xaa, 0x64]));
+        assert!(matches!(
+            PeCoffBackend.parse(&[0xaa, 0x64]),
+            Err(ArtifactError::WrongFormat { .. })
+        ));
+    }
+
     #[test]
     fn a_pdb_is_not_guessed_for_a_coff_object() {
         let error = PeCoffBackend
@@ -531,10 +548,61 @@ mod tests {
         assert!(!pdb_identity_matches([1; 16], 2, [1; 16], 3));
     }
 
+    /// Changed fixture bytes still travel the whole parser.
+    ///
+    /// Generated input is only worth anything if it gets past the machine-word
+    /// check, so this pins the reachability the property test below relies on:
+    /// the altered instruction comes back through section iteration, symbol
+    /// collection, and normalization.
+    #[test]
+    fn an_altered_fixture_is_read_through_sections_symbols_and_normalization() {
+        let bytes = with_altered_instruction(coff_fixture());
+        let ir = PeCoffBackend.parse(&bytes).expect("altered fixture parses");
+
+        assert!(!ir.sections.is_empty(), "{ir:#?}");
+        assert_eq!(ir.symbols.len(), 1, "{ir:#?}");
+        assert_eq!(ir.symbols[0].code, vec![0x50, 0xc3]);
+        assert_eq!(
+            ir.symbols[0]
+                .normalized
+                .as_ref()
+                .map(|value| value.version.as_str()),
+            Some(PE_COFF_NORMALIZATION_VERSION)
+        );
+    }
+
+    /// Replace the fixture's first instruction with another one-byte opcode.
+    fn with_altered_instruction(mut bytes: Vec<u8>) -> Vec<u8> {
+        let position = bytes
+            .windows(2)
+            .position(|window| window == [0x90, 0xc3])
+            .expect("fixture carries its instruction bytes");
+        bytes[position] = 0x50;
+        bytes
+    }
+
     proptest::proptest! {
         #[test]
-        fn arbitrary_bytes_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
-            let _ = PeCoffBackend.parse(&bytes);
+        fn arbitrary_prefixed_and_damaged_bytes_never_panic(
+            bytes in proptest::collection::vec(any::<u8>(), 0..2048),
+            position in any::<prop::sample::Index>(),
+            mask in 1_u8..=u8::MAX,
+            cut in any::<prop::sample::Index>(),
+        ) {
+            let fixture = coff_fixture();
+            let mut flipped = fixture.clone();
+            let at = position.index(flipped.len());
+            flipped[at] ^= mask;
+            let truncated = fixture[..cut.index(fixture.len())].to_vec();
+            let mut coff_magic = vec![0x64, 0x86];
+            coff_magic.extend(&bytes);
+            let mut image_magic = b"MZ".to_vec();
+            image_magic.extend(&bytes);
+            for input in [&bytes, &flipped, &truncated, &coff_magic, &image_magic] {
+                if let Err(failure) = crate::check_parse_answers(&PeCoffBackend, input) {
+                    return Err(TestCaseError::fail(failure));
+                }
+            }
         }
     }
 }

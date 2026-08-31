@@ -30,6 +30,15 @@ impl ArtifactBackend for ArchiveBackend {
     }
 
     fn parse(&self, bytes: &[u8]) -> Result<ArtifactIr, ArtifactError> {
+        // The reader below also accepts archive flavours this backend does not
+        // claim. Without this guard a caller trying backends in turn would see
+        // input of another format reported as a broken archive, and would stop
+        // instead of offering it to the backend that owns it.
+        if !self.detects(bytes) {
+            return Err(ArtifactError::WrongFormat {
+                expected: ArtifactFormat::Archive,
+            });
+        }
         let archive = ArchiveFile::parse(bytes).map_err(|error| malformed(error.to_string()))?;
         let mut ir = ArtifactIr::empty(ArtifactFormat::Archive, bytes);
         for member in archive.members() {
@@ -357,19 +366,112 @@ mod tests {
         );
     }
 
+    /// A caller chaining backends learns "not mine", not "mine and broken".
     #[test]
     fn other_bytes_do_not_claim_the_backend() {
-        assert!(!ArchiveBackend.detects(b"not an archive"));
-        assert!(matches!(
-            ArchiveBackend.parse(b"not an archive"),
-            Err(ArtifactError::Malformed { .. })
-        ));
+        let elf = {
+            let mut object =
+                WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+            let text = object.section_id(StandardSection::Text);
+            object.append_section_data(text, &[0x90, 0xc3], 1);
+            object.write().expect("write ELF object")
+        };
+        for other in [
+            b"not an archive".as_slice(),
+            elf.as_slice(),
+            // An archive flavour with its own member layout, which this
+            // backend does not read.
+            b"<bigaf>\n".as_slice(),
+            b"".as_slice(),
+        ] {
+            assert!(!ArchiveBackend.detects(other));
+            assert!(
+                matches!(
+                    ArchiveBackend.parse(other),
+                    Err(ArtifactError::WrongFormat {
+                        expected: ArtifactFormat::Archive
+                    })
+                ),
+                "{:02x?}",
+                &other[..other.len().min(16)]
+            );
+        }
+    }
+
+    /// Everything the backend claims is answered by the archive reader itself.
+    #[test]
+    fn claimed_bytes_are_never_answered_with_another_format() {
+        for claimed in [
+            archive_fixture(),
+            thin_archive_fixture(),
+            b"!<arch>\n".to_vec(),
+            b"!<thin>\njunk".to_vec(),
+        ] {
+            assert!(ArchiveBackend.detects(&claimed));
+            assert!(
+                !matches!(
+                    ArchiveBackend.parse(&claimed),
+                    Err(ArtifactError::WrongFormat { .. } | ArtifactError::Unsupported { .. })
+                ),
+                "{:02x?}",
+                &claimed[..claimed.len().min(16)]
+            );
+        }
+    }
+
+    /// Changed member bytes still travel member iteration and delegation.
+    ///
+    /// Generated input is only worth anything if it gets past the archive
+    /// magic, so this pins the reachability the property test below relies on:
+    /// the altered instruction comes back out of a delegated member parse.
+    #[test]
+    fn an_altered_member_is_read_through_member_iteration_and_delegation() {
+        let mut bytes = archive_fixture();
+        let position = bytes
+            .windows(2)
+            .position(|window| window == [0x90, 0xc3])
+            .expect("fixture carries its member instruction bytes");
+        bytes[position] = 0x50;
+
+        let ir = ArchiveBackend
+            .parse(&bytes)
+            .expect("altered fixture parses");
+        assert_eq!(ir.archive_members.len(), 2, "{ir:#?}");
+        assert_eq!(ir.symbols.len(), 2, "{ir:#?}");
+        assert!(
+            ir.symbols.iter().any(|symbol| symbol.code == [0x50, 0xc3]),
+            "{ir:#?}"
+        );
+        assert!(
+            ir.symbols
+                .iter()
+                .all(|symbol| symbol.normalized.is_some() && !symbol.code.is_empty()),
+            "{ir:#?}"
+        );
     }
 
     proptest::proptest! {
         #[test]
-        fn arbitrary_bytes_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
-            let _ = ArchiveBackend.parse(&bytes);
+        fn arbitrary_prefixed_and_damaged_bytes_never_panic(
+            bytes in proptest::collection::vec(any::<u8>(), 0..2048),
+            position in any::<prop::sample::Index>(),
+            mask in 1_u8..=u8::MAX,
+            cut in any::<prop::sample::Index>(),
+        ) {
+            let fixture = archive_fixture();
+            let mut flipped = fixture.clone();
+            let at = position.index(flipped.len());
+            flipped[at] ^= mask;
+            let truncated = fixture[..cut.index(fixture.len())].to_vec();
+            let mut thick = b"!<arch>\n".to_vec();
+            thick.extend(&bytes);
+            let mut thin = b"!<thin>\n".to_vec();
+            thin.extend(&bytes);
+            for input in [&bytes, &flipped, &truncated, &thick, &thin] {
+                if let Err(failure) = crate::check_parse_answers(&ArchiveBackend, input) {
+                    return Err(TestCaseError::fail(failure));
+                }
+            }
         }
     }
 }
