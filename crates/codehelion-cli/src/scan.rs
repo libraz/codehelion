@@ -677,7 +677,9 @@ pub(crate) fn common_run_info(mut inputs: RunInfoInputs<'_>) -> report::RunInfo 
     report::RunInfo {
         tool_version: env!("CARGO_PKG_VERSION").to_string(),
         mode: variant.mode.name().to_string(),
-        root: inputs.root.display().to_string(),
+        // Through the key the run is recorded under, so that replaying this
+        // run names its root exactly as this rendering does.
+        root: path_label(inputs.root),
         configuration: inputs.configuration.clone(),
         started_at: inputs.started_at.to_string(),
         finished_at: inputs.finished_at.to_string(),
@@ -1030,7 +1032,7 @@ pub(crate) use baseline::{ScanBaseline, apply_baseline, load_baseline};
 
 pub(crate) mod store;
 
-pub(crate) use codehelion_store::{display_path, path_key};
+pub(crate) use codehelion_store::{display_path, path_key, path_label};
 use store::{detector_versions, rank_groups, record_ranked};
 pub(crate) use store::{file_rows, open_recorded_store, open_store, reuse_config_hash};
 

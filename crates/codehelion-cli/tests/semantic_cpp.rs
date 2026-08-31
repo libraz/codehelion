@@ -135,6 +135,8 @@ fn restricted_finding_set(report: &Value) -> Vec<Value> {
 mod builds_and_database;
 #[path = "semantic_cpp/core_semantics.rs"]
 mod core_semantics;
+#[path = "semantic_cpp/headers.rs"]
+mod headers;
 #[path = "semantic_cpp/templates_and_artifacts.rs"]
 mod templates_and_artifacts;
 

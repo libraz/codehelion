@@ -57,9 +57,10 @@ use codehelion_core::semantic::{
 };
 use codehelion_core::types::TypeTag;
 use codehelion_helper::ir::{
-    CallSite, CallTarget, CompilerIr, DirectPropagation as HelperDirectPropagation,
+    CallSite, CallTarget, CompilerIr, DirectPropagation as HelperDirectPropagation, EffectSummary,
     FallibleKind as HelperFallibleKind, Instantiation, ResolvedExpression, ResolvedSymbol,
-    ResolvedType, SemanticConstructKind, Unavailability, UnexpandedMacro, UnitRef,
+    ResolvedType, SemanticConstruct, SemanticConstructKind, Unavailability, UnexpandedMacro,
+    UnitRef,
 };
 use codehelion_helper::protocol::{Capability, CompileCommandSelector, Execution, HelperIdentity};
 use codehelion_helper::{Analysis, SandboxRequest, Supervisor};
@@ -401,6 +402,15 @@ fn read_by_other_units(gathered: &mut [Gathered], sources: &[SourceUnit]) {
                     .push((*backend, ir));
             }
         }
+        for construct in &ir.semantic_constructs {
+            let file = construct.anchor.expansion.file.as_str();
+            if seen.insert(file) {
+                readers
+                    .entry((root, file))
+                    .or_default()
+                    .push((*backend, ir));
+            }
+        }
         for macro_ in &ir.unexpanded_macros {
             let file = macro_.invocation.file.as_str();
             if seen.insert(file) {
@@ -463,12 +473,15 @@ fn read_by_other_units(gathered: &mut [Gathered], sources: &[SourceUnit]) {
 /// complete macro-aware anchor and target. Anything less than all of that is a
 /// disagreement, and a disagreement is dropped: the occurrence is then
 /// compared as it is written, which is what a run with no compiler would have
-/// done with it and is the direction that cannot mislead.
+/// done with it and is the direction that cannot mislead. Confirmed constructs
+/// are held to the same rule, so the patterns a header states — propagation,
+/// validation, accumulation, resource lifetime — reach normalization exactly
+/// when every unit that compiled the header established the same one.
 ///
-/// `None` when no symbol, instantiation, call, expression, or unexpanded macro survived,
-/// which is a file its readers say nothing common about — reported as
-/// unanswerable rather than as an analysis that found nothing, because those
-/// are different claims.
+/// `None` when no symbol, instantiation, call, expression, construct, or
+/// unexpanded macro survived, which is a file its readers say nothing common
+/// about — reported as unanswerable rather than as an analysis that found
+/// nothing, because those are different claims.
 ///
 /// What the result is filed under keeps naming the file, and names the unit
 /// only when one unit read it. An agreement between several is an answer about
@@ -516,6 +529,11 @@ fn agreed(file: UnitRef, readings: &[(usize, &CompilerIr, String)]) -> Option<Co
                 .is_some_and(|found| same_expression(ir, found, first, held))
         });
     }
+    let mut constructs = constructs_in(first, first_file);
+    for (_, ir, file) in readings.iter().skip(1) {
+        let other = constructs_in(ir, file);
+        constructs.retain(|at, held| other.get(at).is_some_and(|found| *found == *held));
+    }
     let mut unexpanded_macros = unexpanded_macros_in(first, first_file);
     for (_, ir, file) in readings.iter().skip(1) {
         let other = unexpanded_macros_in(ir, file);
@@ -525,6 +543,7 @@ fn agreed(file: UnitRef, readings: &[(usize, &CompilerIr, String)]) -> Option<Co
         && instantiations.is_empty()
         && calls.is_empty()
         && expressions.is_empty()
+        && constructs.is_empty()
         && unexpanded_macros.is_empty()
     {
         return None;
@@ -560,9 +579,34 @@ fn agreed(file: UnitRef, readings: &[(usize, &CompilerIr, String)]) -> Option<Co
             })
         })
         .collect();
+    merged.semantic_constructs = constructs.into_values().cloned().collect();
+    merged.effects = agreed_effects(&merged.semantic_constructs, readings);
     merged.unexpanded_macros = unexpanded_macros.into_values().cloned().collect();
     merged.types = types.types;
     Some(merged)
+}
+
+/// What the readings agree this file's own effects are.
+///
+/// An effect summary carries no anchor, so a reader's summary is about the
+/// whole translation unit and cannot be filed under one of the files it
+/// compiled. What can be filed under this file is the summary its agreed
+/// constructs support, taken with the same function every helper summarizes
+/// its own constructs with — so the file is credited with the interactions it
+/// states and not with a reader's other files'.
+///
+/// Not computed unless every reading computed it: an empty summary from a
+/// helper that never looked is a different claim from one that looked and
+/// found nothing, and the readings that did look cannot answer for the one
+/// that did not.
+fn agreed_effects(
+    constructs: &[SemanticConstruct],
+    readings: &[(usize, &CompilerIr, String)],
+) -> EffectSummary {
+    if !readings.iter().all(|(_, ir, _)| ir.effects.computed) {
+        return EffectSummary::default();
+    }
+    codehelion_helper::effects::summarize(constructs)
 }
 
 /// Where each name written in `file` sits, keyed so that two readings of the
@@ -723,6 +767,35 @@ fn same_expression(
     };
     expression.anchor.definition == held.anchor.definition
         && resolved(ir, expression) == resolved(against, held)
+}
+
+/// Confirmed constructs written in `file`, lined up by the occurrence they are
+/// about.
+///
+/// One range can hold several constructs of different kinds, so the kind joins
+/// the bytes in the key exactly as a name does for a symbol — that is the
+/// identity a helper itself deduplicates its constructs by. Everything the
+/// construct adds to that identity stays a value: a container, propagation form
+/// or resource category another translation unit resolved differently is a
+/// disagreement about one construct, not a second construct that survives.
+fn constructs_in<'a>(
+    ir: &'a CompilerIr,
+    file: &str,
+) -> BTreeMap<(u64, u64, &'a str), &'a SemanticConstruct> {
+    ir.semantic_constructs
+        .iter()
+        .filter(|construct| construct.anchor.expansion.file == file)
+        .map(|construct| {
+            (
+                (
+                    construct.anchor.expansion.start_byte,
+                    construct.anchor.expansion.end_byte,
+                    construct.kind.name(),
+                ),
+                construct,
+            )
+        })
+        .collect()
 }
 
 /// Unexpanded macro invocations written in `file`, lined up by their source

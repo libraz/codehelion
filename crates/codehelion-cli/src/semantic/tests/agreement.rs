@@ -43,6 +43,55 @@ fn read_with_unexpanded_macros(unit: &str, macros: Vec<UnexpandedMacro>) -> Gath
     gathered
 }
 
+fn read_with_constructs(unit: &str, constructs: Vec<SemanticConstruct>) -> Gathered {
+    let mut gathered = read(unit, Vec::new(), Vec::new());
+    let Gathered::Analyzed { ir, .. } = &mut gathered else {
+        unreachable!("read always produces an analysis");
+    };
+    ir.effects = codehelion_helper::effects::summarize(&constructs);
+    ir.semantic_constructs = constructs;
+    gathered
+}
+
+fn construct(
+    file: &str,
+    start: u64,
+    kind: SemanticConstructKind,
+    resource_kind: Option<&str>,
+) -> SemanticConstruct {
+    SemanticConstruct {
+        anchor: Anchor::written_here(SourceRange {
+            file: file.into(),
+            start_byte: start,
+            end_byte: start + 4,
+            start_line: 20,
+        }),
+        kind,
+        fallible_kind: None,
+        direct_propagation: None,
+        resource_kind: resource_kind.map(ToOwned::to_owned),
+    }
+}
+
+/// A resource lifetime written in a header, as the unit that compiled it
+/// reports the pair.
+fn resource_lifetime(file: &str) -> Vec<SemanticConstruct> {
+    vec![
+        construct(
+            file,
+            12,
+            SemanticConstructKind::AcquireResource,
+            Some("file"),
+        ),
+        construct(
+            file,
+            36,
+            SemanticConstructKind::ReleaseResource,
+            Some("file"),
+        ),
+    ]
+}
+
 fn unexpanded_macro(start: u64, reason: UnexpandedMacroReason) -> UnexpandedMacro {
     UnexpandedMacro {
         invocation: SourceRange {
@@ -533,6 +582,185 @@ fn header_unexpanded_macros_survive_only_exact_agreement() {
     ];
     read_by_other_units(&mut disagreeing, &sources);
     assert!(matches!(disagreeing[2], Gathered::Unavailable { .. }));
+}
+
+/// A header-only library states its patterns and nothing else: the only
+/// thing a translation unit can report about such a header is the
+/// constructs it confirmed there, so those alone have to find the header.
+#[test]
+fn a_header_known_only_through_confirmed_constructs_is_answered() {
+    let sources = [source("src/narrow.cpp", Language::Cpp, None), header()];
+    let mut gathered = vec![
+        read_with_constructs("narrow.cpp", resource_lifetime("include/accumulate.hpp")),
+        unanswerable(&sources[1]),
+    ];
+
+    read_by_other_units(&mut gathered, &sources);
+    let Gathered::Analyzed { ir, .. } = &gathered[1] else {
+        panic!("the constructs the reader confirmed answer the header");
+    };
+    assert!(ir.symbols.is_empty());
+    assert!(ir.calls.is_empty());
+    assert_eq!(
+        ir.semantic_constructs
+            .iter()
+            .map(|construct| construct.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            SemanticConstructKind::AcquireResource,
+            SemanticConstructKind::ReleaseResource
+        ]
+    );
+    // The header is credited with the interactions its own constructs state.
+    assert!(ir.effects.computed);
+    assert_eq!(ir.effects.interactions, ["file_io"]);
+}
+
+/// Two translation units can confirm different things about one construct —
+/// a lock in one build and a file in another. What they agree on is kept and
+/// what they contradict is left to be compared as it is written.
+#[test]
+fn header_constructs_survive_only_exact_agreement() {
+    let sources = [
+        source("src/narrow.cpp", Language::Cpp, None),
+        source("src/wide.cpp", Language::Cpp, None),
+        header(),
+    ];
+    let file = "include/accumulate.hpp";
+    let stable = construct(file, 400, SemanticConstructKind::Validate, None);
+    let mut gathered = vec![
+        read_with_constructs(
+            "narrow.cpp",
+            vec![
+                stable.clone(),
+                construct(
+                    file,
+                    500,
+                    SemanticConstructKind::AcquireResource,
+                    Some("file"),
+                ),
+            ],
+        ),
+        read_with_constructs(
+            "wide.cpp",
+            vec![
+                stable.clone(),
+                construct(
+                    file,
+                    500,
+                    SemanticConstructKind::AcquireResource,
+                    Some("lock"),
+                ),
+            ],
+        ),
+        unanswerable(&sources[2]),
+    ];
+
+    read_by_other_units(&mut gathered, &sources);
+    let Gathered::Analyzed { ir, .. } = &gathered[2] else {
+        panic!("the agreed construct answers the header");
+    };
+    assert_eq!(
+        ir.semantic_constructs.as_slice(),
+        std::slice::from_ref(&stable)
+    );
+    // The contradicted acquire took its interaction with it.
+    assert!(ir.effects.computed);
+    assert!(ir.effects.interactions.is_empty());
+}
+
+/// A construct every reader contradicts leaves the header with nothing said
+/// about it, which is unanswerable rather than an analysis that found
+/// nothing.
+#[test]
+fn a_header_with_only_disagreeing_constructs_stays_unavailable() {
+    let sources = [
+        source("src/narrow.cpp", Language::Cpp, None),
+        source("src/wide.cpp", Language::Cpp, None),
+        header(),
+    ];
+    let file = "include/accumulate.hpp";
+    let mut gathered = vec![
+        read_with_constructs(
+            "narrow.cpp",
+            vec![construct(file, 500, SemanticConstructKind::Validate, None)],
+        ),
+        read_with_constructs(
+            "wide.cpp",
+            vec![construct(file, 500, SemanticConstructKind::Collect, None)],
+        ),
+        unanswerable(&sources[2]),
+    ];
+
+    read_by_other_units(&mut gathered, &sources);
+    assert!(
+        matches!(gathered[2], Gathered::Unavailable { .. }),
+        "one translation unit's construct was selected"
+    );
+}
+
+/// The point of answering a header from its readers: a pattern a header
+/// states normalizes into the same restricted graph as the same pattern
+/// written in a file that is its own translation unit.
+#[test]
+fn a_pattern_a_header_states_normalizes_as_one_in_a_unit_does() {
+    let sources = [source("src/narrow.cpp", Language::Cpp, None), header()];
+    let mut gathered = vec![
+        read_with_constructs("narrow.cpp", resource_lifetime("include/accumulate.hpp")),
+        unanswerable(&sources[1]),
+    ];
+    read_by_other_units(&mut gathered, &sources);
+    let Gathered::Analyzed { ir, .. } = &gathered[1] else {
+        panic!("the header is answered by the unit that read it");
+    };
+    let Gathered::Analyzed { ir: written, .. } =
+        read_with_constructs("own.cpp", resource_lifetime("src/own.cpp"))
+    else {
+        unreachable!("read always produces an analysis");
+    };
+
+    let from_header = registered_sog_for(ir, "include/accumulate.hpp", Language::Cpp, [21; 32])
+        .expect("the header's agreed constructs normalize");
+    let from_unit = registered_sog_for(&written, "src/own.cpp", Language::Cpp, [21; 32])
+        .expect("the same constructs normalize in a translation unit");
+    assert_eq!(from_header.graph, from_unit.graph);
+    assert!(
+        from_header
+            .graph
+            .is_some_and(|graph| graph.nodes.len() == 2),
+        "the resource lifetime reached normalization"
+    );
+}
+
+/// An empty summary from a helper that never looked is a different claim
+/// from one that looked and found nothing, so a reading that did not compute
+/// its effects leaves the header's summary uncomputed.
+#[test]
+fn a_reading_that_computed_no_effects_leaves_the_header_summary_uncomputed() {
+    let sources = [
+        source("src/narrow.cpp", Language::Cpp, None),
+        source("src/wide.cpp", Language::Cpp, None),
+        header(),
+    ];
+    let constructs = resource_lifetime("include/accumulate.hpp");
+    let mut silent = read_with_constructs("wide.cpp", constructs.clone());
+    let Gathered::Analyzed { ir, .. } = &mut silent else {
+        unreachable!("read always produces an analysis");
+    };
+    ir.effects = EffectSummary::default();
+    let mut gathered = vec![
+        read_with_constructs("narrow.cpp", constructs),
+        silent,
+        unanswerable(&sources[2]),
+    ];
+
+    read_by_other_units(&mut gathered, &sources);
+    let Gathered::Analyzed { ir, .. } = &gathered[2] else {
+        panic!("the agreed constructs still answer the header");
+    };
+    assert_eq!(ir.semantic_constructs.len(), 2);
+    assert!(!ir.effects.computed);
+    assert!(ir.effects.interactions.is_empty());
 }
 
 /// A file that is its own unit was answered about the program it actually

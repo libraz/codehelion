@@ -246,6 +246,13 @@ pub(crate) fn hydrate_group_identity(
                 compared_with_run: predecessor_run,
                 adopted_from: Some(parent.fingerprint_hex.clone()),
                 shared_members: u64::try_from(parent.shared_content).ok(),
+                // The population the shared count was taken out of, carried
+                // only when the recorded edge measured one: a count paired
+                // with a denominator from anywhere else would misstate the
+                // evidence the connection was decided on.
+                compared_members: parent
+                    .compared_content
+                    .and_then(|compared| u64::try_from(compared).ok()),
             })
         } else if previous.contains(&group.fingerprint) {
             Some(report::GroupIdentity {
@@ -253,6 +260,7 @@ pub(crate) fn hydrate_group_identity(
                 compared_with_run: predecessor_run,
                 adopted_from: None,
                 shared_members: None,
+                compared_members: None,
             })
         } else {
             // Nothing connects this group to the earlier run. Saying so about

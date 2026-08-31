@@ -6,11 +6,10 @@ use super::{
     CrossLanguageSemanticMemberRow, CrossVariantComparisonSnapshot, CrossVariantGroupRow,
     CrossVariantMemberRow, CrossVariantUnit, DiscoveryReport, Installed, Language,
     PartitionOutcome, Path, Report, ReportInputs, Result, ScanArgs, ScanBaseline,
-    SemanticCandidateConfig, SemanticDetection, SemanticPartition, SourceMeta, SourceUnit,
-    StructuralReport, SyntaxIrFile, as_u64, build_groups, build_report, compile_rules, coverage,
-    detector_versions, directory_partitions, evaluate_suppression,
-    extract_cross_language_candidates, literal_norm, map_sources, mark_test_modules,
-    mark_test_paths, parse_one, path_key, presentation_suppression, record,
+    SemanticDetection, SemanticProgram, SourceMeta, StructuralReport, SyntaxIrFile, as_u64,
+    build_groups, build_report, compile_rules, coverage, detector_versions, directory_partitions,
+    evaluate_suppression, extract_cross_language_candidates, literal_norm, map_sources,
+    mark_test_modules, mark_test_paths, parse_one, path_key, presentation_suppression, record,
     registered_semantic_pairs, remove_signature_sibling_funnel_stage, report, reportable_regions,
     resolve, rfc3339_now, semantic_confidence, stable_id, structural, structural_config,
     summary_row, suppress, verify_cross_language_candidates,
@@ -40,28 +39,60 @@ pub(super) fn cross_variant_comparison_not_run(
     }
 }
 
-/// Execute and record one semantic partition.
+/// Everything one program is analysed under, whether the run holds one or
+/// several.
+///
+/// The context is built once per invocation. A partitioned run and a run over
+/// the whole tree then take the same path with the same values, so a change to
+/// what a program's report carries cannot reach one of them and miss the other.
+#[derive(Clone, Copy)]
+pub(super) struct ProgramContext<'a> {
+    pub(super) args: &'a ScanArgs,
+    pub(super) cfg: &'a Config,
+    pub(super) guardrails: Option<&'a report::Guardrails>,
+    pub(super) jobs: usize,
+    pub(super) root: &'a Path,
+    pub(super) db_path: &'a Path,
+    pub(super) configuration: &'a report::ConfigurationInfo,
+    pub(super) started_at: &'a str,
+    /// The helpers this run asks about its sources, if any.
+    pub(super) asking: Option<&'a [&'a Installed]>,
+    pub(super) glob_excluded: usize,
+    /// The analysis a failure here belongs to.
+    pub(super) mode: crate::cli::Mode,
+    /// Whether this program is the whole run. It then records a complete
+    /// snapshot of its own and may stand in for a compatible predecessor;
+    /// otherwise it stages a part that the invocation commits with the others.
+    pub(super) whole_run: bool,
+}
+
+/// Execute and record one program.
 ///
 /// The parser is intentionally run per partition for now. It never executes
 /// target code, and keeping its products private to the partition makes it
 /// impossible for a future resolved-type refinement to accidentally reconnect
 /// clone grouping across build variants.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(super) fn run_semantic_partition(
-    args: &ScanArgs,
-    cfg: &Config,
-    guardrails: Option<&report::Guardrails>,
-    jobs: usize,
-    root: &Path,
-    db_path: &Path,
-    configuration: &report::ConfigurationInfo,
-    started_at: &str,
+#[allow(clippy::too_many_lines)]
+pub(super) fn run_program(
+    ctx: &ProgramContext<'_>,
     shared_discovery: Option<&DiscoveryReport>,
-    sources: &[SourceUnit],
-    glob_excluded: usize,
-    asking: Option<&[&Installed]>,
-    partition: &SemanticPartition,
+    program: SemanticProgram<'_>,
 ) -> Result<PartitionOutcome> {
+    let ProgramContext {
+        args,
+        cfg,
+        guardrails,
+        jobs,
+        root,
+        db_path,
+        configuration,
+        started_at,
+        asking,
+        glob_excluded,
+        mode,
+        whole_run,
+    } = *ctx;
+    let sources = program.sources;
     let analysis_began = std::time::Instant::now();
     let replay_database = args
         .db
@@ -71,7 +102,7 @@ pub(super) fn run_semantic_partition(
     let (parsed, unreadable, timed_out) = map_sources(sources, jobs, |source| {
         parse_one(source, cfg.limits.max_file_bytes, timeout)
     })
-    .map_err(|error| crate::analysis_failure(crate::cli::Mode::Semantic, error))?;
+    .map_err(|error| crate::analysis_failure(mode, error))?;
     let (files, mut irs): (Vec<SourceMeta>, Vec<SyntaxIrFile>) = parsed
         .into_iter()
         .map(|source| (source.meta, source.ir))
@@ -82,8 +113,8 @@ pub(super) fn run_semantic_partition(
         asking,
         sources,
         &files,
-        &partition.variant,
-        &partition.commands,
+        program.variant,
+        program.commands,
         args.untrusted.then_some(root),
         std::time::Duration::from_millis(cfg.limits.helper_timeout_ms),
     );
@@ -92,13 +123,13 @@ pub(super) fn run_semantic_partition(
         let directory_partitions = directory_partitions(&files);
         structural::analyze_resolved_with_context(
             &irs,
-            &partition.variant,
+            program.variant,
             &structural_cfg,
             &resolved,
             &directory_partitions,
         )
     } else {
-        structural::analyze_resolved(&irs, &partition.variant, &structural_cfg, &resolved)
+        structural::analyze_resolved(&irs, program.variant, &structural_cfg, &resolved)
     };
     mark_test_paths(cfg, &files, &mut analysis)?;
     let semantic = registered_semantic_pairs(
@@ -107,10 +138,10 @@ pub(super) fn run_semantic_partition(
         &files,
         &irs,
         &analysis,
-        &partition.variant,
+        program.variant,
         cfg,
     )
-    .map_err(|error| crate::analysis_failure(crate::cli::Mode::Semantic, error))?;
+    .map_err(|error| crate::analysis_failure(mode, error))?;
     let mut rules = compile_rules(cfg, &files, &analysis)?;
     let matched_rules: BTreeSet<usize> = rules
         .files
@@ -121,7 +152,7 @@ pub(super) fn run_semantic_partition(
         args.baseline.as_deref(),
         args.baseline_mode,
         &mut rules.rules,
-        &partition.variant,
+        program.variant,
         &detector_versions(
             literal_norm(cfg.literal_normalization),
             cfg.entropy_ratio_floor,
@@ -139,7 +170,7 @@ pub(super) fn run_semantic_partition(
         &regions,
         &semantic.groups,
         &semantic.pairs,
-        &partition.variant,
+        program.variant,
     );
     let finished_at = rfc3339_now();
     let analysis_took = analysis_began.elapsed();
@@ -150,7 +181,7 @@ pub(super) fn run_semantic_partition(
         configuration,
         started_at,
         finished_at: &finished_at,
-        variant: &partition.variant,
+        variant: program.variant,
         files: &files,
         irs: &irs,
         analysis: &analysis,
@@ -177,7 +208,7 @@ pub(super) fn run_semantic_partition(
         weights: cfg.priority.weights(),
         min_clone_tokens: u64::from(cfg.min_clone_tokens),
         sort: args.sort.axis(),
-        reuse_allowed: false,
+        reuse_allowed: whole_run && !args.no_reuse,
         untrusted: args.untrusted,
         siblings_by_signature: args.siblings_by_signature,
     };
@@ -204,14 +235,9 @@ pub(super) fn run_semantic_partition(
         .map(|baseline| crate::scan::apply_baseline(baseline, &mut model.groups));
     model.refresh_supplemental_summary();
     let comparison_units =
-        maybe_cross_comparison_units(args, &partition.variant, &files, &irs, &analysis);
-    let cross_language_units = maybe_cross_language_comparison_units(
-        args,
-        &partition.variant,
-        &files,
-        &analysis,
-        &semantic,
-    );
+        maybe_cross_comparison_units(args, program.variant, &files, &irs, &analysis);
+    let cross_language_units =
+        maybe_cross_language_comparison_units(args, program.variant, &files, &analysis, &semantic);
     let recording_began = std::time::Instant::now();
     let record_result = record(
         cfg,
@@ -220,10 +246,10 @@ pub(super) fn run_semantic_partition(
         crate::scan::file_rows(sources),
         &stored,
         asked.as_ref(),
-        false,
+        whole_run,
     );
     let recording_took = recording_began.elapsed();
-    let (recording_error, staged) = match record_result {
+    let (recording_error, staged, reuse_key) = match record_result {
         Ok(recorded) => {
             model.run.run_id = Some(recorded.run_id);
             model.run.reused = recorded.reused;
@@ -232,14 +258,14 @@ pub(super) fn run_semantic_partition(
                 recording: (!recorded.reused).then_some(recording_took),
             });
             model.summary.changes = recorded.changes;
-            (None, recorded.staged)
+            (None, recorded.staged, Some(recorded.reuse_key))
         }
         Err(error) => {
             model.run.timings = Some(report::RunTimings {
                 analysis: analysis_took,
                 recording: None,
             });
-            (Some(error), None)
+            (Some(error), None, None)
         }
     };
     let outcome = crate::scan::outcome(args, &model);
@@ -250,6 +276,7 @@ pub(super) fn run_semantic_partition(
         cross_language_units,
         recording_error,
         staged,
+        reuse_key,
     })
 }
 
@@ -538,16 +565,11 @@ pub(super) fn prepare_cross_language_comparison(
             graph: unit.graph.clone(),
         })
         .collect();
-    let max_candidate_pairs = cfg
-        .limits
-        .pair_budget
-        .unwrap_or_else(|| SemanticCandidateConfig::default().max_candidate_pairs);
     let candidates = extract_cross_language_candidates(
         &inputs,
-        SemanticCandidateConfig {
-            max_bucket_members: SemanticCandidateConfig::default().max_bucket_members,
-            max_candidate_pairs,
-        },
+        crate::scan::runtime::stage_limits(cfg)
+            .pairing
+            .semantic_candidates(),
     );
     let verified = enabled_cross_language_matches(
         verify_cross_language_candidates(&inputs, &candidates.pairs),
@@ -719,4 +741,115 @@ pub(super) fn enabled_cross_language_matches(
         .into_iter()
         .filter(|(_, matched)| cfg.semantic.enabled(matched.rule.id))
         .collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod posting_ceiling_tests {
+    use super::{
+        BTreeSet, BuildVariant, Config, CrossLanguageComparisonUnit, Language, Path,
+        prepare_cross_language_comparison, report, stable_id,
+    };
+    use codehelion_core::discovery::LanguageSelection;
+    use codehelion_core::semantic::{
+        FallibleKind, OperationAttributes, OperationKind, OperationNode, SemanticOperationGraph,
+    };
+
+    /// Three comparable units whose graphs share one candidate bucket: two Rust
+    /// and one C++, so a ceiling of two members leaves that bucket over it while
+    /// the default ceiling admits it. Each origin reads the tree under its own
+    /// build variant, which is what makes a pair across two of them comparable.
+    fn one_bucket_of_three() -> Vec<CrossLanguageComparisonUnit> {
+        [
+            ("origin-a", 7, Language::Rust, "src/left.rs"),
+            ("origin-b", 8, Language::Rust, "src/right.rs"),
+            ("origin-b", 8, Language::Cpp, "cpp/right.cpp"),
+        ]
+        .into_iter()
+        .map(|(origin_variant, origin_seed, language, file_path)| {
+            let graph = SemanticOperationGraph::new(
+                language,
+                [origin_seed; 32],
+                vec![OperationNode {
+                    kind: OperationKind::Validate,
+                    attributes: OperationAttributes {
+                        fallible_kind: Some(FallibleKind::Option),
+                        ..OperationAttributes::default()
+                    },
+                }],
+                Vec::new(),
+            )
+            .expect("closed optional validation graph");
+            let variant = BuildVariant::structural(LanguageSelection::default(), language);
+            CrossLanguageComparisonUnit {
+                origin_variant: origin_variant.to_owned(),
+                language,
+                file_path: file_path.to_owned(),
+                start_line: 1,
+                end_line: 3,
+                name: None,
+                occurrence: stable_id::semantic_fragment_fingerprint(&variant, &graph),
+                graph,
+                normalization_confidence: 1.0,
+                interactions: BTreeSet::new(),
+                data_flows: BTreeSet::new(),
+                cfg_shape: None,
+            }
+        })
+        .collect()
+    }
+
+    /// Buckets the member ceiling refused, as this comparison accounted for them.
+    fn buckets_over_the_ceiling(funnel: &[report::FunnelStage]) -> u64 {
+        funnel
+            .iter()
+            .filter(|stage| stage.stage == "cross-language candidate buckets")
+            .flat_map(|stage| &stage.dropped)
+            .filter(|drop| drop.cause == "bucket_member_cap")
+            .map(|drop| drop.count)
+            .sum()
+    }
+
+    fn comparison(cfg: &Config) -> report::CrossLanguageComparison {
+        prepare_cross_language_comparison(
+            Path::new("/tree"),
+            "2026-01-01T00:00:00Z",
+            &one_bucket_of_three(),
+            cfg,
+        )
+        .expect("the comparison prepares")
+        .expect("two origins holding both languages compare")
+        .report
+    }
+
+    /// The cross-language index is one of the bucket paths a run's stated
+    /// posting ceiling governs, so it takes that ceiling from the stage mapping
+    /// the reported guardrail is read from rather than from a width of its own.
+    /// A ceiling written into this call site instead would leave the bucket
+    /// paired at a width no configuration can lower.
+    #[test]
+    fn the_cross_language_index_cuts_at_the_configured_posting_ceiling() {
+        let cfg = Config::from_toml("[limits]\nposting-cap = 2\n")
+            .expect("a posting ceiling is configurable");
+        let stated = crate::scan::runtime::stage_limits(&cfg)
+            .pairing
+            .semantic_candidates();
+        assert_eq!(stated.max_bucket_members, 2);
+
+        let cut = comparison(&cfg);
+        assert_eq!(buckets_over_the_ceiling(&cut.funnel), 1);
+        assert!(cut.search_truncated);
+        assert!(cut.groups.is_empty());
+    }
+
+    /// The same tree under no configured ceiling pairs the bucket, which is what
+    /// makes the cut above a consequence of the stated number.
+    #[test]
+    fn the_cross_language_index_pairs_the_same_bucket_under_the_default_ceiling() {
+        let cfg = Config::default();
+        let admitted = comparison(&cfg);
+        assert_eq!(buckets_over_the_ceiling(&admitted.funnel), 0);
+        assert!(!admitted.search_truncated);
+        assert!(!admitted.groups.is_empty());
+    }
 }

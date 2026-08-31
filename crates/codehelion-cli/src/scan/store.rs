@@ -12,6 +12,8 @@ use super::{
     UnitRow, build_group, engine, fast_group_scope, literal_norm, path_key, priority_row, report,
     shared, stable_id,
 };
+use codehelion_store::snapshot::SuppressionRuleRow;
+use std::fmt::Write as _;
 
 /// The tree a scan read, as rows to record beside its findings.
 ///
@@ -30,24 +32,58 @@ pub(crate) fn file_rows(units: &[SourceUnit]) -> Vec<FileRow> {
         .collect()
 }
 
+/// What one invocation decided outside the detector settings `Config`
+/// serializes.
+///
+/// Everything here can change the rows a run records — which findings are
+/// hidden, and where each is ranked — so two invocations that disagree about
+/// any of it are asking different questions and may not stand in for one
+/// another.
+#[derive(Clone, Copy)]
+pub(crate) struct ReuseProfile<'a> {
+    /// Whether the run is subject to the untrusted execution contract.
+    pub(crate) untrusted: bool,
+    /// Whether the signature-based sibling detector ran.
+    pub(crate) siblings_by_signature: bool,
+    /// The suppression rules the run applied. This is what decides the
+    /// `suppressed_by` of every recorded row: a baseline the run was told to
+    /// compare against rather than suppress registers no rule here, so the two
+    /// readings of one baseline are not interchangeable runs.
+    pub(crate) rules: &'a [SuppressionRuleRow],
+    /// The presentation policy the run ranked its findings under. An
+    /// invocation may override it for itself without changing the
+    /// configuration the run is recorded under.
+    pub(crate) presentation: &'a crate::config::Suppression,
+}
+
 /// Hash the effective detector configuration and the reuse profile.
 ///
 /// The profile is part of reuse compatibility even though it is not a
 /// detector setting serialized by `Config`: an untrusted scan is subject to a
-/// different execution contract from a trusted one. Keeping this recipe in
-/// one place prevents the Fast, Structural, and Semantic paths from selecting
-/// different predecessors for the same invocation.
-pub(crate) fn reuse_config_hash(
-    cfg: &Config,
-    untrusted: bool,
-    siblings_by_signature: bool,
-) -> Result<ContentHash> {
-    let config_text = format!(
-        "{}\nreuse-profile-v2:untrusted={};siblings-by-signature={}",
+/// different execution contract from a trusted one, and a run that was told to
+/// hide known findings records different rows from one told to mark them.
+/// Keeping this recipe in one place prevents the Fast, Structural, and
+/// Semantic paths from selecting different predecessors for the same
+/// invocation.
+pub(crate) fn reuse_config_hash(cfg: &Config, profile: ReuseProfile<'_>) -> Result<ContentHash> {
+    let mut config_text = format!(
+        "{}\nreuse-profile-v3:untrusted={};siblings-by-signature={}\npresentation:{}\nrules:",
         cfg.to_toml()?,
-        untrusted,
-        siblings_by_signature,
+        profile.untrusted,
+        profile.siblings_by_signature,
+        serde_json::to_string(profile.presentation)
+            .context("serializing the presentation policy of a scan")?,
     );
+    for rule in profile.rules {
+        write!(
+            config_text,
+            "\n{}\u{1f}{}\u{1f}{}",
+            rule.scope,
+            rule.pattern,
+            rule.reason.as_deref().unwrap_or_default(),
+        )
+        .context("describing a suppression rule of a scan")?;
+    }
     Ok(ContentHash::of(config_text.as_bytes()))
 }
 
@@ -109,7 +145,15 @@ pub(super) fn record_ranked(
         &cfg.suppression,
     );
     let mut store = open_store(inputs.db_path)?;
-    let config_hash = reuse_config_hash(cfg, inputs.untrusted, false)?;
+    let config_hash = reuse_config_hash(
+        cfg,
+        ReuseProfile {
+            untrusted: inputs.untrusted,
+            siblings_by_signature: false,
+            rules: &inputs.rules.rows,
+            presentation: inputs.suppression,
+        },
+    )?;
     let mut detector_versions = detector_versions(
         literal_norm(cfg.literal_normalization),
         cfg.entropy_ratio_floor,

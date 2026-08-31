@@ -1,5 +1,6 @@
 //! Structural scan classification, suppression, and reportable-region selection.
 
+use super::reporting::{member_hosts, ranks_after};
 use super::{
     BTreeMap, BTreeSet, Boilerplate, BoilerplatePolicy, BuildVariant, CategoryAction, Config,
     Context, Path, RegionOccurrence, ReportInputs, Result, SemanticGroup, SemanticPair,
@@ -47,56 +48,85 @@ pub(super) fn mark_test_paths(
 }
 
 /// Build the structural stage configuration from the effective scan
-/// configuration. An overridden candidate ceiling applies to every candidate
-/// stage, so one configured number bounds the whole funnel; left unset, each
-/// stage keeps the default measured for it.
+/// configuration.
+///
+/// The ceilings every mode shares come from the one mapping that hands a run's
+/// limits to its stages, so a number this pipeline enforces is the number the
+/// run reports. The near-match band and the two sibling channels have no
+/// counterpart outside this pipeline and are read here; left unset, each stage
+/// keeps the default measured for it.
 pub(super) fn structural_config(cfg: &Config) -> StructuralConfig {
+    // Exhaustively destructured on purpose: a ceiling added to the
+    // configuration stops this compiling until this pipeline has either
+    // enforced it or said that the shared mapping holds it.
+    let config::Limits {
+        // Held by the shared stage mapping below, or by a stage this pipeline
+        // does not configure.
+        max_file_bytes: _,
+        parse_timeout_ms: _,
+        helper_timeout_ms: _,
+        posting_cap: _,
+        pair_budget: _,
+        max_component: _,
+        verification_budget: _,
+        max_alignment_cells: _,
+        near_miss_delta,
+        near_miss_cap,
+        sibling_candidate_budget,
+        sibling_per_group_cap,
+        sibling_total_cap,
+        signature_sibling_candidate_budget,
+        signature_sibling_per_group_cap,
+        signature_sibling_total_cap,
+        signature_sibling_max_units_per_signature,
+    } = &cfg.limits;
+    let limits = crate::scan::runtime::stage_limits(cfg);
     let mut config = StructuralConfig {
         min_clone_tokens: cfg.min_clone_tokens,
         ..StructuralConfig::default()
     };
-    if let Some(cap) = cfg.limits.posting_cap {
+    if let Some(cap) = limits.pairing.posting_cap {
         config.candidate.posting_cap = cap;
         config.near_match.posting_cap = cap;
         config.control_flow.posting_cap = cap;
     }
-    if let Some(budget) = cfg.limits.pair_budget {
+    if let Some(budget) = limits.pairing.pair_budget {
         config.candidate.pair_budget = budget;
         config.near_match.pair_budget = budget;
         config.control_flow.pair_budget = budget;
     }
-    if let Some(delta) = cfg.limits.near_miss_delta {
-        config.near_match.near_miss_delta = delta;
-    }
-    if let Some(cap) = cfg.limits.near_miss_cap {
-        config.near_match.near_miss_cap = cap;
-    }
-    config.grouping.max_component = cfg.limits.max_component;
-    if let Some(budget) = cfg.limits.verification_budget {
+    config.grouping.max_component = limits.grouping.max_component;
+    if let Some(budget) = limits.verification.verification_budget {
         config.verification_budget = budget;
     }
-    if let Some(cells) = cfg.limits.max_alignment_cells {
+    if let Some(cells) = limits.verification.max_alignment_cells {
         config.verify.max_alignment_cells = cells;
     }
-    if let Some(budget) = cfg.limits.sibling_candidate_budget {
+    if let Some(delta) = *near_miss_delta {
+        config.near_match.near_miss_delta = delta;
+    }
+    if let Some(cap) = *near_miss_cap {
+        config.near_match.near_miss_cap = cap;
+    }
+    if let Some(budget) = *sibling_candidate_budget {
         config.siblings.candidate_budget = budget;
     }
-    if let Some(cap) = cfg.limits.sibling_per_group_cap {
+    if let Some(cap) = *sibling_per_group_cap {
         config.siblings.per_group_cap = cap;
     }
-    if let Some(cap) = cfg.limits.sibling_total_cap {
+    if let Some(cap) = *sibling_total_cap {
         config.siblings.total_cap = cap;
     }
-    if let Some(budget) = cfg.limits.signature_sibling_candidate_budget {
+    if let Some(budget) = *signature_sibling_candidate_budget {
         config.signature_siblings.candidate_budget = budget;
     }
-    if let Some(cap) = cfg.limits.signature_sibling_per_group_cap {
+    if let Some(cap) = *signature_sibling_per_group_cap {
         config.signature_siblings.per_group_cap = cap;
     }
-    if let Some(cap) = cfg.limits.signature_sibling_total_cap {
+    if let Some(cap) = *signature_sibling_total_cap {
         config.signature_siblings.total_cap = cap;
     }
-    if let Some(limit) = cfg.limits.signature_sibling_max_units_per_signature {
+    if let Some(limit) = *signature_sibling_max_units_per_signature {
         config.signature_siblings.max_units_per_signature = limit;
     }
     config.literals = literal_norm(cfg.literal_normalization);
@@ -415,14 +445,28 @@ pub(super) fn evaluate_suppression(
         .iter()
         .map(|siblings| {
             let detail = &analysis.details[siblings.group];
-            let member_count = as_u64(analysis.groups.groups[siblings.group].members.len());
+            let group = &analysis.groups.groups[siblings.group];
+            let member_count = as_u64(group.members.len());
+            // The id a rule is matched against has to be the one this run
+            // reports and records for the same sibling, so it is derived the
+            // same way: a sibling ranks after the primary members, because its
+            // host content can repeat a member's and an id shared with that
+            // member would answer to a rule written about the member.
+            let ranks = ranks_after(
+                member_hosts(&analysis.units, &group.members),
+                siblings
+                    .siblings
+                    .iter()
+                    .map(|sibling| analysis.units[sibling.unit].fingerprint),
+            );
             siblings
                 .siblings
                 .iter()
-                .map(|sibling| {
+                .zip(ranks)
+                .map(|(sibling, rank)| {
                     let unit = &analysis.units[sibling.unit];
                     let finding =
-                        stable_id::finding_id(&detail.fingerprint, Some(&unit.fingerprint), 0);
+                        stable_id::finding_id(&detail.fingerprint, Some(&unit.fingerprint), rank);
                     shared::SuppressionPriority::first(|| {
                         rules.rules.clone_id_rule(&finding.to_hex())
                     })
@@ -725,7 +769,7 @@ pub(super) fn region_test_code_evidence(
 }
 
 /// Raw identifier agreement between the first reported run occurrence and the
-/// remaining occurrences.
+/// remaining occurrences, absent where none of them named an identifier.
 ///
 /// A run is already an exact normalized match. This is therefore triage-only
 /// proxy evidence for a possible shared refactoring target, not a similarity
@@ -733,8 +777,8 @@ pub(super) fn region_test_code_evidence(
 pub(super) fn region_identifier_jaccard(
     inputs: &ReportInputs<'_>,
     region: &StructuralRegion,
-) -> f64 {
-    region.occurrences.first().map_or(1.0, |canonical| {
+) -> Option<f64> {
+    region.occurrences.first().and_then(|canonical| {
         structural::span_identifier_jaccard(
             inputs.irs,
             region_token_span(canonical),

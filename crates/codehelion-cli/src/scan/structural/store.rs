@@ -15,8 +15,10 @@ use super::{
     semantic_member_ranks, semantic_scope, shared, stable_id, store_compiler,
 };
 use crate::scan::reuse_config_hash;
+use crate::scan::store::ReuseProfile;
 use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::CloneClass;
+use codehelion_core::discovery::ContentHash;
 use codehelion_core::discovery::Language;
 use codehelion_core::frontend::UnitKind;
 use codehelion_core::stable_id::{
@@ -33,6 +35,10 @@ pub(super) struct RecordResult {
     pub reused: bool,
     pub changes: Option<report::TreeChanges>,
     pub staged: Option<StagedSnapshotPart>,
+    /// The key this snapshot was recorded under. A later reuse decision about
+    /// the same invocation reads it back rather than rebuilding the recipe,
+    /// which is how the two could describe different runs.
+    pub reuse_key: ContentHash,
 }
 
 pub(super) fn record(
@@ -46,7 +52,15 @@ pub(super) fn record(
 ) -> Result<RecordResult> {
     let (units, groups, host_index) = snapshot_rows(inputs, ranked)?;
     let mut store = open_store(inputs.db_path)?;
-    let config_hash = reuse_config_hash(cfg, inputs.untrusted, inputs.siblings_by_signature)?;
+    let config_hash = reuse_config_hash(
+        cfg,
+        ReuseProfile {
+            untrusted: inputs.untrusted,
+            siblings_by_signature: inputs.siblings_by_signature,
+            rules: &inputs.rules.rows,
+            presentation: inputs.suppression,
+        },
+    )?;
     let mut detector_versions = detector_versions(
         literal_norm(cfg.literal_normalization),
         cfg.entropy_ratio_floor,
@@ -84,6 +98,7 @@ pub(super) fn record(
             reused: true,
             changes,
             staged: None,
+            reuse_key: config_hash,
         });
     }
     let (compiler_helpers, compiler_units) = asked.map_or_else(
@@ -128,6 +143,7 @@ pub(super) fn record(
         reused: false,
         changes,
         staged,
+        reuse_key: config_hash,
     })
 }
 
@@ -1062,7 +1078,7 @@ fn unit_group_row(
     row.boilerplate = detail.boilerplate;
     row.width_family = detail.width_family;
     row.similarity = Some(breakdown_row(group, detail));
-    row.identifier_jaccard = Some(detail.identifier_jaccard);
+    row.identifier_jaccard = detail.identifier_jaccard;
     row.has_loop = Some(detail.body_materiality.has_loop);
     row.has_dynamic_allocation = Some(detail.body_materiality.has_dynamic_allocation);
     row.call_count = Some(detail.body_materiality.call_count);
@@ -1163,7 +1179,7 @@ fn split_pair_row(
         min_pairwise: pair.similarity,
         confidence_band: pair.confidence,
     });
-    row.identifier_jaccard = Some(split_pair_identifier_jaccard(inputs, pair));
+    row.identifier_jaccard = split_pair_identifier_jaccard(inputs, pair);
     row.width_family = pair.width_family;
     row.suppress_reason = inputs.entropy_suppress_reason(row.entropy_bits, canonical_tokens.len());
     Ok(row)
@@ -1222,7 +1238,7 @@ fn region_row(
     row.test_code = test_code_evidence.is_some();
     row.test_code_evidence = test_code_evidence;
     row.suppress_reason = inputs.entropy_suppress_reason(row.entropy_bits, canonical.len());
-    row.identifier_jaccard = Some(region_identifier_jaccard(inputs, region));
+    row.identifier_jaccard = region_identifier_jaccard(inputs, region);
     Ok(row)
 }
 

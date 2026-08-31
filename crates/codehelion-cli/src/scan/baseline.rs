@@ -114,14 +114,7 @@ pub(crate) fn apply_baseline(
         .map(|group| crate::baseline::ScanGroup {
             group: group.fingerprint.as_str(),
             instances: as_u64(group.members.len()),
-            duplicated_tokens: crate::baseline::duplicated_tokens(
-                group.members.iter().map(|member| member.tokens),
-                group
-                    .members
-                    .iter()
-                    .find(|member| member.canonical)
-                    .map_or(0, |member| member.tokens),
-            ),
+            duplicated_tokens: report::duplicated_tokens(group),
             sites: group
                 .members
                 .iter()

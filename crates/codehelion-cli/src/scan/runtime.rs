@@ -7,14 +7,16 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use codehelion_core::config::{
+    DiscoveryLimits, GroupingLimits, PairingLimits, ProcessLimits, StageLimits, VerificationLimits,
+};
+
 use super::{
     Config, ConfigSource, Context, DEFAULT_SCAN_LINES, DiscoveryConfig, DiscoveryReport,
     EngineConfig, Frontend, GeneratedMarkers, Glob, GlobSet, GlobSetBuilder, Language,
     LanguageSelection, LexedSource, LiteralNorm, LiteralNormalization, Path, PathBuf,
     ResolvedConfig, Result, ScanArgs, SourceUnit, bail, discovery, path_key, report, suppress,
 };
-#[cfg(test)]
-use std::io::Read;
 
 /// Maximum parser workers accepted from either the command line or config.
 ///
@@ -59,23 +61,148 @@ pub(crate) fn guarded(mut cfg: Config, args: &ScanArgs) -> (Config, Option<repor
     }
     let profile = codehelion_core::execution::Limits::untrusted();
     cfg.limits.clamp_to_untrusted(&profile);
+    announce_process_memory(&hold_this_process_to(&StageLimits::of(&profile).process));
     let guardrails = report::Guardrails::untrusted(&cfg.limits, &profile);
     (cfg, Some(guardrails))
 }
 
+/// The ceilings this run's stages work under.
+///
+/// The one place a configured ceiling becomes stage configuration. A stage that
+/// read the configuration for itself is how a number came to be reported as
+/// applied while the stage that was supposed to hold it kept its own default,
+/// so a stage takes its ceilings from here or does not have them.
+///
+/// `None` means the stage keeps the default measured for it, which is not the
+/// same number at every stage.
+pub(crate) const fn stage_limits(cfg: &Config) -> StageLimits {
+    // Exhaustively destructured on purpose: a ceiling added to the
+    // configuration stops this compiling until it has been given a stage.
+    let crate::config::Limits {
+        max_file_bytes,
+        parse_timeout_ms,
+        helper_timeout_ms,
+        posting_cap,
+        pair_budget,
+        max_component,
+        verification_budget,
+        max_alignment_cells,
+        // The near-match band and the two sibling channels exist only in the
+        // structural pipeline, which builds its own stage configuration from
+        // these and has no counterpart in the other modes.
+        near_miss_delta: _,
+        near_miss_cap: _,
+        sibling_candidate_budget: _,
+        sibling_per_group_cap: _,
+        sibling_total_cap: _,
+        signature_sibling_candidate_budget: _,
+        signature_sibling_per_group_cap: _,
+        signature_sibling_total_cap: _,
+        signature_sibling_max_units_per_signature: _,
+    } = &cfg.limits;
+    StageLimits {
+        discovery: DiscoveryLimits {
+            max_file_bytes: *max_file_bytes,
+            parse_timeout: std::time::Duration::from_millis(*parse_timeout_ms),
+        },
+        pairing: PairingLimits {
+            posting_cap: *posting_cap,
+            pair_budget: *pair_budget,
+        },
+        grouping: GroupingLimits {
+            max_component: *max_component,
+        },
+        verification: VerificationLimits {
+            verification_budget: *verification_budget,
+            max_alignment_cells: *max_alignment_cells,
+        },
+        process: ProcessLimits {
+            // A configuration states no memory ceiling: only a profile does,
+            // and `guarded` puts that one into force for the whole run.
+            max_memory_bytes: None,
+            helper_timeout: std::time::Duration::from_millis(*helper_timeout_ms),
+        },
+    }
+}
+
+/// What became of the memory ceiling a profile states for this process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProcessMemory {
+    /// The profile states no ceiling.
+    Unbounded,
+    /// The operating system now holds this process to `bytes`.
+    Held {
+        /// The installed ceiling.
+        bytes: u64,
+    },
+    /// A ceiling was stated and could not be installed.
+    Unenforceable {
+        /// The ceiling that was asked for.
+        bytes: u64,
+        /// What the operating system or this build said about it.
+        reason: String,
+    },
+    /// Left uninstalled while this crate's own tests run. The ceiling is
+    /// process-wide and cannot be lifted again, so a test that installed one
+    /// would impose it on every other test sharing the process.
+    Withheld {
+        /// The ceiling that was asked for.
+        bytes: u64,
+    },
+}
+
+/// Put a profile's memory ceiling into force for the scanner process.
+///
+/// The ceilings that bound one file, one posting list or one component all act
+/// after the bytes have been read; a tree of files each just under the size
+/// ceiling costs whatever their total is. This is the one that bounds the run
+/// itself, so it is installed where the profile is resolved, before any of the
+/// tree has been read.
+fn hold_this_process_to(limits: &ProcessLimits) -> ProcessMemory {
+    let Some(bytes) = limits.max_memory_bytes else {
+        return ProcessMemory::Unbounded;
+    };
+    if cfg!(test) {
+        return ProcessMemory::Withheld { bytes };
+    }
+    codehelion_helper::enforce_current_process_memory_limit(bytes).map_or_else(
+        |error| ProcessMemory::Unenforceable {
+            bytes,
+            reason: error.to_string(),
+        },
+        |()| ProcessMemory::Held { bytes },
+    )
+}
+
+/// Say when a stated memory ceiling is not in force.
+///
+/// Not every platform can hold a process to one, and on those the flag still
+/// buys the ceilings that are enforced inside this process — what is read, how
+/// wide pairing fans out, how large a group is refined. What it does not buy is
+/// a bound on the run's own memory, and a reader who was not told that would
+/// take a scan of a hostile tree for a contained one.
+fn announce_process_memory(outcome: &ProcessMemory) {
+    if let ProcessMemory::Unenforceable { bytes, reason } = outcome {
+        eprintln!(
+            "note: this build cannot hold the scanner process to the {bytes}-byte memory ceiling \
+             the untrusted profile states ({reason}); the run continues under the ceilings it \
+             does enforce on file size, parse work, candidate pairing, grouping and verification"
+        );
+    }
+}
+
 /// Build the engine configuration from the effective scan configuration:
-/// detection knobs plus any candidate ceiling the configuration overrides.
+/// detection knobs plus the ceilings this run's pairing stage works under.
 pub(super) fn engine_config(cfg: &Config) -> Result<EngineConfig> {
-    let defaults = EngineConfig::default();
-    Ok(EngineConfig {
+    let mut engine = EngineConfig {
         min_clone_tokens: usize::try_from(cfg.min_clone_tokens)
             .context("min-clone-tokens out of range")?,
         entropy_ratio_floor: cfg.entropy_ratio_floor,
         literals: literal_norm(cfg.literal_normalization),
-        posting_cap: cfg.limits.posting_cap.unwrap_or(defaults.posting_cap),
-        pair_budget: cfg.limits.pair_budget.unwrap_or(defaults.pair_budget),
-        ..defaults
-    })
+        ..EngineConfig::default()
+    };
+    stage_limits(cfg).pairing.apply_to_engine(&mut engine);
+    Ok(engine)
 }
 
 /// Map the configured literal strategy onto the engine's.
@@ -95,9 +222,12 @@ pub(crate) fn discover_sources(
     follow_links: bool,
     compile_commands: Option<&Path>,
 ) -> Result<DiscoveryReport> {
+    // The read ceiling is the discovery stage's own, taken from the same
+    // mapping every other stage takes its ceilings from: it bounds what a file
+    // costs to read, so it has to be the number the run reports.
     let discovery_config = DiscoveryConfig {
         respect_gitignore: !no_ignore,
-        max_file_bytes: cfg.limits.max_file_bytes,
+        max_file_bytes: stage_limits(cfg).discovery.max_file_bytes,
         languages: LanguageSelection {
             rust: cfg.languages.rust,
             c: cfg.languages.c,
@@ -172,23 +302,6 @@ pub(crate) const PARSE_BYTES_PER_MILLISECOND: u64 = 256;
 pub(crate) fn parse_work_byte_limit(max_file_bytes: u64, budget: std::time::Duration) -> u64 {
     let milliseconds = u64::try_from(budget.as_millis()).unwrap_or(u64::MAX);
     max_file_bytes.min(milliseconds.saturating_mul(PARSE_BYTES_PER_MILLISECOND))
-}
-
-/// Read no more than one byte beyond `maximum_bytes`, so a file that grew
-/// after discovery cannot make a frontend retain unbounded input.
-///
-/// `Ok(None)` means the file exceeded the limit; I/O failures remain distinct
-/// so callers can account for unreadable files separately.
-#[cfg(test)]
-pub(crate) fn read_bounded_source(
-    path: &Path,
-    maximum_bytes: u64,
-) -> std::io::Result<Option<Vec<u8>>> {
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(maximum_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    Ok((u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= maximum_bytes).then_some(bytes))
 }
 
 /// Run `frontend` over every source, letting `jobs` worker threads claim the
@@ -286,23 +399,18 @@ fn lex_one(
     }
     let bytes = &source.source_bytes;
     let text = String::from_utf8_lossy(bytes);
-    let file = match source.language {
-        Language::Rust => codehelion_frontend_rust::RustFrontend.lex(&text),
-        Language::C => codehelion_frontend_c::CFrontend.lex(&text),
-        Language::Cpp => codehelion_frontend_cpp::CppFrontend.lex(&text),
-    };
-    let arm_paths = match source.language {
-        Language::Rust => None,
-        Language::C => Some(codehelion_frontend_c::lexer::conditional_paths(
-            &text,
-            &file.tokens,
-            &codehelion_frontend_c::dialect::C,
-        )),
-        Language::Cpp => Some(codehelion_frontend_c::lexer::conditional_paths(
-            &text,
-            &file.tokens,
-            &codehelion_frontend_cpp::CPP,
-        )),
+    // One lex per file: the C-family arm paths are derived from the directives
+    // that same lex passed, so no source is read twice.
+    let (file, arm_paths) = match source.language {
+        Language::Rust => (codehelion_frontend_rust::RustFrontend.lex(&text), None),
+        Language::C => {
+            let (file, paths) = codehelion_frontend_c::CFrontend.lex_with_arm_paths(&text);
+            (file, Some(paths))
+        }
+        Language::Cpp => {
+            let (file, paths) = codehelion_frontend_cpp::CppFrontend.lex_with_arm_paths(&text);
+            (file, Some(paths))
+        }
     };
     let unit_lines = file
         .units
@@ -638,7 +746,98 @@ fn repository_root(root: &Path) -> PathBuf {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{incompatible_database_replacement, schema_versioned_sibling, spelled_natively};
+    use codehelion_core::execution::Limits;
+    use codehelion_core::ir::{IrNode, MAX_IR_DEPTH, Shape, StructuralFrontend, SyntaxIrFile};
+    use codehelion_core::semantic::SemanticCandidateConfig;
+
+    use super::{
+        EngineConfig, Language, ProcessLimits, ProcessMemory, StageLimits, engine_config,
+        hold_this_process_to, incompatible_database_replacement, schema_versioned_sibling,
+        spelled_natively, stage_limits,
+    };
+    use crate::config::Config;
+    use crate::report::Guardrails;
+
+    /// A run reports the ceilings it was given and every stage takes them from
+    /// one place, so the two cannot disagree: the posting ceiling a report
+    /// names is the width the registered-rule bucket index cuts at, and the
+    /// component ceiling it names is what semantic grouping refines to.
+    #[test]
+    fn the_ceilings_a_distrusting_run_reports_are_the_ones_its_stages_take() {
+        let profile = Limits::untrusted();
+        let mut cfg = Config::default();
+        cfg.limits.posting_cap = Some(4_096);
+        cfg.limits.max_component = 4_096;
+        cfg.limits.pair_budget = Some(4_000_000);
+        cfg.limits.clamp_to_untrusted(&profile);
+        let reported = Guardrails::untrusted(&cfg.limits, &profile);
+
+        let stages = stage_limits(&cfg);
+        let candidates = stages.pairing.semantic_candidates();
+        assert_eq!(candidates.max_bucket_members, reported.posting_cap);
+        assert_eq!(candidates.max_candidate_pairs, reported.pair_budget);
+        assert_eq!(
+            stages.grouping.grouping().max_component,
+            reported.max_component
+        );
+
+        let mut engine = EngineConfig::default();
+        stages.pairing.apply_to_engine(&mut engine);
+        assert_eq!(engine.posting_cap, reported.posting_cap);
+        assert_eq!(engine.pair_budget, reported.pair_budget);
+    }
+
+    /// A ceiling nobody set leaves each stage at the width measured for it.
+    /// One number for all of them would silently widen the narrowest stage,
+    /// which is the pairing path most likely to blow up.
+    #[test]
+    fn a_run_with_no_configured_ceilings_leaves_each_stage_at_its_own_default() {
+        let stages = stage_limits(&Config::default());
+        assert_eq!(
+            stages.pairing.semantic_candidates(),
+            SemanticCandidateConfig::default()
+        );
+        let engine = engine_config(&Config::default()).expect("default engine configuration");
+        assert_eq!(engine.posting_cap, EngineConfig::default().posting_cap);
+        assert_eq!(engine.pair_budget, EngineConfig::default().pair_budget);
+    }
+
+    /// The discovery ceiling comes from the same mapping, because it is the
+    /// one that bounds what a file costs before anything else can bound it.
+    #[test]
+    fn the_read_ceiling_a_distrusting_run_reports_is_the_one_discovery_takes() {
+        let profile = Limits::untrusted();
+        let mut cfg = Config::default();
+        cfg.limits.max_file_bytes = 8 * 1024 * 1024;
+        cfg.limits.clamp_to_untrusted(&profile);
+        assert_eq!(
+            stage_limits(&cfg).discovery.max_file_bytes,
+            profile.max_file_bytes
+        );
+    }
+
+    /// A profile that states no memory ceiling asks nothing of the operating
+    /// system, and one that states a ceiling is answered rather than ignored.
+    #[test]
+    fn a_stated_memory_ceiling_is_answered_and_an_absent_one_asks_nothing() {
+        let unbounded = ProcessLimits {
+            max_memory_bytes: None,
+            ..StageLimits::of(&Limits::untrusted()).process
+        };
+        assert_eq!(hold_this_process_to(&unbounded), ProcessMemory::Unbounded);
+
+        let profile = Limits::untrusted();
+        let stated = StageLimits::of(&profile).process;
+        let bytes = profile
+            .max_subprocess_bytes
+            .expect("the untrusted profile states a memory ceiling");
+        // Withheld here on purpose: this process is shared with every other
+        // test, and the ceiling could not be lifted again.
+        assert_eq!(
+            hold_this_process_to(&stated),
+            ProcessMemory::Withheld { bytes }
+        );
+    }
 
     /// Where the database is has to read as one path, whatever mixture of
     /// separators and redundant components the configuration reached it by.
@@ -701,5 +900,138 @@ mod tests {
                 .iter()
                 .collect::<PathBuf>()
         );
+    }
+
+    /// Depth of nesting to put past the structural budget. The Rust frontend
+    /// refuses recursive parsing above `MAX_IR_DEPTH` delimiters and the
+    /// C-family walker stops descending at the same ceiling, so this exceeds
+    /// both. One level per line keeps the columns short enough to check every
+    /// token's position against the source.
+    fn budget_exceeding_depth() -> usize {
+        MAX_IR_DEPTH + 100
+    }
+
+    /// The same source shape in each language: a healthy definition holding a
+    /// multi-byte literal, then a generated definition nested past the budget.
+    fn agreement_sources() -> [(Language, String); 3] {
+        let nest = |open: &str, inner: &str| {
+            let depth = budget_exceeding_depth();
+            let mut text = String::from(open);
+            text.push_str(&"{\n".repeat(depth));
+            text.push_str(inner);
+            text.push_str(&"}\n".repeat(depth));
+            text
+        };
+        let rust = format!(
+            "fn healthy() {{\n    let marker = \"\u{3b1}\u{3b2}\u{3b3}\";\n}}\n{}",
+            nest("fn generated() ", "()\n")
+        );
+        let c_family = format!(
+            "void healthy(void) {{\n    const char *marker = \"\u{3b1}\u{3b2}\u{3b3}\";\n}}\n{}",
+            nest("void generated(void) ", ";\n")
+        );
+        [
+            (Language::Rust, rust),
+            (Language::C, c_family.clone()),
+            (Language::Cpp, c_family),
+        ]
+    }
+
+    fn parse_structurally(language: Language, source: &str) -> SyntaxIrFile {
+        match language {
+            Language::Rust => codehelion_frontend_rust::ir::RustStructuralFrontend.parse(source),
+            Language::C => codehelion_frontend_c::ir::CStructuralFrontend.parse(source),
+            Language::Cpp => codehelion_frontend_cpp::ir::CppStructuralFrontend.parse(source),
+        }
+    }
+
+    /// The 1-based line and character column of `byte`, read straight from the
+    /// text. This is what every frontend's token positions are checked against.
+    fn position_in(source: &str, byte: usize) -> (u32, u32) {
+        let head = source.get(..byte).unwrap_or("");
+        let line = head.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let column = head.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+        (
+            u32::try_from(line).unwrap_or(u32::MAX),
+            u32::try_from(column).unwrap_or(u32::MAX),
+        )
+    }
+
+    /// Assert what the shared assembly owns for one language's parse: token
+    /// positions, the token a node begins at, and the recovery data a walk
+    /// that ran out of depth budget leaves behind.
+    fn assert_assembled_alike(language: Language, source: &str, file: &SyntaxIrFile) {
+        let name = language.name();
+        assert!(!file.tokens.is_empty(), "{name}: the file has tokens");
+        for token in &file.tokens {
+            assert_eq!(
+                (token.span.start_line, token.span.start_column),
+                position_in(source, token.span.start_byte),
+                "{name}: token {:?} is reported at the wrong position",
+                token.text.as_str()
+            );
+        }
+
+        file.walk(&mut |node| {
+            assert!(
+                node.token_start <= node.token_end && node.token_end <= file.tokens.len(),
+                "{name}: node token range {}..{} is not a range of the file's {} tokens",
+                node.token_start,
+                node.token_end,
+                file.tokens.len()
+            );
+            if node.token_start < node.token_end {
+                assert_eq!(
+                    file.tokens[node.token_start].span.start_byte, node.range.start,
+                    "{name}: a node of shape {:?} begins at another stream's token",
+                    node.shape
+                );
+            }
+        });
+
+        assert!(
+            file.depth_truncated,
+            "{name}: a depth-limited parse is distinguished from ordinary recovery"
+        );
+        let mut deepest = 0;
+        let mut truncation_leaves = Vec::new();
+        let mut pending: Vec<(&IrNode, usize)> = file.roots.iter().map(|root| (root, 1)).collect();
+        while let Some((node, depth)) = pending.pop() {
+            deepest = deepest.max(depth);
+            if node.shape == Shape::Error && node.children.is_empty() {
+                truncation_leaves.push(node.range);
+            }
+            pending.extend(node.children.iter().rev().map(|child| (child, depth + 1)));
+        }
+        assert!(
+            deepest <= MAX_IR_DEPTH,
+            "{name}: IR depth {deepest} exceeds the budget {MAX_IR_DEPTH}"
+        );
+        assert!(
+            truncation_leaves.iter().any(|range| {
+                !range.is_empty() && range.end <= source.len() && file.error_ranges.contains(range)
+            }),
+            "{name}: the omitted region is kept as an Error leaf and an error range"
+        );
+        assert!(
+            file.error_ranges
+                .windows(2)
+                .all(|pair| (pair[0].start, pair[0].end) < (pair[1].start, pair[1].end)),
+            "{name}: error ranges are ordered and carry no duplicates"
+        );
+    }
+
+    /// One assembly builds every Structural file, so the frontends this scan
+    /// dispatches answer the same source shape the same way: the same reading
+    /// of where a byte sits, the same token a node begins at, and the same
+    /// recovery data when a parse runs out of depth budget. An edge case
+    /// found in one language is therefore settled in all of them, and no
+    /// language can drift on these concerns unnoticed.
+    #[test]
+    fn every_structural_frontend_assembles_positions_and_truncation_alike() {
+        for (language, source) in agreement_sources() {
+            let file = parse_structurally(language, &source);
+            assert_assembled_alike(language, &source, &file);
+        }
     }
 }

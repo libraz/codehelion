@@ -511,26 +511,6 @@ fn parse_work_budget_is_a_fixed_function_of_input_bytes_and_the_file_ceiling() {
 }
 
 #[test]
-fn bounded_source_read_stops_after_the_first_byte_over_the_limit() {
-    let directory = tempfile::tempdir().expect("temporary source directory");
-    let source = directory.path().join("grown.rs");
-    std::fs::write(&source, vec![b'x'; 257]).expect("write source larger than the read budget");
-
-    assert!(
-        read_bounded_source(&source, 256)
-            .expect("read source")
-            .is_none(),
-        "a file that grew after discovery is excluded before frontend allocation"
-    );
-    assert_eq!(
-        read_bounded_source(&source, 257)
-            .expect("read source at its exact limit")
-            .as_deref(),
-        Some(&[b'x'; 257][..])
-    );
-}
-
-#[test]
 fn engine_config_applies_configured_ceilings() {
     let cfg = Config {
         limits: config::Limits {

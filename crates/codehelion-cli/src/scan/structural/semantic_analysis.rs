@@ -3,13 +3,13 @@
 use super::{
     BTreeMap, BTreeSet, BuildConfiguration, BuildVariant, ByteRange, CfgShape, CloneScope,
     CompileCommandSelector, Config, Context, ControlFlowGraph, DataFlowSummary, DiscoveryReport,
-    EdgeKind, GroupingConfig, Installed, Language, LanguageSelection, Path, PathBuf, Result,
-    SemanticCandidateConfig, SemanticCandidateStats, SemanticConfidenceEvidence, SemanticDetection,
-    SemanticGroup, SemanticGroupingStats, SemanticGroupingUnit, SemanticOperationGraph,
-    SemanticPair, SemanticUnitGraph, SourceMeta, SourceUnit, StructuralReport, StructuralUnit,
-    SyntaxIrFile, VerifiedSemanticPair, bail, extract_registered_candidates,
-    group_verified_semantic_pairs, path_key, registered_semantic_windows, semantic, stable_id,
-    structural, verify_registered_candidates,
+    EdgeKind, Installed, Language, LanguageSelection, Path, PathBuf, Result,
+    SemanticCandidateStats, SemanticConfidenceEvidence, SemanticDetection, SemanticGroup,
+    SemanticGroupingStats, SemanticGroupingUnit, SemanticOperationGraph, SemanticPair,
+    SemanticUnitGraph, SourceMeta, SourceUnit, StructuralReport, StructuralUnit, SyntaxIrFile,
+    VerifiedSemanticPair, bail, extract_registered_candidates, group_verified_semantic_pairs,
+    path_key, registered_semantic_windows, semantic, stable_id, structural,
+    verify_registered_candidates,
 };
 
 /// What a file's compiler answer is looked up under.
@@ -35,6 +35,64 @@ pub(super) struct SemanticPartition {
     pub(super) variant: BuildVariant,
     pub(super) sources: Vec<SourceUnit>,
     pub(super) commands: BTreeMap<PathBuf, CompileCommandSelector>,
+}
+
+impl SemanticPartition {
+    /// This partition as the analysis reads it.
+    pub(super) fn program(&self) -> SemanticProgram<'_> {
+        SemanticProgram {
+            variant: &self.variant,
+            sources: &self.sources,
+            commands: &self.commands,
+        }
+    }
+}
+
+/// One independently analysed program.
+///
+/// A tree that no compilation database splits is one program too, so the
+/// single-partition run describes itself the same way rather than through a
+/// parallel pipeline of its own.
+#[derive(Clone, Copy)]
+pub(super) struct SemanticProgram<'a> {
+    pub(super) variant: &'a BuildVariant,
+    pub(super) sources: &'a [SourceUnit],
+    pub(super) commands: &'a BTreeMap<PathBuf, CompileCommandSelector>,
+}
+
+/// Every independently analysed program a semantic run splits the tree into.
+///
+/// One place decides what a program is, so every source the globs kept ends in
+/// exactly the partitions that can speak for it: a header belongs to the
+/// translation units that give it meaning, and when no command names any of
+/// them it belongs to the no-build partition rather than to nothing at all.
+pub(super) fn semantic_partitions(
+    discovered: &DiscoveryReport,
+    sources: &[SourceUnit],
+    cfg: &Config,
+    asking: Option<&[&Installed]>,
+    root: &Path,
+    helper_timeout: std::time::Duration,
+) -> Result<Vec<SemanticPartition>> {
+    let compiler_version = clang_toolchain(asking);
+    let mut partitions = cpp_partitions(discovered, sources, cfg, compiler_version.as_deref());
+    // Command partitions each hold every header. Without one, no partition
+    // does, so the no-build partition takes them.
+    let headers_unclaimed = partitions.is_empty();
+    if let Some(unconfigured) = unconfigured_cpp_partition(discovered, sources, headers_unclaimed) {
+        partitions.push(unconfigured);
+    }
+    if let Some(rust) = rust_partition(
+        sources,
+        asking,
+        discovered.header_language,
+        root,
+        helper_timeout,
+    )? {
+        partitions.push(rust);
+    }
+    partitions.sort_by_cached_key(|partition| partition.variant.fingerprint());
+    Ok(partitions)
 }
 
 /// Split a C/C++ scan by the exact command-derived build variant.
@@ -102,9 +160,17 @@ pub(super) fn cpp_partitions(
 
 /// C/C++ source a database did not name, recorded as an explicit no-build
 /// partition rather than silently dropped or assigned to a real command.
+///
+/// `unclaimed_headers` says whether this partition is also the only home the
+/// tree's headers have. A header is analysed under the translation units that
+/// give it meaning, so a run with command partitions leaves them there; a run
+/// with none would otherwise read no header at all and account for none, and
+/// the same tree scanned structurally would report more files with nothing
+/// saying why.
 pub(super) fn unconfigured_cpp_partition(
     discovered: &DiscoveryReport,
     sources: &[SourceUnit],
+    unclaimed_headers: bool,
 ) -> Option<SemanticPartition> {
     let configured: BTreeSet<PathBuf> =
         discovered
@@ -124,7 +190,7 @@ pub(super) fn unconfigured_cpp_partition(
         .iter()
         .filter(|source| {
             matches!(source.language, Language::C | Language::Cpp)
-                && !source.is_header
+                && (unclaimed_headers || !source.is_header)
                 && !configured.contains(&source.absolute_path)
         })
         .cloned()
@@ -330,7 +396,8 @@ pub(super) fn registered_semantic_pairs(
             candidates: SemanticCandidateStats::default(),
             registered_observations: 0,
             excluded_observations: 0,
-            unrepresentable_units: 0,
+            units_without_registered_operations: 0,
+            units_no_registered_rule_claimed: 0,
             verified_pairs: 0,
             disabled_pairs: 0,
             grouping: SemanticGroupingStats::default(),
@@ -341,7 +408,13 @@ pub(super) fn registered_semantic_pairs(
     let mut units = Vec::new();
     let mut registered_observations = 0_usize;
     let mut excluded_observations = 0_usize;
-    let mut unrepresentable_units = 0_usize;
+    // A unit reaches no semantic window for one of two reasons, and they send
+    // whoever is looking into a thin run to different places: the compiler
+    // resolved nothing the registry recognizes inside it, or it did and no
+    // registered rule claimed what it found. The first is a gap in what the
+    // helper was asked about, the second a gap in the rules.
+    let mut units_without_registered_operations = 0_usize;
+    let mut units_no_registered_rule_claimed = 0_usize;
     for (unit_index, unit) in analysis.units.iter().enumerate() {
         let Some(file) = files.get(unit.file) else {
             continue;
@@ -369,7 +442,8 @@ pub(super) fn registered_semantic_pairs(
         excluded_observations =
             excluded_observations.saturating_add(normalized.excluded_observations);
         let Some(graph) = normalized.graph.as_ref() else {
-            unrepresentable_units = unrepresentable_units.saturating_add(1);
+            units_without_registered_operations =
+                units_without_registered_operations.saturating_add(1);
             continue;
         };
         registered_observations = registered_observations.saturating_add(graph.nodes.len());
@@ -382,7 +456,7 @@ pub(super) fn registered_semantic_pairs(
             )
         })?;
         if windows.is_empty() {
-            unrepresentable_units = unrepresentable_units.saturating_add(1);
+            units_no_registered_rule_claimed = units_no_registered_rule_claimed.saturating_add(1);
         }
         let Some(syntax_ir) = irs.get(unit.file) else {
             continue;
@@ -439,17 +513,8 @@ pub(super) fn registered_semantic_pairs(
     // The floor still decides what Fast and Structural report, where a token
     // count does describe the finding.
     let graphs: Vec<_> = units.iter().map(|unit| unit.graph.clone()).collect();
-    let max_candidate_pairs = cfg
-        .limits
-        .pair_budget
-        .unwrap_or_else(|| SemanticCandidateConfig::default().max_candidate_pairs);
-    let candidates = extract_registered_candidates(
-        &graphs,
-        SemanticCandidateConfig {
-            max_bucket_members: SemanticCandidateConfig::default().max_bucket_members,
-            max_candidate_pairs,
-        },
-    );
+    let stages = crate::scan::runtime::stage_limits(cfg);
+    let candidates = extract_registered_candidates(&graphs, stages.pairing.semantic_candidates());
     let verified = verify_registered_candidates(&graphs, &candidates.pairs);
     let verified_pairs = verified.len();
     let disabled_pairs = verified
@@ -468,7 +533,7 @@ pub(super) fn registered_semantic_pairs(
         })
         .collect::<Vec<_>>();
     let grouped =
-        group_verified_semantic_pairs(&grouping_units, &enabled, &GroupingConfig::default());
+        group_verified_semantic_pairs(&grouping_units, &enabled, &stages.grouping.grouping());
     let grouping = grouped.stats.clone();
     let mut groups = grouped
         .groups
@@ -518,7 +583,8 @@ pub(super) fn registered_semantic_pairs(
         candidates: candidates.stats,
         registered_observations,
         excluded_observations,
-        unrepresentable_units,
+        units_without_registered_operations,
+        units_no_registered_rule_claimed,
         verified_pairs,
         disabled_pairs,
         grouping,
@@ -768,12 +834,50 @@ pub(super) fn semantic_window_interactions(graph: &SemanticOperationGraph) -> BT
         .nodes
         .iter()
         .filter_map(|node| node.attributes.resource_kind.as_deref())
-        .filter_map(|resource| match resource {
-            "file" => Some("file_io".to_owned()),
-            "lock" => Some("synchronization".to_owned()),
-            _ => None,
-        })
+        .filter_map(codehelion_helper::ir::resource_interaction)
+        .map(ToOwned::to_owned)
         .collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod window_interaction_tests {
+    use super::{BTreeSet, SemanticOperationGraph, semantic_window_interactions};
+    use codehelion_core::discovery::Language;
+    use codehelion_core::semantic::{OperationAttributes, OperationKind, OperationNode};
+
+    fn acquires(resource_kind: &str) -> OperationNode {
+        OperationNode {
+            kind: OperationKind::AcquireResource,
+            attributes: OperationAttributes {
+                resource_kind: Some(resource_kind.to_owned()),
+                ..OperationAttributes::default()
+            },
+        }
+    }
+
+    /// A resource kind the shared vocabulary does not list contributes nothing,
+    /// rather than an interaction guessed from its spelling.
+    #[test]
+    fn a_resource_kind_outside_the_closed_vocabulary_names_no_interaction() {
+        let graph = SemanticOperationGraph::new(
+            Language::Rust,
+            [0; 32],
+            vec![
+                acquires("file"),
+                acquires("lock"),
+                acquires("socket"),
+                acquires("File"),
+            ],
+            Vec::new(),
+        )
+        .expect("resource acquisitions alone form a valid graph");
+
+        assert_eq!(
+            semantic_window_interactions(&graph),
+            BTreeSet::from(["file_io".to_owned(), "synchronization".to_owned()])
+        );
+    }
 }
 
 /// Retain only helper-reported direct receiver flows whose two written API

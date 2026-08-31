@@ -224,6 +224,7 @@ pub(super) fn unused_suppressions(
         .map(|row| report::UnusedRule {
             scope: row.scope.clone(),
             pattern: row.pattern.clone(),
+            matched: 0,
         })
         .collect()
 }

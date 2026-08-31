@@ -9,6 +9,8 @@ use super::{
     semantic_scope, shared, stable_id, structural, unit_token_span,
 };
 use codehelion_core::boilerplate::BOILERPLATE_VERSION;
+use codehelion_core::config::Stage;
+use codehelion_core::discovery::AnalysisMode;
 use codehelion_core::discovery::NORMALIZATION_VERSION;
 use codehelion_core::features::FEATURE_SCHEMA_VERSION;
 use codehelion_core::grouping::GROUPING_VERSION;
@@ -257,6 +259,7 @@ pub(super) fn funnel(
     semantic: &SemanticDetection,
     parsed_files: u64,
     depth_truncated_files: u64,
+    mode: AnalysisMode,
 ) -> Vec<report::FunnelStage> {
     let near = &stats.near_match;
     let grouping = &stats.grouping;
@@ -384,17 +387,38 @@ pub(super) fn funnel(
             .dropping("contained", as_u64(maximal.absorbed)),
         report::FunnelStage::new("duplicated runs", as_u64(maximal.shared)),
         report::FunnelStage::new("joined runs", as_u64(stats.region_merged)),
+        // Runs, and only runs: what this row passes on and what it drops are
+        // both whole duplicated runs, so the two can be read against each
+        // other.
         report::FunnelStage::new("confirmed runs", as_u64(stats.regions))
-            .dropping("unshared_content", as_u64(stats.region_singletons))
-            .dropping("overlapping_occurrence", as_u64(stats.region_overlapping))
-            .dropping("adjoining_occurrence", as_u64(stats.region_adjoining))
             .dropping("same_content", as_u64(stats.region_folded))
             .dropping("subsumed", as_u64(stats.region_subsumed))
             .dropping(
                 "below_min_clone_tokens",
                 as_u64(stats.below_min_clone_token_regions),
             ),
+        // The reasons confirmation sets an occurrence aside are about single
+        // occurrences, so they are stated where the value is occurrences too.
+        // Against a count of runs they would be a ratio of two different
+        // things, and a run holding four occurrences would let the drops
+        // exceed it.
+        report::FunnelStage::new("run occurrences", as_u64(stats.region_occurrences))
+            .dropping("unshared_content", as_u64(stats.region_singletons))
+            // Kept apart from `unshared_content`: an occurrence whose tokens
+            // were never established did not disagree with anything, and
+            // reading the two as one reason points an investigation at the
+            // content comparison instead of at the range that named no tokens.
+            .dropping("unresolved_occurrence", as_u64(stats.region_unresolved))
+            .dropping("overlapping_occurrence", as_u64(stats.region_overlapping))
+            .dropping("adjoining_occurrence", as_u64(stats.region_adjoining)),
     ];
+    // A stage a mode never reaches is absent from its funnel rather than
+    // measured at zero: a run that asked no compiler about anything has no
+    // answer about registered-rule duplication, and a reader who found a zero
+    // there would take it for one.
+    if !Stage::Compiler.runs_in(mode) {
+        return stages;
+    }
     let candidates = &semantic.candidates;
     stages.extend([
         report::FunnelStage::new(
@@ -406,23 +430,27 @@ pub(super) fn funnel(
             "outside_registered_vocabulary",
             as_u64(semantic.excluded_observations),
         ),
-        // `candidates.graphs` already excludes short windows, while
-        // `unrepresentable_units` never produced a graph at all. The stage
-        // starts from the parser-owned inputs so its drops share one
-        // denominator instead of subtracting unrelated populations.
+        // The denominator is every parser-owned unit normalization looked at:
+        // the graphs the extractor was presented with, plus the units that
+        // reached it with no graph to present. What passed is what the
+        // extractor found eligible, so the ineligible graphs are a drop rather
+        // than part of the value they are subtracted from.
         report::FunnelStage::new(
             "semantic graphs",
             as_u64(
-                semantic
-                    .units
-                    .len()
-                    .saturating_add(semantic.unrepresentable_units),
+                candidates
+                    .graphs
+                    .saturating_sub(candidates.ineligible_graphs),
             ),
         )
         .dropping("ineligible", as_u64(candidates.ineligible_graphs))
         .dropping(
             "no_registered_operations",
-            as_u64(semantic.unrepresentable_units),
+            as_u64(semantic.units_without_registered_operations),
+        )
+        .dropping(
+            "no_registered_rule_matched",
+            as_u64(semantic.units_no_registered_rule_claimed),
         ),
         // A member ceiling discards buckets, not a known number of pairs:
         // omitted oversized buckets never enumerate their quadratic pair set.
@@ -439,26 +467,47 @@ pub(super) fn funnel(
         .dropping("bucket_member_cap", as_u64(candidates.oversized_buckets)),
         report::FunnelStage::new("semantic candidate pairs", as_u64(candidates.pairs_emitted))
             .dropping("pair_budget", as_u64(candidates.pairs_budget_dropped)),
-        report::FunnelStage::new("semantic verified pairs", as_u64(semantic.verified_pairs))
-            .dropping("rule_disabled", as_u64(semantic.disabled_pairs)),
+        // What a verified pair passes on to is grouping, so the pairs a
+        // disabled rule kept out of it are not among them. Grouping counts the
+        // same population from the other side, in
+        // `SemanticGroupingStats::considered_pairs`.
+        report::FunnelStage::new(
+            "semantic verified pairs",
+            as_u64(
+                semantic
+                    .verified_pairs
+                    .saturating_sub(semantic.disabled_pairs),
+            ),
+        )
+        .dropping("rule_disabled", as_u64(semantic.disabled_pairs)),
+        // Grouping is where a pair either reaches a group or does not, so the
+        // reasons it reached none are stated here rather than on the pair
+        // findings below, which are those same pairs written out. A pair
+        // refinement weighed and declined is a fact about the code; one the
+        // component ceiling severed is a fact about the ceiling, and the two
+        // are named apart so neither is counted twice.
         report::FunnelStage::new(
             "semantic pairs represented by groups",
             as_u64(semantic.grouping.grouped_pairs),
+        )
+        .dropping(
+            "invalid_grouping_input",
+            as_u64(semantic.grouping.invalid_pairs),
+        )
+        .dropping(
+            "duplicate_relation",
+            as_u64(semantic.grouping.duplicate_pairs),
+        )
+        .dropping(
+            "no_group_holds_both",
+            as_u64(semantic.grouping.declined_pairs()),
+        )
+        .dropping(
+            "the_ceiling_cut_the_set",
+            as_u64(semantic.grouping.ceiling_severed_pairs),
         ),
-        report::FunnelStage::new("restricted semantic groups", as_u64(semantic.groups.len()))
-            .dropping(
-                "invalid_grouping_input",
-                as_u64(semantic.grouping.invalid_pairs),
-            ),
-        report::FunnelStage::new("restricted semantic pairs", as_u64(semantic.pairs.len()))
-            .dropping(
-                "no_group_holds_both",
-                as_u64(semantic.grouping.ungrouped_pairs),
-            )
-            .dropping(
-                "the_ceiling_cut_the_set",
-                as_u64(semantic.grouping.ceiling_severed_pairs),
-            ),
+        report::FunnelStage::new("restricted semantic groups", as_u64(semantic.groups.len())),
+        report::FunnelStage::new("restricted semantic pairs", as_u64(semantic.pairs.len())),
     ]);
     stages
 }
@@ -675,6 +724,7 @@ pub(super) fn summary_row(
                     .filter(|file| file.depth_truncated)
                     .count(),
             ),
+            inputs.variant.mode,
         ),
         unused_suppressions: inputs.unused_suppressions(),
     })
@@ -771,7 +821,7 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             .collect(),
     });
     assembled.similarity = Some(similarity(group, detail));
-    assembled.identifier_jaccard = Some(detail.identifier_jaccard);
+    assembled.identifier_jaccard = detail.identifier_jaccard;
     assembled.body_materiality = Some(report::BodyMateriality {
         has_loop: detail.body_materiality.has_loop,
         has_dynamic_allocation: detail.body_materiality.has_dynamic_allocation,
@@ -805,12 +855,15 @@ pub(super) fn pair_members(pair: &VerifiedPair) -> Vec<usize> {
 }
 
 /// Raw identifier agreement between a split pair's canonical unit and every
-/// corresponding unit.
+/// corresponding unit, absent where neither side named an identifier.
 ///
 /// A split pair is a verified clone relation, but its raw names are only
 /// triage evidence for a possible shared refactoring target. They do not
 /// establish similarity and cannot affect detection or grouping.
-pub(super) fn split_pair_identifier_jaccard(inputs: &ReportInputs<'_>, pair: &VerifiedPair) -> f64 {
+pub(super) fn split_pair_identifier_jaccard(
+    inputs: &ReportInputs<'_>,
+    pair: &VerifiedPair,
+) -> Option<f64> {
     structural::span_identifier_jaccard(
         inputs.irs,
         unit_token_span(&inputs.analysis.units[pair.canonical]),
@@ -874,7 +927,7 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             })
             .collect(),
     });
-    assembled.identifier_jaccard = Some(split_pair_identifier_jaccard(inputs, pair));
+    assembled.identifier_jaccard = split_pair_identifier_jaccard(inputs, pair);
     assembled.similarity = pair.breakdown.map(|breakdown| report::Similarity {
         weight_version: WEIGHT_VERSION.to_string(),
         lexical: breakdown.lexical,
@@ -951,7 +1004,7 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
             })
             .collect(),
     });
-    assembled.identifier_jaccard = Some(region_identifier_jaccard(inputs, region));
+    assembled.identifier_jaccard = region_identifier_jaccard(inputs, region);
     assembled.test_code = test_code_evidence.is_some();
     assembled.test_code_evidence = test_code_evidence;
     assembled.suppressed = inputs.finding_suppression(
