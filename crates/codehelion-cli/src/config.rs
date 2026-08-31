@@ -919,12 +919,29 @@ impl Config {
 
 /// Resolve configured helper paths with command-line overrides taking priority.
 ///
+/// A helper location is the name of a program this run starts, so it is taken
+/// only from the operator: `--helper NAME=PATH`, or a configuration file the
+/// caller named. The `[helpers]` section of a configuration discovered at the
+/// scan root is disregarded, because that file can belong to the tree under
+/// analysis and nothing confines such a path the way [`Config::database`] is
+/// confined — a program inside the tree is exactly what it would name.
+///
+/// Disregarded rather than refused: `--untrusted` exists to scan a repository
+/// nobody vouches for, and a repository that could end the scan by writing one
+/// section would be choosing whether it gets audited.
+/// [`disregarded_helpers_note`] is the sentence that keeps the omission from
+/// looking like a helper nobody installed.
+///
 /// # Errors
 ///
 /// Returns an error for an unknown helper name, an empty path, a malformed
 /// assignment, or a duplicate command-line setting.
-pub fn helper_paths(configured: &Helpers, overrides: &[String]) -> Result<Helpers> {
-    let mut paths = configured.clone();
+pub fn helper_paths(resolved: &ResolvedConfig, overrides: &[String]) -> Result<Helpers> {
+    let mut paths = if matches!(resolved.source, ConfigSource::Discovered(_)) {
+        Helpers::default()
+    } else {
+        resolved.config.helpers.clone()
+    };
     let mut seen = std::collections::BTreeSet::new();
     for override_ in overrides {
         let Some((name, path)) = override_.split_once('=') else {
@@ -972,6 +989,36 @@ pub struct ResolvedConfig {
     pub config: Config,
     /// Where it came from.
     pub source: ConfigSource,
+}
+
+/// What to tell the reader when a configuration found in the scanned tree names
+/// helper programs this run will not start, or `None` when it names none.
+///
+/// [`helper_paths`] makes the decision; this is what keeps it from reading as a
+/// helper nobody installed. Returned as a sentence rather than printed here,
+/// because the commands that resolve helpers write their results to different
+/// places and this belongs beside neither of them.
+#[must_use]
+pub fn disregarded_helpers_note(resolved: &ResolvedConfig) -> Option<String> {
+    let ConfigSource::Discovered(path) = &resolved.source else {
+        return None;
+    };
+    let helpers = &resolved.config.helpers;
+    let named: Vec<&str> = [("rust", &helpers.rust), ("clang", &helpers.clang)]
+        .into_iter()
+        .filter(|(_, configured)| configured.is_some())
+        .map(|(name, _)| name)
+        .collect();
+    if named.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "ignoring [helpers] {} in {}: a configuration discovered in the scanned \
+         repository cannot choose which program this run starts; pass \
+         --helper NAME=PATH, or name the configuration with --config",
+        named.join(" and "),
+        path.display()
+    ))
 }
 
 /// Resolve the configuration for a scan rooted at `start_dir`.
@@ -1133,6 +1180,11 @@ pub const TEMPLATE: &str = "\
 
 # Explicit compiler-helper locations, useful for hermetic CI or a package
 # manager installation outside PATH. Command-line --helper overrides these.
+# These are read only from a configuration named with `--config`: this file is
+# discovered inside the tree being scanned, and a repository must not get to
+# choose which program a scan of it starts. In a file found at the scan root the
+# section is ignored, with a note saying so; pass `--helper rust=<path>` or name
+# this file with `--config` to pin a helper.
 # [helpers]
 # rust = \"/opt/codehelion/codehelion-backend-rust\"
 # clang = \"/opt/codehelion/codehelion-backend-clang\"
@@ -1178,12 +1230,25 @@ pub const TEMPLATE: &str = "\
 # signature-sibling-per-group-cap = 8
 # Maximum signature-based incomplete local mirrors retained in one Structural report.
 # signature-sibling-total-cap = 1000
+# Largest number of units that may share one signature before that signature
+# stops being sibling evidence. A rarity threshold rather than a resource
+# ceiling: a signature shared by much of a tree proposes work without proposing
+# duplication. The caps above bound what raising it costs.
+# signature-sibling-max-units-per-signature = 8
 # Maximum Structural candidate pairs that enter precise verification.
 # verification-budget = 1000000
 # Maximum dynamic-programming cells used by one Structural alignment.
 # max-alignment-cells = 4000000
 # Largest set of related units compared as one piece when forming groups.
 # max-component = 1024
+
+# What a report states about the run before it.
+# [report]
+# How many of each run's highest-ranked groups are compared when saying what
+# became of the work worth looking at. A total counts duplication rather than
+# progress: closing a handful of groups out of thousands leaves it almost where
+# it was, so the comparison is made over the top of each run.
+# churn-top = 100
 ";
 
 #[cfg(test)]

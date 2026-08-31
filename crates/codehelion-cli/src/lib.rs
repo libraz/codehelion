@@ -14,8 +14,11 @@
 //! `run` returns an [`Outcome`] that maps to a process exit code: `0` on
 //! success (whether or not findings were reported), and [`EXIT_FINDINGS`] when
 //! a scan reported findings and `--fail-on-findings` was set. Any error maps to
-//! `1` in `main`, and `clap` uses `2` for usage errors. Commands whose engine
-//! or store support is not built yet fail with an explicit message.
+//! `1` in `main`, and `clap` uses `2` for usage errors.
+//!
+//! A reader that stops reading — `codehelion scan | head` — ends the output,
+//! not the run: the remaining text is dropped and the exit code stays the one
+//! the completed work earned.
 
 pub mod artifact;
 pub mod baseline;
@@ -36,6 +39,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use codehelion_core::doctor;
+use codehelion_helper::client::ConfiguredHelper;
 use codehelion_store::query::{IdKind, IdMatch, RunOrigin};
 use codehelion_store::{Store, fingerprint_hex};
 
@@ -120,12 +124,66 @@ impl Outcome {
 ///
 /// # Errors
 ///
-/// Returns an error if a command fails, including commands whose support is not
-/// built in this release.
+/// Returns an error if the dispatched command fails, or if the completed
+/// output cannot be delivered to standard output.
 pub fn run(cli: &Cli) -> Result<Outcome> {
     let stdout = io::stdout();
-    let mut out = stdout.lock();
-    dispatch(&cli.command, &mut out)
+    let mut out = UntilClosed::new(stdout.lock());
+    let outcome = dispatch(&cli.command, &mut out)?;
+    out.flush().context("writing to standard output")?;
+    Ok(outcome)
+}
+
+/// A writer that takes a closed consumer as the end of the output.
+///
+/// `codehelion scan | head` closes the pipe once the reader has what it came
+/// for. The analysis and the recording are complete by the time a report is
+/// rendered, so the closed pipe is the reader's decision about how much to
+/// read, not a failure of the run: the rest of the text is dropped and the
+/// command still exits on what it did. Every other write failure is passed on.
+struct UntilClosed<W: Write> {
+    /// The stream the output is meant for.
+    inner: W,
+    /// Whether the consumer has already gone away.
+    closed: bool,
+}
+
+impl<W: Write> UntilClosed<W> {
+    /// Wrap a stream whose consumer may stop reading.
+    const fn new(inner: W) -> Self {
+        Self {
+            inner,
+            closed: false,
+        }
+    }
+}
+
+impl<W: Write> Write for UntilClosed<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.closed {
+            return Ok(buf.len());
+        }
+        match self.inner.write(buf) {
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                self.closed = true;
+                Ok(buf.len())
+            }
+            other => other,
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.closed {
+            return Ok(());
+        }
+        match self.inner.flush() {
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                self.closed = true;
+                Ok(())
+            }
+            other => other,
+        }
+    }
 }
 
 /// Dispatch a command to the given writer.
@@ -137,7 +195,10 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
             let root = codehelion_core::paths::canonical(&args.path)
                 .with_context(|| format!("resolving path {}", args.path.display()))?;
             let resolved = config::load(args.config.as_deref(), &root)?;
-            let helpers = config::helper_paths(&resolved.config.helpers, &args.helpers)?;
+            if let Some(note) = config::disregarded_helpers_note(&resolved) {
+                eprintln!("{note}");
+            }
+            let helpers = config::helper_paths(&resolved, &args.helpers)?;
             // The lookup is supplied here rather than by the engine: starting
             // a program is this layer's business, and keeping it out of the
             // engine is what stops a compiler helper from becoming something
@@ -214,12 +275,16 @@ const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 /// process running behind a command that printed a table and returned. The
 /// caller supplies containment so semantic discovery and later analysis start
 /// under the same policy.
+///
+/// `configured` carries operator authority: [`config::helper_paths`] is the
+/// only way a location reaches this, and it is what keeps a path written by the
+/// tree under analysis from naming the program that gets started here.
 fn interrogate(
     name: &str,
     configured: Option<&Path>,
     sandbox: codehelion_helper::SandboxRequest,
 ) -> Option<doctor::HelperFacts> {
-    let path = codehelion_helper::locate(name, configured)?;
+    let path = codehelion_helper::locate(name, configured.map(ConfiguredHelper::operator))?;
     let state =
         match codehelion_helper::Helper::start_with_sandbox(&path, &[], HANDSHAKE_TIMEOUT, sandbox)
         {
@@ -286,6 +351,16 @@ fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     }
     if args.siblings_by_signature && args.mode == Mode::Fast {
         bail!("--siblings-by-signature requires --mode structural or --mode semantic");
+    }
+    // Only semantic analysis starts a compiler helper. Pinning one for a mode
+    // that starts none reads as pinning the run, so it is refused with the mode
+    // named rather than accepted and ignored.
+    if !args.helpers.is_empty() && args.mode != Mode::Semantic {
+        bail!(
+            "--helper has nothing to act on in {} mode, which reads source \
+             without a compiler helper; it applies to --mode semantic",
+            args.mode.name()
+        );
     }
     // Resolved before the mode is dispatched on, because a permission that
     // nothing in the chosen mode could act on is refused rather than accepted:

@@ -324,6 +324,59 @@ fn template_parses_as_defaults() {
     assert_eq!(config, Config::default());
 }
 
+/// The setting names one text spells, taken without the table they sit in so
+/// each is compared the way a reader searches the file for it.
+fn setting_names(text: &str) -> std::collections::BTreeSet<&str> {
+    let mut names = std::collections::BTreeSet::new();
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches('#').trim();
+        // `config show` states an unset optional setting as `table.key: what
+        // its absence selects`; every other setting is an assignment.
+        let Some((name, _)) = line.split_once(" = ").or_else(|| line.split_once(": ")) else {
+            continue;
+        };
+        let leaf = name.rsplit('.').next().unwrap_or(name);
+        let spelled_as_a_key = !leaf.is_empty()
+            && leaf
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if spelled_as_a_key {
+            names.insert(leaf);
+        }
+    }
+    names
+}
+
+/// A configuration carrying a value for every optional setting, so serializing
+/// it names the keys an all-defaults one leaves out.
+fn every_setting_carried() -> Config {
+    let mut config = Config::default();
+    config
+        .limits
+        .clamp_to_untrusted(&codehelion_core::execution::Limits::untrusted());
+    config.helpers = Helpers {
+        rust: Some(PathBuf::from("/opt/rust")),
+        clang: Some(PathBuf::from("/opt/clang")),
+    };
+    config
+}
+
+#[test]
+fn the_template_offers_every_setting_a_configuration_accepts() {
+    let carried = every_setting_carried().to_toml().unwrap();
+    // The all-defaults rendering states the optional settings as absences, and
+    // `config init` is the file where those absences get filled in.
+    let shown = Config::default().to_display_toml().unwrap();
+    let mut settable = setting_names(&carried);
+    settable.extend(setting_names(&shown));
+    let template = setting_names(TEMPLATE);
+    let missing: Vec<&&str> = settable.difference(&template).collect();
+    assert!(
+        missing.is_empty(),
+        "the template offers no entry for {missing:?}"
+    );
+}
+
 #[test]
 fn helper_paths_are_read_from_their_own_configuration_section() {
     let config = Config::from_toml(
@@ -340,14 +393,25 @@ fn helper_paths_are_read_from_their_own_configuration_section() {
     );
 }
 
+/// A configuration holding both helper locations, as one provenance or another.
+fn resolved_with_helpers(source: ConfigSource) -> ResolvedConfig {
+    ResolvedConfig {
+        config: Config {
+            helpers: Helpers {
+                rust: Some(PathBuf::from("/configured/rust")),
+                clang: Some(PathBuf::from("/configured/clang")),
+            },
+            ..Config::default()
+        },
+        source,
+    }
+}
+
 #[test]
 fn command_line_helper_paths_override_configuration_and_validate_names() {
-    let configured = Helpers {
-        rust: Some(PathBuf::from("/configured/rust")),
-        clang: None,
-    };
+    let named = resolved_with_helpers(ConfigSource::Explicit(PathBuf::from("/named.toml")));
     let paths = helper_paths(
-        &configured,
+        &named,
         &[
             "rust=/command/rust".to_string(),
             "clang=/command/clang".to_string(),
@@ -356,8 +420,43 @@ fn command_line_helper_paths_override_configuration_and_validate_names() {
     .unwrap();
     assert_eq!(paths.rust, Some(PathBuf::from("/command/rust")));
     assert_eq!(paths.clang, Some(PathBuf::from("/command/clang")));
-    assert!(helper_paths(&configured, &["other=/tool".to_string()]).is_err());
-    assert!(helper_paths(&configured, &["rust=".to_string()]).is_err());
+    assert!(helper_paths(&named, &["other=/tool".to_string()]).is_err());
+    assert!(helper_paths(&named, &["rust=".to_string()]).is_err());
+}
+
+#[test]
+fn a_named_configuration_may_say_where_the_helpers_are() {
+    let named = resolved_with_helpers(ConfigSource::Explicit(PathBuf::from("/named.toml")));
+    let paths = helper_paths(&named, &[]).unwrap();
+    assert_eq!(paths.rust, Some(PathBuf::from("/configured/rust")));
+    assert_eq!(paths.clang, Some(PathBuf::from("/configured/clang")));
+    assert_eq!(disregarded_helpers_note(&named), None);
+}
+
+#[test]
+fn a_configuration_found_in_the_scanned_tree_may_not_say_where_the_helpers_are() {
+    let found = resolved_with_helpers(ConfigSource::Discovered(PathBuf::from(
+        "/repository/codehelion.toml",
+    )));
+    let paths = helper_paths(&found, &[]).unwrap();
+    assert_eq!(paths, Helpers::default());
+    // The command line still names one, and the section it displaces is one
+    // that was never going to be read.
+    let overridden = helper_paths(&found, &["rust=/command/rust".to_string()]).unwrap();
+    assert_eq!(overridden.rust, Some(PathBuf::from("/command/rust")));
+    assert_eq!(overridden.clang, None);
+    let note = disregarded_helpers_note(&found).expect("the omission is stated");
+    assert!(note.contains("rust and clang"), "{note}");
+    assert!(note.contains("/repository/codehelion.toml"), "{note}");
+}
+
+#[test]
+fn a_configuration_found_in_the_scanned_tree_that_names_no_helper_says_nothing() {
+    let found = ResolvedConfig {
+        config: Config::default(),
+        source: ConfigSource::Discovered(PathBuf::from("/repository/codehelion.toml")),
+    };
+    assert_eq!(disregarded_helpers_note(&found), None);
 }
 
 #[test]

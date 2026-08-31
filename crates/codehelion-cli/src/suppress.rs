@@ -45,6 +45,7 @@ use anyhow::{Context, Result, bail};
 use codehelion_store::snapshot::SuppressionRuleRow;
 use globset::{Glob, GlobMatcher};
 
+use crate::FULL_ID_CHARS;
 use crate::config::Suppression;
 
 /// The marker text an inline suppression comment must contain.
@@ -57,6 +58,12 @@ pub(crate) const INLINE_MARKER: &str = "codehelion:ignore";
 /// a finding was hidden by a default, and to tell that default apart from
 /// their own rules when deciding what to change.
 pub(crate) const VENDORED_SCOPE: &str = "vendored_path";
+
+/// Rule scope recorded for a configured stable clone id.
+///
+/// Named because two surfaces have to agree on it: the rule a suppressed group
+/// cites, and the report that counts how many groups one clone id covers.
+pub(crate) const CLONE_ID_SCOPE: &str = "stable_clone_id";
 
 /// Shortest accepted clone-id prefix.
 ///
@@ -143,7 +150,8 @@ impl Rules {
     /// # Errors
     ///
     /// Returns an error if a glob is malformed or a clone id is not a hex
-    /// string of at least [`MIN_CLONE_ID_CHARS`] characters.
+    /// string of between [`MIN_CLONE_ID_CHARS`] and [`FULL_ID_CHARS`]
+    /// characters.
     pub(crate) fn compile(suppression: &Suppression, any_markers: bool) -> Result<Self> {
         let mut path_matchers = Vec::with_capacity(suppression.paths.len());
         let mut symbol_matchers = Vec::with_capacity(suppression.symbols.len());
@@ -183,7 +191,7 @@ impl Rules {
         for id in &suppression.clone_ids {
             let normalized = clone_id_prefix(id)?;
             rows.push(SuppressionRuleRow {
-                scope: "stable_clone_id".to_string(),
+                scope: CLONE_ID_SCOPE.to_string(),
                 pattern: normalized.clone(),
                 reason: None,
             });
@@ -269,7 +277,7 @@ impl Rules {
                 !used.contains(index)
                     && matches!(
                         row.scope.as_str(),
-                        "path_glob" | "symbol_pattern" | "stable_clone_id"
+                        "path_glob" | "symbol_pattern" | CLONE_ID_SCOPE
                     )
             })
             .map(|(_, row)| row)
@@ -393,6 +401,37 @@ impl Rules {
     }
 }
 
+/// The configured clone ids covering more than one group, with how many groups
+/// each covers.
+///
+/// A clone id is a prefix, so a rule written about one duplication starts
+/// hiding a second as soon as the tree grows a group whose id shares that
+/// prefix. Every matching group is hidden, which is what the rule says; what
+/// nothing else would say is that a judgement made about one duplication has
+/// become a judgement about several, and a group is then missing from the
+/// report without the user having decided anything about it. Naming the id
+/// with its count is the same answer an ambiguous id gets when it is used to
+/// look one group up: the reader is told what the prefix currently resolves to
+/// instead of being handed the first match.
+///
+/// `patterns` is the clone id each suppressed group cites, one entry per
+/// group. The result is ordered by id so that two runs over one tree read the
+/// same.
+pub(crate) fn multi_match_clone_ids<'a>(
+    patterns: impl IntoIterator<Item = &'a str>,
+) -> Vec<(String, u64)> {
+    let mut covered: BTreeMap<&str, u64> = BTreeMap::new();
+    for pattern in patterns {
+        let groups = covered.entry(pattern).or_insert(0);
+        *groups = groups.saturating_add(1);
+    }
+    covered
+        .into_iter()
+        .filter(|&(_, groups)| groups > 1)
+        .map(|(pattern, groups)| (pattern.to_string(), groups))
+        .collect()
+}
+
 /// Validate one configured clone id and return it in the form the comparison
 /// uses: lower-case hex.
 ///
@@ -404,6 +443,15 @@ fn clone_id_prefix(id: &str) -> Result<String> {
         bail!(
             "suppression clone id {id:?} is shorter than {MIN_CLONE_ID_CHARS} characters; \
              use a longer prefix of the id shown in the report"
+        );
+    }
+    // An id longer than a whole one cannot be a prefix of any id there is, so
+    // the rule could never fire. Refused for the same reason a short one is:
+    // the alternative is a rule that reads as working.
+    if id.len() > FULL_ID_CHARS {
+        bail!(
+            "suppression clone id {id:?} is longer than the {FULL_ID_CHARS} characters an id has; \
+             use the id shown in the report, or a prefix of it"
         );
     }
     if !id.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -637,6 +685,21 @@ mod tests {
     }
 
     #[test]
+    fn a_clone_id_covering_several_groups_is_named_with_how_many() {
+        // Two groups cite the same id, so the prefix no longer identifies the
+        // one duplication it was written about.
+        assert_eq!(
+            multi_match_clone_ids(["0123abcd", "9999beef", "0123abcd"]),
+            vec![("0123abcd".to_string(), 2)]
+        );
+
+        // An id that resolves to a single group says exactly what it said when
+        // it was written, and there is nothing to report about it.
+        assert!(multi_match_clone_ids(["0123abcd", "9999beef"]).is_empty());
+        assert!(multi_match_clone_ids([]).is_empty());
+    }
+
+    #[test]
     fn a_clone_id_that_could_not_identify_a_group_is_an_error() {
         let err = Rules::compile(&suppression(&[], &[], &["0123ab"]), false)
             .expect_err("too short to identify one group");
@@ -645,6 +708,18 @@ mod tests {
         let err = Rules::compile(&suppression(&[], &[], &["not-a-hex-id"]), false)
             .expect_err("ids are hexadecimal");
         assert!(format!("{err:#}").contains("hexadecimal"));
+
+        // Nothing is longer than a whole id, so a longer rule matches nothing
+        // no matter what the tree holds.
+        let whole = "a".repeat(FULL_ID_CHARS);
+        let overlong = "a".repeat(FULL_ID_CHARS + 1);
+        let err = Rules::compile(&suppression(&[], &[], &[&overlong]), false)
+            .expect_err("longer than an id");
+        assert!(format!("{err:#}").contains("longer than"));
+
+        // A whole id remains the exact rule it looks like.
+        Rules::compile(&suppression(&[], &[], &[&whole]), false)
+            .expect("a whole id is a valid rule");
     }
 
     #[test]

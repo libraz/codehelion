@@ -1,9 +1,9 @@
 //! Command-line interface definition, built with `clap`'s derive API.
 //!
 //! This module only declares the surface: the parsed [`Cli`] is handed to
-//! [`crate::run`], which dispatches each [`Command`]. Commands that depend on
-//! parts of the engine or store that do not exist yet parse and validate their
-//! arguments here, then fail with an explicit message at dispatch.
+//! [`crate::run`], which dispatches each [`Command`]. What a flag means to a
+//! run is decided by the command that receives it; what is declared here is
+//! only which flags exist and which combinations of them parse.
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -85,9 +85,10 @@ pub enum Mode {
     /// breakdowns, siblings or near misses, and never runs target code.
     Fast,
     /// Measures gapped Type-3 copies and duplicated statement runs, with
-    /// identifier agreement, similarity breakdowns and near misses. Sibling
-    /// generation is opt-in with `--siblings-by-signature`. Parses sources
-    /// and never runs target code.
+    /// identifier agreement, similarity breakdowns and near misses. The
+    /// similarity sibling channel always runs; the signature one is opt-in
+    /// with `--siblings-by-signature`. Parses sources and never runs target
+    /// code.
     Structural,
     /// Adds registered semantic matches and compiler-resolved type/name
     /// evidence to Structural measurements. Needs a helper `doctor` reports
@@ -406,6 +407,9 @@ pub struct ArtifactArgs {
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub max_memory_bytes: Option<u64>,
     /// Clamp input, time, and supported memory ceilings for an artifact nobody vouches for.
+    ///
+    /// The memory ceiling is part of the preset rather than optional, so this
+    /// runs on Linux only; elsewhere it is refused.
     #[arg(long)]
     pub untrusted: bool,
     /// JSON manifest you write describing the conditions this artifact was
@@ -572,13 +576,18 @@ pub struct ArtifactCompareArgs {
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub max_memory_bytes: Option<u64>,
     /// Clamp input, time, and supported memory ceilings for artifacts nobody vouches for.
+    ///
+    /// The memory ceiling is part of the preset rather than optional, so this
+    /// runs on Linux only; elsewhere it is refused.
     #[arg(long)]
     pub untrusted: bool,
     /// Source scan that produced the clone group being calibrated.
     ///
-    /// Must be used with `--clone-group`, both build-variant manifests, and
-    /// `--db`; a whole-artifact difference is never assigned to a group by
-    /// inference.
+    /// Must be used with `--clone-group` and both build-variant manifests; a
+    /// whole-artifact difference is never assigned to a group by inference.
+    /// `--db` is optional here and resolves to the same local database every
+    /// other command resolves; it is the pair above that decides whether a
+    /// calibration is recorded at all.
     #[arg(long)]
     pub source_run: Option<i64>,
     /// Stable clone-group fingerprint to evaluate against this comparison.
@@ -629,7 +638,7 @@ pub struct ScanArgs {
     #[arg(long)]
     pub output: Option<PathBuf>,
     /// Replace an existing output file.
-    #[arg(long)]
+    #[arg(long, requires = "output")]
     pub force: bool,
     /// Configuration file to use instead of the discovered `codehelion.toml`.
     #[arg(long)]
@@ -693,12 +702,14 @@ pub struct ScanArgs {
     /// JSON and SARIF always retain sibling data.
     #[arg(long)]
     pub show_siblings: bool,
-    /// Generate sibling evidence from normalized signatures.
+    /// Also generate sibling evidence from normalized signatures.
     ///
-    /// This is separate from `--show-siblings`, which only changes text
-    /// presentation. The flag is available in Structural and Semantic modes;
-    /// it is off by default because signature matching is bounded by the
-    /// configured sibling ceilings.
+    /// This adds the signature channel to the similarity one, which runs
+    /// whether or not this flag is given. It is separate from
+    /// `--show-siblings`, which only changes text presentation. The flag is
+    /// available in Structural and Semantic modes; it is off by default
+    /// because signature matching is bounded by the configured sibling
+    /// ceilings.
     #[arg(long)]
     pub siblings_by_signature: bool,
     /// Also list bounded LSH proposals that narrowly missed the primary
@@ -747,6 +758,9 @@ pub struct ScanArgs {
     /// is discovered inside the tree being scanned, so a repository could set
     /// its own trust level — which is the one setting whose whole point is that
     /// its subject does not choose it.
+    ///
+    /// Semantic mode additionally requires an OS-enforced helper memory
+    /// ceiling, so `--untrusted --mode semantic` runs on Linux only.
     #[arg(long)]
     pub untrusted: bool,
     /// Let a compiler helper run these classes of the project's own code:
@@ -788,7 +802,7 @@ pub struct ReportArgs {
     #[arg(long)]
     pub output: Option<PathBuf>,
     /// Replace an existing output file.
-    #[arg(long)]
+    #[arg(long, requires = "output")]
     pub force: bool,
     /// Also list suppressed groups in a text report, with the reason each was
     /// hidden. JSON and SARIF always retain suppressed findings.
@@ -1336,9 +1350,36 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)] // The rendered help text is the test subject.
+    fn artifact_compare_help_states_what_its_database_option_actually_requires() {
+        let mut command = Cli::command();
+        let compare = command
+            .find_subcommand_mut("artifact")
+            .and_then(|artifact| artifact.find_subcommand_mut("compare"))
+            .expect("artifact compare is a declared subcommand");
+        let help = compare.render_long_help().to_string();
+        // Rejoined on whitespace so the assertion is about the sentence rather
+        // than about where the renderer chose to wrap it.
+        let flowed = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        // The calibration pair is what the comparison cannot infer; the
+        // database resolves the way it does for every other command, so the
+        // help may not present it as a further thing the caller must supply.
+        assert!(flowed.contains("`--db` is optional here"), "{help}");
+    }
+
+    #[test]
     #[allow(clippy::expect_used)] // Expected parse outcomes are the test subject.
-    fn every_artifact_output_surface_requires_a_destination_for_force() {
+    fn every_output_surface_requires_a_destination_for_force() {
         let valid = [
+            vec![
+                "codehelion",
+                "scan",
+                ".",
+                "--output",
+                "report.txt",
+                "--force",
+            ],
+            vec!["codehelion", "report", "--output", "report.txt", "--force"],
             vec![
                 "codehelion",
                 "artifact",
@@ -1383,7 +1424,13 @@ mod tests {
             Cli::try_parse_from(args).expect("artifact output with force parses");
         }
 
+        // A flag whose whole effect is conditioned on another one is refused
+        // when the other is absent, on every command that offers it: the same
+        // mistyped invocation cannot be a usage error on one surface and a
+        // silent no-op on the next.
         for args in [
+            vec!["codehelion", "scan", ".", "--force"],
+            vec!["codehelion", "report", "--force"],
             vec![
                 "codehelion",
                 "artifact",

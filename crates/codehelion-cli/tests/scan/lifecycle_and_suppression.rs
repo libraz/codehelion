@@ -1090,6 +1090,40 @@ fn a_path_selector_matching_part_of_a_group_is_not_stale() {
 }
 
 #[test]
+fn a_clone_id_still_naming_one_group_is_reported_as_neither_stale_nor_overreaching() {
+    let dir = fixture();
+    let first = scan_json(dir.path());
+    let id = first["groups"][0]["fingerprint"]
+        .as_str()
+        .expect("a group carries its stable id");
+    let prefix = &id[..8];
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        format!("[suppression]\npaths = [\"third_party/**\"]\nclone-ids = [\"{prefix}\"]\n"),
+    )
+    .unwrap();
+
+    let report = scan_json(dir.path());
+    assert_eq!(report["summary"]["suppressed"]["by_rule"], 1, "{report}");
+
+    // The clone id hid the one group it names, so the only rule to report is
+    // the glob that matched nothing, and it says so with a count of its own.
+    let unused = report["summary"]["unused_suppressions"]
+        .as_array()
+        .expect("unused rules array");
+    assert_eq!(unused.len(), 1, "{report}");
+    assert_eq!(unused[0]["pattern"], "third_party/**");
+    assert_eq!(unused[0]["matched"], 0);
+
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hide more than the one group they name").not());
+}
+
+#[test]
 fn an_inline_marker_suppresses_the_next_unit() {
     let dir = fixture();
     let marked = format!("// codehelion:ignore\n{MIX_C}");
