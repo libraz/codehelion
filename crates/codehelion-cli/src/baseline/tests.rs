@@ -101,6 +101,33 @@ fn freezing_a_run_records_what_it_reported_and_what_it_was() {
     assert_eq!(anchor.unit.as_deref(), Some("parse"));
 }
 
+/// A stored group whose members flag none of them is what a partially written
+/// or hand-edited database holds. Freezing it still has to name one
+/// occurrence, and the one every report view measures the group against, or a
+/// frozen anchor points somewhere no listing marks and the token count a later
+/// scan is compared against was taken past a different copy.
+#[test]
+fn freezing_a_group_with_no_flagged_member_anchors_where_every_view_does() {
+    let mut unflagged = group("aa11");
+    for member in &mut unflagged.members {
+        member.is_canonical = false;
+    }
+    let first = unflagged.members[0].clone();
+    let total: u64 = unflagged
+        .members
+        .iter()
+        .map(|member| tokens(member.token_count))
+        .sum();
+
+    let baseline = Baseline::from_run(&origin(), &[unflagged], "2026-07-27T01:00:00Z");
+    let entry = &only_partition(&baseline).entries[0];
+
+    let anchor = entry.anchor.as_ref().expect("one occurrence is the anchor");
+    assert_eq!(anchor.file, first.file_path);
+    assert_eq!(anchor.start_line, first.start_line.unwrap_or(0));
+    assert_eq!(entry.duplicated_tokens, total - tokens(first.token_count));
+}
+
 #[test]
 fn a_group_the_run_already_hid_is_not_frozen_again() {
     let mut hidden = group("cc33");
@@ -366,4 +393,38 @@ fn a_baseline_says_when_it_describes_a_different_run() {
         .expect("a changed detection window is a mismatch");
     assert!(other_window.contains("min-clone-tokens 20"));
     assert!(other_window.contains("uses 25"));
+}
+
+#[test]
+fn a_file_larger_than_a_baseline_may_be_is_refused_before_it_is_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("baseline.json");
+    std::fs::write(&path, vec![b'x'; 64]).unwrap();
+
+    let err = read_bounded(&path, 32).expect_err("the file is over the ceiling");
+    let rendered = format!("{err:#}");
+    assert!(rendered.contains("exceeds the maximum"), "{rendered}");
+    assert!(rendered.contains("32 bytes"), "{rendered}");
+
+    // The ceiling this build applies, stated where a reader can check it
+    // against the sentence the refusal carries.
+    assert_eq!(MAX_BASELINE_BYTES, 512 * 1024 * 1024);
+}
+
+#[test]
+fn a_baseline_path_that_is_not_a_regular_file_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let err = Baseline::load(dir.path()).expect_err("a directory is not a baseline");
+    assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
+}
+
+#[test]
+fn a_baseline_within_the_ceiling_is_read_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("baseline.json");
+    let baseline = Baseline::from_run(&origin(), &[group("aa11")], "2026-07-27T01:00:00Z");
+    baseline.write(&path).unwrap();
+
+    assert_eq!(Baseline::load(&path).unwrap(), baseline);
 }

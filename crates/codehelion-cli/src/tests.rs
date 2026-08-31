@@ -42,9 +42,10 @@ fn analysis_failure_hints_name_only_independent_measurements() {
     }
 }
 
-#[test]
-fn comparison_and_presentation_flags_reject_unsupported_modes() {
-    let mut args = ScanArgs {
+/// A plain fast scan of the current directory, for tests that add one flag to
+/// it and expect the command to refuse before any analysis starts.
+fn fast_scan_args() -> ScanArgs {
+    ScanArgs {
         helpers: Vec::new(),
         sort: SortAxis::default(),
         min_identifier_jaccard: None,
@@ -62,7 +63,7 @@ fn comparison_and_presentation_flags_reject_unsupported_modes() {
         baseline: None,
         baseline_mode: BaselineMode::Suppress,
         allow_execution: None,
-        compare_build_variants: true,
+        compare_build_variants: false,
         compare_languages: false,
         show_suppressed: false,
         show_siblings: false,
@@ -74,7 +75,13 @@ fn comparison_and_presentation_flags_reject_unsupported_modes() {
         no_reuse: false,
         fail_on_findings: false,
         untrusted: false,
-    };
+    }
+}
+
+#[test]
+fn comparison_and_presentation_flags_reject_unsupported_modes() {
+    let mut args = fast_scan_args();
+    args.compare_build_variants = true;
     let error = scan_command(&args, &mut Vec::new()).expect_err("mode must be semantic");
     assert!(format!("{error:#}").contains("--compare-build-variants requires --mode semantic"));
 
@@ -105,6 +112,51 @@ fn comparison_and_presentation_flags_reject_unsupported_modes() {
         format!("{error:#}")
             .contains("--siblings-by-signature requires --mode structural or --mode semantic")
     );
+}
+
+#[test]
+fn pinning_a_compiler_helper_is_refused_by_the_modes_that_start_none() {
+    for mode in [Mode::Fast, Mode::Structural] {
+        let mut args = fast_scan_args();
+        args.mode = mode;
+        args.helpers = vec!["rust=/opt/codehelion/codehelion-backend-rust".to_string()];
+        let error =
+            scan_command(&args, &mut Vec::new()).expect_err("only semantic starts a helper");
+        let message = format!("{error:#}");
+        assert!(message.contains("--helper"), "{message}");
+        assert!(message.contains(mode.name()), "{message}");
+        assert!(message.contains("--mode semantic"), "{message}");
+    }
+}
+
+/// A stream that fails every write with one kind of error, standing in for a
+/// consumer that has gone away.
+struct FailingWriter(io::ErrorKind);
+
+impl Write for FailingWriter {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        Err(io::Error::new(self.0, "the stream refused the write"))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Err(io::Error::new(self.0, "the stream refused the flush"))
+    }
+}
+
+#[test]
+fn a_consumer_that_stopped_reading_ends_the_output_rather_than_the_run() {
+    let mut out = UntilClosed::new(FailingWriter(io::ErrorKind::BrokenPipe));
+    writeln!(out, "the first line the reader wanted").expect("a closed pipe ends the report");
+    writeln!(out, "everything after it is dropped").expect("later writes stay silent too");
+    out.flush().expect("there is nothing left to deliver");
+}
+
+#[test]
+fn a_write_failure_that_is_not_a_closed_consumer_still_reaches_the_caller() {
+    let mut out = UntilClosed::new(FailingWriter(io::ErrorKind::PermissionDenied));
+    let error = writeln!(out, "a report nobody can be given")
+        .expect_err("an unwritable stream is a failure of the run");
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
 }
 
 #[test]

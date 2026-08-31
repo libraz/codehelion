@@ -752,6 +752,56 @@ fn discovered_database_paths_cannot_escape_the_scan_tree() {
     assert!(!explicit.exists());
 }
 
+/// Reading a recorded audit is confined by the same boundary that recording
+/// one is: a configuration a distrusting run was handed cannot send the read
+/// outside the tree either. The database there is real and a trusting run
+/// replays it, so the refusal is what the flag did rather than a missing file.
+#[test]
+fn a_distrusting_report_cannot_read_a_database_outside_the_scan_tree() {
+    let tree = tempfile::tempdir().expect("temp tree");
+    let root = tree.path().join("repository");
+    let outside = tree.path().join("outside");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(root.join("src/a.rs"), CHECKSUM_RS).unwrap();
+    std::fs::write(root.join("src/b.rs"), CHECKSUM_RS).unwrap();
+
+    let recorded = outside.join("recorded.db");
+    cmd()
+        .current_dir(&root)
+        .args([
+            "scan",
+            ".",
+            "--db",
+            recorded.to_str().expect("temporary path is UTF-8"),
+        ])
+        .assert()
+        .success();
+    assert!(recorded.is_file());
+
+    std::fs::write(root.join("codehelion.toml"), database_setting(&recorded)).unwrap();
+    cmd()
+        .current_dir(&root)
+        .args(["report", "--config", "codehelion.toml", "--format", "json"])
+        .assert()
+        .success();
+    cmd()
+        .current_dir(&root)
+        .args([
+            "report",
+            "--config",
+            "codehelion.toml",
+            "--format",
+            "json",
+            "--untrusted",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("refusing database path"))
+        .stderr(predicate::str::contains("--db <path>"));
+}
+
 /// A lexical relative path is not enough: a repository can place a symlink
 /// below its root that would redirect `SQLite` creation or cache deletion.
 #[cfg(unix)]
@@ -1894,4 +1944,35 @@ fn a_replayed_report_states_the_same_top_churn_the_scan_did() {
         replayed["summary"]["top_churn"],
         scanned["summary"]["top_churn"]
     );
+}
+
+/// A reader that stops early — `codehelion scan | head` — is the consumer
+/// deciding how much of the report it wants. The analysis and the recording
+/// are finished before the first line is printed, so the closed pipe ends the
+/// output and nothing else: a run that exits non-zero here tells a CI gate the
+/// scan failed when it did everything it was asked to.
+#[cfg(unix)]
+#[test]
+// Spawning the binary directly is the point: the reader has to close the pipe
+// while the scan still holds the writing end, which needs a handle to a live
+// child rather than a finished run's captured output.
+#[allow(clippy::disallowed_types)]
+fn a_reader_that_stops_early_leaves_the_scan_successful_and_recorded() {
+    let dir = wide_fixture();
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("codehelion"))
+        .current_dir(dir.path())
+        .args(["scan", ".", "--verbose"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("binary should build");
+    // The only end that could read the report is closed before the scan has
+    // one to write.
+    drop(child.stdout.take());
+    let status = child.wait().expect("the scan runs to completion");
+    assert_eq!(status.code(), Some(0), "{status}");
+
+    let store = Store::open_existing(&dir.path().join(".codehelion/audit.db")).unwrap();
+    let run = store.latest_run().unwrap().expect("recorded run");
+    assert!(!store.run_groups(run.id).unwrap().is_empty());
 }

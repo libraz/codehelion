@@ -264,12 +264,12 @@ fn the_similarity_breakdown_reaches_the_result_intact() {
         "marker"
     );
 
-    // A mode that scores no dimensions omits the key rather than
-    // inventing values.
-    assert!(
-        value["runs"][0]["results"][0]["properties"]
-            .get("similarity")
-            .is_none()
+    // A mode that scores no dimensions says so rather than inventing values,
+    // and says it where the JSON report says it: the key is stated as null in
+    // both views, so a consumer reading either finds the same answer.
+    assert_eq!(
+        value["runs"][0]["results"][0]["properties"]["similarity"],
+        serde_json::Value::Null
     );
 }
 
@@ -528,4 +528,143 @@ fn a_member_without_lines_reports_no_region() {
     let physical = &value["runs"][0]["results"][0]["locations"][0]["physicalLocation"];
     assert!(physical.get("region").is_none());
     assert_eq!(physical["artifactLocation"]["uri"], "src/file0.rs");
+}
+
+/// Where a reader finds one JSON-report field that SARIF carries in a
+/// first-class place instead of a property bag: the JSON key, then the SARIF
+/// field that carries it.
+///
+/// Kept as data so the two machine-readable views can be checked against each
+/// other field for field: anything absent from both these tables and the
+/// property bag is a field one view publishes and the other drops.
+type FirstClass = (&'static str, &'static str);
+
+const RUN_FIRST_CLASS: &[FirstClass] = &[
+    ("tool_version", "driver version"),
+    ("started_at", "invocation start time"),
+    ("finished_at", "invocation end time"),
+];
+
+const GROUP_FIRST_CLASS: &[FirstClass] = &[
+    ("fingerprint", "partial fingerprints"),
+    ("members", "related locations"),
+];
+
+const MEMBER_FIRST_CLASS: &[FirstClass] = &[
+    ("file", "artifact location"),
+    ("start_line", "region"),
+    ("end_line", "region"),
+    ("unit", "logical location"),
+];
+
+const REPORT_FIRST_CLASS: &[FirstClass] = &[
+    ("schema_version", "report_schema_version run property"),
+    ("groups", "results"),
+    // Spread across the run rather than nested under one key; its own fields
+    // are checked one level down.
+    ("run", "run properties and invocation"),
+    // Attached to the result that owns them, where a consumer reading one
+    // finding sees them without cross-referencing a run-level list.
+    ("siblings", "the owning result's siblings property"),
+];
+
+/// Assert every key of one JSON-report object reaches the SARIF log, either
+/// through the matching property bag or through a named first-class field.
+fn assert_every_key_reaches_sarif(
+    object: &serde_json::Value,
+    properties: &serde_json::Value,
+    first_class: &[FirstClass],
+) {
+    for key in object.as_object().unwrap().keys() {
+        let reachable = properties.get(key).is_some()
+            || first_class.iter().any(|(carried, _)| *carried == *key);
+        assert!(
+            reachable,
+            "field {key:?} is published by the JSON report and reaches no SARIF field"
+        );
+    }
+}
+
+#[test]
+fn every_json_report_field_reaches_the_sarif_log() {
+    let mut report = sample_report();
+    report.siblings = vec![sample_siblings()];
+    report.near_misses = vec![sample_near_miss()];
+    report.run.reused = true;
+    report.groups[0].identity = Some(crate::report::GroupIdentity {
+        origin: crate::report::IDENTITY_ADOPTED.to_string(),
+        compared_with_run: 1,
+        adopted_from: Some("ab".repeat(16)),
+        shared_members: Some(2),
+        compared_members: Some(3),
+    });
+    report.groups[0].members[0].boilerplate = Some("forwarding".to_string());
+
+    let json: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    let log = sarif(&report);
+    let run = &log["runs"][0];
+
+    assert_every_key_reaches_sarif(&json, &run["properties"], REPORT_FIRST_CLASS);
+    assert_every_key_reaches_sarif(&json["run"], &run["properties"], RUN_FIRST_CLASS);
+    let result = &run["results"][0];
+    assert_every_key_reaches_sarif(&json["groups"][0], &result["properties"], GROUP_FIRST_CLASS);
+    assert_every_key_reaches_sarif(
+        &json["groups"][0]["members"][0],
+        &result["relatedLocations"][0]["properties"],
+        MEMBER_FIRST_CLASS,
+    );
+
+    // The values, not only the keys: a bag that repeats a field under the
+    // right name with the wrong contents agrees with nothing.
+    assert_eq!(
+        result["properties"]["identity"],
+        json["groups"][0]["identity"]
+    );
+    assert_eq!(
+        result["properties"]["ranked_down"],
+        json["groups"][0]["ranked_down"]
+    );
+    assert_eq!(
+        run["properties"]["configuration"],
+        json["run"]["configuration"]
+    );
+    assert_eq!(run["properties"]["reused"], json["run"]["reused"]);
+    assert_eq!(
+        result["relatedLocations"][0]["properties"]["boilerplate"],
+        json["groups"][0]["members"][0]["boilerplate"]
+    );
+}
+
+/// A root the filesystem names in bytes no text can hold is still a root a
+/// report has to print and a SARIF log has to base its URIs on. The stored key
+/// keeps those bytes reversibly, under a reserved marker that is not a path:
+/// left in place it would put a bare control character and a colon into
+/// `SRCROOT`, and the two commands that render one run would disagree about
+/// which tree it was.
+#[cfg(unix)]
+#[test]
+fn a_root_that_is_not_utf8_reaches_the_log_as_a_uri_without_the_stored_marker() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::path::PathBuf;
+
+    let root = PathBuf::from(OsString::from_vec(b"/work/\x80project".to_vec()));
+    let key = codehelion_store::path_key(&root);
+    // What a live scan prints and what a replay of the recorded run prints.
+    let live = codehelion_store::path_label(&root);
+    let replayed = codehelion_store::display_path(&key);
+    assert_eq!(live, replayed);
+
+    let mut report = sample_report();
+    report.run.root = replayed;
+    let value = sarif(&report);
+    let uri = value["runs"][0]["originalUriBaseIds"]["SRCROOT"]["uri"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(uri.starts_with("file:///"), "{uri}");
+    assert!(uri.ends_with('/'), "{uri}");
+    assert!(!uri.contains("codehelion-path-bytes"), "{uri}");
+    assert!(!uri.contains('\u{001f}'), "{uri}");
+    assert!(!root_uri(&key).eq(&uri));
 }

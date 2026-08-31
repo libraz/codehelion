@@ -58,6 +58,7 @@
 //! [`CloneGroupFingerprint`]: codehelion_core::stable_id::CloneGroupFingerprint
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -75,6 +76,41 @@ use crate::scan::display_path;
 /// judgement about the tree as it stands, not an archive.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Largest baseline file this build will read into memory.
+///
+/// A baseline is one line of JSON per frozen occurrence, so a real one is
+/// orders of magnitude below this. The ceiling is here because the path is
+/// given on a command line and the file behind it is read whole: a named path
+/// that turns out to be enormous must be refused with a sentence rather than
+/// allocated until the machine gives out.
+pub const MAX_BASELINE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Read a file the caller named, refusing one too large to hold in memory.
+///
+/// The byte count comes from the read rather than from filesystem metadata:
+/// a special file can report a misleading or zero length, and reading one byte
+/// past the ceiling bounds memory before the size is reported.
+fn read_bounded(path: &Path, max_bytes: u64) -> Result<String> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("reading baseline metadata {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("baseline {} is not a regular file", path.display());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .with_context(|| format!("opening baseline {}", path.display()))?
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading baseline {}", path.display()))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        bail!(
+            "baseline {} exceeds the maximum of {max_bytes} bytes",
+            path.display()
+        );
+    }
+    String::from_utf8(bytes).with_context(|| format!("reading baseline {}", path.display()))
+}
+
 /// A baseline file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Baseline {
@@ -84,7 +120,9 @@ pub struct Baseline {
     pub created_at: String,
     /// Tool version that recorded it.
     pub tool_version: String,
-    /// Root the recorded run scanned.
+    /// Root the recorded run scanned, rendered the way every other command
+    /// renders that run's root. Descriptive only: entries are matched on their
+    /// group ids, never on this.
     pub root: String,
     /// Frozen findings by the build variant that minted their stable ids.
     ///
@@ -197,7 +235,7 @@ impl Baseline {
             schema_version: SCHEMA_VERSION,
             created_at: created_at.to_string(),
             tool_version: origin.tool_version.clone(),
-            root: origin.root_path.clone(),
+            root: display_path(&origin.root_path),
             partitions: vec![BaselinePartition::from_run(origin, groups)],
         }
     }
@@ -236,7 +274,7 @@ impl Baseline {
             schema_version: SCHEMA_VERSION,
             created_at: created_at.to_string(),
             tool_version: first.tool_version.clone(),
-            root: first.root_path.clone(),
+            root: display_path(&first.root_path),
             partitions,
         })
     }
@@ -245,11 +283,11 @@ impl Baseline {
     ///
     /// # Errors
     ///
-    /// Returns an error when the file cannot be read, is not valid JSON, or
-    /// was written by a build whose schema this one does not know.
+    /// Returns an error when the file is not a regular file, is larger than a
+    /// baseline may be, cannot be read, is not valid JSON, or was written by a
+    /// build whose schema this one does not know.
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading baseline {}", path.display()))?;
+        let text = read_bounded(path, MAX_BASELINE_BYTES)?;
         let baseline: Self = serde_json::from_str(&text)
             .with_context(|| format!("parsing baseline {}", path.display()))?;
         if baseline.schema_version != SCHEMA_VERSION {
@@ -608,11 +646,11 @@ pub struct Compatibility {
 impl Entry {
     /// Freeze one stored group.
     fn from_group(group: &StoredGroup) -> Self {
-        let canonical = group
-            .members
-            .iter()
-            .find(|member| member.is_canonical)
-            .or_else(|| group.members.first());
+        // The same rule the report views resolve it by, so a frozen anchor and
+        // the occurrence a listing marks are one occurrence.
+        let canonical =
+            crate::report::canonical_position(&group.members, |member| member.is_canonical)
+                .and_then(|index| group.members.get(index));
         Self {
             group: group.fingerprint_hex.clone(),
             clone_type: group.clone_type.clone(),

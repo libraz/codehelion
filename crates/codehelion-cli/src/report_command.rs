@@ -54,7 +54,7 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
         run: report::RunInfo {
             tool_version: run.tool_version,
             mode: run.analysis_mode,
-            root: run.root_path,
+            root: scan::display_path(&run.root_path),
             configuration: recorded_configuration(&origin)?,
             started_at: run.started_at,
             finished_at: finished_at.to_string(),
@@ -429,7 +429,7 @@ pub(crate) fn report_database(
         &root,
         args.db.as_deref(),
         &resolved_config,
-        false,
+        args.untrusted,
     )?;
     Ok((root, resolved_config, path))
 }
@@ -789,7 +789,7 @@ pub(crate) fn explain_cross_variant_group(
         group_id: group.group_id_hex,
         comparison_id: group.comparison_id_hex,
         policy_version: group.policy_version,
-        root_path: group.root_path,
+        root_path: scan::display_path(&group.root_path),
         origin_variants: group.origin_variants,
         clone_type: group.clone_type,
         members: group
@@ -913,7 +913,7 @@ pub(crate) fn explain_cross_language_group(
         group_id: group.group_id_hex,
         comparison_id: group.comparison_id_hex,
         policy_version: group.policy_version,
-        root_path: group.root_path,
+        root_path: scan::display_path(&group.root_path),
         origin_variants: group.origin_variants,
         rule_id: group.rule_id,
         rule_version: group.rule_version,

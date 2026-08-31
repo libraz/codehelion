@@ -763,6 +763,72 @@ fn text_run_status_names_reuse_and_the_exact_tree_delta() {
     assert!(!rendered.contains("reused: tree unchanged"), "{rendered}");
 }
 
+/// Render one report at detailed verbosity and hand back its text.
+fn detailed_text(report: &Report) -> String {
+    let mut rendered = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut rendered,
+        )
+        .unwrap();
+    String::from_utf8(rendered).unwrap()
+}
+
+#[test]
+fn an_adopted_group_states_its_shared_count_out_of_the_population_it_was_counted_in() {
+    // Every member carries one content, which is the population the adoption
+    // rule compared: a group of identical copies shares all of it.
+    let mut report = sample_report();
+    report.groups[0].identity = Some(GroupIdentity {
+        origin: IDENTITY_ADOPTED.to_string(),
+        compared_with_run: 1,
+        adopted_from: Some("ab".repeat(16)),
+        shared_members: Some(1),
+        compared_members: Some(1),
+    });
+
+    let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    let identity = &value["groups"][0]["identity"];
+    assert_eq!(identity["shared_members"], 1, "{identity}");
+    assert_eq!(identity["compared_members"], 1, "{identity}");
+
+    let text = detailed_text(&report);
+    assert!(
+        text.contains("1 of 1 member content(s) shared"),
+        "the shared count was stated out of a population it was not counted in: {text}"
+    );
+    // The group's member count is a different population; dividing by it
+    // would read as weak evidence for a connection decided on all of it.
+    assert!(
+        !text.contains(&format!("of {} members", report.groups[0].members.len())),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_adopted_group_without_a_measured_population_states_the_shared_count_alone() {
+    let mut report = sample_report();
+    report.groups[0].identity = Some(GroupIdentity {
+        origin: IDENTITY_ADOPTED.to_string(),
+        compared_with_run: 1,
+        adopted_from: Some("ab".repeat(16)),
+        shared_members: Some(2),
+        compared_members: None,
+    });
+
+    let value: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    let identity = &value["groups"][0]["identity"];
+    assert!(identity.get("compared_members").is_none(), "{identity}");
+
+    let text = detailed_text(&report);
+    assert!(text.contains("2 member content(s) shared"), "{text}");
+    assert!(!text.contains("2 of "), "{text}");
+}
+
 #[test]
 fn an_unrecorded_report_does_not_offer_replay_or_artifact_guidance() {
     let mut report = sample_report();
@@ -983,6 +1049,79 @@ fn signature_siblings_keep_their_identity_and_render_as_exact_matches() {
     assert_eq!(sibling["signature"], "normalized-signature-sentinel");
 }
 
+/// A set of ceilings whose numbers are all different, so a rendering that
+/// reads one where it meant another is visible rather than coincidentally
+/// right.
+fn sample_guardrails() -> Guardrails {
+    Guardrails {
+        profile: "untrusted".to_string(),
+        max_file_bytes: 1,
+        parse_timeout_ms: 2,
+        helper_timeout_ms: 3,
+        posting_cap: 4,
+        pair_budget: 5,
+        verification_budget: 6,
+        max_alignment_cells: 7,
+        near_miss_delta: 0.1,
+        near_miss_cap: 8,
+        sibling_candidate_budget: 9,
+        sibling_per_group_cap: 10,
+        sibling_total_cap: 11,
+        signature_sibling_candidate_budget: 12,
+        signature_sibling_per_group_cap: 13,
+        signature_sibling_total_cap: 14,
+        signature_sibling_max_units_per_signature: 16,
+        max_component: 15,
+    }
+}
+
+/// The parse budget is an amount of work, not an amount of time, and the views
+/// that state it have to say so in the same terms. A reader who takes it for a
+/// wall-clock deadline expects a busy machine to report fewer findings, which
+/// is the one thing a deterministic budget exists to rule out.
+#[test]
+fn the_parse_budget_is_stated_as_work_rather_than_elapsed_time() {
+    let mut report = sample_report();
+    report.summary.guardrails = Some(sample_guardrails());
+
+    let mut text = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                verbosity: 2,
+                ..TextOptions::default()
+            },
+            &mut text,
+        )
+        .unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(
+        text.contains(&format!(
+            "parse work capped at min(file ceiling, 2 ms × {} bytes)",
+            crate::scan::runtime::PARSE_BYTES_PER_MILLISECOND
+        )),
+        "{text}"
+    );
+
+    let schema: serde_json::Value = serde_json::from_str(JSON_SCHEMA).unwrap();
+    let described = schema["$defs"]["summary"]["properties"]["guardrails"]["properties"]
+        ["parse_timeout_ms"]["description"]
+        .as_str()
+        .expect("the shipped schema describes the field it publishes");
+    assert!(
+        described.contains(&format!(
+            "{} input bytes",
+            crate::scan::runtime::PARSE_BYTES_PER_MILLISECOND
+        )),
+        "{described}"
+    );
+    assert!(
+        described.contains("Not a wall-clock deadline"),
+        "a consumer reading only the schema would take the budget for a \
+         deadline: {described}"
+    );
+}
+
 #[test]
 fn supplemental_totals_count_serialized_hidden_entries_and_name_the_flags() {
     let mut report = sample_report();
@@ -1190,6 +1329,48 @@ fn identifier_floor_reports_the_exact_unmeasured_count() {
 }
 
 #[test]
+fn the_legend_opens_a_group_the_identifier_floor_left_listed() {
+    let mut report = sample_report();
+    let mut measured = structural_group();
+    measured.identifier_jaccard = Some(0.95);
+    report.groups.push(measured);
+
+    let mut rendered = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                min_identifier_jaccard: Some(0.9),
+                ..TextOptions::default()
+            },
+            &mut rendered,
+        )
+        .unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+    let legend = rendered
+        .lines()
+        .find(|line| line.contains("open one:"))
+        .expect("a listing offers the group it listed");
+    assert!(legend.contains("0d0d0d0d"), "{legend}");
+    assert!(!legend.contains("0b0b0b0b"), "{legend}");
+}
+
+#[test]
+fn a_listing_the_identifier_floor_emptied_offers_nothing_to_open() {
+    let mut rendered = Vec::new();
+    sample_report()
+        .render_text(
+            TextOptions {
+                min_identifier_jaccard: Some(0.9),
+                ..TextOptions::default()
+            },
+            &mut rendered,
+        )
+        .unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+    assert!(!rendered.contains("open one:"), "{rendered}");
+}
+
+#[test]
 fn identifier_floor_omits_unmeasured_clause_when_every_group_has_a_measure() {
     let mut report = sample_report();
     report.groups[0].identifier_jaccard = Some(0.5);
@@ -1332,10 +1513,12 @@ fn a_rule_that_matched_nothing_is_named_not_left_to_be_noticed() {
         UnusedRule {
             scope: "path_glob".to_string(),
             pattern: "third_party/**".to_string(),
+            matched: 0,
         },
         UnusedRule {
             scope: "stable_clone_id".to_string(),
             pattern: "abcd1234".to_string(),
+            matched: 0,
         },
     ];
 

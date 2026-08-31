@@ -613,12 +613,13 @@
         },
         "unused_suppressions": {
           "type": "array",
-          "description": "Configured suppression rules that hid nothing in this run. A rule matching nothing reads as an instruction that took effect while the findings it was meant to cover are still reported, so it is named rather than left to be found by accident.",
+          "description": "Configured suppression rules this run has to name: one that hid nothing, or a clone id whose prefix covers more than one group. A rule matching nothing reads as an instruction that took effect while the findings it was meant to cover are still reported, and a clone id covering several groups hides duplications nobody judged, so both are named rather than left to be found by accident.",
           "items": {
             "type": "object",
             "required": [
               "scope",
-              "pattern"
+              "pattern",
+              "matched"
             ],
             "properties": {
               "scope": {
@@ -631,6 +632,11 @@
               "pattern": {
                 "type": "string",
                 "description": "The pattern as configured."
+              },
+              "matched": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Groups the rule covers: 0 for a rule that hid nothing, and the number of groups for a clone id whose prefix covers more than one."
               }
             }
           }
@@ -742,7 +748,7 @@
             "parse_timeout_ms": {
               "type": "integer",
               "minimum": 0,
-              "description": "Longest one file was parsed for, in milliseconds."
+              "description": "Per-file deterministic parse-work budget, expressed in compatibility milliseconds. Each millisecond admits 256 input bytes; files above the resulting byte budget are excluded and counted as skipped. Not a wall-clock deadline: host load and worker count do not change what a scan reports."
             },
             "helper_timeout_ms": {
               "type": "integer",
@@ -982,7 +988,13 @@
             },
             "shared_members": {
               "type": "integer",
-              "description": "Members this group shares with that predecessor. The connection was decided on this quantity, so it is the evidence for it."
+              "minimum": 0,
+              "description": "Distinct member contents this group shares with that predecessor. The connection was decided on this quantity, so it is the evidence for it. Contents rather than members: several members of one group can carry the same content, and the rule that adopted the history counted contents."
+            },
+            "compared_members": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Distinct member contents this group was compared on: the population shared_members was counted out of. Absent when the recorded connection carries no measured population, in which case the shared count stands alone rather than being paired with a number that counts something else."
             }
           }
         },
@@ -1309,6 +1321,14 @@
           ],
           "minLength": 1,
           "description": "Exact normalized signature for signature-channel siblings."
+        },
+        "signature_units": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "How many units in the tree share that signature. A signature is evidence only while it is rare, so the count travels with the finding and the reader weighs it; it never moves confidence_band. Null for a similarity-channel sibling, which carries no signature."
         },
         "similarity": {
           "$ref": "#/$defs/sibling_similarity"

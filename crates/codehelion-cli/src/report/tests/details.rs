@@ -165,6 +165,56 @@ fn signature_sibling_detail_keeps_the_basis_and_exact_signature_marker() {
 }
 
 #[test]
+fn a_signature_sibling_detail_states_how_rare_the_signature_is() {
+    let mut sibling = sample_siblings().siblings.remove(0);
+    sibling.basis = "signature".to_string();
+    sibling.signature = Some("detail-signature-sentinel".to_string());
+    sibling.signature_units = Some(900);
+    let detail = SiblingDetail {
+        scan_run: 17,
+        group_fingerprint: "19".repeat(16),
+        sibling,
+    };
+
+    let mut text = Vec::new();
+    detail.render_text(&mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    // A signature nine hundred units share is not the evidence a signature
+    // three units share, and the two render differently wherever either does.
+    assert!(
+        text.contains("[same signature, 900 units share it]"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_suppressed_sibling_detail_names_the_rule_that_hid_it() {
+    let mut sibling = sample_siblings().siblings.remove(0);
+    sibling.suppressed = Some(Suppression {
+        kind: SuppressionKind::Rule,
+        reason: None,
+        scope: Some("path_glob".to_string()),
+        pattern: Some("vendor/**".to_string()),
+        active: Some(true),
+    });
+    let detail = SiblingDetail {
+        scan_run: 17,
+        group_fingerprint: "19".repeat(16),
+        sibling,
+    };
+
+    let json: serde_json::Value = serde_json::from_str(&detail.to_json().unwrap()).unwrap();
+    assert_eq!(json["sibling"]["suppressed"]["scope"], "path_glob");
+    let mut text = Vec::new();
+    detail.render_text(&mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(
+        text.contains("suppressed: path glob \"vendor/**\""),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_scored_group_reports_every_dimension_and_marks_the_absent_one() {
     let mut report = sample_report();
     report.summary.groups.type_3 = 1;
@@ -421,6 +471,14 @@ fn json_field_names_appear_in_the_shipped_schema() {
             }),
         }],
     });
+    report.siblings = vec![sample_siblings()];
+    report.groups[0].identity = Some(GroupIdentity {
+        origin: IDENTITY_ADOPTED.to_string(),
+        compared_with_run: 1,
+        adopted_from: Some("ab".repeat(16)),
+        shared_members: Some(2),
+        compared_members: Some(3),
+    });
     report.groups[0].baseline = Some(GroupBaseline {
         state: GROUP_NEW.to_string(),
         added_instances: None,
@@ -487,6 +545,22 @@ fn json_field_names_appear_in_the_shipped_schema() {
         (
             &value["groups"][0]["priority"]["inputs"],
             &schema["$defs"]["priority_inputs"]["properties"],
+        ),
+        (
+            &value["groups"][0]["identity"],
+            &schema["$defs"]["group"]["properties"]["identity"]["properties"],
+        ),
+        (
+            &value["siblings"][0],
+            &schema["$defs"]["group_siblings"]["properties"],
+        ),
+        (
+            &value["siblings"][0]["siblings"][0],
+            &schema["$defs"]["sibling"]["properties"],
+        ),
+        (
+            &value["siblings"][0]["siblings"][0]["similarity"],
+            &schema["$defs"]["sibling_similarity"]["properties"],
         ),
     ];
     for (object, properties) in checks {
@@ -675,6 +749,7 @@ fn what_unsettles_the_report_is_written_as_a_warning_before_the_notes() {
     report.summary.unused_suppressions = vec![UnusedRule {
         scope: "path".to_string(),
         pattern: "vendor/**".to_string(),
+        matched: 0,
     }];
     let mut buffer = Vec::new();
     report
@@ -1433,4 +1508,71 @@ fn repeated_tokens_count_everything_past_the_copy_that_would_be_kept() {
         .expect("a canonical member")
         .tokens;
     assert_eq!(duplicated_tokens(&group), total - canonical);
+}
+
+/// A group whose stored members flag none of them is what a partially written
+/// or hand-edited database holds. Every view still has to answer "which
+/// occurrence is this group measured against" the same way, or a report, a
+/// SARIF log and a frozen baseline describe three different occurrences of one
+/// group.
+#[test]
+fn every_view_resolves_the_same_occurrence_when_no_member_is_flagged() {
+    let mut report = sample_report();
+    let mut group = visible_group();
+    for member in &mut group.members {
+        member.canonical = false;
+    }
+    let first = group.members[0].clone();
+    let total: u64 = group.members.iter().map(|member| member.tokens).sum();
+    let fingerprint = group.fingerprint.clone();
+    report.groups = vec![group];
+
+    let group = &report.groups[0];
+    assert_eq!(
+        canonical_member(group).map(|member| member.finding_id.as_str()),
+        Some(first.finding_id.as_str()),
+    );
+    // The token count the listing prints is taken past that same occurrence.
+    assert_eq!(duplicated_tokens(group), total - first.tokens);
+
+    // The listing leads with that same occurrence, which is what its mark says
+    // the group is measured against.
+    let mut text = Vec::new();
+    report
+        .render_text(TextOptions::default(), &mut text)
+        .unwrap();
+    let text = String::from_utf8(text).unwrap();
+    let leads = text.find(first.file.as_str());
+    let follows = text.find(report.groups[0].members[1].file.as_str());
+    assert!(leads.is_some() && leads < follows, "{text}");
+
+    let sarif: serde_json::Value = serde_json::from_str(&report.to_sarif().unwrap()).unwrap();
+    let result = &sarif["runs"][0]["results"][0];
+    assert_eq!(
+        result["partialFingerprints"]["cloneGroupFingerprint/v1"],
+        fingerprint
+    );
+    let primary = &result["locations"][0];
+    assert_eq!(
+        primary["physicalLocation"]["region"]["startLine"],
+        first.start_line
+    );
+    // The occurrence chosen as the primary location is the occurrence this log
+    // calls canonical, and it is the only one.
+    assert_eq!(primary["properties"]["canonical"], true);
+    let related = result["relatedLocations"].as_array().unwrap();
+    assert_eq!(
+        related
+            .iter()
+            .filter(|location| location["properties"]["canonical"] == true)
+            .count(),
+        1,
+    );
+    assert_eq!(related[0]["properties"]["canonical"], true);
+    assert!(
+        related[0]["message"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("(canonical instance)")
+    );
 }

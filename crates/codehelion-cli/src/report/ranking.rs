@@ -6,6 +6,7 @@ use super::{
     Serialize, Similarity, Summary, SummaryRow, SuppressedCounts, SuppressionConfig,
     UnparsedCounts, UnusedRuleRow, VENDORED_SCOPE, Weights, priority,
 };
+use crate::suppress::{CLONE_ID_SCOPE, multi_match_clone_ids};
 use codehelion_store::directory_of;
 
 impl Guardrails {
@@ -277,15 +278,37 @@ pub fn compare_on(a: &Group, b: &Group, sort: Sort) -> Ordering {
         .then_with(|| a.fingerprint.cmp(&b.fingerprint))
 }
 
+/// Which occurrence of a group is the one it is measured against.
+///
+/// One rule for every view, because the answer is read by the text listing,
+/// the SARIF primary location, and a frozen baseline anchor, and those naming
+/// different occurrences of the same group would be three accounts of one
+/// fact. A group whose members carry no flag at all — which a partially
+/// written or hand-edited database can hold — resolves to its first member
+/// rather than to nothing, so the fact stays single-valued.
+///
+/// Generic over the member type: a report member and a stored member spell the
+/// flag differently, and the rule is about neither spelling.
+#[must_use]
+pub fn canonical_position<T>(members: &[T], flagged: impl Fn(&T) -> bool) -> Option<usize> {
+    if members.is_empty() {
+        return None;
+    }
+    Some(members.iter().position(flagged).unwrap_or(0))
+}
+
+/// The occurrence a report group is measured against.
+#[must_use]
+pub fn canonical_member(group: &Group) -> Option<&Member> {
+    canonical_position(&group.members, |member| member.canonical)
+        .and_then(|index| group.members.get(index))
+}
+
 /// Tokens a group repeats: everything past the one copy a reader would keep.
 #[must_use]
 pub fn duplicated_tokens(group: &Group) -> u64 {
     let total: u64 = group.members.iter().map(|member| member.tokens).sum();
-    let canonical = group
-        .members
-        .iter()
-        .find(|member| member.canonical)
-        .map_or(0, |member| member.tokens);
+    let canonical = canonical_member(group).map_or(0, |member| member.tokens);
     total.saturating_sub(canonical)
 }
 
@@ -408,13 +431,42 @@ pub fn stored_identity_collapsed(funnel: &[FunnelStageRow]) -> u64 {
 }
 
 /// The rules that hid nothing, in the shape the audit database stores them.
+///
+/// A rule that covered several groups is left out: it hid something, and the
+/// report derives that notice from the groups themselves on every path.
 #[must_use]
 pub fn stored_rules(rules: &[UnusedRule]) -> Vec<UnusedRuleRow> {
     rules
         .iter()
+        .filter(|rule| rule.matched == 0)
         .map(|rule| UnusedRuleRow {
             scope: rule.scope.clone(),
             pattern: rule.pattern.clone(),
+        })
+        .collect()
+}
+
+/// The configured clone ids this report shows covering more than one group.
+///
+/// Read off the groups rather than counted beside the rules, because a clone
+/// id outranks every other suppression rule in every mode: a group its prefix
+/// covers is hidden by it and cites it, so the report itself holds the count.
+/// That also makes a replayed run say what the scan said, since the groups a
+/// run recorded carry the rule each of them was hidden by.
+fn clone_ids_covering_several_groups(groups: &[Group]) -> Vec<UnusedRule> {
+    let cited = groups.iter().filter_map(|group| {
+        let suppression = group.suppressed.as_ref()?;
+        if suppression.scope.as_deref() != Some(CLONE_ID_SCOPE) {
+            return None;
+        }
+        suppression.pattern.as_deref()
+    });
+    multi_match_clone_ids(cited)
+        .into_iter()
+        .map(|(pattern, matched)| UnusedRule {
+            scope: CLONE_ID_SCOPE.to_string(),
+            pattern,
+            matched,
         })
         .collect()
 }
@@ -530,7 +582,9 @@ pub fn restored(stored: &SummaryRow, groups: &[Group], analysis_mode: &str) -> S
             .map(|rule| UnusedRule {
                 scope: rule.scope.clone(),
                 pattern: rule.pattern.clone(),
+                matched: 0,
             })
+            .chain(clone_ids_covering_several_groups(groups))
             .collect(),
         unapplied_suppression_policies: unapplied_suppression_policies(analysis_mode),
         funnel,
@@ -586,13 +640,20 @@ pub fn unmeasured_in_this_mode(analysis_mode: &str) -> Vec<String> {
     }
 }
 
-/// One configured suppression rule that matched nothing.
+/// One configured suppression rule a report has to name.
+///
+/// Either the rule matched nothing, or — for a clone id, whose whole purpose
+/// is to name one duplication — its prefix currently covers several groups.
+/// Both are a rule doing something other than what it says.
 #[derive(Debug, Serialize)]
 pub struct UnusedRule {
     /// Rule scope (`path_glob`, `symbol_pattern`, `stable_clone_id`).
     pub scope: String,
     /// The pattern as configured.
     pub pattern: String,
+    /// How many groups the rule covers: `0` for a rule that hid nothing, and
+    /// the number of groups for a clone id whose prefix covers more than one.
+    pub matched: u64,
 }
 
 impl UnusedRule {
@@ -603,7 +664,7 @@ impl UnusedRule {
         match self.scope.as_str() {
             "path_glob" => format!("path glob {:?}", self.pattern),
             "symbol_pattern" => format!("symbol glob {:?}", self.pattern),
-            "stable_clone_id" => format!("clone id {}", self.pattern),
+            CLONE_ID_SCOPE => format!("clone id {}", self.pattern),
             scope => format!("{scope} {:?}", self.pattern),
         }
     }
@@ -878,4 +939,100 @@ pub struct Member {
     pub tokens: u64,
     /// Whether this is the group's canonical instance.
     pub canonical: bool,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::{
+        CLONE_ID_SCOPE, Group, Priority, SummaryRow, Suppression, SuppressionKind, UnusedRule,
+        restored,
+    };
+    use crate::report::{TextOptions, tests::sample_report};
+
+    /// A group the clone id `rule` hid, whose own id starts with that rule.
+    fn hidden_by_clone_id(fingerprint: &str, rule: &str) -> Group {
+        Group {
+            fingerprint: fingerprint.to_string(),
+            clone_type: "type-1".to_string(),
+            scope: "unit".to_string(),
+            statements: None,
+            confidence: 1.0,
+            entropy_bits: 2.0,
+            priority: Priority::unranked(),
+            identity: None,
+            similarity: None,
+            identifier_jaccard: None,
+            body_materiality: None,
+            boilerplate: None,
+            test_code: false,
+            test_code_evidence: None,
+            width_family: false,
+            split_pair: false,
+            ranked_down: false,
+            suppressed: Some(Suppression {
+                kind: SuppressionKind::Rule,
+                reason: None,
+                scope: Some(CLONE_ID_SCOPE.to_string()),
+                pattern: Some(rule.to_string()),
+                active: Some(true),
+            }),
+            baseline: None,
+            semantic: None,
+            artifact_savings: Vec::new(),
+            members: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_clone_id_hiding_more_than_the_group_it_names_is_reported_with_the_count() {
+        // Two groups whose ids share the configured prefix: the id was written
+        // about one duplication and now hides a second nobody judged.
+        let groups = vec![
+            hidden_by_clone_id(&format!("0123abcd{}", "11".repeat(12)), "0123abcd"),
+            hidden_by_clone_id(&format!("0123abcd{}", "22".repeat(12)), "0123abcd"),
+        ];
+
+        let summary = restored(&SummaryRow::default(), &groups, "fast");
+        let covering: Vec<&UnusedRule> = summary
+            .unused_suppressions
+            .iter()
+            .filter(|rule| rule.matched > 1)
+            .collect();
+        assert_eq!(covering.len(), 1);
+        assert_eq!(covering[0].scope, CLONE_ID_SCOPE);
+        assert_eq!(covering[0].pattern, "0123abcd");
+        assert_eq!(covering[0].matched, 2);
+
+        // The machine surface carries the count beside the rule.
+        let value = serde_json::to_value(&summary).unwrap();
+        assert_eq!(value["unused_suppressions"][0]["matched"], 2);
+
+        // And so does the text one, where a reader meets it.
+        let mut report = sample_report();
+        report.summary.unused_suppressions = summary.unused_suppressions;
+        let mut buffer = Vec::new();
+        report
+            .render_notes(TextOptions::default(), &mut buffer)
+            .unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        assert!(
+            text.contains(
+                "note: 1 suppression rule(s) hide more than the one group they name: \
+                 clone id 0123abcd (2 groups)"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_clone_id_that_still_names_one_group_is_left_alone() {
+        let groups = vec![
+            hidden_by_clone_id(&format!("0123abcd{}", "11".repeat(12)), "0123abcd"),
+            hidden_by_clone_id(&format!("9999beef{}", "22".repeat(12)), "9999beef"),
+        ];
+
+        let summary = restored(&SummaryRow::default(), &groups, "fast");
+        assert!(summary.unused_suppressions.is_empty());
+    }
 }

@@ -6,6 +6,7 @@ use super::{
     FINDING_DETAIL_SCHEMA_VERSION, Group, GroupColumns, MappingEvidence, Member, Palette,
     SCOPE_FRAGMENT, SemanticEvidence, SemanticOperationGraph, Serialize, Sibling, Similarity,
     Suppression, TestCodeEvidence, TextOptions, Write, detail_json, io, render_group,
+    signature_note,
 };
 
 /// Where a stored run ranked a finding, as it was recorded.
@@ -96,7 +97,8 @@ pub struct CrossLanguageGroupDetail {
     pub comparison_id: String,
     /// Version of the comparison policy.
     pub policy_version: String,
-    /// Root shared by the compared partitions.
+    /// Root shared by the compared partitions, rendered for a reader rather
+    /// than spelled as the key it is stored under.
     pub root_path: String,
     /// Origin build variants kept separate by the comparison.
     pub origin_variants: Vec<String>,
@@ -121,7 +123,8 @@ pub struct CrossVariantGroupDetail {
     pub comparison_id: String,
     /// Version of the comparison policy.
     pub policy_version: String,
-    /// Root shared by the compared partitions.
+    /// Root shared by the compared partitions, rendered for a reader rather
+    /// than spelled as the key it is stored under.
     pub root_path: String,
     /// Origin build variants kept separate by the comparison.
     pub origin_variants: Vec<String>,
@@ -283,8 +286,15 @@ impl SiblingDetail {
         if let Some(unit) = &self.sibling.member.unit {
             writeln!(out, "    unit: {unit}")?;
         }
-        if self.sibling.basis == "signature" {
-            writeln!(out, "    [same signature]")?;
+        // Said here for the same reason the owning group's listing says it: a
+        // supplemental finding hidden by a rule is still recorded and still
+        // explainable, and a reader who pasted its id in is the one person
+        // about to mistake it for something the report shows.
+        if let Some(cause) = &self.sibling.suppressed {
+            writeln!(out, "  suppressed: {}", cause.label())?;
+        }
+        if let Some(note) = signature_note(&self.sibling.basis, self.sibling.signature_units) {
+            writeln!(out, "    {note}")?;
         }
         Ok(())
     }

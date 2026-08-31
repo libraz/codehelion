@@ -217,8 +217,16 @@ fn reruns_produce_the_same_log() {
         run["invocations"][0]["startTimeUtc"] = Value::Null;
         run["invocations"][0]["endTimeUtc"] = Value::Null;
         run["properties"]["run_id"] = Value::Null;
+        // Whether the invocation reused the run before it says something about
+        // what was already recorded, not about what the tree holds.
+        run["properties"]["reused"] = Value::Null;
         run["properties"]["summary"]["changes"] = Value::Null;
         run["properties"]["summary"]["audit"] = Value::Null;
+        // How a group came by its history is part of that comparison: only
+        // the second run has a predecessor to have kept an identity from.
+        for result in run["results"].as_array_mut().expect("results are an array") {
+            result["properties"]["identity"] = Value::Null;
+        }
         logs.push(log);
     }
     assert_eq!(logs[0], logs[1], "reruns agree token for token");
@@ -304,9 +312,11 @@ fn fast_output_satisfies_the_published_schema_and_scores_no_dimensions() {
     let results = log["runs"][0]["results"].as_array().unwrap();
     assert!(!results.is_empty());
     for result in results {
-        assert!(
-            result["properties"].get("similarity").is_none(),
-            "a mode that measures no dimensions reports none"
+        assert_eq!(
+            result["properties"]["similarity"],
+            Value::Null,
+            "a mode that measures no dimensions reports none, in the same field \
+             the JSON report states it in"
         );
         assert_eq!(result["level"], "note");
         assert!(result["ruleIndex"].as_u64().unwrap() < 3);

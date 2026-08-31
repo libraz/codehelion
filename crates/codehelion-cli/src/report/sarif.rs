@@ -52,9 +52,9 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::{
-    ArtifactSavings, BodyMateriality, BuildVariantInfo, CompilerCoverage, DetectorVersion, Group,
-    GroupSiblings, Member, Priority, RankingInfo, Report, SCOPE_FRAGMENT, Sibling, Similarity,
-    Summary, Suppression, SuppressionKind,
+    ArtifactSavings, BodyMateriality, BuildVariantInfo, CompilerCoverage, ConfigurationInfo,
+    DetectorVersion, Group, GroupSiblings, Member, Priority, RankingInfo, Report, SCOPE_FRAGMENT,
+    Sibling, Similarity, Summary, Suppression, SuppressionKind, canonical_position,
 };
 
 /// SARIF version this reporter emits.
@@ -325,12 +325,14 @@ impl<'a> From<&'a Report> for Run<'a> {
                 report_schema_version: report.schema_version,
                 mode: &run.mode,
                 root: &run.root,
+                configuration: &run.configuration,
                 build_variant: &run.build_variant,
                 detector_versions: &run.detector_versions,
                 ranking: &run.ranking,
                 summary: &report.summary,
                 database: &run.database,
                 run_id: run.run_id,
+                reused: run.reused,
                 near_misses: &report.near_misses,
             },
         }
@@ -701,6 +703,7 @@ struct RunProperties<'a> {
     report_schema_version: u32,
     mode: &'a str,
     root: &'a str,
+    configuration: &'a ConfigurationInfo,
     build_variant: &'a BuildVariantInfo,
     detector_versions: &'a [DetectorVersion],
     ranking: &'a RankingInfo,
@@ -708,6 +711,10 @@ struct RunProperties<'a> {
     database: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     run_id: Option<i64>,
+    /// Whether the run reused a matching completed local run rather than
+    /// analysing again, present exactly where the JSON report states it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    reused: bool,
     near_misses: &'a [super::NearMiss],
 }
 
@@ -732,11 +739,10 @@ struct ResultEntry<'a> {
 impl<'a> ResultEntry<'a> {
     fn new(group: &'a Group, siblings: &'a [Sibling]) -> Self {
         let rule = RULES.iter().find(|spec| spec.class == group.clone_type);
-        let canonical = group
-            .members
-            .iter()
-            .find(|member| member.canonical)
-            .or_else(|| group.members.first());
+        // The occurrence the group is measured against, resolved the one way
+        // every view resolves it, so the primary location and the member this
+        // log calls canonical are the same occurrence.
+        let anchor = canonical_position(&group.members, |member| member.canonical);
         Self {
             rule_id: rule.map(|spec| spec.id),
             rule_index: RULES.iter().position(|spec| spec.class == group.clone_type),
@@ -745,8 +751,9 @@ impl<'a> ResultEntry<'a> {
                 text: message_text(group),
             },
             occurrence_count: (!group.members.is_empty()).then_some(group.members.len()),
-            locations: canonical
-                .map(|member| Location::new(member, None, None))
+            locations: anchor
+                .and_then(|index| group.members.get(index))
+                .map(|member| Location::new(member, true, None, None))
                 .into_iter()
                 .collect(),
             related_locations: group
@@ -754,10 +761,12 @@ impl<'a> ResultEntry<'a> {
                 .iter()
                 .enumerate()
                 .map(|(index, member)| {
+                    let canonical = anchor == Some(index);
                     Location::new(
                         member,
+                        canonical,
                         Some(index),
-                        Some(occurrence_label(index, group.members.len(), member)),
+                        Some(occurrence_label(index, group.members.len(), canonical)),
                     )
                 })
                 .collect(),
@@ -784,6 +793,8 @@ impl<'a> ResultEntry<'a> {
                 test_code_evidence: group.test_code_evidence,
                 width_family: group.width_family,
                 split_pair: group.split_pair,
+                ranked_down: group.ranked_down,
+                identity: group.identity.as_ref(),
                 suppressed: group.suppressed.as_ref(),
                 baseline: group.baseline.as_ref(),
                 semantic: group.semantic.as_ref(),
@@ -821,13 +832,13 @@ fn message_text(group: &Group) -> String {
 }
 
 /// Label for one occurrence inside its group.
-fn occurrence_label(index: usize, total: usize, member: &Member) -> String {
-    let canonical = if member.canonical {
+fn occurrence_label(index: usize, total: usize, canonical: bool) -> String {
+    let mark = if canonical {
         " (canonical instance)"
     } else {
         ""
     };
-    format!("occurrence {} of {total}{canonical}", index + 1)
+    format!("occurrence {} of {total}{mark}", index + 1)
 }
 
 #[derive(Debug, Serialize)]
@@ -852,7 +863,15 @@ struct Location<'a> {
 }
 
 impl<'a> Location<'a> {
-    fn new(member: &'a Member, id: Option<usize>, message: Option<String>) -> Self {
+    /// `canonical` is the resolved group-level answer rather than the member's
+    /// own flag, so a group whose stored members flag none of them cannot
+    /// report its primary location as a non-canonical occurrence.
+    fn new(
+        member: &'a Member,
+        canonical: bool,
+        id: Option<usize>,
+        message: Option<String>,
+    ) -> Self {
         Self {
             id,
             physical_location: PhysicalLocation {
@@ -873,8 +892,9 @@ impl<'a> Location<'a> {
                 finding_id: &member.finding_id,
                 content: &member.content,
                 language: &member.language,
+                boilerplate: member.boilerplate.as_deref(),
                 tokens: member.tokens,
-                canonical: member.canonical,
+                canonical,
             },
         }
     }
@@ -924,6 +944,10 @@ struct LocationProperties<'a> {
     finding_id: &'a str,
     content: &'a str,
     language: &'a str,
+    /// Boilerplate shape of the enclosing whole unit, when the mode
+    /// classified one. Absent exactly where the JSON report omits it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    boilerplate: Option<&'a str>,
     tokens: u64,
     canonical: bool,
 }
@@ -950,27 +974,39 @@ impl From<&Suppression> for SuppressionEntry {
 /// Result property bag: the group fields SARIF has no place for, under their
 /// JSON-report keys so the two machine-readable views agree field for field.
 #[derive(Debug, Serialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each boolean is an independently established finding classification"
+)]
 struct ResultProperties<'a> {
     clone_type: &'a str,
     scope: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Present whenever the JSON report states it, which for a whole-unit
+    /// group is as an explicit null: a field a consumer finds in one
+    /// machine-readable view and not the other is a field it cannot rely on.
     statements: Option<u64>,
     confidence: f64,
     entropy_bits: f64,
     priority: &'a Priority,
-    #[serde(skip_serializing_if = "Option::is_none")]
     similarity: Option<&'a Similarity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     identifier_jaccard: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     body_materiality: Option<&'a BodyMateriality>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     boilerplate: Option<&'a str>,
     test_code: bool,
     test_code_evidence: Option<codehelion_core::test_code::TestCodeEvidence>,
     width_family: bool,
     split_pair: bool,
+    /// Whether the effective policy places this group after ordinary findings.
+    /// A consumer that only reads results otherwise cannot tell a group ranked
+    /// down by policy from one that simply scored low.
+    ranked_down: bool,
+    /// How the group came by the history it carries, when a preceding run
+    /// gave it one. Lineage is not a SARIF concept, so it travels here or not
+    /// at all.
     #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<&'a super::GroupIdentity>,
     suppressed: Option<&'a Suppression>,
     #[serde(skip_serializing_if = "Option::is_none")]
     baseline: Option<&'a super::GroupBaseline>,

@@ -12,8 +12,8 @@
 use super::{
     ArtifactSavings, BASELINE_COMPARE, BaselineStatus, Decoration, GONE_LISTED, GROUP_EXPANDED,
     GROUP_NEW, Group, IDENTITY_ADOPTED, IDENTITY_RETAINED, Member, Report, SCOPE_FRAGMENT, Summary,
-    TextOptions, UnusedRule, Write, budget_note, depth_truncation_files, duplicated_tokens, io,
-    search_truncation_note, severed_note,
+    TextOptions, UnusedRule, Write, budget_note, canonical_position, depth_truncation_files,
+    duplicated_tokens, io, search_truncation_note, severed_note,
 };
 
 /// Ranking value at and above which a group is drawn as the report's own
@@ -381,6 +381,33 @@ impl Report {
         self.render_legend(opts, palette, out)
     }
 
+    /// The groups this report has to say something about: everything no rule
+    /// hid, before the view narrows it.
+    fn reported(&self) -> Vec<&Group> {
+        self.groups
+            .iter()
+            .filter(|group| group.suppressed.is_none())
+            .collect()
+    }
+
+    /// The groups the listing shows, in listing order.
+    ///
+    /// One rule for the listing and for the legend that says what to type
+    /// next: a legend naming a group the same view filtered out would send a
+    /// reader after something this report does not contain.
+    fn visible(&self, opts: TextOptions) -> Vec<&Group> {
+        self.reported()
+            .into_iter()
+            .filter(|group| {
+                opts.min_identifier_jaccard.is_none_or(|floor| {
+                    group
+                        .identifier_jaccard
+                        .is_some_and(|measured| measured >= floor)
+                })
+            })
+            .collect()
+    }
+
     /// What the listing's marks meant, and what to type next.
     ///
     /// Written once, under the counts, and only about what this report
@@ -393,9 +420,8 @@ impl Report {
         out: &mut impl Write,
     ) -> io::Result<()> {
         let listed: Vec<&Group> = self
-            .groups
-            .iter()
-            .filter(|group| group.suppressed.is_none())
+            .visible(opts)
+            .into_iter()
             .take(opts.group_limit())
             .collect();
         let Some(first) = listed.first() else {
@@ -578,16 +604,31 @@ impl Report {
         }
         // Then what qualifies the report without unsettling it: a rule that
         // matched nothing, a policy this mode could not apply.
-        if !summary.unused_suppressions.is_empty() {
-            let names: Vec<String> = summary
-                .unused_suppressions
-                .iter()
-                .map(UnusedRule::label)
-                .collect();
+        let (covering, matched_nothing): (Vec<&UnusedRule>, Vec<&UnusedRule>) = summary
+            .unused_suppressions
+            .iter()
+            .partition(|rule| rule.matched > 1);
+        if !matched_nothing.is_empty() {
+            let names: Vec<String> = matched_nothing.iter().map(|rule| rule.label()).collect();
             writeln!(
                 out,
                 "note: {} suppression rule(s) matched nothing: {}",
-                summary.unused_suppressions.len(),
+                matched_nothing.len(),
+                names.join(", "),
+            )?;
+        }
+        // A clone id names one duplication, so a prefix that has come to cover
+        // several is hiding groups nobody judged. Named with the count, which
+        // is what tells the reader the id no longer says what it said.
+        if !covering.is_empty() {
+            let names: Vec<String> = covering
+                .iter()
+                .map(|rule| format!("{} ({} groups)", rule.label(), rule.matched))
+                .collect();
+            writeln!(
+                out,
+                "note: {} suppression rule(s) hide more than the one group they name: {}",
+                covering.len(),
                 names.join(", "),
             )?;
         }
@@ -742,22 +783,8 @@ impl Report {
         palette: &Palette,
         out: &mut impl Write,
     ) -> io::Result<()> {
-        let reported: Vec<&Group> = self
-            .groups
-            .iter()
-            .filter(|group| group.suppressed.is_none())
-            .collect();
-        let visible: Vec<&Group> = reported
-            .iter()
-            .copied()
-            .filter(|group| {
-                opts.min_identifier_jaccard.is_none_or(|floor| {
-                    group
-                        .identifier_jaccard
-                        .is_some_and(|measured| measured >= floor)
-                })
-            })
-            .collect();
+        let reported = self.reported();
+        let visible = self.visible(opts);
         let limit = opts.group_limit();
         let columns = GroupColumns::measure(&visible, opts);
         for (position, group) in visible.iter().take(limit).enumerate() {
@@ -909,21 +936,10 @@ impl Report {
             .filter(|sibling| opts.show_suppressed || sibling.suppressed.is_none())
         {
             let member = &sibling.member;
-            // How many units share the signature is the whole strength of this
-            // channel: a signature held by a handful of units says something,
-            // and one the whole layer shares says nothing. The number is shown
-            // so the reader can tell those apart; it never moves the band.
-            let evidence = match (sibling.basis.as_str(), sibling.signature_units) {
-                ("signature", Some(units)) => format!(
-                    "({:.2}) [same signature, {} units share it]",
-                    sibling.similarity.composite,
-                    thousands(units),
-                ),
-                ("signature", None) => {
-                    format!("({:.2}) [same signature]", sibling.similarity.composite)
-                }
-                _ => format!("({:.2})", sibling.similarity.composite),
-            };
+            let evidence = signature_note(&sibling.basis, sibling.signature_units).map_or_else(
+                || format!("({:.2})", sibling.similarity.composite),
+                |note| format!("({:.2}) {note}", sibling.similarity.composite),
+            );
             writeln!(
                 out,
                 "  sibling {} {} {}: {}:{}{}",
@@ -936,6 +952,25 @@ impl Report {
             )?;
         }
         Ok(())
+    }
+}
+
+/// What a signature-channel sibling's evidence is worth, in the words every
+/// text view says it in.
+///
+/// How many units share the signature is the whole strength of this channel: a
+/// signature held by a handful of units says something, and one the whole layer
+/// shares says nothing. The number is shown so the reader can tell those apart;
+/// it never moves the confidence band. `None` is a sibling from the similarity
+/// channel, whose evidence is the score alone.
+pub(super) fn signature_note(basis: &str, signature_units: Option<u64>) -> Option<String> {
+    match (basis, signature_units) {
+        ("signature", Some(units)) => Some(format!(
+            "[same signature, {} units share it]",
+            thousands(units)
+        )),
+        ("signature", None) => Some("[same signature]".to_owned()),
+        _ => None,
     }
 }
 
@@ -1428,8 +1463,15 @@ fn baseline_marker(group: &Group, palette: &Palette) -> String {
 ///
 /// Written only where there is a comparison to report: a group with no
 /// predecessor connection says nothing here, and a first scan says nothing at
-/// all. An adoption names the group it took over from and the shared members
-/// the connection was decided on, because that count is the rule itself.
+/// all. An adoption names the group it took over from and the shared member
+/// contents the connection was decided on, because that count is the rule
+/// itself.
+///
+/// The count is stated out of the population it was counted in — the group's
+/// distinct member contents, of which several members can share one — and
+/// alone when the recorded connection measured no population. The group's
+/// member count is a different population, and dividing by it would present
+/// strong evidence as weak.
 fn render_group_identity(group: &Group, indent: &str, out: &mut impl Write) -> io::Result<()> {
     let Some(identity) = &group.identity else {
         return Ok(());
@@ -1437,11 +1479,17 @@ fn render_group_identity(group: &Group, indent: &str, out: &mut impl Write) -> i
     if identity.origin == IDENTITY_ADOPTED {
         let from = identity.adopted_from.as_deref().unwrap_or("");
         let shared = identity.shared_members.unwrap_or(0);
-        return writeln!(
-            out,
-            "{indent}  new identity (lineage: {from}, {shared} of {} members shared)",
-            group.members.len(),
-        );
+        return match identity.compared_members {
+            Some(compared) => writeln!(
+                out,
+                "{indent}  new identity (lineage: {from}, {shared} of {compared} member \
+                 content(s) shared)",
+            ),
+            None => writeln!(
+                out,
+                "{indent}  new identity (lineage: {from}, {shared} member content(s) shared)",
+            ),
+        };
     }
     if identity.origin == IDENTITY_RETAINED {
         return writeln!(
@@ -1526,11 +1574,7 @@ fn group_markers(group: &Group, palette: &Palette) -> String {
 /// against and the one a reader opens first; every other order makes that a
 /// fact you have to look for.
 fn listed_members(group: &Group, opts: TextOptions) -> Vec<(bool, &Member)> {
-    let anchor = group
-        .members
-        .iter()
-        .position(|member| member.canonical)
-        .unwrap_or(0);
+    let anchor = canonical_position(&group.members, |member| member.canonical).unwrap_or(0);
     let mut ordered: Vec<(bool, &Member)> = group
         .members
         .iter()

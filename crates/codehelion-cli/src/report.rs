@@ -1187,7 +1187,11 @@ pub struct Guardrails {
     pub profile: String,
     /// Largest file read, in bytes.
     pub max_file_bytes: u64,
-    /// Longest one file was parsed for, in milliseconds.
+    /// Per-file deterministic parse-work budget, expressed in compatibility
+    /// milliseconds. Each millisecond admits 256 input bytes; files above the
+    /// resulting byte budget are excluded and counted as skipped. Not a
+    /// wall-clock deadline: host load and worker count do not change what a
+    /// scan reports.
     pub parse_timeout_ms: u64,
     /// Longest a compiler helper may answer for one source unit, in milliseconds.
     pub helper_timeout_ms: u64,
@@ -1226,9 +1230,10 @@ mod ranking;
 
 pub use ranking::{
     FunnelDrop, FunnelStage, Member, RankingInfo, Sort, Suppression, SuppressionKind, UnusedRule,
-    compare_on, duplicated_tokens, identity_collapsed, is_search_truncation, order, order_recorded,
-    ranked, ranks_down, restored, search_truncated, stored_funnel, stored_identity_collapsed,
-    stored_rules, unapplied_suppression_policies, unmeasured_in_this_mode,
+    canonical_member, canonical_position, compare_on, duplicated_tokens, identity_collapsed,
+    is_search_truncation, order, order_recorded, ranked, ranks_down, restored, search_truncated,
+    stored_funnel, stored_identity_collapsed, stored_rules, unapplied_suppression_policies,
+    unmeasured_in_this_mode,
 };
 
 pub(crate) use ranking::append_stored_identity_stage;
@@ -1514,10 +1519,24 @@ pub struct GroupIdentity {
     /// The predecessor whose history an `adopted` group took over.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adopted_from: Option<String>,
-    /// Members this group shares with that predecessor. The connection was
-    /// decided on this quantity, so it is the evidence for it.
+    /// Distinct member contents this group shares with that predecessor. The
+    /// connection was decided on this quantity, so it is the evidence for it.
+    ///
+    /// Contents rather than members: several members of one group can carry
+    /// the same content, and the rule that adopted the history counted
+    /// contents.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shared_members: Option<u64>,
+    /// Distinct member contents this group was compared on: the population
+    /// [`Self::shared_members`] was counted out of.
+    ///
+    /// A count is only evidence beside what it is a count out of, and both
+    /// numbers have to come from one population. `None` when the recorded
+    /// connection carries no measured population, in which case a reader
+    /// states the shared count alone rather than pairing it with a number that
+    /// counts something else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compared_members: Option<u64>,
 }
 
 /// The origin value of a group the preceding run already knew by fingerprint.
@@ -1994,7 +2013,7 @@ impl TextOptions {
 
 mod render;
 
-use render::{GroupColumns, Palette, render_group};
+use render::{GroupColumns, Palette, render_group, signature_note};
 
 pub(crate) fn render_partition_artifact_guidance(
     reports: &[Report],
