@@ -56,6 +56,7 @@
 //! believing a whole file only when it is error-free left 69% to 77% of the
 //! arms the parser had in fact read cleanly unused.
 
+use crate::frontend::Token;
 use crate::ir::{IrNode, Shape};
 
 /// One conditional a unit is inside, and which of its arms.
@@ -158,8 +159,23 @@ impl ArmTracker {
 }
 
 impl ArmPath {
+    /// The path that applies inside `node`, established without any literal
+    /// evidence about the arm's condition.
+    ///
+    /// A caller holding the condition tokens uses
+    /// [`Self::descend_with_condition`] instead; without them every arm is
+    /// taken to be possible, which is the conservative reading.
+    #[must_use]
+    pub fn descend(&self, node: &IrNode, next: &mut u32) -> Option<Self> {
+        self.descend_with_condition(node, next, StaticCondition::Unknown)
+    }
+
     /// The path that applies inside `node`, or `None` when `node` leaves it
     /// unchanged — which is every node but a conditional's own.
+    ///
+    /// `condition` is what lexical preprocessing established about the arm
+    /// being entered. A literally false arm is entered unreachable: it nests
+    /// like any other, and nothing under it belongs to a build.
     ///
     /// `next` hands out conditional identifiers and must be shared across
     /// every file in a run, so that two files' conditionals never collide.
@@ -171,10 +187,16 @@ impl ArmPath {
     /// under it would advance the arm of the conditional above — but it is
     /// entered unbelieved, and none of its arms is distinguished from another.
     #[must_use]
-    pub fn descend(&self, node: &IrNode, next: &mut u32) -> Option<Self> {
+    pub fn descend_with_condition(
+        &self,
+        node: &IrNode,
+        next: &mut u32,
+        condition: StaticCondition,
+    ) -> Option<Self> {
         let Shape::Native(kind) = &node.shape else {
             return None;
         };
+        let reachable = condition != StaticCondition::False;
         let mut arms = self.arms.clone();
         match &**kind {
             "preproc_if" | "preproc_ifdef" => {
@@ -182,7 +204,7 @@ impl ArmPath {
                     conditional: *next,
                     index: 0,
                     believed: !stumbled_inside(node),
-                    reachable: true,
+                    reachable,
                 });
                 *next = next.wrapping_add(1);
             }
@@ -195,6 +217,7 @@ impl ArmPath {
                     return None;
                 }
                 arm.index += 1;
+                arm.reachable = reachable;
             }
             _ => return None,
         }
@@ -224,6 +247,43 @@ impl ArmPath {
     pub fn is_unreachable(&self) -> bool {
         self.arms.iter().any(|arm| !arm.reachable)
     }
+
+    /// Whether one build can hold both units: neither sits under an arm no
+    /// build takes, and no conditional they share puts them in different arms.
+    ///
+    /// This is the whole question a gate proposing a pair asks of the two
+    /// paths, so asking it through one predicate is what keeps a pair judged
+    /// the same way in every mode.
+    #[must_use]
+    pub fn can_coexist(&self, other: &Self) -> bool {
+        !self.is_unreachable() && !other.is_unreachable() && !self.excludes(other)
+    }
+}
+
+/// The literal condition the conditional starting at `tokens` opens with.
+///
+/// `tokens` is the whole conditional's token range, so the directive keyword
+/// leads and the condition runs to the end of its line. Only `#if` and `#elif`
+/// carry an expression at all: `#ifdef` and its relatives name a macro this
+/// mode does not resolve, and `#else` states no condition. Anything but a lone
+/// `0` or `1` needs preprocessing to settle and is left unknown.
+#[must_use]
+pub fn literal_condition(tokens: &[Token]) -> StaticCondition {
+    let [directive, rest @ ..] = tokens else {
+        return StaticCondition::Unknown;
+    };
+    if !matches!(directive.text.as_ref(), "#if" | "#elif") {
+        return StaticCondition::Unknown;
+    }
+    let mut condition = rest.iter().take_while(|token| token.text.as_ref() != "\n");
+    let (Some(first), None) = (condition.next(), condition.next()) else {
+        return StaticCondition::Unknown;
+    };
+    match first.text.as_ref() {
+        "0" => StaticCondition::False,
+        "1" => StaticCondition::True,
+        _ => StaticCondition::Unknown,
+    }
 }
 
 /// Whether the parser stumbled anywhere inside `node`.
@@ -244,7 +304,7 @@ fn stumbled_inside(node: &IrNode) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::frontend::Lexeme;
+    use crate::frontend::{Lexeme, SourceSpan, TokenKind};
     use crate::ir::ByteRange;
 
     fn node(shape: Shape, children: Vec<IrNode>) -> IrNode {
@@ -409,6 +469,105 @@ mod tests {
             None
         );
         assert!(!broken_inner.excludes(&outer));
+    }
+
+    /// The condition of a directive, read from its tokens as the walk hands
+    /// them over.
+    fn condition(words: &[&str]) -> StaticCondition {
+        let tokens: Vec<Token> = words
+            .iter()
+            .map(|word| Token {
+                kind: TokenKind::Punctuation,
+                text: (*word).into(),
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: word.len(),
+                    start_line: 1,
+                    start_column: 1,
+                },
+            })
+            .collect();
+        literal_condition(&tokens)
+    }
+
+    #[test]
+    fn only_a_lone_literal_settles_a_condition() {
+        assert_eq!(condition(&["#if", "0", "\n"]), StaticCondition::False);
+        assert_eq!(condition(&["#if", "1", "\n"]), StaticCondition::True);
+        assert_eq!(condition(&["#elif", "0", "\n"]), StaticCondition::False);
+        assert_eq!(
+            condition(&["#if", "0", "\n", "int", "dead", "(", ")", ";"]),
+            StaticCondition::False,
+            "what the arm holds is not part of its condition"
+        );
+        assert_eq!(
+            condition(&["#ifdef", "0", "\n"]),
+            StaticCondition::Unknown,
+            "a macro name is not an expression this mode evaluates"
+        );
+        assert_eq!(
+            condition(&["#else", "0"]),
+            StaticCondition::Unknown,
+            "a branch keyword states no condition"
+        );
+        assert_eq!(
+            condition(&["#if", "defined", "(", "X", ")", "\n"]),
+            StaticCondition::Unknown
+        );
+        assert_eq!(condition(&["#if", "\n"]), StaticCondition::Unknown);
+        assert_eq!(condition(&[]), StaticCondition::Unknown);
+    }
+
+    #[test]
+    fn a_literally_false_arm_is_entered_unreachable() {
+        let mut next = 0;
+        let root = ArmPath::default();
+        let dead = root
+            .descend_with_condition(&native("preproc_if"), &mut next, StaticCondition::False)
+            .unwrap();
+        assert!(dead.is_unreachable(), "no build compiles a `#if 0` arm");
+        // The `#else` beside it is the arm every build takes.
+        let otherwise = dead
+            .descend_with_condition(&native("preproc_else"), &mut next, StaticCondition::Unknown)
+            .unwrap();
+        assert!(!otherwise.is_unreachable());
+        // A conditional nested under a dead arm is dead with it.
+        let inner = dead
+            .descend_with_condition(
+                &native("preproc_ifdef"),
+                &mut next,
+                StaticCondition::Unknown,
+            )
+            .unwrap();
+        assert!(inner.is_unreachable());
+        // Without literal evidence the arm remains possible.
+        assert!(
+            !root
+                .descend(&native("preproc_if"), &mut next)
+                .unwrap()
+                .is_unreachable()
+        );
+    }
+
+    #[test]
+    fn code_no_build_takes_coexists_with_nothing() {
+        let mut next = 0;
+        let root = ArmPath::default();
+        let dead = root
+            .descend_with_condition(&native("preproc_if"), &mut next, StaticCondition::False)
+            .unwrap();
+        assert!(!dead.can_coexist(&root));
+        assert!(!root.can_coexist(&dead));
+        assert!(
+            !dead.can_coexist(&dead),
+            "two units under one dead arm are still in no build"
+        );
+
+        let taken = root.descend(&native("preproc_ifdef"), &mut next).unwrap();
+        let otherwise = taken.descend(&native("preproc_else"), &mut next).unwrap();
+        assert!(!taken.can_coexist(&otherwise), "alternative arms");
+        assert!(taken.can_coexist(&root), "a guard rules out nothing else");
+        assert!(root.can_coexist(&ArmPath::default()));
     }
 
     #[test]

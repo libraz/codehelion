@@ -30,6 +30,7 @@ pub use generated::{DEFAULT_MARKERS, DEFAULT_SCAN_LINES, GeneratedMarkers};
 pub use language::{Classification, HeaderEvidence, HeaderPolicy, Language, LanguageSelection};
 pub use source_unit::{ContentHash, SourceUnit, TargetKind};
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -82,29 +83,48 @@ impl Default for DiscoveryConfig {
 /// Counts of files excluded for reasons other than being generated.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SkipReport {
-    /// Files past the size ceiling.
+    /// Source candidates past the size ceiling.
+    ///
+    /// Metadata is counted by [`Self::oversized_metadata`] instead: a
+    /// compilation database too large to read is a lost build description, not
+    /// a source file missing from the comparison.
     pub too_large: u64,
+    /// Recognised metadata files past the size ceiling.
+    ///
+    /// A compilation database counted here is also named by
+    /// [`DiscoveryReport::compile_commands_error`]; a Cargo manifest counted
+    /// here contributed no package attribution.
+    pub oversized_metadata: u64,
     /// Files that looked binary (a NUL byte in their head).
     pub binary: u64,
     /// Files that could not be read.
     pub unreadable: u64,
     /// Source files excluded because their language was disabled.
     pub language_excluded: u64,
-    /// Symbolic links deliberately left unresolved by the walker.
+    /// Symbolic links the walker counted instead of walking.
+    ///
+    /// The three fields below break this total down by what the link names.
     pub symlinks: u64,
-    /// Symbolic-link files deliberately left unresolved by the walker.
+    /// Symbolic links that name a file.
     pub symlink_files: u64,
-    /// Symbolic-link directories deliberately left unresolved by the walker.
+    /// Symbolic links that name a directory.
     pub symlink_directories: u64,
+    /// Symbolic links whose own entry could not be read, so they name neither
+    /// a file nor a directory the walk could see.
+    pub symlink_unresolved: u64,
     /// Directory entries the walker could not read.
     pub walk_errors: u64,
 }
 
 impl SkipReport {
     /// Total number of skipped entries.
+    ///
+    /// The symbolic-link breakdown is not added again: [`Self::symlinks`]
+    /// already counts every link once.
     #[must_use]
     pub const fn total(&self) -> u64 {
         self.too_large
+            + self.oversized_metadata
             + self.binary
             + self.unreadable
             + self.language_excluded
@@ -189,10 +209,12 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
     let walked = walk::collect(&root, &settings);
     let mut skipped = SkipReport {
         too_large: walked.too_large,
+        oversized_metadata: walked.oversized_metadata,
         language_excluded: walked.language_excluded,
         symlinks: walked.symlinks,
         symlink_files: walked.symlink_files,
         symlink_directories: walked.symlink_directories,
+        symlink_unresolved: walked.symlink_unresolved,
         walk_errors: walked.walk_errors,
         ..SkipReport::default()
     };
@@ -203,13 +225,7 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
     // header is parsed with is part of the build variant, so it is one
     // decision for the whole run rather than a per-file guess. An explicit
     // policy is the answer where there is one; detection only fills the gap.
-    let mut loaded = Vec::new();
-    for candidate in walked.candidates {
-        match std::fs::read(&candidate.absolute_path) {
-            Ok(bytes) => loaded.push((candidate, bytes)),
-            Err(_) => skipped.unreadable += 1,
-        }
-    }
+    let loaded = read_candidates(walked.candidates, config.max_file_bytes, &mut skipped);
     let header_language = match config.header_policy {
         HeaderPolicy::C => Language::C,
         HeaderPolicy::Cpp => Language::Cpp,
@@ -287,6 +303,44 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
         compile_commands,
         compile_commands_error,
     })
+}
+
+/// Read every candidate the walk kept, keeping the bytes of the ones within
+/// the size ceiling and accounting for the rest in `skipped`.
+///
+/// A candidate the read finds oversized is counted as such and dropped, so it
+/// reaches neither the units nor the header evidence.
+fn read_candidates(
+    candidates: Vec<walk::Candidate>,
+    max_file_bytes: u64,
+    skipped: &mut SkipReport,
+) -> Vec<(walk::Candidate, Vec<u8>)> {
+    let mut loaded = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        match read_within_ceiling(&candidate.absolute_path, max_file_bytes) {
+            Ok(Some(bytes)) => loaded.push((candidate, bytes)),
+            Ok(None) => skipped.too_large += 1,
+            Err(_) => skipped.unreadable += 1,
+        }
+    }
+    loaded
+}
+
+/// Read at most one byte past `max_file_bytes`, so the ceiling is enforced by
+/// the read itself rather than by the size the walk was told.
+///
+/// The walk decides from a file's metadata, and a file being written while the
+/// tree is traversed can be larger by the time it is opened. Reading it whole
+/// would hold it for the rest of the scan, which is exactly the cost the
+/// ceiling exists to bound. `Ok(None)` reports a file the read measured as
+/// over the ceiling; I/O failures stay distinct so an unreadable file is still
+/// accounted for as one.
+fn read_within_ceiling(path: &Path, max_file_bytes: u64) -> std::io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(max_file_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok((u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= max_file_bytes).then_some(bytes))
 }
 
 fn resolve_compile_commands_path(root: &Path, path: &Path) -> PathBuf {
@@ -472,10 +526,85 @@ mod tests {
         };
         let report = discover(&root, &config).unwrap();
         assert_eq!(report.skipped.too_large, 1);
+        assert!(
+            report.units.iter().all(|unit| unit.byte_len <= 1024
+                && u64::try_from(unit.source_bytes.len()).unwrap() <= 1024),
+            "no unit carries more bytes than the ceiling allows"
+        );
     }
 
+    /// A candidate the walk let through because its metadata said it fitted,
+    /// and which the read then finds over the ceiling — a file still being
+    /// written while the tree was traversed. The read's measurement is the one
+    /// that decides, so the file is counted as oversized and its bytes are not
+    /// retained for the rest of the run.
     #[test]
-    fn oversized_metadata_inputs_are_skipped_before_they_are_read() {
+    fn a_candidate_the_read_finds_oversized_is_counted_and_dropped() {
+        let (_guard, root) = fixture();
+        let grown = root.join("src/grown.rs");
+        fs::write(&grown, vec![b'x'; 4096]).unwrap();
+        let candidate = walk::Candidate {
+            relative_path: PathBuf::from("src/grown.rs"),
+            absolute_path: grown,
+            classification: Classification {
+                language: Language::Rust,
+                is_header: false,
+                provisional: false,
+            },
+        };
+        let mut skipped = SkipReport::default();
+
+        let loaded = read_candidates(vec![candidate], 1024, &mut skipped);
+
+        assert!(loaded.is_empty(), "no oversized bytes reach the units");
+        assert_eq!(skipped.too_large, 1);
+        assert_eq!(skipped.unreadable, 0);
+    }
+
+    /// A candidate that cannot be opened at all is a different outcome from one
+    /// that is too large, and each keeps its own count.
+    #[test]
+    fn a_candidate_that_vanished_after_the_walk_is_counted_as_unreadable() {
+        let (_guard, root) = fixture();
+        let candidate = walk::Candidate {
+            relative_path: PathBuf::from("src/gone.rs"),
+            absolute_path: root.join("src/gone.rs"),
+            classification: Classification {
+                language: Language::Rust,
+                is_header: false,
+                provisional: false,
+            },
+        };
+        let mut skipped = SkipReport::default();
+
+        let loaded = read_candidates(vec![candidate], 1024, &mut skipped);
+
+        assert!(loaded.is_empty());
+        assert_eq!(skipped.unreadable, 1);
+        assert_eq!(skipped.too_large, 0);
+    }
+
+    /// The ceiling is a ceiling on what is read, not only on what is kept: one
+    /// byte past it is enough to reject a file, and the read stops there.
+    #[test]
+    fn a_source_read_stops_one_byte_past_the_ceiling() {
+        let (_guard, root) = fixture();
+        let path = root.join("src/wide.rs");
+        fs::write(&path, vec![b'x'; 257]).unwrap();
+
+        assert_eq!(read_within_ceiling(&path, 256).unwrap(), None);
+        assert_eq!(
+            read_within_ceiling(&path, 257).unwrap().as_deref(),
+            Some(&[b'x'; 257][..])
+        );
+    }
+
+    /// Metadata over the ceiling is counted apart from the source files that
+    /// were too large to compare, and the database says which file it was:
+    /// a run without build settings is a different report from a run whose
+    /// sources were all skipped, and one number for both tells neither.
+    #[test]
+    fn oversized_metadata_is_counted_apart_from_oversized_sources() {
         let (_guard, root) = fixture();
         fs::write(root.join("Cargo.toml"), "x".repeat(4096)).unwrap();
         fs::write(root.join("compile_commands.json"), "[{}]".repeat(1024)).unwrap();
@@ -488,8 +617,19 @@ mod tests {
 
         assert!(report.packages.is_empty());
         assert!(report.compile_commands.is_none());
-        assert!(report.compile_commands_error.is_none());
-        assert_eq!(report.skipped.too_large, 2);
+        assert_eq!(
+            report
+                .compile_commands_error
+                .as_ref()
+                .map(|diagnostic| diagnostic.message.as_str()),
+            Some("compile_commands.json is 4096 bytes, exceeding the 1024-byte limit"),
+            "an automatically discovered database reports the same failure an explicit one does"
+        );
+        assert_eq!(report.skipped.oversized_metadata, 2);
+        assert_eq!(
+            report.skipped.too_large, 0,
+            "metadata does not enter the count of sources left out of the comparison"
+        );
     }
 
     #[test]
@@ -517,11 +657,14 @@ mod tests {
     }
 
     /// `CMake` commonly leaves its database in an ignored build directory and
-    /// exposes it through this root-level symlink for editor tooling.
+    /// exposes it through this root-level symlink for editor tooling. The
+    /// ignored directory is out of the walk's reach in a real repository, so
+    /// the link is the only way the database is reachable at all.
     #[cfg(unix)]
     #[test]
     fn discovers_a_root_compilation_database_symlink_into_an_ignored_build_directory() {
         let (_guard, root) = fixture();
+        fs::create_dir_all(root.join(".git")).unwrap();
         let build = root.join("build");
         fs::create_dir_all(&build).unwrap();
         fs::write(root.join(".gitignore"), "build/\n").unwrap();
@@ -540,6 +683,11 @@ mod tests {
         assert_eq!(
             report.compile_commands.as_ref().map(|db| db.entries.len()),
             Some(1)
+        );
+        assert!(report.compile_commands_error.is_none());
+        assert_eq!(
+            report.skipped.symlinks, 0,
+            "the database is classified by its role, not counted as a link left alone"
         );
     }
 
@@ -607,6 +755,31 @@ mod tests {
                 .units
                 .iter()
                 .all(|unit| unit.relative_path != Path::new("src/linked.rs"))
+        );
+    }
+
+    /// A link with nothing at the end of it names neither a file nor a
+    /// directory, and reporting it as a file would claim a source the tree does
+    /// not have.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_resolves_to_nothing_is_counted_as_neither_file_nor_directory() {
+        use std::os::unix::fs::symlink;
+
+        let (_guard, root) = fixture();
+        symlink(root.join("src/absent.rs"), root.join("src/dangling.rs")).unwrap();
+
+        let report = discover(&root, &DiscoveryConfig::default()).unwrap();
+        assert_eq!(report.skipped.symlinks, 1);
+        assert_eq!(report.skipped.symlink_unresolved, 1);
+        assert_eq!(report.skipped.symlink_files, 0);
+        assert_eq!(report.skipped.symlink_directories, 0);
+        assert_eq!(report.skipped.unreadable, 0, "nothing tried to read it");
+        assert!(
+            report
+                .units
+                .iter()
+                .all(|unit| unit.relative_path != Path::new("src/dangling.rs"))
         );
     }
 
@@ -708,6 +881,44 @@ mod tests {
                 .units
                 .iter()
                 .any(|unit| unit.relative_path == Path::new("src/lib.rs"))
+        );
+    }
+
+    /// An unpacked archive, a shallow checkout or a vendored copy carries the
+    /// ignore files without the repository around them. The generated trees
+    /// they describe are the same either way, and walking them would fill a
+    /// report with machine output while looking like a run that was asked to.
+    #[test]
+    fn ignore_files_are_honoured_in_a_tree_that_is_not_a_repository() {
+        let (_guard, root) = fixture();
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(root.join("target/built.rs"), "pub fn built() {}\n").unwrap();
+        assert!(!root.join(".git").exists(), "no repository in this tree");
+
+        let report = discover(&root, &DiscoveryConfig::default()).unwrap();
+        assert!(
+            report
+                .units
+                .iter()
+                .all(|unit| unit.relative_path != Path::new("target/built.rs"))
+        );
+
+        // The same file with the ignore rules switched off, so what excluded it
+        // above was the ignore file rather than anything else about the path.
+        let unfiltered = discover(
+            &root,
+            &DiscoveryConfig {
+                respect_gitignore: false,
+                ..DiscoveryConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            unfiltered
+                .units
+                .iter()
+                .any(|unit| unit.relative_path == Path::new("target/built.rs"))
         );
     }
 

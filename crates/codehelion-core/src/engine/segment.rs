@@ -136,11 +136,22 @@ pub(crate) struct FragmentExtraction {
     pub(crate) fragments: Vec<Fragment>,
     /// Control headers too long or malformed to locate a block safely.
     pub(crate) control_headers_over_limit: usize,
+    /// Blocks left uncut because they nest deeper than the extraction limit.
+    pub(crate) bodies_over_nesting_limit: usize,
 }
 
 /// Most real control headers are a few tokens. A fixed limit prevents a
 /// malformed file full of keywords from making extraction quadratic.
 const MAX_CONTROL_HEADER_TOKENS: usize = 256;
+
+/// Blocks nested deeper than this are not cut into fragments.
+///
+/// Every enclosing block covers the tokens of the blocks inside it, so cutting
+/// each level of a nesting chain costs, and emits, the file over again per
+/// level: a chain of thousands of blocks is quadratic in its own depth. Real
+/// code nests a couple of dozen levels at most, so the depth is capped and the
+/// total cut volume stays a linear multiple of the file.
+const MAX_BODY_NESTING_DEPTH: u32 = 64;
 
 /// Extract the candidate fragments of one file.
 ///
@@ -158,10 +169,11 @@ pub(crate) fn fragments(
 ) -> FragmentExtraction {
     let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut out: Vec<Fragment> = Vec::new();
-    // Every block body found below, whatever its kind; statement runs are cut
-    // inside each of them, so a transplanted run is recovered wherever it
-    // landed (directly in a function, inside a loop, inside a branch).
-    let mut bodies: Vec<(usize, usize)> = Vec::new();
+    // Every block found below, whatever its kind, keyed by its `{`. Statement
+    // runs are cut inside each of them, so a transplanted run is recovered
+    // wherever it landed (directly in a function, inside a loop, inside a
+    // branch).
+    let mut blocks: Vec<(FragmentKind, usize, usize)> = Vec::new();
     let mut push = |kind: FragmentKind, start: usize, end: usize| {
         if end > start && end - start >= min_tokens && seen.insert((start, end)) {
             out.push(Fragment { kind, start, end });
@@ -175,8 +187,7 @@ pub(crate) fn fragments(
             UnitKind::Function | UnitKind::Method | UnitKind::Closure
         ) {
             if let Some((open, close)) = body_braces(tokens, braces, unit) {
-                bodies.push((open + 1, close));
-                push(FragmentKind::Body, open + 1, close);
+                blocks.push((FragmentKind::Body, open, close));
             }
         }
     }
@@ -196,8 +207,7 @@ pub(crate) fn fragments(
             {
                 match block_after(tokens, braces, i) {
                     BlockAfter::Found(open, close) => {
-                        bodies.push((open + 1, close));
-                        push(FragmentKind::Loop, open + 1, close);
+                        blocks.push((FragmentKind::Loop, open, close));
                     }
                     BlockAfter::Limit => control_headers_over_limit += 1,
                     BlockAfter::None => {}
@@ -206,8 +216,7 @@ pub(crate) fn fragments(
             TokenKind::Keyword if matches!(token.text.as_str(), "if" | "match" | "switch") => {
                 match block_after(tokens, braces, i) {
                     BlockAfter::Found(open, close) => {
-                        bodies.push((open + 1, close));
-                        push(FragmentKind::Branch, open + 1, close);
+                        blocks.push((FragmentKind::Branch, open, close));
                     }
                     BlockAfter::Limit => control_headers_over_limit += 1,
                     BlockAfter::None => {}
@@ -219,8 +228,7 @@ pub(crate) fn fragments(
             {
                 match block_after(tokens, braces, i) {
                     BlockAfter::Found(open, close) => {
-                        bodies.push((open + 1, close));
-                        push(FragmentKind::Branch, open + 1, close);
+                        blocks.push((FragmentKind::Branch, open, close));
                     }
                     BlockAfter::Limit => control_headers_over_limit += 1,
                     BlockAfter::None => {}
@@ -231,12 +239,31 @@ pub(crate) fn fragments(
                 if token.text == "=>" && tokens.get(i + 1).is_some_and(|t| t.text == "{") =>
             {
                 if let Some(&close) = braces.get(&(i + 1)) {
-                    bodies.push((i + 2, close));
-                    push(FragmentKind::Branch, i + 2, close);
+                    blocks.push((FragmentKind::Branch, i + 1, close));
                 }
             }
             _ => {}
         }
+    }
+
+    // Several rules reach the same block: a closure whose body is an `if`, or
+    // a run of control keywords sharing one header. Cutting a range twice
+    // cannot add a fragment, so each block is cut once, which also keeps the
+    // work per block from multiplying by the number of rules that found it.
+    let depths = brace_depths(tokens);
+    let mut cut_blocks: BTreeSet<usize> = BTreeSet::new();
+    let mut bodies: Vec<(usize, usize)> = Vec::new();
+    let mut bodies_over_nesting_limit = 0;
+    for (kind, open, close) in blocks {
+        if depths[open] >= MAX_BODY_NESTING_DEPTH {
+            bodies_over_nesting_limit += 1;
+            continue;
+        }
+        if !cut_blocks.insert(open) {
+            continue;
+        }
+        bodies.push((open + 1, close));
+        push(kind, open + 1, close);
     }
 
     // Statement runs inside every body.
@@ -256,7 +283,28 @@ pub(crate) fn fragments(
     FragmentExtraction {
         fragments: out,
         control_headers_over_limit,
+        bodies_over_nesting_limit,
     }
+}
+
+/// The `{` nesting depth of every token.
+///
+/// A `{` carries the number of blocks enclosing it, zero at the outermost
+/// level, and a `}` the depth it closes back to; the depth of a block is the
+/// depth of its `{`. Unbalanced braces saturate at zero rather than wrapping.
+fn brace_depths(tokens: &[Token]) -> Vec<u32> {
+    let mut depths = Vec::with_capacity(tokens.len());
+    let mut depth: u32 = 0;
+    for token in tokens {
+        if token.kind == TokenKind::Punctuation && token.text == "}" {
+            depth = depth.saturating_sub(1);
+        }
+        depths.push(depth);
+        if token.kind == TokenKind::Punctuation && token.text == "{" {
+            depth = depth.saturating_add(1);
+        }
+    }
+    depths
 }
 
 /// The `{`/`}` token indices delimiting a unit's body.
@@ -502,6 +550,69 @@ mod tests {
         let mut dedup = ranges.clone();
         dedup.dedup();
         assert_eq!(ranges, dedup);
+    }
+
+    #[test]
+    fn brace_depth_counts_enclosing_blocks_and_survives_unbalanced_braces() {
+        // { { } } }
+        let tokens = quick("{ { } } }");
+        assert_eq!(brace_depths(&tokens), vec![0, 1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn blocks_nested_past_the_limit_are_not_cut_and_are_accounted_for() {
+        // Nesting depth grows with the file: every enclosing block covers the
+        // ones inside it, so cutting all of them would cover the file once per
+        // level.
+        const DEPTH: usize = 20_000;
+        let limit = usize::try_from(MAX_BODY_NESTING_DEPTH).unwrap();
+        let source = "if ( a ) { ".repeat(DEPTH) + &"} ".repeat(DEPTH);
+        let tokens = quick(&source);
+        let braces = brace_pairs(&tokens);
+
+        let extraction = fragments(&tokens, &[], &braces, 1, 1);
+
+        assert_eq!(extraction.bodies_over_nesting_limit, DEPTH - limit);
+        // One fragment per cut block plus its single statement window, each at
+        // most the whole file: the cut volume is a linear multiple of the
+        // input rather than growing with the square of the nesting depth.
+        let volume: usize = extraction
+            .fragments
+            .iter()
+            .map(|fragment| fragment.end - fragment.start)
+            .sum();
+        assert!(
+            volume <= 2 * limit * tokens.len(),
+            "cut {volume} tokens out of {}",
+            tokens.len()
+        );
+
+        // Same bytes, same settings, same fragments in the same order.
+        let again = fragments(&tokens, &[], &braces, 1, 1);
+        assert_eq!(extraction.fragments, again.fragments);
+        assert_eq!(
+            extraction.bodies_over_nesting_limit,
+            again.bodies_over_nesting_limit
+        );
+    }
+
+    #[test]
+    fn one_block_found_by_several_rules_is_cut_once() {
+        // `else {` and the `if` that follows it share nothing, but a closure
+        // body that is itself a branch block is reached twice.
+        let tokens = quick("| | if p { a ; b ; }");
+        let units = vec![unit(UnitKind::Closure, 0, tokens.len())];
+        let braces = brace_pairs(&tokens);
+
+        let extraction = fragments(&tokens, &units, &braces, 1, 4);
+
+        assert_eq!(extraction.bodies_over_nesting_limit, 0);
+        let body = extraction
+            .fragments
+            .iter()
+            .filter(|fragment| (fragment.start, fragment.end) == (5, 9))
+            .count();
+        assert_eq!(body, 1, "the shared block yields one fragment");
     }
 
     #[test]

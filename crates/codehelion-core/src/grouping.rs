@@ -346,7 +346,10 @@ impl SimilarityGraph {
             }
             let key = ordered(edge.a, edge.b);
             // Keep the strongest edge if a pair is listed more than once, so
-            // the result never depends on input order.
+            // the result never depends on input order. Similarity alone does
+            // not settle that: two listings of one pair can agree on the score
+            // and differ on the class or the confidence, which is the rest of
+            // what a group reads off the edge it keeps.
             let data = EdgeData {
                 similarity: edge.similarity,
                 class: edge.class,
@@ -354,7 +357,7 @@ impl SimilarityGraph {
             };
             map.entry(key)
                 .and_modify(|existing: &mut EdgeData| {
-                    if edge.similarity > existing.similarity {
+                    if strength(&data, existing).is_gt() {
                         *existing = data;
                     }
                 })
@@ -377,6 +380,29 @@ impl SimilarityGraph {
             return None;
         }
         self.edges.get(&ordered(a, b)).copied()
+    }
+}
+
+/// Order two judgements of one pair from the weakest claim to the strongest:
+/// by similarity, then by how exact the class is, then by confidence.
+///
+/// [`CloneClass`] already runs from exact to gapped, so the stronger class is
+/// the lesser one. [`Confidence`] is a closed vocabulary of bands rather than a
+/// scale, so the order it is read in is stated here.
+fn strength(left: &EdgeData, right: &EdgeData) -> std::cmp::Ordering {
+    left.similarity
+        .total_cmp(&right.similarity)
+        .then_with(|| right.class.cmp(&left.class))
+        .then_with(|| confidence_rank(right.confidence).cmp(&confidence_rank(left.confidence)))
+}
+
+/// How far a verdict sits from the threshold, ascending: a larger rank is the
+/// weaker claim.
+const fn confidence_rank(confidence: Confidence) -> u8 {
+    match confidence {
+        Confidence::High => 0,
+        Confidence::Medium => 1,
+        Confidence::Low => 2,
     }
 }
 
@@ -735,13 +761,15 @@ fn build_group(
     })
 }
 
-/// The looser of two classes: Type-3 is weakest, Type-1 strongest.
-const fn weaker_class(a: CloneClass, b: CloneClass) -> CloneClass {
-    match (a, b) {
-        (CloneClass::Type3, _) | (_, CloneClass::Type3) => CloneClass::Type3,
-        (CloneClass::Type2, _) | (_, CloneClass::Type2) => CloneClass::Type2,
-        _ => CloneClass::Type1,
-    }
+/// The looser of two classes.
+///
+/// [`CloneClass`] orders itself from the strongest claim to the weakest —
+/// verbatim, renamed, gapped, then justified only by a registered rule — so the
+/// looser of two is the greater. Deferring to that order keeps this commutative
+/// and idempotent, and keeps a class this function was never told about from
+/// being reported as a verbatim copy.
+fn weaker_class(a: CloneClass, b: CloneClass) -> CloneClass {
+    a.max(b)
 }
 
 /// The lower of two confidences.

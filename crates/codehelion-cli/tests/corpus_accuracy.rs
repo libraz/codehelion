@@ -110,7 +110,13 @@ const CORPORA: &[Expected] = &[
             Measurements {
                 mode: "fast",
                 by_type: [Some(1.0), Some(1.0), Some(0.0)],
-                precision: 1.0 / 3.0,
+                // The fragment pass reports the `sum_even` conditional, which
+                // is byte-identical across seed, type1 and type3 at exactly
+                // `min_clone_tokens`. It is a true copy the corpus has no
+                // label for: it recovers part of the gapped Type-3 pair, and
+                // the line overlap against that label falls under the
+                // coverage threshold, so it is charged as a false positive.
+                precision: 2.0 / 6.0,
                 findings_per_kloc: 44.4444,
                 false_positives_per_kloc: 29.6296,
                 recall: 5.0 / 6.0,
@@ -135,6 +141,9 @@ const CORPORA: &[Expected] = &[
             Measurements {
                 mode: "fast",
                 by_type: [Some(1.0), Some(1.0), Some(0.0)],
+                // As in the C corpus, the fragment pass reports the
+                // `sum_even` conditional shared verbatim by seed, type1 and
+                // type3, which no label covers.
                 precision: 3.0 / 7.0,
                 // The signature mirror adds fifteen source lines without
                 // entering the primary finding stream, so the counts stay
@@ -203,9 +212,14 @@ const CORPORA: &[Expected] = &[
             Measurements {
                 mode: "structural",
                 by_type: [None, None, Some(1.0)],
-                precision: 0.25,
-                findings_per_kloc: 22.9885,
-                false_positives_per_kloc: 17.2414,
+                // Reading `true` and `false` as keywords rather than boolean
+                // literals keeps them apart under literal normalization, so
+                // the pair that differed only in a boolean constant is no
+                // longer reported. This corpus is the only one carrying both
+                // spellings in one unit.
+                precision: 1.0 / 3.0,
+                findings_per_kloc: 17.2414,
+                false_positives_per_kloc: 11.4943,
                 recall: 1.0,
                 non_clone_hits: 0,
                 shortfall: "",

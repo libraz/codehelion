@@ -127,7 +127,13 @@ impl CargoLayout {
         Self { packages }
     }
 
-    /// The recognised packages, ordered by name.
+    /// The recognised packages, ordered by name and then by root.
+    ///
+    /// The root breaks ties because one name is not unique in a tree: a
+    /// vendored copy of a package sits beside the original under its own root,
+    /// and ordering those two by name alone would leave them in whatever order
+    /// the directories happened to be read in — a published field that differs
+    /// between two runs over the same manifests.
     #[must_use]
     pub fn packages(&self) -> Vec<PackageInfo> {
         let mut infos: Vec<PackageInfo> = self
@@ -138,7 +144,7 @@ impl CargoLayout {
                 root: p.root.clone(),
             })
             .collect();
-        infos.sort_by(|a, b| a.name.cmp(&b.name));
+        infos.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.root.cmp(&b.root)));
         infos
     }
 
@@ -424,6 +430,37 @@ mod tests {
     fn a_file_outside_every_package_belongs_to_no_crate() {
         let layout = CargoLayout::default();
         assert_eq!(layout.crate_name(Path::new("/tmp/loose/file.rs")), None);
+    }
+
+    /// Two packages can share a name — a vendored copy beside the original —
+    /// and the reported order is then a function of the manifests alone, not of
+    /// the order the tree happened to be read in.
+    #[test]
+    fn packages_of_one_name_are_ordered_by_root_whatever_order_they_were_found_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut roots = Vec::new();
+        for relative in ["vendor/demo", "demo"] {
+            let package_root = dir.path().join(relative);
+            std::fs::create_dir_all(&package_root).unwrap();
+            roots.push(write_manifest(
+                &package_root,
+                "[package]\nname = \"demo\"\n",
+            ));
+        }
+
+        let found_one_way = CargoLayout::from_manifests(&roots).packages();
+        roots.reverse();
+        let found_the_other = CargoLayout::from_manifests(&roots).packages();
+
+        assert_eq!(found_one_way, found_the_other);
+        let ordered: Vec<PathBuf> = found_one_way
+            .into_iter()
+            .map(|package| package.root)
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![dir.path().join("demo"), dir.path().join("vendor/demo")]
+        );
     }
 
     #[test]

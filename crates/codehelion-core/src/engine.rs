@@ -28,6 +28,8 @@ mod segment;
 pub use group::{content_entropy_bits, entropy_ratio, group_pairs};
 pub use normalize::LiteralNorm;
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::clone_class::CloneClass;
 use crate::conditional::ArmPath;
 use crate::frontend::{Token, Unit};
@@ -186,7 +188,16 @@ pub struct EngineStats {
     /// Malformed or excessively long control headers that did not become
     /// Type-2 body fragments.
     pub control_headers_over_limit: usize,
-    /// Fragment classes (≥ 2 members) that entered pairing.
+    /// Block bodies that did not become Type-2 fragments because they nest
+    /// deeper than the extraction limit.
+    pub bodies_over_nesting_limit: usize,
+    /// Fragment classes handed to the pairing stage: what the minimum-size,
+    /// hash-collision and posting-cap filters left.
+    ///
+    /// This is the population [`Self::fragment_pairs_available`] sums over, so
+    /// the two describe the same set whether or not the budget stopped pairing
+    /// partway through it. What a truncated run did not get to is attributed by
+    /// the stage that spent the allowance, not by removing classes from here.
     pub fragment_classes: usize,
     /// Fragment classes dropped for exceeding the posting cap.
     pub class_cap_dropped: usize,
@@ -205,6 +216,9 @@ pub struct EngineStats {
     pub fragment_pairs_available: usize,
     /// Verified clone pairs across both passes.
     pub pairs: usize,
+    /// Pairs dropped because a wider pair of the same class already stated the
+    /// same duplication between the same two occurrences.
+    pub restated_pairs: usize,
     /// Members evicted from a class whose normal form did not match its hash.
     pub hash_collisions: usize,
     /// Whether the pair budget ran out before all candidates were examined.
@@ -305,6 +319,10 @@ fn detect_inner(
         pairs.retain(|pair| pair_can_coexist(arm_paths, pair));
         stats.conditional_pairs = before.saturating_sub(pairs.len());
     }
+    // The two passes reach the same duplication by different routes and stop
+    // at different widths. Only the widest statement of a relation is carried
+    // forward, so a reader meets one duplication once.
+    stats.restated_pairs = detect::fold_restatements(&mut pairs);
     stats.pairs = pairs.len();
     stats.pair_budget_exhausted = raw_budget.exhausted() || fragment_budget.exhausted();
 
@@ -321,23 +339,33 @@ fn detect_inner(
 /// member occupies the same or a containing/contained range as one member of
 /// the Type-2 group. Retaining both would count the shared instances twice.
 fn drop_subsumed_type1_groups(groups: &mut Vec<CloneGroup>) -> usize {
+    subsume_type1_groups(groups).dropped
+}
+
+/// What one subsumption sweep removed, and how much of the index it read.
+///
+/// `comparisons` counts every time one renamed-class member range is examined
+/// against one exact-class member range. It is the cost the index exists to
+/// bound, so it is reported rather than left to a wall clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Subsumption {
+    dropped: usize,
+    comparisons: usize,
+}
+
+/// Drop exact groups already represented by a renamed one, through an index
+/// over renamed-group members rather than a sweep over every group pair.
+fn subsume_type1_groups(groups: &mut Vec<CloneGroup>) -> Subsumption {
+    let index = Type2MemberIndex::build(groups);
+    let mut comparisons = 0;
     let mut dropped = vec![false; groups.len()];
-    for (index, group) in groups.iter().enumerate() {
+    for (position, group) in groups.iter().enumerate() {
         if group.clone_type != CloneClass::Type1 {
             continue;
         }
-        dropped[index] = groups.iter().any(|outer| {
-            outer.clone_type == CloneClass::Type2
-                && group.members.iter().all(|member| {
-                    outer.members.iter().any(|candidate| {
-                        candidate.file == member.file
-                            && ((candidate.token_start <= member.token_start
-                                && member.token_end <= candidate.token_end)
-                                || (member.token_start <= candidate.token_start
-                                    && candidate.token_end <= member.token_end))
-                    })
-                })
-        });
+        dropped[position] = index
+            .subsuming_group(group, groups, &mut comparisons)
+            .is_some();
     }
     let count = dropped.iter().filter(|&&drop| drop).count();
     let mut position = 0;
@@ -346,7 +374,169 @@ fn drop_subsumed_type1_groups(groups: &mut Vec<CloneGroup>) -> usize {
         position += 1;
         keep
     });
-    count
+    Subsumption {
+        dropped: count,
+        comparisons,
+    }
+}
+
+/// Whether one member range accounts for another: same file, and one range
+/// contains the other in either direction.
+const fn ranges_subsume(candidate_start: usize, candidate_end: usize, member: &Instance) -> bool {
+    (candidate_start <= member.token_start && member.token_end <= candidate_end)
+        || (member.token_start <= candidate_start && candidate_end <= member.token_end)
+}
+
+/// One renamed-group member, indexed by the file it sits in.
+#[derive(Debug, Clone, Copy)]
+struct IndexedMember {
+    start: usize,
+    end: usize,
+    group: usize,
+}
+
+/// The renamed-group members of one file, sorted by token start.
+#[derive(Debug, Default)]
+struct FileMembers {
+    entries: Vec<IndexedMember>,
+    /// Running maximum of `entries[..=i].end`, so a query that no earlier
+    /// member can contain stops instead of walking the whole file.
+    max_end: Vec<usize>,
+}
+
+/// An occurrence index over the members of every renamed group.
+///
+/// An exact group is only subsumed when one renamed group accounts for every
+/// one of its members, so the search starts from the members that cover the
+/// exact group's first member and narrows from there. Without the index every
+/// exact group is compared against every member of every renamed group, which
+/// grows with the square of the group count on trees that produce many groups.
+#[derive(Debug, Default)]
+struct Type2MemberIndex {
+    files: BTreeMap<usize, FileMembers>,
+    /// Whether any renamed group exists at all, which is the answer for a
+    /// group that has no members to account for.
+    any_group: bool,
+}
+
+impl Type2MemberIndex {
+    fn build(groups: &[CloneGroup]) -> Self {
+        let mut index = Self::default();
+        for (position, group) in groups.iter().enumerate() {
+            if group.clone_type != CloneClass::Type2 {
+                continue;
+            }
+            index.any_group = true;
+            for member in &group.members {
+                index
+                    .files
+                    .entry(member.file)
+                    .or_default()
+                    .entries
+                    .push(IndexedMember {
+                        start: member.token_start,
+                        end: member.token_end,
+                        group: position,
+                    });
+            }
+        }
+        for file in index.files.values_mut() {
+            file.entries
+                .sort_unstable_by_key(|entry| (entry.start, entry.end, entry.group));
+            let mut running = 0;
+            file.max_end = file
+                .entries
+                .iter()
+                .map(|entry| {
+                    running = running.max(entry.end);
+                    running
+                })
+                .collect();
+        }
+        index
+    }
+
+    /// A renamed group accounting for every member of `group`, if one exists.
+    fn subsuming_group(
+        &self,
+        group: &CloneGroup,
+        groups: &[CloneGroup],
+        comparisons: &mut usize,
+    ) -> Option<usize> {
+        let Some(first) = group.members.first() else {
+            // A group with nothing to account for is accounted for by any
+            // renamed group.
+            return self.any_group.then_some(0);
+        };
+        let mut candidates = self.groups_covering(first, comparisons);
+        for member in group.members.iter().skip(1) {
+            if candidates.is_empty() {
+                return None;
+            }
+            candidates.retain(|&candidate| {
+                groups
+                    .get(candidate)
+                    .is_some_and(|outer| covers_member(outer, member, comparisons))
+            });
+        }
+        candidates.first().copied()
+    }
+
+    /// Renamed groups with a member accounting for `member`, in group order.
+    fn groups_covering(&self, member: &Instance, comparisons: &mut usize) -> Vec<usize> {
+        let Some(file) = self.files.get(&member.file) else {
+            return Vec::new();
+        };
+        let mut found = BTreeSet::new();
+
+        // Members starting at or before this one can only account for it by
+        // containing it; the running maximum ends the walk as soon as no
+        // earlier member reaches far enough.
+        let mut position = file
+            .entries
+            .partition_point(|entry| entry.start <= member.token_start);
+        while position > 0 {
+            if file
+                .max_end
+                .get(position - 1)
+                .is_none_or(|&reach| reach < member.token_end)
+            {
+                break;
+            }
+            position -= 1;
+            let entry = file.entries[position];
+            *comparisons += 1;
+            if ranges_subsume(entry.start, entry.end, member) {
+                found.insert(entry.group);
+            }
+        }
+
+        // Members starting inside this one account for it when they also end
+        // inside it. The scan stops at the member's own end.
+        let from = file
+            .entries
+            .partition_point(|entry| entry.start < member.token_start);
+        for entry in file.entries[from..]
+            .iter()
+            .take_while(|entry| entry.start <= member.token_end)
+        {
+            *comparisons += 1;
+            if ranges_subsume(entry.start, entry.end, member) {
+                found.insert(entry.group);
+            }
+        }
+
+        found.into_iter().collect()
+    }
+}
+
+/// Whether `outer` has a member accounting for `member`.
+fn covers_member(outer: &CloneGroup, member: &Instance, comparisons: &mut usize) -> bool {
+    outer.members.iter().any(|candidate| {
+        *comparisons += 1;
+        candidate.file == member.file
+            && ranges_subsume(candidate.token_start, candidate.token_end, member)
+    })
 }
 
 /// Whether a reported pair can be present in one C-family build.
@@ -590,6 +780,252 @@ mod tests {
         assert_eq!(report.groups[0].clone_type, CloneClass::Type2);
         assert_eq!(report.groups[0].members.len(), 3);
         assert_eq!(report.stats.subsumed_groups, 1);
+    }
+
+    /// Whether one group states an occurrence pair another group already
+    /// states, at a narrower width: two of its members sit inside two members
+    /// of the other, and the two spans are not the same.
+    fn restates_a_pair(narrow: &CloneGroup, wide: &CloneGroup) -> bool {
+        fn inside(member: &Instance, outer: &Instance) -> bool {
+            member.file == outer.file
+                && outer.token_start <= member.token_start
+                && member.token_end <= outer.token_end
+        }
+        fn same(member: &Instance, outer: &Instance) -> bool {
+            (member.token_start, member.token_end) == (outer.token_start, outer.token_end)
+        }
+        narrow.members.iter().enumerate().any(|(i, first)| {
+            narrow.members[i + 1..].iter().any(|second| {
+                wide.members.iter().enumerate().any(|(j, host)| {
+                    wide.members[j + 1..].iter().any(|other| {
+                        let covered = (inside(first, host) && inside(second, other))
+                            || (inside(first, other) && inside(second, host));
+                        let identical = (same(first, host) && same(second, other))
+                            || (same(first, other) && same(second, host));
+                        covered && !identical
+                    })
+                })
+            })
+        })
+    }
+
+    #[test]
+    fn one_duplication_relation_is_reported_at_one_width() {
+        // A function copied whole, its body holding a nested function. The raw
+        // pass extends inside one segment at a time, so it reaches the nested
+        // function's own tokens and stops; the fragment pass reaches the whole
+        // body, which nothing promised the raw pass a seed for. Both describe
+        // the same two occurrences, and the reader is owed one of them.
+        let source = "fn outer ( ) { alpha ( ) ; fn inner ( ) { beta ( ) ; } gamma ( ) ; }";
+        let first = quick(source);
+        let second = quick(source);
+        let units = [function_unit(0, first.len()), function_unit(9, 19)];
+        let files = [
+            InputFile {
+                tokens: &first,
+                units: &units,
+            },
+            InputFile {
+                tokens: &second,
+                units: &units,
+            },
+        ];
+        let config = EngineConfig {
+            min_clone_tokens: 8,
+            ..EngineConfig::default()
+        };
+
+        let report = detect(&files, &config);
+
+        for narrow in &report.groups {
+            for wide in &report.groups {
+                assert!(
+                    !restates_a_pair(narrow, wide),
+                    "one relation at two widths: {:?} inside {:?}",
+                    narrow.members,
+                    wide.members
+                );
+            }
+        }
+        assert!(
+            report.groups.iter().any(|group| {
+                group
+                    .members
+                    .iter()
+                    .all(|member| (member.token_start, member.token_end) == (5, first.len() - 1))
+            }),
+            "the surviving statement must be the whole shared body: {:#?}",
+            report.groups
+        );
+        assert!(report.stats.restated_pairs > 0);
+    }
+
+    fn synthetic_instance(file: usize, token_start: usize, token_end: usize) -> Instance {
+        Instance {
+            file,
+            token_start,
+            token_end,
+            start_line: 1,
+            end_line: 1,
+            unit: None,
+        }
+    }
+
+    fn synthetic_group(
+        key: u64,
+        clone_type: CloneClass,
+        members: &[(usize, usize, usize)],
+    ) -> CloneGroup {
+        CloneGroup {
+            content_key: key,
+            clone_type,
+            score: 1.0,
+            members: members
+                .iter()
+                .map(|&(file, start, end)| synthetic_instance(file, start, end))
+                .collect(),
+            entropy_bits: 1.0,
+            suppressed: None,
+        }
+    }
+
+    /// Groups shaped like the ones consolidation produces: renamed groups,
+    /// the exact groups they account for (in both containment directions),
+    /// and exact groups only partly accounted for.
+    fn subsumption_corpus(blocks: usize) -> Vec<CloneGroup> {
+        let mut groups = Vec::new();
+        let mut key = 0;
+        let mut push =
+            |groups: &mut Vec<CloneGroup>, clone_type, members: &[(usize, usize, usize)]| {
+                groups.push(synthetic_group(key, clone_type, members));
+                key += 1;
+            };
+        for block in 0..blocks {
+            let file = block % 8;
+            let other = file + 8;
+            let start = block * 100;
+            push(
+                &mut groups,
+                CloneClass::Type2,
+                &[(file, start, start + 60), (other, start, start + 60)],
+            );
+            // Every member sits inside a renamed member: accounted for.
+            push(
+                &mut groups,
+                CloneClass::Type1,
+                &[
+                    (file, start + 10, start + 40),
+                    (other, start + 10, start + 40),
+                ],
+            );
+            // One member sits outside every renamed member: retained.
+            push(
+                &mut groups,
+                CloneClass::Type1,
+                &[
+                    (file, start + 10, start + 40),
+                    (other, start + 70, start + 90),
+                ],
+            );
+            // Every member contains a renamed member instead: also accounted
+            // for, since containment counts in either direction.
+            push(
+                &mut groups,
+                CloneClass::Type1,
+                &[(file, start, start + 80), (other, start, start + 80)],
+            );
+        }
+        groups
+    }
+
+    /// The all-pairs predicate the indexed sweep must agree with.
+    fn oracle_subsume_type1_groups(groups: &mut Vec<CloneGroup>) -> Subsumption {
+        let mut comparisons = 0;
+        let mut dropped = vec![false; groups.len()];
+        for (position, group) in groups.iter().enumerate() {
+            if group.clone_type != CloneClass::Type1 {
+                continue;
+            }
+            dropped[position] = groups.iter().any(|outer| {
+                outer.clone_type == CloneClass::Type2
+                    && group.members.iter().all(|member| {
+                        outer.members.iter().any(|candidate| {
+                            comparisons += 1;
+                            candidate.file == member.file
+                                && ((candidate.token_start <= member.token_start
+                                    && member.token_end <= candidate.token_end)
+                                    || (member.token_start <= candidate.token_start
+                                        && candidate.token_end <= member.token_end))
+                        })
+                    })
+            });
+        }
+        let count = dropped.iter().filter(|&&drop| drop).count();
+        let mut position = 0;
+        groups.retain(|_| {
+            let keep = !dropped[position];
+            position += 1;
+            keep
+        });
+        Subsumption {
+            dropped: count,
+            comparisons,
+        }
+    }
+
+    fn retained_keys(groups: &[CloneGroup]) -> Vec<u64> {
+        groups.iter().map(|group| group.content_key).collect()
+    }
+
+    #[test]
+    fn indexed_subsumption_keeps_the_same_groups_as_the_all_pairs_predicate() {
+        let mut indexed = subsumption_corpus(250);
+        let mut oracle = subsumption_corpus(250);
+
+        let indexed_result = subsume_type1_groups(&mut indexed);
+        let oracle_result = oracle_subsume_type1_groups(&mut oracle);
+
+        assert_eq!(indexed_result.dropped, oracle_result.dropped);
+        assert_eq!(indexed_result.dropped, 500, "two of four groups per block");
+        assert_eq!(retained_keys(&indexed), retained_keys(&oracle));
+        assert_eq!(indexed.len(), 500);
+    }
+
+    #[test]
+    fn indexed_subsumption_reads_far_less_than_the_all_pairs_predicate() {
+        let mut indexed = subsumption_corpus(250);
+        let mut oracle = subsumption_corpus(250);
+
+        let indexed_result = subsume_type1_groups(&mut indexed);
+        let oracle_result = oracle_subsume_type1_groups(&mut oracle);
+
+        assert!(
+            indexed_result.comparisons * 20 < oracle_result.comparisons,
+            "indexed {} vs all-pairs {}",
+            indexed_result.comparisons,
+            oracle_result.comparisons
+        );
+    }
+
+    #[test]
+    fn subsumption_work_grows_with_the_group_count_not_its_square() {
+        let mut small = subsumption_corpus(200);
+        let mut doubled = subsumption_corpus(400);
+        let small_work = subsume_type1_groups(&mut small).comparisons;
+        let doubled_work = subsume_type1_groups(&mut doubled).comparisons;
+
+        assert!(
+            doubled_work <= small_work * 3,
+            "doubling the groups must not multiply the work: {small_work} then {doubled_work}"
+        );
+
+        // The predicate the index replaces does grow with the square, which
+        // is what makes the bound worth asserting.
+        let mut small_oracle = subsumption_corpus(200);
+        let mut doubled_oracle = subsumption_corpus(400);
+        let small_oracle_work = oracle_subsume_type1_groups(&mut small_oracle).comparisons;
+        let doubled_oracle_work = oracle_subsume_type1_groups(&mut doubled_oracle).comparisons;
+        assert!(doubled_oracle_work > small_oracle_work * 3);
     }
 
     #[test]

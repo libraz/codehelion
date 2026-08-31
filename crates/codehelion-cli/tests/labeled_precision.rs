@@ -140,18 +140,29 @@ const CORPORA: &[Expected] = &[
         name: "cjson",
         has_origin: true,
         confirmed: 14,
-        // Two creator families fewer than this corpus used to produce. Both
-        // name their kind and nothing else, and neither says what to do when
+        // Two creator families fewer than this corpus once produced. Both name
+        // their kind and nothing else, and neither says what to do when
         // creating fails — the shape the report now sets aside. The families
         // that do carry that error path are still here and still confirmed.
-        refuted: 4,
+        //
+        // A third lookalike has left with them: two runs of assignments filling
+        // in a print buffer, alike but for the boolean one field is set to.
+        // Reading `true` and `false` as keywords rather than boolean literals
+        // holds the two spellings apart under literal normalization, so the
+        // runs no longer normalize alike and the pair is not reported. Nothing
+        // confirmed left with it — every labelled clone here is still reached.
+        refuted: 3,
         forward_confirmed: 14,
-        forward_refuted: 4,
+        forward_refuted: 3,
         fast: Verdicts {
             confirmed: 12,
             refuted: 6,
             forward_confirmed: 12,
             forward_refuted: 6,
+            // The fragment pass reports token runs that repeat verbatim, and
+            // most of what goes unruled here is that: byte-identical copies
+            // nobody has ruled on, among them a pair of writes closing off a
+            // rendered string and a pair of pointer decodes.
             unjudged: 82,
             conflicting: 0,
         },
@@ -168,7 +179,11 @@ const CORPORA: &[Expected] = &[
             refuted: 9,
             forward_confirmed: 12,
             forward_refuted: 9,
-            unjudged: 219,
+            // The same account as cjson: verbatim runs the fragment pass
+            // reports, here a clamp on the acceleration parameter written out
+            // in three places and a forwarding return written twice. All are
+            // byte-identical and none carries a verdict.
+            unjudged: 221,
             conflicting: 0,
         },
     },
@@ -184,7 +199,9 @@ const CORPORA: &[Expected] = &[
             refuted: 27,
             forward_confirmed: 30,
             forward_refuted: 27,
-            unjudged: 552,
+            // Five verbatim runs the fragment pass reports and no label speaks
+            // about, the longest a macro arm spelled out twice in full.
+            unjudged: 551,
             conflicting: 1,
         },
     },
@@ -205,7 +222,10 @@ const CORPORA: &[Expected] = &[
             refuted: 1,
             forward_confirmed: 23,
             forward_refuted: 1,
-            unjudged: 160,
+            // Two more verbatim runs, one repeated three times inside a single
+            // socket client header and one shared by two console sinks.
+            // Neither carries a verdict.
+            unjudged: 162,
             conflicting: 0,
         },
     },
@@ -278,7 +298,14 @@ const ORDERINGS: &[Ordering] = &[
         name: "size",
         at_10: 1.0,
         at_50: 0.94,
-        map: 0.8774,
+        // The baseline moved where the ranking did not, which is the population
+        // changing rather than the ordering. One confirmed finding pairs a
+        // `return true` against a `return 1`; with `true` read as a keyword the
+        // two no longer normalize alike, so the match ends before them and the
+        // finding is three tokens shorter. Sorting by length alone drops it
+        // past a few lookalikes, which costs more than the lookalike that left
+        // the population returns.
+        map: 0.8770,
     },
 ];
 
@@ -292,7 +319,11 @@ const BANDS: &[(&str, usize, usize)] = &[
     ("high", 43, 20),
     ("medium", 44, 38),
     ("low", 14, 20),
-    ("(unscored)", 18, 5),
+    // One refuted finding fewer, and it is the boolean-separated pair of
+    // assignment runs the cjson row above accounts for. It was matched
+    // verbatim and so never carried a similarity score, which is why the whole
+    // of its departure lands in this row and none of it in the three bands.
+    ("(unscored)", 18, 4),
 ];
 
 /// The lookalike classes reached by the report, as last measured.
@@ -304,7 +335,10 @@ const BANDS: &[(&str, usize, usize)] = &[
 const REASONS: &[(&str, usize, usize, usize)] = &[
     ("assertion-run", 0, 10, 32),
     ("const-overload-pair", 0, 0, 1),
-    ("declaration-run", 5, 5, 5),
+    // Four of the five labelled runs still reach the report. The fifth is the
+    // pair that differs only in the boolean it stores, and a class reaching one
+    // label fewer is one lookalike fewer put in front of a reader.
+    ("declaration-run", 4, 4, 5),
     ("dispatch-table-entry", 1, 1, 1),
     ("exhaustive-match-table", 1, 1, 3),
     ("field-mapping-boilerplate", 0, 0, 1),
@@ -834,7 +868,14 @@ fn compare_floors(axes: &AxisSplit, complaints: &mut String) {
             )
             .expect("writing to a string cannot fail"),
             // An axis nothing carries any more is not an axis that separates
-            // nothing; it is one nobody can ask about.
+            // nothing; it is one nobody can ask about. Those two states read
+            // the same from a bare `None`, so ask which one this is.
+            None if axes.scored(axis) => writeln!(
+                complaints,
+                "the last confirmed finding on {axis} is gone, so no floor can \
+                 be priced there any more",
+            )
+            .expect("writing to a string cannot fail"),
             None => writeln!(complaints, "no finding was scored on {axis}")
                 .expect("writing to a string cannot fail"),
         }

@@ -204,21 +204,16 @@ pub fn generate(files: &[FileFeatures], config: &ControlFlowConfig) -> ControlFl
             break;
         }
         remaining -= possible;
-        let mut filtered = 0usize;
-        for (i, &a) in postings.iter().enumerate() {
-            for &b in &postings[i + 1..] {
-                if a.within_length_ratio(b, config.max_length_ratio) {
-                } else {
-                    filtered += 1;
-                }
-            }
-        }
-        stats.filtered_by_size += filtered;
+        // One walk per posting list: each unordered pair is length-gated
+        // exactly once, and that single verdict both counts the size drop and
+        // produces the pair.
         for (i, &a) in postings.iter().enumerate() {
             for &b in &postings[i + 1..] {
                 if a.within_length_ratio(b, config.max_length_ratio) {
                     let (a, b) = if a <= b { (a, b) } else { (b, a) };
                     pairs.push(ControlFlowPair { a, b, hash: *hash });
+                } else {
+                    stats.filtered_by_size += 1;
                 }
             }
         }
@@ -381,6 +376,31 @@ mod tests {
         assert!(set.stats.budget_exhausted);
         assert_eq!(set.stats.filtered_by_size, 0);
         assert_eq!(set.stats.budget_dropped, 9);
+    }
+
+    #[test]
+    fn every_posting_pair_is_length_gated_exactly_once() {
+        // One list of five units where two sizes are out of ratio with the
+        // rest: the size drops and the emitted pairs together account for
+        // C(5,2) verdicts, so no pair was gated twice or left ungated.
+        let files = vec![file(vec![
+            unit(1, 4, 20),
+            unit(1, 4, 22),
+            unit(1, 4, 24),
+            unit(1, 4, 90),
+            unit(1, 4, 400),
+        ])];
+        let set = generate(&files, &ControlFlowConfig::default());
+        let list_pairs = 5 * 4 / 2;
+        assert_eq!(
+            set.pairs.len() + set.stats.filtered_by_size,
+            list_pairs,
+            "pairs {:?}, filtered {}",
+            set.pairs.len(),
+            set.stats.filtered_by_size
+        );
+        assert_eq!(set.stats.candidate_pairs, set.pairs.len());
+        assert!(set.stats.filtered_by_size > 0, "the gate must have fired");
     }
 
     #[test]

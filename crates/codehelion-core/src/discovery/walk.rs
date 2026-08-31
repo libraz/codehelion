@@ -1,9 +1,22 @@
 //! Filesystem traversal that produces classified source-file candidates.
 //!
-//! The walk is read-only and never follows symbolic links. It honours
-//! `.gitignore` and related ignore files by default so vendored and build
-//! output is skipped, and it applies a byte-size ceiling per file. Symbolic
-//! links and files that exceed the ceiling are counted, not silently dropped.
+//! The walk is read-only. A file it recognises by name — a Cargo manifest or a
+//! compilation database — is classified by the role it plays before any of the
+//! filters that apply to source candidates, because those filters exist to
+//! bound the cost of code to compare and say nothing about metadata: a project
+//! that exposes its database through a symbolic link, or one whose database is
+//! larger than a source file may be, still gets the build settings it wrote
+//! down or a reason it did not.
+//!
+//! Everything else is a source candidate, filtered by a byte-size ceiling and,
+//! unless `follow_links` says otherwise, by leaving symbolic links unresolved:
+//! a link is counted rather than walked, and the target it names is discovered
+//! on its own if it is in the tree at all. Files excluded either way are
+//! counted, not silently dropped.
+//!
+//! `.gitignore` and related ignore files are honoured by default whether or
+//! not the tree sits in a git worktree, so an unpacked archive or a partial
+//! checkout is enumerated exactly as the repository it came from would be.
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +28,15 @@ use super::language::{
 
 const CARGO_MANIFEST: &str = "Cargo.toml";
 const COMPILE_COMMANDS: &str = "compile_commands.json";
+
+/// A file discovery recognises by name rather than by its contents.
+#[derive(Clone, Copy)]
+enum MetadataKind {
+    /// A Cargo manifest, read for the package layout.
+    Manifest,
+    /// A Clang compilation database, read for the build settings.
+    CompileCommands,
+}
 
 /// A file selected by the walk as a possible source unit.
 pub(super) struct Candidate {
@@ -36,16 +58,20 @@ pub(super) struct WalkOutput {
     pub(super) evidence: HeaderEvidence,
     pub(super) manifests: Vec<PathBuf>,
     pub(super) compile_commands: Vec<PathBuf>,
-    /// Files skipped because they exceeded the size ceiling.
+    /// Source candidates skipped because they exceeded the size ceiling.
     pub(super) too_large: u64,
+    /// Recognised metadata files that exceeded the size ceiling.
+    pub(super) oversized_metadata: u64,
     /// Source files excluded because their language was disabled.
     pub(super) language_excluded: u64,
     /// Symbolic links deliberately left unresolved by the walker.
     pub(super) symlinks: u64,
-    /// Symbolic-link files deliberately left unresolved by the walker.
+    /// Symbolic links that name a file.
     pub(super) symlink_files: u64,
-    /// Symbolic-link directories deliberately left unresolved by the walker.
+    /// Symbolic links that name a directory.
     pub(super) symlink_directories: u64,
+    /// Symbolic links whose own entry could not be read, so they name neither.
+    pub(super) symlink_unresolved: u64,
     /// Directory entries the walker could not read.
     pub(super) walk_errors: u64,
 }
@@ -68,16 +94,26 @@ pub(super) fn collect(root: &Path, settings: &WalkSettings) -> WalkOutput {
         manifests: Vec::new(),
         compile_commands: Vec::new(),
         too_large: 0,
+        oversized_metadata: 0,
         language_excluded: 0,
         symlinks: 0,
         symlink_files: 0,
         symlink_directories: 0,
+        symlink_unresolved: 0,
         walk_errors: 0,
     };
 
     let mut builder = WalkBuilder::new(root);
     builder.follow_links(settings.follow_links);
-    if !settings.respect_gitignore {
+    if settings.respect_gitignore {
+        // An ignore file states what the project generates, and it states it
+        // whether or not the copy being scanned kept the repository around. A
+        // tree unpacked from an archive or checked out without its history has
+        // the same `build/` and `target/` in it as the worktree it came from,
+        // and enumerating those is indistinguishable from being asked not to
+        // honour the ignore rules at all.
+        builder.require_git(false);
+    } else {
         builder
             .git_ignore(false)
             .git_global(false)
@@ -95,42 +131,55 @@ pub(super) fn collect(root: &Path, settings: &WalkSettings) -> WalkOutput {
             output.walk_errors += 1;
             continue;
         };
+        let path = entry.path();
+        if let Some((kind, byte_len)) = recognised_metadata(path) {
+            if byte_len > settings.max_file_bytes {
+                output.oversized_metadata += 1;
+            }
+            match kind {
+                // The database reader enforces the ceiling itself and names
+                // what it rejected, so an oversized database is handed on
+                // rather than dropped here: reporting the database the run
+                // would have used is the difference between a scan that has no
+                // build settings and one that says why.
+                MetadataKind::CompileCommands => output.compile_commands.push(path.to_path_buf()),
+                // A manifest has no such channel and is read whole, so the
+                // ceiling applies to it here and the count above is all the
+                // report has to say about it.
+                MetadataKind::Manifest => {
+                    if byte_len <= settings.max_file_bytes {
+                        output.manifests.push(path.to_path_buf());
+                    }
+                }
+            }
+            continue;
+        }
         if !settings.follow_links
             && entry
                 .file_type()
                 .is_some_and(|file_type| file_type.is_symlink())
         {
             output.symlinks += 1;
-            if entry.path().is_dir() {
-                output.symlink_directories += 1;
-            } else {
-                output.symlink_files += 1;
+            match std::fs::metadata(path) {
+                Ok(metadata) if metadata.is_dir() => output.symlink_directories += 1,
+                Ok(_) => output.symlink_files += 1,
+                // A link naming nothing that can be reached is neither, and
+                // calling it a file would report a source file that is not
+                // there.
+                Err(_) => output.symlink_unresolved += 1,
             }
             continue;
         }
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
-        let path = entry.path();
         let Ok(metadata) = entry.metadata() else {
             output.walk_errors += 1;
             continue;
         };
-        let byte_len = metadata.len();
-        if byte_len > settings.max_file_bytes {
+        if metadata.len() > settings.max_file_bytes {
             output.too_large += 1;
             continue;
-        }
-        match path.file_name().and_then(|n| n.to_str()) {
-            Some(CARGO_MANIFEST) => {
-                output.manifests.push(path.to_path_buf());
-                continue;
-            }
-            Some(COMPILE_COMMANDS) => {
-                output.compile_commands.push(path.to_path_buf());
-                continue;
-            }
-            _ => {}
         }
         let Some(classification) = classify(path, settings.header_policy) else {
             continue;
@@ -157,4 +206,22 @@ pub(super) fn collect(root: &Path, settings: &WalkSettings) -> WalkOutput {
     }
 
     output
+}
+
+/// The kind and byte length of a metadata file discovery recognises at `path`.
+///
+/// A symbolic link is resolved: a compilation database left in an ignored
+/// build directory and exposed at the project root through a link is the file
+/// the project means, and refusing to look through the link would leave the
+/// run without any of the build settings that database records. `None` for
+/// anything the resolved path is not a readable regular file for, which the
+/// general classification below then accounts for as what it is.
+fn recognised_metadata(path: &Path) -> Option<(MetadataKind, u64)> {
+    let kind = match path.file_name().and_then(|name| name.to_str()) {
+        Some(CARGO_MANIFEST) => MetadataKind::Manifest,
+        Some(COMPILE_COMMANDS) => MetadataKind::CompileCommands,
+        _ => return None,
+    };
+    let metadata = std::fs::metadata(path).ok()?;
+    metadata.is_file().then_some((kind, metadata.len()))
 }

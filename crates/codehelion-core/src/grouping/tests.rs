@@ -340,6 +340,72 @@ fn the_group_takes_the_weakest_class_and_confidence() {
 }
 
 #[test]
+fn a_group_a_registered_rule_alone_explains_is_not_a_verbatim_copy() {
+    // Every internal edge is justified by a registered rule, so the group is
+    // no more than that. Reporting it as a verbatim copy would say the members
+    // agree token for token, and `is_exact` would agree.
+    let units = units(3);
+    let edges: Vec<SimilarityEdge> = clique(3)
+        .into_iter()
+        .map(|mut edge| {
+            edge.class = CloneClass::RestrictedSemantic;
+            edge
+        })
+        .collect();
+    let set = group(&units, &edges, &GroupingConfig::default());
+    let only = &set.groups[0];
+    assert_eq!(only.clone_type, CloneClass::RestrictedSemantic);
+    assert!(!only.clone_type.is_exact());
+}
+
+#[test]
+fn two_listings_of_one_pair_are_settled_by_what_they_say_not_by_their_order() {
+    // The same pair stated twice at the same score, once as a renamed copy and
+    // once as a gapped one. The stronger reading is kept whichever way round
+    // the two arrive, and whichever way round their endpoints are written.
+    let units = units(3);
+    let renamed = SimilarityEdge {
+        a: 0,
+        b: 1,
+        similarity: 0.9,
+        breakdown: None,
+        class: CloneClass::Type2,
+        confidence: Confidence::High,
+    };
+    let gapped = SimilarityEdge {
+        a: 1,
+        b: 0,
+        similarity: 0.9,
+        breakdown: None,
+        class: CloneClass::Type3,
+        confidence: Confidence::Low,
+    };
+    let rest = [
+        SimilarityEdge {
+            a: 1,
+            b: 2,
+            ..renamed
+        },
+        SimilarityEdge {
+            a: 0,
+            b: 2,
+            ..renamed
+        },
+    ];
+
+    let mut forward = vec![renamed, gapped];
+    forward.extend_from_slice(&rest);
+    let mut backward = vec![gapped, renamed];
+    backward.extend_from_slice(&rest);
+
+    let a = group(&units, &forward, &GroupingConfig::default());
+    let b = group(&units, &backward, &GroupingConfig::default());
+    assert_eq!(a.groups, b.groups);
+    assert_eq!(a.groups[0].clone_type, CloneClass::Type2);
+    assert_eq!(a.groups[0].confidence, Confidence::High);
+}
+
+#[test]
 fn grouping_is_deterministic_regardless_of_edge_order() {
     let units = units(5);
     let forward = vec![
