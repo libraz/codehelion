@@ -215,7 +215,7 @@ pub fn compile_commands(fixture: &str) -> Result<Vec<CompileCommand>, FixtureErr
 /// unwritable.
 pub fn write_compile_commands(fixture: &str, destination: &Path) -> Result<PathBuf, FixtureError> {
     let directory = cpp(fixture)?;
-    let rendered = render(&directory.join("compile_commands.json.in"), &directory)?;
+    let rendered = compile_commands_for(&directory, &directory)?;
     let written = destination.join("compile_commands.json");
     std::fs::write(&written, rendered).map_err(|source| FixtureError::Io {
         path: written.clone(),
@@ -241,26 +241,37 @@ pub fn copy_cpp(fixture: &str, destination: &Path) -> Result<PathBuf, FixtureErr
     let source = cpp(fixture)?;
     let root = destination.join(fixture);
     copy_tree(&source, &root)?;
-    let template = source.join("compile_commands.json.in");
-    let mut entries: Vec<CompileCommand> = serde_json::from_str(&render(&template, &root)?)
-        .map_err(|source| FixtureError::Malformed {
-            path: template,
-            source,
-        })?;
-    for entry in &mut entries {
-        entry.arguments.splice(1..1, platform_arguments());
-    }
+    let rendered = compile_commands_for(&source, &root)?;
     let written = root.join("compile_commands.json");
-    let rendered =
-        serde_json::to_string_pretty(&entries).map_err(|source| FixtureError::Malformed {
-            path: written.clone(),
-            source,
-        })?;
     std::fs::write(&written, rendered).map_err(|source| FixtureError::Io {
         path: written,
         source,
     })?;
     Ok(root)
+}
+
+/// One fixture's compilation database as a document, naming `root` as the
+/// directory its commands run in.
+///
+/// Both writers render through here. A database written for a real compiler
+/// has to be the same document whichever function wrote it: one that is
+/// missing this machine's arguments drives a compiler that resolves the
+/// standard library to nothing, and a test then reads that silence as an
+/// answer about the fixture.
+fn compile_commands_for(fixture: &Path, root: &Path) -> Result<String, FixtureError> {
+    let template = fixture.join("compile_commands.json.in");
+    let mut entries: Vec<CompileCommand> = serde_json::from_str(&render(&template, root)?)
+        .map_err(|source| FixtureError::Malformed {
+            path: template.clone(),
+            source,
+        })?;
+    for entry in &mut entries {
+        entry.arguments.splice(1..1, platform_arguments());
+    }
+    serde_json::to_string_pretty(&entries).map_err(|source| FixtureError::Malformed {
+        path: template,
+        source,
+    })
 }
 
 /// What a database generated on this machine would carry that a committed
@@ -375,6 +386,45 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&rendered)
             .unwrap_or_else(|error| panic!("{rendered} is not a database: {error}"));
         assert_eq!(parsed[0]["directory"], awkward.to_str().unwrap());
+    }
+
+    /// Both of the databases this crate writes are there to drive a real
+    /// compiler, so which function wrote one cannot change the arguments it
+    /// carries. Only the root the commands are anchored at is allowed to
+    /// differ, and that is what the two are compared modulo.
+    #[test]
+    fn both_written_databases_give_a_fixture_the_same_arguments() {
+        let scratch = tempfile::tempdir().unwrap();
+        let fixture = "header-only";
+        let written = write_compile_commands(fixture, scratch.path()).unwrap();
+        let copied = copy_cpp(fixture, scratch.path()).unwrap();
+        let anchored = |database: &Path, root: &Path| -> Vec<Vec<String>> {
+            serde_json::from_str::<Vec<CompileCommand>>(&read(database))
+                .unwrap()
+                .into_iter()
+                .map(|entry| {
+                    entry
+                        .arguments
+                        .iter()
+                        .map(|argument| {
+                            argument.replace(root.to_str().unwrap(), DIRECTORY_PLACEHOLDER)
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            anchored(&written, &cpp(fixture).unwrap()),
+            anchored(&copied.join("compile_commands.json"), &copied)
+        );
+        let platform = platform_arguments();
+        assert!(
+            anchored(&written, &cpp(fixture).unwrap())
+                .iter()
+                .all(|arguments| arguments[1..=platform.len()] == platform[..]),
+            "the arguments this machine adds are missing or misplaced"
+        );
     }
 
     /// A renamed or deleted fixture would otherwise be discovered one test at a
@@ -629,7 +679,14 @@ mod tests {
         let written = write_compile_commands("cmake", destination.path()).unwrap();
         assert_eq!(written.file_name().unwrap(), "compile_commands.json");
         let entries: Vec<CompileCommand> = serde_json::from_str(&read(&written)).unwrap();
-        assert_eq!(entries, compile_commands("cmake").unwrap());
+        // The fixture's own database, filled in for this machine: what a
+        // compiler is driven with here is the template plus whatever this
+        // installation needs to find its standard library.
+        let mut expected = compile_commands("cmake").unwrap();
+        for entry in &mut expected {
+            entry.arguments.splice(1..1, platform_arguments());
+        }
+        assert_eq!(entries, expected);
         assert!(!read(&written).contains(DIRECTORY_PLACEHOLDER));
     }
 
