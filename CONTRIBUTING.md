@@ -45,8 +45,12 @@ clicks. Not worth closing one over.
 
 ```sh
 make check   # format-check + lint + test + doc, plus the boundary checks
-make hooks   # install a pre-commit hook that runs the above
+make hooks   # install a pre-commit hook that runs the formatting and lint checks
 ```
+
+The hook is the mechanical half only — `cargo fmt --check` and `cargo clippy`
+with warnings denied — because a hook that takes minutes is a hook people pass
+`--no-verify` to. The tests and the boundary checks stay in `make check`.
 
 Run `make check` before pushing: it is the core of what CI runs, and the part
 worth having locally. CI adds a dependency audit, a build that proves Fast and

@@ -121,7 +121,9 @@ codehelion report --run 1     # 特定の記録済みスキャンを再描画
 codehelion explain <ID>       # ローカルデータベースから finding を表示
 codehelion explain <ID> --format json
 codehelion baseline create    # 最新の finding を baseline として固定
+codehelion baseline update    # 最新スキャンが報告しなくなった baseline 項目を落とす
 codehelion cache status       # ローカルデータベースの場所とサイズ
+codehelion cache prune --force # 保持上限を適用してデータベースを圧縮
 codehelion cache clear --force # ローカル監査データベースを恒久的に削除
 codehelion config init        # コメント付き codehelion.toml テンプレートを生成
 codehelion config show        # 有効な設定を表示
@@ -131,7 +133,8 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 主な scan の制御項目:
 
 - `--config <file>` と `--db <path>` は設定ファイルとローカルデータベースを選びます。
-- `--jobs <n>` は frontend の read/lex worker 数を指定します（host parallelism の 4 倍まで）。clone grouping と report rendering は serial です。`--no-ignore` は無視対象のファイルも読みます。
+- `--jobs <n>` は frontend の read/lex worker 数を指定します（host parallelism の 4 倍まで）。clone grouping と report rendering は serial です。省略した場合の worker 数はホストの並列度から自動で決まります。
+- `--no-ignore` は無視対象のファイルも読みます。`--follow-links` はシンボリックリンクを辿ります（既定では辿らず、種別ごとに数えて報告します）。`--compile-commands <path>` は自動選択の代わりに読む compilation database を指定します。
 - `--baseline <file>` は判断済みの finding と比較します。`--show-suppressed`、`--show-siblings`、`--show-near-misses` は text 出力を展開します。JSON と SARIF には常にこれらのデータが含まれます。`--siblings-by-signature` は Structural / Semantic モードでシグネチャによる sibling 生成を有効にします。既定では無効で、`--show-siblings` は text 表示だけを変えます。
 - `-v` / `-vv` は各グループについて書く量を、`--limit <n>` は列挙するグループ数を決めます。`--quiet` はグループだけを出力します。`--color <auto|always|never>` は端末判定を上書きし、`NO_COLOR` にも従います。
 - `--decoration <auto|unicode|ascii|none>` は一覧を描くグリフを選びます。色とは違って出力先には従いません。ファイルに書き出したレポートも端末と同じツリーを保ちます。エスケープシーケンスと違い、罫線素片はファイルの中でも読めるからです。`auto` は Windows を除いて罫線素片を使います。Windows のコンソールはアクティブなコードページ次第で描画が変わるためです。
@@ -139,6 +142,8 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 - `--fail-on-findings` は visible finding が残ると exit code 3 を返します。
 - `--compare-build-variants` と `--compare-languages` は独立した Semantic comparison を要求し、通常の scan partition を混ぜません。
 - `--allow-execution=build-script` は、Semantic helper がプロジェクトの build script を実行するための明示的な opt-in 許可です。これが無ければ scan 対象のコードは実行されず、`--untrusted` でも実行は許可されません。
+- `--untrusted` はどのプラットフォームでも scan の上限を下げます。ただし `--mode semantic` と併用する場合は helper プロセスに OS が強制するメモリ上限を要求するため、それを課せる Linux でのみ使えます。ほかの OS では、helper を無防備に走らせる代わりにエラーで停止します。
+- `cache prune --force` はローカル監査データベースに保持上限を適用して圧縮します。既定では単体の artifact 解析を新しい順に 20 件、各種 comparison をそれぞれ新しい順に 20 件残します（`--keep-artifacts` と `--keep-comparisons` で変更できます）。保持済みの履歴を削除する操作なので確認フラグが必要です。
 - `cache clear --force` はローカル監査データベースを恒久的に削除します。常に明示的な確認フラグが必要です。
 
 ### 終了コード
@@ -168,7 +173,7 @@ codehelion scan --mode structural --sort identifier-jaccard --min-identifier-jac
 
 ### baseline
 
-検出結果はクローングループにまとめられ、グループとメンバーそれぞれが安定 ID を持ちます。既定の text レポートは各メンバーを `[finding <ID>]` と表示するため、そのまま `codehelion explain <ID>` に渡せます。この ID で抑制・baseline 登録・後日の参照ができます。
+検出結果はクローングループにまとめられ、グループとメンバーそれぞれが安定 ID を持ちます。既定のレポートで見出しの末尾に出るのはグループの ID で、`[suppression] clone-ids` と baseline が受け取るのもこちらです。どちらもグループ単位で指定するものなので、メンバーの ID を書いても何にも一致しません。メンバーの ID は `-v` を付けたときに `[finding <ID>]` として表示されます。どちらの ID も `codehelion explain <ID>` で開けます。
 
 判断済みの finding は `codehelion baseline create` で凍結でき、以降のスキャンはそれを隠します。ローカルに残るスキャン履歴とは別に、プロジェクトが明示的に持ち続けられる前後比較が baseline です。
 
@@ -201,16 +206,22 @@ codehelion scan --mode structural
 
 ## 成果物検査（任意）
 
-`artifact` コマンドは WASM、ELF、Mach-O、PE/COFF、静的アーカイブをローカルで読み取り、観測済みサイズ、重複したコードとデータ、retained size、ソース位置の根拠を報告します。読むのはバイト列だけで、対象の成果物をロードすることも実行することもありません。
+`artifact` コマンドは WASM、ELF、Mach-O、PE/COFF、静的アーカイブをローカルで読み取ります。読むのはバイト列だけで、対象の成果物をロードすることも実行することもありません。
+
+観測済みサイズと重複したコードは、どのフォーマットについても報告します。それ以外は、そのフォーマット自身が確立できる量に限られます。retained size と shared size はコールグラフを必要とし、これを導けるのは WASM と ELF です。重複データは独立にサイズの付くデータ領域を必要とし、それを持つのは WASM です。ソース位置にはデバッグ情報が要ります。ELF なら DWARF、Mach-O なら identity の一致する dSYM、PE/COFF なら一致する PDB、WASM なら記録された source map の URL です。フォーマットが供給できない量は数値を作らず unavailable として報告し、何が足りなかったかを述べる assumption を並べます。
 
 ```sh
 codehelion artifact analyze path/to/binary
+codehelion artifact analyze path/to/binary --format csv  # json も可。既定は text
+codehelion artifact analyze path/to/binary --untrusted   # サイズ・時間・メモリの上限を下げる
 codehelion artifact report              # 最新の保存済み解析を再描画
 codehelion artifact report --analysis 1 # 特定の保存済み解析を再描画
 codehelion artifact compare before/binary after/binary
-codehelion artifact calibration                 # 最新の完了済みソーススキャンを集計
+codehelion artifact calibration                 # 記録済みの計測を集計
 codehelion artifact calibration --source-run 1  # 特定のソーススキャンを集計
 ```
+
+`artifact calibration` は計測を取るコマンドではなく読むコマンドなので、計測が 1 件も無ければ集計する対象もありません。計測を記録するのは `artifact compare` で、`--source-run` と `--clone-group` を `--before-build-variant` / `--after-build-variant` と併せて渡したときです。そのグループについて保存済みの見積もりと、2 つの成果物が実際に示したサイズ差を並べます。ここで必要になる見積もりは、先に `--source-run` と `--build-variant` を付けて実行した `artifact analyze` が残します。
 
 デバッグ情報は ELF build ID、Mach-O UUID、または PE CodeView/PDB identity が一致した場合にだけ受け入れます。`artifact analyze --debug-file companion` は source scan なしでも native debug companion を検査できます。source-artifact correlation を要求する場合にだけ `--source-run` と `--build-variant` を追加してください。`--build-variant manifest.json` を渡した場合、build variant の identity には正規化した JSON 値を使うため、空白や object member の順序は identity を変えません。
 
@@ -223,7 +234,7 @@ codehelion artifact analyze dist/app.wasm --build-variant build-variant.json --s
 
 source run にも build variant があり、レポートはその digest を表示します。両者は別々の条件 — ソースをどう読んだか、成果物をどうビルドしたか — であり、突き合わせるのではなく並べて記録します。manifest に書き写すべき source 側の digest は存在しません。
 
-artifact operation は既定で 512 MiB を超える入力を拒否し、parse・相関・永続化・render を含む全 worker 処理に 30 秒の期限を適用します。timeout 時には停止した段階を報告します。どちらも `--max-bytes` と `--timeout-seconds` で調整できます。Linux では `--max-memory-bytes <bytes>` により worker の仮想メモリ上限も強制します。ほかの OS ではこのオプションを黙って無視せず、エラーとして返します。`artifact report` 用に保存する versioned IR には別途 64 MiB の上限があり、保存対象の詳細がこれを超える分析は partial なデータベースレコードを残さずに失敗します。
+`artifact analyze` と `artifact compare` は既定で 512 MiB を超える入力を拒否し、parse・相関・永続化・render を含む全 worker 処理に 30 秒の期限を適用します。timeout 時には停止した段階を報告します。どちらも `--max-bytes` と `--timeout-seconds` で調整できます。Linux では `--max-memory-bytes <bytes>` により worker の仮想メモリ上限も強制します。ほかの OS ではこのオプションを黙って無視せず、エラーとして返します。`--untrusted` はこの 3 つをまとめて締めるため Linux 限定です。ほかの OS では、強制できないメモリ上限のまま素性の分からない成果物を読む代わりにエラーで停止します。`artifact report` と `artifact calibration` はローカルデータベースにあるものを読み直すだけで、worker を挟まずプロセス内で動くため、これらのオプションは対象外です。`artifact report` 用に保存する versioned IR には別途 64 MiB の上限があり、保存対象の詳細がこれを超える分析は partial なデータベースレコードを残さずに失敗します。
 
 ## 設定
 
@@ -233,7 +244,9 @@ artifact operation は既定で 512 MiB を超える入力を拒否し、parse�
 # min-clone-tokens = 20             # 報告する最小クローン長（トークン数）
 # literal-normalization = "full"    # "preserve" / "category" / "full"
 # database = ".codehelion/audit.db" # ローカルデータベースの場所
-# jobs = 4                           # frontend read/lex worker 数（host parallelism の 4 倍まで）。grouping/reporting は serial
+# jobs = 4                           # frontend read/lex worker 数（host parallelism の 4 倍まで）。
+                                    # grouping/reporting は serial。省略すると自動で決まり、
+                                    # それが組み込みの既定。4 は例であって既定値ではない
 
 [languages]
 # headers = "detect"                # 拡張子 ".h" を読む文法。"detect" / "c" / "cpp"
@@ -247,7 +260,7 @@ artifact operation は既定で 512 MiB を超える入力を拒否し、parse�
 # vendored-paths = [...]            # 自分では書かない vendored ツリー。既定で
                                     # 隠す。[] にするか --include-vendored で解除
 # symbols = []                      # 所属ユニット名に対する glob
-# clone-ids = []                    # 安定クローン ID（hex、前方一致は 8 文字以上）
+# clone-ids = []                    # 安定クローングループ ID（hex、前方一致は 8 文字以上）
 # generated-markers = ["@generated", "do not edit", "automatically generated", "auto-generated", "autogenerated"]
                                     # 生成物を示すバナー。大文字小文字は無視。
                                     # 設定すると既定値を置き換える
@@ -292,7 +305,7 @@ C++ と Rust では、同じシグネチャと同じ本体を持つ関数が ide
 
 **Fast モードは読み切れない量を報告します。** boilerplate・テストコード・整数幅の関数群に対する抑制ポリシーは構造分類を必要とするため、Fast モードでは適用できず、その旨をレポートに明示します。ある程度以上の規模のツリーで上から読んでいける一覧がほしい場合は `--mode structural` を使ってください。
 
-**欠落や編集のあるコピーは検出しにくくなります。** Structural / Semantic モードの sibling channel は `--siblings-by-signature` を指定したときだけ生成され、既定では無効です。有効にすると、グループの canonical function と正規化済みシグネチャが一致し、まだグループ化されていない関数が同じディレクトリにある場合、低信頼度の sibling として保持できます。シグネチャが証拠になるのは、それが珍しいあいだだけです。そのため `limits.signature-sibling-max-units-per-signature` が許す数より多くの unit が共有するシグネチャは、探索から丸ごと除外されます。いくつのシグネチャを除外したか、いちばん広く共有されていたものがどれだけの unit に及んだかは、サマリが report します。この上限で除外された候補と、探索の上限で落ちた候補は別々に数えるので、どちらを動かすべきかが読み取れます。どちらも変更でき、件数はツリーと設定が決まれば一意に定まるため、実行環境ではなく設定の性質です。`--show-siblings` は text 表示だけを変え、JSON と SARIF には生成済みの sibling が残ります。別ディレクトリの mirror、変化したシグネチャ、sibling 探索の上限を超えた候補は、なお見逃すことがあります。codehelion はミラー整合性検査ツールではありません。すべての mirror を見つけたことや、同じシグネチャの本体が同じ動作をすることを証明するものではありません。
+**欠落や編集のあるコピーは検出しにくくなります。** Structural / Semantic モードには sibling channel が 2 つあります。similarity channel は常に動き、グループの canonical member に近いと測られ、そのグループがすでに占めているファイルの中にある未グループの unit を保持します。signature channel は `--siblings-by-signature` を指定したときだけ動き、既定では無効です。有効にすると、グループの canonical function と正規化済みシグネチャが一致し、まだグループ化されていない関数が同じディレクトリにある場合、低信頼度の sibling として保持できます。シグネチャが証拠になるのは、それが珍しいあいだだけです。そのため `limits.signature-sibling-max-units-per-signature` が許す数より多くの unit が共有するシグネチャは、探索から丸ごと除外されます。いくつのシグネチャを除外したか、いちばん広く共有されていたものがどれだけの unit に及んだかは、サマリが report します。この上限で除外された候補と、探索の上限で落ちた候補は別々に数えるので、どちらを動かすべきかが読み取れます。どちらも変更でき、件数はツリーと設定が決まれば一意に定まるため、実行環境ではなく設定の性質です。`--show-siblings` は text 表示だけを変え、JSON と SARIF には生成済みの sibling が残ります。別ディレクトリの mirror、変化したシグネチャ、sibling 探索の上限を超えた候補は、なお見逃すことがあります。codehelion はミラー整合性検査ツールではありません。すべての mirror を見つけたことや、同じシグネチャの本体が同じ動作をすることを証明するものではありません。
 
 **1 つのシグネチャで駆動する層に、このチャネルは何も与えません。** dispatch table や callback table によって 100 本の関数が同じ呼び出し形を持つ場所では、シグネチャは何も区別しません。そうした層について、このチャネルが出せる証拠はありません。それを言えるようにすることが共有数の上限の目的です。上限が無ければ、任意の関数どうしを組にした sibling が数千件並び、検討するまでは結果のように見えてしまいます。
 
@@ -367,7 +380,7 @@ make coverage      # HTML カバレッジレポート（cargo-llvm-cov が必要
 make hooks         # pre-commit git フックを導入
 ```
 
-ガードレール: 設定を固定した `rustfmt`、`pedantic` + `nursery` を警告エラー扱いにした `clippy`（`unsafe` は禁止）、依存関係の advisory・ban・license を確認する `cargo-deny`、scan path のプロセス起動と network socket を禁止する `clippy.toml`、対象コードと同時に書くテスト、`make check` 一式を実行する pre-commit フック。
+ガードレール: 設定を固定した `rustfmt`、`pedantic` + `nursery` を警告エラー扱いにした `clippy`（`unsafe` は禁止）、依存関係の advisory・ban・license を確認する `cargo-deny`、scan path のプロセス起動と network socket を禁止する `clippy.toml`、対象コードと同時に書くテスト。pre-commit フックが走らせるのは `cargo fmt --check` と警告エラー扱いの `cargo clippy` だけで、数秒で終わる機械的な部分に絞っています。テスト・境界検査・パッケージング検査は `make check` の側にあり、push の前に実行します。
 
 検出精度は `corpus/` 配下のコーパスで測ります。コーパスが持つのは実プロジェクトそのものではなく、それに対する手書きの verdict です。表を出すのは `make eval` で、現在の数値は[精度](#精度)にあります。それぞれの半分が何を答えられて何を答えられないかは `corpus/README.md` に書いてあります。
 

@@ -172,7 +172,9 @@ codehelion report --run 1     # render a particular recorded scan again
 codehelion explain <ID>       # show a finding from the local database
 codehelion explain <ID> --format json
 codehelion baseline create    # freeze the latest findings as a baseline
+codehelion baseline update    # drop baseline entries the latest scan no longer reports
 codehelion cache status       # local-database location and size
+codehelion cache prune --force # apply the retention limits and compact the database
 codehelion cache clear --force # permanently delete the local audit database
 codehelion config init        # write a commented codehelion.toml template
 codehelion config show        # print the effective configuration
@@ -182,7 +184,8 @@ codehelion doctor             # report available analysis components
 The main scan controls are:
 
 - `--config <file>` and `--db <path>` choose the configuration and local database.
-- `--jobs <n>` sets frontend read-and-lex workers (capped at four times host parallelism); clone grouping and report rendering remain serial. `--no-ignore` also reads ignored files.
+- `--jobs <n>` sets frontend read-and-lex workers (capped at four times host parallelism); clone grouping and report rendering remain serial. Omitted, the worker count follows host parallelism.
+- `--no-ignore` also reads ignored files, and `--follow-links` follows symbolic links, which are otherwise excluded and counted by type. `--compile-commands <path>` names the compilation database to read instead of the one discovery would pick.
 - `--baseline <file>` compares with accepted findings; `--show-suppressed`, `--show-siblings`, and `--show-near-misses` expand text output. JSON and SARIF retain those data regardless. `--siblings-by-signature` enables signature-based sibling generation in Structural and Semantic modes; it is off by default, while `--show-siblings` only changes text visibility.
 - `-v`/`-vv` choose how much is said about each group, `--limit <n>` how many groups are listed, and `--quiet` prints the groups alone. `--color <auto|always|never>` overrides the terminal detection, and `NO_COLOR` is honoured.
 - `--decoration <auto|unicode|ascii|none>` chooses the glyphs the listing is drawn with. Unlike colour it does not follow the destination: a report written to a file keeps the tree a terminal would have shown, because a box-drawing character in a file is still readable where an escape sequence is not. `auto` draws box-drawing characters everywhere except Windows, whose console depends on the active code page.
@@ -190,6 +193,8 @@ The main scan controls are:
 - `--fail-on-findings` returns exit code 3 when visible findings remain.
 - `--compare-build-variants` and `--compare-languages` request separate Semantic comparisons; they never merge ordinary scan partitions.
 - `--allow-execution=build-script` is the explicit, opt-in permission for a Semantic helper to run a project build script. Nothing in the scanned tree executes without it; `--untrusted` permits no execution.
+- `--untrusted` lowers the scan's ceilings on any platform. Combined with `--mode semantic` it also requires an operating-system memory ceiling around the helper process, which only Linux can enforce; elsewhere that combination fails rather than run a helper unconfined.
+- `cache prune --force` applies the retention limits to the local audit database and compacts it, keeping the newest 20 standalone artifact analyses and the newest 20 comparisons of each kind unless `--keep-artifacts` and `--keep-comparisons` say otherwise. It deletes retained history, so it requires the confirmation flag.
 - `cache clear --force` permanently removes the local audit database; it always requires the explicit confirmation flag.
 
 ### Exit status
@@ -227,10 +232,12 @@ value to compare and the report says how many entries that left out.
 
 ### Baselines
 
-Findings are grouped into clone groups; each group and member carries a stable
-ID you can suppress, baseline or look up later with `explain`. The default text
-report prints each listed member as `[finding <ID>]`, so the identifier is ready
-to paste into `codehelion explain <ID>`.
+Findings are grouped into clone groups, and both a group and each of its
+members carry a stable ID. The group's ID closes its heading in the default
+report, and it is the one `[suppression] clone-ids` and a baseline take: both
+name whole groups, so a member's ID written there matches nothing. Member IDs
+are printed as `[finding <ID>]` under `-v`. Either kind can be opened with
+`codehelion explain <ID>`.
 
 Once a finding is accepted, `codehelion baseline create` freezes it and later
 scans hide it. A baseline is the explicit before-and-after comparison a team
@@ -293,18 +300,35 @@ the occurrences have in common and leaves the refactoring to you.
 ## Artifact inspection (optional)
 
 The `artifact` commands read WASM, ELF, Mach-O, PE/COFF and static archives
-locally to report observed size, duplicate code and data, retained size and
-source-location evidence. They parse bytes; they never load or execute the
-inspected artifact.
+locally. They parse bytes; they never load or execute the inspected artifact.
+
+Observed size and duplicate code are reported for every format. The rest is
+what the format itself can establish: retained and shared size need a call
+graph, which is derived for WASM and ELF; duplicate data needs independently
+sized data regions, which WASM has; a source location needs debug evidence —
+DWARF for ELF, a matching dSYM for Mach-O, a matching PDB for PE/COFF, a
+recorded source-map URL for WASM. A quantity the format cannot supply is
+reported as unavailable beside an assumption naming what was missing, rather
+than as a number.
 
 ```sh
 codehelion artifact analyze path/to/binary
+codehelion artifact analyze path/to/binary --format csv  # also json, or text by default
+codehelion artifact analyze path/to/binary --untrusted   # lowered size, time and memory ceilings
 codehelion artifact report              # render the latest saved analysis
 codehelion artifact report --analysis 1 # render a particular saved analysis
 codehelion artifact compare before/binary after/binary
-codehelion artifact calibration                 # summarize the latest completed source scan
+codehelion artifact calibration                 # summarize the recorded measurements
 codehelion artifact calibration --source-run 1  # summarize a particular source scan
 ```
+
+`artifact calibration` reads measurements rather than taking them, so it
+summarizes nothing until some exist. One is recorded by `artifact compare`
+when it is given `--source-run` and `--clone-group` together with
+`--before-build-variant` and `--after-build-variant`: the group's saved
+estimate is then set beside the size difference the two artifacts actually
+show. The estimate it needs comes from an earlier `artifact analyze` run with
+`--source-run` and `--build-variant`.
 
 Debug companions are accepted only after the matching ELF build ID, Mach-O UUID
 or PE CodeView/PDB identity has been verified. `artifact analyze --debug-file companion`
@@ -326,12 +350,17 @@ are separate conditions — how the sources were read, and how the artifact was
 built — recorded side by side rather than checked against each other. There is
 no source digest to find and copy into the manifest.
 
-Artifact operations reject inputs above 512 MiB by default and run parsing,
-correlation, persistence, and rendering in a worker with one 30-second
-deadline. Timeout diagnostics name the phase that was running; `--max-bytes`
-and `--timeout-seconds` adjust the limits. On Linux,
+`artifact analyze` and `artifact compare` reject inputs above 512 MiB by
+default and run parsing, correlation, persistence, and rendering in a worker
+with one 30-second deadline. Timeout diagnostics name the phase that was
+running; `--max-bytes` and `--timeout-seconds` adjust the limits. On Linux,
 `--max-memory-bytes <bytes>` also enforces a worker virtual-memory ceiling;
-other platforms reject that option rather than silently ignoring it. The
+other platforms reject that option rather than silently ignoring it.
+`--untrusted` clamps all three at once, so it is available on Linux only:
+elsewhere it fails rather than accept an artifact nobody vouches for under a
+memory ceiling that cannot be enforced. `artifact report` and
+`artifact calibration` re-read what is already in the local database and run
+in process, so none of these options apply to them. The
 versioned IR retained for `artifact report` is separately capped at 64 MiB, and
 an analysis whose persisted details exceed that limit fails without writing a
 partial database record.
@@ -345,7 +374,9 @@ partial database record.
 # min-clone-tokens = 20             # smallest clone reported, in tokens
 # literal-normalization = "full"    # "preserve", "category" or "full"
 # database = ".codehelion/audit.db" # local-database location
-# jobs = 4                           # frontend read-and-lex workers (capped at 4× host parallelism); grouping/reporting stay serial
+# jobs = 4                           # frontend read-and-lex workers (capped at 4× host parallelism);
+                                    # grouping/reporting stay serial. Omit for automatic,
+                                    # which is what the built-in default does; 4 is an example
 
 [languages]
 # headers = "detect"                # grammar for a bare ".h": "detect", "c", "cpp"
@@ -360,7 +391,7 @@ partial database record.
                                     # writes, hidden by default; set to [] to
                                     # read them, or pass --include-vendored
 # symbols = []                      # globs over the name of the enclosing unit
-# clone-ids = []                    # stable clone ids (hex; prefixes need at least 8 characters)
+# clone-ids = []                    # stable clone-group ids (hex; prefixes need at least 8 characters)
 # generated-markers = ["@generated", "do not edit", "automatically generated", "auto-generated", "autogenerated"]
                                     # banners flagging machine output, matched
                                     # without regard to case; replaces defaults
@@ -461,11 +492,14 @@ tree of any size, `--mode structural` is what produces a list worth reading
 top-down.
 
 **Incomplete or edited copies are harder to detect.** Structural and Semantic
-modes generate the sibling channel only with `--siblings-by-signature`; it is
-off by default. When enabled, the channel can retain a low-confidence sibling
-when its normalized signature matches the group's canonical function and the
-otherwise ungrouped function is in the same directory. A shared signature is
-evidence only while it is rare, so a signature that more units share than
+modes run two sibling channels. The similarity channel always runs: it retains
+an ungrouped unit that measures close to a group's canonical member and sits in
+a file that group already occupies. The signature channel is opt-in with
+`--siblings-by-signature` and off by default; enabled, it can retain a
+low-confidence sibling when its normalized signature matches the group's
+canonical function and the otherwise ungrouped function is in the
+same directory. A shared signature is evidence only while it is rare, so a
+signature that more units share than
 `limits.signature-sibling-max-units-per-signature` allows is left out of the
 search entirely, and the summary names how many signatures were left out and
 how far the widest one reached. Candidates removed by that limit are counted
@@ -602,7 +636,10 @@ Guardrails: `rustfmt` with a pinned config; `clippy` `pedantic` + `nursery`
 with warnings as errors and `unsafe` forbidden; `cargo-deny` checks dependency
 advisories, bans and licences; `clippy.toml` disallows process spawning and
 network sockets in the scan path. Tests are written alongside the code they
-cover and a pre-commit hook runs the whole `make check` suite.
+cover. The pre-commit hook runs `cargo fmt --check` and `cargo clippy` with
+warnings denied — the mechanical part, which costs seconds. The tests, the
+boundary checks and the packaging check are in `make check`, to run before
+pushing.
 
 Detection accuracy is measured against the corpora in `corpus/`, which record
 hand-written verdicts on real projects rather than the projects themselves.
