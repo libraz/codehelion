@@ -5,7 +5,7 @@
 //! unit has no effects. Consumers may reward matching non-empty evidence but
 //! must not reject a finding or infer purity from its absence.
 
-use crate::ir::{EffectSummary, SemanticConstruct, SemanticConstructKind};
+use crate::ir::{EffectSummary, SemanticConstruct, SemanticConstructKind, resource_interaction};
 
 /// Summarize the closed interactions represented by semantic constructs.
 #[must_use]
@@ -13,11 +13,8 @@ pub fn summarize(constructs: &[SemanticConstruct]) -> EffectSummary {
     let mut interactions = constructs
         .iter()
         .filter(|construct| construct.kind == SemanticConstructKind::AcquireResource)
-        .filter_map(|construct| match construct.resource_kind.as_deref() {
-            Some("file") => Some("file_io".to_owned()),
-            Some("lock") => Some("synchronization".to_owned()),
-            _ => None,
-        })
+        .filter_map(|construct| resource_interaction(construct.resource_kind.as_deref()?))
+        .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     interactions.sort();
     interactions.dedup();
@@ -60,5 +57,19 @@ mod tests {
         assert!(summary.computed);
         assert_eq!(summary.interactions, ["file_io", "synchronization"]);
         assert!(summary.writes.is_empty());
+    }
+
+    /// A resource kind the shared vocabulary does not list contributes nothing,
+    /// rather than an interaction guessed from its spelling.
+    #[test]
+    fn a_resource_kind_outside_the_closed_vocabulary_names_no_interaction() {
+        let summary = summarize(&[
+            construct(SemanticConstructKind::AcquireResource, Some("socket")),
+            construct(SemanticConstructKind::AcquireResource, Some("File")),
+            construct(SemanticConstructKind::AcquireResource, Some("")),
+            construct(SemanticConstructKind::AcquireResource, None),
+        ]);
+        assert!(summary.computed);
+        assert!(summary.interactions.is_empty());
     }
 }

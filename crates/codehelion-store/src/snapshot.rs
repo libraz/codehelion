@@ -409,7 +409,7 @@ pub struct SuppressionRuleRow {
 /// Everything one scan run persists.
 #[derive(Debug, Clone)]
 pub struct Snapshot<'a> {
-    /// Scanned root, as [`path_key`](crate::path_key) spells the canonical
+    /// Scanned root, as [`path_key`](crate::path_key()) spells the canonical
     /// path of the tree that was read.
     ///
     /// Every lookup that asks about a root — run reuse, baselines, lineage —
@@ -477,7 +477,7 @@ pub struct Snapshot<'a> {
 #[derive(Debug, Clone)]
 pub struct CrossVariantComparisonSnapshot<'a> {
     /// Scan root shared by the partition scans, spelled by
-    /// [`path_key`](crate::path_key) like every other recorded root.
+    /// [`path_key`](crate::path_key()) like every other recorded root.
     pub root_path: &'a str,
     /// Comparison-domain identity.
     pub comparison_id: CrossVariantComparisonId,
@@ -532,7 +532,7 @@ pub struct CrossVariantMemberRow {
 #[derive(Debug, Clone)]
 pub struct CrossLanguageComparisonSnapshot<'a> {
     /// Scan root shared by the partition scans, spelled by
-    /// [`path_key`](crate::path_key) like every other recorded root.
+    /// [`path_key`](crate::path_key()) like every other recorded root.
     pub root_path: &'a str,
     /// Comparison-domain identity.
     pub comparison_id: CrossLanguageComparisonId,

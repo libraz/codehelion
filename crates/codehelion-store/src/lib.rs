@@ -444,11 +444,22 @@ impl Store {
 
     /// Apply explicit retention limits and compact the local database.
     ///
-    /// The newest artifact analyses and each comparison kind are retained by
-    /// their recorded timestamps. All incomplete partitions are abandoned by
-    /// definition once a user explicitly prunes under the exclusive database
-    /// lease. Completed source scans remain subject to their existing
-    /// replacement and artifact-reference rules.
+    /// The limits reach three tables: the newest artifact analyses and the
+    /// newest of each comparison kind are retained by their recorded
+    /// timestamps, and everything older is removed. Incomplete scan partitions
+    /// are removed outright, because a user pruning under the exclusive
+    /// database lease is the one writer there could be, so any partition still
+    /// marked running was abandoned.
+    ///
+    /// Every other table is history and is kept indefinitely. Completed scan
+    /// runs and the rows they own — scanned files, units, fragments, clone
+    /// groups and their findings — are never pruned, by count or by age, so a
+    /// tree scanned repeatedly accumulates one generation per scan. Nothing
+    /// here bounds the database's size; `cache clear` is what discards
+    /// recorded history. Fingerprints are the exception among the untouched
+    /// tables: they are shared content identities rather than run-owned rows,
+    /// so the ones no remaining row references are removed with the rows that
+    /// referenced them.
     ///
     /// # Errors
     ///
@@ -630,6 +641,51 @@ mod tests {
         assert_eq!(store.table_count("artifact_analysis").unwrap(), 1);
         assert_eq!(store.table_count("cross_variant_comparison").unwrap(), 1);
         assert_eq!(store.table_count("cross_language_comparison").unwrap(), 1);
+    }
+
+    /// Pruning discards the partitions nobody finished and nothing else: a
+    /// completed scan is the history the tool exists to keep, so the retention
+    /// counts that bound the artifact and comparison tables do not reach it.
+    #[test]
+    fn prune_discards_incomplete_partitions_and_keeps_completed_scans() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO build_variant
+                     (id, variant_fingerprint, canonical, analysis_mode, normalization_version)
+                 VALUES (1, 'aa', '{}', 'fast', 1)",
+                [],
+            )
+            .unwrap();
+        for (ordinal, status) in [(1_u8, "running"), (2, "completed"), (3, "completed")] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO scan_run
+                         (build_variant_id, root_path, tool_version, config_hash, config_source,
+                          analysis_mode, started_at, finished_at, status, min_clone_tokens)
+                     VALUES (1, '/repo', 'test', 'hash', 'defaults', 'fast', ?1, ?1, ?2, 20)",
+                    rusqlite::params![format!("2026-01-0{ordinal}T00:00:00Z"), status],
+                )
+                .unwrap();
+        }
+
+        let report = store.prune(1, 1).unwrap();
+
+        assert_eq!(report.abandoned_runs, 1);
+        // Both completed runs survive a prune asked to keep one of everything
+        // it does bound, because no count or age rule applies to them.
+        assert_eq!(store.table_count("scan_run").unwrap(), 2);
+        let statuses: Vec<String> = store
+            .conn
+            .prepare("SELECT status FROM scan_run ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(statuses, ["completed", "completed"]);
     }
 
     #[test]
