@@ -127,9 +127,56 @@ fn the_summary_keeps_the_sizes_and_the_whole_pipeline_block() {
 fn the_pipeline_counts_cover_the_stages_the_ceiling_stopped() {
     let counted = count_pipeline(&truncated_report());
     assert_eq!(counted.lines, 100_000);
-    assert_eq!(counted.examined_pairs, 40);
+    // The seed-pair stage passed 4000 and lost nothing to the allowance, so
+    // it is outside both sides of the ratio.
+    assert_eq!(counted.truncated_stage_examined_pairs, 40);
     assert_eq!(counted.skipped_pairs, 60);
     assert!(counted.search_truncated);
+}
+
+/// A run no allowance cut short has no cut-short stage, so the count is zero
+/// and reads as one: the share is zero and nothing is reported about it.
+#[test]
+fn a_complete_run_has_no_cut_stage_to_count() {
+    let report = serde_json::json!({
+        "summary": {
+            "files": {"total": 400},
+            "lines": 100_000,
+            "search_truncated": false,
+            "funnel": [
+                {"stage": "seed pairs", "passed": 4_000, "dropped": []},
+                {"stage": "fragment pairs", "passed": 2_500, "dropped": [
+                    {"cause": "min_tokens", "count": 1_500},
+                ]},
+            ],
+        }
+    });
+    let counted = count_pipeline(&report);
+    assert!(!counted.search_truncated);
+    assert_eq!(
+        (
+            counted.truncated_stage_examined_pairs,
+            counted.skipped_pairs
+        ),
+        (0, 0),
+        "6500 pairs passed the funnel, but none of them at a stage an \
+         allowance stopped"
+    );
+
+    let measured = ScanMeasurement {
+        wall: Duration::from_secs(1),
+        max_rss_bytes: Some(1),
+        lines: counted.lines,
+        truncated_stage_examined_pairs: counted.truncated_stage_examined_pairs,
+        skipped_pairs: counted.skipped_pairs,
+        search_truncated: counted.search_truncated,
+        summary: String::new(),
+    };
+    assert!(measured.truncation_share().abs() < f64::EPSILON);
+    assert!(
+        Slo::for_lines(100_000).shortfalls(&measured).is_empty(),
+        "a complete run is never charged for the zero"
+    );
 }
 
 fn measurement(
@@ -143,7 +190,7 @@ fn measurement(
         wall: Duration::from_secs(wall_secs),
         max_rss_bytes: rss,
         lines,
-        examined_pairs: 1_000,
+        truncated_stage_examined_pairs: 1_000,
         skipped_pairs: skipped,
         search_truncated,
         summary: String::new(),
@@ -180,7 +227,7 @@ fn a_fast_run_that_stopped_early_still_misses_the_target() {
     let truncated = measurement(5, Some(1_000_000_000), 1_000_000, 3_000, true);
     let missed = slo.shortfalls(&truncated);
     assert_eq!(missed.len(), 1, "{missed:?}");
-    assert!(missed[0].contains("examined 1000 of 4000"));
+    assert!(missed[0].contains("after 1000 of its 4000"), "{missed:?}");
     assert!(missed[0].contains("75%"));
 }
 
@@ -209,7 +256,13 @@ fn a_non_pair_ceiling_is_still_an_incomplete_search() {
     });
     let counted = count_pipeline(&report);
     assert!(counted.search_truncated);
-    assert_eq!((counted.examined_pairs, counted.skipped_pairs), (0, 0));
+    assert_eq!(
+        (
+            counted.truncated_stage_examined_pairs,
+            counted.skipped_pairs
+        ),
+        (0, 0)
+    );
 
     let missed = Slo::for_lines(100_000).shortfalls(&measurement(
         1,

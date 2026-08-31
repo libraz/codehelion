@@ -61,9 +61,16 @@ pub struct ScanMeasurement {
     pub max_rss_bytes: Option<u64>,
     /// Source lines the scan analysed.
     pub lines: u64,
-    /// Candidate pairs the pairing passes examined.
-    pub examined_pairs: u64,
-    /// Candidate pairs a spent allowance left unexamined.
+    /// Candidate pairs already passed on by the funnel stages a spent pair
+    /// allowance cut short.
+    ///
+    /// This is the denominator of what that allowance stopped, not a count of
+    /// every pair the run compared: a stage that finished its own search is
+    /// left out, so a run nothing cut short reports zero. Read it beside
+    /// [`skipped_pairs`](Self::skipped_pairs), which says whether there was a
+    /// cut to measure at all.
+    pub truncated_stage_examined_pairs: u64,
+    /// Candidate pairs a spent pair allowance left unexamined.
     pub skipped_pairs: u64,
     /// Whether any candidate-search resource ceiling truncated the scan.
     ///
@@ -75,13 +82,17 @@ pub struct ScanMeasurement {
 }
 
 impl ScanMeasurement {
-    /// Share of the candidate pairs a spent allowance left unexamined, in
-    /// `0.0..=1.0`. Zero when nothing was cut, including when there was
-    /// nothing to cut.
+    /// Share of the cut-short stages' candidate pairs that a spent allowance
+    /// left unexamined, in `0.0..=1.0`.
+    ///
+    /// Zero when nothing was cut, because then there is no cut-short stage to
+    /// take a share over.
     #[must_use]
     #[allow(clippy::cast_precision_loss)] // ratio of display-scale counts
     pub fn truncation_share(&self) -> f64 {
-        let total = self.examined_pairs.saturating_add(self.skipped_pairs);
+        let total = self
+            .truncated_stage_examined_pairs
+            .saturating_add(self.skipped_pairs);
         if total == 0 {
             return 0.0;
         }
@@ -178,11 +189,14 @@ impl Slo {
         }
         if measurement.search_truncated {
             if measurement.skipped_pairs > 0 {
+                // Both numbers belong to the stages the allowance cut, which
+                // is why this branch is gated on there having been a cut: a
+                // complete run has no such stage and no share to report.
                 missed.push(format!(
-                    "examined {} of {} candidate pairs; the allowance stopped the search \
+                    "the pair allowance stopped a stage after {} of its {} candidate pairs, \
                      {:.0}% short",
-                    measurement.examined_pairs,
-                    measurement.examined_pairs + measurement.skipped_pairs,
+                    measurement.truncated_stage_examined_pairs,
+                    measurement.truncated_stage_examined_pairs + measurement.skipped_pairs,
                     measurement.truncation_share() * 100.0,
                 ));
             } else {
@@ -259,7 +273,7 @@ pub fn measure_scan(
         wall,
         max_rss_bytes,
         lines: counted.lines,
-        examined_pairs: counted.examined_pairs,
+        truncated_stage_examined_pairs: counted.truncated_stage_examined_pairs,
         skipped_pairs: counted.skipped_pairs,
         search_truncated: counted.search_truncated,
         summary: summarize(&value),
@@ -269,13 +283,17 @@ pub fn measure_scan(
 /// The numbers a size measurement needs from a scan report.
 struct PipelineCounts {
     lines: u64,
-    examined_pairs: u64,
+    truncated_stage_examined_pairs: u64,
     skipped_pairs: u64,
     search_truncated: bool,
 }
 
 /// Read the analysed size and the pairing stages' own accounting out of a
 /// report.
+///
+/// Only the stages a pair allowance actually cut short are counted, on both
+/// sides of the ratio: a stage that finished its own search would otherwise
+/// dilute a share that exists to say how much of the search was abandoned.
 ///
 /// `summary.search_truncated` is the completeness signal. Pair-budget counts
 /// remain a useful diagnostic when available, but not every ceiling drops
@@ -284,7 +302,7 @@ fn count_pipeline(report: &serde_json::Value) -> PipelineCounts {
     let summary = &report["summary"];
     let mut counts = PipelineCounts {
         lines: summary["lines"].as_u64().unwrap_or(0),
-        examined_pairs: 0,
+        truncated_stage_examined_pairs: 0,
         skipped_pairs: 0,
         // A new report schema requires this field. Treat an older or malformed
         // report as incomplete rather than allowing an absent signal to claim
@@ -305,8 +323,8 @@ fn count_pipeline(report: &serde_json::Value) -> PipelineCounts {
         if skipped == 0 {
             continue;
         }
-        counts.examined_pairs = counts
-            .examined_pairs
+        counts.truncated_stage_examined_pairs = counts
+            .truncated_stage_examined_pairs
             .saturating_add(stage["passed"].as_u64().unwrap_or(0));
         counts.skipped_pairs = counts.skipped_pairs.saturating_add(skipped);
     }

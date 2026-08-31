@@ -476,7 +476,10 @@ impl fmt::Display for WidthFamily {
 /// [`Self::floor_that_costs_nothing`] is the answer in one number per axis. A
 /// floor above the lowest confirmed finding is a floor that hides real
 /// duplication, so the highest usable one is that finding's value, and what it
-/// removes is what the axis is worth as a filter.
+/// removes is what the axis is worth as a filter. It therefore needs a
+/// confirmed finding to stand on; [`Self::scored`] answers the separate
+/// question of whether the axis was measured at all, so the two cases do not
+/// have to be told apart from one absent value.
 ///
 /// An axis a finding was not scored on is left out of that axis and counted in
 /// no other: a split pair has no similarity, and treating its absence as zero
@@ -514,9 +517,16 @@ impl AxisSplit {
     /// The highest floor on `axis` that removes no confirmed finding, and how
     /// many refuted ones it would remove.
     ///
-    /// `None` where no finding was scored on the axis at all. A count of zero
-    /// says the axis is worthless as a filter: the lowest real clone sits at or
-    /// below every lookalike, so nothing can be cut without cutting it.
+    /// `None` where no confirmed finding carried a value on the axis, which is
+    /// the only thing it can mean: the floor is the lowest confirmed value, so
+    /// with nothing confirmed there is no floor to name. That an axis is
+    /// measured at all is [`Self::scored`], and a run whose last confirmed
+    /// finding disappeared is a change in the verdicts rather than in what the
+    /// detector reports.
+    ///
+    /// A count of zero says the axis is worthless as a filter: the lowest real
+    /// clone sits at or below every lookalike, so nothing can be cut without
+    /// cutting it.
     #[must_use]
     pub fn floor_that_costs_nothing(&self, axis: &str) -> Option<(f64, usize)> {
         let &floor = self.confirmed.get(axis)?.first()?;
@@ -527,6 +537,16 @@ impl AxisSplit {
         Some((floor, removed))
     }
 
+    /// Whether any judged finding carried a value on `axis`, either verdict.
+    ///
+    /// The companion to [`Self::floor_that_costs_nothing`] returning `None`:
+    /// together they separate "nothing confirmed on this axis" from "nobody
+    /// was scored on this axis", which call for opposite reactions.
+    #[must_use]
+    pub fn scored(&self, axis: &str) -> bool {
+        self.confirmed.contains_key(axis) || self.refuted.contains_key(axis)
+    }
+
     /// The axes anything was scored on, in report order.
     #[must_use]
     pub fn axes(&self) -> Vec<&'static str> {
@@ -534,7 +554,7 @@ impl AxisSplit {
             .named()
             .iter()
             .map(|&(name, _)| name)
-            .filter(|name| self.confirmed.contains_key(name) || self.refuted.contains_key(name))
+            .filter(|name| self.scored(name))
             .collect()
     }
 }

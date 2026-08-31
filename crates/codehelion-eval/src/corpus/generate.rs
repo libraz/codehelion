@@ -24,7 +24,7 @@ use crate::corpus::spec::{
     VariantSpec,
 };
 use crate::corpus::{Error, LABEL_SCHEMA_VERSION, LABELS_FILE, SPEC_SCHEMA_VERSION};
-use crate::labels::{KnownSibling, LabelPair, LabelSet, NonClone};
+use crate::labels::{KnownSibling, LabelPair, LabelSet, NON_CLONE_REASONS, NonClone};
 use crate::schema::{CloneType, Fragment};
 
 /// Marker comment emitted as the second line of every generated variant file.
@@ -162,9 +162,9 @@ fn is_statement(trimmed: &str) -> bool {
 /// # Errors
 ///
 /// Returns an [`Error`] when the spec declares an unsupported language,
-/// references unknown items or files, an edit cannot be applied, an edit is
-/// not allowed for the item's clone type, or the label document cannot be
-/// serialized.
+/// references unknown items or files, names a non-clone reason outside
+/// [`NON_CLONE_REASONS`], an edit cannot be applied, an edit is not allowed
+/// for the item's clone type, or the label document cannot be serialized.
 pub fn generate(spec: &MutationSpec, seed_text: &str) -> Result<GeneratedCorpus, Error> {
     if spec.schema_version != SPEC_SCHEMA_VERSION {
         return Err(Error::UnsupportedSchemaVersion(spec.schema_version));
@@ -205,6 +205,18 @@ pub fn generate(spec: &MutationSpec, seed_text: &str) -> Result<GeneratedCorpus,
         &spec.seed,
         spec.non_clones.len(),
     )?);
+    // Every label leaves here with a reason the scorers know, whichever spec
+    // construct produced it. Checked once, after both sources have been
+    // resolved, so a reason cannot reach `labels.json` and fail on the way
+    // back in.
+    for non_clone in &non_clones {
+        if !NON_CLONE_REASONS.contains(&non_clone.reason.as_str()) {
+            return Err(Error::UnsupportedNonCloneReason {
+                label: non_clone.id.clone(),
+                reason: non_clone.reason.clone(),
+            });
+        }
+    }
     let labels = LabelSet {
         schema_version: LABEL_SCHEMA_VERSION,
         language: spec.language.clone(),

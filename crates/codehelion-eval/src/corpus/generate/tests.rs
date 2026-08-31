@@ -428,7 +428,7 @@ fn a_replacement_needs_the_type_that_allows_statement_edits() {
 fn non_clone_ranges_are_recomputed() {
     let mut spec = type2_spec();
     spec.non_clones.push(NonCloneSpec {
-        reason: "helper-boilerplate".to_string(),
+        reason: "single-expression-return".to_string(),
         function: "fn add".to_string(),
         counterpart: None,
         variant: "v2.rs".to_string(),
@@ -446,7 +446,7 @@ fn a_non_clone_can_name_a_different_counterpart() {
     let mut spec = type2_spec();
     spec.variants[0].items.push(item("fn twice"));
     spec.non_clones.push(NonCloneSpec {
-        reason: "same-skeleton-different-logic".to_string(),
+        reason: "different-computation-skeleton".to_string(),
         function: "fn add".to_string(),
         counterpart: Some("fn twice".to_string()),
         variant: "v2.rs".to_string(),
@@ -464,7 +464,7 @@ fn a_non_clone_can_name_a_different_counterpart() {
 fn a_non_clone_counterpart_must_exist() {
     let mut spec = type2_spec();
     spec.non_clones.push(NonCloneSpec {
-        reason: "same-skeleton-different-logic".to_string(),
+        reason: "different-computation-skeleton".to_string(),
         function: "fn add".to_string(),
         counterpart: Some("fn missing".to_string()),
         variant: "v2.rs".to_string(),
@@ -474,6 +474,74 @@ fn a_non_clone_counterpart_must_exist() {
         error,
         Error::UnknownNonCloneRef { ref reference } if reference == "fn missing"
     ));
+}
+
+/// A reason the scorers do not know is a corpus that generates cleanly and
+/// then fails every reader. The generator answers instead of the reader.
+#[test]
+fn a_spec_level_non_clone_reason_must_be_registered() {
+    let mut spec = type2_spec();
+    spec.non_clones.push(NonCloneSpec {
+        reason: "helper-boilerplate".to_string(),
+        function: "fn add".to_string(),
+        counterpart: None,
+        variant: "v2.rs".to_string(),
+    });
+    let error = generate(&spec, SEED).expect_err("the reason is not a recorded class");
+    assert!(
+        matches!(
+            error,
+            Error::UnsupportedNonCloneReason { ref label, ref reason }
+                if label == "nc-001" && reason == "helper-boilerplate"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_transplant_non_clone_reason_must_be_registered() {
+    let mut spec = partial_spec();
+    let transplanted = &mut spec.variants[0].items[0].transplants[0];
+    transplanted.labelled = false;
+    transplanted.clone_type = None;
+    transplanted.non_clone = Some("loop-boilerplate".to_string());
+    let error = generate(&spec, PARTIAL_SEED).expect_err("the reason is not a recorded class");
+    assert!(
+        matches!(
+            error,
+            Error::UnsupportedNonCloneReason { ref reason, .. } if reason == "loop-boilerplate"
+        ),
+        "{error}"
+    );
+}
+
+/// The generated document is read back by the same parser every scorer uses,
+/// so a corpus that generates is a corpus that scores.
+#[test]
+fn a_generated_label_document_is_accepted_by_the_label_reader() {
+    let mut spec = partial_spec();
+    let transplanted = &mut spec.variants[0].items[0].transplants[0];
+    transplanted.labelled = false;
+    transplanted.clone_type = None;
+    transplanted.non_clone = Some("list-walk-idiom".to_string());
+    spec.non_clones.push(NonCloneSpec {
+        reason: "declaration-run".to_string(),
+        function: "fn host".to_string(),
+        counterpart: None,
+        variant: "partial.rs".to_string(),
+    });
+    let corpus = generate(&spec, PARTIAL_SEED).expect("generates");
+    let labels = LabelSet::from_json(&corpus.files[LABELS_FILE])
+        .expect("the reader accepts every generated reason");
+    assert_eq!(labels.non_clones.len(), 2);
+    assert_eq!(
+        labels
+            .non_clones
+            .iter()
+            .map(|n| n.reason.as_str())
+            .collect::<Vec<_>>(),
+        vec!["declaration-run", "list-walk-idiom"]
+    );
 }
 
 #[test]
@@ -632,9 +700,9 @@ fn transplant_non_clone_is_labelled_at_fragment_granularity() {
     let transplanted = &mut spec.variants[0].items[0].transplants[0];
     transplanted.labelled = false;
     transplanted.clone_type = None;
-    transplanted.non_clone = Some("loop-boilerplate".to_string());
+    transplanted.non_clone = Some("list-walk-idiom".to_string());
     spec.non_clones.push(NonCloneSpec {
-        reason: "host-scaffold".to_string(),
+        reason: "declaration-run".to_string(),
         function: "fn host".to_string(),
         counterpart: None,
         variant: "partial.rs".to_string(),
@@ -645,10 +713,10 @@ fn transplant_non_clone_is_labelled_at_fragment_granularity() {
     // Spec-level non-clones come first; the transplant-derived one
     // continues the id numbering at fragment granularity.
     assert_eq!(corpus.labels.non_clones[0].id, "nc-001");
-    assert_eq!(corpus.labels.non_clones[0].reason, "host-scaffold");
+    assert_eq!(corpus.labels.non_clones[0].reason, "declaration-run");
     let fragment_level = &corpus.labels.non_clones[1];
     assert_eq!(fragment_level.id, "nc-002");
-    assert_eq!(fragment_level.reason, "loop-boilerplate");
+    assert_eq!(fragment_level.reason, "list-walk-idiom");
     assert_eq!(
         fragment_level.fragments,
         vec![
@@ -734,7 +802,7 @@ fn type1_transplant_rejects_substitution() {
 #[test]
 fn transplant_cannot_be_both_labelled_and_non_clone() {
     let mut spec = partial_spec();
-    spec.variants[0].items[0].transplants[0].non_clone = Some("boilerplate".to_string());
+    spec.variants[0].items[0].transplants[0].non_clone = Some("list-walk-idiom".to_string());
     assert!(matches!(
         generate(&spec, PARTIAL_SEED),
         Err(Error::DisallowedEdit { .. })

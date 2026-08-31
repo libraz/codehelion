@@ -117,6 +117,17 @@ pub enum Error {
         /// The unresolved reference (variant file or function key).
         reference: String,
     },
+    /// A non-clone label names a reason outside the controlled vocabulary.
+    ///
+    /// The reason is a measurement dimension rather than free-form prose, so
+    /// an unregistered one is rejected here instead of by every scorer that
+    /// later reads the generated label document.
+    UnsupportedNonCloneReason {
+        /// Generated id of the label naming it.
+        label: String,
+        /// The unregistered reason.
+        reason: String,
+    },
     /// A known-sibling spec names a channel outside the controlled vocabulary.
     UnsupportedSiblingBasis {
         /// The unsupported channel name.
@@ -200,6 +211,12 @@ impl fmt::Display for Error {
             ),
             Self::UnknownNonCloneRef { reference } => {
                 write!(f, "non-clone label references unknown `{reference}`")
+            }
+            Self::UnsupportedNonCloneReason { label, reason } => {
+                write!(
+                    f,
+                    "non-clone label `{label}` names unsupported reason `{reason}`"
+                )
             }
             Self::UnsupportedSiblingBasis { basis } => {
                 write!(f, "known-sibling basis `{basis}` is not supported")

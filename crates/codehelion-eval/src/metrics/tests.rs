@@ -409,6 +409,263 @@ fn nothing_judged_has_no_precision_measurement() {
     assert_eq!(ruled.precision(), None);
 }
 
+/// The ranking cut-off is read from a whole order, so both ends of `k` and
+/// the direction ties break in are behaviour a caller depends on.
+#[test]
+fn precision_at_clamps_k_and_breaks_ties_against_the_ranking() {
+    let (results, labels) = self_test_inputs();
+    let mut ranked = RankedVerdicts::default();
+    ranked.record(&results, &labels, DEFAULT_MATCH_THRESHOLD, |finding| {
+        finding.score
+    });
+    // Ordered by score: f-003 (0.95, refuted), f-001 (0.9), f-002 (0.8).
+    assert_eq!(ranked.len(), 3);
+    assert!(!ranked.is_empty());
+    assert_eq!(ranked.precision_at(1), Some(0.0));
+    assert_eq!(ranked.precision_at(2), Some(0.5));
+    assert_eq!(
+        ranked.precision_at(99),
+        Some(2.0 / 3.0),
+        "a cut-off past the end scores every entry rather than running off it"
+    );
+    assert_eq!(
+        ranked.precision_at(0),
+        None,
+        "an empty top set is unmeasured"
+    );
+    assert_eq!(RankedVerdicts::default().precision_at(3), None);
+
+    // At one score the refuted finding sorts first: a ranking is not credited
+    // for an order it never expressed.
+    let (mut tied, labels) = self_test_inputs();
+    tied.findings[0].score = 0.5;
+    tied.findings[2].score = 0.5;
+    tied.findings[1].score = 0.1;
+    let mut ranked = RankedVerdicts::default();
+    ranked.record(&tied, &labels, DEFAULT_MATCH_THRESHOLD, |finding| {
+        finding.score
+    });
+    assert_eq!(ranked.precision_at(1), Some(0.0));
+}
+
+/// Mean average precision answers with a number for every ranking, including
+/// one with nothing to find, so it can be averaged across corpora.
+#[test]
+fn mean_average_precision_reads_the_whole_order_and_is_zero_without_a_hit() {
+    let (results, labels) = self_test_inputs();
+    let record = |score: fn(&Finding) -> f64| {
+        let mut ranked = RankedVerdicts::default();
+        ranked.record(&results, &labels, DEFAULT_MATCH_THRESHOLD, score);
+        ranked.mean_average_precision()
+    };
+    // By the detector's own score the refuted finding leads: (1/2 + 2/3) / 2.
+    let by_score = record(|finding| finding.score);
+    assert!(
+        (by_score - f64::midpoint(0.5, 2.0 / 3.0)).abs() < 1e-9,
+        "{by_score}"
+    );
+    // A ranking that puts both confirmed findings first scores perfectly, so
+    // the measure separates two orderings of one result set.
+    let by_id = record(|finding| if finding.id == "f-003" { 0.0 } else { 1.0 });
+    assert!((by_id - 1.0).abs() < 1e-9, "{by_id}");
+    assert!(by_score < by_id);
+
+    let mut refuted_only = RankedVerdicts::default();
+    let (only, labels) = self_test_inputs();
+    let only = DetectionResult {
+        findings: vec![only.findings[2].clone()],
+        ..only
+    };
+    refuted_only.record(&only, &labels, DEFAULT_MATCH_THRESHOLD, |finding| {
+        finding.score
+    });
+    assert_eq!(refuted_only.len(), 1);
+    assert!(
+        refuted_only.mean_average_precision().abs() < f64::EPSILON,
+        "a ranking with nothing confirmed is worth zero, not undefined"
+    );
+    assert!(RankedVerdicts::default().mean_average_precision().abs() < f64::EPSILON);
+}
+
+/// The band table accounts for every judged finding, including the ones the
+/// detector never scored a band for.
+#[test]
+fn the_band_split_keeps_the_unscored_findings_in_their_own_row() {
+    let (mut results, labels) = self_test_inputs();
+    results.findings[0].band = Some("high".to_string());
+    results.findings[1].band = None;
+    results.findings[2].band = Some("high".to_string());
+
+    let mut split = BandSplit::default();
+    split.record(&results, &labels, DEFAULT_MATCH_THRESHOLD);
+    assert_eq!(split.bands["high"], (1, 1));
+    assert_eq!(
+        split.bands["(unscored)"],
+        (1, 0),
+        "a split pair carries no band and is still a judged finding"
+    );
+    let judged: usize = split
+        .bands
+        .values()
+        .map(|&(confirmed, refuted)| confirmed + refuted)
+        .sum();
+    assert_eq!(judged, 3);
+
+    let table = split.to_string();
+    let (high, unscored) = (
+        table.find("high").expect("the table shows the band"),
+        table.find("(unscored)").expect("and the unscored row"),
+    );
+    assert!(
+        high < unscored,
+        "the strongest band leads and the unscored row trails: {table}"
+    );
+}
+
+/// The lookalike table is counted over labels: a class is reached or it is
+/// not, however many findings reached it.
+#[test]
+fn the_reason_split_counts_labels_rather_than_the_findings_over_them() {
+    let (mut results, mut labels) = self_test_inputs();
+    labels.non_clones[0].reason = "getter-boilerplate".to_string();
+    // A second label of the same class that no finding reaches.
+    labels.non_clones.push(NonClone {
+        id: "nc-002".to_string(),
+        reason: "getter-boilerplate".to_string(),
+        rule_id: None,
+        fragments: vec![fragment("x.rs", 300, 310), fragment("y.rs", 300, 310)],
+    });
+    // A second finding over the region the first label covers.
+    results.findings.push(finding(
+        "f-004",
+        0.6,
+        vec![fragment("x.rs", 200, 210), fragment("y.rs", 200, 210)],
+    ));
+
+    let mut split = ReasonSplit::default();
+    split.record(&results, &labels, DEFAULT_MATCH_THRESHOLD);
+    assert_eq!(
+        split.reasons["getter-boilerplate"],
+        (1, 1, 2),
+        "two findings over one label are one label reached, of two labelled"
+    );
+    assert_eq!(
+        split.still_reported(),
+        vec![("getter-boilerplate", 1, 1, 2)]
+    );
+
+    // Filing both findings below the fold leaves the class shown but no
+    // longer put forward, which is the distinction the table exists for.
+    for finding in &mut results.findings {
+        finding.actionable = false;
+    }
+    let mut filed = ReasonSplit::default();
+    filed.record(&results, &labels, DEFAULT_MATCH_THRESHOLD);
+    assert_eq!(filed.reasons["getter-boilerplate"], (0, 1, 2));
+}
+
+/// Acting on the width rule moves everything it reaches out of the report, so
+/// a count read only from the report would answer "nothing" the moment the
+/// rule was turned on.
+#[test]
+fn the_width_family_reads_the_withheld_findings_beside_the_reported_ones() {
+    let (mut results, labels) = self_test_inputs();
+    let mut withheld = results.findings.remove(2);
+    withheld.width_family = true;
+    results.withheld.push(withheld);
+    results.findings[0].width_family = true;
+
+    let mut family = WidthFamily::default();
+    family.record(
+        &results,
+        &labels,
+        DEFAULT_MATCH_THRESHOLD,
+        |finding| match finding.id.as_str() {
+            "f-001" => Some(codehelion_core::substitution::Witness {
+                changes: Vec::new(),
+                edits: 3,
+            }),
+            _ => None,
+        },
+    );
+    assert_eq!(family.confirmed, 1, "the reported finding the rule reaches");
+    assert_eq!(family.refuted, 1, "and the withheld one it also reaches");
+    assert_eq!(
+        family.untouched, 1,
+        "f-002 is judged and outside the rule, so it is asked about and not reached"
+    );
+    assert_eq!(
+        family.unalignable, 1,
+        "the withheld finding was reached with no gap to read"
+    );
+    assert_eq!(family.most_edits, 3);
+}
+
+/// The fold was drawn to improve the precision of what a reader meets first,
+/// so that is the figure that says whether drawing it worked.
+#[test]
+fn actionable_precision_scores_only_the_findings_put_forward() {
+    let (mut results, labels) = self_test_inputs();
+    // One confirmed finding filed below the fold: overall precision is
+    // unchanged, and the reader now meets one confirmed and one refuted.
+    results.findings[1].actionable = false;
+
+    let ruled = adjudicate(&results, &labels, DEFAULT_MATCH_THRESHOLD);
+    assert_eq!(ruled.precision(), Some(2.0 / 3.0));
+    assert_eq!(ruled.actionable_confirmed, 1);
+    assert_eq!(ruled.actionable_refuted, 1);
+    assert_eq!(ruled.actionable_precision(), Some(0.5));
+
+    for finding in &mut results.findings {
+        finding.actionable = false;
+    }
+    let filed = adjudicate(&results, &labels, DEFAULT_MATCH_THRESHOLD);
+    assert_eq!(
+        filed.actionable_precision(),
+        None,
+        "a report that puts nothing forward is unmeasured rather than perfect"
+    );
+    assert_eq!(filed.precision(), Some(2.0 / 3.0));
+}
+
+/// The floor is the lowest confirmed value, and what it removes is what the
+/// axis is worth as a filter.
+#[test]
+fn the_axis_floor_is_the_lowest_confirmed_value_and_prices_the_lookalikes() {
+    let (mut results, labels) = self_test_inputs();
+    results.findings[0].axes.lexical = Some(0.9);
+    results.findings[1].axes.lexical = Some(0.7);
+    results.findings[2].axes.lexical = Some(0.4);
+
+    let mut split = AxisSplit::default();
+    split.record(&results, &labels, DEFAULT_MATCH_THRESHOLD);
+    assert_eq!(split.axes(), vec!["lexical"]);
+    assert_eq!(split.floor_that_costs_nothing("lexical"), Some((0.7, 1)));
+    assert!(split.to_string().contains("lexical"));
+}
+
+/// An axis with lookalikes on it but no confirmed finding left has no floor
+/// to name, which is a different thing from an axis nobody was scored on.
+#[test]
+fn an_axis_without_a_confirmed_finding_is_still_a_measured_axis() {
+    let (mut results, labels) = self_test_inputs();
+    results.findings[2].axes.api = Some(0.4);
+
+    let mut split = AxisSplit::default();
+    split.record(&results, &labels, DEFAULT_MATCH_THRESHOLD);
+    assert_eq!(split.floor_that_costs_nothing("api"), None);
+    assert!(
+        split.scored("api"),
+        "the refuted findings carry the axis; what is missing is a confirmed \
+         finding for the floor to stand on"
+    );
+    assert!(
+        !split.scored("composite"),
+        "no finding carried a composite value, so nobody was scored on it"
+    );
+    assert!(split.floor_that_costs_nothing("composite").is_none());
+}
+
 #[test]
 fn the_size_split_measures_the_smallest_member_of_each_judged_finding() {
     let (results, labels) = self_test_inputs();

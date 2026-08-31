@@ -494,7 +494,7 @@ mod tests {
                       "from": "buffer.clear();",
                       "to": "state = 0;",
                       "after": "count",
-                      "non_clone": "cleanup-boilerplate"
+                      "non_clone": "lifecycle-teardown"
                     }
                   ]
                 }
@@ -513,7 +513,7 @@ mod tests {
         assert!(!transplants[1].labelled);
         assert_eq!(
             transplants[1].non_clone.as_deref(),
-            Some("cleanup-boilerplate")
+            Some("lifecycle-teardown")
         );
         // Round trip: serializing and re-parsing preserves the spec.
         let json = serde_json::to_string(&spec).unwrap();
