@@ -250,6 +250,13 @@ pub struct LineageParent {
     pub primary: bool,
     /// Number of shared content identities.
     pub shared_content: u64,
+    /// How many distinct content identities the newer group had, which is the
+    /// population [`Self::shared_content`] is a count out of.
+    ///
+    /// `None` for an edge whose writer did not measure one; a reader with no
+    /// denominator reports the count alone rather than pairing it with a
+    /// number from somewhere else.
+    pub compared_content: Option<u64>,
     /// Fraction of the new group represented by the predecessor.
     pub overlap: f64,
 }
@@ -265,6 +272,12 @@ pub struct LineageAdoption {
     pub lineage: String,
     /// Number of shared content identities supporting this edge.
     pub shared: u64,
+    /// How many distinct content identities the newer group was compared on.
+    ///
+    /// `None` when the caller cannot say, which records the count without a
+    /// denominator rather than inviting one to be taken from elsewhere. When
+    /// present it must be at least [`Self::shared`].
+    pub compared: Option<u64>,
     /// Fraction of the new group represented by the predecessor.
     pub overlap: f64,
 }
@@ -396,7 +409,14 @@ pub struct SuppressionRuleRow {
 /// Everything one scan run persists.
 #[derive(Debug, Clone)]
 pub struct Snapshot<'a> {
-    /// Scanned root, as given by the user.
+    /// Scanned root, as [`path_key`](crate::path_key) spells the canonical
+    /// path of the tree that was read.
+    ///
+    /// Every lookup that asks about a root — run reuse, baselines, lineage —
+    /// compares this column against a key produced by that same function, so a
+    /// snapshot recorded under any other spelling of the path is one no later
+    /// question reaches, and each scan of the tree silently looks like its
+    /// first. Rendering it for a reader is [`display_path`](crate::display_path).
     pub root_path: &'a str,
     /// The tool version that produced the results.
     pub tool_version: &'a str,
@@ -456,7 +476,8 @@ pub struct Snapshot<'a> {
 /// relation may be inferred from it.
 #[derive(Debug, Clone)]
 pub struct CrossVariantComparisonSnapshot<'a> {
-    /// Scan root shared by the partition scans.
+    /// Scan root shared by the partition scans, spelled by
+    /// [`path_key`](crate::path_key) like every other recorded root.
     pub root_path: &'a str,
     /// Comparison-domain identity.
     pub comparison_id: CrossVariantComparisonId,
@@ -510,7 +531,8 @@ pub struct CrossVariantMemberRow {
 /// snapshots or baselines.
 #[derive(Debug, Clone)]
 pub struct CrossLanguageComparisonSnapshot<'a> {
-    /// Scan root shared by the partition scans.
+    /// Scan root shared by the partition scans, spelled by
+    /// [`path_key`](crate::path_key) like every other recorded root.
     pub root_path: &'a str,
     /// Comparison-domain identity.
     pub comparison_id: CrossLanguageComparisonId,

@@ -248,22 +248,23 @@ pub(super) fn apply_lineage_adoptions_tx(
     predecessor_run: i64,
     adoptions: &[ParsedAdoption],
 ) -> Result<LineageAdoptionResult, StoreError> {
+    ensure_comparable_runs_tx(tx, newer_run, predecessor_run)?;
     let mut result = LineageAdoptionResult::default();
     for adoption in adoptions {
         let newer = tx
             .query_row(
-                "SELECT id, lineage_state FROM clone_group
-                 WHERE scan_run_id = ?1 AND group_fingerprint_id =
-                       (SELECT id FROM fingerprint WHERE hash = ?2 LIMIT 1)",
+                "SELECT g.id, g.lineage_state FROM clone_group g
+                 JOIN fingerprint f ON f.id = g.group_fingerprint_id
+                 WHERE g.scan_run_id = ?1 AND f.kind = 'clone_group' AND f.hash = ?2",
                 params![newer_run, adoption.group.as_slice()],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?;
         let predecessor = tx
             .query_row(
-                "SELECT lineage FROM clone_group
-                 WHERE scan_run_id = ?1 AND group_fingerprint_id =
-                       (SELECT id FROM fingerprint WHERE hash = ?2 LIMIT 1)",
+                "SELECT g.lineage FROM clone_group g
+                 JOIN fingerprint f ON f.id = g.group_fingerprint_id
+                 WHERE g.scan_run_id = ?1 AND f.kind = 'clone_group' AND f.hash = ?2",
                 params![predecessor_run, adoption.previous_group.as_slice()],
                 |row| row.get::<_, Vec<u8>>(0),
             )
@@ -291,13 +292,14 @@ pub(super) fn apply_lineage_adoptions_tx(
         tx.execute(
             "INSERT INTO clone_group_lineage_parent
                  (clone_group_id, ordinal, parent_fingerprint, parent_lineage, is_primary,
-                  shared_content, overlap)
-             VALUES (?1, 0, ?2, ?3, 1, ?4, ?5)",
+                  shared_content, compared_content, overlap)
+             VALUES (?1, 0, ?2, ?3, 1, ?4, ?5, ?6)",
             params![
                 newer_group_id,
                 adoption.previous_group.as_slice(),
                 adoption.lineage.as_slice(),
                 adoption.shared,
+                adoption.compared,
                 adoption.overlap,
             ],
         )?;
@@ -326,6 +328,15 @@ fn matching_adoptions(
         if candidate.state != "new" || candidate.contents.is_empty() {
             continue;
         }
+        // A group the predecessor run already held under this fingerprint did
+        // not change, so it has nothing to adopt: its history is its own. Its
+        // member content can still overlap another predecessor group — split
+        // pairs share content by construction — and without this the strongest
+        // such overlap would take the unchanged group's identity away and
+        // report it as newly connected.
+        if predecessors.contains_key(group) {
+            continue;
+        }
         let Some((previous_group, previous, _)) = predecessors
             .iter()
             .filter_map(|(fingerprint, prior)| {
@@ -350,10 +361,51 @@ fn matching_adoptions(
             lineage_hex: previous.lineage.clone(),
             lineage: parse_stable_id(&previous.lineage)?,
             shared: i64::try_from(shared).unwrap_or(i64::MAX),
+            // The rule weighed the shared contents against all of the new
+            // group's contents, so that is the population the recorded
+            // evidence is a share of.
+            compared: Some(i64::try_from(candidate.contents.len()).unwrap_or(i64::MAX)),
             overlap: overlap_fraction(shared, candidate.contents.len()),
         });
     }
     Ok(adoptions)
+}
+
+/// Reject a lineage edge between two runs that were not asking the same
+/// question.
+///
+/// Root, build variant and analysis mode all have to agree before one run's
+/// findings continue another's. A lineage identifier shared across build
+/// variants would report a finding compiled under one macro set as the
+/// continuation of a finding from another, and nothing recomputes lineage
+/// later, so the mistake would stay in the database.
+fn ensure_comparable_runs_tx(
+    tx: &Transaction<'_>,
+    newer_run: i64,
+    predecessor_run: i64,
+) -> Result<(), StoreError> {
+    let newer = run_identity_tx(tx, newer_run)?;
+    let predecessor = run_identity_tx(tx, predecessor_run)?;
+    if newer == predecessor {
+        return Ok(());
+    }
+    Err(StoreError::InvalidLineageEvidence {
+        reason: format!(
+            "run {newer_run} and run {predecessor_run} differ in root, \
+             build variant or analysis mode"
+        ),
+    })
+}
+
+/// What decides whether two runs are about the same question.
+fn run_identity_tx(tx: &Transaction<'_>, run_id: i64) -> Result<(String, i64, String), StoreError> {
+    tx.query_row(
+        "SELECT root_path, build_variant_id, analysis_mode FROM scan_run WHERE id = ?1",
+        params![run_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()?
+    .ok_or(StoreError::RunNotFound { run_id })
 }
 
 fn ensure_completed_run_tx(tx: &Transaction<'_>, run_id: i64) -> Result<(), StoreError> {
@@ -428,6 +480,7 @@ pub(super) struct ParsedAdoption {
     lineage_hex: String,
     lineage: [u8; 16],
     shared: i64,
+    compared: Option<i64>,
     overlap: f64,
 }
 
@@ -438,6 +491,17 @@ impl ParsedAdoption {
                 reason: format!("overlap for group {} is outside 0..=1", adoption.group),
             });
         }
+        if adoption
+            .compared
+            .is_some_and(|total| total < adoption.shared)
+        {
+            return Err(StoreError::InvalidLineageEvidence {
+                reason: format!(
+                    "group {} shares more content than it was compared on",
+                    adoption.group
+                ),
+            });
+        }
         Ok(Self {
             group_hex: adoption.group.clone(),
             group: parse_stable_id(&adoption.group)?,
@@ -446,6 +510,9 @@ impl ParsedAdoption {
             lineage_hex: adoption.lineage.clone(),
             lineage: parse_stable_id(&adoption.lineage)?,
             shared: i64::try_from(adoption.shared).unwrap_or(i64::MAX),
+            compared: adoption
+                .compared
+                .map(|total| i64::try_from(total).unwrap_or(i64::MAX)),
             overlap: adoption.overlap,
         })
     }
@@ -756,8 +823,8 @@ fn write_lineage_parents(
         tx.execute(
             "INSERT INTO clone_group_lineage_parent
                  (clone_group_id, ordinal, parent_fingerprint, parent_lineage, is_primary,
-                  shared_content, overlap)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                  shared_content, compared_content, overlap)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 group_row_id,
                 i64::try_from(ordinal).unwrap_or(i64::MAX),
@@ -765,6 +832,9 @@ fn write_lineage_parents(
                 parent.lineage.as_bytes().as_slice(),
                 parent.primary,
                 i64::try_from(parent.shared_content).unwrap_or(i64::MAX),
+                parent
+                    .compared_content
+                    .map(|total| i64::try_from(total).unwrap_or(i64::MAX)),
                 parent.overlap,
             ],
         )?;

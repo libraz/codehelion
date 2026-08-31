@@ -73,5 +73,18 @@ pub fn display_path(key: &str) -> String {
     String::from_utf8(bytes).unwrap_or_else(|_| format!("<non-UTF-8 path: {hex}>"))
 }
 
+/// Render a filesystem path the way its stored key reads back.
+///
+/// A command holding the path itself and a command holding only the recorded
+/// key are describing one tree, so they have to name it identically. Spelling
+/// the path directly is a second rule, and the two rules disagree exactly where
+/// a key is not the path's own text: a non-UTF-8 name and, on Windows, a name
+/// separated the other way. Going through the key is what removes the second
+/// rule rather than keeping it in step by hand.
+#[must_use]
+pub fn path_label(path: &Path) -> String {
+    display_path(&path_key(path))
+}
+
 #[cfg(test)]
 mod tests;

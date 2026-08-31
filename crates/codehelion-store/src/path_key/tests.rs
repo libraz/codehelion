@@ -55,6 +55,31 @@ fn a_path_spelled_like_the_encoding_is_escaped_too() {
     assert_eq!(display_path(&key), impostor.to_string_lossy());
 }
 
+/// A command holding the path and a command holding only the stored key name
+/// one tree the same way, including where the key is not the path's own text.
+#[test]
+fn a_path_and_the_key_it_is_stored_under_are_labelled_alike() {
+    for path in ["src/plain.rs", "src/a b.rs", "src/\u{3042}.rs"] {
+        assert_eq!(
+            path_label(Path::new(path)),
+            display_path(&path_key(Path::new(path)))
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_root_that_is_not_utf8_is_labelled_without_the_reserved_marker() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let root = PathBuf::from(OsString::from_vec(b"/work/\x80project".to_vec()));
+    let label = path_label(&root);
+    assert_eq!(label, display_path(&path_key(&root)));
+    assert!(!label.contains("codehelion-path-bytes"));
+    assert!(!label.contains('\u{001f}'));
+}
+
 #[test]
 fn a_key_that_is_not_a_whole_number_of_bytes_is_refused() {
     let truncated = format!("{ESCAPED_PATH_PREFIX}abc");

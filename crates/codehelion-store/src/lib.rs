@@ -26,7 +26,7 @@ pub mod snapshot;
 
 mod preflight;
 
-pub use path_key::{display_path, path_key};
+pub use path_key::{display_path, path_key, path_label};
 
 use std::path::Path;
 use std::time::Duration;

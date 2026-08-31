@@ -207,6 +207,7 @@ fn a_history_carries_across_a_change_that_moved_every_identifier() {
                 previous_group: group_fp(9).to_hex(),
                 lineage: history.to_hex(),
                 shared: 2,
+                compared: Some(2),
                 overlap: 1.0,
             }],
         )
@@ -285,6 +286,7 @@ fn a_group_the_comparison_already_connected_is_left_as_it_was() {
             lineage: evidence,
             primary: true,
             shared_content: 2,
+            compared_content: Some(2),
             overlap: 1.0,
         }],
     };
@@ -303,6 +305,7 @@ fn a_group_the_comparison_already_connected_is_left_as_it_was() {
                 previous_group: group_fp(9).to_hex(),
                 lineage: invented.to_hex(),
                 shared: 1,
+                compared: Some(2),
                 overlap: 0.5,
             }],
         )
@@ -337,6 +340,7 @@ fn a_group_a_run_does_not_hold_is_named_rather_than_passed_over() {
                 previous_group: group_fp(9).to_hex(),
                 lineage: group_lineage_id(&group_fp(9)).to_hex(),
                 shared: 2,
+                compared: Some(2),
                 overlap: 1.0,
             }],
         )
@@ -367,6 +371,7 @@ fn a_malformed_identifier_stops_the_rewrite_rather_than_half_applying_it() {
                 previous_group: group_fp(9).to_hex(),
                 lineage: "not-a-lineage".to_string(),
                 shared: 2,
+                compared: Some(2),
                 overlap: 1.0,
             }],
         )
@@ -378,4 +383,174 @@ fn a_malformed_identifier_stops_the_rewrite_rather_than_half_applying_it() {
         Some(group_lineage_id(&group_fp(77))),
         "a rewrite that could not finish left nothing behind"
     );
+}
+
+/// A second group in the same run, whose one member content is shared with the
+/// first group's.
+fn snapshot_with_overlapping_pair<'a>(
+    variant: &'a BuildVariant,
+    detectors: &'a [(String, String)],
+) -> Snapshot<'a> {
+    let mut snapshot = sample_snapshot(variant, detectors);
+    let mut second = snapshot.groups[0].clone();
+    second.fingerprint = group_fp(31);
+    second.history = GroupOrigin::unconnected(&group_fp(31));
+    second.members = vec![
+        member_with_finding(1, 31, "src/a.rs", Some(0)),
+        member_with_finding(2, 32, "src/c.rs", Some(1)),
+    ];
+    snapshot.groups.push(second);
+    snapshot
+}
+
+/// A group the earlier run already held is a group nobody touched. Its member
+/// content can still be shared with a different predecessor — split pairs
+/// share content by construction — and that must not take its identity away
+/// and report it as newly connected to somewhere else.
+#[test]
+fn a_group_the_earlier_run_already_held_keeps_its_own_history() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let before = store
+        .record_snapshot(&snapshot_with_overlapping_pair(&variant, &detectors))
+        .unwrap();
+    // The later run keeps the unchanged group and drops the one it overlapped.
+    let mut after_snapshot = sample_snapshot(&variant, &detectors);
+    after_snapshot.started_at = "2026-07-25T00:00:00Z";
+    after_snapshot.finished_at = "2026-07-25T00:00:05Z";
+    let after = store.record_snapshot(&after_snapshot).unwrap();
+
+    let adopted = store.adopt_matching_lineages(after, before).unwrap();
+    assert!(
+        adopted.taken.is_empty(),
+        "an unchanged group was reported as newly connected: {adopted:?}"
+    );
+    assert_eq!(
+        store.run_group_snapshots(after).unwrap()[0].lineage,
+        Some(group_lineage_id(&group_fp(9))),
+        "the unchanged group kept the history its own fingerprint started"
+    );
+    assert!(
+        store.run_group_origins(after).unwrap().is_empty(),
+        "an unchanged group was given a predecessor edge"
+    );
+    assert!(
+        store
+            .run_group_fingerprints(before)
+            .unwrap()
+            .contains(&group_fp(9).to_hex())
+    );
+}
+
+/// The evidence for a connection is a count out of the population the rule
+/// weighed, and the population is the newer group's distinct contents. Read
+/// beside a count of members instead, a group of identical copies looks like
+/// the weakest evidence there is.
+#[test]
+fn an_adoption_records_the_population_it_was_decided_on() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let before = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+    // Four members carrying two distinct contents, under a new group id.
+    let mut after_snapshot = sample_snapshot(&variant, &detectors);
+    after_snapshot.started_at = "2026-07-25T00:00:00Z";
+    after_snapshot.finished_at = "2026-07-25T00:00:05Z";
+    after_snapshot.groups[0].fingerprint = group_fp(77);
+    after_snapshot.groups[0].history = GroupOrigin::unconnected(&group_fp(77));
+    after_snapshot.groups[0].members = vec![
+        member_with_finding(1, 41, "src/a.rs", Some(0)),
+        member_with_finding(1, 42, "src/b.rs", Some(1)),
+        member_with_finding(1, 43, "src/c.rs", Some(0)),
+        member_with_finding(2, 44, "src/d.rs", Some(1)),
+    ];
+    let after = store.record_snapshot(&after_snapshot).unwrap();
+
+    let adopted = store.adopt_matching_lineages(after, before).unwrap();
+    assert_eq!(adopted.taken, vec![group_fp(77).to_hex()]);
+    let origins = store.run_group_origins(after).unwrap();
+    let parent = origins[0]
+        .adopted_from
+        .as_ref()
+        .expect("the predecessor the connection was decided on");
+    // One of the two distinct contents is shared, out of two compared: the
+    // members, of which four carry those two contents, are a different count.
+    assert_eq!(parent.shared_content, 1);
+    assert_eq!(parent.compared_content, Some(2));
+}
+
+/// Results computed under different build variants answer different questions.
+/// A lineage identifier shared between them would report a finding from one
+/// build as the continuation of a finding from another, and nothing recomputes
+/// lineage later.
+#[test]
+fn lineage_is_refused_between_runs_of_different_build_variants() {
+    let narrow = compiled_variant(&[]);
+    let wide = compiled_variant(&["-DACCUM_WIDTH=64"]);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let before = store
+        .record_snapshot(&sample_snapshot(&narrow, &detectors))
+        .unwrap();
+    let after_snapshot = renamed_snapshot(&wide, &detectors);
+    let after = store.record_snapshot(&after_snapshot).unwrap();
+
+    let error = store
+        .adopt_lineage(
+            after,
+            before,
+            &[LineageAdoption {
+                group: group_fp(77).to_hex(),
+                previous_group: group_fp(9).to_hex(),
+                lineage: group_lineage_id(&group_fp(9)).to_hex(),
+                shared: 2,
+                compared: Some(2),
+                overlap: 1.0,
+            }],
+        )
+        .unwrap_err();
+    assert!(matches!(error, StoreError::InvalidLineageEvidence { .. }));
+
+    let matched = store.adopt_matching_lineages(after, before).unwrap_err();
+    assert!(matches!(matched, StoreError::InvalidLineageEvidence { .. }));
+    assert_eq!(
+        store.run_group_snapshots(after).unwrap()[0].lineage,
+        Some(group_lineage_id(&group_fp(77))),
+        "no edge crossed the two build variants"
+    );
+    assert!(store.run_group_origins(after).unwrap().is_empty());
+}
+
+/// The evidence a caller supplies has to be internally consistent: a share
+/// larger than the population it is a share of describes nothing.
+#[test]
+fn an_adoption_sharing_more_than_it_compared_is_refused() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let before = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+    let after = store
+        .record_snapshot(&renamed_snapshot(&variant, &detectors))
+        .unwrap();
+
+    let error = store
+        .adopt_lineage(
+            after,
+            before,
+            &[LineageAdoption {
+                group: group_fp(77).to_hex(),
+                previous_group: group_fp(9).to_hex(),
+                lineage: group_lineage_id(&group_fp(9)).to_hex(),
+                shared: 3,
+                compared: Some(2),
+                overlap: 1.0,
+            }],
+        )
+        .unwrap_err();
+    assert!(matches!(error, StoreError::InvalidLineageEvidence { .. }));
 }

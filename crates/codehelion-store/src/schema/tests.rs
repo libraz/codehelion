@@ -273,3 +273,144 @@ fn artifact_tables_accept_only_the_canonical_format_vocabulary() {
         .is_err()
     );
 }
+
+/// Every reason a helper can report has to be writable. A reason the code
+/// produces but the column refuses takes down the transaction that carries it,
+/// and with it every unit the same scan already analysed.
+#[test]
+fn the_unit_reason_column_accepts_every_reason_a_helper_can_report() {
+    let conn = seeded();
+    for (id, reason) in Unavailability::ALL.into_iter().enumerate() {
+        conn.execute(
+            "INSERT INTO compiler_unit
+                 (scan_run_id, build_variant_id, unit_name, file_path, variant_key,
+                  unavailable_reason, has_cfg, effects_computed, data_flow_computed)
+             VALUES (1, 1, ?1, 'src/lib.rs', 'v', ?2, 0, 0, 0)",
+            (format!("unit-{id}"), reason.name()),
+        )
+        .unwrap_or_else(|error| panic!("{} was refused: {error}", reason.name()));
+    }
+    assert_eq!(
+        count(&conn, "compiler_unit"),
+        i64::try_from(Unavailability::ALL.len()).unwrap()
+    );
+    assert!(
+        conn.execute(
+            "INSERT INTO compiler_unit
+                 (scan_run_id, build_variant_id, unit_name, file_path, variant_key,
+                  unavailable_reason, has_cfg, effects_computed, data_flow_computed)
+             VALUES (1, 1, 'invented', 'src/lib.rs', 'v', 'no_such_reason', 0, 0, 0)",
+            [],
+        )
+        .is_err(),
+        "a reason no build produces was accepted"
+    );
+}
+
+/// The same for the artifact reader: a binary whose debug information cannot
+/// be decoded is the input it exists to survive, and recording why a symbol
+/// stayed unmapped must not discard the rest of the analysis.
+#[test]
+fn the_unmapped_columns_accept_every_reason_correlation_can_establish() {
+    let conn = seeded();
+    conn.execute(
+        "INSERT INTO artifact_analysis
+             (id, schema_version, path, format, content_fingerprint, observed_bytes,
+              started_at, finished_at, status)
+         VALUES (1, 'fixture-v1', 'lib.wasm', 'wasm', randomblob(16), 1,
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', 'completed')",
+        [],
+    )
+    .unwrap();
+    for (id, reason) in ArtifactAnalysisUnmappedReason::ALL.into_iter().enumerate() {
+        conn.execute(
+            "INSERT INTO artifact_analysis_unmapped_symbol
+                 (artifact_analysis_id, artifact_symbol_fingerprint, reason)
+             VALUES (1, ?1, ?2)",
+            (vec![u8::try_from(id).unwrap(); 16], reason.as_sql()),
+        )
+        .unwrap_or_else(|error| panic!("{} was refused: {error}", reason.as_sql()));
+    }
+    for (id, reason) in ArtifactAnalysisUnmappedSourceReason::ALL
+        .into_iter()
+        .enumerate()
+    {
+        conn.execute(
+            "INSERT INTO artifact_analysis_unmapped_source
+                 (artifact_analysis_id, source_kind, source_fingerprint,
+                  source_instance_fingerprint, reason)
+             VALUES (1, 'unit', ?1, ?1, ?2)",
+            (vec![u8::try_from(id).unwrap(); 16], reason.as_sql()),
+        )
+        .unwrap_or_else(|error| panic!("{} was refused: {error}", reason.as_sql()));
+    }
+    assert_eq!(
+        count(&conn, "artifact_analysis_unmapped_symbol"),
+        i64::try_from(ArtifactAnalysisUnmappedReason::ALL.len()).unwrap()
+    );
+    assert_eq!(
+        count(&conn, "artifact_analysis_unmapped_source"),
+        i64::try_from(ArtifactAnalysisUnmappedSourceReason::ALL.len()).unwrap()
+    );
+    assert!(
+        conn.execute(
+            "INSERT INTO artifact_analysis_unmapped_symbol
+                 (artifact_analysis_id, artifact_symbol_fingerprint, reason)
+             VALUES (1, randomblob(16), 'no_such_reason')",
+            [],
+        )
+        .is_err(),
+        "a reason no build produces was accepted"
+    );
+}
+
+/// A rule is content-addressed by what it matches, so two rows can never claim
+/// the same pair: one lookup would find either of them and an update would
+/// flip only one.
+#[test]
+fn a_suppression_rule_exists_at_most_once_per_scope_and_pattern() {
+    let conn = seeded();
+    let insert = |reason: &str| {
+        conn.execute(
+            "INSERT INTO suppression (scope, pattern, reason, active)
+             VALUES ('path_glob', 'vendor/**', ?1, 1)",
+            [reason],
+        )
+    };
+    assert_eq!(insert("first").unwrap(), 1);
+    assert!(
+        insert("second").is_err(),
+        "a second row for one rule was accepted"
+    );
+    assert_eq!(count(&conn, "suppression"), 1);
+}
+
+/// Resolving a lineage edge names the kind it is looking for, so it reaches
+/// the declared index instead of reading every fingerprint in the database —
+/// and cannot answer with a row from another identifier namespace.
+#[test]
+fn lineage_group_lookup_is_constrained_to_group_fingerprints() {
+    let conn = seeded();
+    let mut statement = conn
+        .prepare(
+            "EXPLAIN QUERY PLAN
+                 SELECT g.id FROM clone_group g
+                 JOIN fingerprint f ON f.id = g.group_fingerprint_id
+                 WHERE g.scan_run_id = ?1 AND f.kind = 'clone_group' AND f.hash = ?2",
+        )
+        .unwrap();
+    let plan = statement
+        .query_map((1_i64, vec![0_u8; 16]), |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("idx_fingerprint_kind_hash")),
+        "the lineage lookup does not use the declared index: {plan:?}"
+    );
+    assert!(
+        !plan.iter().any(|step| step.contains("SCAN fingerprint")),
+        "the lineage lookup reads every fingerprint: {plan:?}"
+    );
+}

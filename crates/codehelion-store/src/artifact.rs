@@ -665,7 +665,33 @@ pub enum ArtifactAnalysisUnmappedSourceReason {
 }
 
 impl ArtifactAnalysisUnmappedSourceReason {
-    const fn as_sql(self) -> &'static str {
+    /// Every reason this build can record, in declaration order.
+    ///
+    /// The schema's vocabulary for the column is built from this list, so a
+    /// reason the analysis can produce is a reason the column accepts.
+    pub const ALL: [Self; 6] = [
+        Self::NoArtifactEvidence,
+        Self::DeadCode,
+        Self::InlinedAway,
+        Self::LtoAbsorbed,
+        Self::NotCompiledForVariant,
+        Self::EvidenceConflict,
+    ];
+
+    /// Where `self` sits in [`Self::ALL`]. Exhaustive, so a new reason cannot
+    /// compile without a place in the list.
+    const fn position(self) -> usize {
+        match self {
+            Self::NoArtifactEvidence => 0,
+            Self::DeadCode => 1,
+            Self::InlinedAway => 2,
+            Self::LtoAbsorbed => 3,
+            Self::NotCompiledForVariant => 4,
+            Self::EvidenceConflict => 5,
+        }
+    }
+
+    pub(crate) const fn as_sql(self) -> &'static str {
         match self {
             Self::NoArtifactEvidence => "no_artifact_evidence",
             Self::DeadCode => "dead_code",
@@ -677,20 +703,25 @@ impl ArtifactAnalysisUnmappedSourceReason {
     }
 
     pub(crate) fn from_sql(value: &str) -> Result<Self, StoreError> {
-        match value {
-            "no_artifact_evidence" => Ok(Self::NoArtifactEvidence),
-            "dead_code" => Ok(Self::DeadCode),
-            "inlined_away" => Ok(Self::InlinedAway),
-            "lto_absorbed" => Ok(Self::LtoAbsorbed),
-            "not_compiled_for_variant" => Ok(Self::NotCompiledForVariant),
-            "evidence_conflict" => Ok(Self::EvidenceConflict),
-            _ => Err(StoreError::UnknownVocabulary {
+        Self::ALL
+            .into_iter()
+            .find(|reason| reason.as_sql() == value)
+            .ok_or_else(|| StoreError::UnknownVocabulary {
                 field: "artifact_analysis_unmapped_source.reason",
                 value: value.to_owned(),
-            }),
-        }
+            })
     }
 }
+
+/// The list holds each source reason once, at the place the exhaustive match
+/// gives it.
+const _: () = {
+    let mut at = 0;
+    while at < ArtifactAnalysisUnmappedSourceReason::ALL.len() {
+        assert!(ArtifactAnalysisUnmappedSourceReason::ALL[at].position() == at);
+        at += 1;
+    }
+};
 
 /// Reasons why source correlation could not establish a mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -710,7 +741,35 @@ pub enum ArtifactAnalysisUnmappedReason {
 }
 
 impl ArtifactAnalysisUnmappedReason {
-    const fn as_sql(self) -> &'static str {
+    /// Every reason this build can record, in declaration order.
+    ///
+    /// The schema's vocabulary for the column is built from this list. A
+    /// binary whose debug information cannot be decoded is exactly the input
+    /// the artifact reader exists to survive, so the reason for it has to be
+    /// storable rather than fatal to the whole analysis.
+    pub const ALL: [Self; 6] = [
+        Self::DebugInfoMissing,
+        Self::DebugInfoUnreadable,
+        Self::Stripped,
+        Self::DemangleFailed,
+        Self::OutsideSourceScope,
+        Self::EvidenceConflict,
+    ];
+
+    /// Where `self` sits in [`Self::ALL`]. Exhaustive, so a new reason cannot
+    /// compile without a place in the list.
+    const fn position(self) -> usize {
+        match self {
+            Self::DebugInfoMissing => 0,
+            Self::DebugInfoUnreadable => 1,
+            Self::Stripped => 2,
+            Self::DemangleFailed => 3,
+            Self::OutsideSourceScope => 4,
+            Self::EvidenceConflict => 5,
+        }
+    }
+
+    pub(crate) const fn as_sql(self) -> &'static str {
         match self {
             Self::DebugInfoMissing => "debug_info_missing",
             Self::DebugInfoUnreadable => "debug_info_unreadable",
@@ -722,20 +781,25 @@ impl ArtifactAnalysisUnmappedReason {
     }
 
     pub(crate) fn from_sql(value: &str) -> Result<Self, StoreError> {
-        match value {
-            "debug_info_missing" => Ok(Self::DebugInfoMissing),
-            "debug_info_unreadable" => Ok(Self::DebugInfoUnreadable),
-            "stripped" => Ok(Self::Stripped),
-            "demangle_failed" => Ok(Self::DemangleFailed),
-            "outside_source_scope" => Ok(Self::OutsideSourceScope),
-            "evidence_conflict" => Ok(Self::EvidenceConflict),
-            _ => Err(StoreError::UnknownVocabulary {
+        Self::ALL
+            .into_iter()
+            .find(|reason| reason.as_sql() == value)
+            .ok_or_else(|| StoreError::UnknownVocabulary {
                 field: "artifact_analysis_unmapped_symbol.reason",
                 value: value.to_owned(),
-            }),
-        }
+            })
     }
 }
+
+/// The list holds each symbol reason once, at the place the exhaustive match
+/// gives it.
+const _: () = {
+    let mut at = 0;
+    while at < ArtifactAnalysisUnmappedReason::ALL.len() {
+        assert!(ArtifactAnalysisUnmappedReason::ALL[at].position() == at);
+        at += 1;
+    }
+};
 
 impl Store {
     /// Record one complete artifact analysis and return its row id.

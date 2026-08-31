@@ -39,15 +39,25 @@
 //!   of the build variant, because results depend on it.
 //! - Savings and confidence live in separate columns; there is no single
 //!   collapsed score column.
+//! - A controlled vocabulary that has a producing type is written from that
+//!   type rather than restated here, so every value the analysis can produce
+//!   is a value its column accepts.
+//! - A suppression rule is content-addressed by `(scope, pattern)`: the pair
+//!   is UNIQUE, so a lookup cannot find one of two rows and flip the other.
+//! - A lineage edge records the population it was decided on, not only the
+//!   part of it that was shared, so evidence for a connection can be read as
+//!   the fraction it actually was.
 //!
 //! The current local baseline is intentionally self-contained.
 //! `schema_meta` records which baseline a database holds. A database from any
 //! other layout is rejected without automatic migration; the operator must
 //! move it aside or choose a fresh database path and scan again.
 
+use codehelion_helper_protocol::ir::Unavailability;
 use rusqlite::Connection;
 
 use crate::StoreError;
+use crate::artifact::{ArtifactAnalysisUnmappedReason, ArtifactAnalysisUnmappedSourceReason};
 
 /// The current local schema baseline this build reads.
 ///
@@ -58,7 +68,14 @@ pub const SCHEMA_VERSION: i64 = 4;
 
 /// Full current local database layout. Existing incompatible databases are
 /// not transformed; create a fresh database when this contract changes.
-const BASELINE_SQL: &str = r"
+///
+/// Columns whose controlled vocabulary has a producing type carry a slot
+/// instead of a list of quoted words; [`baseline_sql`] fills each slot from
+/// the type that decides what can be written. A vocabulary copied into the
+/// layout by hand can fall behind the code that produces the values, and the
+/// row that first uses the missing word takes the whole transaction — every
+/// other row analysis already finished — down with it.
+const BASELINE_TEMPLATE: &str = r"
 CREATE TABLE artifact (
     id                 INTEGER PRIMARY KEY,
     scan_run_id        INTEGER NOT NULL REFERENCES scan_run (id) ON DELETE CASCADE,
@@ -176,9 +193,7 @@ CREATE TABLE artifact_analysis_unmapped_source (
     source_kind               TEXT NOT NULL CHECK (source_kind IN ('unit', 'fragment')),
     source_fingerprint        BLOB NOT NULL CHECK (length(source_fingerprint) = 16),
     source_instance_fingerprint BLOB NOT NULL CHECK (length(source_instance_fingerprint) = 16),
-    reason                    TEXT NOT NULL CHECK (reason IN
-                                 ('no_artifact_evidence', 'dead_code', 'inlined_away', 'lto_absorbed',
-                                  'not_compiled_for_variant', 'evidence_conflict')),
+    reason                    TEXT NOT NULL CHECK (reason IN (:unmapped_source_reason:)),
     source_build_variant_fingerprint BLOB
         CHECK (source_build_variant_fingerprint IS NULL OR length(source_build_variant_fingerprint) = 16),
     PRIMARY KEY (artifact_analysis_id, source_kind, source_fingerprint, source_instance_fingerprint)
@@ -186,9 +201,7 @@ CREATE TABLE artifact_analysis_unmapped_source (
 CREATE TABLE artifact_analysis_unmapped_symbol (
     artifact_analysis_id        INTEGER NOT NULL REFERENCES artifact_analysis (id) ON DELETE CASCADE,
     artifact_symbol_fingerprint BLOB NOT NULL CHECK (length(artifact_symbol_fingerprint) = 16),
-    reason                      TEXT NOT NULL CHECK (reason IN
-                                    ('debug_info_missing', 'stripped', 'demangle_failed',
-                                     'outside_source_scope', 'evidence_conflict')),
+    reason                      TEXT NOT NULL CHECK (reason IN (:unmapped_symbol_reason:)),
     PRIMARY KEY (artifact_analysis_id, artifact_symbol_fingerprint)
 ) STRICT;
 CREATE TABLE artifact_symbol (
@@ -254,6 +267,8 @@ CREATE TABLE clone_group_lineage_parent (
     parent_lineage      BLOB NOT NULL CHECK (length(parent_lineage) = 16),
     is_primary          INTEGER NOT NULL CHECK (is_primary IN (0, 1)),
     shared_content      INTEGER NOT NULL CHECK (shared_content >= 0),
+    compared_content    INTEGER
+        CHECK (compared_content IS NULL OR compared_content >= shared_content),
     overlap             REAL NOT NULL CHECK (overlap >= 0 AND overlap <= 1),
     PRIMARY KEY (clone_group_id, ordinal)
 ) STRICT;
@@ -523,10 +538,7 @@ CREATE TABLE compiler_unit (
     file_path          TEXT NOT NULL,
     variant_key        TEXT NOT NULL,
     schema_version     TEXT,
-    unavailable_reason TEXT CHECK (unavailable_reason IN
-                           ('requires_execution', 'no_build_information', 'toolchain_mismatch',
-                            'helper_timed_out', 'helper_died', 'unreadable_schema',
-                            'not_supported')),
+    unavailable_reason TEXT CHECK (unavailable_reason IN (:unavailable_reason:)),
     unavailable_diagnostic TEXT,
     has_cfg            INTEGER NOT NULL CHECK (has_cfg IN (0, 1)),
     effects_computed   INTEGER NOT NULL CHECK (effects_computed IN (0, 1)),
@@ -813,7 +825,8 @@ CREATE TABLE suppression (
                  'generated_marker')),
     pattern TEXT NOT NULL,
     reason  TEXT,
-    active  INTEGER NOT NULL CHECK (active IN (0, 1))
+    active  INTEGER NOT NULL CHECK (active IN (0, 1)),
+    UNIQUE (scope, pattern)
 ) STRICT;
 CREATE INDEX idx_scan_run_started ON scan_run (started_at DESC);
 CREATE INDEX idx_fingerprint_kind_hash ON fingerprint (kind, hash);
@@ -884,6 +897,43 @@ CREATE INDEX idx_cross_language_semantic_group_comparison
     ON cross_language_semantic_group (comparison_id);
 ";
 
+/// The layout with every generated vocabulary filled in.
+fn baseline_sql() -> String {
+    BASELINE_TEMPLATE
+        .replace(
+            ":unavailable_reason:",
+            &vocabulary(Unavailability::ALL.into_iter().map(Unavailability::name)),
+        )
+        .replace(
+            ":unmapped_symbol_reason:",
+            &vocabulary(
+                ArtifactAnalysisUnmappedReason::ALL
+                    .into_iter()
+                    .map(ArtifactAnalysisUnmappedReason::as_sql),
+            ),
+        )
+        .replace(
+            ":unmapped_source_reason:",
+            &vocabulary(
+                ArtifactAnalysisUnmappedSourceReason::ALL
+                    .into_iter()
+                    .map(ArtifactAnalysisUnmappedSourceReason::as_sql),
+            ),
+        )
+}
+
+/// One `IN` list of quoted words, in the order the producing type declares
+/// them.
+///
+/// The words are stable lowercase identifiers from that type, so none of them
+/// can carry a quote to escape.
+fn vocabulary(names: impl Iterator<Item = &'static str>) -> String {
+    names
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Initialize a new database with the one supported local layout.
 pub(crate) fn initialize(conn: &mut Connection) -> Result<(), StoreError> {
     let has_meta: bool = conn.query_row(
@@ -937,7 +987,7 @@ pub(crate) fn validate_existing(conn: &Connection) -> Result<(), StoreError> {
 /// Apply the only baseline atomically and record which one it is.
 fn apply_baseline(conn: &mut Connection) -> Result<(), StoreError> {
     let tx = conn.transaction()?;
-    tx.execute_batch(BASELINE_SQL)?;
+    tx.execute_batch(&baseline_sql())?;
     tx.execute(
         "INSERT INTO schema_meta (id, version) VALUES (1, ?1)",
         [SCHEMA_VERSION],
@@ -956,5 +1006,5 @@ pub(crate) fn version(conn: &Connection) -> Result<i64, StoreError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests;

@@ -616,6 +616,16 @@ pub struct StoredLineageParent {
     /// Member contents the two groups have in common. This is the quantity
     /// the connection was decided on, so it is what explains the decision.
     pub shared_content: i64,
+    /// The newer group's distinct member contents: the population
+    /// [`Self::shared_content`] was counted out of.
+    ///
+    /// A share is only evidence beside what it is a share of, and the two
+    /// numbers have to come from the same population — the newer group's
+    /// contents, not its members, of which several can carry one content.
+    /// `None` for an edge recorded without a measured population; a reader
+    /// then reports the count on its own rather than dividing it by a number
+    /// that counts something else.
+    pub compared_content: Option<i64>,
 }
 
 /// Where a stored run ranked a finding, and what it read to get there.

@@ -874,7 +874,8 @@ impl Store {
     /// Returns any underlying database error.
     pub fn run_group_origins(&self, run_id: i64) -> Result<Vec<StoredGroupOrigin>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT lower(hex(f.hash)), lower(hex(p.parent_fingerprint)), p.shared_content
+            "SELECT lower(hex(f.hash)), lower(hex(p.parent_fingerprint)), p.shared_content,
+                    p.compared_content
              FROM clone_group g
              JOIN fingerprint f ON f.id = g.group_fingerprint_id
              JOIN clone_group_lineage_parent p
@@ -890,6 +891,7 @@ impl Store {
                     adopted_from: Some(StoredLineageParent {
                         fingerprint_hex: row.get(1)?,
                         shared_content: row.get(2)?,
+                        compared_content: row.get(3)?,
                     }),
                 })
             })?

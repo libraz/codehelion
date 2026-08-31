@@ -260,3 +260,43 @@ fn a_dynamic_call_with_no_candidates_is_not_an_unresolved_one() {
     );
     assert_eq!(stored.calls[1].target, CallTarget::Unresolved);
 }
+
+/// A scan records what it learned about every unit in one transaction, so a
+/// reason it cannot store is not one unit lost but the whole scan: the units a
+/// compiler did answer for go with it. Every reason a helper can report is
+/// therefore recorded beside an analysis that survived it.
+#[test]
+fn a_reason_no_helper_could_avoid_does_not_take_the_analysed_units_with_it() {
+    let (_dir, mut store, _path) = on_disk();
+    let variant = variant();
+    let mut units = vec![answered(full_analysis(unit_ref("render", "src/render.rs")))];
+    units.extend(Unavailability::ALL.into_iter().map(|reason| {
+        unavailable(
+            unit_ref(reason.name(), &format!("src/{}.rs", reason.name())),
+            reason,
+            Some(0),
+        )
+    }));
+    let run = store
+        .record_snapshot(&snapshot("/tree", &variant, vec![helper_row()], units))
+        .unwrap();
+
+    let stored = store.run_compiler_units(run).unwrap();
+    assert_eq!(stored.len(), Unavailability::ALL.len() + 1);
+    let reasons: Vec<Unavailability> = stored
+        .iter()
+        .filter_map(|unit| match &unit.outcome {
+            CompilerOutcome::Unavailable { reason, .. } => Some(*reason),
+            CompilerOutcome::Analyzed(_) => None,
+        })
+        .collect();
+    for reason in Unavailability::ALL {
+        assert!(reasons.contains(&reason), "{reason:?} was not read back");
+    }
+    let coverage = store.run_compiler_coverage(run).unwrap().unwrap();
+    assert_eq!(coverage.answered, 1);
+    assert_eq!(
+        coverage.unavailable.values().sum::<u64>(),
+        u64::try_from(Unavailability::ALL.len()).unwrap()
+    );
+}

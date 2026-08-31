@@ -654,20 +654,16 @@ fn capability(name: &str) -> Result<Capability, StoreError> {
     }
 }
 
+/// A stored reason back as the reason a helper reported.
+///
+/// Resolved through the protocol's own list of reasons, which is what the
+/// column's vocabulary is built from: reading and writing therefore accept the
+/// same set, and a reason cannot become storable but unreadable.
 fn unavailability(name: &str) -> Result<Unavailability, StoreError> {
-    match name {
-        "requires_execution" => Ok(Unavailability::RequiresExecution),
-        "no_build_information" => Ok(Unavailability::NoBuildInformation),
-        "toolchain_mismatch" => Ok(Unavailability::ToolchainMismatch),
-        "helper_timed_out" => Ok(Unavailability::HelperTimedOut),
-        "helper_died" => Ok(Unavailability::HelperDied),
-        "unreadable_schema" => Ok(Unavailability::UnreadableSchema),
-        "not_supported" => Ok(Unavailability::NotSupported),
-        _ => Err(StoreError::UnknownVocabulary {
-            field: "unavailable_reason",
-            value: name.to_owned(),
-        }),
-    }
+    Unavailability::from_name(name).ok_or_else(|| StoreError::UnknownVocabulary {
+        field: "unavailable_reason",
+        value: name.to_owned(),
+    })
 }
 
 fn category(name: &str) -> Result<TypeCategory, StoreError> {

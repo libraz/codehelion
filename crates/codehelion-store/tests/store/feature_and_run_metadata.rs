@@ -263,16 +263,14 @@ fn incompatible_schema_rejection_leaves_the_database_and_wal_sidecars_unchanged(
                 .unwrap();
             }
         }
-        let sidecars = [
-            (
-                format!("{}-wal", path.display()),
-                b"wal-sentinel".as_slice(),
-            ),
-            (
-                format!("{}-shm", path.display()),
-                b"shm-sentinel".as_slice(),
-            ),
-        ];
+        // The write-ahead log carries database content and must come through
+        // a rejection exactly as it was. Shared memory is not content: it is
+        // the index every reader rebuilds from the log it finds, so a reader
+        // that rebuilds it has read the database rather than altered it.
+        let sidecars = [(
+            format!("{}-wal", path.display()),
+            b"wal-sentinel".as_slice(),
+        )];
         for (sidecar, bytes) in &sidecars {
             std::fs::write(sidecar, bytes).unwrap();
         }
@@ -403,23 +401,25 @@ fn stale_wal_schema_rejection_preserves_the_real_database_and_sidecars() {
         .unwrap();
     assert_eq!(private_version, 1);
 
-    let before = [file_state(&path), file_state(&wal), file_state(&shm)];
+    let before = [file_state(&path), file_state(&wal)];
 
     let error = Store::open(&path).unwrap_err();
     assert!(matches!(error, StoreError::UnsupportedSchema { found: 1 }));
     assert_eq!(
-        [file_state(&path), file_state(&wal), file_state(&shm)],
+        [file_state(&path), file_state(&wal)],
         before,
-        "preflight rejection must not recover or delete the real WAL"
+        "rejection must not recover or delete the real WAL"
     );
+    assert!(shm.is_file(), "the shared-memory index was removed");
 
     let error = Store::open_existing(&path).unwrap_err();
     assert!(matches!(error, StoreError::UnsupportedSchema { found: 1 }));
     assert_eq!(
-        [file_state(&path), file_state(&wal), file_state(&shm)],
+        [file_state(&path), file_state(&wal)],
         before,
-        "open_existing must use the same non-mutating preflight"
+        "open_existing must validate the same way"
     );
+    assert!(shm.is_file(), "the shared-memory index was removed");
 }
 
 #[test]
