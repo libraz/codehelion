@@ -15,15 +15,12 @@
 //! sentence that explains the failure is almost always there and is lost the
 //! moment the process is reaped.
 
-use std::collections::BTreeSet;
-use std::io::{BufRead, BufReader};
+use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
-
-#[allow(clippy::disallowed_types)]
-use std::process::{Child, ChildStdin};
+use std::time::{Duration, Instant};
 
 use crate::ir::{CompilerIr, Unavailability, UnitRef};
 use crate::protocol::{
@@ -31,7 +28,7 @@ use crate::protocol::{
     DescribeBuild, Execution, FrameError, HelperIdentity, PROTOCOL_VERSION, Request, RequestBody,
     Response, ResponseBody, read_frame, write_frame,
 };
-use crate::sandbox::{SandboxError, SandboxRequest, spawn, terminate};
+use crate::sandbox::{HelperProcess, SandboxError, SandboxRequest, spawn};
 
 /// How long a request waits before the helper is treated as unresponsive.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -46,8 +43,66 @@ const SHUTDOWN_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 /// Lines of helper standard error kept for diagnostics.
 ///
 /// Enough to carry a compiler's complaint and a backtrace, bounded so a helper
-/// looping on a warning cannot grow this without limit.
+/// looping on a warning cannot grow this without limit. The bound applies to
+/// what has not been reported yet rather than to the whole process: one helper
+/// answers about many units, and a ceiling on its lifetime output would spend
+/// itself on the first few and leave every later unit with no explanation.
 pub const MAX_DIAGNOSTIC_LINES: usize = 256;
+
+/// Helper standard error that has not been reported yet, and what did not fit.
+///
+/// The count is kept rather than the lines: a run that drops an explanation has
+/// to say so, because diagnostics that end silently read exactly like a helper
+/// that had nothing more to say.
+#[derive(Debug, Default)]
+struct Diagnostics {
+    /// Lines collected since the last time they were handed out.
+    kept: Vec<String>,
+    /// Lines the ceiling left out over the same span.
+    dropped: usize,
+}
+
+impl Diagnostics {
+    /// Keep `line` if there is room, and count it if there is not.
+    fn push(&mut self, line: String) {
+        if self.kept.len() < MAX_DIAGNOSTIC_LINES {
+            self.kept.push(line);
+        } else {
+            self.dropped = self.dropped.saturating_add(1);
+        }
+    }
+
+    /// What has been collected, without consuming it.
+    fn peek(&self) -> Vec<String> {
+        bounded(self.kept.clone(), self.dropped)
+    }
+
+    /// What has been collected, leaving the next span empty.
+    fn take(&mut self) -> Vec<String> {
+        let dropped = std::mem::take(&mut self.dropped);
+        bounded(std::mem::take(&mut self.kept), dropped)
+    }
+}
+
+/// Cut `lines` to the ceiling, ending with a note for what a limit left out.
+///
+/// `already_dropped` lines were discarded before this point. The note is part
+/// of the ceiling rather than an extra line past it, so what a caller receives
+/// is bounded whether or not anything was left out.
+fn bounded(mut lines: Vec<String>, already_dropped: usize) -> Vec<String> {
+    let mut dropped = already_dropped;
+    if lines.len().saturating_add(usize::from(dropped > 0)) > MAX_DIAGNOSTIC_LINES {
+        let room = MAX_DIAGNOSTIC_LINES.saturating_sub(1);
+        dropped = dropped.saturating_add(lines.len().saturating_sub(room));
+        lines.truncate(room);
+    }
+    if dropped > 0 {
+        lines.push(format!(
+            "{dropped} further line(s) the helper printed were not kept"
+        ));
+    }
+    lines
+}
 
 /// Why talking to a helper did not work.
 #[derive(Debug, thiserror::Error)]
@@ -131,16 +186,70 @@ fn describe(stderr: &[String]) -> String {
     }
 }
 
+/// Who chose where a helper is looked for.
+///
+/// Starting a program is not something a location alone may decide, so every
+/// configured location arrives with the answer to this question attached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperAuthority {
+    /// An operator: a command line, or a configuration file the caller named.
+    Operator,
+    /// The tree under analysis, through a configuration file found inside it.
+    Scanned,
+}
+
+/// Where a helper was configured to be, together with who said so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfiguredHelper<'a> {
+    /// The configured location.
+    pub path: &'a Path,
+    /// Who chose it.
+    pub authority: HelperAuthority,
+}
+
+impl<'a> ConfiguredHelper<'a> {
+    /// A location an operator chose.
+    #[must_use]
+    pub const fn operator(path: &'a Path) -> Self {
+        Self {
+            path,
+            authority: HelperAuthority::Operator,
+        }
+    }
+
+    /// A location the tree under analysis supplied.
+    #[must_use]
+    pub const fn scanned(path: &'a Path) -> Self {
+        Self {
+            path,
+            authority: HelperAuthority::Scanned,
+        }
+    }
+}
+
 /// Where to look for a helper, in the order the search tries.
 ///
-/// An explicitly configured path is tried first. The plan for this search put
+/// An operator's configured path is tried first. The plan for this search put
 /// configuration last, which is the wrong way round: a setting that loses to
 /// whatever happens to be on `PATH` cannot be used to pin a helper, which is
 /// the only reason to write one down.
+///
+/// A location the scanned tree supplied is passed over as though it had not
+/// been written, and the search goes on beside this executable and along
+/// `PATH`. Following it would let a repository name the program that a scan of
+/// it starts, and there is no confining such a path the way a storage path is
+/// confined — a program inside the tree is exactly what it would name. Passing
+/// it over rather than refusing keeps the repository from choosing the helper
+/// and from denying the run one.
 #[must_use]
-pub fn locate(name: &str, configured: Option<&Path>) -> Option<PathBuf> {
-    if let Some(path) = configured {
-        return path.is_file().then(|| path.to_path_buf());
+pub fn locate(name: &str, configured: Option<ConfiguredHelper<'_>>) -> Option<PathBuf> {
+    if let Some(configured) = configured
+        && configured.authority == HelperAuthority::Operator
+    {
+        return configured
+            .path
+            .is_file()
+            .then(|| configured.path.to_path_buf());
     }
     let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     if let Ok(current) = std::env::current_exe()
@@ -160,11 +269,10 @@ pub fn locate(name: &str, configured: Option<&Path>) -> Option<PathBuf> {
 /// A running helper and the conversation with it.
 #[derive(Debug)]
 pub struct Helper {
-    #[allow(clippy::disallowed_types)]
-    child: Child,
-    stdin: ChildStdin,
+    child: HelperProcess,
+    requests: SyncSender<Outgoing>,
     responses: Receiver<Result<Response, FrameError>>,
-    stderr: Arc<Mutex<Vec<String>>>,
+    stderr: Arc<Mutex<Diagnostics>>,
     identity: HelperIdentity,
     protocol_version: u32,
     timeout: Duration,
@@ -215,20 +323,21 @@ impl Helper {
     ) -> Result<Self, HelperError> {
         let mut child = spawn(path, args, sandbox)?;
 
-        let Some(stdin) = child.stdin.take() else {
+        let Some(stdin) = child.take_stdin() else {
             return Err(HelperError::Died {
                 stderr: vec!["the helper was started without a standard input".into()],
             });
         };
-        let stderr = Arc::new(Mutex::new(Vec::new()));
-        if let Some(stream) = child.stderr.take() {
+        let stderr = Arc::new(Mutex::new(Diagnostics::default()));
+        if let Some(stream) = child.take_stderr() {
             drain_stderr(stream, Arc::clone(&stderr));
         }
-        let responses = read_responses(child.stdout.take());
+        let responses = read_responses(child.take_stdout());
+        let requests = write_requests(stdin);
 
         let mut helper = Self {
             child,
-            stdin,
+            requests,
             responses,
             stderr,
             identity: unknown_identity(),
@@ -278,13 +387,30 @@ impl Helper {
         self
     }
 
-    /// Everything the helper has printed on standard error so far.
+    /// What the helper has printed on standard error and nobody has taken.
+    ///
+    /// Ends with a line counting whatever the ceiling left out, so a caller is
+    /// never handed a shortened explanation that looks complete.
     #[must_use]
     pub fn diagnostics(&self) -> Vec<String> {
         self.stderr
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .peek()
+    }
+
+    /// What the helper has printed on standard error since this was last asked.
+    ///
+    /// One helper answers about many units, and what it printed while refusing
+    /// one of them explains that one. Read whole every time, the same sentence
+    /// would be attached to every unit that came after it, which reads as a
+    /// project where everything went wrong for the same reason.
+    #[must_use]
+    pub fn recent_diagnostics(&mut self) -> Vec<String> {
+        self.stderr
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 
     /// Whether a timeout made this helper conversation unsafe to reuse.
@@ -304,18 +430,29 @@ impl Helper {
     /// acknowledging is not an error — it left, which is what was asked.
     pub fn shutdown(mut self) -> Result<(), HelperError> {
         if self.poisoned_after_timeout {
-            terminate(&mut self.child);
-            let _ = self.child.wait();
+            self.child.terminate();
+            self.child.wait();
             return Ok(());
         }
-        let id = self.send(RequestBody::Shutdown)?;
-        match self.receive_with_timeout(id, self.timeout.min(SHUTDOWN_ACK_TIMEOUT)) {
+        let ack = self.timeout.min(SHUTDOWN_ACK_TIMEOUT);
+        let id = match self.send_within(RequestBody::Shutdown, ack) {
+            Ok(id) => id,
+            Err(HelperError::TimedOut { .. }) => {
+                // It has stopped reading, so asking is over. It leaves the way
+                // a helper that will not leave always does.
+                self.child.terminate();
+                self.child.wait();
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        match self.receive_with_timeout(id, ack) {
             Ok(ResponseBody::Shutdown) | Err(HelperError::Died { .. }) => {}
             Ok(_) | Err(_) => {
-                terminate(&mut self.child);
+                self.child.terminate();
             }
         }
-        let _ = self.child.wait();
+        self.child.wait();
         Ok(())
     }
 
@@ -462,21 +599,36 @@ impl Helper {
 
     /// Write a request and return the id it was given.
     fn send(&mut self, body: RequestBody) -> Result<u64, HelperError> {
+        self.send_within(body, self.timeout)
+    }
+
+    /// Write a request subject to one operation's deadline.
+    ///
+    /// A request larger than the pipe's buffer is only written as fast as the
+    /// helper reads it, so a helper that has stopped reading blocks the writer
+    /// exactly as a helper that has stopped answering blocks the reader. Both
+    /// therefore happen away from the caller and are collected with a deadline.
+    fn send_within(&mut self, body: RequestBody, timeout: Duration) -> Result<u64, HelperError> {
         if self.poisoned_after_timeout {
             return Err(HelperError::PoisonedAfterTimeout);
         }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
-        write_frame(
-            &mut self.stdin,
-            &Request {
-                protocol_version: self.protocol_version,
-                id,
-                body,
-            },
-        )
-        .map_err(|error| self.explain(error))?;
-        Ok(id)
+        let request = Request {
+            protocol_version: self.protocol_version,
+            id,
+            body,
+        };
+        match deliver(&self.requests, request, timeout) {
+            Ok(()) => Ok(id),
+            Err(Delivery::Timeout) => {
+                // Part of a frame may already be in the pipe, so what the
+                // helper reads next is not a message either side can name.
+                self.poisoned_after_timeout = true;
+                Err(HelperError::TimedOut { timeout })
+            }
+            Err(Delivery::Failed(error)) => Err(self.explain(error)),
+        }
     }
 
     /// Wait for the answer to `expected`, or for the deadline.
@@ -492,14 +644,14 @@ impl Helper {
     ) -> Result<ResponseBody, HelperError> {
         match self.responses.recv_timeout(timeout) {
             Ok(Ok(response)) => {
-                // Both the handshake and every later response use the one
-                // revision this build accepts.
-                let valid_revision = if self.identity.name.is_empty() {
-                    response.protocol_version == PROTOCOL_VERSION
-                } else {
-                    response.protocol_version == self.protocol_version
-                };
-                if !valid_revision {
+                // The handshake is exempt, and it is the only message that is:
+                // it is how two peers find out what they can say to each other,
+                // so refusing it for arriving in an unknown revision would make
+                // a difference in revisions undiscoverable by either side.
+                // `shake_hands` compares the revision it announces instead, and
+                // names both.
+                let settled = !matches!(response.body, ResponseBody::Handshake(_));
+                if settled && response.protocol_version != self.protocol_version {
                     return Err(HelperError::ProtocolMismatch {
                         received: response.protocol_version,
                         expected: self.protocol_version,
@@ -538,7 +690,7 @@ impl Helper {
     /// a stream failure against a process that has already exited is reported
     /// as the death it was.
     fn explain(&mut self, error: FrameError) -> HelperError {
-        if matches!(error, FrameError::Io(_)) && matches!(self.child.try_wait(), Ok(Some(_))) {
+        if matches!(error, FrameError::Io(_)) && self.child.has_exited() {
             HelperError::Died {
                 stderr: self.diagnostics(),
             }
@@ -593,15 +745,30 @@ pub struct Supervisor {
     spoke_with: Option<HelperIdentity>,
     /// What every helper started here may run out of the project.
     permitted: Vec<Execution>,
-    /// Units that have already broken a helper once.
-    poisoned: BTreeSet<UnitRef>,
+    /// Units that have already broken a helper once, under what broke it.
+    poisoned: BTreeMap<UnitRef, Explained>,
     /// Bounded stderr emitted while answering the most recent unavailable unit.
     diagnostics: Vec<String>,
     /// Whether a helper has ever been started, which is what tells a first
     /// start apart from a restart.
     started: bool,
-    /// Set once restarts run out: the helper is not started again.
-    given_up: bool,
+    /// Set once the run stops starting helpers, under the condition that
+    /// stopped it.
+    given_up: Option<Explained>,
+}
+
+/// A reason a unit has no compiler IR, with what was said while it arose.
+///
+/// The two travel together because a run reports them together: a reason with
+/// no sentence beside it tells somebody that something is wrong and nothing
+/// about what to do, and the sentence is only available at the moment the
+/// reason is produced.
+#[derive(Debug, Clone)]
+struct Explained {
+    /// The condition that prevented the analysis.
+    reason: Unavailability,
+    /// What the helper said about it, bounded as collected.
+    diagnostics: Vec<String>,
 }
 
 impl Supervisor {
@@ -619,10 +786,10 @@ impl Supervisor {
             helper: None,
             spoke_with: None,
             permitted: Vec::new(),
-            poisoned: BTreeSet::new(),
+            poisoned: BTreeMap::new(),
             diagnostics: Vec::new(),
             started: false,
-            given_up: false,
+            given_up: None,
         }
     }
 
@@ -671,7 +838,7 @@ impl Supervisor {
     /// Whether `unit` has been set aside as one the helper cannot survive.
     #[must_use]
     pub fn has_set_aside(&self, unit: &UnitRef) -> bool {
-        self.poisoned.contains(unit)
+        self.poisoned.contains_key(unit)
     }
 
     /// Take the helper diagnostics from the most recent unavailable request.
@@ -713,41 +880,90 @@ impl Supervisor {
         want: &[Capability],
     ) -> Analysis {
         self.diagnostics.clear();
-        if self.given_up {
-            return Analysis::Missing(Unavailability::HelperDied);
+        // A run that stopped asking, and a unit already set aside, are both
+        // answered from what was found out at the time. Answering either with a
+        // fresh generic reason would bury the one condition that explains the
+        // whole run under one repeated symptom of it.
+        if let Some(given_up) = self.given_up.clone() {
+            self.diagnostics = given_up.diagnostics;
+            return Analysis::Missing(given_up.reason);
         }
-        if self.poisoned.contains(unit) {
+        if let Some(set_aside) = self.poisoned.get(unit).cloned() {
             // It broke a helper twice already. Asking again costs another
             // restart and answers nothing new.
-            return Analysis::Missing(Unavailability::HelperDied);
+            self.diagnostics = set_aside.diagnostics;
+            return Analysis::Missing(set_aside.reason);
         }
         match self.attempt(unit, compile_command, read_boundary, want) {
             Ok(analysis) => {
                 self.consecutive_restarts = 0;
+                self.keep_what_was_said_about(&analysis);
                 analysis
             }
             Err(first) => {
-                self.diagnostics = diagnostics_from_error(&first);
-                if !unavailability(&first).worth_retrying() {
-                    return Analysis::Missing(unavailability(&first));
+                let explained = self.explained(&first);
+                self.diagnostics.clone_from(&explained.diagnostics);
+                if !explained.reason.worth_retrying() {
+                    return Analysis::Missing(explained.reason);
                 }
                 self.helper = None;
                 match self.attempt(unit, compile_command, read_boundary, want) {
                     Ok(analysis) => {
                         self.consecutive_restarts = 0;
                         self.diagnostics.clear();
+                        self.keep_what_was_said_about(&analysis);
                         analysis
                     }
                     Err(second) => {
-                        self.diagnostics = diagnostics_from_error(&second);
+                        let explained = self.explained(&second);
+                        self.diagnostics.clone_from(&explained.diagnostics);
                         // Twice on the same unit: the unit is what the helper
-                        // cannot survive, so it is the unit that is set aside.
-                        self.poisoned.insert(unit.clone());
+                        // cannot survive, so it is the unit that is set aside,
+                        // under what it did rather than under a later guess.
+                        let reason = explained.reason;
+                        self.poisoned.insert(unit.clone(), explained);
                         self.helper = None;
-                        Analysis::Missing(unavailability(&second))
+                        Analysis::Missing(reason)
                     }
                 }
             }
+        }
+    }
+
+    /// Keep what the helper printed while refusing a unit it answered about.
+    ///
+    /// A helper that says a unit is unavailable has usually said why on its
+    /// standard error, and that sentence is the whole difference between a
+    /// report somebody can act on and a count of a reason's name.
+    fn keep_what_was_said_about(&mut self, analysis: &Analysis) {
+        let Some(helper) = self.helper.as_mut() else {
+            return;
+        };
+        let said = helper.recent_diagnostics();
+        if matches!(analysis, Analysis::Missing(_)) {
+            self.diagnostics = said;
+        }
+    }
+
+    /// Why a unit has no IR, with everything said while finding that out.
+    ///
+    /// Both halves are kept: the error carries what the helper refused in its
+    /// own words, and the process carries what it printed while doing so. A
+    /// helper that timed out says nothing in the error and may have said
+    /// everything on its standard error.
+    fn explained(&mut self, error: &HelperError) -> Explained {
+        let mut diagnostics = explanation(error);
+        if let Some(helper) = self.helper.as_mut() {
+            for line in helper.recent_diagnostics() {
+                if !diagnostics.contains(&line) {
+                    diagnostics.push(line);
+                }
+            }
+        }
+        let diagnostics = bounded(diagnostics, 0);
+        Explained {
+            reason: unavailability(error),
+            diagnostics,
         }
     }
 
@@ -762,7 +978,10 @@ impl Supervisor {
         if self.helper.is_none() {
             if self.started {
                 if self.consecutive_restarts >= self.max_restarts {
-                    self.given_up = true;
+                    self.given_up = Some(Explained {
+                        reason: Unavailability::RestartBudgetExhausted,
+                        diagnostics: self.diagnostics.clone(),
+                    });
                     return Ok(Analysis::Missing(Unavailability::RestartBudgetExhausted));
                 }
                 self.restarts = self.restarts.saturating_add(1);
@@ -770,15 +989,23 @@ impl Supervisor {
             }
             self.started = true;
             let arguments: Vec<&str> = self.args.iter().map(String::as_str).collect();
-            let helper =
-                Helper::start_with_sandbox(&self.program, &arguments, self.timeout, self.sandbox)
-                    .inspect_err(|_| {
-                        // A helper that will not start will not start for the next
-                        // unit either, so the run stops asking rather than paying a
-                        // process spawn per file to be told the same thing.
-                        self.given_up = true;
-                    })?
-                    .permitting(self.permitted.clone());
+            let started =
+                Helper::start_with_sandbox(&self.program, &arguments, self.timeout, self.sandbox);
+            let helper = match started {
+                Ok(helper) => helper.permitting(self.permitted.clone()),
+                Err(error) => {
+                    // A helper that will not start will not start for the next
+                    // unit either, so the run stops asking rather than paying a
+                    // process spawn per file to be told the same thing — and it
+                    // keeps why, because every unit after this one is reported
+                    // under it.
+                    self.given_up = Some(Explained {
+                        reason: unavailability(&error),
+                        diagnostics: explanation(&error),
+                    });
+                    return Err(error);
+                }
+            };
             self.spoke_with = Some(helper.identity().clone());
             self.helper = Some(helper);
         }
@@ -797,23 +1024,33 @@ impl Supervisor {
 }
 
 /// The reason a unit has no IR, given how talking to the helper went.
+///
+/// A refusal is not a crash. The helper received the request, understood it,
+/// and answered that it would not handle it — a restart puts the same question
+/// to the same program, so it is classified as something a retry cannot change.
 const fn unavailability(error: &HelperError) -> Unavailability {
     match error {
         HelperError::TimedOut { .. } => Unavailability::HelperTimedOut,
         HelperError::NoCommonProtocol { .. }
         | HelperError::MissingRequiredCapability { .. }
         | HelperError::ProtocolMismatch { .. } => Unavailability::ToolchainMismatch,
+        HelperError::Refused { .. } => Unavailability::NotSupported,
         _ => Unavailability::HelperDied,
     }
 }
 
-/// Preserve only helper-provided stderr, which has already been bounded by
-/// [`drain_stderr`]. Other errors are local protocol facts, not diagnostics
-/// emitted by a compiler helper.
-fn diagnostics_from_error(error: &HelperError) -> Vec<String> {
+/// What a failure says for itself, in sentences.
+///
+/// A helper's collected standard error is kept as it was printed, already
+/// bounded by [`drain_stderr`]. Everything else is rendered, because a reason
+/// that reaches a report as a bare name tells somebody that something is wrong
+/// and nothing about which thing.
+fn explanation(error: &HelperError) -> Vec<String> {
     match error {
+        // Its own rendering repeats these lines, so they are reported as the
+        // helper wrote them rather than folded into one sentence.
         HelperError::Died { stderr } => stderr.clone(),
-        _ => Vec::new(),
+        other => vec![other.to_string()],
     }
 }
 
@@ -821,9 +1058,10 @@ impl Drop for Helper {
     fn drop(&mut self) {
         // A helper outliving the run would hold a compiler process open for as
         // long as the scan lives. Whatever state the conversation is in, the
-        // process goes.
-        terminate(&mut self.child);
-        let _ = self.child.wait();
+        // process goes — unless it has already gone, in which case both of
+        // these are the no-ops that keep its number out of a signal.
+        self.child.terminate();
+        self.child.wait();
     }
 }
 
@@ -870,23 +1108,95 @@ fn read_responses(
     receiver
 }
 
+/// One request on its way to the helper, with where its outcome goes.
+#[derive(Debug)]
+struct Outgoing {
+    /// The frame to write.
+    request: Request,
+    /// Where the writer reports whether the frame reached the helper.
+    outcome: SyncSender<Result<(), FrameError>>,
+}
+
+/// How handing a request to the writer can fail.
+#[derive(Debug)]
+enum Delivery {
+    /// The deadline passed with the request still unwritten.
+    Timeout,
+    /// The stream refused it.
+    Failed(FrameError),
+}
+
+/// Write requests to the helper on a thread.
+///
+/// The writer is a thread for the same reason the reader is: a pipe write
+/// blocks until the peer reads, and a helper that has stopped reading would
+/// otherwise hold the run inside a call that cannot be given a deadline.
+fn write_requests<W: Write + Send + 'static>(mut stdin: W) -> SyncSender<Outgoing> {
+    let (sender, receiver) = sync_channel::<Outgoing>(1);
+    std::thread::spawn(move || {
+        while let Ok(outgoing) = receiver.recv() {
+            let result = write_frame(&mut stdin, &outgoing.request);
+            let failed = result.is_err();
+            let _ = outgoing.outcome.send(result);
+            if failed {
+                // The stream is no longer one whole frames can be written to,
+                // so the pipe closes here rather than carrying half a message.
+                break;
+            }
+        }
+    });
+    sender
+}
+
+/// Hand `request` to the writer and wait, no longer than `timeout`, for it to
+/// reach the helper.
+fn deliver(
+    requests: &SyncSender<Outgoing>,
+    request: Request,
+    timeout: Duration,
+) -> Result<(), Delivery> {
+    let started = Instant::now();
+    let (outcome, written) = sync_channel(1);
+    match requests.try_send(Outgoing { request, outcome }) {
+        Ok(()) => {}
+        // One request is outstanding at a time, so a full queue means the
+        // writer is still on a frame whose deadline has already passed.
+        Err(TrySendError::Full(_)) => return Err(Delivery::Timeout),
+        Err(TrySendError::Disconnected(_)) => return Err(Delivery::Failed(broken_pipe())),
+    }
+    match written.recv_timeout(timeout.saturating_sub(started.elapsed())) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(Delivery::Failed(error)),
+        Err(RecvTimeoutError::Timeout) => Err(Delivery::Timeout),
+        Err(RecvTimeoutError::Disconnected) => Err(Delivery::Failed(broken_pipe())),
+    }
+}
+
+/// The stream failure a writer that has gone leaves behind.
+fn broken_pipe() -> FrameError {
+    FrameError::Io(std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "the helper's standard input was closed",
+    ))
+}
+
 /// Keep the helper's standard error, bounded, on a thread.
-fn drain_stderr(stream: std::process::ChildStderr, sink: Arc<Mutex<Vec<String>>>) {
+fn drain_stderr(stream: std::process::ChildStderr, sink: Arc<Mutex<Diagnostics>>) {
     std::thread::spawn(move || {
         collect_stderr(BufReader::new(stream), &sink);
     });
 }
 
-/// Read all of one helper stderr stream while retaining only the bounded prefix.
-fn collect_stderr(reader: impl BufRead, sink: &Arc<Mutex<Vec<String>>>) {
+/// Read all of one helper stderr stream while retaining the bounded prefix of
+/// each span between two reads.
+fn collect_stderr(reader: impl BufRead, sink: &Arc<Mutex<Diagnostics>>) {
     for line in reader.lines().map_while(Result::ok) {
         // Take the lock for one line and let it go: the helper writing to
         // its standard error must never be what stops a caller from
         // reading what it has written so far.
-        let mut kept = sink.lock().unwrap_or_else(PoisonError::into_inner);
-        if kept.len() < MAX_DIAGNOSTIC_LINES {
-            kept.push(line);
-        }
+        sink.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(line);
     }
 }
 
@@ -904,17 +1214,110 @@ mod tests {
         for line in 0..=MAX_DIAGNOSTIC_LINES {
             writeln!(input, "line-{line}").unwrap();
         }
-        let sink = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::new(Mutex::new(Diagnostics::default()));
         collect_stderr(std::io::Cursor::new(input), &sink);
-        let kept = sink.lock().unwrap();
+        let kept = sink.lock().unwrap().peek();
         assert_eq!(kept.len(), MAX_DIAGNOSTIC_LINES);
         assert_eq!(kept.first().map(String::as_str), Some("line-0"));
-        let expected_last = format!("line-{}", MAX_DIAGNOSTIC_LINES - 1);
+        let expected_last = format!("line-{}", MAX_DIAGNOSTIC_LINES - 2);
         assert_eq!(
-            kept.last().map(String::as_str),
+            kept.get(MAX_DIAGNOSTIC_LINES - 2).map(String::as_str),
             Some(expected_last.as_str())
         );
-        drop(kept);
+    }
+
+    #[test]
+    fn lines_a_ceiling_left_out_are_counted_where_the_kept_ones_are_reported() {
+        use std::fmt::Write as _;
+
+        let overshoot = 7;
+        let mut input = String::new();
+        for line in 0..MAX_DIAGNOSTIC_LINES + overshoot {
+            writeln!(input, "line-{line}").unwrap();
+        }
+        let sink = Arc::new(Mutex::new(Diagnostics::default()));
+        collect_stderr(std::io::Cursor::new(input), &sink);
+
+        let reported = sink.lock().unwrap().take();
+        assert_eq!(reported.len(), MAX_DIAGNOSTIC_LINES);
+        // One kept line gives up its place to the note that accounts for the
+        // rest, so the count names every line that was not kept.
+        let expected = format!("{} further line(s)", overshoot + 1);
+        let note = reported.last().cloned().unwrap_or_default();
+        assert!(note.contains(&expected), "{note}");
+    }
+
+    #[test]
+    fn what_one_unit_was_refused_for_is_not_spent_by_the_units_before_it() {
+        // A helper explaining every unit it refuses prints far more lines over
+        // its life than any one report may carry. Each unit's reasons must
+        // still be its own, however many units came first.
+        let sink = Arc::new(Mutex::new(Diagnostics::default()));
+        let units = MAX_DIAGNOSTIC_LINES * 2;
+        for unit in 0..units {
+            sink.lock().unwrap().push(format!("refused unit-{unit}"));
+            let reported = sink.lock().unwrap().take();
+            assert_eq!(reported, vec![format!("refused unit-{unit}")]);
+        }
+    }
+
+    #[test]
+    fn a_span_that_was_read_starts_the_next_one_empty() {
+        let sink = Arc::new(Mutex::new(Diagnostics::default()));
+        sink.lock().unwrap().push("first".to_string());
+        assert_eq!(sink.lock().unwrap().take(), vec!["first".to_string()]);
+        assert!(sink.lock().unwrap().take().is_empty());
+        assert!(sink.lock().unwrap().peek().is_empty());
+    }
+
+    /// A stream that accepts nothing, the way a pipe behaves once the peer at
+    /// the other end has stopped reading it.
+    struct NeverAccepts;
+
+    impl Write for NeverAccepts {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            std::thread::sleep(Duration::from_secs(30));
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn shutdown_request() -> Request {
+        Request {
+            protocol_version: PROTOCOL_VERSION,
+            id: 0,
+            body: RequestBody::Shutdown,
+        }
+    }
+
+    #[test]
+    fn a_request_a_helper_will_not_read_gives_up_on_its_deadline() {
+        let deadline = Duration::from_millis(200);
+        let requests = write_requests(NeverAccepts);
+
+        let started = Instant::now();
+        let outcome = deliver(&requests, shutdown_request(), deadline);
+        let waited = started.elapsed();
+
+        assert!(matches!(outcome, Err(Delivery::Timeout)), "{outcome:?}");
+        assert!(
+            waited < Duration::from_secs(5),
+            "the write waited {waited:?} on a {deadline:?} deadline"
+        );
+    }
+
+    #[test]
+    fn a_request_a_helper_reads_completes_rather_than_waiting_out_its_deadline() {
+        let requests = write_requests(std::io::sink());
+
+        let started = Instant::now();
+        let outcome = deliver(&requests, shutdown_request(), Duration::from_secs(30));
+
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
@@ -922,12 +1325,39 @@ mod tests {
         // Falling back to PATH would silently run a different build than the
         // one the setting names, which is the failure a setting exists to stop.
         let missing = Path::new("/nonexistent/codehelion-backend-rust");
-        assert_eq!(locate("codehelion-backend-rust", Some(missing)), None);
+        assert_eq!(
+            locate(
+                "codehelion-backend-rust",
+                Some(ConfiguredHelper::operator(missing))
+            ),
+            None
+        );
     }
 
     #[test]
     fn a_helper_nobody_has_installed_is_not_found() {
         assert_eq!(locate("codehelion-backend-nothing-at-all", None), None);
+    }
+
+    #[test]
+    fn a_program_the_scanned_tree_named_is_never_where_a_helper_is_looked_for() {
+        // One file that certainly exists, offered by each of the two
+        // authorities: who chose it, not whether it is there, is what decides.
+        let present = std::env::current_exe().expect("this test is a file on disk");
+        assert_eq!(
+            locate(
+                "codehelion-backend-nothing-at-all",
+                Some(ConfiguredHelper::operator(&present))
+            ),
+            Some(present.clone())
+        );
+        assert_eq!(
+            locate(
+                "codehelion-backend-nothing-at-all",
+                Some(ConfiguredHelper::scanned(&present))
+            ),
+            None
+        );
     }
 
     #[cfg(not(target_os = "linux"))]

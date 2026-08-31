@@ -47,12 +47,21 @@ fn a_well_behaved_helper_says_what_it_is_and_what_it_can_do() {
     helper.shutdown().expect("it goes when asked");
 }
 
+/// A difference in revisions is a thing both sides must be able to discover,
+/// so the handshake is answered whatever revision it arrives in and whatever
+/// revision the answer comes back in. Refusing the answering frame for its
+/// revision would report the difference as a peer that changed language
+/// mid-conversation, and would never name either revision.
 #[test]
 fn a_helper_from_another_era_is_named_as_such_rather_than_used() {
     let error = start("ancient", DEADLINE).expect_err("the v1 protocol must match exactly");
-    assert!(
-        matches!(error, HelperError::NoCommonProtocol { .. }),
-        "{error:?}"
+    let HelperError::NoCommonProtocol { helper, required } = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*required, PROTOCOL_VERSION);
+    assert_ne!(
+        *helper, PROTOCOL_VERSION,
+        "a helper from another era must be reported under its own revision"
     );
     // The message has to identify the exact protocol contract this build uses.
     let said = error.to_string();
@@ -60,6 +69,74 @@ fn a_helper_from_another_era_is_named_as_such_rather_than_used() {
         said.contains(&format!("requires protocol {PROTOCOL_VERSION}")),
         "{said}"
     );
+}
+
+/// And the mock has to be the peer it stands in for: a helper stamps its own
+/// build's revision on every frame, including the handshake it answers. One
+/// that echoed the caller's would agree with everybody and leave the path
+/// above untested.
+#[test]
+fn a_mock_from_another_era_stamps_its_own_revision_the_way_a_helper_does() {
+    let (frame, identity) = handshake_with(
+        "ancient",
+        // Asked in a revision neither side speaks, so an echo is visible as
+        // one: nothing else would answer in this number.
+        PROTOCOL_VERSION.saturating_add(7),
+    );
+    assert_ne!(frame, PROTOCOL_VERSION.saturating_add(7), "the mock echoed");
+    assert_ne!(frame, PROTOCOL_VERSION);
+    assert_eq!(
+        frame, identity,
+        "the frame and the identity must name one revision"
+    );
+
+    let (frame, identity) = handshake_with("well-behaved", PROTOCOL_VERSION.saturating_add(7));
+    assert_eq!(frame, PROTOCOL_VERSION);
+    assert_eq!(identity, PROTOCOL_VERSION);
+}
+
+/// Shake hands with the mock at `revision`, returning the revision its
+/// answering frame carries and the one its identity announces.
+#[allow(clippy::disallowed_types)]
+fn handshake_with(behaviour: &str, revision: u32) -> (u32, u32) {
+    use codehelion_helper::protocol::{
+        ClientIdentity, Request, RequestBody, Response, ResponseBody, read_frame, write_frame,
+    };
+    use std::process::{Command, Stdio};
+
+    // The conversation under test is a process boundary, so this test drives
+    // one directly rather than through the client that is the thing being
+    // stood in for.
+    let mut child = Command::new(MOCK)
+        .arg(behaviour)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("start the mock helper");
+    let mut stdin = child.stdin.take().expect("the mock reads requests");
+    write_frame(
+        &mut stdin,
+        &Request {
+            protocol_version: revision,
+            id: 0,
+            body: RequestBody::Handshake(ClientIdentity {
+                client: "conformance".into(),
+                client_version: "0.0.0".into(),
+                protocol: revision,
+            }),
+        },
+    )
+    .expect("send a handshake");
+    let mut stdout = child.stdout.take().expect("the mock writes responses");
+    let response: Response = read_frame(&mut stdout)
+        .expect("read the answering frame")
+        .expect("the mock answers a handshake");
+    drop(stdin);
+    let _ = child.wait();
+    let ResponseBody::Handshake(identity) = response.body else {
+        panic!("a handshake is answered with an identity");
+    };
+    (response.protocol_version, identity.protocol)
 }
 
 #[test]
@@ -435,4 +512,259 @@ fn a_helper_that_keeps_dying_is_given_up_on_rather_than_restarted_forever() {
         supervisor.restarts()
     );
     supervisor.shutdown();
+}
+
+/// What stopped a run is what every unit after it is reported under. Falling
+/// back to a generic dead helper would bury the one condition that explains
+/// the whole scan under one symptom of it, repeated once per file.
+#[test]
+fn units_after_a_run_stops_asking_are_reported_under_what_stopped_it() {
+    let mut supervisor = supervisor("allergic", 1);
+    // The first unit exhausts the budget: it kills the helper, is retried
+    // once, and kills the restarted one too.
+    assert_eq!(
+        supervisor.analyze(&unit("src/poison-a.rs"), &[Capability::Types]),
+        Analysis::Missing(Unavailability::HelperDied)
+    );
+    assert!(
+        !supervisor.take_diagnostics().is_empty(),
+        "the crash was reported without the sentence that explains it"
+    );
+    for file in ["src/poison-b.rs", "src/second.rs"] {
+        assert_eq!(
+            supervisor.analyze(&unit(file), &[Capability::Types]),
+            Analysis::Missing(Unavailability::RestartBudgetExhausted),
+            "{file} was reported under a symptom rather than under the budget"
+        );
+    }
+    supervisor.shutdown();
+}
+
+/// The same for a helper that never started: every unit says the helper cannot
+/// be spoken to, not that it died answering them.
+#[test]
+fn every_unit_of_an_unusable_helper_names_why_it_is_unusable() {
+    let mut supervisor = supervisor("ancient", 3);
+    for file in ["src/first.rs", "src/second.rs", "src/third.rs"] {
+        assert_eq!(
+            supervisor.analyze(&unit(file), &[Capability::Types]),
+            Analysis::Missing(Unavailability::ToolchainMismatch),
+            "{file} lost the reason the helper could not be used"
+        );
+        let said = supervisor.take_diagnostics();
+        assert!(
+            said.iter().any(|line| line.contains("protocol")),
+            "{file} was reported without what the revisions were: {said:?}"
+        );
+    }
+    assert_eq!(
+        supervisor.restarts(),
+        0,
+        "a helper that will not start is not started again per unit"
+    );
+    supervisor.shutdown();
+}
+
+/// A unit set aside after two attempts keeps the condition it met, so a unit
+/// that timed out twice is not later reported as one that killed a helper.
+#[test]
+fn a_unit_set_aside_keeps_the_condition_it_actually_met() {
+    let mut supervisor = Supervisor::new(
+        PathBuf::from(MOCK),
+        vec!["deaf-on-poison".to_owned()],
+        Duration::from_millis(300),
+    )
+    .with_max_restarts(8);
+    assert_eq!(
+        supervisor.analyze(&unit("src/poison.rs"), &[Capability::Types]),
+        Analysis::Missing(Unavailability::HelperTimedOut)
+    );
+    assert!(supervisor.has_set_aside(&unit("src/poison.rs")));
+    assert_eq!(
+        supervisor.analyze(&unit("src/poison.rs"), &[Capability::Types]),
+        Analysis::Missing(Unavailability::HelperTimedOut),
+        "asking again reported a condition this unit never met"
+    );
+    supervisor.shutdown();
+}
+
+/// A helper that answers a unit with a refusal has received the request and
+/// declined it. Restarting puts the same question to the same program, so it
+/// spends a restart to be told the same thing and takes the budget away from
+/// the crashes a restart does help with.
+#[test]
+fn a_refused_unit_does_not_cost_a_restart_and_the_rest_go_on() {
+    let mut supervisor = supervisor("declines-analysis", 3);
+    assert_eq!(
+        supervisor.analyze(&unit("src/first.rs"), &[Capability::Types]),
+        Analysis::Missing(Unavailability::NotSupported)
+    );
+    let said = supervisor.take_diagnostics();
+    assert!(
+        said.iter().any(|line| line.contains("unreadable_request")),
+        "the refusal reached the caller without its own words: {said:?}"
+    );
+    assert_eq!(
+        supervisor.analyze(&unit("src/second.rs"), &[Capability::Types]),
+        Analysis::Missing(Unavailability::NotSupported)
+    );
+    assert_eq!(
+        supervisor.restarts(),
+        0,
+        "a refusal was treated as a crash and spent the restart budget"
+    );
+    assert!(
+        !supervisor.has_set_aside(&unit("src/first.rs")),
+        "a unit the helper survived was set aside"
+    );
+    supervisor.shutdown();
+}
+
+/// A reason is a name a report can count; the sentence beside it is the whole
+/// difference between a scan somebody can act on and a tally of unavailability.
+/// Both a helper that declines a unit and one that never answers have one.
+#[test]
+fn a_refused_unit_and_a_timed_out_unit_both_arrive_with_a_sentence() {
+    let mut supervisor = supervisor("unbuildable", 3);
+    assert_eq!(
+        supervisor.analyze(&unit("src/uncovered.cc"), &[Capability::Types]),
+        Analysis::Missing(Unavailability::NoBuildInformation)
+    );
+    let said = supervisor.take_diagnostics();
+    assert!(
+        said.iter()
+            .any(|line| line.contains("no compilation command covers src/uncovered.cc")),
+        "what the helper said about the refusal was dropped: {said:?}"
+    );
+    supervisor.shutdown();
+
+    let mut supervisor = Supervisor::new(
+        PathBuf::from(MOCK),
+        vec!["noisy-deafness".to_owned()],
+        Duration::from_millis(300),
+    )
+    .with_max_restarts(1);
+    assert_eq!(
+        supervisor.analyze(&unit("src/slow.rs"), &[Capability::Types]),
+        Analysis::Missing(Unavailability::HelperTimedOut)
+    );
+    let said = supervisor.take_diagnostics();
+    assert!(
+        said.iter().any(|line| line.contains("expanding macros")),
+        "a timeout lost what the helper printed before it stopped: {said:?}"
+    );
+    supervisor.shutdown();
+}
+
+/// A helper that answered one unit and refused the next must not have the
+/// first unit's silence read as the second's explanation, or the other way
+/// round.
+#[test]
+fn what_was_said_about_one_unit_is_not_reported_against_another() {
+    let mut supervisor = supervisor("unbuildable", 3);
+    assert!(matches!(
+        supervisor.analyze(&unit("src/first.cc"), &[Capability::Types]),
+        Analysis::Missing(Unavailability::NoBuildInformation)
+    ));
+    assert!(
+        supervisor
+            .take_diagnostics()
+            .iter()
+            .any(|line| line.contains("src/first.cc"))
+    );
+    assert!(matches!(
+        supervisor.analyze(&unit("src/second.cc"), &[Capability::Types]),
+        Analysis::Missing(Unavailability::NoBuildInformation)
+    ));
+    let said = supervisor.take_diagnostics();
+    assert!(
+        said.iter().any(|line| line.contains("src/second.cc")),
+        "{said:?}"
+    );
+    assert!(
+        !said.iter().any(|line| line.contains("src/first.cc")),
+        "one unit's explanation was reported against the next: {said:?}"
+    );
+    supervisor.shutdown();
+}
+
+/// An answer too large for one frame is this unit's unavailability, and the
+/// helper goes on answering about the rest of the project.
+#[test]
+fn an_answer_that_will_not_fit_in_a_frame_is_the_units_unavailability() {
+    let mut supervisor = supervisor("oversized-answer", 3);
+    assert_eq!(
+        supervisor.analyze(&unit("src/enormous.rs"), &[Capability::Types]),
+        Analysis::Missing(Unavailability::ResponseTooLarge)
+    );
+    assert_eq!(
+        supervisor.restarts(),
+        0,
+        "an oversized answer was treated as a crash"
+    );
+    supervisor.shutdown();
+}
+
+/// A read boundary is sent with the request and enforced by the helper, so a
+/// unit resolving outside it comes back as an answer about that unit rather
+/// than as a broken conversation.
+#[test]
+fn a_unit_outside_the_declared_read_boundary_is_refused_by_the_helper() {
+    let mut supervisor = supervisor("bounded", 3);
+    let boundary = Path::new("/repo");
+    assert!(matches!(
+        supervisor.analyze_with_command_and_boundary(
+            &unit("/repo/src/inside.rs"),
+            None,
+            Some(boundary),
+            &[Capability::Types],
+        ),
+        Analysis::Done(_)
+    ));
+    assert_eq!(
+        supervisor.analyze_with_command_and_boundary(
+            &unit("/elsewhere/outside.rs"),
+            None,
+            Some(boundary),
+            &[Capability::Types],
+        ),
+        Analysis::Missing(Unavailability::NotSupported)
+    );
+    let said = supervisor.take_diagnostics();
+    assert!(
+        said.iter()
+            .any(|line| line.contains("outside the declared read boundary")),
+        "{said:?}"
+    );
+    supervisor.shutdown();
+}
+
+/// Whether a reason is worth another attempt decides where the restart budget
+/// goes, so every reason answers that question here. The match is exhaustive:
+/// a reason added without a decision stops this compiling.
+#[test]
+fn every_reason_a_unit_has_no_ir_says_whether_a_retry_could_change_it() {
+    for reason in Unavailability::ALL {
+        let worth_retrying = match reason {
+            // A helper that stopped may have stopped on this input, and only
+            // asking again says which of the two it was about.
+            Unavailability::HelperDied | Unavailability::HelperTimedOut => true,
+            // Everything the helper decided, and everything about the pair of
+            // programs, is the same on the next attempt.
+            Unavailability::RequiresExecution
+            | Unavailability::MetadataUnavailable
+            | Unavailability::NoBuildInformation
+            | Unavailability::ToolchainMismatch
+            | Unavailability::UnreadableSchema
+            | Unavailability::ResponseTooLarge
+            | Unavailability::RestartBudgetExhausted
+            | Unavailability::NotSupported => false,
+        };
+        assert_eq!(
+            reason.worth_retrying(),
+            worth_retrying,
+            "{} is classified against what a retry can change",
+            reason.name()
+        );
+    }
 }

@@ -18,6 +18,11 @@
 //! mock-helper deaf              # never answers
 //! mock-helper deaf-after-setup  # establishes the run, then hangs on analysis
 //! mock-helper deaf-on-poison    # hangs only for a unit named `poison`
+//! mock-helper noisy-deafness    # says what it is doing, then hangs on analysis
+//! mock-helper unbuildable       # says on stderr why a unit has no build information
+//! mock-helper declines-analysis # answers every analysis with a failure
+//! mock-helper bounded           # refuses units outside the declared read boundary
+//! mock-helper oversized-answer  # answers with an IR over the frame ceiling
 //! mock-helper dies              # exits mid-handshake
 //! mock-helper noisy-death       # complains on stderr, then exits
 //! mock-helper noisy-stdout      # writes a diagnostic to the protocol stream
@@ -40,7 +45,7 @@ use codehelion_helper::ir::{
     Unavailability, UnitRef,
 };
 use codehelion_helper::protocol::{
-    BuildDescription, Capability, Execution, Failure, HelperIdentity, MAX_FRAME_BYTES,
+    BuildDescription, Capability, Execution, Failure, FrameError, HelperIdentity, MAX_FRAME_BYTES,
     PROTOCOL_VERSION, Request, RequestBody, Response, ResponseBody, read_frame, write_frame,
 };
 
@@ -99,6 +104,10 @@ fn main() {
             {
                 park();
             }
+            "noisy-deafness" if matches!(&request.body, RequestBody::Analyze(_)) => {
+                eprintln!("mock compiler is still expanding macros and will not come back");
+                park();
+            }
             "slow" => std::thread::sleep(Duration::from_secs(30)),
             _ => {}
         }
@@ -107,7 +116,6 @@ fn main() {
         } else {
             request.id
         };
-        let request_protocol = request.protocol_version;
         let body = match request.body {
             RequestBody::Handshake(_) if behaviour == "refuses" => ResponseBody::Failed(Failure {
                 code: "no_toolchain".into(),
@@ -132,6 +140,40 @@ fn main() {
                     reason: Unavailability::RequiresExecution,
                 }
             }
+            RequestBody::Analyze(_) if behaviour == "declines-analysis" => {
+                ResponseBody::Failed(Failure {
+                    code: "unreadable_request".into(),
+                    message: "this mock will not handle an analysis request".into(),
+                })
+            }
+            RequestBody::Analyze(analyze) if behaviour == "unbuildable" => {
+                // The shape of a real refusal: the reason is a name a report
+                // can count, and why this unit earned it is a sentence only
+                // the helper is in a position to write.
+                eprintln!(
+                    "no compilation command covers {}: it is compiled by nothing in the database",
+                    analyze.unit.file
+                );
+                ResponseBody::Unavailable {
+                    unit: analyze.unit,
+                    reason: Unavailability::NoBuildInformation,
+                }
+            }
+            RequestBody::Analyze(analyze) if behaviour == "bounded" => {
+                match &analyze.read_boundary {
+                    Some(boundary) if !analyze.unit.file.starts_with(boundary.as_str()) => {
+                        eprintln!(
+                            "{} resolves outside the declared read boundary {boundary}",
+                            analyze.unit.file
+                        );
+                        ResponseBody::Unavailable {
+                            unit: analyze.unit,
+                            reason: Unavailability::NotSupported,
+                        }
+                    }
+                    _ => ResponseBody::Analyzed(Box::new(analyzed(analyze.unit))),
+                }
+            }
             RequestBody::Analyze(analyze) => {
                 if behaviour == "allergic" && analyze.unit.file.contains("poison") {
                     eprintln!("mock compiler crashed while reading {}", analyze.unit.file);
@@ -141,18 +183,30 @@ fn main() {
                 if behaviour == "wrong-schema" {
                     ir.schema_version = "compiler-ir-from-the-future".into();
                 }
+                if behaviour == "oversized-answer" {
+                    ir.anchored_at = Some("x".repeat(MAX_FRAME_BYTES as usize));
+                }
                 ResponseBody::Analyzed(Box::new(ir))
             }
             RequestBody::Shutdown => ResponseBody::Shutdown,
         };
         let shutting_down = matches!(body, ResponseBody::Shutdown);
+        let answered_about = match &body {
+            ResponseBody::Analyzed(ir) => Some(ir.unit.clone()),
+            _ => None,
+        };
         let wrong_revision = behaviour == "wrong-revision-after-setup"
             || (behaviour == "wrong-revision-on-poison"
                 && matches!(&body, ResponseBody::Analyzed(ir) if ir.unit.file.contains("poison")));
+        // Whatever this program itself speaks, never the revision it was asked
+        // in: a peer that guessed wrong can only find out by being answered in
+        // the other side's own revision, which is what the real server loop
+        // stamps on every frame it writes.
+        let speaks = spoken_protocol(behaviour.as_str());
         let protocol_version = if wrong_revision && matches!(&body, ResponseBody::Analyzed(_)) {
-            request_protocol.saturating_add(1)
+            speaks.saturating_add(1)
         } else {
-            request_protocol
+            speaks
         };
         let sent = write_frame(
             &mut output,
@@ -162,6 +216,26 @@ fn main() {
                 body,
             },
         );
+        // An answer that will not fit in one frame is this unit's
+        // unavailability rather than the end of the conversation, which is how
+        // the real server loop treats it.
+        if let (Err(FrameError::TooLarge { .. }), Some(unit)) = (&sent, answered_about) {
+            let oversized = write_frame(
+                &mut output,
+                &Response {
+                    protocol_version,
+                    id,
+                    body: ResponseBody::Unavailable {
+                        unit,
+                        reason: Unavailability::ResponseTooLarge,
+                    },
+                },
+            );
+            if oversized.is_err() {
+                return;
+            }
+            continue;
+        }
         if sent.is_err() || shutting_down {
             return;
         }
@@ -195,13 +269,24 @@ fn analyzed(unit: UnitRef) -> CompilerIr {
     ir
 }
 
-/// What this mock claims to be, under the named behaviour.
-fn identity(behaviour: &str) -> HelperIdentity {
-    let protocol = if behaviour == "ancient" {
+/// The revision this program writes, under the named behaviour.
+///
+/// A helper built against another revision of the protocol stamps that
+/// revision on everything it sends, including the handshake it answers. An
+/// `ancient` mock stands in for one, so it does the same rather than repeating
+/// back whatever it was asked in — a mock that echoed would agree with every
+/// caller and prove nothing about two peers finding a difference.
+fn spoken_protocol(behaviour: &str) -> u32 {
+    if behaviour == "ancient" {
         PROTOCOL_VERSION.saturating_sub(1)
     } else {
         PROTOCOL_VERSION
-    };
+    }
+}
+
+/// What this mock claims to be, under the named behaviour.
+fn identity(behaviour: &str) -> HelperIdentity {
+    let protocol = spoken_protocol(behaviour);
     let capabilities = if behaviour == "untyped" {
         vec![Capability::CallTargets]
     } else if behaviour == "unnamed" {
