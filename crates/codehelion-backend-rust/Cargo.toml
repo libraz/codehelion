@@ -2,12 +2,7 @@
 name = "codehelion-backend-rust"
 version.workspace = true
 edition.workspace = true
-# Not the workspace MSRV. The analysis libraries below need a newer compiler
-# than the tool does, and this crate is the only place that is allowed to: it
-# is a separate optional program, so what it needs to build does not become
-# what codehelion needs to build. That is the isolation earning its keep rather
-# than an exception to it.
-rust-version = "1.95"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -19,13 +14,13 @@ codehelion-helper = { version = "0.4.0", path = "../codehelion-helper" }
 # server, on a stable toolchain, and resolved by cargo like any other
 # dependency — which is what a version bump costs here, instead of a nightly
 # pin and an adapter per compiler release.
-ra_ap_hir = "0.0.344"
-ra_ap_ide_db = "0.0.344"
-ra_ap_load-cargo = "0.0.344"
-ra_ap_project_model = "0.0.344"
-ra_ap_syntax = "0.0.344"
-ra_ap_toolchain = "0.0.344"
-ra_ap_vfs = "0.0.344"
+ra_ap_hir = "0.0.350"
+ra_ap_ide_db = "0.0.350"
+ra_ap_load-cargo = "0.0.350"
+ra_ap_project_model = "0.0.350"
+ra_ap_syntax = "0.0.350"
+ra_ap_toolchain = "0.0.350"
+ra_ap_vfs = "0.0.350"
 tempfile = "3"
 
 [dev-dependencies]

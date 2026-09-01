@@ -124,7 +124,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.98.0
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --all-features

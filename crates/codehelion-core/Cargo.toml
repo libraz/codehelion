@@ -18,7 +18,7 @@ ignore = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-toml = "0.8"
+toml = "1"
 
 [dev-dependencies]
 # Test scaffolding only, and itself free of codehelion dependencies: the
