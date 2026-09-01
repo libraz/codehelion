@@ -1508,6 +1508,11 @@ mod tests {
 
     /// Declaration positions of every subprogram an object's debug information
     /// describes, read the way the address join reads them.
+    ///
+    /// Confined to the platforms that can build the object it reads, like the
+    /// compiler run that produces one: elsewhere it has no caller, and a
+    /// helper without one fails the build.
+    #[cfg(unix)]
     fn declaration_frames(file: &object::File<'_>) -> Vec<ArtifactInlineFrame> {
         let endian = match file.endianness() {
             object::Endianness::Little => RunTimeEndian::Little,
