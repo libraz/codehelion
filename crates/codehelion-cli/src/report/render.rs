@@ -10,10 +10,11 @@
 //! standard output stays something a pipe can read.
 
 use super::{
-    ArtifactSavings, BASELINE_COMPARE, BaselineStatus, Decoration, GONE_LISTED, GROUP_EXPANDED,
-    GROUP_NEW, Group, IDENTITY_ADOPTED, IDENTITY_RETAINED, Member, Report, SCOPE_FRAGMENT, Summary,
-    TextOptions, UnusedRule, Write, budget_note, canonical_position, depth_truncation_files,
-    duplicated_tokens, io, nesting_truncation_bodies, search_truncation_note, severed_note,
+    ArtifactSavings, BASELINE_COMPARE, BaselineStatus, Decoration, FunnelCause, GONE_LISTED,
+    GROUP_EXPANDED, GROUP_NEW, Group, IDENTITY_ADOPTED, IDENTITY_RETAINED, Member, Report,
+    SCOPE_FRAGMENT, Summary, TextOptions, UnusedRule, Write, budget_note, canonical_position,
+    depth_truncation_files, duplicated_tokens, io, nesting_truncation_bodies,
+    search_truncation_note, severed_note,
 };
 
 /// Ranking value at and above which a group is drawn as the report's own
@@ -1158,15 +1159,15 @@ fn render_supplemental_totals(summary: &Summary, out: &mut impl Write) -> io::Re
     let sibling_drops = funnel_drop_count(
         summary,
         &[
-            "sibling_candidate_budget",
-            "sibling_per_group_cap",
-            "sibling_total_cap",
-            "signature_sibling_candidate_budget",
-            "signature_sibling_per_group_cap",
-            "signature_sibling_total_cap",
+            FunnelCause::SiblingCandidateBudget,
+            FunnelCause::SiblingPerGroupCap,
+            FunnelCause::SiblingTotalCap,
+            FunnelCause::SignatureSiblingCandidateBudget,
+            FunnelCause::SignatureSiblingPerGroupCap,
+            FunnelCause::SignatureSiblingTotalCap,
         ],
     );
-    let near_miss_drops = funnel_drop_count(summary, &["retention_cap"]);
+    let near_miss_drops = funnel_drop_count(summary, &[FunnelCause::RetentionCap]);
     render_common_signatures(summary, out)?;
     if summary.siblings == 0 && summary.near_misses == 0 {
         let mut drops = Vec::new();
@@ -1238,12 +1239,20 @@ fn render_common_signatures(summary: &Summary, out: &mut impl Write) -> io::Resu
     )
 }
 
-fn funnel_drop_count(summary: &Summary, causes: &[&str]) -> u64 {
+/// What the named causes dropped between them, summed.
+///
+/// Causes are named as the values they are rather than as the strings a
+/// recorded funnel spells them with: a caller asking for a cause that no
+/// longer exists then fails to compile, instead of quietly matching nothing
+/// and reporting that a ceiling dropped nobody.
+fn funnel_drop_count(summary: &Summary, causes: &[FunnelCause]) -> u64 {
     summary
         .funnel
         .iter()
         .flat_map(|stage| &stage.dropped)
-        .filter(|drop| causes.contains(&drop.cause.as_str()))
+        .filter(|drop| {
+            FunnelCause::from_name(&drop.cause).is_some_and(|cause| causes.contains(&cause))
+        })
         .map(|drop| drop.count)
         .fold(0, u64::saturating_add)
 }

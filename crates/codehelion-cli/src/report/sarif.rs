@@ -53,8 +53,8 @@ use serde::Serialize;
 
 use super::{
     ArtifactSavings, BodyMateriality, BuildVariantInfo, CompilerCoverage, ConfigurationInfo,
-    DetectorVersion, Group, GroupSiblings, Member, Priority, RankingInfo, Report, SCOPE_FRAGMENT,
-    Sibling, Similarity, Summary, Suppression, SuppressionKind, canonical_position,
+    DetectorVersion, FunnelCause, Group, GroupSiblings, Member, Priority, RankingInfo, Report,
+    SCOPE_FRAGMENT, Sibling, Similarity, Summary, Suppression, SuppressionKind, canonical_position,
 };
 
 /// SARIF version this reporter emits.
@@ -631,7 +631,9 @@ fn grouping_ceiling_occurrences(report: &Report) -> Vec<(String, NotificationPro
         .funnel
         .iter()
         .flat_map(|stage| &stage.dropped)
-        .filter(|drop| drop.cause == "the_ceiling_cut_the_set")
+        .filter(|drop| {
+            FunnelCause::from_name(&drop.cause) == Some(FunnelCause::TheCeilingCutTheSet)
+        })
         .map(|drop| drop.count)
         .sum::<u64>();
     (relationships > 0)

@@ -43,6 +43,16 @@ pub enum ComponentStatus {
 }
 
 impl ComponentStatus {
+    /// Every status a component report can carry.
+    ///
+    /// What the table measures its own column against, so a status added or
+    /// removed moves the column with it rather than leaving it padded for a
+    /// word nothing prints any more.
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &[Self::Available, Self::NotFound, Self::Unusable]
+    }
+
     /// Short human-readable label for reports.
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -64,6 +74,12 @@ pub enum Requirement {
 }
 
 impl Requirement {
+    /// Both requirements, for the same reason [`ComponentStatus::all`] exists.
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &[Self::Required, Self::Optional]
+    }
+
     /// Short human-readable label for reports.
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -290,6 +306,16 @@ pub fn diagnose() -> Vec<ComponentReport> {
     diagnose_with(&|_| None)
 }
 
+/// The width of the widest label in a set of them.
+fn label_width<T: Copy>(values: &[T], label: impl Fn(T) -> &'static str) -> usize {
+    values
+        .iter()
+        .copied()
+        .map(|value| label(value).len())
+        .max()
+        .unwrap_or(0)
+}
+
 /// Render `reports` as an aligned plain-text table.
 ///
 /// # Errors
@@ -299,10 +325,16 @@ pub fn render(reports: &[ComponentReport], out: &mut impl Write) -> io::Result<(
     writeln!(out, "codehelion environment diagnostics")?;
     writeln!(out)?;
     let name_width = reports.iter().map(|r| r.name.len()).max().unwrap_or(0);
+    // Both label columns are as wide as their widest label and no wider. Read
+    // from the labels rather than written down beside them: a column padded
+    // for a word this build no longer prints is a gap a reader spends time
+    // looking across for something that is not there.
+    let req_width = label_width(Requirement::all(), Requirement::label);
+    let status_width = label_width(ComponentStatus::all(), ComponentStatus::label);
     for report in reports {
         writeln!(
             out,
-            "  {name:<name_width$}  {req:<8}  {status:<15}  {detail}",
+            "  {name:<name_width$}  {req:<req_width$}  {status:<status_width$}  {detail}",
             name = report.name,
             req = report.requirement.label(),
             status = report.status.label(),
