@@ -564,6 +564,16 @@ mod tests {
         usize::try_from(Limits::untrusted().max_file_bytes).expect("file limit fits in usize")
     }
 
+    /// What lexing a file of that size has to stay under.
+    ///
+    /// The bound separates a scan costing the file's length from one costing
+    /// its square, not a quick machine from a loaded one. At half a megabyte
+    /// the quadratic reading is some five hundred thousand times the work, so
+    /// the number only has to sit clear of the slowest linear run a shared
+    /// machine produces; a debug build on a busy runner has been seen just
+    /// past a second.
+    const LINEAR_LEX_BOUND: Duration = Duration::from_secs(10);
+
     fn kinds(source: &str) -> Vec<TokenKind> {
         lex(source).0.into_iter().map(|t| t.kind).collect()
     }
@@ -764,7 +774,7 @@ mod tests {
             vec![format!("r{hashes}\"{body}\"{hashes}").as_str()]
         );
         assert!(tokens.iter().any(|token| token.text.as_str() == "tail"));
-        assert!(elapsed < Duration::from_secs(1), "lexing took {elapsed:?}");
+        assert!(elapsed < LINEAR_LEX_BOUND, "lexing took {elapsed:?}");
     }
 
     #[test]
@@ -785,7 +795,7 @@ mod tests {
             "an unclosed hash run is not a raw string"
         );
         assert!(tokens.iter().any(|token| token.text.as_str() == "tail"));
-        assert!(elapsed < Duration::from_secs(1), "lexing took {elapsed:?}");
+        assert!(elapsed < LINEAR_LEX_BOUND, "lexing took {elapsed:?}");
     }
 
     #[test]
