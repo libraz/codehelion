@@ -141,10 +141,14 @@ pub fn classify_c(node: &Node<'_>) -> Mapping {
         // transparent so the labelled statement itself is still mapped.
         "goto_statement" => Mapping::Native("goto_statement"),
         // Conditional compilation is kept unexpanded: both branches stay in
-        // the IR under native nodes.
-        "preproc_if" | "preproc_ifdef" | "preproc_else" | "preproc_elif" | "preproc_elifdef" => {
-            Mapping::Native(node.kind())
-        }
+        // the IR under native nodes. Each kind names itself rather than being
+        // read back off the node, because a node's kind borrows from the tree
+        // while a native node's name outlives it.
+        "preproc_if" => Mapping::Native("preproc_if"),
+        "preproc_ifdef" => Mapping::Native("preproc_ifdef"),
+        "preproc_else" => Mapping::Native("preproc_else"),
+        "preproc_elif" => Mapping::Native("preproc_elif"),
+        "preproc_elifdef" => Mapping::Native("preproc_elifdef"),
         "struct_specifier" | "union_specifier" | "enum_specifier" => record_mapping(node),
         "ERROR" => Mapping::Error,
         _ => Mapping::Transparent,
