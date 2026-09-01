@@ -1388,6 +1388,10 @@ mod tests {
                 format: ArtifactFormat::Wasm
             })
         );
+        // And that refusal is an answer, not a failure to answer. Stated here
+        // rather than left to the property test above, which only meets a
+        // component when its generator happens to flip the layer byte.
+        assert_eq!(crate::check_parse_answers(&WasmBackend, &component), Ok(()));
     }
 
     /// A recorded source-map URL is the only source correspondence a core

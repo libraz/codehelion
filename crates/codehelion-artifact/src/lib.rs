@@ -608,25 +608,46 @@ pub(crate) fn is_coff_machine(bytes: &[u8]) -> bool {
 /// Check that `backend` answers for `bytes` instead of unwinding.
 ///
 /// Every backend promises an answer for any byte string: either an IR for its
-/// own format, or a refusal that says whether the input belongs to it. This
-/// returns the failure text a property test reports, so generated input whose
-/// result is discarded cannot make the property pass by accident.
+/// own format, or a refusal that says whether the input belongs to it. All
+/// three refusals qualify — bytes with another magic, bytes this format cannot
+/// be read from, and bytes belonging to an encoding inside this format that no
+/// backend parses. What none of them may do is name a format the backend does
+/// not handle: a refusal is a statement about the reader as much as about the
+/// input, and one naming somebody else's format sends a caller to a backend
+/// that never saw these bytes.
+///
+/// The refusal is taken apart exhaustively, so a fourth kind of refusal has to
+/// say which format it names rather than falling into a catch-all that reads
+/// every unfamiliar refusal as a backend failing to answer.
+///
+/// This returns the failure text a property test reports, so generated input
+/// whose result is discarded cannot make the property pass by accident.
 #[cfg(test)]
 pub(crate) fn check_parse_answers(
     backend: &impl ArtifactBackend,
     bytes: &[u8],
 ) -> Result<(), String> {
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| backend.parse(bytes)));
-    match outcome {
-        Ok(Ok(ir)) if ir.format == backend.format() => Ok(()),
-        Ok(Ok(ir)) => Err(format!(
-            "{} backend answered with {} IR",
-            backend.format(),
-            ir.format
-        )),
-        Ok(Err(ArtifactError::WrongFormat { .. } | ArtifactError::Malformed { .. })) => Ok(()),
-        Ok(Err(error)) => Err(format!("{} backend answered: {error}", backend.format())),
-        Err(_) => Err(format!("{} backend panicked", backend.format())),
+    let refusal =
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| backend.parse(bytes))) {
+            Ok(Ok(ir)) if ir.format == backend.format() => return Ok(()),
+            Ok(Ok(ir)) => {
+                return Err(format!(
+                    "{} backend answered with {} IR",
+                    backend.format(),
+                    ir.format
+                ));
+            }
+            Ok(Err(refusal)) => refusal,
+            Err(_) => return Err(format!("{} backend panicked", backend.format())),
+        };
+    let named = match &refusal {
+        ArtifactError::WrongFormat { expected } => *expected,
+        ArtifactError::Malformed { format, .. } | ArtifactError::Unsupported { format } => *format,
+    };
+    if named == backend.format() {
+        Ok(())
+    } else {
+        Err(format!("{} backend answered: {refusal}", backend.format()))
     }
 }
 
@@ -662,6 +683,72 @@ mod tests {
         assert_eq!(detect_format(b"!<arch>\n"), Some(ArtifactFormat::Archive));
         assert_eq!(detect_format(b"!<thin>\n"), Some(ArtifactFormat::Archive));
         assert_eq!(detect_format(b"not an artifact"), None);
+    }
+
+    /// A backend that refuses everything, with the refusal it is built from.
+    struct Refusing(ArtifactError);
+
+    impl ArtifactBackend for Refusing {
+        fn format(&self) -> ArtifactFormat {
+            ArtifactFormat::Wasm
+        }
+
+        fn detects(&self, _bytes: &[u8]) -> bool {
+            true
+        }
+
+        fn parse(&self, _bytes: &[u8]) -> Result<ArtifactIr, ArtifactError> {
+            Err(match &self.0 {
+                ArtifactError::WrongFormat { expected } => ArtifactError::WrongFormat {
+                    expected: *expected,
+                },
+                ArtifactError::Malformed { format, message } => ArtifactError::Malformed {
+                    format: *format,
+                    message: message.clone(),
+                },
+                ArtifactError::Unsupported { format } => {
+                    ArtifactError::Unsupported { format: *format }
+                }
+            })
+        }
+
+        fn capabilities(&self) -> ArtifactCapabilities {
+            ArtifactCapabilities::default()
+        }
+    }
+
+    /// Refusing to read an encoding is an answer; refusing in somebody else's
+    /// name is not, whichever kind of refusal it is.
+    #[test]
+    fn a_refusal_answers_only_when_it_names_the_format_the_backend_handles() {
+        for own in [
+            ArtifactError::WrongFormat {
+                expected: ArtifactFormat::Wasm,
+            },
+            ArtifactError::Malformed {
+                format: ArtifactFormat::Wasm,
+                message: "truncated section".to_string(),
+            },
+            ArtifactError::Unsupported {
+                format: ArtifactFormat::Wasm,
+            },
+        ] {
+            assert_eq!(check_parse_answers(&Refusing(own), b"anything"), Ok(()));
+        }
+        for other in [
+            ArtifactError::WrongFormat {
+                expected: ArtifactFormat::Elf,
+            },
+            ArtifactError::Malformed {
+                format: ArtifactFormat::Elf,
+                message: "truncated section".to_string(),
+            },
+            ArtifactError::Unsupported {
+                format: ArtifactFormat::Elf,
+            },
+        ] {
+            assert!(check_parse_answers(&Refusing(other), b"anything").is_err());
+        }
     }
 
     /// A machine word is little-endian, so a reversed pair names no machine.
