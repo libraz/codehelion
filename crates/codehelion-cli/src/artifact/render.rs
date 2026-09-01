@@ -612,8 +612,14 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
             .map_or_else(|| "unknown".to_owned(), |format| format.to_string());
         row[column::FINGERPRINT].clone_from(&member.fingerprint);
         row[column::NAME] = csv(&member.name);
-        row[column::OFFSET] = member.offset.to_string();
-        row[column::SIZE] = member.size.to_string();
+        // A thin member has neither, and an empty field is how this record
+        // says so: a zero here would be a position and a length.
+        row[column::OFFSET] = member
+            .offset
+            .map_or_else(String::new, |offset| offset.to_string());
+        row[column::SIZE] = member
+            .size
+            .map_or_else(String::new, |size| size.to_string());
         row[column::DEAD_CODE_STATUS] = csv(member.parse_error.as_deref().unwrap_or("parsed"));
         write_artifact_csv_row(out, &row)?;
     }

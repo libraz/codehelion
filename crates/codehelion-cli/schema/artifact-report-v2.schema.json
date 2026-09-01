@@ -159,8 +159,8 @@
       "properties": {
         "name": { "type": "string" },
         "fingerprint": { "$ref": "#/$defs/fingerprint" },
-        "offset": { "type": "integer", "minimum": 0 },
-        "size": { "type": "integer", "minimum": 0 },
+        "offset": { "type": ["integer", "null"], "minimum": 0, "description": "Where the member sits in the archive. Null for a thin member, which the archive names rather than carries, so it occupies no position in it." },
+        "size": { "type": ["integer", "null"], "minimum": 0, "description": "The member's observed byte length. Null for a thin member, whose bytes this parse never read; not zero, which would be a measured length." },
         "format": { "type": ["string", "null"], "enum": ["wasm", "elf", "macho", "pe-coff", "archive", null] },
         "thin": { "type": "boolean" },
         "parse_error": { "type": ["string", "null"] }

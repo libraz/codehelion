@@ -377,8 +377,8 @@ fn artifact_json_field_names_appear_in_the_shipped_schema() {
                 "archive-member",
                 b"member",
             ),
-            offset: 32,
-            size: 8,
+            offset: Some(32),
+            size: Some(8),
             format: Some(BinaryFormat::Wasm),
             thin: false,
             parse_error: None,
@@ -1615,8 +1615,8 @@ fn an_archive_with_repeated_member_identities_reports_no_reachability() {
         .map(|name| codehelion_artifact::ArtifactArchiveMember {
             name: name.to_owned(),
             fingerprint,
-            offset: 32,
-            size: 8,
+            offset: Some(32),
+            size: Some(8),
             format: Some(BinaryFormat::Elf),
             thin: false,
             parse_error: None,
@@ -2001,8 +2001,8 @@ fn archive_report_retains_member_failures_without_raw_member_bytes() {
                 "archive-member",
                 b"member",
             ),
-            offset: 32,
-            size: 0,
+            offset: None,
+            size: None,
             format: Some(BinaryFormat::Elf),
             thin: true,
             parse_error: Some("external member paths are not followed".to_owned()),
@@ -2012,6 +2012,11 @@ fn archive_report_retains_member_failures_without_raw_member_bytes() {
     let json = serde_json::to_value(&report).unwrap();
     assert_eq!(json["archive_members"][0]["name"], "thin-member.o");
     assert_eq!(json["archive_members"][0]["thin"], true);
+    // A member the archive only names has no position in it and no observed
+    // length, and the document says so rather than putting a zero where a
+    // measurement goes.
+    assert!(json["archive_members"][0]["offset"].is_null());
+    assert!(json["archive_members"][0]["size"].is_null());
     assert!(
         json["archive_members"][0]["parse_error"]
             .as_str()

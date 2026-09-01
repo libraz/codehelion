@@ -111,8 +111,11 @@ impl ArtifactBackend for ArchiveBackend {
             let mut provenance = ArtifactArchiveMember {
                 name,
                 fingerprint,
-                offset,
-                size,
+                // A thin member holds no local bytes, so the archive gives it
+                // no position and no length; what the header declares is about
+                // a file elsewhere, which this parse never read.
+                offset: (!thin).then_some(offset),
+                size: (!thin).then_some(size),
                 format,
                 thin,
                 parse_error: None,
@@ -124,7 +127,7 @@ impl ArtifactBackend for ArchiveBackend {
                 );
             } else if let Some(format) = format {
                 match parse_member(format, data) {
-                    Ok(member_ir) => merge_member(&mut ir, member_ir, &provenance),
+                    Ok(member_ir) => merge_member(&mut ir, member_ir, &provenance, offset),
                     Err(error) => provenance.parse_error = Some(error.to_string()),
                 }
             } else {
@@ -168,8 +171,8 @@ fn incomplete_member(name: String, offset: u64, size: u64, error: &str) -> Artif
             "archive-incomplete-member",
             identity.as_bytes(),
         ),
-        offset,
-        size,
+        offset: Some(offset),
+        size: Some(size),
         format: None,
         thin: false,
         parse_error: Some(format!("truncated or unreadable archive member: {error}")),
@@ -189,7 +192,18 @@ fn parse_member(format: ArtifactFormat, bytes: &[u8]) -> Result<ArtifactIr, Arti
 }
 
 /// Merge a parsed local object without letting its local offsets act as IDs.
-fn merge_member(archive: &mut ArtifactIr, member: ArtifactIr, provenance: &ArtifactArchiveMember) {
+/// Fold one member's parsed IR into the archive's, moving every local offset
+/// to where the member sits.
+///
+/// `base` is that position, taken as a value rather than read off the
+/// provenance: only a member the archive carries bytes for is merged, and
+/// asking a thin member where it sits is a question with no answer.
+fn merge_member(
+    archive: &mut ArtifactIr,
+    member: ArtifactIr,
+    provenance: &ArtifactArchiveMember,
+    base: u64,
+) {
     archive.capabilities.debug_info_unreadable |= member.capabilities.debug_info_unreadable;
     archive.capabilities.normalized_duplicates |= member.capabilities.normalized_duplicates;
     let prefix = format!("{}:", provenance.name);
@@ -197,7 +211,7 @@ fn merge_member(archive: &mut ArtifactIr, member: ArtifactIr, provenance: &Artif
         .sections
         .extend(member.sections.into_iter().map(|mut section| {
             section.name = Some(format!("{prefix}{}", section.name.unwrap_or_default()));
-            section.offset = provenance.offset.saturating_add(section.offset);
+            section.offset = base.saturating_add(section.offset);
             section
         }));
     archive.imports.extend(member.imports);
@@ -209,7 +223,7 @@ fn merge_member(archive: &mut ArtifactIr, member: ArtifactIr, provenance: &Artif
         fingerprints.insert(original, fingerprint);
         symbol.fingerprint = fingerprint;
         symbol.section = None;
-        symbol.offset = provenance.offset.saturating_add(symbol.offset);
+        symbol.offset = base.saturating_add(symbol.offset);
         archive.symbols.push(symbol);
     }
     archive.entry_points.extend(
@@ -244,7 +258,7 @@ fn merge_member(archive: &mut ArtifactIr, member: ArtifactIr, provenance: &Artif
         .relocations
         .extend(member.relocations.into_iter().map(|mut relocation| {
             relocation.section = None;
-            relocation.offset = provenance.offset.saturating_add(relocation.offset);
+            relocation.offset = base.saturating_add(relocation.offset);
             relocation
         }));
     archive.source_mappings.extend(member.source_mappings);
@@ -261,7 +275,7 @@ fn merge_member(archive: &mut ArtifactIr, member: ArtifactIr, provenance: &Artif
                 data.fingerprint,
             );
             data.section = None;
-            data.offset = provenance.offset.saturating_add(data.offset);
+            data.offset = base.saturating_add(data.offset);
             data
         }));
     archive.entry_points.sort();
@@ -365,7 +379,7 @@ mod tests {
         (archive, header_start)
     }
 
-    fn thin_archive_fixture() -> Vec<u8> {
+    pub(super) fn thin_archive_fixture() -> Vec<u8> {
         let mut archive = b"!<thin>\n".to_vec();
         archive.extend(archive_member("left.obj", b""));
         archive.extend(archive_member("right.obj", b""));
@@ -436,18 +450,20 @@ mod tests {
         );
         let incomplete = unreadable_member(&ir);
         assert_eq!(
-            incomplete.offset, header_start,
+            incomplete.offset,
+            Some(header_start),
             "the record starts where the parser stopped: {:#?}",
             ir.archive_members
         );
         assert_ne!(
-            incomplete.offset, ir.observed_bytes,
+            incomplete.offset,
+            Some(ir.observed_bytes),
             "no member begins at the end of the archive: {:#?}",
             ir.archive_members
         );
         assert_eq!(
             incomplete.size,
-            ir.observed_bytes - header_start,
+            Some(ir.observed_bytes - header_start),
             "the unread span is measured, not reported as empty: {:#?}",
             ir.archive_members
         );
@@ -466,10 +482,10 @@ mod tests {
             .parse(&bytes)
             .expect("a readable thin manifest prefix remains useful");
         let incomplete = unreadable_member(&ir);
-        assert_eq!(incomplete.offset, MEMBER_REGION_START, "{ir:#?}");
+        assert_eq!(incomplete.offset, Some(MEMBER_REGION_START), "{ir:#?}");
         assert_eq!(
             incomplete.size,
-            ir.observed_bytes - MEMBER_REGION_START,
+            Some(ir.observed_bytes - MEMBER_REGION_START),
             "{ir:#?}"
         );
     }

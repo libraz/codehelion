@@ -291,9 +291,17 @@ pub struct ArtifactArchiveMember {
     /// Content-derived identity of this member's bytes.
     pub fingerprint: ArtifactFingerprint,
     /// Byte offset of the member data in the archive, never an identity input.
-    pub offset: u64,
+    ///
+    /// `None` for a thin member, which declares a path instead of carrying
+    /// bytes: there is no position in this archive for it to sit at, and a
+    /// zero there is a position rather than an absence.
+    pub offset: Option<u64>,
     /// Member byte length observed in the archive.
-    pub size: u64,
+    ///
+    /// `None` for a thin member, for the same reason: the length of a file the
+    /// archive only names is not something this parse observed, and no length
+    /// is not a length of zero.
+    pub size: Option<u64>,
     /// Container format recognised inside this member, when any.
     pub format: Option<ArtifactFormat>,
     /// Whether this member is thin and therefore has no local bytes to parse.

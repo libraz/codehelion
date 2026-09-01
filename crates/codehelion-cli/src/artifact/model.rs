@@ -94,8 +94,12 @@ pub(super) struct DataSegmentReport {
 pub(super) struct ArchiveMemberReport {
     pub(super) name: String,
     pub(super) fingerprint: String,
-    pub(super) offset: u64,
-    pub(super) size: u64,
+    /// Where the member sits in the archive; absent for a thin member, which
+    /// the archive names rather than carries.
+    pub(super) offset: Option<u64>,
+    /// The member's observed length; absent for the same reason. Not zero:
+    /// no length is not a length of zero.
+    pub(super) size: Option<u64>,
     pub(super) format: Option<BinaryFormat>,
     pub(super) thin: bool,
     pub(super) parse_error: Option<String>,
