@@ -12,12 +12,13 @@ use codehelion_core::config::{
 };
 
 use super::{
-    Config, ConfigSource, Context, DEFAULT_SCAN_LINES, DiscoveryConfig, DiscoveryReport,
-    EngineConfig, Frontend, GeneratedMarkers, Glob, GlobSet, GlobSetBuilder, Language,
-    LanguageSelection, LexedSource, LiteralNorm, LiteralNormalization, Path, PathBuf,
-    ResolvedConfig, Result, ScanArgs, SourceUnit, bail, discovery, path_key, report, suppress,
+    Config, Context, DEFAULT_SCAN_LINES, DiscoveryConfig, DiscoveryReport, EngineConfig, Frontend,
+    GeneratedMarkers, Glob, GlobSet, GlobSetBuilder, Language, LanguageSelection, LexedSource,
+    LiteralNorm, LiteralNormalization, Path, PathBuf, ResolvedConfig, Result, ScanArgs, SourceUnit,
+    bail, discovery, path_key, report, suppress,
 };
-use crate::provenance::{FromScannedTree, OperatorSupplied};
+use crate::config::configured_paths;
+use crate::provenance::{Authority, FromScannedTree, OperatorSupplied};
 
 /// Maximum parser workers accepted from either the command line or config.
 ///
@@ -506,33 +507,6 @@ fn lex_one(
     }))
 }
 
-/// Where a configuration's database setting came from, which is what decides
-/// whether it is confined.
-enum ConfiguredDatabase<'a> {
-    /// Read out of a configuration file found inside the scanned tree.
-    FromTree(FromScannedTree<&'a Path>),
-    /// Named through `--config`, or this build's own default. Either way the
-    /// tree under audit had no part in choosing it.
-    Chosen(OperatorSupplied<&'a Path>),
-}
-
-/// Attribute the resolved configuration's database setting to whoever chose
-/// it.
-fn configured_database(config: &ResolvedConfig) -> ConfiguredDatabase<'_> {
-    let configured = config.config.database.as_path();
-    match &config.source {
-        ConfigSource::Discovered(_) => {
-            ConfiguredDatabase::FromTree(FromScannedTree::found(configured))
-        }
-        ConfigSource::Explicit(_) => {
-            ConfiguredDatabase::Chosen(OperatorSupplied::from_command_line(configured))
-        }
-        ConfigSource::Defaults => {
-            ConfiguredDatabase::Chosen(OperatorSupplied::from_this_build(configured))
-        }
-    }
-}
-
 /// Resolve the audit-database path with the authority that selected it.
 ///
 /// `--db` is an explicit operator instruction and may name storage outside the
@@ -566,16 +540,15 @@ pub(crate) fn database_path(
         return Ok(spelled_natively(path));
     }
     let selected_tree = OperatorSupplied::from_command_line(root.to_path_buf());
-    let (configured, authority) = match (configured_database(config), untrusted) {
-        (ConfiguredDatabase::Chosen(configured), false) => {
+    let (configured, authority) = match (configured_paths(config).database, untrusted) {
+        (Authority::Operator(configured), false) => {
             return Ok(spelled_natively(&configured_database_path(
                 &repository_root(root),
                 &configured,
             )));
         }
-        (ConfiguredDatabase::Chosen(configured), true) => (configured.distrusted(), "--untrusted"),
-        (ConfiguredDatabase::FromTree(configured), true) => (configured, "--untrusted"),
-        (ConfiguredDatabase::FromTree(configured), false) => (
+        (configured, true) => (configured.distrusted(), "--untrusted"),
+        (Authority::Tree(configured), false) => (
             configured,
             "a configuration discovered in the scanned repository",
         ),
@@ -888,12 +861,12 @@ mod tests {
     use codehelion_core::semantic::SemanticCandidateConfig;
 
     use super::{
-        ConfigSource, EngineConfig, FileOutcome, Language, ProcessLimits, ProcessMemory,
-        ResolvedConfig, SourceUnit, StageLimits, database_path, engine_config,
-        hold_this_process_to, incompatible_database_replacement, map_sources, repository_root,
-        schema_versioned_sibling, spelled_natively, stage_limits,
+        EngineConfig, FileOutcome, Language, ProcessLimits, ProcessMemory, ResolvedConfig,
+        SourceUnit, StageLimits, database_path, engine_config, hold_this_process_to,
+        incompatible_database_replacement, map_sources, repository_root, schema_versioned_sibling,
+        spelled_natively, stage_limits,
     };
-    use crate::config::Config;
+    use crate::config::{Config, ConfigSource};
     use crate::report::Guardrails;
 
     /// A run reports the ceilings it was given and every stage takes them from

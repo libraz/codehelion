@@ -424,6 +424,41 @@ fn command_line_helper_paths_override_configuration_and_validate_names() {
     assert!(helper_paths(&named, &["rust=".to_string()]).is_err());
 }
 
+/// Whether each place a configuration names came from the tree under audit.
+fn from_the_tree(resolved: &ResolvedConfig) -> (bool, bool, bool) {
+    let places = configured_paths(resolved);
+    (
+        matches!(places.database, Authority::Tree(_)),
+        matches!(places.rust_helper, Some(Authority::Tree(_))),
+        matches!(places.clang_helper, Some(Authority::Tree(_))),
+    )
+}
+
+#[test]
+fn every_place_a_configuration_names_is_attributed_to_whoever_chose_it() {
+    // The file decides, and it is the same file for every setting in it: a
+    // configuration whose database is the tree's word cannot also be the
+    // operator's word about which program to start.
+    let found = resolved_with_helpers(ConfigSource::Discovered(PathBuf::from(
+        "/repository/codehelion.toml",
+    )));
+    assert_eq!(from_the_tree(&found), (true, true, true));
+
+    let named = resolved_with_helpers(ConfigSource::Explicit(PathBuf::from("/named.toml")));
+    assert_eq!(from_the_tree(&named), (false, false, false));
+
+    // A setting nobody wrote is this build's own, which the tree had no part
+    // in choosing; a helper nobody named is absent rather than distrusted.
+    let defaults = ResolvedConfig {
+        config: Config::default(),
+        source: ConfigSource::Defaults,
+    };
+    let places = configured_paths(&defaults);
+    assert!(matches!(places.database, Authority::Operator(_)));
+    assert!(places.rust_helper.is_none());
+    assert!(places.clang_helper.is_none());
+}
+
 #[test]
 fn a_named_configuration_may_say_where_the_helpers_are() {
     let named = resolved_with_helpers(ConfigSource::Explicit(PathBuf::from("/named.toml")));

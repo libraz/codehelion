@@ -154,6 +154,33 @@ pub(crate) mod provenance {
         }
     }
 
+    /// A value one of the two parties chose, before anything narrows it.
+    ///
+    /// A configured setting arrives without its authority attached — the file
+    /// it came from decides that, and the file is the same file whatever the
+    /// setting. Pairing the two here means a consumer receives the value and
+    /// the question about it together, and answers the question by matching
+    /// rather than by remembering to ask.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Authority<T> {
+        /// The operator chose it, through an argument or this build's default.
+        Operator(OperatorSupplied<T>),
+        /// The tree under audit chose it.
+        Tree(FromScannedTree<T>),
+    }
+
+    impl<T> Authority<T> {
+        /// Read this value as though the tree had supplied it, whoever did.
+        ///
+        /// What `--untrusted` says about every configured setting at once.
+        pub(crate) fn distrusted(self) -> FromScannedTree<T> {
+            match self {
+                Self::Operator(value) => value.distrusted(),
+                Self::Tree(value) => value,
+            }
+        }
+    }
+
     impl<'a> FromScannedTree<&'a str> {
         /// The comment text this source holds, as `(1-based line, text)`
         /// pairs, one entry per line a comment covers.

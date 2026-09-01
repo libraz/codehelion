@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::provenance::{Authority, FromScannedTree, OperatorSupplied};
 use anyhow::{Context, Result, bail};
 use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::discovery::{DEFAULT_MARKERS, HeaderPolicy};
@@ -937,10 +938,10 @@ impl Config {
 /// Returns an error for an unknown helper name, an empty path, a malformed
 /// assignment, or a duplicate command-line setting.
 pub fn helper_paths(resolved: &ResolvedConfig, overrides: &[String]) -> Result<Helpers> {
-    let mut paths = if matches!(resolved.source, ConfigSource::Discovered(_)) {
-        Helpers::default()
-    } else {
-        resolved.config.helpers.clone()
+    let configured = configured_paths(resolved);
+    let mut paths = Helpers {
+        rust: operator_choice(configured.rust_helper),
+        clang: operator_choice(configured.clang_helper),
     };
     let mut seen = std::collections::BTreeSet::new();
     for override_ in overrides {
@@ -963,6 +964,81 @@ pub fn helper_paths(resolved: &ResolvedConfig, overrides: &[String]) -> Result<H
     Ok(paths)
 }
 
+/// The path behind an authority the operator holds, or `None` for one the tree
+/// under audit chose or for a setting nobody wrote.
+fn operator_choice(configured: Option<Authority<&Path>>) -> Option<PathBuf> {
+    match configured? {
+        Authority::Operator(path) => Some(path.get().to_path_buf()),
+        Authority::Tree(_) => None,
+    }
+}
+
+/// Every setting a configuration can use to name a place on disk, each one
+/// attributed to whoever chose it.
+///
+/// The one place that turns a [`ConfigSource`] into a trust decision. A
+/// consumer receives the value and the question about it together and answers
+/// by matching, instead of reaching into [`Config`] for a bare path and
+/// remembering — or not — to ask where it came from.
+pub(crate) struct ConfiguredPaths<'a> {
+    /// Where the audit database goes.
+    pub(crate) database: Authority<&'a Path>,
+    /// The Rust compiler helper, when the configuration names one.
+    pub(crate) rust_helper: Option<Authority<&'a Path>>,
+    /// The Clang compiler helper, when the configuration names one.
+    pub(crate) clang_helper: Option<Authority<&'a Path>>,
+}
+
+/// Attribute each of a resolved configuration's places on disk to whoever
+/// chose it.
+///
+/// [`Config`] is taken apart exhaustively rather than read field by field: a
+/// setting added to it stops this compiling until it says whether it names a
+/// place on disk, which is the question a new path-like setting is otherwise
+/// free to never be asked. Fields that name no place are bound and discarded
+/// here, and the grouping says which is which.
+pub(crate) fn configured_paths(resolved: &ResolvedConfig) -> ConfiguredPaths<'_> {
+    let Config {
+        // Patterns, measures and policy. None of these is opened, joined onto
+        // a directory, or started as a program, so none of them carries an
+        // authority question: a glob decides what is read out of the tree the
+        // operator already pointed this run at.
+        include: _,
+        exclude: _,
+        min_clone_tokens: _,
+        entropy_ratio_floor: _,
+        literal_normalization: _,
+        languages: _,
+        suppression: _,
+        priority: _,
+        limits: _,
+        semantic: _,
+        report: _,
+        jobs: _,
+        // Places on disk: one the tool writes, two it starts as programs.
+        database,
+        helpers: Helpers { rust, clang },
+    } = &resolved.config;
+    let source = &resolved.source;
+    ConfiguredPaths {
+        database: attributed(source, database),
+        rust_helper: rust.as_deref().map(|path| attributed(source, path)),
+        clang_helper: clang.as_deref().map(|path| attributed(source, path)),
+    }
+}
+
+/// Which party a configured value came from.
+///
+/// Naming a configuration file is an authority decision; finding one at the
+/// scan root is not, because that file can belong to the tree under audit.
+const fn attributed<'a>(source: &ConfigSource, path: &'a Path) -> Authority<&'a Path> {
+    match source {
+        ConfigSource::Discovered(_) => Authority::Tree(FromScannedTree::found(path)),
+        ConfigSource::Explicit(_) => Authority::Operator(OperatorSupplied::from_command_line(path)),
+        ConfigSource::Defaults => Authority::Operator(OperatorSupplied::from_this_build(path)),
+    }
+}
+
 /// Where the resolved configuration came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigSource {
@@ -980,6 +1056,23 @@ pub enum ConfigSource {
     Discovered(PathBuf),
     /// No file found; built-in defaults were used.
     Defaults,
+}
+
+impl ConfigSource {
+    /// The file this configuration was read from, for quoting back to a
+    /// reader; `None` when no file was read.
+    ///
+    /// Deliberately not a trust decision, and it cannot be made into one: it
+    /// answers where a setting was written down, not who is entitled to it.
+    /// Attributing a configured place to whoever chose it happens in one
+    /// place inside this module, and this is not it.
+    #[must_use]
+    pub fn file(&self) -> Option<&Path> {
+        match self {
+            Self::Explicit(path) | Self::Discovered(path) => Some(path),
+            Self::Defaults => None,
+        }
+    }
 }
 
 /// A resolved configuration together with its provenance.
@@ -1000,18 +1093,20 @@ pub struct ResolvedConfig {
 /// places and this belongs beside neither of them.
 #[must_use]
 pub fn disregarded_helpers_note(resolved: &ResolvedConfig) -> Option<String> {
-    let ConfigSource::Discovered(path) = &resolved.source else {
-        return None;
-    };
-    let helpers = &resolved.config.helpers;
-    let named: Vec<&str> = [("rust", &helpers.rust), ("clang", &helpers.clang)]
-        .into_iter()
-        .filter(|(_, configured)| configured.is_some())
-        .map(|(name, _)| name)
-        .collect();
+    let configured = configured_paths(resolved);
+    let named: Vec<&str> = [
+        ("rust", configured.rust_helper),
+        ("clang", configured.clang_helper),
+    ]
+    .into_iter()
+    .filter(|(_, configured)| matches!(configured, Some(Authority::Tree(_))))
+    .map(|(name, _)| name)
+    .collect();
     if named.is_empty() {
         return None;
     }
+    // Only a file the tree supplied reaches here, and such a file has a path.
+    let path = resolved.source.file()?;
     Some(format!(
         "ignoring [helpers] {} in {}: a configuration discovered in the scanned \
          repository cannot choose which program this run starts; pass \
