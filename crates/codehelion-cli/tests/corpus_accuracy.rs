@@ -371,7 +371,6 @@ const CORPORA: &[Expected] = &[
     },
 ];
 
-/// Whether a per-type recall is what was recorded, absence included.
 /// The rows of the recall table both READMEs carry, written out of what this
 /// file records.
 ///
@@ -419,6 +418,7 @@ fn both_readmes_carry_the_recall_this_file_records() {
     }
 }
 
+/// Whether a per-type recall is what was recorded, absence included.
 fn same_measure(measured: Option<f64>, recorded: Option<f64>) -> bool {
     match (measured, recorded) {
         (Some(left), Some(right)) => (left - right).abs() < 1e-9,
