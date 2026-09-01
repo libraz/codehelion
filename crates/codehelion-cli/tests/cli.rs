@@ -836,10 +836,10 @@ fn stale_automatically_discovered_dsym_is_reported_without_failing_analysis() {
 }
 
 #[test]
-fn readmes_document_the_cli_operations_flags_and_exit_statuses() {
-    for readme in [
-        include_str!("../../../README.md"),
-        include_str!("../../../README_ja.md"),
+fn command_line_documents_state_the_operations_flags_and_exit_statuses() {
+    for document in [
+        include_str!("../../../docs/en/cli.md"),
+        include_str!("../../../docs/ja/cli.md"),
     ] {
         for snippet in [
             "codehelion report --run 1",
@@ -861,17 +861,21 @@ fn readmes_document_the_cli_operations_flags_and_exit_statuses() {
             "--compare-languages",
             "`3`:",
         ] {
-            assert!(readme.contains(snippet), "README is missing {snippet}");
+            assert!(
+                document.contains(snippet),
+                "the command-line document is missing {snippet}"
+            );
         }
     }
 }
 
-/// How a README names one artifact format in prose, in English and Japanese.
+/// How the artifact document names one format in prose, in English and
+/// Japanese.
 ///
 /// Matched exhaustively: a format added to the enum stops this compiling until
 /// it says how a reader is told about it, which is what stops a format
 /// shipping that the documents never mention.
-const fn readme_names(format: codehelion_artifact::ArtifactFormat) -> [&'static str; 2] {
+const fn document_names(format: codehelion_artifact::ArtifactFormat) -> [&'static str; 2] {
     use codehelion_artifact::ArtifactFormat;
     match format {
         ArtifactFormat::Wasm => ["WASM", "WASM"],
@@ -882,7 +886,7 @@ const fn readme_names(format: codehelion_artifact::ArtifactFormat) -> [&'static 
     }
 }
 
-/// The formats a capability holds for, as each README lists them.
+/// The formats a capability holds for, as each artifact document lists them.
 fn named_formats(
     holds: impl Fn(&codehelion_artifact::ArtifactCapabilities) -> bool,
 ) -> [String; 2] {
@@ -891,7 +895,7 @@ fn named_formats(
         if !holds(&row.capabilities) {
             continue;
         }
-        for (language, name) in readme_names(row.format).into_iter().enumerate() {
+        for (language, name) in document_names(row.format).into_iter().enumerate() {
             listed[language].push(name);
         }
     }
@@ -907,7 +911,7 @@ fn english_list(names: &[&str]) -> String {
     }
 }
 
-/// Both READMEs name every artifact format this build reads, and name the
+/// Both artifact documents name every format this build reads, and name the
 /// right ones as supplying each derived quantity.
 ///
 /// The lists are written out of the support definitions rather than copied
@@ -915,17 +919,17 @@ fn english_list(names: &[&str]) -> String {
 /// fails here until the documents say the same thing. What stays prose is the
 /// sentence around the lists.
 #[test]
-fn readmes_name_every_artifact_format_and_what_each_one_supplies() {
-    let readmes = [
-        include_str!("../../../README.md"),
-        include_str!("../../../README_ja.md"),
+fn artifact_documents_name_every_format_and_what_each_one_supplies() {
+    let documents = [
+        include_str!("../../../docs/en/artifact-analysis.md"),
+        include_str!("../../../docs/ja/artifact-analysis.md"),
     ];
     let languages = ["English", "Japanese"];
     for row in &codehelion_artifact::FORMAT_SUPPORT {
-        for (language, name) in readme_names(row.format).into_iter().enumerate() {
+        for (language, name) in document_names(row.format).into_iter().enumerate() {
             assert!(
-                readmes[language].contains(name),
-                "the {} README does not name {name}",
+                documents[language].contains(name),
+                "the {} artifact document does not name {name}",
                 languages[language]
             );
         }
@@ -942,8 +946,8 @@ fn readmes_name_every_artifact_format_and_what_each_one_supplies() {
     ] {
         for (language, list) in listed.into_iter().enumerate() {
             assert!(
-                readmes[language].contains(&list),
-                "the {} README does not name {list:?} as the formats supplying {what}",
+                documents[language].contains(&list),
+                "the {} artifact document does not name {list:?} as the formats supplying {what}",
                 languages[language]
             );
         }
@@ -951,15 +955,21 @@ fn readmes_name_every_artifact_format_and_what_each_one_supplies() {
 }
 
 #[test]
-fn readmes_document_canonical_build_variant_json_identities() {
-    for readme in [
-        include_str!("../../../README.md"),
-        include_str!("../../../README_ja.md"),
+fn artifact_documents_state_canonical_build_variant_json_identities() {
+    for document in [
+        include_str!("../../../docs/en/artifact-analysis.md"),
+        include_str!("../../../docs/ja/artifact-analysis.md"),
     ] {
-        assert!(readme.contains("--build-variant manifest.json"));
+        assert!(document.contains("--build-variant manifest.json"));
     }
-    assert!(include_str!("../../../README.md").contains("whitespace and object-member ordering"));
-    assert!(include_str!("../../../README_ja.md").contains("空白や object member の順序"));
+    assert!(
+        include_str!("../../../docs/en/artifact-analysis.md")
+            .contains("whitespace and object-member ordering")
+    );
+    assert!(
+        include_str!("../../../docs/ja/artifact-analysis.md")
+            .contains("空白や object member の順序")
+    );
 }
 
 /// Compression is explained as a mechanism, never as a measured ratio.
@@ -967,11 +977,11 @@ fn readmes_document_canonical_build_variant_json_identities() {
 /// The size a compressor charges for a second copy of a byte sequence is
 /// nearly nothing, which is exactly the redundancy deduplication removes. A
 /// figure written by hand would be right for one build and wrong for the next,
-/// and nothing here re-derives it, so both READMEs say why rather than how
-/// much.
+/// and nothing here re-derives it, so both limitation documents say why rather
+/// than how much.
 #[test]
-fn readmes_explain_compressed_size_without_quoting_a_measured_ratio() {
-    let english = include_str!("../../../README.md");
+fn limitation_documents_explain_compressed_size_without_quoting_a_measured_ratio() {
+    let english = include_str!("../../../docs/en/limitations.md");
     for snippet in [
         "Compressed size moves less than uncompressed size does",
         "repeated byte sequence is the first thing a compressor folds away",
@@ -980,11 +990,11 @@ fn readmes_explain_compressed_size_without_quoting_a_measured_ratio() {
     ] {
         assert!(
             english.contains(snippet),
-            "English README is missing {snippet}"
+            "English limitation document is missing {snippet}"
         );
     }
 
-    let japanese = include_str!("../../../README_ja.md");
+    let japanese = include_str!("../../../docs/ja/limitations.md");
     for snippet in [
         "圧縮後のサイズは、非圧縮のサイズほどには動きません",
         "圧縮器が真っ先に畳むもの",
@@ -993,15 +1003,15 @@ fn readmes_explain_compressed_size_without_quoting_a_measured_ratio() {
     ] {
         assert!(
             japanese.contains(snippet),
-            "Japanese README is missing {snippet}"
+            "Japanese limitation document is missing {snippet}"
         );
     }
 }
 
 /// A baseline is for CI; following your own progress needs no baseline.
 #[test]
-fn readmes_tell_the_two_baseline_uses_apart() {
-    let english = include_str!("../../../README.md");
+fn baseline_documents_tell_the_two_uses_apart() {
+    let english = include_str!("../../../docs/en/baselines.md");
     for snippet in [
         "A baseline is for freezing a threshold and defending it in CI",
         "own progress through a refactor does not need one",
@@ -1009,11 +1019,11 @@ fn readmes_tell_the_two_baseline_uses_apart() {
     ] {
         assert!(
             english.contains(snippet),
-            "English README is missing {snippet}"
+            "English baseline document is missing {snippet}"
         );
     }
 
-    let japanese = include_str!("../../../README_ja.md");
+    let japanese = include_str!("../../../docs/ja/baselines.md");
     for snippet in [
         "baseline は閾値を凍結して CI で守るためのもの",
         "リファクタの進み具合を自分で追うだけなら baseline は要りません",
@@ -1021,7 +1031,7 @@ fn readmes_tell_the_two_baseline_uses_apart() {
     ] {
         assert!(
             japanese.contains(snippet),
-            "Japanese README is missing {snippet}"
+            "Japanese baseline document is missing {snippet}"
         );
     }
 }
@@ -1032,8 +1042,8 @@ fn readmes_tell_the_two_baseline_uses_apart() {
 /// them collapse into one function is outside what it claims to know, so the
 /// paragraph has to say so in as many words.
 #[test]
-fn readmes_read_a_similarity_breakdown_without_claiming_to_decide_it() {
-    let english = include_str!("../../../README.md");
+fn workflow_documents_read_a_similarity_breakdown_without_claiming_to_decide_it() {
+    let english = include_str!("../../../docs/en/refactoring-workflow.md");
     for snippet in [
         "A group whose structure and control flow agree exactly",
         "function taking an argument for whatever differs",
@@ -1041,11 +1051,11 @@ fn readmes_read_a_similarity_breakdown_without_claiming_to_decide_it() {
     ] {
         assert!(
             english.contains(snippet),
-            "English README is missing {snippet}"
+            "English workflow document is missing {snippet}"
         );
     }
 
-    let japanese = include_str!("../../../README_ja.md");
+    let japanese = include_str!("../../../docs/ja/refactoring-workflow.md");
     for snippet in [
         "構造と制御フローが完全に一致していて識別子だけが一致しない",
         "違う部分を引数に取る 1 つの関数に畳めます",
@@ -1053,7 +1063,7 @@ fn readmes_read_a_similarity_breakdown_without_claiming_to_decide_it() {
     ] {
         assert!(
             japanese.contains(snippet),
-            "Japanese README is missing {snippet}"
+            "Japanese workflow document is missing {snippet}"
         );
     }
 }
@@ -1063,10 +1073,11 @@ fn readmes_read_a_similarity_breakdown_without_claiming_to_decide_it() {
 /// The word names two things — the file describing how an artifact was built,
 /// and the digest qualifying how sources were read — and a reader who takes
 /// them for one thing goes looking for a source digest to copy into the file.
-/// There is none, so both READMEs say so and show the file being written.
+/// There is none, so both artifact documents say so and show the file being
+/// written.
 #[test]
-fn readmes_say_a_build_variant_manifest_is_written_rather_than_found() {
-    let english = include_str!("../../../README.md");
+fn artifact_documents_say_a_build_variant_manifest_is_written_rather_than_found() {
+    let english = include_str!("../../../docs/en/artifact-analysis.md");
     for snippet in [
         "takes a file you write, not one to go looking for",
         "echo '{\"profile\":\"release\",\"target\":\"wasm32\",\"toolchain\":\"emcc-5.0.2\"}' > build-variant.json",
@@ -1074,11 +1085,11 @@ fn readmes_say_a_build_variant_manifest_is_written_rather_than_found() {
     ] {
         assert!(
             english.contains(snippet),
-            "English README is missing {snippet}"
+            "English artifact document is missing {snippet}"
         );
     }
 
-    let japanese = include_str!("../../../README_ja.md");
+    let japanese = include_str!("../../../docs/ja/artifact-analysis.md");
     for snippet in [
         "自分で書くファイルで、どこかにある既存のファイルを探すものではありません",
         "echo '{\"profile\":\"release\",\"target\":\"wasm32\",\"toolchain\":\"emcc-5.0.2\"}' > build-variant.json",
@@ -1086,14 +1097,14 @@ fn readmes_say_a_build_variant_manifest_is_written_rather_than_found() {
     ] {
         assert!(
             japanese.contains(snippet),
-            "Japanese README is missing {snippet}"
+            "Japanese artifact document is missing {snippet}"
         );
     }
 }
 
-/// The manifest the README writes is a manifest the tool accepts.
+/// The manifest the artifact document writes is a manifest the tool accepts.
 #[test]
-fn the_build_variant_manifest_the_readme_writes_is_accepted() {
+fn the_build_variant_manifest_the_document_writes_is_accepted() {
     let directory = tempfile::tempdir().expect("fixture directory");
     let manifest = directory.path().join("build-variant.json");
     let artifact = directory.path().join("app.wasm");
@@ -1102,7 +1113,7 @@ fn the_build_variant_manifest_the_readme_writes_is_accepted() {
         &manifest,
         r#"{"profile":"release","target":"wasm32","toolchain":"emcc-5.0.2"}"#,
     )
-    .expect("write the manifest the README writes");
+    .expect("write the manifest the artifact document writes");
     std::fs::write(&artifact, b"\0asm\x01\0\0\0").expect("write wasm fixture");
 
     cmd()
@@ -1123,7 +1134,7 @@ fn the_build_variant_manifest_the_readme_writes_is_accepted() {
         .stdout(predicate::str::contains("(digest "));
 }
 
-/// The flag's own help says the same thing the README does.
+/// The flag's own help says the same thing the artifact document does.
 #[test]
 fn build_variant_help_says_the_two_conditions_are_not_matched_against_each_other() {
     let output = cmd()
@@ -1141,22 +1152,22 @@ fn build_variant_help_says_the_two_conditions_are_not_matched_against_each_other
 }
 
 #[test]
-fn readmes_limit_jobs_to_frontend_parallelism() {
+fn command_line_documents_limit_jobs_to_frontend_parallelism() {
     assert!(
-        include_str!("../../../README.md")
+        include_str!("../../../docs/en/cli.md")
             .contains("clone grouping and report rendering remain serial")
     );
     assert!(
-        include_str!("../../../README_ja.md")
+        include_str!("../../../docs/ja/cli.md")
             .contains("clone grouping と report rendering は serial")
     );
 }
 
 #[test]
-fn japanese_readme_explains_the_fast_mode_comment_and_whitespace_normalization() {
+fn japanese_mode_document_explains_the_fast_mode_comment_and_whitespace_normalization() {
     assert!(
-        include_str!("../../../README_ja.md").contains("コメントと空白を除く"),
-        "Japanese README must retain Fast-mode normalization semantics"
+        include_str!("../../../docs/ja/analysis-modes.md").contains("コメントと空白を除く"),
+        "the Japanese analysis-mode document must retain Fast-mode normalization semantics"
     );
 }
 
@@ -1174,8 +1185,8 @@ fn mode_help_describes_measurement_differences_and_safety() {
 }
 
 #[test]
-fn readmes_document_the_rescan_after_refactor_loop() {
-    let english = include_str!("../../../README.md");
+fn workflow_documents_state_the_rescan_after_refactor_loop() {
+    let english = include_str!("../../../docs/en/refactoring-workflow.md");
     for snippet in [
         "Rescanning after a refactor",
         "replacement you missed",
@@ -1184,11 +1195,11 @@ fn readmes_document_the_rescan_after_refactor_loop() {
     ] {
         assert!(
             english.contains(snippet),
-            "English README is missing {snippet}"
+            "English workflow document is missing {snippet}"
         );
     }
 
-    let japanese = include_str!("../../../README_ja.md");
+    let japanese = include_str!("../../../docs/ja/refactoring-workflow.md");
     for snippet in [
         "リファクタ直後の再スキャン",
         "その呼び出し元は置換漏れです",
@@ -1197,7 +1208,7 @@ fn readmes_document_the_rescan_after_refactor_loop() {
     ] {
         assert!(
             japanese.contains(snippet),
-            "Japanese README is missing {snippet}"
+            "Japanese workflow document is missing {snippet}"
         );
     }
 }
@@ -1206,20 +1217,20 @@ fn readmes_document_the_rescan_after_refactor_loop() {
 /// order of magnitude, never as a measured byte count: nothing re-derives a
 /// figure written by hand, so one would drift the moment a build changed.
 #[test]
-fn readmes_scale_identical_code_folding_without_a_measured_byte_count() {
-    let english = include_str!("../../../README.md");
+fn limitation_documents_scale_identical_code_folding_without_a_measured_byte_count() {
+    let english = include_str!("../../../docs/en/limitations.md");
     assert!(english.contains("thousands of times larger"));
     assert!(english.contains("exact and the normalized figure"));
 
-    let japanese = include_str!("../../../README_ja.md");
+    let japanese = include_str!("../../../docs/ja/limitations.md");
     assert!(japanese.contains("その数千倍あります"));
     assert!(japanese.contains("exact と normalized の値"));
 }
 
 #[test]
-fn readmes_explain_artifact_folding_and_size_relevance() {
-    let english = include_str!("../../../README.md");
-    let japanese = include_str!("../../../README_ja.md");
+fn limitation_documents_explain_artifact_folding_and_size_relevance() {
+    let english = include_str!("../../../docs/en/limitations.md");
+    let japanese = include_str!("../../../docs/ja/limitations.md");
     assert!(english.contains("Identical code folding"));
     assert!(english.contains("Type-1 copies"));
     assert!(english.contains("Type-2 and Type-3 copies"));
@@ -1232,8 +1243,8 @@ fn readmes_explain_artifact_folding_and_size_relevance() {
 /// left to the run that produces them: a figure written here has nothing that
 /// re-derives it, and the summary now names both numbers per run.
 #[test]
-fn readmes_name_the_shape_of_code_signature_siblings_cannot_help() {
-    let english = include_str!("../../../README.md");
+fn limitation_documents_name_the_shape_of_code_signature_siblings_cannot_help() {
+    let english = include_str!("../../../docs/en/limitations.md");
     for snippet in [
         "A layer built on one signature gets nothing from that channel",
         "dispatch or callback table",
@@ -1242,11 +1253,11 @@ fn readmes_name_the_shape_of_code_signature_siblings_cannot_help() {
     ] {
         assert!(
             english.contains(snippet),
-            "English README is missing {snippet}"
+            "English limitation document is missing {snippet}"
         );
     }
 
-    let japanese = include_str!("../../../README_ja.md");
+    let japanese = include_str!("../../../docs/ja/limitations.md");
     for snippet in [
         "1 つのシグネチャで駆動する層に、このチャネルは何も与えません",
         "callback table",
@@ -1255,14 +1266,14 @@ fn readmes_name_the_shape_of_code_signature_siblings_cannot_help() {
     ] {
         assert!(
             japanese.contains(snippet),
-            "Japanese README is missing {snippet}"
+            "Japanese limitation document is missing {snippet}"
         );
     }
 }
 
 #[test]
-fn readmes_describe_opt_in_sibling_evidence_limits() {
-    let english = include_str!("../../../README.md");
+fn limitation_documents_describe_opt_in_sibling_evidence_limits() {
+    let english = include_str!("../../../docs/en/limitations.md");
     for snippet in [
         "--siblings-by-signature",
         "off by default",
@@ -1274,11 +1285,11 @@ fn readmes_describe_opt_in_sibling_evidence_limits() {
     ] {
         assert!(
             english.contains(snippet),
-            "English README is missing {snippet}"
+            "English limitation document is missing {snippet}"
         );
     }
 
-    let japanese = include_str!("../../../README_ja.md");
+    let japanese = include_str!("../../../docs/ja/limitations.md");
     for snippet in [
         "--siblings-by-signature",
         "既定では無効",
@@ -1290,61 +1301,99 @@ fn readmes_describe_opt_in_sibling_evidence_limits() {
     ] {
         assert!(
             japanese.contains(snippet),
-            "Japanese README is missing {snippet}"
+            "Japanese limitation document is missing {snippet}"
         );
     }
 }
 
+/// The documents that carry a default or a lifecycle rule each state it.
+///
+/// Split by subject rather than gathered into one document, because that is
+/// where a reader looking for the rule arrives: the configuration document owns
+/// the suppression defaults and the database's lifecycle, the trust document
+/// owns what enforces the execution ban, and the architecture document owns the
+/// conformance cases. The README keeps only the registry badge.
 #[test]
-fn readmes_document_current_defaults_and_database_lifecycle() {
+fn documents_state_current_defaults_and_database_lifecycle() {
+    for configuration in [
+        include_str!("../../../docs/en/configuration.md"),
+        include_str!("../../../docs/ja/configuration.md"),
+    ] {
+        for snippet in ["auto-generated", "autogenerated", ".codehelion/"] {
+            assert!(
+                configuration.contains(snippet),
+                "a configuration document is missing {snippet}"
+            );
+        }
+    }
+    for trust in [
+        include_str!("../../../docs/en/security.md"),
+        include_str!("../../../docs/ja/security.md"),
+    ] {
+        assert!(
+            trust.contains("clippy.toml"),
+            "a trust document is missing clippy.toml"
+        );
+    }
+    for architecture in [
+        include_str!("../../../docs/en/architecture.md"),
+        include_str!("../../../docs/ja/architecture.md"),
+    ] {
+        assert!(
+            architecture.contains("codehelion-helper-conformance/"),
+            "an architecture document is missing the conformance cases"
+        );
+    }
     for readme in [
         include_str!("../../../README.md"),
         include_str!("../../../README_ja.md"),
     ] {
-        for snippet in [
-            "codehelion.svg",
-            "auto-generated",
-            "autogenerated",
-            ".codehelion/",
-            "clippy.toml",
-            "codehelion-helper-conformance/",
-        ] {
-            assert!(readme.contains(snippet), "README is missing {snippet}");
-        }
+        assert!(
+            readme.contains("codehelion.svg"),
+            "a README is missing the registry badge"
+        );
     }
     assert!(
-        include_str!("../../../README.md").contains("at least 8 characters"),
-        "English README must state the clone-id prefix minimum"
+        include_str!("../../../docs/en/configuration.md").contains("at least 8 characters"),
+        "the English configuration document must state the clone-id prefix minimum"
     );
     assert!(
-        include_str!("../../../README_ja.md").contains("8 文字以上"),
-        "Japanese README must state the clone-id prefix minimum"
+        include_str!("../../../docs/ja/configuration.md").contains("8 文字以上"),
+        "the Japanese configuration document must state the clone-id prefix minimum"
     );
 }
 
 #[test]
-fn readmes_state_the_toolchain_requirement_the_manifest_declares() {
+fn documents_state_the_toolchain_requirement_the_manifest_declares() {
     // Read from the manifest rather than written out again, so raising the
-    // requirement cannot leave either README quoting the old one.
+    // requirement cannot leave a document quoting the old one.
     let version = env!("CARGO_PKG_RUST_VERSION");
 
-    let english = include_str!("../../../README.md");
+    for english in [
+        include_str!("../../../README.md"),
+        include_str!("../../../docs/en/getting-started.md"),
+    ] {
+        assert!(
+            english.contains(&format!("Rust {version} or newer")),
+            "an English document must state Rust {version} as the requirement"
+        );
+    }
     assert!(
-        english.contains(&format!("Rust {version} or newer")),
-        "English README must state Rust {version} as the requirement"
-    );
-    assert!(
-        english.contains(&format!("Rust-{version}%2B")),
+        include_str!("../../../README.md").contains(&format!("Rust-{version}%2B")),
         "English README badge must state Rust {version}"
     );
 
-    let japanese = include_str!("../../../README_ja.md");
+    for japanese in [
+        include_str!("../../../README_ja.md"),
+        include_str!("../../../docs/ja/getting-started.md"),
+    ] {
+        assert!(
+            japanese.contains(&format!("Rust {version} 以降")),
+            "a Japanese document must state Rust {version} as the requirement"
+        );
+    }
     assert!(
-        japanese.contains(&format!("Rust {version} 以降")),
-        "Japanese README must state Rust {version} as the requirement"
-    );
-    assert!(
-        japanese.contains(&format!("Rust-{version}%2B")),
+        include_str!("../../../README_ja.md").contains(&format!("Rust-{version}%2B")),
         "Japanese README badge must state Rust {version}"
     );
 }

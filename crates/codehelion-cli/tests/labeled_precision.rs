@@ -331,15 +331,15 @@ const ORDERINGS: &[Ordering] = &[
     },
 ];
 
-/// The rows of the precision table both READMEs carry, and the rows of the
-/// ordering table under it, written out of what this file records.
+/// The rows of the precision table both accuracy documents carry, and the rows
+/// of the ordering table under it, written out of what this file records.
 ///
 /// Generated rather than transcribed, for the reason the format-support
 /// document is: a detector change moves a recorded value here, the assertions
 /// below fail until somebody records the new one, and this then fails until
 /// the sentence a reader is given about it says the same thing.
 ///
-/// The rows and not the headings, because a translated README names its
+/// The rows and not the headings, because a translated document names its
 /// columns in its own language while the numbers under them are the same
 /// numbers. Cases are ordered by the precision they reached, highest first,
 /// which is the order a reader wants and which the recorded order is not.
@@ -366,7 +366,7 @@ fn precision_rows() -> String {
     rows
 }
 
-/// The aggregate row's cells, without the label a translated README writes in
+/// The aggregate row's cells, without the label a translated document writes in
 /// its own language.
 fn aggregate_cells() -> String {
     let confirmed: usize = CORPORA.iter().map(|case| case.confirmed).sum();
@@ -377,7 +377,7 @@ fn aggregate_cells() -> String {
     )
 }
 
-/// The rows of the ordering table both READMEs carry.
+/// The rows of the ordering table both accuracy documents carry.
 fn ordering_rows() -> String {
     let mut rows = String::new();
     for (index, ordering) in ORDERINGS.iter().enumerate() {
@@ -421,26 +421,27 @@ fn share(confirmed: usize, refuted: usize) -> f64 {
     }
 }
 
-/// Both READMEs state the precision and the ordering this file records.
+/// Both accuracy documents state the precision and the ordering this file
+/// records.
 ///
 /// Read as documents rather than as separate claims: a case added here has to
 /// appear in both, with the verdicts this file records, and the aggregate has
 /// to be the aggregate of them. The aggregate is compared without its label,
-/// which a translated README writes in its own language.
+/// which a translated document writes in its own language.
 #[test]
-fn both_readmes_carry_the_precision_this_file_records() {
+fn both_accuracy_documents_carry_the_precision_this_file_records() {
     for (what, rows) in [
         ("precision", precision_rows()),
         ("aggregate", aggregate_cells()),
         ("ordering", ordering_rows()),
     ] {
-        for (language, readme) in [
-            ("English", include_str!("../../../README.md")),
-            ("Japanese", include_str!("../../../README_ja.md")),
+        for (language, document) in [
+            ("English", include_str!("../../../docs/en/accuracy.md")),
+            ("Japanese", include_str!("../../../docs/ja/accuracy.md")),
         ] {
             assert!(
-                readme.contains(&rows),
-                "the {language} README does not carry the recorded {what} rows:\n{rows}"
+                document.contains(&rows),
+                "the {language} accuracy document does not carry the recorded {what} rows:\n{rows}"
             );
         }
     }
