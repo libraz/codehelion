@@ -9,10 +9,11 @@ use std::collections::BTreeMap;
 use crate::elf::ElfBackend;
 use crate::macho::MachOBackend;
 use crate::pe::PeCoffBackend;
+use crate::support::format_support;
 use crate::wasm::WasmBackend;
 use crate::{
     ArtifactArchiveMember, ArtifactBackend, ArtifactCapabilities, ArtifactError,
-    ArtifactFingerprint, ArtifactFormat, ArtifactIr, detect_format,
+    ArtifactFingerprint, ArtifactFormat, ArtifactIr, UnresolvedCall, detect_format,
 };
 use object::read::archive::ArchiveFile;
 
@@ -107,8 +108,12 @@ impl ArtifactBackend for ArchiveBackend {
             call_graph: !ir.calls.is_empty(),
             source_mapping: !ir.source_mappings.is_empty(),
             debug_info_unreadable: ir.capabilities.debug_info_unreadable,
-            normalized_duplicates: !ir.symbols.is_empty()
-                && ir.symbols.iter().all(|symbol| symbol.normalized.is_some()),
+            // A normalizer belongs to an instruction architecture, so this is
+            // the union the members' own backends declared. Counting decoded
+            // symbols instead would let one member whose text failed to decode
+            // withdraw the normalized figures of every other member, which the
+            // same objects report when they are analysed outside the archive.
+            normalized_duplicates: ir.capabilities.normalized_duplicates,
             independent_data_segments: false,
             relocations: !ir.relocations.is_empty(),
             data_segments: !ir.data_segments.is_empty(),
@@ -117,16 +122,7 @@ impl ArtifactBackend for ArchiveBackend {
     }
 
     fn capabilities(&self) -> ArtifactCapabilities {
-        ArtifactCapabilities {
-            symbols: true,
-            call_graph: true,
-            source_mapping: true,
-            debug_info_unreadable: false,
-            normalized_duplicates: false,
-            independent_data_segments: false,
-            relocations: true,
-            data_segments: true,
-        }
+        format_support(ArtifactFormat::Archive).capabilities
     }
 }
 
@@ -162,6 +158,7 @@ fn parse_member(format: ArtifactFormat, bytes: &[u8]) -> Result<ArtifactIr, Arti
 /// Merge a parsed local object without letting its local offsets act as IDs.
 fn merge_member(archive: &mut ArtifactIr, member: ArtifactIr, provenance: &ArtifactArchiveMember) {
     archive.capabilities.debug_info_unreadable |= member.capabilities.debug_info_unreadable;
+    archive.capabilities.normalized_duplicates |= member.capabilities.normalized_duplicates;
     let prefix = format!("{}:", provenance.name);
     archive
         .sections
@@ -199,9 +196,15 @@ fn merge_member(archive: &mut ArtifactIr, member: ArtifactIr, provenance: &Artif
         .extend(member.calls.into_iter().filter_map(|mut call| {
             let caller = fingerprints.get(&call.caller).copied()?;
             call.caller = caller;
-            call.target = call
-                .target
-                .and_then(|target| fingerprints.get(&target).copied());
+            if let Some(target) = call.target {
+                call.target = fingerprints.get(&target).copied();
+                // A target the member established but this merge could not
+                // re-map is a lost edge. Recording why keeps it unresolved
+                // evidence instead of a call that looks like it had no target.
+                if call.target.is_none() {
+                    call.unresolved = Some(UnresolvedCall::MissingRelocation);
+                }
+            }
             Some(call)
         }));
     archive
@@ -262,14 +265,18 @@ mod tests {
     use proptest::prelude::*;
 
     fn coff_member(name: &[u8]) -> Vec<u8> {
+        coff_member_with_code(name, &[0x90, 0xc3])
+    }
+
+    fn coff_member_with_code(name: &[u8], code: &[u8]) -> Vec<u8> {
         let mut object =
             WriteObject::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
         let text = object.section_id(StandardSection::Text);
-        let offset = object.append_section_data(text, &[0x90, 0xc3], 1);
+        let offset = object.append_section_data(text, code, 1);
         object.add_symbol(Symbol {
             name: name.to_vec(),
             value: offset,
-            size: 2,
+            size: code.len() as u64,
             kind: SymbolKind::Text,
             scope: SymbolScope::Dynamic,
             weak: false,
@@ -287,7 +294,7 @@ mod tests {
         member.extend(format!("{:<10}", bytes.len()).as_bytes());
         member.extend(b"`\n");
         member.extend(bytes);
-        if bytes.len() % 2 != 0 {
+        if !bytes.len().is_multiple_of(2) {
             member.push(b'\n');
         }
         member
@@ -364,6 +371,74 @@ mod tests {
             ir.archive_members[0].fingerprint,
             ir.archive_members[1].fingerprint
         );
+    }
+
+    /// A normalizer belongs to an instruction architecture, so one member
+    /// whose text does not decode cannot withdraw the normalized figures the
+    /// other members support. The same objects report those figures when they
+    /// are analysed outside the archive.
+    #[test]
+    fn an_undecodable_member_keeps_the_other_members_normalized_duplicates() {
+        let mut archive = b"!<arch>\n".to_vec();
+        // Two bodies that differ only in an immediate, which is exactly the
+        // duplication normalization exists to see.
+        archive.extend(archive_member(
+            "left.obj",
+            &coff_member_with_code(b"left", &[0xb8, 1, 0, 0, 0, 0xc3]),
+        ));
+        archive.extend(archive_member(
+            "right.obj",
+            &coff_member_with_code(b"right", &[0xb8, 2, 0, 0, 0, 0xc3]),
+        ));
+        // A lone escape byte is not a complete instruction.
+        archive.extend(archive_member(
+            "opaque.obj",
+            &coff_member_with_code(b"opaque", &[0x0f]),
+        ));
+
+        let ir = ArchiveBackend.parse(&archive).expect("parse mixed archive");
+
+        assert_eq!(ir.symbols.len(), 3, "{ir:#?}");
+        assert!(
+            ir.symbols.iter().any(|symbol| symbol.normalized.is_none()),
+            "the fixture must contain a symbol that does not decode: {ir:#?}"
+        );
+        assert!(
+            ir.capabilities.normalized_duplicates,
+            "{:?}",
+            ir.capabilities
+        );
+        let sizes = crate::metrics::classify_sizes(&ir);
+        assert_eq!(sizes.duplicated_bytes, 0, "{sizes:#?}");
+        assert_eq!(sizes.duplicated_bytes_normalized, Some(6), "{sizes:#?}");
+        assert!(
+            !sizes
+                .assumptions
+                .iter()
+                .any(|assumption| assumption.contains("needs a normalizer for this architecture")),
+            "{:?}",
+            sizes.assumptions
+        );
+    }
+
+    /// The same objects outside an archive establish the same capability, so
+    /// being read inside one changes no architecture fact.
+    #[test]
+    fn membership_of_an_archive_does_not_change_a_normalizer_fact() {
+        let member = coff_member_with_code(b"left", &[0xb8, 1, 0, 0, 0, 0xc3]);
+        let mut archive = b"!<arch>\n".to_vec();
+        archive.extend(archive_member("left.obj", &member));
+
+        let alone = PeCoffBackend
+            .parse(&member)
+            .expect("parse the object alone");
+        let inside = ArchiveBackend.parse(&archive).expect("parse the archive");
+
+        assert_eq!(
+            inside.capabilities.normalized_duplicates,
+            alone.capabilities.normalized_duplicates
+        );
+        assert!(inside.capabilities.normalized_duplicates);
     }
 
     /// A caller chaining backends learns "not mine", not "mine and broken".

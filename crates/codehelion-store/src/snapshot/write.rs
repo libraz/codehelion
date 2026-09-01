@@ -9,10 +9,12 @@ use super::{
     Transaction, params,
 };
 
-/// Incomplete partitions younger than this may belong to a scan still
-/// assembling comparisons. Older ones are safe to reap on the next writer
-/// open, while the command-level database lease prevents concurrent writers.
-const ABANDONED_RUN_GRACE_SECONDS: i64 = 24 * 60 * 60;
+// Completed snapshots are retained rather than superseded. A later scan can
+// only explain a changed clone-group fingerprint by reading the prior group's
+// members and lineage, so a completed snapshot is history, not a replaceable
+// cache entry. The cache maintenance surface owns any explicit retention
+// policy; recording a scan never discards evidence, and therefore never
+// creates an orphaned content identity either.
 
 impl Store {
     /// List incomplete multi-partition snapshots in oldest-first order.
@@ -60,25 +62,10 @@ impl Store {
             Some(_) => return Err(StoreError::RunNotRunning { run_id }),
             None => return Err(StoreError::RunNotFound { run_id }),
         }
-        tx.execute("DELETE FROM scan_run WHERE id = ?1", params![run_id])?;
-        crate::remove_orphaned_fingerprints(&tx)?;
+        let discarded = tx.execute("DELETE FROM scan_run WHERE id = ?1", params![run_id])?;
+        crate::lifecycle::remove_orphaned_fingerprints(&tx, discarded)?;
         tx.commit()?;
-        Ok(())
-    }
-
-    /// Reap incomplete partitions whose last write is outside the grace
-    /// period. Called only by the creating/writing open path.
-    pub(crate) fn discard_expired_abandoned_runs(&mut self) -> Result<(), StoreError> {
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "DELETE FROM scan_run
-             WHERE status = 'running'
-               AND unixepoch(finished_at) IS NOT NULL
-               AND unixepoch(finished_at) <= unixepoch('now') - ?1",
-            params![ABANDONED_RUN_GRACE_SECONDS],
-        )?;
-        crate::remove_orphaned_fingerprints(&tx)?;
-        tx.commit()?;
+        crate::lifecycle::forget_live_runs(&self.database, [run_id]);
         Ok(())
     }
 
@@ -111,8 +98,9 @@ impl Store {
         rules: &[SuppressionRuleRow],
     ) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
+        // Writing the policy only inserts and updates suppression rows, so no
+        // content identity can be left without a referent here.
         write_suppressions(&tx, rules, true)?;
-        crate::remove_orphaned_fingerprints(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -147,7 +135,6 @@ impl Store {
             let adoptions = plan_matching_lineages_tx(&tx, run_id, predecessor_run)?;
             apply_lineage_adoptions_tx(&tx, run_id, predecessor_run, &adoptions)?;
         }
-        remove_superseded_snapshots(&tx, &[run_id])?;
         tx.commit()?;
         Ok(run_id)
     }
@@ -167,6 +154,7 @@ impl Store {
         let tx = self.conn.transaction()?;
         let (run_id, _) = write_snapshot(&tx, snapshot, SnapshotStatus::Running, true)?;
         tx.commit()?;
+        crate::lifecycle::register_live_run(&self.database, run_id);
         Ok(run_id)
     }
 
@@ -185,6 +173,7 @@ impl Store {
         let tx = self.conn.transaction()?;
         let (run_id, suppressions) = write_snapshot(&tx, snapshot, SnapshotStatus::Running, false)?;
         tx.commit()?;
+        crate::lifecycle::register_live_run(&self.database, run_id);
         Ok(StagedSnapshotPart {
             run_id,
             suppressions,
@@ -276,11 +265,17 @@ impl Store {
                     });
                 }
             }
-            let run_ids: Vec<i64> = parts.iter().map(|part| part.run_id).collect();
-            remove_superseded_snapshots(&tx, &run_ids)?;
             tx.execute_batch("RELEASE codehelion_finalize")?;
             Ok(())
         })();
+        // Whatever the outcome, this invocation no longer owns these
+        // partitions: they either completed or were removed.
+        let owned = parts
+            .iter()
+            .chain(retired_parts)
+            .map(|part| part.run_id)
+            .collect::<Vec<_>>();
+        crate::lifecycle::forget_live_runs(&self.database, owned);
         match result {
             Ok(()) => match tx.commit() {
                 Ok(()) => Ok(()),
@@ -350,12 +345,16 @@ impl Store {
                 }
             }
         }
+        let mut discarded = 0_usize;
         for part in parts {
-            tx.execute("DELETE FROM scan_run WHERE id = ?1", params![part.run_id])?;
+            discarded = discarded.saturating_add(
+                tx.execute("DELETE FROM scan_run WHERE id = ?1", params![part.run_id])?,
+            );
         }
         cleanup_staged_suppressions(&tx, parts, &[])?;
-        crate::remove_orphaned_fingerprints(&tx)?;
+        crate::lifecycle::remove_orphaned_fingerprints(&tx, discarded)?;
         tx.commit()?;
+        crate::lifecycle::forget_live_runs(&self.database, parts.iter().map(|part| part.run_id));
         Ok(())
     }
 
@@ -380,8 +379,8 @@ impl Store {
                 return Err(StoreError::RunNotRunning { run_id: *run_id });
             }
         }
-        remove_superseded_snapshots(&tx, run_ids)?;
         tx.commit()?;
+        crate::lifecycle::forget_live_runs(&self.database, run_ids.iter().copied());
         Ok(())
     }
 }
@@ -414,20 +413,6 @@ fn validate_group_fingerprints(snapshot: &Snapshot<'_>) -> Result<(), StoreError
             }
         }
     }
-    Ok(())
-}
-
-/// Retain completed snapshots needed as lineage predecessors.
-///
-/// A later scan can only explain a changed clone-group fingerprint by reading
-/// the prior group's members and lineage. Completed snapshots are therefore
-/// history, not replaceable cache entries. The cache maintenance surface owns
-/// any explicit retention policy; recording a scan never discards evidence.
-fn remove_superseded_snapshots(
-    tx: &Transaction<'_>,
-    _current_run_ids: &[i64],
-) -> Result<(), StoreError> {
-    crate::remove_orphaned_fingerprints(tx)?;
     Ok(())
 }
 
@@ -572,14 +557,15 @@ fn cleanup_snapshot_parts_tx(
     parts: &[StagedSnapshotPart],
     retired_parts: &[StagedSnapshotPart],
 ) -> Result<(), StoreError> {
+    let mut discarded = 0_usize;
     for part in parts {
-        tx.execute(
+        discarded = discarded.saturating_add(tx.execute(
             "DELETE FROM scan_run WHERE id = ?1 AND status = 'running'",
             params![part.run_id],
-        )?;
+        )?);
     }
     cleanup_staged_suppressions(tx, parts, retired_parts)?;
-    crate::remove_orphaned_fingerprints(tx)?;
+    crate::lifecycle::remove_orphaned_fingerprints(tx, discarded)?;
     Ok(())
 }
 

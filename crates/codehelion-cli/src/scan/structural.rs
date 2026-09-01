@@ -57,6 +57,7 @@ use super::{
     literal_norm, map_sources, open_store, parse_work_byte_limit, path_key, rfc3339_now,
     scan_database_path, shared, write_partitioned_reports,
 };
+use crate::provenance::FromScannedTree;
 
 use crate::Outcome;
 use crate::cli::ScanArgs;
@@ -532,10 +533,10 @@ fn run_with(
         {
             recording_error = Some(error);
         }
-        if finished.report.run.reused {
-            if let Some(staged) = staged.take() {
-                retired_parts.push(staged);
-            }
+        if finished.report.run.reused
+            && let Some(staged) = staged.take()
+        {
+            retired_parts.push(staged);
         }
         if let Some(staged) = staged {
             staged_parts.push(staged);
@@ -845,7 +846,10 @@ fn parse_one(
             relative_path: path_key(&source.relative_path),
             directory_key,
             language: source.language,
-            marker_lines: suppress::marker_lines(&text),
+            marker_lines: suppress::marker_lines(
+                &FromScannedTree::found(text.as_ref()),
+                source.language,
+            ),
             lines: u64::try_from(text.lines().count()).unwrap_or(u64::MAX),
             diagnostics: ir.diagnostics.len(),
             unaccounted_tokens,
@@ -971,10 +975,11 @@ impl ReportInputs<'_> {
 
     /// The tokens one analysed unit covers, in its own file.
     fn unit_tokens(&self, unit: &StructuralUnit) -> &[Token] {
-        let tokens = &self.irs[unit.file].tokens;
-        let end = unit.token_end.min(tokens.len());
-        let start = unit.token_start.min(end);
-        &tokens[start..end]
+        codehelion_core::frontend::tokens_in_range(
+            &self.irs[unit.file].tokens,
+            unit.token_start,
+            unit.token_end,
+        )
     }
 
     /// The configured suppression rules whose selectors matched no scanned
@@ -998,10 +1003,11 @@ impl ReportInputs<'_> {
 
     /// The tokens one occurrence of a duplicated run covers, in its own file.
     fn region_tokens(&self, occurrence: &RegionOccurrence) -> &[Token] {
-        let tokens = &self.irs[occurrence.file].tokens;
-        let end = occurrence.token_end.min(tokens.len());
-        let start = occurrence.token_start.min(end);
-        &tokens[start..end]
+        codehelion_core::frontend::tokens_in_range(
+            &self.irs[occurrence.file].tokens,
+            occurrence.token_start,
+            occurrence.token_end,
+        )
     }
 
     /// The suppression a report entry carries, from the index of the rule

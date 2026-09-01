@@ -7,32 +7,26 @@
 //! and the preprocessor never runs.
 //!
 //! A function definition is recognised from its body brace: walking backwards
-//! over signature-trailer tokens (`const`, `noexcept`, a trailing return
-//! type, ...) must reach the parameter list's `)`, whose matching `(` must be
-//! preceded by the function's name. Constructor initialiser lists are walked
-//! through entry by entry. The heuristic is deliberately conservative:
-//! constructs a lexer cannot classify with confidence (K&R definitions,
-//! function-try-blocks, functions returning function pointers) are left
-//! un-anchored rather than risking spurious units.
-
-use std::collections::HashMap;
+//! over signature-trailer tokens (`const`, `noexcept`, `requires`, a trailing
+//! return type, ...) must reach the parameter list's `)`, whose matching `(`
+//! must be preceded by the function's name — directly, or through an explicit
+//! template argument list. Constructor initialiser lists are walked through
+//! entry by entry. The heuristic is deliberately conservative: constructs a
+//! lexer cannot classify with confidence (K&R definitions, function-try-blocks,
+//! functions returning function pointers) are left un-anchored rather than
+//! risking spurious units.
+//!
+//! The walking itself — skipping a balanced group, the trailer vocabulary, the
+//! record-versus-declarator decision — lives in the crate's private
+//! `declarator` module, so C and C++ and every rule below share one
+//! implementation of it.
 
 use codehelion_core::frontend::{
     Diagnostic, DiagnosticKind, SourceSpan, Token, TokenKind, Unit, UnitKind,
 };
 
+use crate::declarator::{self, DelimPairs, delim_pairs, group_close, group_open};
 use crate::dialect::Dialect;
-
-/// Keywords that may appear between a parameter list and the body brace
-/// (qualifiers and trailing-return-type material).
-const TRAILER_KEYWORDS: &[&str] = &[
-    "const", "volatile", "noexcept", "throw", "mutable", "auto", "decltype", "unsigned", "signed",
-    "long", "short", "int", "char", "float", "double", "bool", "void", "typename", "restrict",
-    "_Atomic",
-];
-
-/// Punctuation that may appear between a parameter list and the body brace.
-const TRAILER_PUNCT: &[&str] = &["::", "<", ">", ">>", "*", "&", "&&", "->"];
 
 /// Tokens that may immediately precede a lambda's `[` (expression position).
 const LAMBDA_PRECEDER_PUNCT: &[&str] = &[
@@ -51,81 +45,6 @@ const LAMBDA_PRECEDER_KEYWORDS: &[&str] = &[
     "do",
 ];
 
-/// Keywords whose parenthesised group belongs to the signature trailer
-/// (`noexcept(...)`, `throw()`, `decltype(...)`), not to the parameter list.
-const TRAILER_GROUP_KEYWORDS: &[&str] = &["noexcept", "throw", "decltype"];
-
-/// Keywords allowed inside a lambda's forward trailer (specifiers and
-/// trailing-return-type material between `)` and `{`).
-const LAMBDA_TRAILER_KEYWORDS: &[&str] = &[
-    "mutable",
-    "noexcept",
-    "constexpr",
-    "consteval",
-    "static",
-    "throw",
-    "decltype",
-    "auto",
-    "const",
-    "unsigned",
-    "signed",
-    "long",
-    "short",
-    "int",
-    "char",
-    "float",
-    "double",
-    "bool",
-    "void",
-    "typename",
-];
-
-/// Maximum tokens one record-declaration lookahead may inspect before
-/// declining an uncertain boundary. This keeps malformed declarations from
-/// making every record keyword scan the rest of the file.
-const MAX_DECLARATION_LOOKAHEAD: usize = 256;
-
-/// Matched delimiter pairs of every kind (`()`, `{}`, `[]`), in both
-/// directions.
-struct DelimPairs {
-    /// Opening token index -> closing token index.
-    close_of: HashMap<usize, usize>,
-    /// Closing token index -> opening token index.
-    open_of: HashMap<usize, usize>,
-}
-
-fn delim_pairs(tokens: &[Token]) -> DelimPairs {
-    let mut close_of = HashMap::new();
-    let mut open_of = HashMap::new();
-    let mut parens = Vec::new();
-    let mut braces = Vec::new();
-    let mut brackets = Vec::new();
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind != TokenKind::Punctuation {
-            continue;
-        }
-        let (stack, closing) = match token.text.as_str() {
-            "(" | "{" | "[" => {
-                match token.text.as_str() {
-                    "(" => parens.push(i),
-                    "{" => braces.push(i),
-                    _ => brackets.push(i),
-                }
-                continue;
-            }
-            ")" => (&mut parens, i),
-            "}" => (&mut braces, i),
-            "]" => (&mut brackets, i),
-            _ => continue,
-        };
-        if let Some(open) = stack.pop() {
-            close_of.insert(open, closing);
-            open_of.insert(closing, open);
-        }
-    }
-    DelimPairs { close_of, open_of }
-}
-
 /// Detect unit boundaries and recoverable boundary errors under `dialect`.
 #[must_use]
 pub fn detect(tokens: &[Token], dialect: &Dialect) -> (Vec<Unit>, Vec<Diagnostic>) {
@@ -135,21 +54,24 @@ pub fn detect(tokens: &[Token], dialect: &Dialect) -> (Vec<Unit>, Vec<Diagnostic
     let mut units = records.clone();
     let mut diagnostics = Vec::new();
     for (i, token) in tokens.iter().enumerate() {
-        if token.kind == TokenKind::Punctuation && token.text == "{" {
-            if let Some(result) = function_unit(tokens, &pairs, &records, i) {
-                match result {
-                    Ok(unit) => units.push(unit),
-                    Err(span) => diagnostics.push(Diagnostic {
-                        kind: DiagnosticKind::UnmatchedDelimiter,
-                        span,
-                    }),
-                }
+        if token.kind == TokenKind::Punctuation
+            && token.text == "{"
+            && let Some(result) = function_unit(tokens, &pairs, &records, dialect, i)
+        {
+            match result {
+                Ok(unit) => units.push(unit),
+                Err(span) => diagnostics.push(Diagnostic {
+                    kind: DiagnosticKind::UnmatchedDelimiter,
+                    span,
+                }),
             }
         }
-        if dialect.lambdas && token.kind == TokenKind::Punctuation && token.text == "[" {
-            if let Some(unit) = lambda_unit(tokens, &pairs, i) {
-                units.push(unit);
-            }
+        if dialect.lambdas
+            && token.kind == TokenKind::Punctuation
+            && token.text == "["
+            && let Some(unit) = lambda_unit(tokens, &pairs, i)
+        {
+            units.push(unit);
         }
     }
 
@@ -161,33 +83,29 @@ pub fn detect(tokens: &[Token], dialect: &Dialect) -> (Vec<Unit>, Vec<Diagnostic
 fn record_units(tokens: &[Token], pairs: &DelimPairs, dialect: &Dialect) -> Vec<Unit> {
     let mut out = Vec::new();
     for (i, token) in tokens.iter().enumerate() {
-        if token.kind != TokenKind::Keyword
-            || !dialect.record_keywords.contains(&token.text.as_str())
+        if !declarator::is_record_keyword(token, dialect) {
+            continue;
+        }
+        // A record keyword inside a `template <...>` list introduces a type
+        // parameter, at any nesting depth; `enum class` names an enumeration.
+        if declarator::is_template_parameter_position(tokens, i) {
+            continue;
+        }
+        if i.checked_sub(1)
+            .map(|p| &tokens[p])
+            .is_some_and(|prev| prev.kind == TokenKind::Keyword && prev.text == "enum")
         {
             continue;
         }
-        if let Some(prev) = i.checked_sub(1).map(|p| &tokens[p]) {
-            // `template<class T>` parameters and `enum class` are not records.
-            if prev.kind == TokenKind::Punctuation && matches!(prev.text.as_str(), "<" | ",") {
-                continue;
-            }
-            if prev.kind == TokenKind::Keyword && prev.text == "enum" {
-                continue;
-            }
-        }
-        let Some(open) = record_body_open(tokens, i + 1) else {
+        let Some(header) = declarator::record_header(tokens, pairs, i + 1) else {
             continue;
         };
-        let Some(&close) = pairs.close_of.get(&open) else {
+        let Some(close) = group_close(pairs, header.body_open) else {
             continue;
         };
-        let name = tokens[i + 1..open]
-            .iter()
-            .find(|t| t.kind == TokenKind::Identifier)
-            .map(|t| t.text.to_string());
         out.push(Unit {
             kind: UnitKind::Record,
-            name,
+            name: header.name.map(|name| tokens[name].text.to_string()),
             token_start: i,
             token_end: close + 1,
             span: span_of(tokens, i, close),
@@ -196,33 +114,12 @@ fn record_units(tokens: &[Token], pairs: &DelimPairs, dialect: &Dialect) -> Vec<
     out
 }
 
-/// Index of the `{` opening a record body declared at `from`, if any.
-///
-/// A `;` means a forward declaration or a variable of record type; a paren
-/// means the keyword is part of a declarator or expression (`struct Foo
-/// *make(void)`, `sizeof(struct S)`), not a definition.
-fn record_body_open(tokens: &[Token], from: usize) -> Option<usize> {
-    for (offset, token) in tokens[from..]
-        .iter()
-        .take(MAX_DECLARATION_LOOKAHEAD)
-        .enumerate()
-    {
-        if token.kind == TokenKind::Punctuation {
-            match token.text.as_str() {
-                "{" => return Some(from + offset),
-                ";" | "(" | ")" | "=" => return None,
-                _ => {}
-            }
-        }
-    }
-    None
-}
-
 /// Try to recognise the `{` at `body_open` as a function body.
 fn function_unit(
     tokens: &[Token],
     pairs: &DelimPairs,
     records: &[Unit],
+    dialect: &Dialect,
     body_open: usize,
 ) -> Option<Result<Unit, SourceSpan>> {
     // Walk backwards over the signature trailer to the parameter list.
@@ -231,31 +128,33 @@ fn function_unit(
         let token = &tokens[j];
         match token.kind {
             TokenKind::Identifier => j = j.checked_sub(1)?,
-            TokenKind::Keyword if TRAILER_KEYWORDS.contains(&token.text.as_str()) => {
+            TokenKind::Keyword if declarator::is_trailer_keyword(&token.text) => {
                 j = j.checked_sub(1)?;
             }
-            TokenKind::Punctuation if TRAILER_PUNCT.contains(&token.text.as_str()) => {
+            TokenKind::Punctuation if declarator::is_trailer_punct(&token.text) => {
                 j = j.checked_sub(1)?;
             }
             TokenKind::Punctuation if token.text == ")" => {
-                let &open = pairs.open_of.get(&j)?;
-                // `noexcept(...)` / `throw()` / `decltype(...)` groups belong
-                // to the trailer; skip them whole.
+                let open = group_open(tokens, pairs, j)?;
+                // `noexcept(...)` / `throw()` / `decltype(...)` / `requires
+                // (...)` groups belong to the trailer, and so does an
+                // attribute specifier's group; skip them whole.
                 if let Some(before) = open.checked_sub(1) {
                     let b = &tokens[before];
-                    if b.kind == TokenKind::Keyword
-                        && TRAILER_GROUP_KEYWORDS.contains(&b.text.as_str())
+                    if (b.kind == TokenKind::Keyword
+                        && declarator::is_trailer_group_keyword(&b.text))
+                        || declarator::is_attribute_specifier(b)
                     {
                         j = before.checked_sub(1)?;
                         continue;
                     }
                 }
-                return resolve_signature(tokens, pairs, records, j, body_open);
+                return resolve_signature(tokens, pairs, records, dialect, j, body_open);
             }
             // A `}` here can only be the last constructor-initialiser entry
             // (`: a(x), b{y} {`); the resolver walks the entries.
             TokenKind::Punctuation if token.text == "}" => {
-                return resolve_signature(tokens, pairs, records, j, body_open);
+                return resolve_signature(tokens, pairs, records, dialect, j, body_open);
             }
             _ => return None,
         }
@@ -265,20 +164,36 @@ fn function_unit(
 
 /// Resolve the group closing at `close` back to the parameter list and the
 /// function name, walking constructor-initialiser entries in between.
+///
+/// The name may be spelled with an explicit template argument list, both in an
+/// initialiser entry (`: Base<int>(x)`) and on the declarator itself (an
+/// explicit function-template specialisation); the shared declarator walk
+/// steps over that group, so the two spellings resolve alike.
 fn resolve_signature(
     tokens: &[Token],
     pairs: &DelimPairs,
     records: &[Unit],
+    dialect: &Dialect,
     close: usize,
     body_open: usize,
 ) -> Option<Result<Unit, SourceSpan>> {
     let mut close = close;
     for _ in 0..32 {
-        let &open = pairs.open_of.get(&close)?;
-        let name_i = open.checked_sub(1)?;
+        let open = group_open(tokens, pairs, close)?;
+        let name_i = declarator::declarator_name(tokens, open)?;
         let name_token = &tokens[name_i];
 
         if name_token.kind == TokenKind::Identifier {
+            // An attribute specifier decorates a declaration without naming
+            // one, and a record keyword directly before the candidate means
+            // the group belongs to that record's header, not to a declarator.
+            if declarator::is_attribute_specifier(name_token)
+                || name_i
+                    .checked_sub(1)
+                    .is_some_and(|p| declarator::is_record_keyword(&tokens[p], dialect))
+            {
+                return None;
+            }
             if let Some(sep_i) = name_i.checked_sub(1) {
                 let sep = &tokens[sep_i];
                 if sep.kind == TokenKind::Punctuation && matches!(sep.text.as_str(), ":" | ",") {
@@ -373,7 +288,7 @@ fn make_function(
     name: String,
     body_open: usize,
 ) -> Result<Unit, SourceSpan> {
-    let end = pairs.close_of.get(&body_open).copied().ok_or_else(|| {
+    let end = group_close(pairs, body_open).ok_or_else(|| {
         // Do not turn a malformed body into a function that extends to EOF.
         // The caller records this at the Fast frontend's ordinary diagnostic
         // boundary, where scan summaries already count recovery events.
@@ -422,12 +337,12 @@ fn lambda_unit(tokens: &[Token], pairs: &DelimPairs, i: usize) -> Option<Unit> {
             return None;
         }
     }
-    let &capture_close = pairs.close_of.get(&i)?;
+    let capture_close = group_close(pairs, i)?;
 
     // Optional parameter list.
     let mut k = capture_close + 1;
     if tokens.get(k).is_some_and(|t| t.text == "(") {
-        k = pairs.close_of.get(&k)? + 1;
+        k = group_close(pairs, k)? + 1;
     }
 
     // Forward trailer: specifiers and a trailing return type, then the body.
@@ -435,7 +350,7 @@ fn lambda_unit(tokens: &[Token], pairs: &DelimPairs, i: usize) -> Option<Unit> {
         let token = tokens.get(k)?;
         match token.kind {
             TokenKind::Punctuation if token.text == "{" => {
-                let &close = pairs.close_of.get(&k)?;
+                let close = group_close(pairs, k)?;
                 return Some(Unit {
                     kind: UnitKind::Closure,
                     name: None,
@@ -444,10 +359,10 @@ fn lambda_unit(tokens: &[Token], pairs: &DelimPairs, i: usize) -> Option<Unit> {
                     span: span_of(tokens, i, close),
                 });
             }
-            TokenKind::Punctuation if TRAILER_PUNCT.contains(&token.text.as_str()) => k += 1,
+            TokenKind::Punctuation if declarator::is_trailer_punct(&token.text) => k += 1,
             TokenKind::Punctuation if token.text == "(" => {
                 // `noexcept(...)` or a parenthesised return-type part.
-                k = pairs.close_of.get(&k)? + 1;
+                k = group_close(pairs, k)? + 1;
             }
             // A name followed by a parameter list is a function declarator,
             // not trailer material: the brackets before it decorate a
@@ -461,7 +376,7 @@ fn lambda_unit(tokens: &[Token], pairs: &DelimPairs, i: usize) -> Option<Unit> {
                 }
                 k += 1;
             }
-            TokenKind::Keyword if LAMBDA_TRAILER_KEYWORDS.contains(&token.text.as_str()) => k += 1,
+            TokenKind::Keyword if declarator::is_lambda_trailer_keyword(&token.text) => k += 1,
             _ => return None,
         }
     }
@@ -469,7 +384,7 @@ fn lambda_unit(tokens: &[Token], pairs: &DelimPairs, i: usize) -> Option<Unit> {
 }
 
 /// Build a reporting span covering the inclusive token range `[start, end]`.
-fn span_of(tokens: &[Token], start: usize, end: usize) -> SourceSpan {
+const fn span_of(tokens: &[Token], start: usize, end: usize) -> SourceSpan {
     let first = tokens[start].span;
     let last = tokens[end].span;
     SourceSpan {
@@ -484,6 +399,7 @@ fn span_of(tokens: &[Token], start: usize, end: usize) -> SourceSpan {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::declarator::MAX_DECLARATION_LOOKAHEAD;
     use crate::dialect;
     use crate::lexer::lex;
 
@@ -534,6 +450,20 @@ mod tests {
         assert_eq!(units.len(), 1, "{units:#?}");
         assert_eq!(units[0].kind, UnitKind::Function);
         assert_eq!(units[0].name.as_deref(), Some("make"));
+    }
+
+    #[test]
+    fn an_attribute_specifier_between_the_keyword_and_the_body_keeps_the_record() {
+        for source in [
+            "struct __attribute__((packed)) S { int a; int b; };",
+            "struct __declspec(align(8)) S { int a; int b; };",
+            "struct S __attribute__((packed)) { int a; int b; };",
+        ] {
+            let units = units_of(source);
+            assert_eq!(units.len(), 1, "{source}: {units:#?}");
+            assert_eq!(units[0].kind, UnitKind::Record, "{source}");
+            assert_eq!(units[0].name.as_deref(), Some("S"), "{source}");
+        }
     }
 
     #[test]
@@ -592,7 +522,8 @@ mod tests {
             "field ".repeat(MAX_DECLARATION_LOOKAHEAD)
         );
         let tokens = lex(&source, &dialect::C).0;
-        assert_eq!(record_body_open(&tokens, 1), None);
+        let pairs = delim_pairs(&tokens);
+        assert!(declarator::record_header(&tokens, &pairs, 1).is_none());
     }
 
     #[test]

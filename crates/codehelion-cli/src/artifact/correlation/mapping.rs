@@ -17,6 +17,28 @@ use super::{
 };
 use crate::artifact::SourceMapLocation;
 
+/// Reference to the build configuration a correlated identity was minted under.
+///
+/// Every value correlation handles is a 128-bit digest, and the build variant
+/// is the one that is not an identity of any code: it says which build the
+/// source and artifact identities beside it are only comparable within. Keeping
+/// it in its own type means a source, symbol or occurrence identity cannot be
+/// passed where a variant belongs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(in crate::artifact) struct BuildVariantFingerprint([u8; 16]);
+
+impl BuildVariantFingerprint {
+    /// Wrap a variant reference recorded earlier by this tool.
+    pub(in crate::artifact) const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// The reference's raw bytes, as persistence and evidence records spell it.
+    pub(in crate::artifact) const fn as_bytes(self) -> [u8; 16] {
+        self.0
+    }
+}
+
 /// Storage identity of one source-to-artifact correspondence.
 ///
 /// The correlation table is unique over exactly these columns, so they are the
@@ -178,6 +200,8 @@ pub(in crate::artifact) fn correlate_source_run(
     let resolved_calls = store
         .source_resolved_calls(source_run)
         .with_context(|| format!("loading compiler calls for scan {source_run}"))?;
+    let artifact_variant =
+        BuildVariantFingerprint::from_bytes(artifact_variant.fingerprint.as_bytes());
     let mut rows = correlate_debug_locations(
         artifact,
         FilePath::new(&origin.root_path),
@@ -186,7 +210,7 @@ pub(in crate::artifact) fn correlate_source_run(
         &instantiations,
         &resolved_symbols,
         &resolved_calls,
-        artifact_variant.fingerprint.as_bytes(),
+        artifact_variant,
     );
     enrich_source_map_evidence(
         artifact,
@@ -194,16 +218,10 @@ pub(in crate::artifact) fn correlate_source_run(
         &units,
         &fragments,
         source_map_locations,
-        artifact_variant.fingerprint.as_bytes(),
+        artifact_variant,
         &mut rows,
     );
-    enrich_linker_map_evidence(
-        artifact,
-        &units,
-        linker_map,
-        artifact_variant.fingerprint.as_bytes(),
-        &mut rows,
-    );
+    enrich_linker_map_evidence(artifact, &units, linker_map, artifact_variant, &mut rows);
     // Every pass that can still establish a correspondence has run, so the
     // source side is split exactly once, from the final mapping set. Deciding
     // it earlier would report a unit that only source-map or linker-map
@@ -238,7 +256,7 @@ pub(in crate::artifact) fn reconcile_unmapped_sources(
         .iter()
         .map(|unit| ArtifactAnalysisUnmappedSource {
             source_kind: ArtifactAnalysisSourceKind::Unit,
-            source_fingerprint: unit.fingerprint,
+            source_fingerprint: *unit.fingerprint.as_bytes(),
             source_instance_fingerprint: source_unit_instance_fingerprint(unit),
             source_build_variant_fingerprint: unit.build_variant_fingerprint,
             reason: ArtifactAnalysisUnmappedSourceReason::NoArtifactEvidence,
@@ -248,8 +266,8 @@ pub(in crate::artifact) fn reconcile_unmapped_sources(
                 .iter()
                 .map(|fragment| ArtifactAnalysisUnmappedSource {
                     source_kind: ArtifactAnalysisSourceKind::Fragment,
-                    source_fingerprint: fragment.fingerprint,
-                    source_instance_fingerprint: fragment.finding_id,
+                    source_fingerprint: *fragment.fingerprint.as_bytes(),
+                    source_instance_fingerprint: *fragment.finding_id.as_bytes(),
                     source_build_variant_fingerprint: fragment.build_variant_fingerprint,
                     reason: ArtifactAnalysisUnmappedSourceReason::NoArtifactEvidence,
                 }),
@@ -277,7 +295,7 @@ pub(in crate::artifact) fn enrich_source_map_evidence(
     units: &[SourceUnitIdentity],
     fragments: &[SourceFragmentIdentity],
     locations: &[SourceMapLocation],
-    artifact_variant: [u8; 16],
+    artifact_variant: BuildVariantFingerprint,
     rows: &mut CorrelationRows,
 ) {
     let sources = SourceLocationIndex::new(scan_root, units, fragments);
@@ -311,31 +329,35 @@ pub(in crate::artifact) fn enrich_source_map_evidence(
             let units = sources.units_at(&location.source_url, location.source_line);
             let candidate_count = u32::try_from(units.len()).unwrap_or(u32::MAX);
             for unit in units {
-                ledger.insert(source_map_mapping(
-                    symbol.fingerprint.as_bytes(),
-                    ArtifactAnalysisSourceKind::Unit,
-                    unit.fingerprint,
-                    source_unit_instance_fingerprint(unit),
-                    unit.build_variant_fingerprint,
-                    &location.source_url,
+                ledger.insert(source_map_mapping(&SourceMapCorrespondence {
+                    artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
+                    source_kind: ArtifactAnalysisSourceKind::Unit,
+                    source_fingerprint: *unit.fingerprint.as_bytes(),
+                    source_instance_fingerprint: source_unit_instance_fingerprint(unit),
+                    source_build_variant: BuildVariantFingerprint::from_bytes(
+                        unit.build_variant_fingerprint,
+                    ),
+                    source_url: &location.source_url,
                     candidate_count,
-                    artifact_variant,
-                ));
+                    artifact_build_variant: artifact_variant,
+                }));
                 mapped = true;
             }
             let fragments = sources.fragments_at(&location.source_url, location.source_line);
             let candidate_count = u32::try_from(fragments.len()).unwrap_or(u32::MAX);
             for fragment in fragments {
-                ledger.insert(source_map_mapping(
-                    symbol.fingerprint.as_bytes(),
-                    ArtifactAnalysisSourceKind::Fragment,
-                    fragment.fingerprint,
-                    fragment.finding_id,
-                    fragment.build_variant_fingerprint,
-                    &location.source_url,
+                ledger.insert(source_map_mapping(&SourceMapCorrespondence {
+                    artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
+                    source_kind: ArtifactAnalysisSourceKind::Fragment,
+                    source_fingerprint: *fragment.fingerprint.as_bytes(),
+                    source_instance_fingerprint: *fragment.finding_id.as_bytes(),
+                    source_build_variant: BuildVariantFingerprint::from_bytes(
+                        fragment.build_variant_fingerprint,
+                    ),
+                    source_url: &location.source_url,
                     candidate_count,
-                    artifact_variant,
-                ));
+                    artifact_build_variant: artifact_variant,
+                }));
                 mapped = true;
             }
         }
@@ -348,36 +370,50 @@ pub(in crate::artifact) fn enrich_source_map_evidence(
     rows.mappings = ledger.into_rows();
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one mapping record has all identity dimensions"
-)]
-fn source_map_mapping(
+/// The identities one source-map correspondence is recorded under.
+///
+/// A correspondence names five 128-bit values that no signature can tell apart
+/// once they are positional arguments, and getting two of them the wrong way
+/// round attributes a symbol to a source occurrence that never wrote it. Naming
+/// them at the call site is what keeps the order from being load-bearing; the
+/// two build variants additionally carry their own type, so a source or symbol
+/// identity cannot stand in for one.
+struct SourceMapCorrespondence<'source> {
+    /// Content-derived artifact symbol identity.
     artifact_symbol_fingerprint: [u8; 16],
+    /// Whether the source side is a whole unit or a clone fragment.
     source_kind: ArtifactAnalysisSourceKind,
+    /// Content-derived identity of that unit or fragment.
     source_fingerprint: [u8; 16],
+    /// Stable discriminator of this source occurrence.
     source_instance_fingerprint: [u8; 16],
-    source_build_variant_fingerprint: [u8; 16],
-    source_url: &str,
+    /// Build variant that minted the source identity.
+    source_build_variant: BuildVariantFingerprint,
+    /// Source-map URL that established the correspondence.
+    source_url: &'source str,
+    /// Source candidates the same evidence reached.
     candidate_count: u32,
-    artifact_variant: [u8; 16],
-) -> ArtifactAnalysisMapping {
+    /// Build variant the artifact was analysed under.
+    artifact_build_variant: BuildVariantFingerprint,
+}
+
+fn source_map_mapping(correspondence: &SourceMapCorrespondence<'_>) -> ArtifactAnalysisMapping {
     ArtifactAnalysisMapping {
         schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
-        artifact_symbol_fingerprint,
-        source_kind,
-        source_fingerprint,
-        source_instance_fingerprint,
-        source_build_variant_fingerprint,
+        artifact_symbol_fingerprint: correspondence.artifact_symbol_fingerprint,
+        source_kind: correspondence.source_kind,
+        source_fingerprint: correspondence.source_fingerprint,
+        source_instance_fingerprint: correspondence.source_instance_fingerprint,
+        source_build_variant_fingerprint: correspondence.source_build_variant.as_bytes(),
         evidence: MappingEvidence::new(
             vec![MappingEvidenceFact::SourceMap {
-                source_url: source_url.to_owned(),
+                source_url: correspondence.source_url.to_owned(),
             }],
-            candidate_count,
+            correspondence.candidate_count,
             false,
         ),
         attributed_bytes: None,
-        build_variant_fingerprint: artifact_variant,
+        build_variant_fingerprint: correspondence.artifact_build_variant.as_bytes(),
     }
 }
 
@@ -485,7 +521,7 @@ pub(in crate::artifact) fn enrich_linker_map_evidence(
     artifact: &ArtifactIr,
     units: &[SourceUnitIdentity],
     entries: &[LinkerMapEntry],
-    artifact_variant: [u8; 16],
+    artifact_variant: BuildVariantFingerprint,
     rows: &mut CorrelationRows,
 ) {
     // Both sides of this join are grouped by the name they are matched on, so
@@ -523,7 +559,7 @@ pub(in crate::artifact) fn enrich_linker_map_evidence(
             {
                 candidates
                     .entry((
-                        unit.fingerprint,
+                        *unit.fingerprint.as_bytes(),
                         source_unit_instance_fingerprint(unit),
                         unit.build_variant_fingerprint,
                     ))
@@ -571,12 +607,12 @@ pub(in crate::artifact) fn enrich_linker_map_evidence(
                 schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
                 artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
                 source_kind: ArtifactAnalysisSourceKind::Unit,
-                source_fingerprint: unit.fingerprint,
+                source_fingerprint: *unit.fingerprint.as_bytes(),
                 source_instance_fingerprint: source_unit_instance_fingerprint(unit),
                 source_build_variant_fingerprint: unit.build_variant_fingerprint,
                 evidence: MappingEvidence::new(facts, candidate_count, has_conflict),
                 attributed_bytes: None,
-                build_variant_fingerprint: artifact_variant,
+                build_variant_fingerprint: artifact_variant.as_bytes(),
             });
         }
         rows.unmapped_symbols.retain(|unmapped| {
@@ -627,7 +663,7 @@ pub(in crate::artifact) fn correlate_debug_locations(
     instantiations: &[SourceInstantiation],
     resolved_symbols: &[SourceResolvedSymbol],
     resolved_calls: &[SourceResolvedCall],
-    artifact_variant: [u8; 16],
+    artifact_variant: BuildVariantFingerprint,
 ) -> CorrelationRows {
     let mut rows = CorrelationRows {
         clone_fragments: fragments.to_vec(),
@@ -647,7 +683,7 @@ pub(in crate::artifact) fn correlate_debug_locations(
                     schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
                     artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
                     source_kind: ArtifactAnalysisSourceKind::Unit,
-                    source_fingerprint: unit.fingerprint,
+                    source_fingerprint: *unit.fingerprint.as_bytes(),
                     source_instance_fingerprint: source_unit_instance_fingerprint(unit),
                     source_build_variant_fingerprint: unit.build_variant_fingerprint,
                     evidence: MappingEvidence::new(
@@ -656,7 +692,7 @@ pub(in crate::artifact) fn correlate_debug_locations(
                         false,
                     ),
                     attributed_bytes: None,
-                    build_variant_fingerprint: artifact_variant,
+                    build_variant_fingerprint: artifact_variant.as_bytes(),
                 });
                 mapped = true;
             }
@@ -667,8 +703,8 @@ pub(in crate::artifact) fn correlate_debug_locations(
                     schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
                     artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
                     source_kind: ArtifactAnalysisSourceKind::Fragment,
-                    source_fingerprint: fragment.fingerprint,
-                    source_instance_fingerprint: fragment.finding_id,
+                    source_fingerprint: *fragment.fingerprint.as_bytes(),
+                    source_instance_fingerprint: *fragment.finding_id.as_bytes(),
                     source_build_variant_fingerprint: fragment.build_variant_fingerprint,
                     evidence: MappingEvidence::new(
                         vec![source_location_evidence(frame)],
@@ -676,7 +712,7 @@ pub(in crate::artifact) fn correlate_debug_locations(
                         false,
                     ),
                     attributed_bytes: None,
-                    build_variant_fingerprint: artifact_variant,
+                    build_variant_fingerprint: artifact_variant.as_bytes(),
                 });
                 mapped = true;
             }
@@ -758,7 +794,7 @@ pub(in crate::artifact) fn source_unit_instance_fingerprint(unit: &SourceUnitIde
         bytes.extend(u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
         bytes.extend(field);
     }
-    bytes.extend(unit.fingerprint);
+    bytes.extend(*unit.fingerprint.as_bytes());
     bytes.extend(unit.occurrence_ordinal.to_le_bytes());
     bytes.extend(unit.build_variant_fingerprint);
     codehelion_artifact::ArtifactFingerprint::from_content("source-unit-instance-v1", &bytes)

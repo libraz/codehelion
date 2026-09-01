@@ -24,10 +24,16 @@ pub mod metrics;
 pub mod native;
 #[cfg(feature = "pe")]
 pub mod pe;
+pub mod support;
 pub mod symbols;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 pub mod x86;
+
+pub use support::{
+    FORMAT_SUPPORT, FormatSupport, SourceAttribution, SourceEvidence, extension_table,
+    format_support,
+};
 
 /// Version of the artifact IR document.
 pub const ARTIFACT_IR_SCHEMA_VERSION: &str = "artifact-ir-v1";
@@ -73,7 +79,11 @@ pub mod base64_bytes {
 /// A binary container format that codehelion recognises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ArtifactFormat {
-    /// A WebAssembly core module or component.
+    /// A WebAssembly core module.
+    ///
+    /// The component encoding starts with the same magic and is recognised
+    /// here, but no backend parses it: a component input is refused with
+    /// [`ArtifactError::Unsupported`] rather than read as a module.
     Wasm,
     /// An ELF executable, shared library, or relocatable object.
     Elf,
@@ -476,10 +486,12 @@ pub enum ArtifactError {
         /// Parser-provided error explanation.
         message: String,
     },
-    /// The backend is a recognised future format with no parser yet.
+    /// The bytes belong to a recognised format but to an encoding inside it
+    /// that no backend parses, such as a WebAssembly component or an archive
+    /// nested in another archive.
     #[error("{format} is recognised but not supported")]
     Unsupported {
-        /// Recognised format without a backend.
+        /// Format the bytes were recognised as.
         format: ArtifactFormat,
     },
 }
@@ -510,6 +522,10 @@ pub trait ArtifactBackend: Send + Sync {
     /// answer does not depend on any input, and
     /// [`ArtifactCapabilities::debug_info_unreadable`] is an observation about
     /// one parse rather than a declared ability, so it stays false here.
+    ///
+    /// Every implementation returns its row from [`format_support`], so this
+    /// declaration, the format extension table, and the report guidance about
+    /// what to supply for a format all read one definition.
     ///
     /// [`parse`]: ArtifactBackend::parse
     fn capabilities(&self) -> ArtifactCapabilities;

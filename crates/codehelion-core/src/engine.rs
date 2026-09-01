@@ -286,7 +286,7 @@ fn detect_inner(
         .iter()
         .map(|f| segment::segment_ids(f.tokens, f.units))
         .collect();
-    let anchors: Vec<Vec<Option<usize>>> = files
+    let anchors: Vec<Vec<segment::AnchorId>> = files
         .iter()
         .map(|f| segment::anchor_ids(f.tokens, f.units))
         .collect();
@@ -1239,6 +1239,76 @@ mod tests {
             found.contains(&CloneClass::Type2),
             "the renamed copy is still found: {found:?}"
         );
+    }
+
+    #[test]
+    fn a_verbatim_copy_outlives_the_ceiling_that_stopped_the_raw_pass() {
+        // Two files hold one body; a third holds it twice, so every fingerprint
+        // the first two share is a frequent one. Both ceilings that bound the
+        // raw pass therefore fire on exactly the class that carries this copy,
+        // and the copy is only reported at all because the pass that verified
+        // it does not decide what to report by predicting the other pass.
+        let body =
+            "let acc = base + rate * step ; emit ( acc , base , rate , step ) ; drain ( acc ) ;";
+        let first = quick(&format!("fn one ( ) {{ {body} }}"));
+        let second = quick(&format!("fn two ( ) {{ {body} }}"));
+        let third = quick(&format!("fn three ( ) {{ {body} {body} }}"));
+        let units_first = vec![function_unit(0, first.len())];
+        let units_second = vec![function_unit(0, second.len())];
+        let units_third = vec![function_unit(0, third.len())];
+        let files = [
+            InputFile {
+                tokens: &first,
+                units: &units_first,
+            },
+            InputFile {
+                tokens: &second,
+                units: &units_second,
+            },
+            InputFile {
+                tokens: &third,
+                units: &units_third,
+            },
+        ];
+        let exhausted_allowance = EngineConfig {
+            min_clone_tokens: 12,
+            max_statement_window: 1,
+            pair_budget: 2,
+            ..EngineConfig::default()
+        };
+        let frequent_fingerprints = EngineConfig {
+            min_clone_tokens: 12,
+            max_statement_window: 1,
+            posting_cap: 2,
+            ..EngineConfig::default()
+        };
+
+        for (ceiling, config) in [
+            ("the pair allowance", exhausted_allowance),
+            ("the posting cap", frequent_fingerprints),
+        ] {
+            let report = detect(&files, &config);
+
+            assert!(
+                report.stats.pair_budget_exhausted || report.stats.stop_fingerprints > 0,
+                "{ceiling} has to fire for this to be measuring anything: {:#?}",
+                report.stats
+            );
+            let verbatim = report
+                .groups
+                .iter()
+                .filter(|group| {
+                    group.clone_type == CloneClass::Type1
+                        && group.members.iter().any(|member| member.file == 0)
+                        && group.members.iter().any(|member| member.file == 1)
+                })
+                .count();
+            assert_eq!(
+                verbatim, 1,
+                "the copy outlives {ceiling}: {:#?}",
+                report.groups
+            );
+        }
     }
 
     #[test]

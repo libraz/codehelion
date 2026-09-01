@@ -203,7 +203,15 @@ pub struct GroupRow {
     /// Registered SOG evidence for a restricted semantic finding. `None` for
     /// textual and structural clone classes.
     pub semantic: Option<SemanticEvidenceRow>,
-    /// The occurrences, in deterministic order; the first is canonical.
+    /// The occurrences, in deterministic order, the canonical one first.
+    ///
+    /// The canonical member is the copy duplication accounting keeps rather
+    /// than counts as duplicated, so the writer nominates it from content —
+    /// Structural the medoid its group fingerprint is anchored on, Fast the
+    /// smallest position-free occurrence identity among members that all share
+    /// one content. It is never the member a walk happened to reach first: a
+    /// file rename would then move a group's duplicated byte count with no
+    /// change to the code.
     pub members: Vec<MemberRow>,
 }
 

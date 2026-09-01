@@ -7,7 +7,8 @@
 use std::collections::BTreeSet;
 
 use codehelion_core::clone_class::{CloneClass, CloneScope};
-use codehelion_core::stable_id::CloneGroupFingerprint;
+use codehelion_core::engine::Instance;
+use codehelion_core::stable_id::{self, CloneGroupFingerprint, MemberIds, OccurrenceDiscriminator};
 use codehelion_store::snapshot::{
     FileCountsRow, GroupRow, GuardrailsRow, MemberRow, PriorityRow, SummaryRow, UnparsedRow,
 };
@@ -94,6 +95,65 @@ pub(super) fn report(
         siblings: Vec::new(),
         near_misses: Vec::new(),
     }
+}
+
+/// One occurrence of a group's content, with the group's nomination resolved.
+///
+/// Only [`nominated_occurrences`] produces these, so every view of a group
+/// reads its member order and its canonical mark off one decision instead of
+/// arranging its own.
+pub(super) struct Occurrence<'a> {
+    /// Where the occurrence sits, as the detector anchored it.
+    pub instance: &'a Instance,
+    /// The occurrence's position-free identifiers.
+    pub ids: &'a MemberIds,
+    /// Whether the group keeps this copy rather than counting it duplicated.
+    pub canonical: bool,
+}
+
+/// Put a group's occurrences in the one order every view of it lists them in:
+/// the canonical member first.
+///
+/// The canonical member is the copy duplication accounting keeps rather than
+/// counts as duplicated, so which occurrence carries the mark decides how a
+/// group's duplicated bytes are attributed. Where every member shares one
+/// content, nothing about the code separates them and the nomination falls to
+/// the members' position-free identities. It must not fall to the order the
+/// occurrences arrived in: that order follows the walk, and a file rename would
+/// then move the reported byte count of code nobody edited.
+///
+/// The public report and the recorded snapshot are two views of one verdict, so
+/// both take their member list from here; a second nomination on either side is
+/// a second verdict, and the two would disagree as soon as they were derived
+/// differently. Where similarity already picked a representative — a Structural
+/// group's medoid — the occurrences arrive nominated and this is not used.
+pub(super) fn nominated_occurrences<'a>(
+    occurrences: impl IntoIterator<Item = (&'a Instance, &'a MemberIds)>,
+) -> Vec<Occurrence<'a>> {
+    let mut occurrences: Vec<Occurrence<'a>> = occurrences
+        .into_iter()
+        .map(|(instance, ids)| Occurrence {
+            instance,
+            ids,
+            canonical: false,
+        })
+        .collect();
+    let discriminators: Vec<OccurrenceDiscriminator> = occurrences
+        .iter()
+        .map(|occurrence| {
+            OccurrenceDiscriminator::of_fragment(&occurrence.ids.content)
+                .and(OccurrenceDiscriminator::of_finding(&occurrence.ids.finding))
+        })
+        .collect();
+    if let Some(index) = stable_id::canonical_occurrence(&discriminators)
+        && let Some(head) = occurrences.get_mut(..=index)
+    {
+        head.rotate_right(1);
+    }
+    if let Some(canonical) = occurrences.first_mut() {
+        canonical.canonical = true;
+    }
+    occurrences
 }
 
 /// Fields every public group has before mode-specific evidence is attached.
@@ -234,12 +294,66 @@ mod tests {
     use std::cell::Cell;
 
     use codehelion_core::clone_class::{CloneClass, CloneScope};
-    use codehelion_core::stable_id::CloneGroupFingerprint;
+    use codehelion_core::engine::Instance;
+    use codehelion_core::stable_id::{
+        CloneGroupFingerprint, FindingId, FragmentFingerprint, MemberIds,
+    };
     use codehelion_store::snapshot::PriorityRow;
 
     use super::{
-        ReportGroupCore, StoredGroupCore, SuppressionPriority, report_group, stored_group,
+        ReportGroupCore, StoredGroupCore, SuppressionPriority, nominated_occurrences, report_group,
+        stored_group,
     };
+
+    fn instance(file: usize) -> Instance {
+        Instance {
+            file,
+            token_start: 0,
+            token_end: 1,
+            start_line: 1,
+            end_line: 1,
+            unit: None,
+        }
+    }
+
+    /// Two occurrences of one content, told apart only by their finding ids.
+    fn member_ids(finding: u8) -> MemberIds {
+        MemberIds {
+            content: FragmentFingerprint::from_bytes([7; 16]),
+            finding: FindingId::from_bytes([finding; 16]),
+        }
+    }
+
+    #[test]
+    fn the_nomination_does_not_follow_the_order_occurrences_arrive_in() {
+        let instances = [instance(0), instance(1)];
+        let ids = [member_ids(1), member_ids(2)];
+
+        let forward = nominated_occurrences(instances.iter().zip(&ids));
+        let reversed = nominated_occurrences(instances.iter().rev().zip(ids.iter().rev()));
+
+        // One of the two arrival orders leads with the occurrence the
+        // identities do not nominate, so agreeing on a canonical at all means
+        // the list was rearranged rather than taken as it came.
+        assert_eq!(
+            forward.first().map(|occurrence| occurrence.ids.finding),
+            reversed.first().map(|occurrence| occurrence.ids.finding),
+        );
+        for nominated in [&forward, &reversed] {
+            let marked: Vec<usize> = nominated
+                .iter()
+                .enumerate()
+                .filter(|(_, occurrence)| occurrence.canonical)
+                .map(|(position, _)| position)
+                .collect();
+            assert_eq!(marked, vec![0], "exactly the first occurrence is marked");
+            let findings: std::collections::BTreeSet<FindingId> = nominated
+                .iter()
+                .map(|occurrence| occurrence.ids.finding)
+                .collect();
+            assert_eq!(findings.len(), 2, "no occurrence is lost or repeated");
+        }
+    }
 
     #[test]
     fn suppression_priority_stops_after_the_first_match() {

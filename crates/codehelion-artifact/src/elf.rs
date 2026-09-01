@@ -5,6 +5,7 @@
 
 use crate::dwarf::attach_dwarf_frames;
 use crate::native::{collect_sections, collect_text_symbol_ranges, collect_undefined_imports};
+use crate::support::format_support;
 use crate::x86::X86_NORMALIZATION_VERSION;
 use crate::{
     ArtifactBackend, ArtifactCall, ArtifactCapabilities, ArtifactError, ArtifactFingerprint,
@@ -38,16 +39,7 @@ impl ArtifactBackend for ElfBackend {
     }
 
     fn capabilities(&self) -> ArtifactCapabilities {
-        ArtifactCapabilities {
-            symbols: true,
-            call_graph: true,
-            source_mapping: true,
-            debug_info_unreadable: false,
-            normalized_duplicates: true,
-            independent_data_segments: false,
-            relocations: true,
-            data_segments: true,
-        }
+        format_support(ArtifactFormat::Elf).capabilities
     }
 }
 
@@ -161,10 +153,10 @@ fn record_entry_point(
     addresses: &HashMap<u64, ArtifactFingerprint>,
     ir: &mut ArtifactIr,
 ) {
-    if entry_address != 0 {
-        if let Some(fingerprint) = addresses.get(&entry_address) {
-            ir.entry_points.push(*fingerprint);
-        }
+    if entry_address != 0
+        && let Some(fingerprint) = addresses.get(&entry_address)
+    {
+        ir.entry_points.push(*fingerprint);
     }
 }
 
@@ -185,10 +177,10 @@ fn record_init_fini_roots(
             continue;
         }
         for (_, relocation) in section.relocations() {
-            if let RelocationTarget::Symbol(index) = relocation.target() {
-                if let Some(Some(fingerprint)) = fingerprints.get(&index) {
-                    roots.insert(*fingerprint);
-                }
+            if let RelocationTarget::Symbol(index) = relocation.target()
+                && let Some(Some(fingerprint)) = fingerprints.get(&index)
+            {
+                roots.insert(*fingerprint);
             }
         }
         if let Ok(data) = section.data() {
@@ -287,47 +279,57 @@ fn x86_direct_calls(
             let mut decoder = Decoder::with_ip(bitness, &caller.code, ip, DecoderOptions::NONE);
             while decoder.can_decode() {
                 let instruction = decoder.decode();
-                if instruction.is_invalid()
-                    || instruction.mnemonic() != Mnemonic::Call
-                    || !matches!(
-                        instruction.op0_kind(),
-                        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
-                    )
-                {
+                if instruction.is_invalid() || instruction.mnemonic() != Mnemonic::Call {
                     continue;
                 }
-                let Some(operand_offset) = instruction
-                    .ip()
-                    .checked_sub(section.address())
-                    .and_then(|offset| offset.checked_add(1))
-                else {
-                    continue;
-                };
-                let (target, unresolved) = relocation_targets.get(&operand_offset).map_or_else(
-                    || {
-                        let target = addresses
-                            .get(&(section.index(), instruction.near_branch_target()))
-                            .copied();
-                        (
-                            target,
-                            target
-                                .is_none()
-                                .then_some(UnresolvedCall::MissingRelocation),
+                // A call through a register, a memory operand, or a far pointer
+                // reaches a callee this backend cannot name, and virtual
+                // dispatch is compiled to exactly those forms. Dropping it
+                // would leave a graph that looks complete while missing every
+                // edge a vtable supplies.
+                let operand_offset = matches!(
+                    instruction.op0_kind(),
+                    OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+                )
+                .then(|| {
+                    instruction
+                        .ip()
+                        .checked_sub(section.address())
+                        .and_then(|offset| offset.checked_add(1))
+                });
+                let (target, unresolved) = match operand_offset {
+                    None => (None, Some(UnresolvedCall::NativeIndirect)),
+                    // A near branch whose operand lies outside this section is
+                    // a target the parser could not read, not an external one.
+                    Some(None) => (None, Some(UnresolvedCall::MissingRelocation)),
+                    Some(Some(operand_offset)) => {
+                        relocation_targets.get(&operand_offset).map_or_else(
+                            || {
+                                let target = addresses
+                                    .get(&(section.index(), instruction.near_branch_target()))
+                                    .copied();
+                                (
+                                    target,
+                                    target
+                                        .is_none()
+                                        .then_some(UnresolvedCall::MissingRelocation),
+                                )
+                            },
+                            |relocation_target| match relocation_target {
+                                RelocationTarget::Symbol(index) => {
+                                    fingerprints.get(index).and_then(|value| *value).map_or(
+                                        (None, Some(UnresolvedCall::ExternalImport)),
+                                        |target| (Some(target), None),
+                                    )
+                                }
+                                RelocationTarget::Section(_) | RelocationTarget::Absolute => {
+                                    (None, Some(UnresolvedCall::MissingRelocation))
+                                }
+                                _ => (None, Some(UnresolvedCall::MissingRelocation)),
+                            },
                         )
-                    },
-                    |relocation_target| match relocation_target {
-                        RelocationTarget::Symbol(index) => fingerprints
-                            .get(index)
-                            .and_then(|value| *value)
-                            .map_or((None, Some(UnresolvedCall::ExternalImport)), |target| {
-                                (Some(target), None)
-                            }),
-                        RelocationTarget::Section(_) | RelocationTarget::Absolute => {
-                            (None, Some(UnresolvedCall::MissingRelocation))
-                        }
-                        _ => (None, Some(UnresolvedCall::MissingRelocation)),
-                    },
-                );
+                    }
+                };
                 calls.push(ArtifactCall {
                     caller: caller.fingerprint,
                     target,

@@ -1,10 +1,15 @@
 //! Human-readable and CSV artifact report rendering.
 
 use super::correlation::{AttributionBasis, RefactorSavingsAssumption};
-use super::model::{ArtifactComparisonReport, ArtifactReport, SourceMapResolutionStatus};
+use super::model::{
+    ARTIFACT_CSV_HEADER, ArtifactComparisonReport, ArtifactReport, AssumptionScope,
+    COMPARE_CSV_HEADER, ReportAssumption, SourceMapResolutionStatus, column, compare_column,
+    comparison_assumptions, dead_code_unavailability, report_assumptions,
+    retained_size_unavailability,
+};
 use super::{
-    ARTIFACT_CSV_COLUMNS, Context, EstimatedRefactorSavingsBytes, Result, VerifiedSavingsBytes,
-    Write, csv, metrics, optional_f64,
+    Context, EstimatedRefactorSavingsBytes, Result, VerifiedSavingsBytes, Write, csv, metrics,
+    optional_f64,
 };
 
 #[allow(clippy::too_many_lines)] // The report order is its public text contract.
@@ -104,6 +109,25 @@ pub(super) fn render_text(
             "source maps: {resolved} resolved, {} unavailable",
             report.source_maps.len().saturating_sub(resolved)
         )?;
+        // Each declared reference states its own outcome, as it does in the
+        // JSON and CSV renderings of the same report.
+        for map in &report.source_maps {
+            match &map.status {
+                SourceMapResolutionStatus::Resolved {
+                    local_path,
+                    sources,
+                    ..
+                } => writeln!(
+                    out,
+                    "  {}: resolved to {local_path} ({} sources)",
+                    map.uri,
+                    sources.len()
+                )?,
+                SourceMapResolutionStatus::Unavailable { reason } => {
+                    writeln!(out, "  {}: unavailable ({reason})", map.uri)?;
+                }
+            }
+        }
     }
     if let Some(correlation) = &report.correlation {
         writeln!(
@@ -279,7 +303,7 @@ pub(super) fn render_text(
     )?;
     writeln!(
         out,
-        "  upper_bound_savings_bytes: {} (upper bound, not guaranteed)",
+        "  upper_bound_savings_bytes: {} (duplicate code only; upper bound, not guaranteed)",
         optional_bytes(report.sizes.upper_bound_savings_bytes)
     )?;
     writeln!(
@@ -302,9 +326,10 @@ pub(super) fn render_text(
         "  savings_confidence: {:?}",
         report.sizes.savings_confidence
     )?;
-    for assumption in &report.sizes.assumptions {
-        writeln!(out, "  assumption: {assumption}")?;
-    }
+    // Every rendering takes its qualifying statements from one description of
+    // the report, so a reader of any one format sees the same set.
+    let assumptions = report_assumptions(report);
+    render_assumptions(&assumptions, AssumptionScope::Sizes, out)?;
     if let Some(dead_code) = &report.dead_code {
         let verdict = if dead_code.definitive {
             "definitive"
@@ -319,13 +344,12 @@ pub(super) fn render_text(
         for symbol in &dead_code.symbols {
             writeln!(out, "  {symbol}")?;
         }
-        for assumption in &dead_code.assumptions {
-            writeln!(out, "  assumption: {assumption}")?;
-        }
+        render_assumptions(&assumptions, AssumptionScope::DeadCode, out)?;
     } else {
         writeln!(
             out,
-            "dead code: unavailable (no resolved exported root set)"
+            "dead code: unavailable ({})",
+            dead_code_unavailability(report)
         )?;
     }
     if let Some(retained) = &report.retained_sizes {
@@ -334,10 +358,18 @@ pub(super) fn render_text(
             writeln!(out, "  {} {} bytes", item.symbol, item.retained_bytes)?;
         }
     } else {
-        writeln!(
-            out,
-            "retained sizes: unavailable (incomplete or ambiguous call graph)"
-        )?;
+        // The conditions come from the walk that withdrew the values, so this
+        // line never names a cause that did not hold for this artifact.
+        let unavailable = retained_size_unavailability(report);
+        if unavailable.is_empty() {
+            writeln!(out, "retained sizes: unavailable")?;
+        } else {
+            writeln!(
+                out,
+                "retained sizes: unavailable ({})",
+                unavailable.join("; ")
+            )?;
+        }
     }
     render_groups("exact", &report.duplicate_groups.exact, out)?;
     render_groups("normalized", &report.duplicate_groups.normalized, out)?;
@@ -394,6 +426,21 @@ pub(super) fn render_text(
                 },
             )?;
         }
+    }
+    Ok(())
+}
+
+/// Print the statements of one scope, indented under the block they qualify.
+fn render_assumptions(
+    assumptions: &[ReportAssumption<'_>],
+    scope: AssumptionScope,
+    out: &mut impl Write,
+) -> Result<()> {
+    for assumption in assumptions
+        .iter()
+        .filter(|assumption| assumption.scope == scope)
+    {
+        writeln!(out, "  assumption: {}", assumption.text)?;
     }
     Ok(())
 }
@@ -473,7 +520,7 @@ fn refactor_savings_assumption_text(assumption: &RefactorSavingsAssumption) -> S
     }
 }
 
-fn optional_bytes(value: Option<u64>) -> String {
+pub(super) fn optional_bytes(value: Option<u64>) -> String {
     value.map_or_else(|| "unavailable".to_owned(), |value| value.to_string())
 }
 
@@ -487,101 +534,120 @@ fn optional_verified_savings(value: Option<VerifiedSavingsBytes>) -> String {
 
 #[allow(clippy::too_many_lines)] // CSV records intentionally remain together to preserve one fixed schema.
 pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Result<()> {
-    writeln!(
-        out,
-        "record_type,path,format,kind,fingerprint,name,offset,size,duplicated_bytes,retained_bytes,dead_code_status,observed_bytes,source_run,mappings,mapped_symbols,unmapped_symbols,upper_bound_savings_bytes,estimated_refactor_savings_bytes,verified_savings_bytes,origin_build_variant_fingerprint,instantiations,translation_units,source_build_variant_fingerprint,artifact_build_variant_fingerprint,mapping_confidence,clone_confidence,model_confidence,savings_confidence,model_schema_version,estimate_assumptions_json,section,executable,module,duplicated_bytes_normalized,estimated_duplicated_bytes,attribution_basis"
-    )?;
+    writeln!(out, "{}", ARTIFACT_CSV_HEADER.join(","))?;
     let correlation = report.correlation.as_ref();
-    let mut summary = artifact_csv_row();
-    "summary".clone_into(&mut summary[0]);
-    summary[1] = csv(&report.path);
-    summary[2] = report.format.to_string();
-    summary[4].clone_from(&report.fingerprint);
-    summary[8] = report.sizes.duplicated_bytes.to_string();
-    summary[9] = optional_bytes(report.sizes.retained_bytes);
-    summary[11] = report.sizes.observed_bytes.to_string();
-    summary[12] = correlation.map_or_else(String::new, |value| value.source_run.to_string());
-    summary[13] = correlation.map_or_else(String::new, |value| value.mappings.to_string());
-    summary[14] = correlation.map_or_else(String::new, |value| value.mapped_symbols.to_string());
-    summary[15] = correlation.map_or_else(String::new, |value| value.unmapped_symbols.to_string());
-    summary[16] = optional_bytes(report.sizes.upper_bound_savings_bytes);
-    summary[17] = optional_estimated_savings(report.sizes.estimated_refactor_savings_bytes);
-    summary[18] = optional_verified_savings(report.sizes.verified_savings_bytes);
-    summary[33] = optional_bytes(report.sizes.duplicated_bytes_normalized);
+    let mut summary = artifact_csv_row("summary", report);
+    summary[column::FINGERPRINT].clone_from(&report.fingerprint);
+    summary[column::DUPLICATED_BYTES] = report.sizes.duplicated_bytes.to_string();
+    summary[column::RETAINED_BYTES] = optional_bytes(report.sizes.retained_bytes);
+    summary[column::OBSERVED_BYTES] = report.sizes.observed_bytes.to_string();
+    summary[column::SOURCE_RUN] =
+        correlation.map_or_else(String::new, |value| value.source_run.to_string());
+    summary[column::MAPPINGS] =
+        correlation.map_or_else(String::new, |value| value.mappings.to_string());
+    summary[column::MAPPED_SYMBOLS] =
+        correlation.map_or_else(String::new, |value| value.mapped_symbols.to_string());
+    summary[column::UNMAPPED_SYMBOLS] =
+        correlation.map_or_else(String::new, |value| value.unmapped_symbols.to_string());
+    summary[column::UPPER_BOUND_SAVINGS_BYTES] =
+        optional_bytes(report.sizes.upper_bound_savings_bytes);
+    summary[column::ESTIMATED_REFACTOR_SAVINGS_BYTES] =
+        optional_estimated_savings(report.sizes.estimated_refactor_savings_bytes);
+    summary[column::VERIFIED_SAVINGS_BYTES] =
+        optional_verified_savings(report.sizes.verified_savings_bytes);
+    summary[column::DUPLICATED_BYTES_NORMALIZED] =
+        optional_bytes(report.sizes.duplicated_bytes_normalized);
+    // Every size category the text and JSON renderings expose is obtainable
+    // from this one record, rather than being reachable in two formats out of
+    // three.
+    summary[column::SHARED_DEPENDENCY_BYTES] = optional_bytes(report.sizes.shared_dependency_bytes);
+    summary[column::CODE_SECTION_BYTES] = report.code_section_bytes.to_string();
+    summary[column::DATA_SEGMENT_BYTES] = report.data_segment_bytes.to_string();
+    summary[column::CLONE_CONFIDENCE] = format!("{:?}", report.sizes.clone_confidence);
+    summary[column::SAVINGS_CONFIDENCE] = format!("{:?}", report.sizes.savings_confidence);
+    summary[column::ARTIFACT_SYMBOLS] = report.symbols.len().to_string();
     write_artifact_csv_row(out, &summary)?;
     if let Some(variant) = &report.build_variant {
-        let mut row = artifact_csv_row();
-        "build-variant".clone_into(&mut row[0]);
-        row[1] = csv(&report.path);
-        row[2] = report.format.to_string();
-        row[4].clone_from(&variant.fingerprint);
-        row[5] = csv(&variant.manifest_path);
+        let mut row = artifact_csv_row("build-variant", report);
+        row[column::FINGERPRINT].clone_from(&variant.fingerprint);
+        row[column::NAME] = csv(&variant.manifest_path);
+        write_artifact_csv_row(out, &row)?;
+    }
+    if let Some(containment) = &report.containment {
+        let mut row = artifact_csv_row("containment", report);
+        row[column::MAX_INPUT_BYTES] = containment.max_input_bytes.to_string();
+        row[column::WORKER_TIMEOUT_SECONDS] = containment.worker_timeout_seconds.to_string();
+        row[column::WORKER_MEMORY_LIMIT_BYTES] = containment.worker_memory_limit_bytes.to_string();
         write_artifact_csv_row(out, &row)?;
     }
     for member in &report.archive_members {
-        let mut row = artifact_csv_row();
-        "archive-member".clone_into(&mut row[0]);
-        row[1] = csv(&report.path);
-        row[2] = report.format.to_string();
-        row[3] = member
+        let mut row = artifact_csv_row("archive-member", report);
+        row[column::KIND] = member
             .format
             .map_or_else(|| "unknown".to_owned(), |format| format.to_string());
-        row[4].clone_from(&member.fingerprint);
-        row[5] = csv(&member.name);
-        row[6] = member.offset.to_string();
-        row[7] = member.size.to_string();
-        row[10] = csv(member.parse_error.as_deref().unwrap_or("parsed"));
+        row[column::FINGERPRINT].clone_from(&member.fingerprint);
+        row[column::NAME] = csv(&member.name);
+        row[column::OFFSET] = member.offset.to_string();
+        row[column::SIZE] = member.size.to_string();
+        row[column::DEAD_CODE_STATUS] = csv(member.parse_error.as_deref().unwrap_or("parsed"));
+        write_artifact_csv_row(out, &row)?;
+    }
+    for map in &report.source_maps {
+        let mut row = artifact_csv_row("source-map", report);
+        row[column::SOURCE_MAP_URI] = csv(&map.uri);
+        match &map.status {
+            SourceMapResolutionStatus::Resolved {
+                local_path,
+                sources,
+                ..
+            } => {
+                "resolved".clone_into(&mut row[column::KIND]);
+                row[column::SOURCE_MAP_LOCAL_PATH] = csv(local_path);
+                row[column::SOURCE_MAP_SOURCES] = csv(&sources.join(";"));
+            }
+            SourceMapResolutionStatus::Unavailable { reason } => {
+                (*reason).clone_into(&mut row[column::KIND]);
+            }
+        }
         write_artifact_csv_row(out, &row)?;
     }
     for section in &report.section_details {
-        let mut row = artifact_csv_row();
-        "section".clone_into(&mut row[0]);
-        row[1] = csv(&report.path);
-        row[2] = report.format.to_string();
-        row[3] = if section.executable {
+        let mut row = artifact_csv_row("section", report);
+        row[column::KIND] = if section.executable {
             "executable".to_owned()
         } else {
             "non-executable".to_owned()
         };
-        row[5] = csv(section.name.as_deref().unwrap_or(""));
-        row[6] = section.offset.to_string();
-        row[7] = section.size.to_string();
-        row[31] = section.executable.to_string();
+        row[column::NAME] = csv(section.name.as_deref().unwrap_or(""));
+        row[column::OFFSET] = section.offset.to_string();
+        row[column::SIZE] = section.size.to_string();
+        row[column::EXECUTABLE] = section.executable.to_string();
         write_artifact_csv_row(out, &row)?;
     }
     for import in &report.import_details {
-        let mut row = artifact_csv_row();
-        "import".clone_into(&mut row[0]);
-        row[1] = csv(&report.path);
-        row[2] = report.format.to_string();
-        artifact_import_kind_label(import.kind).clone_into(&mut row[3]);
-        row[5] = csv(import.name.as_deref().unwrap_or(""));
-        row[32] = csv(import.module.as_deref().unwrap_or(""));
+        let mut row = artifact_csv_row("import", report);
+        artifact_import_kind_label(import.kind).clone_into(&mut row[column::KIND]);
+        row[column::NAME] = csv(import.name.as_deref().unwrap_or(""));
+        row[column::MODULE] = csv(import.module.as_deref().unwrap_or(""));
         write_artifact_csv_row(out, &row)?;
     }
     for relocation in &report.relocation_details {
-        let mut row = artifact_csv_row();
-        "relocation".clone_into(&mut row[0]);
-        row[1] = csv(&report.path);
-        row[2] = report.format.to_string();
-        row[3] = csv(&relocation.kind);
-        row[5] = csv(relocation.target.as_deref().unwrap_or(""));
-        row[6] = relocation.offset.to_string();
-        row[30] = relocation
+        let mut row = artifact_csv_row("relocation", report);
+        row[column::KIND] = csv(&relocation.kind);
+        row[column::NAME] = csv(relocation.target.as_deref().unwrap_or(""));
+        row[column::OFFSET] = relocation.offset.to_string();
+        row[column::SECTION] = relocation
             .section
             .map_or_else(String::new, |section| section.to_string());
         write_artifact_csv_row(out, &row)?;
     }
     for segment in &report.data_segment_details {
-        let mut row = artifact_csv_row();
-        "data-segment".clone_into(&mut row[0]);
-        row[1] = csv(&report.path);
-        row[2] = report.format.to_string();
-        "exact-data".clone_into(&mut row[3]);
-        row[4].clone_from(&segment.fingerprint);
-        row[6] = segment.offset.to_string();
-        row[7] = segment.size.to_string();
-        row[30] = segment
+        let mut row = artifact_csv_row("data-segment", report);
+        "exact-data".clone_into(&mut row[column::KIND]);
+        row[column::FINGERPRINT].clone_from(&segment.fingerprint);
+        row[column::OFFSET] = segment.offset.to_string();
+        row[column::SIZE] = segment.size.to_string();
+        row[column::SECTION] = segment
             .section
             .map_or_else(String::new, |section| section.to_string());
         write_artifact_csv_row(out, &row)?;
@@ -592,23 +658,18 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
         ("data", &report.duplicate_groups.data),
     ] {
         for group in groups {
-            let mut row = artifact_csv_row();
-            "duplicate-group".clone_into(&mut row[0]);
-            row[1] = csv(&report.path);
-            row[2] = report.format.to_string();
-            kind.clone_into(&mut row[3]);
-            row[4] = group.fingerprint.to_string();
-            row[8] = group.duplicated_bytes.to_string();
+            let mut row = artifact_csv_row("duplicate-group", report);
+            kind.clone_into(&mut row[column::KIND]);
+            row[column::FINGERPRINT] = group.fingerprint.to_string();
+            row[column::DUPLICATED_BYTES] = group.duplicated_bytes.to_string();
+            row[column::MEMBERS] = group.members.len().to_string();
             write_artifact_csv_row(out, &row)?;
             for member in &group.members {
-                let mut row = artifact_csv_row();
-                "duplicate-member".clone_into(&mut row[0]);
-                row[1] = csv(&report.path);
-                row[2] = report.format.to_string();
-                kind.clone_into(&mut row[3]);
-                row[4] = member.symbol.to_string();
-                row[6] = member.offset.to_string();
-                row[7] = member.size.to_string();
+                let mut row = artifact_csv_row("duplicate-member", report);
+                kind.clone_into(&mut row[column::KIND]);
+                row[column::FINGERPRINT] = member.symbol.to_string();
+                row[column::OFFSET] = member.offset.to_string();
+                row[column::SIZE] = member.size.to_string();
                 write_artifact_csv_row(out, &row)?;
             }
         }
@@ -620,23 +681,17 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
             "candidate"
         };
         for symbol in &dead_code.symbols {
-            let mut row = artifact_csv_row();
-            "dead-code".clone_into(&mut row[0]);
-            row[1] = csv(&report.path);
-            row[2] = report.format.to_string();
-            row[4] = symbol.to_string();
-            status.clone_into(&mut row[10]);
+            let mut row = artifact_csv_row("dead-code", report);
+            row[column::FINGERPRINT] = symbol.to_string();
+            status.clone_into(&mut row[column::DEAD_CODE_STATUS]);
             write_artifact_csv_row(out, &row)?;
         }
     }
     if let Some(retained) = &report.retained_sizes {
         for item in retained {
-            let mut row = artifact_csv_row();
-            "retained-size".clone_into(&mut row[0]);
-            row[1] = csv(&report.path);
-            row[2] = report.format.to_string();
-            row[4] = item.symbol.to_string();
-            row[9] = item.retained_bytes.to_string();
+            let mut row = artifact_csv_row("retained-size", report);
+            row[column::FINGERPRINT] = item.symbol.to_string();
+            row[column::RETAINED_BYTES] = item.retained_bytes.to_string();
             write_artifact_csv_row(out, &row)?;
         }
     }
@@ -645,24 +700,27 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
         // reader taking either one by position never receives the other kind
         // of number.
         for attribution in &correlation.clone_group_attributions {
-            let mut row = artifact_csv_row();
-            "clone-group-attribution".clone_into(&mut row[0]);
-            row[1] = csv(&report.path);
-            row[2] = report.format.to_string();
-            "clone-group-attribution".clone_into(&mut row[3]);
-            row[4].clone_from(&attribution.clone_group_fingerprint);
-            row[8] = attribution
+            let mut row = artifact_csv_row("clone-group-attribution", report);
+            "clone-group-attribution".clone_into(&mut row[column::KIND]);
+            row[column::FINGERPRINT].clone_from(&attribution.clone_group_fingerprint);
+            row[column::DUPLICATED_BYTES] = attribution
                 .duplicated_bytes
                 .map_or_else(String::new, |bytes| bytes.to_string());
-            row[20] = attribution.attributed_noncanonical_members.to_string();
-            row[22].clone_from(&attribution.source_build_variant_fingerprint);
-            row[25] = format!("{:.3}", attribution.clone_confidence);
-            row[34] = attribution
+            // The attributed count and the members it was drawn from each
+            // carry the column that names them, so the ratio the text states
+            // is recoverable here.
+            row[column::MEMBERS] = attribution.members.to_string();
+            row[column::ATTRIBUTED_NONCANONICAL_MEMBERS] =
+                attribution.attributed_noncanonical_members.to_string();
+            row[column::SOURCE_BUILD_VARIANT_FINGERPRINT]
+                .clone_from(&attribution.source_build_variant_fingerprint);
+            row[column::CLONE_CONFIDENCE] = format!("{:.3}", attribution.clone_confidence);
+            row[column::ESTIMATED_DUPLICATED_BYTES] = attribution
                 .estimated_duplicated_bytes
                 .map_or_else(String::new, |bytes| bytes.to_string());
             // A group whose members were not all attributed carries no byte
             // total at all, so it names no evidence class either.
-            row[35] = attribution
+            row[column::ATTRIBUTION_BASIS] = attribution
                 .duplicated_bytes
                 .map(|_| AttributionBasis::Observed)
                 .or_else(|| {
@@ -676,84 +734,104 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
             write_artifact_csv_row(out, &row)?;
         }
         for estimate in &correlation.estimated_refactor_savings {
-            let mut row = artifact_csv_row();
-            "clone-group-savings".clone_into(&mut row[0]);
-            row[1] = csv(&report.path);
-            row[2] = report.format.to_string();
-            "refactor-estimate".clone_into(&mut row[3]);
-            row[4].clone_from(&estimate.clone_group_fingerprint);
+            let mut row = artifact_csv_row("clone-group-savings", report);
+            "refactor-estimate".clone_into(&mut row[column::KIND]);
+            row[column::FINGERPRINT].clone_from(&estimate.clone_group_fingerprint);
             let attributed = estimate.duplicated_bytes.to_string();
             if estimate.duplicated_bytes_basis.is_estimated() {
-                row[34] = attributed;
+                row[column::ESTIMATED_DUPLICATED_BYTES] = attributed;
             } else {
-                row[8] = attributed;
+                row[column::DUPLICATED_BYTES] = attributed;
             }
-            attribution_basis_field(estimate.duplicated_bytes_basis).clone_into(&mut row[35]);
-            row[17] = estimate.estimated_refactor_savings_bytes.0.to_string();
-            row[22].clone_from(&estimate.source_build_variant_fingerprint);
-            row[23].clone_from(&estimate.artifact_build_variant_fingerprint);
-            row[24] = format!("{:?}", estimate.mapping_confidence);
-            row[25] = format!("{:.3}", estimate.clone_confidence);
-            row[26] = format!("{:?}", estimate.model_confidence);
-            row[27] = format!("{:?}", estimate.savings_confidence);
-            estimate.model_schema_version.clone_into(&mut row[28]);
-            row[29] = csv(&serde_json::to_string(&estimate.assumptions)
-                .context("serializing CSV refactoring-estimate assumptions")?);
+            attribution_basis_field(estimate.duplicated_bytes_basis)
+                .clone_into(&mut row[column::ATTRIBUTION_BASIS]);
+            row[column::ESTIMATED_REFACTOR_SAVINGS_BYTES] =
+                estimate.estimated_refactor_savings_bytes.0.to_string();
+            row[column::SOURCE_BUILD_VARIANT_FINGERPRINT]
+                .clone_from(&estimate.source_build_variant_fingerprint);
+            row[column::ARTIFACT_BUILD_VARIANT_FINGERPRINT]
+                .clone_from(&estimate.artifact_build_variant_fingerprint);
+            row[column::MAPPING_CONFIDENCE] = format!("{:?}", estimate.mapping_confidence);
+            row[column::CLONE_CONFIDENCE] = format!("{:.3}", estimate.clone_confidence);
+            row[column::MODEL_CONFIDENCE] = format!("{:?}", estimate.model_confidence);
+            row[column::SAVINGS_CONFIDENCE] = format!("{:?}", estimate.savings_confidence);
+            estimate
+                .model_schema_version
+                .clone_into(&mut row[column::MODEL_SCHEMA_VERSION]);
+            row[column::ESTIMATE_ASSUMPTIONS_JSON] =
+                csv(&serde_json::to_string(&estimate.assumptions)
+                    .context("serializing CSV refactoring-estimate assumptions")?);
             write_artifact_csv_row(out, &row)?;
         }
         for origin in &correlation.generic_origins {
-            let mut row = artifact_csv_row();
-            "generic-origin".clone_into(&mut row[0]);
-            row[1] = csv(&report.path);
-            row[2] = report.format.to_string();
-            "generic-origin".clone_into(&mut row[3]);
-            row[4].clone_from(&origin.origin_fingerprint);
-            row[5] = csv(&origin.definition);
-            row[7] = origin.observed_symbol_bytes.to_string();
-            row[8] = origin.normalized_instruction_duplicated_bytes.to_string();
-            row[19].clone_from(&origin.origin_build_variant_fingerprint);
-            row[20] = origin.instantiations.to_string();
-            row[21] = origin.translation_units.to_string();
+            let mut row = artifact_csv_row("generic-origin", report);
+            "generic-origin".clone_into(&mut row[column::KIND]);
+            row[column::FINGERPRINT].clone_from(&origin.origin_fingerprint);
+            row[column::NAME] = csv(&origin.definition);
+            row[column::SIZE] = origin.observed_symbol_bytes.to_string();
+            row[column::DUPLICATED_BYTES] =
+                origin.normalized_instruction_duplicated_bytes.to_string();
+            row[column::RETAINED_BYTES] = optional_bytes(origin.retained_size_sum);
+            row[column::ORIGIN_BUILD_VARIANT_FINGERPRINT]
+                .clone_from(&origin.origin_build_variant_fingerprint);
+            row[column::INSTANTIATIONS] = origin.instantiations.to_string();
+            row[column::TRANSLATION_UNITS] = origin.translation_units.to_string();
+            row[column::ARTIFACT_SYMBOLS] = origin.artifact_symbols.to_string();
             write_artifact_csv_row(out, &row)?;
             for specialization in &origin.specializations {
-                let mut row = artifact_csv_row();
-                "generic-specialization".clone_into(&mut row[0]);
-                row[1] = csv(&report.path);
-                row[2] = report.format.to_string();
-                "generic-origin".clone_into(&mut row[3]);
-                row[4].clone_from(&origin.origin_fingerprint);
-                row[5] = csv(&specialization.instantiation_key);
-                row[7] = specialization.observed_symbol_bytes.to_string();
-                row[19].clone_from(&origin.origin_build_variant_fingerprint);
-                "1".clone_into(&mut row[20]);
-                row[21] = specialization.translation_units.to_string();
+                let mut row = artifact_csv_row("generic-specialization", report);
+                "generic-origin".clone_into(&mut row[column::KIND]);
+                row[column::FINGERPRINT].clone_from(&origin.origin_fingerprint);
+                row[column::NAME] = csv(&specialization.instantiation_key);
+                row[column::SIZE] = specialization.observed_symbol_bytes.to_string();
+                row[column::ORIGIN_BUILD_VARIANT_FINGERPRINT]
+                    .clone_from(&origin.origin_build_variant_fingerprint);
+                "1".clone_into(&mut row[column::INSTANTIATIONS]);
+                row[column::TRANSLATION_UNITS] = specialization.translation_units.to_string();
+                row[column::ARTIFACT_SYMBOLS] = specialization.artifact_symbols.to_string();
                 write_artifact_csv_row(out, &row)?;
             }
         }
         for origin in &correlation.macro_origins {
-            let mut row = artifact_csv_row();
-            "macro-origin".clone_into(&mut row[0]);
-            row[1] = csv(&report.path);
-            row[2] = report.format.to_string();
-            "macro-origin".clone_into(&mut row[3]);
-            row[4].clone_from(&origin.origin_fingerprint);
-            row[5] = csv(&origin.definition_paths.join(";"));
-            row[7] = origin.observed_symbol_bytes.to_string();
-            row[19].clone_from(&origin.origin_build_variant_fingerprint);
-            row[20] = origin.artifact_symbols.to_string();
-            row[21] = origin.definition_paths.len().to_string();
+            let mut row = artifact_csv_row("macro-origin", report);
+            "macro-origin".clone_into(&mut row[column::KIND]);
+            row[column::FINGERPRINT].clone_from(&origin.origin_fingerprint);
+            row[column::NAME] = csv(&origin.definition_paths.join(";"));
+            row[column::SIZE] = origin.observed_symbol_bytes.to_string();
+            row[column::ORIGIN_BUILD_VARIANT_FINGERPRINT]
+                .clone_from(&origin.origin_build_variant_fingerprint);
+            // Symbol counts and definition paths are neither instantiations
+            // nor translation units, and now say which they are.
+            row[column::ARTIFACT_SYMBOLS] = origin.artifact_symbols.to_string();
+            row[column::DEFINITION_PATH_COUNT] = origin.definition_paths.len().to_string();
             write_artifact_csv_row(out, &row)?;
         }
+    }
+    // The statements that qualify these numbers reach this format from the
+    // same description the text and JSON renderings read.
+    for assumption in report_assumptions(report) {
+        let mut row = artifact_csv_row("assumption", report);
+        assumption
+            .scope
+            .field()
+            .clone_into(&mut row[column::ASSUMPTION_SCOPE]);
+        row[column::ASSUMPTION] = csv(assumption.text);
+        write_artifact_csv_row(out, &row)?;
     }
     Ok(())
 }
 
-fn artifact_csv_row() -> Vec<String> {
-    vec![String::new(); ARTIFACT_CSV_COLUMNS]
+/// Start one artifact CSV record with the fields every record carries.
+fn artifact_csv_row(record_type: &str, report: &ArtifactReport) -> Vec<String> {
+    let mut row = vec![String::new(); ARTIFACT_CSV_HEADER.len()];
+    record_type.clone_into(&mut row[column::RECORD_TYPE]);
+    row[column::PATH] = csv(&report.path);
+    row[column::FORMAT] = report.format.to_string();
+    row
 }
 
 fn write_artifact_csv_row(out: &mut impl Write, row: &[String]) -> Result<()> {
-    debug_assert_eq!(row.len(), ARTIFACT_CSV_COLUMNS);
+    debug_assert_eq!(row.len(), ARTIFACT_CSV_HEADER.len());
     writeln!(out, "{}", row.join(","))?;
     Ok(())
 }
@@ -762,69 +840,115 @@ pub(super) fn render_compare_csv(
     report: &ArtifactComparisonReport,
     out: &mut impl Write,
 ) -> Result<()> {
-    writeln!(
-        out,
-        "record_type,before_path,after_path,before_format,after_format,before_fingerprint,after_fingerprint,observed_size_reduction_bytes,duplicated_code_delta_bytes,duplicated_data_delta_bytes,estimated_refactor_savings_bytes,verified_savings_bytes,source_run,clone_group_fingerprint,change_kind,name,fingerprint,symbol_size_delta_bytes,duplicated_bytes_delta,members_delta,warning,absolute_error_bytes,relative_error"
-    )?;
+    writeln!(out, "{}", COMPARE_CSV_HEADER.join(","))?;
     write_compare_csv_row(out, &compare_csv_row(report, "summary"))?;
     for delta in &report.symbol_deltas {
         let mut row = compare_csv_row(report, "symbol-delta");
-        delta.kind.clone_into(&mut row[14]);
-        row[15] = csv(delta.name.as_deref().unwrap_or(""));
-        row[16].clone_from(&delta.fingerprint);
-        row[17] = delta.size_delta_bytes.to_string();
+        delta.kind.clone_into(&mut row[compare_column::CHANGE_KIND]);
+        row[compare_column::NAME] = csv(delta.name.as_deref().unwrap_or(""));
+        row[compare_column::FINGERPRINT].clone_from(&delta.fingerprint);
+        row[compare_column::SYMBOL_SIZE_DELTA_BYTES] = delta.size_delta_bytes.to_string();
         write_compare_csv_row(out, &row)?;
     }
     for delta in &report.duplicate_group_deltas {
         let mut row = compare_csv_row(report, "duplicate-group-delta");
-        delta.kind.clone_into(&mut row[14]);
-        row[16].clone_from(&delta.fingerprint);
-        row[18] = delta.duplicated_bytes_delta.to_string();
-        row[19] = delta.members_delta.to_string();
+        delta.kind.clone_into(&mut row[compare_column::CHANGE_KIND]);
+        row[compare_column::FINGERPRINT].clone_from(&delta.fingerprint);
+        row[compare_column::DUPLICATED_BYTES_DELTA] = delta.duplicated_bytes_delta.to_string();
+        row[compare_column::MEMBERS_DELTA] = delta.members_delta.to_string();
         write_compare_csv_row(out, &row)?;
     }
-    if let Some(warning) = &report.build_variant_warning {
-        let mut row = compare_csv_row(report, "build-variant-warning");
-        row[20] = csv(warning);
+    if let Some(containment) = &report.containment {
+        let mut row = compare_csv_row(report, "containment");
+        row[compare_column::MAX_INPUT_BYTES] = containment.max_input_bytes.to_string();
+        row[compare_column::WORKER_TIMEOUT_SECONDS] =
+            containment.worker_timeout_seconds.to_string();
+        row[compare_column::WORKER_MEMORY_LIMIT_BYTES] =
+            containment.worker_memory_limit_bytes.to_string();
         write_compare_csv_row(out, &row)?;
     }
     if let Some(calibration) = &report.calibration {
         let mut row = compare_csv_row(report, "calibration");
-        row[10] = calibration.estimated_refactor_savings_bytes.0.to_string();
-        row[11] = calibration.verified_savings_bytes.0.to_string();
-        row[12] = calibration.source_run.to_string();
-        row[13].clone_from(&calibration.clone_group_fingerprint);
-        row[21] = calibration.absolute_error_bytes.to_string();
-        row[22] = optional_f64(calibration.relative_error);
+        row[compare_column::ESTIMATED_REFACTOR_SAVINGS_BYTES] =
+            calibration.estimated_refactor_savings_bytes.0.to_string();
+        row[compare_column::VERIFIED_SAVINGS_BYTES] =
+            calibration.verified_savings_bytes.0.to_string();
+        row[compare_column::SOURCE_RUN] = calibration.source_run.to_string();
+        row[compare_column::CLONE_GROUP_FINGERPRINT]
+            .clone_from(&calibration.clone_group_fingerprint);
+        row[compare_column::ABSOLUTE_ERROR_BYTES] = calibration.absolute_error_bytes.to_string();
+        row[compare_column::RELATIVE_ERROR] = optional_f64(calibration.relative_error);
+        row[compare_column::ARTIFACT_ANALYSIS_ID] = calibration.artifact_analysis_id.to_string();
+        row[compare_column::MATCHING_ANALYSES] = calibration.matching_analyses.to_string();
+        calibration_record_label(calibration.already_recorded)
+            .clone_into(&mut row[compare_column::CALIBRATION_RECORD]);
+        write_compare_csv_row(out, &row)?;
+    }
+    // The build-condition warning keeps its own record, and the remaining
+    // statements arrive as assumption records, so each is written once.
+    for assumption in comparison_assumptions(report) {
+        let record_type = if assumption.scope == AssumptionScope::BuildVariant {
+            "build-variant-warning"
+        } else {
+            "assumption"
+        };
+        let mut row = compare_csv_row(report, record_type);
+        if assumption.scope == AssumptionScope::BuildVariant {
+            row[compare_column::WARNING] = csv(assumption.text);
+        } else {
+            assumption
+                .scope
+                .field()
+                .clone_into(&mut row[compare_column::ASSUMPTION_SCOPE]);
+            row[compare_column::ASSUMPTION] = csv(assumption.text);
+        }
         write_compare_csv_row(out, &row)?;
     }
     Ok(())
 }
 
-const COMPARE_CSV_COLUMNS: usize = 23;
-
 fn compare_csv_row(report: &ArtifactComparisonReport, record_type: &str) -> Vec<String> {
-    let mut row = vec![String::new(); COMPARE_CSV_COLUMNS];
-    record_type.clone_into(&mut row[0]);
-    row[1] = csv(&report.before.path);
-    row[2] = csv(&report.after.path);
-    row[3] = report.before.format.to_string();
-    row[4] = report.after.format.to_string();
-    row[5].clone_from(&report.before.fingerprint);
-    row[6].clone_from(&report.after.fingerprint);
-    row[7] = report.observed_size_reduction_bytes.0.to_string();
-    row[8] = report.duplicated_code_delta_bytes.to_string();
-    row[9] = report
+    let mut row = vec![String::new(); COMPARE_CSV_HEADER.len()];
+    record_type.clone_into(&mut row[compare_column::RECORD_TYPE]);
+    row[compare_column::BEFORE_PATH] = csv(&report.before.path);
+    row[compare_column::AFTER_PATH] = csv(&report.after.path);
+    row[compare_column::BEFORE_FORMAT] = report.before.format.to_string();
+    row[compare_column::AFTER_FORMAT] = report.after.format.to_string();
+    row[compare_column::BEFORE_FINGERPRINT].clone_from(&report.before.fingerprint);
+    row[compare_column::AFTER_FINGERPRINT].clone_from(&report.after.fingerprint);
+    row[compare_column::OBSERVED_SIZE_REDUCTION_BYTES] =
+        report.observed_size_reduction_bytes.0.to_string();
+    row[compare_column::DUPLICATED_CODE_DELTA_BYTES] =
+        report.duplicated_code_delta_bytes.to_string();
+    row[compare_column::DUPLICATED_DATA_DELTA_BYTES] = report
         .duplicated_data_delta_bytes
         .map_or_else(|| "unavailable".to_owned(), |value| value.to_string());
+    // An observed difference is attributable to code or to data only when both
+    // sides publish both totals, exactly as the single-artifact report does.
+    row[compare_column::BEFORE_CODE_SECTION_BYTES] = report.before.code_section_bytes.to_string();
+    row[compare_column::AFTER_CODE_SECTION_BYTES] = report.after.code_section_bytes.to_string();
+    row[compare_column::CODE_SECTION_DELTA_BYTES] = report.code_section_delta_bytes.to_string();
+    row[compare_column::BEFORE_DATA_SEGMENT_BYTES] = report.before.data_segment_bytes.to_string();
+    row[compare_column::AFTER_DATA_SEGMENT_BYTES] = report.after.data_segment_bytes.to_string();
+    row[compare_column::DATA_SEGMENT_DELTA_BYTES] = report.data_segment_delta_bytes.to_string();
     row
 }
 
+/// How one recorded measurement reached the stored calibration row.
+const fn calibration_record_label(already_recorded: bool) -> &'static str {
+    if already_recorded {
+        "already recorded"
+    } else {
+        "newly recorded"
+    }
+}
+
 fn write_compare_csv_row(out: &mut impl Write, row: &[String]) -> Result<()> {
-    debug_assert_eq!(row.len(), COMPARE_CSV_COLUMNS);
+    debug_assert_eq!(row.len(), COMPARE_CSV_HEADER.len());
     writeln!(out, "{}", row.join(",")).map_err(Into::into)
 }
 
+#[allow(clippy::too_many_lines)] // The comparison order is its public text contract.
 pub(super) fn render_compare_text(
     report: &ArtifactComparisonReport,
     out: &mut impl Write,
@@ -855,8 +979,24 @@ pub(super) fn render_compare_text(
             variant.manifest_path, variant.fingerprint
         )?;
     }
-    if let Some(warning) = &report.build_variant_warning {
-        writeln!(out, "build variant warning: {warning}")?;
+    if let Some(containment) = &report.containment {
+        writeln!(
+            out,
+            "untrusted containment: input {} bytes, worker timeout {}s, worker memory {} bytes",
+            containment.max_input_bytes,
+            containment.worker_timeout_seconds,
+            containment.worker_memory_limit_bytes,
+        )?;
+    }
+    // Every statement comes from one description of this comparison, and the
+    // build-condition warning takes the line kept for it rather than being
+    // repeated among the assumptions below.
+    let assumptions = comparison_assumptions(report);
+    for warning in assumptions
+        .iter()
+        .filter(|assumption| assumption.scope == AssumptionScope::BuildVariant)
+    {
+        writeln!(out, "build variant warning: {}", warning.text)?;
     }
     writeln!(
         out,
@@ -880,6 +1020,15 @@ pub(super) fn render_compare_text(
                 .relative_error
                 .map_or_else(|| "unavailable".to_owned(), |value| format!("{value:.4}")),
         )?;
+        // Which saved analysis the estimate came from, and whether taking the
+        // same measurement again refreshed a row that was already on file.
+        writeln!(
+            out,
+            "  measured against analysis {} of {} matching, {}",
+            calibration.artifact_analysis_id,
+            calibration.matching_analyses,
+            calibration_record_label(calibration.already_recorded),
+        )?;
     }
     writeln!(
         out,
@@ -898,6 +1047,22 @@ pub(super) fn render_compare_text(
             |value| signed_bytes(value, "less duplicated", "more duplicated")
         )
     )?;
+    // Whether an artifact grew in code or in data is the first question a
+    // size difference raises, and both sides carry both totals.
+    writeln!(
+        out,
+        "code section bytes: {} before, {} after, {}",
+        report.before.code_section_bytes,
+        report.after.code_section_bytes,
+        signed_bytes(report.code_section_delta_bytes, "smaller", "larger")
+    )?;
+    writeln!(
+        out,
+        "data segment bytes: {} before, {} after, {}",
+        report.before.data_segment_bytes,
+        report.after.data_segment_bytes,
+        signed_bytes(report.data_segment_delta_bytes, "smaller", "larger")
+    )?;
     writeln!(
         out,
         "symbols: {} added, {} removed, {} named modified",
@@ -913,8 +1078,11 @@ pub(super) fn render_compare_text(
             delta.kind, delta.fingerprint, delta.duplicated_bytes_delta, delta.members_delta,
         )?;
     }
-    for assumption in &report.assumptions {
-        writeln!(out, "assumption: {assumption}")?;
+    for assumption in assumptions
+        .iter()
+        .filter(|assumption| assumption.scope != AssumptionScope::BuildVariant)
+    {
+        writeln!(out, "assumption: {}", assumption.text)?;
     }
     Ok(())
 }

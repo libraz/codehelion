@@ -1,5 +1,83 @@
 use super::*;
 
+/// Every non-value return form has to keep its control flow, or a checker
+/// reading `debug.DumpCFG` headings loses the graph for anything but a
+/// function returning by value. Built as its own self-contained project
+/// (rather than reusing the `CMake` fixture) so the source is visible right
+/// here next to what it asserts.
+#[test]
+fn pointer_and_reference_returning_functions_keep_their_cfg_blocks() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = directory.path().canonicalize().expect("temp dir exists");
+    let source = root.join("unit.cpp");
+    std::fs::write(
+        &source,
+        concat!(
+            "struct S { int value; };\n",
+            "\n",
+            "int *pick(int v) {\n",
+            "  static int a = 1;\n",
+            "  static int b = 2;\n",
+            "  if (v > 0) {\n",
+            "    return &a;\n",
+            "  }\n",
+            "  return &b;\n",
+            "}\n",
+            "\n",
+            "int &ref(S &s) {\n",
+            "  if (s.value > 0) {\n",
+            "    return s.value;\n",
+            "  }\n",
+            "  s.value = 0;\n",
+            "  return s.value;\n",
+            "}\n",
+        ),
+    )
+    .expect("write source");
+    let database = serde_json::json!([{
+        "directory": root,
+        "arguments": ["clang++", "-std=c++20", "-c", "-o", "unit.o", source],
+        "file": source,
+    }]);
+    std::fs::write(
+        root.join("compile_commands.json"),
+        serde_json::to_vec_pretty(&database).expect("serialize database"),
+    )
+    .expect("write database");
+
+    let unit = UnitRef {
+        unit: source.display().to_string(),
+        file: source.display().to_string(),
+        variant: "host".to_string(),
+    };
+    let mut helper = helper();
+    let analysis = helper
+        .analyze(&unit, &[Capability::MirCfg])
+        .expect("the helper should answer");
+    helper.shutdown().expect("the helper should stop cleanly");
+    let Analysis::Done(ir) = analysis else {
+        panic!("a pointer- and reference-returning translation unit is readable");
+    };
+    let cfg = ir
+        .cfg
+        .expect("pointer- and reference-returning functions still produce a CFG");
+    let anchors: std::collections::BTreeSet<_> = cfg
+        .blocks
+        .iter()
+        .map(|block| {
+            (
+                block.anchor.expansion.start_byte,
+                block.anchor.expansion.end_byte,
+            )
+        })
+        .collect();
+    assert_eq!(
+        anchors.len(),
+        2,
+        "both the pointer-returning and the reference-returning definition keep blocks: {cfg:?}"
+    );
+}
+
 #[test]
 fn compiler_cfgs_are_anchored_to_unambiguous_function_definitions() {
     let planted = plant("cmake");

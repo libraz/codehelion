@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::support::format_support;
 use crate::symbols::demangle;
 use crate::{
     ArtifactBackend, ArtifactCall, ArtifactCapabilities, ArtifactDataSegment, ArtifactError,
@@ -12,12 +13,50 @@ use crate::{
     ArtifactSection, ArtifactSourceMapping, ArtifactSymbol, NormalizedInstructions, UnresolvedCall,
 };
 use wasmparser::{
-    ElementItems, Encoding, ExternalKind, KnownCustom, Name, Operator, Parser, Payload, TypeRef,
-    Validator,
+    ConstExpr, CustomSectionReader, ElementItems, Encoding, ExternalKind, KnownCustom, Name,
+    Operator, Parser, Payload, TableInit, TypeRef, Validator, WasmFeatures,
 };
 
 /// Version of the immediate-free WebAssembly opcode representation.
 pub const WASM_NORMALIZATION_VERSION: &str = "wasm-opcode-v1";
+
+/// WebAssembly proposals this backend accepts, named rather than inherited.
+///
+/// The same set drives validation and every later decode, so a module is
+/// refused for a property of its own -- truncation, an out-of-range index, a
+/// type error -- and never because a dependency's default set does not name an
+/// opcode family this backend's own decoder reads. Legacy exception handling
+/// is one such family: toolchains still emit it, the decoder reads it, and
+/// only the default feature set stood between such a module and a result.
+/// Naming each proposal also keeps a dependency upgrade from silently widening
+/// or narrowing what parses. Component-model proposals are absent because a
+/// component is refused before any of them could apply.
+fn accepted_features() -> WasmFeatures {
+    WasmFeatures::MUTABLE_GLOBAL
+        | WasmFeatures::SATURATING_FLOAT_TO_INT
+        | WasmFeatures::SIGN_EXTENSION
+        | WasmFeatures::REFERENCE_TYPES
+        | WasmFeatures::MULTI_VALUE
+        | WasmFeatures::BULK_MEMORY
+        | WasmFeatures::SIMD
+        | WasmFeatures::RELAXED_SIMD
+        | WasmFeatures::THREADS
+        | WasmFeatures::SHARED_EVERYTHING_THREADS
+        | WasmFeatures::TAIL_CALL
+        | WasmFeatures::FLOATS
+        | WasmFeatures::MULTI_MEMORY
+        | WasmFeatures::EXCEPTIONS
+        | WasmFeatures::LEGACY_EXCEPTIONS
+        | WasmFeatures::MEMORY64
+        | WasmFeatures::EXTENDED_CONST
+        | WasmFeatures::FUNCTION_REFERENCES
+        | WasmFeatures::MEMORY_CONTROL
+        | WasmFeatures::GC
+        | WasmFeatures::GC_TYPES
+        | WasmFeatures::CUSTOM_PAGE_SIZES
+        | WasmFeatures::STACK_SWITCHING
+        | WasmFeatures::WIDE_ARITHMETIC
+}
 
 /// Parser backend for a WebAssembly core module.
 #[derive(Debug, Default, Clone, Copy)]
@@ -39,13 +78,21 @@ impl ArtifactBackend for WasmBackend {
                 expected: ArtifactFormat::Wasm,
             });
         }
-        Validator::new()
+        if is_component(bytes) {
+            return Err(ArtifactError::Unsupported {
+                format: ArtifactFormat::Wasm,
+            });
+        }
+        let features = accepted_features();
+        Validator::new_with_features(features)
             .validate_all(bytes)
             .map_err(|error| malformed(error.to_string()))?;
 
         let mut state = ParseState::default();
         let mut ir = ArtifactIr::empty(ArtifactFormat::Wasm, bytes);
-        for payload in Parser::new(0).parse_all(bytes) {
+        let mut parser = Parser::new(0);
+        parser.set_features(features);
+        for payload in parser.parse_all(bytes) {
             let payload = payload.map_err(|error| malformed(error.to_string()))?;
             if let Some((id, range)) = payload.as_section() {
                 ir.sections.push(ArtifactSection {
@@ -90,7 +137,9 @@ impl ArtifactBackend for WasmBackend {
                     for export in reader {
                         let export = export.map_err(|error| malformed(error.to_string()))?;
                         if export.kind == ExternalKind::Func {
-                            state.names.insert(export.index, export.name.to_owned());
+                            state
+                                .export_names
+                                .insert(export.index, export.name.to_owned());
                             state.exports.insert(export.index);
                         }
                     }
@@ -111,39 +160,33 @@ impl ArtifactBackend for WasmBackend {
                             for expression in expressions {
                                 let expression =
                                     expression.map_err(|error| malformed(error.to_string()))?;
-                                let operators = expression.get_operators_reader();
-                                for operator in operators {
-                                    if let Operator::RefFunc { function_index } =
-                                        operator.map_err(|error| malformed(error.to_string()))?
-                                    {
-                                        state.element_functions.insert(function_index);
-                                    }
-                                }
+                                collect_function_references(
+                                    &expression,
+                                    &mut state.element_functions,
+                                )?;
                             }
                         }
                     }
                 }
-                Payload::CustomSection(section) => {
-                    if section.name() == "sourceMappingURL" {
-                        let uri = std::str::from_utf8(section.data())
-                            .map_err(|_| malformed("sourceMappingURL is not UTF-8".to_owned()))?;
-                        ir.source_mappings.push(ArtifactSourceMapping {
-                            uri: uri.to_owned(),
-                        });
+                Payload::GlobalSection(reader) => {
+                    for global in reader {
+                        let global = global.map_err(|error| malformed(error.to_string()))?;
+                        collect_function_references(
+                            &global.init_expr,
+                            &mut state.element_functions,
+                        )?;
                     }
-                    if let KnownCustom::Name(names) = section.as_known() {
-                        for name in names {
-                            if let Name::Function(functions) =
-                                name.map_err(|error| malformed(error.to_string()))?
-                            {
-                                for function in functions {
-                                    let function =
-                                        function.map_err(|error| malformed(error.to_string()))?;
-                                    state.names.insert(function.index, function.name.to_owned());
-                                }
-                            }
+                }
+                Payload::TableSection(reader) => {
+                    for table in reader {
+                        let table = table.map_err(|error| malformed(error.to_string()))?;
+                        if let TableInit::Expr(expression) = table.init {
+                            collect_function_references(&expression, &mut state.element_functions)?;
                         }
                     }
+                }
+                Payload::CustomSection(section) => {
+                    read_custom_section(&section, &mut state, &mut ir);
                 }
                 Payload::CodeSectionEntry(body) => {
                     let defined = u32::try_from(state.functions.len())
@@ -157,15 +200,30 @@ impl ArtifactBackend for WasmBackend {
                         .get(defined as usize)
                         .ok_or_else(|| malformed("function type is missing".to_owned()))?;
                     state.function_types.insert(index, type_index);
-                    state.functions.push(parse_function(index, &body, bytes)?);
+                    let mut function = parse_function(index, &body, bytes)?;
+                    // A body that materialises a function reference hands out a
+                    // callable the parser cannot follow, so its target joins the
+                    // conservative roots exactly as a table element does.
+                    state.element_functions.append(&mut function.references);
+                    state.functions.push(function);
                 }
                 Payload::DataSection(reader) => {
                     for data in reader {
                         let data = data.map_err(|error| malformed(error.to_string()))?;
+                        // The segment range opens at its flags and offset
+                        // expression. An offset that reported those would not
+                        // address the bytes beside it, so derive the payload
+                        // start from the end of the range instead.
+                        let payload_bytes = u64::try_from(data.data.len())
+                            .map_err(|_| malformed("data segment is too large".to_owned()))?;
+                        let offset =
+                            data.range.end.checked_sub(payload_bytes).ok_or_else(|| {
+                                malformed("data segment runs past its range".to_owned())
+                            })?;
                         ir.data_segments.push(ArtifactDataSegment {
                             fingerprint: ArtifactFingerprint::from_content("wasm-data", data.data),
                             section: Some(11),
-                            offset: data.range.start,
+                            offset,
                             bytes: data.data.to_vec(),
                         });
                     }
@@ -176,7 +234,8 @@ impl ArtifactBackend for WasmBackend {
 
         let mut by_index = BTreeMap::new();
         for function in &mut state.functions {
-            let name = state.names.get(&function.index).map(|name| demangle(name));
+            let name = resolved_name(&state.names, &state.export_names, function.index)
+                .map(|name| demangle(name));
             let normalized = NormalizedInstructions {
                 version: std::mem::take(&mut function.normalized.version),
                 bytes: std::mem::take(&mut function.normalized.bytes),
@@ -217,7 +276,9 @@ impl ArtifactBackend for WasmBackend {
                         }
                         None => (None, Some(UnresolvedCall::MissingRelocation)),
                     },
-                    PendingCall::Indirect { .. } => (None, Some(UnresolvedCall::IndirectTable)),
+                    PendingCall::Indirect { .. } | PendingCall::Untyped => {
+                        (None, Some(UnresolvedCall::IndirectTable))
+                    }
                 };
                 ir.calls.push(ArtifactCall {
                     caller,
@@ -226,23 +287,71 @@ impl ArtifactBackend for WasmBackend {
                 });
             }
         }
+        let unreadable = ir.capabilities.debug_info_unreadable;
         ir.capabilities = self.capabilities();
         ir.capabilities.source_mapping = !ir.source_mappings.is_empty();
+        ir.capabilities.debug_info_unreadable = unreadable;
         Ok(ir)
     }
 
     fn capabilities(&self) -> ArtifactCapabilities {
-        ArtifactCapabilities {
-            symbols: true,
-            call_graph: true,
-            source_mapping: false,
-            debug_info_unreadable: false,
-            normalized_duplicates: true,
-            independent_data_segments: true,
-            relocations: false,
-            data_segments: true,
+        format_support(ArtifactFormat::Wasm).capabilities
+    }
+}
+
+/// Read a custom section for the facts this backend keeps, degrading rather
+/// than failing when its bytes do not decode.
+///
+/// A custom section carries no fact a core module depends on, so a post-link
+/// tool that leaves a broken `name` section behind must not cost the caller
+/// the code, symbol, call-graph and data results the module itself still
+/// supports. Whatever decoded before the failure is kept -- that prefix is a
+/// function of the input alone, so two runs over the same bytes agree -- and
+/// the loss is recorded as unreadable debug information rather than passed off
+/// as an absence.
+fn read_custom_section(
+    section: &CustomSectionReader<'_>,
+    state: &mut ParseState,
+    ir: &mut ArtifactIr,
+) {
+    if section.name() == "sourceMappingURL" {
+        match std::str::from_utf8(section.data()) {
+            Ok(uri) => ir.source_mappings.push(ArtifactSourceMapping {
+                uri: uri.to_owned(),
+            }),
+            Err(_) => ir.capabilities.debug_info_unreadable = true,
         }
     }
+    if let KnownCustom::Name(names) = section.as_known() {
+        for name in names {
+            match name {
+                Ok(Name::Function(functions)) => {
+                    for function in functions {
+                        let Ok(function) = function else {
+                            ir.capabilities.debug_info_unreadable = true;
+                            return;
+                        };
+                        state.names.insert(function.index, function.name.to_owned());
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    ir.capabilities.debug_info_unreadable = true;
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Whether the preamble declares the component layer rather than a module.
+///
+/// Both encodings open with the same magic, so the layer word after the
+/// version decides. Answering before validation keeps the refusal about the
+/// encoding this backend does not read, rather than about a proposal missing
+/// from the accepted feature set.
+fn is_component(bytes: &[u8]) -> bool {
+    matches!(bytes.get(6..8), Some([0x01, 0x00]))
 }
 
 const fn import_kind(import: &TypeRef) -> ArtifactImportKind {
@@ -263,9 +372,32 @@ struct ParseState {
     element_functions: BTreeSet<u32>,
     function_types: BTreeMap<u32, u32>,
     defined_function_types: Vec<u32>,
+    /// Names the `name` custom section gives function indices.
     names: BTreeMap<u32, String>,
+    /// Names the export section gives function indices.
+    ///
+    /// These are held apart from the name section rather than written into one
+    /// map, because the two sources reach a module in whatever order it stores
+    /// its sections, and a name that depends on that order would make a
+    /// symbol's identity depend on how the module was laid out.
+    export_names: BTreeMap<u32, String>,
     exports: BTreeSet<u32>,
     functions: Vec<PendingFunction>,
+}
+
+/// Resolve the name of a function index once the whole module is read.
+///
+/// The `name` custom section states what the producer called a function, so it
+/// wins. An export name only says how the module publishes an index, and is
+/// the fallback for an index the name section does not cover. Neither source
+/// overwrites the other, so the answer is a function of what the module
+/// declares and not of the order its sections happen to arrive in.
+fn resolved_name<'a>(
+    names: &'a BTreeMap<u32, String>,
+    export_names: &'a BTreeMap<u32, String>,
+    index: u32,
+) -> Option<&'a String> {
+    names.get(&index).or_else(|| export_names.get(&index))
 }
 
 impl ParseState {
@@ -273,17 +405,24 @@ impl ParseState {
     ///
     /// If no indirect call was seen, or an index has no type evidence, every
     /// table element remains a root. That avoids falsely claiming dead code
-    /// when an export or host call can dispatch through the table.
+    /// when an export or host call can dispatch through the table. A transfer
+    /// recorded without a type is type evidence the parser does not have, so
+    /// it suppresses narrowing rather than narrowing against a partial set.
     fn indirect_root_indices(&self) -> BTreeSet<u32> {
-        let types: BTreeSet<_> = self
+        let mut types = BTreeSet::new();
+        for call in self
             .functions
             .iter()
             .flat_map(|function| function.calls.iter())
-            .filter_map(|call| match call {
-                PendingCall::Indirect { type_index } => Some(*type_index),
-                PendingCall::Direct(_) => None,
-            })
-            .collect();
+        {
+            match call {
+                PendingCall::Indirect { type_index } => {
+                    types.insert(*type_index);
+                }
+                PendingCall::Untyped => return self.element_functions.clone(),
+                PendingCall::Direct(_) => {}
+            }
+        }
         if types.is_empty() {
             return self.element_functions.clone();
         }
@@ -312,12 +451,47 @@ struct PendingFunction {
     code: Vec<u8>,
     normalized: NormalizedInstructions,
     calls: Vec<PendingCall>,
+    references: BTreeSet<u32>,
 }
 
 /// A call target represented by the temporary WebAssembly index space only.
 enum PendingCall {
     Direct(u32),
-    Indirect { type_index: u32 },
+    Indirect {
+        type_index: u32,
+    },
+    /// A control transfer this parser recognised without classifying further.
+    Untyped,
+}
+
+/// Whether `opcode` is one of the single-byte control-transfer instructions.
+///
+/// The call family occupies one contiguous range, so a transfer this parser
+/// does not name individually is still recorded rather than dropped: an edge
+/// that leaves no evidence in the IR is indistinguishable from a resolved one.
+const fn transfers_control(opcode: u8) -> bool {
+    // call, call_indirect, return_call, return_call_indirect, call_ref,
+    // return_call_ref.
+    matches!(opcode, 0x10..=0x15)
+}
+
+/// Record every function a constant initializer expression materialises.
+///
+/// A `ref.func` outside a table element still hands the host or the module a
+/// callable reference, so its target is a conservative reachability root in
+/// exactly the way a table element is.
+fn collect_function_references(
+    expression: &ConstExpr<'_>,
+    roots: &mut BTreeSet<u32>,
+) -> Result<(), ArtifactError> {
+    for operator in expression.get_operators_reader() {
+        if let Operator::RefFunc { function_index } =
+            operator.map_err(|error| malformed(error.to_string()))?
+        {
+            roots.insert(function_index);
+        }
+    }
+    Ok(())
 }
 
 fn parse_function(
@@ -330,6 +504,7 @@ fn parse_function(
         usize::try_from(body_range.end.saturating_sub(body_range.start)).unwrap_or(0),
     );
     let mut calls = Vec::new();
+    let mut references = BTreeSet::new();
     let operators = body
         .get_operators_reader()
         .map_err(|error| malformed(error.to_string()))?;
@@ -337,15 +512,24 @@ fn parse_function(
         let (operator, offset) = operator.map_err(|error| malformed(error.to_string()))?;
         let offset = usize::try_from(offset)
             .map_err(|_| malformed("operator offset lies outside the input".to_owned()))?;
-        append_opcode_key(&mut normalized, bytes, offset)?;
+        let opcode = append_opcode_key(&mut normalized, bytes, offset)?;
         match operator {
             Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
                 calls.push(PendingCall::Direct(function_index));
             }
+            // A `call_ref` dispatches through a value rather than a table, but
+            // both reach only functions the module made referenceable, and both
+            // are bounded by the same conservative root set.
             Operator::CallIndirect { type_index, .. }
-            | Operator::ReturnCallIndirect { type_index, .. } => {
+            | Operator::ReturnCallIndirect { type_index, .. }
+            | Operator::CallRef { type_index }
+            | Operator::ReturnCallRef { type_index } => {
                 calls.push(PendingCall::Indirect { type_index });
             }
+            Operator::RefFunc { function_index } => {
+                references.insert(function_index);
+            }
+            _ if transfers_control(opcode) => calls.push(PendingCall::Untyped),
             _ => {}
         }
     }
@@ -358,10 +542,12 @@ fn parse_function(
             bytes: normalized,
         },
         calls,
+        references,
     })
 }
 
-/// Encode an opcode without any of its value, index, or branch immediates.
+/// Encode an opcode without any of its value, index, or branch immediates, and
+/// return the leading opcode byte.
 ///
 /// WebAssembly's extended opcodes start with an escape byte and a LEB128
 /// subopcode. Keeping that subopcode distinguishes operations while allowing
@@ -370,18 +556,18 @@ fn append_opcode_key(
     normalized: &mut Vec<u8>,
     bytes: &[u8],
     offset: usize,
-) -> Result<(), ArtifactError> {
+) -> Result<u8, ArtifactError> {
     let opcode = *bytes
         .get(offset)
         .ok_or_else(|| malformed("operator offset lies outside the input".to_owned()))?;
     if !matches!(opcode, 0xfb..=0xfe) {
         normalized.push(opcode);
-        return Ok(());
+        return Ok(opcode);
     }
     let (subopcode, _) = unsigned_leb(bytes, offset + 1)?;
     normalized.push(opcode);
     normalized.extend(subopcode.to_le_bytes());
-    Ok(())
+    Ok(opcode)
 }
 
 /// Read one unsigned LEB128 value only to distinguish an extended opcode.
@@ -428,6 +614,8 @@ const fn section_name(id: u8) -> Option<&'static str> {
         9 => Some("element"),
         10 => Some("code"),
         11 => Some("data"),
+        12 => Some("datacount"),
+        13 => Some("tag"),
         _ => None,
     }
 }
@@ -618,6 +806,462 @@ mod tests {
         assert!(dead.definitive);
     }
 
+    /// One empty function type, two defined functions, and an exported first
+    /// function. `body` supplies each body including its local declarations,
+    /// and `global_reference` adds a `funcref` global holding `ref.func` of
+    /// that index, which is also what declares the index for `ref.func` in a
+    /// body.
+    fn two_function_module(bodies: [&[u8]; 2], global_reference: Option<u8>) -> Vec<u8> {
+        let mut module = vec![
+            0, 97, 115, 109, 1, 0, 0, 0, // magic and version
+            1, 4, 1, 96, 0, 0, // one type: [] -> []
+            3, 3, 2, 0, 0, // two functions of that type
+        ];
+        if let Some(index) = global_reference {
+            // One immutable funcref global initialised to `ref.func index`.
+            module.extend([6, 6, 1, 0x70, 0, 0xd2, index, 0x0b]);
+        }
+        // Export the first function as "run".
+        module.extend([7, 7, 1, 3, b'r', b'u', b'n', 0, 0]);
+        let mut code = vec![2];
+        for body in bodies {
+            code.push(u8::try_from(body.len()).expect("test body fits one byte"));
+            code.extend(body);
+        }
+        module.push(10);
+        module.push(u8::try_from(code.len()).expect("test code section fits one byte"));
+        module.extend(code);
+        module
+    }
+
+    /// A `call_ref` reaches a callee this parser cannot name, so it stays in
+    /// the IR as an unresolved edge instead of being dropped, and the function
+    /// the module made referenceable stays a reachability root.
+    #[test]
+    fn call_ref_records_an_unresolved_edge_and_keeps_its_callee_reachable() {
+        let module = two_function_module(
+            [
+                // ref.func 1; call_ref 0; end
+                &[0, 0xd2, 1, 0x14, 0, 0x0b],
+                &[0, 0x0b],
+            ],
+            Some(1),
+        );
+
+        let artifact = WasmBackend.parse(&module).expect("call_ref fixture parses");
+
+        assert_eq!(artifact.symbols.len(), 2);
+        assert_eq!(artifact.calls.len(), 1, "{artifact:#?}");
+        assert_eq!(artifact.calls[0].caller, artifact.symbols[0].fingerprint);
+        assert_eq!(artifact.calls[0].target, None);
+        assert_eq!(
+            artifact.calls[0].unresolved,
+            Some(UnresolvedCall::IndirectTable)
+        );
+        assert_eq!(
+            artifact.indirect_references,
+            vec![artifact.symbols[1].fingerprint]
+        );
+
+        let dead = metrics::dead_code_candidates(&artifact).expect("an export establishes roots");
+        assert!(!dead.definitive);
+        assert!(
+            !dead.symbols.contains(&artifact.symbols[1].fingerprint),
+            "{dead:#?}"
+        );
+    }
+
+    /// A `ref.func` in a global initialiser materialises a callable the parser
+    /// cannot follow, so its target is a root exactly as a table element is.
+    #[test]
+    fn a_global_function_reference_is_a_conservative_reachability_root() {
+        let module = two_function_module([&[0, 0x0b], &[0, 1, 0x0b]], Some(1));
+
+        let artifact = WasmBackend.parse(&module).expect("global fixture parses");
+
+        assert_eq!(
+            artifact.indirect_references,
+            vec![artifact.symbols[1].fingerprint]
+        );
+        let dead = metrics::dead_code_candidates(&artifact).expect("an export establishes roots");
+        assert!(dead.symbols.is_empty(), "{dead:#?}");
+        assert!(dead.definitive);
+    }
+
+    /// A module without that global is the same module minus one root, which
+    /// is what makes the reference above the reason the callee stays live.
+    #[test]
+    fn a_function_no_reference_reaches_is_reported_as_dead() {
+        let module = two_function_module([&[0, 0x0b], &[0, 1, 0x0b]], None);
+
+        let artifact = WasmBackend.parse(&module).expect("fixture parses");
+
+        assert!(artifact.indirect_references.is_empty());
+        let dead = metrics::dead_code_candidates(&artifact).expect("an export establishes roots");
+        assert_eq!(dead.symbols, vec![artifact.symbols[1].fingerprint]);
+        assert!(dead.definitive);
+    }
+
+    /// A call to an import names a callee index below the imported-function
+    /// count, which is a resolved non-edge in the local graph rather than a
+    /// gap in it. Real modules all call imports, so treating it as a gap left
+    /// these sizes structurally unreachable.
+    #[test]
+    fn calling_an_import_keeps_the_local_call_graph_complete() {
+        let module = [
+            0, 97, 115, 109, 1, 0, 0, 0, // magic and version
+            1, 4, 1, 96, 0, 0, // one type: [] -> []
+            2, 7, 1, 1, b'm', 1, b'f', 0, 0, // import "m" "f" as a function
+            3, 2, 1, 0, // one defined function
+            7, 7, 1, 3, b'r', b'u', b'n', 0, 1, // export it as "run"
+            10, 6, 1, 4, 0, 0x10, 0, 0x0b, // its body: call 0; end
+        ];
+
+        let artifact = WasmBackend.parse(&module).expect("import fixture parses");
+
+        assert_eq!(artifact.symbols.len(), 1);
+        assert_eq!(
+            artifact.calls[0].unresolved,
+            Some(UnresolvedCall::ExternalImport)
+        );
+        let sizes = metrics::classify_sizes(&artifact);
+        assert_eq!(sizes.retained_bytes, Some(artifact.symbols[0].size));
+        assert_eq!(sizes.shared_dependency_bytes, Some(0));
+        assert!(
+            !sizes
+                .assumptions
+                .iter()
+                .any(|assumption| assumption.contains("retained and shared dependency sizes need")),
+            "{:?}",
+            sizes.assumptions
+        );
+        assert!(metrics::retained_sizes(&artifact).is_some());
+        let dead = metrics::dead_code_candidates(&artifact).expect("an export establishes roots");
+        assert!(dead.definitive, "{dead:#?}");
+        assert!(dead.symbols.is_empty());
+    }
+
+    /// A transfer of control this parser does not name individually still has
+    /// to leave evidence, and it withdraws the type narrowing it supplies no
+    /// type for.
+    #[test]
+    fn an_unnamed_control_transfer_suppresses_table_root_narrowing() {
+        assert!(transfers_control(0x10));
+        assert!(transfers_control(0x15));
+        assert!(!transfers_control(0x0f));
+        assert!(!transfers_control(0x16));
+
+        let state = ParseState {
+            element_functions: BTreeSet::from([0, 1, 2]),
+            function_types: BTreeMap::from([(0, 7), (1, 8), (2, 7)]),
+            functions: vec![PendingFunction {
+                index: 3,
+                offset: 0,
+                code: Vec::new(),
+                normalized: NormalizedInstructions {
+                    version: WASM_NORMALIZATION_VERSION.to_owned(),
+                    bytes: Vec::new(),
+                },
+                calls: vec![
+                    PendingCall::Indirect { type_index: 7 },
+                    PendingCall::Untyped,
+                ],
+                references: BTreeSet::new(),
+            }],
+            ..ParseState::default()
+        };
+
+        assert_eq!(state.indirect_root_indices(), BTreeSet::from([0, 1, 2]));
+    }
+
+    /// One section with a one-byte length, which every fixture here fits in.
+    fn section(id: u8, payload: &[u8]) -> Vec<u8> {
+        let mut encoded = vec![
+            id,
+            u8::try_from(payload.len()).expect("fixture section is short"),
+        ];
+        encoded.extend(payload);
+        encoded
+    }
+
+    fn module(sections: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes = vec![0, 97, 115, 109, 1, 0, 0, 0];
+        for encoded in sections {
+            bytes.extend(encoded);
+        }
+        bytes
+    }
+
+    /// One type `[] -> []`, one function of it, and a body that just returns.
+    fn one_function_sections() -> [Vec<u8>; 3] {
+        [
+            section(1, &[1, 0x60, 0, 0]),
+            section(3, &[1, 0]),
+            section(10, &[1, 2, 0, 0x0b]),
+        ]
+    }
+
+    /// A `name` custom section naming function index 0 `foo`.
+    fn name_section(entry_count: u8) -> Vec<u8> {
+        let mut payload = vec![4, b'n', b'a', b'm', b'e'];
+        let subsection = [entry_count, 0, 3, b'f', b'o', b'o'];
+        payload.push(1);
+        payload.push(u8::try_from(subsection.len()).expect("fixture subsection is short"));
+        payload.extend(subsection);
+        section(0, &payload)
+    }
+
+    /// A `sourceMappingURL` custom section carrying `data`.
+    fn source_mapping_section(data: &[u8]) -> Vec<u8> {
+        let mut payload = vec![16];
+        payload.extend(b"sourceMappingURL");
+        payload.extend(data);
+        section(0, &payload)
+    }
+
+    /// A body a producer that predates the current exception handling emits.
+    ///
+    /// The opcodes are `try` with an empty block type, `catch_all`, the end of
+    /// the handler, and the end of the function.
+    #[test]
+    fn a_module_using_legacy_exception_handling_is_parsed_rather_than_refused() {
+        let legacy = module(&[
+            section(1, &[1, 0x60, 0, 0]),
+            section(3, &[1, 0]),
+            section(7, &[1, 3, b'r', b'u', b'n', 0, 0]),
+            section(10, &[1, 6, 0, 0x06, 0x40, 0x19, 0x0b, 0x0b]),
+        ]);
+
+        let artifact = WasmBackend
+            .parse(&legacy)
+            .expect("a module whose opcodes this decoder reads is accepted");
+
+        assert_eq!(artifact.symbols.len(), 1, "{artifact:#?}");
+        assert_eq!(artifact.symbols[0].name.as_deref(), Some("run"));
+        assert_eq!(
+            artifact.symbols[0].code,
+            vec![0, 0x06, 0x40, 0x19, 0x0b, 0x0b]
+        );
+    }
+
+    /// The accepted set is chosen here, not inherited, and one set drives both
+    /// the acceptance decision and every later decode.
+    #[test]
+    fn the_accepted_feature_set_is_stated_rather_than_inherited() {
+        let features = accepted_features();
+        assert!(features.legacy_exceptions());
+        assert!(features.exceptions());
+        assert!(features.bulk_memory());
+        assert!(features.gc());
+        assert_ne!(
+            features,
+            WasmFeatures::default(),
+            "the backend must not inherit the dependency's default set"
+        );
+        let mut parser = Parser::new(0);
+        parser.set_features(features);
+        assert_eq!(parser.features(), features);
+    }
+
+    /// A post-link tool that leaves a broken `name` section behind must not
+    /// cost the caller everything the core module still supports.
+    #[test]
+    fn a_truncated_name_section_degrades_to_unreadable_debug_information() {
+        let mut sections = one_function_sections().to_vec();
+        // The subsection declares two names and supplies one.
+        sections.push(name_section(2));
+        let damaged = module(&sections);
+
+        let artifact = WasmBackend
+            .parse(&damaged)
+            .expect("a core module with a broken custom section still parses");
+
+        assert!(artifact.capabilities.debug_info_unreadable, "{artifact:#?}");
+        assert_eq!(artifact.symbols.len(), 1);
+        assert_eq!(artifact.symbols[0].code, vec![0, 0x0b]);
+        // The prefix that decoded before the failure is a function of the
+        // input alone, so a second parse agrees with the first.
+        assert_eq!(WasmBackend.parse(&damaged).expect("second parse"), artifact);
+    }
+
+    /// The code, call graph, sections and data of a module do not depend on a
+    /// custom section that failed to decode.
+    #[test]
+    fn a_broken_custom_section_leaves_the_core_module_facts_untouched() {
+        let mut damaged_sections = one_function_sections().to_vec();
+        let plain = WasmBackend
+            .parse(&module(&damaged_sections))
+            .expect("plain parses");
+
+        damaged_sections.push(source_mapping_section(&[0xff, 0xfe]));
+        let damaged = WasmBackend
+            .parse(&module(&damaged_sections))
+            .expect("a non-UTF-8 sourceMappingURL does not fail the module");
+
+        assert!(damaged.capabilities.debug_info_unreadable);
+        assert!(damaged.source_mappings.is_empty(), "{damaged:#?}");
+        assert!(!damaged.capabilities.source_mapping);
+        assert_eq!(
+            damaged
+                .symbols
+                .iter()
+                .map(|symbol| (symbol.name.clone(), symbol.code.clone()))
+                .collect::<Vec<_>>(),
+            plain
+                .symbols
+                .iter()
+                .map(|symbol| (symbol.name.clone(), symbol.code.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(damaged.calls, plain.calls);
+        assert_eq!(damaged.data_segments, plain.data_segments);
+    }
+
+    /// A reported data-segment offset has to address the reported bytes, so
+    /// that pasting it into a hex viewer lands on the payload.
+    #[test]
+    fn a_data_segment_offset_addresses_its_own_payload() {
+        // An active segment with three bytes, then an empty passive one.
+        let with_data = module(&[
+            section(1, &[1, 0x60, 0, 0]),
+            section(3, &[1, 0]),
+            section(5, &[1, 0, 1]),
+            section(10, &[1, 2, 0, 0x0b]),
+            section(11, &[2, 0, 0x41, 0x00, 0x0b, 3, b'x', b'y', b'z', 1, 0]),
+        ]);
+
+        for input in [MODULE.to_vec(), with_data] {
+            let artifact = WasmBackend.parse(&input).expect("data fixture parses");
+            assert!(!artifact.data_segments.is_empty(), "{artifact:#?}");
+            for segment in &artifact.data_segments {
+                let start = usize::try_from(segment.offset).expect("offset fits");
+                let end = start + segment.bytes.len();
+                assert_eq!(
+                    input.get(start..end),
+                    Some(segment.bytes.as_slice()),
+                    "segment at {start} does not address its own bytes"
+                );
+            }
+        }
+    }
+
+    /// A symbol's name, and therefore its identity, is a function of what the
+    /// module declares rather than of the order it stores its sections in.
+    #[test]
+    fn a_name_section_outranks_an_export_name_in_either_section_order() {
+        let head = [section(1, &[1, 0x60, 0, 0]), section(3, &[1, 0])];
+        let export = section(7, &[1, 3, b'z', b'z', b'z', 0, 0]);
+        let code = section(10, &[1, 2, 0, 0x0b]);
+
+        let name_last = module(&[
+            head[0].clone(),
+            head[1].clone(),
+            export.clone(),
+            code.clone(),
+            name_section(1),
+        ]);
+        let name_first = module(&[
+            head[0].clone(),
+            name_section(1),
+            head[1].clone(),
+            export,
+            code,
+        ]);
+
+        let last = WasmBackend.parse(&name_last).expect("name-last parses");
+        let first = WasmBackend.parse(&name_first).expect("name-first parses");
+
+        assert_eq!(last.symbols[0].name.as_deref(), Some("foo"));
+        assert_eq!(first.symbols[0].name.as_deref(), Some("foo"));
+        assert_eq!(last.symbols[0].fingerprint, first.symbols[0].fingerprint);
+        assert!(last.symbols[0].exported && first.symbols[0].exported);
+    }
+
+    /// An export name still names an index the name section does not cover.
+    #[test]
+    fn an_export_name_is_the_fallback_for_an_unnamed_index() {
+        let exported = module(&[
+            section(1, &[1, 0x60, 0, 0]),
+            section(3, &[1, 0]),
+            section(7, &[1, 3, b'z', b'z', b'z', 0, 0]),
+            section(10, &[1, 2, 0, 0x0b]),
+        ]);
+
+        let artifact = WasmBackend.parse(&exported).expect("export fixture parses");
+
+        assert_eq!(artifact.symbols[0].name.as_deref(), Some("zzz"));
+    }
+
+    /// Sections a module may carry are named, so a size reader never meets a
+    /// row of bytes with no name attached.
+    #[test]
+    fn data_count_and_tag_sections_are_named() {
+        let tagged = module(&[
+            section(1, &[1, 0x60, 0, 0]),
+            section(3, &[1, 0]),
+            section(13, &[1, 0, 0]),
+            section(12, &[1]),
+            section(10, &[1, 2, 0, 0x0b]),
+            section(11, &[1, 1, 0]),
+        ]);
+
+        let artifact = WasmBackend.parse(&tagged).expect("tagged fixture parses");
+
+        let named: Vec<_> = artifact
+            .sections
+            .iter()
+            .map(|section| section.name.as_deref())
+            .collect();
+        assert!(named.contains(&Some("datacount")), "{named:?}");
+        assert!(named.contains(&Some("tag")), "{named:?}");
+        assert!(named.iter().all(Option::is_some), "{named:?}");
+        assert_eq!(
+            artifact
+                .sections
+                .iter()
+                .filter(|section| section.executable)
+                .map(|section| section.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("code")]
+        );
+        assert_eq!(section_name(14), None);
+    }
+
+    /// The component encoding shares the module's magic and is recognised, but
+    /// no backend reads it, so the refusal says exactly that.
+    #[test]
+    fn a_component_is_refused_as_an_encoding_this_backend_does_not_parse() {
+        let component = [0, 97, 115, 109, 0x0d, 0x00, 0x01, 0x00];
+
+        assert!(WasmBackend.detects(&component));
+        assert!(is_component(&component));
+        assert!(!is_component(MODULE));
+        assert_eq!(
+            WasmBackend.parse(&component),
+            Err(ArtifactError::Unsupported {
+                format: ArtifactFormat::Wasm
+            })
+        );
+    }
+
+    /// A recorded source-map URL is the only source correspondence a core
+    /// module carries, and the declaration has to admit it.
+    #[test]
+    fn the_declaration_admits_the_source_mapping_a_parse_can_establish() {
+        let declared = WasmBackend.capabilities();
+        assert!(declared.source_mapping);
+        assert!(!declared.debug_info_unreadable);
+
+        let mut mapped = MODULE.to_vec();
+        mapped.extend(source_mapping_section(b"maps.json"));
+        let artifact = WasmBackend
+            .parse(&mapped)
+            .expect("source-map fixture parses");
+
+        assert!(artifact.capabilities.source_mapping);
+        assert!(declared.source_mapping || !artifact.capabilities.source_mapping);
+    }
+
     #[test]
     fn indirect_call_types_narrow_table_roots_when_all_types_are_known() {
         let state = ParseState {
@@ -632,6 +1276,7 @@ mod tests {
                     bytes: Vec::new(),
                 },
                 calls: vec![PendingCall::Indirect { type_index: 7 }],
+                references: BTreeSet::new(),
             }],
             ..ParseState::default()
         };

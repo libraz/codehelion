@@ -112,6 +112,13 @@ pub(super) fn run_isolated_request(
     out: &mut impl Write,
 ) -> Result<Outcome> {
     validate_worker_timeout(timeout_seconds)?;
+    // The worker durably commits its analysis before this process sees any of
+    // it, and no error afterwards can withdraw those rows. Claiming the named
+    // destination up front is therefore part of deciding whether to start the
+    // worker at all, rather than of writing what it produced.
+    let reservation = output
+        .map(|path| super::OutputReservation::claim(path, force))
+        .transpose()?;
     let request_path = tempfile::NamedTempFile::new()
         .context("creating artifact worker request")?
         .into_temp_path();
@@ -189,8 +196,8 @@ pub(super) fn run_isolated_request(
             .context("relaying isolated artifact worker diagnostics")?;
     }
     let rendered = fs::read(&report_path).context("reading isolated artifact worker report")?;
-    if let Some(path) = output {
-        super::write_output(path, &rendered, force)?;
+    if let Some(reservation) = reservation {
+        reservation.commit(&rendered)?;
     } else {
         out.write_all(&rendered)?;
     }

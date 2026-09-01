@@ -1,3 +1,7 @@
+use codehelion_core::stable_id::{
+    CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint,
+};
+
 use super::common::{fingerprint_from_blob, parse_build_variant_reference, positive_line};
 use super::{
     SourceFragmentIdentity, SourceInstantiation, SourceMacroDefinition, SourceResolvedCall,
@@ -55,7 +59,10 @@ impl Store {
                     end_line,
                 )| {
                     Ok(SourceUnitIdentity {
-                        fingerprint: fingerprint_from_blob("fingerprint.hash", fingerprint)?,
+                        fingerprint: UnitFingerprint::from_bytes(fingerprint_from_blob(
+                            "fingerprint.hash",
+                            fingerprint,
+                        )?),
                         build_variant_fingerprint: parse_build_variant_reference(&build_variant)?,
                         file_path,
                         name,
@@ -128,15 +135,20 @@ impl Store {
                     end_line,
                 )| {
                     Ok(SourceFragmentIdentity {
-                        fingerprint: fingerprint_from_blob("fingerprint.hash", fingerprint)?,
-                        finding_id: fingerprint_from_blob(
+                        fingerprint: FragmentFingerprint::from_bytes(fingerprint_from_blob(
+                            "fingerprint.hash",
+                            fingerprint,
+                        )?),
+                        finding_id: FindingId::from_bytes(fingerprint_from_blob(
                             "clone_group_member.finding_id",
                             finding_id,
-                        )?,
-                        clone_group_fingerprint: fingerprint_from_blob(
-                            "clone_group.group_fingerprint",
-                            clone_group_fingerprint,
-                        )?,
+                        )?),
+                        clone_group_fingerprint: CloneGroupFingerprint::from_bytes(
+                            fingerprint_from_blob(
+                                "clone_group.group_fingerprint",
+                                clone_group_fingerprint,
+                            )?,
+                        ),
                         is_canonical: is_canonical != 0,
                         clone_confidence,
                         build_variant_fingerprint: parse_build_variant_reference(&build_variant)?,

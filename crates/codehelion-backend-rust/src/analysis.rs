@@ -37,6 +37,15 @@
 //! with. So the toolchain it reports is its own, and the question a handshake
 //! settles is whether it can analyse a project rather than whether it matches
 //! it.
+//!
+//! That is a claim about a program on disk, not only about a version string.
+//! Cargo reads a configuration file out of the directory it is started in, and
+//! the directory it is started in for a target workspace is inside that
+//! workspace, so `build.rustc` and the `build.rustc-wrapper` keys beside it are
+//! a tree naming a program to run as whoever started this process. The
+//! environment in [`compiler_environment`] settles which program that is before
+//! any of it is read, on every path, including the first handshake — where no
+//! permission has been negotiated yet and none can therefore have been given.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -71,6 +80,9 @@ pub(crate) struct Loaded {
 #[derive(Clone)]
 struct HelperToolchain {
     cargo: PathBuf,
+    /// The compiler every Cargo this process starts is told to run, so that
+    /// naming one is never left to a file in the tree being read.
+    rustc: PathBuf,
     rustup_toolchain: String,
 }
 
@@ -141,6 +153,7 @@ fn discover_helper_toolchain() -> Result<HelperToolchain, String> {
     }
     Ok(HelperToolchain {
         cargo,
+        rustc,
         rustup_toolchain: sysroot.display().to_string(),
     })
 }
@@ -344,6 +357,24 @@ impl Workspaces {
                 ),
             );
         }
+        // A workspace is read from inside itself, so the Cargo configuration
+        // beside it is the one Cargo obeys, and the keys in it name programs to
+        // start. Nothing named there is ever started without a permission —
+        // [`compiler_environment`] settles that on its own — and a tree that
+        // names one is told so rather than read under a configuration this
+        // process disabled behind its back.
+        if !permitted.build_scripts
+            && let Some(named) = program_named_by(root.parent().unwrap_or(&root))
+        {
+            return Outcome::unavailable(
+                Unavailability::RequiresExecution,
+                format!(
+                    "{} sets {}, which names a program for Cargo to run, and nothing permitted running it",
+                    named.file.display(),
+                    named.key
+                ),
+            );
+        }
         let loaded = self
             .loaded
             .entry((root.clone(), permitted))
@@ -507,12 +538,144 @@ fn declared_by(value: &str) -> Declared {
     Declared::Script
 }
 
+/// A program the tree under analysis asked Cargo to run.
+struct NamedProgram {
+    /// The file that names it, which is a file in the tree.
+    file: PathBuf,
+    /// The key that names it, spelled as a person would look it up.
+    key: String,
+}
+
+/// The Cargo configuration files a directory can carry, in the order Cargo
+/// prefers them. Both are read here: the second is the older spelling, and a
+/// tree that uses it is read by Cargo the same way.
+const CARGO_CONFIGURATION_FILES: [&str; 2] = ["config.toml", "config"];
+
+/// What the workspace at `root` asks Cargo to run, if it asks for anything.
+///
+/// Its own directory and no other. Cargo finds configuration by walking up from
+/// where it was started, and where it is started for this workspace is here, so
+/// the files above this directory belong to the machine rather than to the tree
+/// and a `.cargo` inside a member is one Cargo never reads.
+fn program_named_by(root: &Path) -> Option<NamedProgram> {
+    let directory = root.join(".cargo");
+    CARGO_CONFIGURATION_FILES.iter().find_map(|name| {
+        let file = directory.join(name);
+        let key = program_naming_key(&std::fs::read_to_string(&file).ok()?)?;
+        Some(NamedProgram { file, key })
+    })
+}
+
+/// The first key in `configuration` that names a program for Cargo to run.
+///
+/// Read key by key rather than parsed, for the reason a manifest is: what is
+/// being looked for is small, and a file too malformed for Cargo to load is not
+/// a file this may decide names nothing. Tables and keys may be quoted, and a
+/// table may be written inline, so all three spellings of one key reach the
+/// same answer.
+fn program_naming_key(configuration: &str) -> Option<String> {
+    let mut table: Vec<String> = Vec::new();
+    for line in configuration.lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        if let Some(header) = line.strip_prefix('[') {
+            table = key_path(
+                header
+                    .split(']')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_start_matches('['),
+            );
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let mut path = table.clone();
+        path.extend(key_path(key));
+        if names_a_program(&path) {
+            return Some(path.join("."));
+        }
+        // An inline table writes the rest of the path on the same line.
+        for nested in inline_keys(value) {
+            let mut path = path.clone();
+            path.push(nested);
+            if names_a_program(&path) {
+                return Some(path.join("."));
+            }
+        }
+    }
+    None
+}
+
+/// A dotted key, split into the segments Cargo looks it up by.
+///
+/// Quotes come off and a dot inside them is part of a segment rather than a
+/// separator, which is how a target key names the settings it applies to.
+fn key_path(key: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut segment = String::new();
+    let mut quote = None;
+    for character in key.chars() {
+        match character {
+            '"' | '\'' if quote == Some(character) => quote = None,
+            '"' | '\'' if quote.is_none() => quote = Some(character),
+            '.' if quote.is_none() => segments.push(std::mem::take(&mut segment)),
+            _ => segment.push(character),
+        }
+    }
+    segments.push(segment);
+    segments
+        .into_iter()
+        .map(|segment| segment.trim().to_owned())
+        .collect()
+}
+
+/// The keys written inside an inline table, at whatever depth they sit.
+///
+/// The depth is dropped on purpose: what a key is looked up under is decided by
+/// the table it opens and the name it ends with, and both survive.
+fn inline_keys(value: &str) -> Vec<String> {
+    if !value.contains('{') {
+        return Vec::new();
+    }
+    value
+        .split(['{', '}', ','])
+        .filter_map(|part| part.split_once('='))
+        .flat_map(|(key, _)| key_path(key))
+        .filter(|key| !key.is_empty())
+        .collect()
+}
+
+/// Whether a Cargo configuration key names a program to start.
+///
+/// Matched by the table a key opens and the name it ends with, because the
+/// settings between the two are a target expression a tree chooses. Every key
+/// here hands Cargo a command line: a compiler, a program to run around it, a
+/// linker, a runner for what was built, a credential helper, or the request to
+/// fetch through the installed `git`.
+fn names_a_program(path: &[String]) -> bool {
+    let (Some(table), Some(key)) = (path.first(), path.last()) else {
+        return false;
+    };
+    match (table.as_str(), key.as_str()) {
+        ("build", "rustc" | "rustc-wrapper" | "rustc-workspace-wrapper" | "rustdoc")
+        | ("target" | "host", "linker" | "runner")
+        | ("registry" | "registries", "credential-provider")
+        | ("net", "git-fetch-with-cli") => true,
+        ("credential-alias", _) => path.len() > 1,
+        _ => false,
+    }
+}
+
 /// How this process reads a project, wherever it reads one.
 ///
 /// One value, so that what a run is told it was analysed under and what it was
 /// actually analysed under cannot drift apart: the description below and the
 /// load above are two readings of the same configuration.
-fn cargo_config(toolchain: &HelperToolchain) -> ra_ap_project_model::CargoConfig {
+fn cargo_config(
+    toolchain: &HelperToolchain,
+    permitted: Permissions,
+) -> ra_ap_project_model::CargoConfig {
     ra_ap_project_model::CargoConfig {
         // Without the standard library almost every type resolves to nothing,
         // and evidence made of unknowns is worse than no evidence: it looks
@@ -539,9 +702,55 @@ fn cargo_config(toolchain: &HelperToolchain) -> ra_ap_project_model::CargoConfig
             ("CARGO_TARGET_DIR".to_owned(), None),
         ]
         .into_iter()
+        .chain(compiler_environment(toolchain, permitted))
         .collect(),
         ..ra_ap_project_model::CargoConfig::default()
     }
+}
+
+/// Which program every Cargo started for a target workspace runs as the
+/// compiler, and which it does not run around it.
+///
+/// Cargo finds `.cargo/config.toml` by walking up from the directory it was
+/// started in, and a target workspace is where it has to be started for its own
+/// metadata to be the metadata that comes back. So the tree decides what that
+/// file says, and the keys in it name programs: `build.rustc` is the compiler
+/// itself, and `build.rustc-wrapper` is a program Cargo runs with the compiler
+/// as its first argument. Either is somebody else's code running as whoever
+/// started this scan, and both are read long before a permission has been asked
+/// for — the handshake that describes a build reads that file too.
+///
+/// An environment variable outranks the file for all four keys, so naming the
+/// compiler here is what settles it. Cargo spells "no wrapper" as an empty
+/// wrapper, which is why the wrappers are set rather than removed: removing
+/// them would leave the file's own value in force.
+///
+/// The wrappers come back when build scripts are permitted, because that
+/// permission is the tree's own build being run on purpose and a wrapper is
+/// part of how the tree builds. The compiler stays this program's own either
+/// way: what a type resolved to is a fact about the compiler that resolved it,
+/// and a permission to run a build script is not a request to be answered by a
+/// different compiler.
+fn compiler_environment(
+    toolchain: &HelperToolchain,
+    permitted: Permissions,
+) -> Vec<(String, Option<String>)> {
+    let rustc = toolchain.rustc.display().to_string();
+    let mut environment = vec![
+        ("RUSTC".to_owned(), Some(rustc.clone())),
+        ("CARGO_BUILD_RUSTC".to_owned(), Some(rustc)),
+    ];
+    if !permitted.build_scripts {
+        for key in [
+            "RUSTC_WRAPPER",
+            "CARGO_BUILD_RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+        ] {
+            environment.push((key.to_owned(), Some(String::new())));
+        }
+    }
+    environment
 }
 
 /// Build the project-model configuration used for an actual workspace load.
@@ -555,8 +764,9 @@ fn cargo_config(toolchain: &HelperToolchain) -> ra_ap_project_model::CargoConfig
 fn cargo_config_for_workspace(
     toolchain: &HelperToolchain,
     manifest: &Path,
+    permitted: Permissions,
 ) -> ra_ap_project_model::CargoConfig {
-    let mut config = cargo_config(toolchain);
+    let mut config = cargo_config(toolchain, permitted);
     if let Some(workspace_root) = manifest.parent() {
         config.extra_env.insert(
             "CARGO_TARGET_DIR".to_owned(),
@@ -566,14 +776,30 @@ fn cargo_config_for_workspace(
     config
 }
 
-fn project_workspace(manifest: &Path) -> Result<ra_ap_project_model::ProjectWorkspace, String> {
+/// How many times this process has called
+/// [`ra_ap_project_model::ProjectWorkspace::load`] and had it succeed.
+///
+/// Test-only. The invariant a request must keep is a cost — reading a
+/// workspace's `cargo metadata` and sysroot once rather than twice — and a
+/// cost is not visible by reading the source that is supposed to enforce it.
+/// A counter around the one call site in this file that reaches the real load
+/// is what lets a test observe the cost a request actually paid.
+#[cfg(test)]
+static PROJECT_WORKSPACE_LOADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn project_workspace(
+    manifest: &Path,
+    permitted: Permissions,
+) -> Result<ra_ap_project_model::ProjectWorkspace, String> {
     let toolchain = helper_toolchain()?;
-    project_workspace_with_toolchain(manifest, &toolchain)
+    project_workspace_with_toolchain(manifest, &toolchain, permitted)
 }
 
 fn project_workspace_with_toolchain(
     manifest: &Path,
     toolchain: &HelperToolchain,
+    permitted: Permissions,
 ) -> Result<ra_ap_project_model::ProjectWorkspace, String> {
     verify_locked_offline_metadata(manifest, toolchain)?;
     let path = manifest
@@ -589,10 +815,12 @@ fn project_workspace_with_toolchain(
         .map_err(|error| error.to_string())?;
     let workspace = ra_ap_project_model::ProjectWorkspace::load(
         found,
-        &cargo_config_for_workspace(toolchain, manifest),
+        &cargo_config_for_workspace(toolchain, manifest, permitted),
         &|_| {},
     )
     .map_err(|error| error.to_string())?;
+    #[cfg(test)]
+    PROJECT_WORKSPACE_LOADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     if let ra_ap_project_model::ProjectWorkspaceKind::Cargo {
         error: Some(error), ..
     } = &workspace.kind
@@ -606,6 +834,11 @@ fn project_workspace_with_toolchain(
 
 /// Prove that Cargo can resolve the project without either network access or a
 /// lockfile update before rust-analyzer loads it through its isolated copy.
+///
+/// Run from a directory of its own rather than from the project, so the
+/// configuration this Cargo reads is not one the project wrote. The compiler
+/// environment goes with it regardless: a directory outside the tree settles
+/// which files are read and says nothing about what this process inherited.
 #[allow(
     clippy::disallowed_types,
     reason = "this compiler helper is the designated subprocess isolation boundary"
@@ -614,7 +847,11 @@ fn verify_locked_offline_metadata(
     manifest: &Path,
     toolchain: &HelperToolchain,
 ) -> Result<(), String> {
-    let output = std::process::Command::new(&toolchain.cargo)
+    // Named, so the directory outlives the command that runs in it.
+    let working_directory = tempfile::tempdir()
+        .map_err(|error| format!("creating an isolated Cargo working directory: {error}"))?;
+    let mut command = std::process::Command::new(&toolchain.cargo);
+    command
         .args([
             "metadata",
             "--format-version=1",
@@ -623,14 +860,19 @@ fn verify_locked_offline_metadata(
             "--manifest-path",
         ])
         .arg(manifest)
-        .current_dir(
-            tempfile::tempdir()
-                .map_err(|error| format!("creating an isolated Cargo working directory: {error}"))?
-                .path(),
-        )
+        .current_dir(working_directory.path())
         .env("RUSTUP_TOOLCHAIN", &toolchain.rustup_toolchain)
         .env("RUSTUP_AUTO_INSTALL", "0")
-        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_TARGET_DIR");
+    // Nothing is compiled to answer this, so nothing here is permitted to run
+    // whatever a wrapper would have been.
+    for (key, value) in compiler_environment(toolchain, Permissions::default()) {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        };
+    }
+    let output = command
         .output()
         .map_err(|error| format!("could not start Cargo metadata: {error}"))?;
     if output.status.success() {
@@ -651,8 +893,12 @@ fn verify_locked_offline_metadata(
 /// sets are derived from the direct selections and the lockfile, and recording
 /// every resolver-internal choice would split a variant when Cargo changes an
 /// irrelevant implementation detail.
+///
+/// Read under no permission at all, because none has been asked for yet: a
+/// build is described before a run knows whether it will analyse anything, and
+/// a request to describe one carries nothing that could permit running it.
 fn describe_workspace(manifest: &Path) -> Result<BuildDescription, String> {
-    let workspace = project_workspace(manifest)?;
+    let workspace = project_workspace(manifest, Permissions::default())?;
     let mut cfgs: Vec<String> = workspace
         .rustc_cfg
         .iter()
@@ -683,10 +929,13 @@ fn describe_workspace(manifest: &Path) -> Result<BuildDescription, String> {
     Ok(BuildDescription { features, cfgs })
 }
 
-fn load(manifest: &Path, permitted: Permissions) -> Result<Loaded, String> {
-    let toolchain = helper_toolchain()?;
-    let config = cargo_config_for_workspace(&toolchain, manifest);
-    let load_config = ra_ap_load_cargo::LoadCargoConfig {
+/// Settings for turning a read [`ra_ap_project_model::ProjectWorkspace`] into
+/// the crate graph and VFS a request answers from.
+///
+/// Its own function so a test can build the identical value without
+/// duplicating the reasoning beside each field.
+const fn load_cargo_config(permitted: Permissions) -> ra_ap_load_cargo::LoadCargoConfig {
+    ra_ap_load_cargo::LoadCargoConfig {
         // The one setting here that runs the project's code, and the only
         // thing that turns it on is a permission that travelled with the
         // request. Running build scripts is what makes the output directory
@@ -699,13 +948,33 @@ fn load(manifest: &Path, permitted: Permissions) -> Result<Loaded, String> {
         prefill_caches: false,
         num_worker_threads: 1,
         proc_macro_processes: 0,
-    };
+    }
+}
+
+fn load(manifest: &Path, permitted: Permissions) -> Result<Loaded, String> {
+    let toolchain = helper_toolchain()?;
+    let config = cargo_config_for_workspace(&toolchain, manifest, permitted);
+    let load_config = load_cargo_config(permitted);
     let root = manifest
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    project_workspace_with_toolchain(manifest, &toolchain)?;
+    // Read the workspace once and carry the result forward, instead of
+    // reading it here only to have `ra_ap_load_cargo::load_workspace_at`
+    // read it again from scratch: `cargo metadata` and sysroot discovery are
+    // the expensive part of a semantic scan, and a large workspace paying for
+    // them twice is time taken straight out of `helper-timeout-ms`. Running
+    // the build scripts and handing the workspace to `load_workspace` is
+    // exactly what `load_workspace_at` does internally, minus its own
+    // `ProjectWorkspace::load`.
+    let mut workspace = project_workspace_with_toolchain(manifest, &toolchain, permitted)?;
+    if load_config.load_out_dirs_from_check {
+        let build_scripts = workspace
+            .run_build_scripts(&config, &|_| {})
+            .map_err(|error| error.to_string())?;
+        workspace.set_build_scripts(build_scripts);
+    }
     let (db, vfs, _proc_macro) =
-        ra_ap_load_cargo::load_workspace_at(manifest, &config, &load_config, &|_| {})
+        ra_ap_load_cargo::load_workspace(workspace, &config.extra_env, &load_config)
             .map_err(|error| error.to_string())?;
     Ok(Loaded { db, vfs, root })
 }
@@ -1116,8 +1385,11 @@ fn display_of(ty: &ra_ap_hir::Type<'_>, db: &RootDatabase) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
     use super::{
-        Declared, cargo_config, declared_build_script, has_build_script, helper_toolchain,
+        Declared, Outcome, PROJECT_WORKSPACE_LOADS, Permissions, Workspaces, cargo_config,
+        declared_build_script, has_build_script, helper_toolchain, program_naming_key,
     };
 
     fn package(body: &str) -> String {
@@ -1270,7 +1542,7 @@ mod tests {
     #[allow(clippy::expect_used)] // Test setup requires an installed helper toolchain.
     fn rust_analyzer_metadata_is_offline_after_the_locked_preflight() {
         let toolchain = helper_toolchain().expect("helper toolchain is available to tests");
-        let config = cargo_config(&toolchain);
+        let config = cargo_config(&toolchain, Permissions::default());
         assert_eq!(config.extra_args, ["--offline"]);
         assert_eq!(config.metadata_extra_args, ["--offline"]);
         assert_eq!(
@@ -1288,5 +1560,154 @@ mod tests {
             Some(toolchain.rustup_toolchain.as_str())
         );
         assert_eq!(config.extra_env.get("CARGO_TARGET_DIR"), Some(&None));
+    }
+
+    /// Which program runs as the compiler is settled before a project is read,
+    /// including for the description a handshake asks for — where no permission
+    /// exists yet, so none can have allowed the tree to choose.
+    #[test]
+    #[allow(clippy::expect_used)] // Test setup requires an installed helper toolchain.
+    fn a_target_tree_cannot_name_the_program_cargo_runs_as_the_compiler() {
+        let toolchain = helper_toolchain().expect("helper toolchain is available to tests");
+        let config = cargo_config(&toolchain, Permissions::default());
+        let named = |key: &str| config.extra_env.get(key).cloned().flatten();
+
+        let rustc = toolchain.rustc.display().to_string();
+        assert_eq!(named("RUSTC").as_deref(), Some(rustc.as_str()));
+        assert_eq!(named("CARGO_BUILD_RUSTC").as_deref(), Some(rustc.as_str()));
+        // Empty rather than absent: Cargo reads an absent wrapper out of the
+        // configuration file, which is the file being defended against.
+        for key in [
+            "RUSTC_WRAPPER",
+            "CARGO_BUILD_RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+        ] {
+            assert_eq!(named(key).as_deref(), Some(""), "{key}");
+        }
+    }
+
+    /// Permitting build scripts is the tree's own build being run on purpose,
+    /// and a wrapper is part of how a tree builds. The compiler itself is still
+    /// this program's own, because what a type resolved to is a fact about the
+    /// compiler that resolved it.
+    #[test]
+    #[allow(clippy::expect_used)] // Test setup requires an installed helper toolchain.
+    fn permitting_build_scripts_returns_the_wrappers_and_keeps_the_compiler() {
+        let toolchain = helper_toolchain().expect("helper toolchain is available to tests");
+        let config = cargo_config(
+            &toolchain,
+            Permissions {
+                build_scripts: true,
+            },
+        );
+
+        assert_eq!(
+            config
+                .extra_env
+                .get("RUSTC")
+                .and_then(Option::as_deref)
+                .map(str::to_owned),
+            Some(toolchain.rustc.display().to_string())
+        );
+        assert!(!config.extra_env.contains_key("RUSTC_WRAPPER"));
+        assert!(!config.extra_env.contains_key("RUSTC_WORKSPACE_WRAPPER"));
+    }
+
+    /// Answering one request about a workspace must cost one real read of it.
+    ///
+    /// Driven end to end through [`Workspaces::analyze`] against a real,
+    /// minimal crate, and counted at the one call site in this file that
+    /// reaches [`ra_ap_project_model::ProjectWorkspace::load`]: a request that
+    /// paid for a second read the way the removed code did would show two
+    /// here, whatever the surrounding source happens to read like.
+    #[test]
+    #[allow(clippy::expect_used)] // Test setup requires an installed helper toolchain.
+    fn a_semantic_request_reads_its_workspace_exactly_once() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            "[workspace]\nresolver = \"3\"\n\n[package]\nname = \"solo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .expect("writing a manifest");
+        std::fs::write(
+            directory.path().join("Cargo.lock"),
+            "# This file is automatically @generated by Cargo.\n\
+             # It is not intended for manual editing.\n\
+             version = 4\n\n[[package]]\nname = \"solo\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("writing a lockfile");
+        std::fs::create_dir(directory.path().join("src")).expect("creating a source directory");
+        std::fs::write(
+            directory.path().join("src/lib.rs"),
+            "pub fn answer() -> i32 { 42 }\n",
+        )
+        .expect("writing a source file");
+
+        let unit = codehelion_helper::ir::UnitRef {
+            unit: "solo".to_string(),
+            file: directory.path().join("src/lib.rs").display().to_string(),
+            variant: "host".to_string(),
+        };
+
+        PROJECT_WORKSPACE_LOADS.store(0, Ordering::SeqCst);
+        let mut workspaces = Workspaces::default();
+        let outcome = workspaces.analyze(&unit, Permissions::default(), None);
+        assert!(
+            matches!(outcome, Outcome::Analyzed(_)),
+            "the fixture crate should analyze cleanly"
+        );
+        assert_eq!(
+            PROJECT_WORKSPACE_LOADS.load(Ordering::SeqCst),
+            1,
+            "one semantic request must read the workspace exactly once"
+        );
+    }
+
+    #[test]
+    fn a_configuration_that_names_a_program_is_found_however_it_is_written() {
+        for configuration in [
+            "[build]\nrustc-wrapper = \"/tmp/anything\"\n",
+            "[build]\nrustc = '/tmp/anything'\n",
+            "[\"build\"]\n\"rustc-workspace-wrapper\" = \"/tmp/anything\"\n",
+            "build.rustc-wrapper = \"/tmp/anything\"\n",
+            "build = { rustc-wrapper = \"/tmp/anything\" }\n",
+            "[target.'cfg(all())']\nlinker = \"/tmp/anything\"\n",
+            "[target.x86_64-unknown-linux-gnu]\nrunner = \"/tmp/anything\"\n",
+            "target = { \"cfg(all())\" = { linker = \"/tmp/anything\" } }\n",
+            "[net]\ngit-fetch-with-cli = true\n",
+            "[registry]\ncredential-provider = \"/tmp/anything\"\n",
+            "[credential-alias]\nmine = [\"/tmp/anything\"]\n",
+        ] {
+            assert!(
+                program_naming_key(configuration).is_some(),
+                "read as naming nothing: {configuration}"
+            );
+        }
+    }
+
+    /// A configuration that only changes where things are put or how they are
+    /// compiled names no program, and a tree carrying one is read rather than
+    /// declined.
+    #[test]
+    fn a_configuration_that_starts_nothing_is_not_read_as_naming_a_program() {
+        assert_eq!(
+            program_naming_key(
+                "[build]\ntarget-dir = \"target\"\nrustflags = [\"-C\", \"debuginfo=0\"]\n\n\
+                 [net]\noffline = true\n\n[term]\nverbose = false\n\n\
+                 [env]\nMY_LINKER = \"anything\"\n"
+            ),
+            None
+        );
+    }
+
+    /// The key a tree is declined over is the one it wrote, so whoever reads
+    /// the refusal can open the file and see it.
+    #[test]
+    fn the_key_a_tree_is_declined_over_is_the_one_it_wrote() {
+        assert_eq!(
+            program_naming_key("[build]\nrustc-wrapper = \"./marker\"\n").as_deref(),
+            Some("build.rustc-wrapper")
+        );
     }
 }

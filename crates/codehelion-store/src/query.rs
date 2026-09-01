@@ -9,7 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use codehelion_core::semantic::{SOG_SCHEMA_VERSION, SemanticOperationGraph};
-use codehelion_core::stable_id::{CloneGroupFingerprint, GroupLineageId};
+use codehelion_core::stable_id::{
+    CloneGroupFingerprint, FindingId, FragmentFingerprint, GroupLineageId, UnitFingerprint,
+};
 use codehelion_core::test_code::TestCodeEvidence;
 use rusqlite::{OptionalExtension, Row, params};
 
@@ -777,10 +779,15 @@ pub struct StoredArtifactAnalysisCorrelation {
 }
 
 /// One source unit available as a candidate for artifact correlation.
+///
+/// The identity keeps the kind it was minted as: a fragment fingerprint or a
+/// finding id cannot be written into [`Self::fingerprint`], because a caller
+/// that correlates the wrong kind of identity produces an attribution nothing
+/// downstream can tell apart from a correct one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceUnitIdentity {
     /// Content-derived stable unit identity.
-    pub fingerprint: [u8; 16],
+    pub fingerprint: UnitFingerprint,
     /// Build variant that minted this unit identity.
     pub build_variant_fingerprint: [u8; 16],
     /// Path relative to the scan root.
@@ -808,14 +815,58 @@ pub struct SourceUnitIdentity {
 /// Only fragments that belong to a persisted clone group are returned. Parser
 /// implementation fragments that never became findings do not need a durable
 /// artifact-absence record.
+///
+/// The three identities it carries are three different kinds of thing — the
+/// content of the slice, this occurrence of it, and the group that holds every
+/// occurrence — so each keeps the newtype it was minted as. They are all
+/// 128-bit digests, so nothing but the type tells them apart, and a swap would
+/// attribute artifact bytes to a source identity that never named them:
+///
+/// ```
+/// use codehelion_core::stable_id::{CloneGroupFingerprint, FindingId, FragmentFingerprint};
+/// use codehelion_store::query::SourceFragmentIdentity;
+///
+/// let fragment = SourceFragmentIdentity {
+///     fingerprint: FragmentFingerprint::from_bytes([1; 16]),
+///     finding_id: FindingId::from_bytes([2; 16]),
+///     clone_group_fingerprint: CloneGroupFingerprint::from_bytes([3; 16]),
+///     is_canonical: true,
+///     clone_confidence: 1.0,
+///     build_variant_fingerprint: [4; 16],
+///     file_path: "src/lib.rs".to_owned(),
+///     start_line: Some(10),
+///     end_line: Some(20),
+/// };
+/// assert_eq!(fragment.finding_id.as_bytes(), &[2; 16]);
+/// ```
+///
+/// Exchanging two of them is a compile error rather than a silent mismatch:
+///
+/// ```compile_fail,E0308
+/// use codehelion_core::stable_id::{CloneGroupFingerprint, FindingId, FragmentFingerprint};
+/// use codehelion_store::query::SourceFragmentIdentity;
+///
+/// let fragment = SourceFragmentIdentity {
+///     // The content identity and the occurrence identity are swapped.
+///     fingerprint: FindingId::from_bytes([2; 16]),
+///     finding_id: FragmentFingerprint::from_bytes([1; 16]),
+///     clone_group_fingerprint: CloneGroupFingerprint::from_bytes([3; 16]),
+///     is_canonical: true,
+///     clone_confidence: 1.0,
+///     build_variant_fingerprint: [4; 16],
+///     file_path: "src/lib.rs".to_owned(),
+///     start_line: Some(10),
+///     end_line: Some(20),
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceFragmentIdentity {
     /// Content-derived stable fragment identity.
-    pub fingerprint: [u8; 16],
+    pub fingerprint: FragmentFingerprint,
     /// Stable identifier of this clone-member occurrence.
-    pub finding_id: [u8; 16],
+    pub finding_id: FindingId,
     /// Content-derived group identity owning this occurrence.
-    pub clone_group_fingerprint: [u8; 16],
+    pub clone_group_fingerprint: CloneGroupFingerprint,
     /// Whether this occurrence is the group's retained canonical member.
     pub is_canonical: bool,
     /// Clone similarity score recorded for the owning group.

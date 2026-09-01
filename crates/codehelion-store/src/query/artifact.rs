@@ -1,3 +1,7 @@
+use std::collections::BTreeMap;
+
+use crate::lifecycle::{ARTIFACT_ANALYSIS_RECENCY, SelectedCloneGroupEstimate};
+
 use super::common::{
     decode_artifact_mapping, fingerprint_from_blob, nonnegative_u64, parse_hex_id,
 };
@@ -14,23 +18,6 @@ use super::{
 };
 
 impl Store {
-    /// The newest saved artifact analysis, if one exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns any underlying database error.
-    pub fn latest_artifact_analysis_id(&self) -> Result<Option<i64>, StoreError> {
-        self.conn
-            .query_row(
-                "SELECT id FROM artifact_analysis
-                 ORDER BY finished_at DESC, id DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(StoreError::from)
-    }
-
     /// Every mapping recorded for one artifact analysis, in stable evidence order.
     ///
     /// The result retains all ambiguous candidates. Callers must not collapse
@@ -227,7 +214,69 @@ impl Store {
         rows.into_iter().map(decode_artifact_mapping).collect()
     }
 
+    /// Select the one saved estimate a controlled measurement evaluates.
+    ///
+    /// Analysing one artifact twice under one build variant leaves two rows
+    /// describing the same measurement, and a third analysis is the natural
+    /// reaction to an error about the second. They are the same estimate, so
+    /// the newest matching analysis is taken — under the same recency order
+    /// the rest of the lifecycle uses — and named in the result, rather than
+    /// leaving the calibration path unusable with no way to disambiguate it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a malformed group identity or an unreadable stored row rather
+    /// than measuring against an estimate that cannot be established.
+    pub fn select_clone_group_estimate(
+        &self,
+        source_scan_run_id: i64,
+        clone_group_fingerprint_hex: &str,
+        artifact_content_fingerprint: [u8; 16],
+        artifact_build_variant_fingerprint: [u8; 16],
+    ) -> Result<Option<SelectedCloneGroupEstimate>, StoreError> {
+        let fingerprint = parse_hex_id(clone_group_fingerprint_hex)?;
+        // The analysis columns are aliased so the shared recency order names
+        // result columns rather than repeating a table qualifier.
+        let columns = clone_group_savings_columns("savings");
+        let query = format!(
+            "SELECT analysis.id AS id, analysis.started_at AS started_at, {columns}
+             FROM artifact_analysis_clone_group_savings AS savings
+             JOIN artifact_analysis AS analysis ON analysis.id = savings.artifact_analysis_id
+             WHERE savings.source_scan_run_id = ?1
+               AND savings.clone_group_fingerprint = ?2
+               AND savings.artifact_build_variant_fingerprint = ?3
+               AND analysis.content_fingerprint = ?4
+               AND analysis.build_variant_fingerprint = ?3
+             ORDER BY {ARTIFACT_ANALYSIS_RECENCY}"
+        );
+        let mut statement = self.conn.prepare(&query)?;
+        let rows = statement
+            .query_map(
+                params![
+                    source_scan_run_id,
+                    fingerprint.as_slice(),
+                    artifact_build_variant_fingerprint.as_slice(),
+                    artifact_content_fingerprint.as_slice(),
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, clone_group_savings_row(row, 2)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let matching_analyses = rows.len();
+        let Some((artifact_analysis_id, selected)) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        Ok(Some(SelectedCloneGroupEstimate {
+            artifact_analysis_id,
+            matching_analyses,
+            estimate: selected.decode()?,
+        }))
+    }
+
     /// Every persisted savings record for one source run and clone group.
+    ///
+    /// The scope is the whole selection: only the rows matching it are read
+    /// and decoded, so a report iterating groups pays for its own group and
+    /// not for every estimate the analysis holds.
     ///
     /// # Errors
     ///
@@ -239,31 +288,60 @@ impl Store {
         clone_group_fingerprint_hex: &str,
     ) -> Result<Vec<(i64, ArtifactAnalysisCloneGroupSavings)>, StoreError> {
         let fingerprint = parse_hex_id(clone_group_fingerprint_hex)?;
-        let analysis_ids: Vec<i64> = self
-            .conn
-            .prepare(
-                "SELECT DISTINCT artifact_analysis_id
-                 FROM artifact_analysis_clone_group_savings
-                 WHERE source_scan_run_id = ?1 AND clone_group_fingerprint = ?2
-                 ORDER BY artifact_analysis_id ASC",
-            )?
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT artifact_analysis_id, {CLONE_GROUP_SAVINGS_COLUMNS}
+             FROM artifact_analysis_clone_group_savings
+             WHERE source_scan_run_id = ?1 AND clone_group_fingerprint = ?2
+             ORDER BY artifact_analysis_id ASC, source_build_variant_fingerprint ASC,
+                      artifact_build_variant_fingerprint ASC"
+        ))?;
+        let rows = statement
             .query_map(params![source_scan_run_id, fingerprint.as_slice()], |row| {
-                row.get(0)
+                Ok((row.get::<_, i64>(0)?, clone_group_savings_row(row, 1)?))
             })?
-            .collect::<Result<_, _>>()?;
-        let mut savings = Vec::new();
-        for analysis_id in analysis_ids {
-            savings.extend(
-                self.artifact_clone_group_savings(analysis_id)?
-                    .into_iter()
-                    .filter(|estimate| {
-                        estimate.source_scan_run_id == source_scan_run_id
-                            && estimate.clone_group_fingerprint == fingerprint
-                    })
-                    .map(|estimate| (analysis_id, estimate)),
-            );
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(analysis_id, raw)| Ok((analysis_id, raw.decode()?)))
+            .collect()
+    }
+
+    /// Every persisted savings record for one source run, grouped by the
+    /// stable clone-group identity it belongs to.
+    ///
+    /// A report renders every group of one run, so it reads the run's
+    /// estimates once instead of asking per group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a stored savings row carries a malformed
+    /// identity or unknown vocabulary.
+    pub fn clone_group_savings_for_run(
+        &self,
+        source_scan_run_id: i64,
+    ) -> Result<BTreeMap<String, Vec<(i64, ArtifactAnalysisCloneGroupSavings)>>, StoreError> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT artifact_analysis_id, {CLONE_GROUP_SAVINGS_COLUMNS}
+             FROM artifact_analysis_clone_group_savings
+             WHERE source_scan_run_id = ?1
+             ORDER BY clone_group_fingerprint ASC, artifact_analysis_id ASC,
+                      source_build_variant_fingerprint ASC,
+                      artifact_build_variant_fingerprint ASC"
+        ))?;
+        let rows = statement
+            .query_map(params![source_scan_run_id], |row| {
+                Ok((row.get::<_, i64>(0)?, clone_group_savings_row(row, 1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut grouped: BTreeMap<String, Vec<(i64, ArtifactAnalysisCloneGroupSavings)>> =
+            BTreeMap::new();
+        for (analysis_id, raw) in rows {
+            let estimate = raw.decode()?;
+            grouped
+                .entry(crate::fingerprint_hex(estimate.clone_group_fingerprint))
+                .or_default()
+                .push((analysis_id, estimate));
         }
-        Ok(savings)
+        Ok(grouped)
     }
 
     /// Symbols that one artifact analysis explicitly left unmapped.
@@ -365,100 +443,18 @@ impl Store {
         &self,
         analysis_id: i64,
     ) -> Result<Vec<ArtifactAnalysisCloneGroupSavings>, StoreError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT schema_version, source_scan_run_id, clone_group_fingerprint,
-                    source_build_variant_fingerprint, artifact_build_variant_fingerprint,
-                    duplicated_bytes, estimated_refactor_savings_bytes,
-                    mapping_confidence, clone_confidence, model_confidence,
-                    savings_confidence, model_schema_version, assumptions_json
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {CLONE_GROUP_SAVINGS_COLUMNS}
              FROM artifact_analysis_clone_group_savings
              WHERE artifact_analysis_id = ?1
              ORDER BY clone_group_fingerprint ASC, source_build_variant_fingerprint ASC,
-                      artifact_build_variant_fingerprint ASC",
-        )?;
-        let rows = stmt
-            .query_map([analysis_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, f64>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, String>(10)?,
-                    row.get::<_, String>(11)?,
-                    row.get::<_, String>(12)?,
-                ))
-            })?
+                      artifact_build_variant_fingerprint ASC"
+        ))?;
+        let rows = statement
+            .query_map([analysis_id], |row| clone_group_savings_row(row, 0))?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(
-                schema_version,
-                source_scan_run_id,
-                clone_group_fingerprint,
-                source_build_variant_fingerprint,
-                artifact_build_variant_fingerprint,
-                duplicated_bytes,
-                estimated_refactor_savings_bytes,
-                mapping_confidence,
-                clone_confidence,
-                model_confidence,
-                savings_confidence,
-                model_schema_version,
-                assumptions_json,
-            )| {
-                if schema_version != ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION {
-                    return Err(StoreError::InvalidMappingEvidence {
-                        reason: "unknown artifact clone-group savings schema".to_owned(),
-                    });
-                }
-                let assumptions: serde_json::Value = serde_json::from_str(&assumptions_json)
-                    .map_err(|_| StoreError::InvalidMappingEvidence {
-                        reason: "savings assumptions are not valid JSON".to_owned(),
-                    })?;
-                if !assumptions.is_array() {
-                    return Err(StoreError::InvalidMappingEvidence {
-                        reason: "savings assumptions are not a JSON array".to_owned(),
-                    });
-                }
-                Ok(ArtifactAnalysisCloneGroupSavings {
-                    schema_version,
-                    source_scan_run_id,
-                    clone_group_fingerprint: fingerprint_from_blob(
-                        "artifact_analysis_clone_group_savings.clone_group_fingerprint",
-                        clone_group_fingerprint,
-                    )?,
-                    source_build_variant_fingerprint: fingerprint_from_blob(
-                        "artifact_analysis_clone_group_savings.source_build_variant_fingerprint",
-                        source_build_variant_fingerprint,
-                    )?,
-                    artifact_build_variant_fingerprint: fingerprint_from_blob(
-                        "artifact_analysis_clone_group_savings.artifact_build_variant_fingerprint",
-                        artifact_build_variant_fingerprint,
-                    )?,
-                    duplicated_bytes: nonnegative_u64(
-                        "artifact_analysis_clone_group_savings.duplicated_bytes",
-                        duplicated_bytes,
-                    )?,
-                    estimated_refactor_savings_bytes,
-                    mapping_confidence: ArtifactAnalysisSavingsConfidence::from_sql(
-                        &mapping_confidence,
-                    )?,
-                    clone_confidence,
-                    model_confidence: ArtifactAnalysisSavingsConfidence::from_sql(
-                        &model_confidence,
-                    )?,
-                    savings_confidence: ArtifactAnalysisSavingsConfidence::from_sql(
-                        &savings_confidence,
-                    )?,
-                    model_schema_version,
-                    assumptions_json,
-                })
-            })
+            .map(CloneGroupSavingsSqlRow::decode)
             .collect()
     }
 
@@ -666,5 +662,116 @@ impl Store {
                 },
             )
             .transpose()
+    }
+}
+
+/// The savings columns, in the one order every reader of this table binds
+/// them. One decoder then serves every scope a caller can ask for.
+const CLONE_GROUP_SAVINGS_COLUMNS: &str = "schema_version, source_scan_run_id, \
+     clone_group_fingerprint, source_build_variant_fingerprint, \
+     artifact_build_variant_fingerprint, duplicated_bytes, \
+     estimated_refactor_savings_bytes, mapping_confidence, clone_confidence, \
+     model_confidence, savings_confidence, model_schema_version, assumptions_json";
+
+/// The same columns qualified with a table alias, for a query that joins.
+fn clone_group_savings_columns(alias: &str) -> String {
+    CLONE_GROUP_SAVINGS_COLUMNS
+        .split(',')
+        .map(|column| format!("{alias}.{}", column.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One savings row as `SQLite` returned it, before its vocabulary and stored
+/// identities have been established.
+struct CloneGroupSavingsSqlRow {
+    schema_version: String,
+    source_scan_run_id: i64,
+    clone_group_fingerprint: Vec<u8>,
+    source_build_variant_fingerprint: Vec<u8>,
+    artifact_build_variant_fingerprint: Vec<u8>,
+    duplicated_bytes: i64,
+    estimated_refactor_savings_bytes: i64,
+    mapping_confidence: String,
+    clone_confidence: f64,
+    model_confidence: String,
+    savings_confidence: String,
+    model_schema_version: String,
+    assumptions_json: String,
+}
+
+/// Read the savings columns starting at `offset`, so a query may select its
+/// own columns before them.
+fn clone_group_savings_row(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<CloneGroupSavingsSqlRow> {
+    Ok(CloneGroupSavingsSqlRow {
+        schema_version: row.get(offset)?,
+        source_scan_run_id: row.get(offset + 1)?,
+        clone_group_fingerprint: row.get(offset + 2)?,
+        source_build_variant_fingerprint: row.get(offset + 3)?,
+        artifact_build_variant_fingerprint: row.get(offset + 4)?,
+        duplicated_bytes: row.get(offset + 5)?,
+        estimated_refactor_savings_bytes: row.get(offset + 6)?,
+        mapping_confidence: row.get(offset + 7)?,
+        clone_confidence: row.get(offset + 8)?,
+        model_confidence: row.get(offset + 9)?,
+        savings_confidence: row.get(offset + 10)?,
+        model_schema_version: row.get(offset + 11)?,
+        assumptions_json: row.get(offset + 12)?,
+    })
+}
+
+impl CloneGroupSavingsSqlRow {
+    /// Establish the stored row's schema, identities, and vocabulary.
+    fn decode(self) -> Result<ArtifactAnalysisCloneGroupSavings, StoreError> {
+        if self.schema_version != ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION {
+            return Err(StoreError::InvalidMappingEvidence {
+                reason: "unknown artifact clone-group savings schema".to_owned(),
+            });
+        }
+        let assumptions: serde_json::Value =
+            serde_json::from_str(&self.assumptions_json).map_err(|_| {
+                StoreError::InvalidMappingEvidence {
+                    reason: "savings assumptions are not valid JSON".to_owned(),
+                }
+            })?;
+        if !assumptions.is_array() {
+            return Err(StoreError::InvalidMappingEvidence {
+                reason: "savings assumptions are not a JSON array".to_owned(),
+            });
+        }
+        Ok(ArtifactAnalysisCloneGroupSavings {
+            schema_version: self.schema_version,
+            source_scan_run_id: self.source_scan_run_id,
+            clone_group_fingerprint: fingerprint_from_blob(
+                "artifact_analysis_clone_group_savings.clone_group_fingerprint",
+                self.clone_group_fingerprint,
+            )?,
+            source_build_variant_fingerprint: fingerprint_from_blob(
+                "artifact_analysis_clone_group_savings.source_build_variant_fingerprint",
+                self.source_build_variant_fingerprint,
+            )?,
+            artifact_build_variant_fingerprint: fingerprint_from_blob(
+                "artifact_analysis_clone_group_savings.artifact_build_variant_fingerprint",
+                self.artifact_build_variant_fingerprint,
+            )?,
+            duplicated_bytes: nonnegative_u64(
+                "artifact_analysis_clone_group_savings.duplicated_bytes",
+                self.duplicated_bytes,
+            )?,
+            estimated_refactor_savings_bytes: self.estimated_refactor_savings_bytes,
+            mapping_confidence: ArtifactAnalysisSavingsConfidence::from_sql(
+                &self.mapping_confidence,
+            )?,
+            clone_confidence: self.clone_confidence,
+            model_confidence: ArtifactAnalysisSavingsConfidence::from_sql(&self.model_confidence)?,
+            savings_confidence: ArtifactAnalysisSavingsConfidence::from_sql(
+                &self.savings_confidence,
+            )?,
+            model_schema_version: self.model_schema_version,
+            assumptions_json: self.assumptions_json,
+        })
     }
 }

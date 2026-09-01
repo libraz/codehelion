@@ -268,7 +268,7 @@ fn source_units_keep_the_variant_that_minted_their_fingerprints() {
     let units = store.source_units(run_id).unwrap();
     assert_eq!(units.len(), 2);
     assert_eq!(units[0].file_path, "src/a.rs");
-    assert_eq!(units[0].fingerprint, [1; 16]);
+    assert_eq!(units[0].fingerprint, UnitFingerprint::from_bytes([1; 16]));
     assert_eq!(units[0].start_line, Some(1));
     assert_eq!(units[0].end_line, Some(9));
     assert_eq!(
@@ -377,19 +377,70 @@ fn clone_fragments_keep_the_variant_that_minted_their_fingerprints() {
 
     let fragments = store.source_clone_fragments(run_id).unwrap();
     assert_eq!(fragments.len(), 2);
-    assert_eq!(fragments[0].fingerprint, [1; 16]);
-    assert_eq!(fragments[0].finding_id, [101; 16]);
-    assert_eq!(fragments[0].clone_group_fingerprint, [9; 16]);
+    assert_eq!(
+        fragments[0].fingerprint,
+        FragmentFingerprint::from_bytes([1; 16])
+    );
+    assert_eq!(fragments[0].finding_id, FindingId::from_bytes([101; 16]));
+    assert_eq!(
+        fragments[0].clone_group_fingerprint,
+        CloneGroupFingerprint::from_bytes([9; 16])
+    );
     assert!(fragments[0].is_canonical);
     assert!((fragments[0].clone_confidence - 1.0).abs() < f64::EPSILON);
     assert_eq!(fragments[0].file_path, "src/a.rs");
     assert_eq!(fragments[0].start_line, Some(10));
     assert_eq!(fragments[0].end_line, Some(20));
-    assert_eq!(fragments[1].fingerprint, [1; 16]);
-    assert_eq!(fragments[1].finding_id, [102; 16]);
-    assert_eq!(fragments[1].clone_group_fingerprint, [9; 16]);
+    assert_eq!(
+        fragments[1].fingerprint,
+        FragmentFingerprint::from_bytes([1; 16])
+    );
+    assert_eq!(fragments[1].finding_id, FindingId::from_bytes([102; 16]));
+    assert_eq!(
+        fragments[1].clone_group_fingerprint,
+        CloneGroupFingerprint::from_bytes([9; 16])
+    );
     assert!(!fragments[1].is_canonical);
     assert_eq!(fragments[1].file_path, "src/b.rs");
+}
+
+/// The canonical mark follows the nomination the writer hands over, not the
+/// paths its members happen to sit at.
+///
+/// The mark decides which occurrence duplication accounting keeps rather than
+/// counts as duplicated, so a store that re-decided it from row order would
+/// move a group's reported duplicated bytes when a file was renamed and nothing
+/// about the code changed.
+#[test]
+fn renaming_a_file_does_not_move_the_canonical_member_mark() {
+    let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let canonical_findings = |first_path: &str| {
+        let mut snapshot = sample_snapshot(&variant, &detectors);
+        snapshot.groups[0].members[0].file_path = first_path.to_string();
+        snapshot.units[0].file_path = first_path.to_string();
+        snapshot.files[0].relative_path = first_path.to_string();
+        let mut store = Store::open_in_memory().unwrap();
+        let run_id = store.record_snapshot(&snapshot).unwrap();
+        store
+            .source_clone_fragments(run_id)
+            .unwrap()
+            .into_iter()
+            .filter(|fragment| fragment.is_canonical)
+            .map(|fragment| (fragment.finding_id, fragment.file_path))
+            .collect::<Vec<_>>()
+    };
+
+    // "src/a.rs" sorts before its sibling "src/b.rs"; "src/zeta.rs" after it.
+    assert_eq!(
+        canonical_findings("src/a.rs"),
+        vec![(FindingId::from_bytes([101; 16]), "src/a.rs".to_string())]
+    );
+    assert_eq!(
+        canonical_findings("src/zeta.rs"),
+        vec![(FindingId::from_bytes([101; 16]), "src/zeta.rs".to_string())],
+        "the same occurrence stays canonical when its file is renamed"
+    );
 }
 
 /// Any layout marker other than the baseline this build reads is rejected.

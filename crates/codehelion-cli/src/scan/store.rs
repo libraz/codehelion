@@ -250,11 +250,11 @@ fn tree_changes(
 
 /// Open the current store, creating its parent directory when needed.
 pub(crate) fn open_store(path: &Path) -> Result<Store> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
     Store::open(path).with_context(|| database_open_context(path))
 }
@@ -342,7 +342,10 @@ pub(super) fn detector_versions(
 ///
 /// `ranked` is the report's own entries in the engine's order, which is where
 /// the recorded ranking comes from: the audit database and the report are two
-/// views of one verdict, not two verdicts that happen to agree.
+/// views of one verdict, not two verdicts that happen to agree. Member order
+/// and the canonical nomination come from the same shared decision the public
+/// report is assembled from, and the store records it as written: the first
+/// member of a group is its canonical one.
 #[allow(
     clippy::too_many_arguments,
     reason = "parallel detector, identity, suppression, and presentation rows are joined here"
@@ -371,8 +374,11 @@ fn snapshot_rows(
         *slot = index;
         let source = &lexed[*file];
         let unit = &source.units[*unit_idx];
-        let end = unit.token_end.min(source.tokens.len());
-        let tokens = &source.tokens[unit.token_start..end];
+        let tokens = codehelion_core::frontend::tokens_in_range(
+            &source.tokens,
+            unit.token_start,
+            unit.token_end,
+        );
         let (_, end_line) = source.unit_lines[*unit_idx];
         units.push(UnitRow {
             fingerprint: stable_id::unit_fingerprint(
@@ -404,6 +410,30 @@ fn snapshot_rows(
                 .map(|member| member.finding_id.as_str())
                 .collect::<std::collections::BTreeSet<_>>();
             let mut emitted_findings = std::collections::BTreeSet::new();
+            let members: Vec<MemberRow> =
+                shared::nominated_occurrences(group.members.iter().zip(&group_ids.members).filter(
+                    |(_, member_ids)| {
+                        let finding = member_ids.finding.to_hex();
+                        retained_findings.contains(finding.as_str())
+                            && emitted_findings.insert(finding)
+                    },
+                ))
+                .into_iter()
+                .map(|occurrence| {
+                    let instance = occurrence.instance;
+                    MemberRow {
+                        content: occurrence.ids.content,
+                        finding: occurrence.ids.finding,
+                        language: lexed[instance.file].language,
+                        host_unit: instance.unit.map(|unit| host_index[&(instance.file, unit)]),
+                        boilerplate: None,
+                        file_path: lexed[instance.file].relative_path.clone(),
+                        start_line: instance.start_line,
+                        end_line: instance.end_line,
+                        token_count: instance.token_end - instance.token_start,
+                    }
+                })
+                .collect();
             let mut row = shared::stored_group(shared::StoredGroupCore {
                 fingerprint: group_ids.fingerprint,
                 clone_type: group.clone_type,
@@ -414,31 +444,108 @@ fn snapshot_rows(
                 suppressed_by,
                 ranked_down: report::ranks_down(ranked_group, suppression),
                 priority: priority_row(&ranked_group.priority),
-                members: group
-                    .members
-                    .iter()
-                    .zip(&group_ids.members)
-                    .filter_map(|(instance, member_ids)| {
-                        let finding = member_ids.finding.to_hex();
-                        (retained_findings.contains(finding.as_str())
-                            && emitted_findings.insert(finding))
-                        .then_some(MemberRow {
-                            content: member_ids.content,
-                            finding: member_ids.finding,
-                            language: lexed[instance.file].language,
-                            host_unit: instance.unit.map(|unit| host_index[&(instance.file, unit)]),
-                            boilerplate: None,
-                            file_path: lexed[instance.file].relative_path.clone(),
-                            start_line: instance.start_line,
-                            end_line: instance.end_line,
-                            token_count: instance.token_end - instance.token_start,
-                        })
-                    })
-                    .collect(),
+                members,
             });
             row.suppress_reason = group.suppressed.map(|reason| reason.name().to_string());
             row
         })
         .collect();
     (units, groups)
+}
+
+#[cfg(test)]
+mod tests {
+    use codehelion_core::clone_class::CloneClass;
+    use codehelion_core::discovery::{Language, LanguageSelection};
+    use codehelion_core::engine::{CloneGroup, EngineStats, Instance};
+    use codehelion_core::frontend::{SourceSpan, Token, TokenKind, Unit, UnitKind};
+
+    use super::{BuildVariant, EngineReport, FileContext, LexedSource, snapshot_rows};
+
+    fn token() -> Token {
+        Token {
+            kind: TokenKind::Identifier,
+            text: "x".into(),
+            span: SourceSpan {
+                start_byte: 0,
+                end_byte: 1,
+                start_line: 1,
+                start_column: 1,
+            },
+        }
+    }
+
+    /// A `Unit` whose token range reaches past the end of its file's token
+    /// stream, as an error-tolerant frontend may legitimately hand back after
+    /// recovering from a parse error.
+    #[test]
+    fn a_unit_with_a_token_start_past_the_token_count_does_not_panic() {
+        let unit = Unit {
+            kind: UnitKind::Function,
+            name: Some("f".to_string()),
+            token_start: 10,
+            token_end: 20,
+            span: SourceSpan {
+                start_byte: 0,
+                end_byte: 1,
+                start_line: 1,
+                start_column: 1,
+            },
+        };
+        let lexed = vec![LexedSource {
+            relative_path: "src/lib.rs".to_string(),
+            language: Language::Rust,
+            frontend_version: "test-v1",
+            tokens: vec![token(), token()],
+            arm_paths: None,
+            units: vec![unit],
+            unit_lines: vec![(1, 2)],
+            marker_lines: Vec::new(),
+            lines: 2,
+            diagnostics: 0,
+        }];
+        let contexts = vec![FileContext {
+            frontend_version: "test-v1",
+            language: Language::Rust,
+        }];
+        let report = EngineReport {
+            groups: vec![CloneGroup {
+                content_key: 0,
+                clone_type: CloneClass::Type1,
+                score: 1.0,
+                members: vec![Instance {
+                    file: 0,
+                    token_start: 0,
+                    token_end: 2,
+                    start_line: 1,
+                    end_line: 2,
+                    unit: Some(0),
+                }],
+                entropy_bits: 1.0,
+                suppressed: None,
+            }],
+            stats: EngineStats::default(),
+        };
+        let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+        let suppression = crate::config::Suppression::default();
+
+        let (units, groups) = snapshot_rows(
+            &lexed,
+            &contexts,
+            &variant,
+            &report,
+            &[],
+            &[],
+            &[],
+            &[],
+            &suppression,
+        );
+
+        assert_eq!(units.len(), 1, "the out-of-range unit is still recorded");
+        assert_eq!(
+            units[0].token_count, 0,
+            "a range past the token count clamps to an empty slice rather than panicking"
+        );
+        assert!(groups.is_empty());
+    }
 }

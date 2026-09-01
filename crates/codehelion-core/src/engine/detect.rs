@@ -9,10 +9,17 @@
 //! The fragment pass finds Type-2 clones: candidate fragments (bodies, loop
 //! and branch bodies, statement runs) are normalized scope-locally and grouped
 //! by whole-fragment content. Equal normal forms with unequal raw text are
-//! renamed copies. A verbatim fragment match is left to the raw pass when
-//! winnowing and segmentation promise that pass a seed for it, since the raw
-//! pass reports it at maximal extent; otherwise the fragment pass reports it
-//! itself, because no other pass looked at it.
+//! renamed copies; equal raw text is a verbatim match, which this pass reports
+//! as a Type-1 clone of its own.
+//!
+//! The raw pass reports the same duplication at maximal extent wherever it
+//! reached it, and the wider of two statements of one relation is the one kept
+//! ([`fold_restatements`]). What that consolidation reads is what the raw pass
+//! actually produced, rather than what the shape of the token window predicts
+//! it would: the raw pass drops whole fingerprint classes at its posting cap
+//! and stops seeding when its allowance runs out, and a verbatim match omitted
+//! because the geometry says another pass will report it is a clone nothing
+//! reports and no counter mentions.
 //!
 //! Candidate-explosion control happens before pairing, not after: fingerprints
 //! whose posting list exceeds the cap are dropped (and counted), and a global
@@ -24,14 +31,14 @@
 
 use std::collections::BTreeMap;
 
-use crate::frontend::{Token, Unit, UnitKind};
+use crate::frontend::Token;
 
 use super::fingerprint::{
     ContentDigest, kgram_hashes, norm_sequence_digest, norm_sequence_hash, raw_sequence_digest,
     raw_sequence_hash, raw_token_hash, winnow,
 };
 use super::normalize::{NormToken, normalize_into};
-use super::segment::{self, SegmentId};
+use super::segment::{self, AnchorId, SegmentId, anchored_unit};
 use super::{CloneClass, ClonePair, EngineConfig, EngineStats, InputFile, Instance};
 
 /// Remaining candidate-pair allowance shared by both passes.
@@ -116,7 +123,7 @@ struct Run {
 /// Build one instance, resolving line range and enclosing-unit anchor.
 fn instance(
     files: &[InputFile<'_>],
-    anchors: &[Vec<Option<usize>>],
+    anchors: &[Vec<AnchorId>],
     file: usize,
     token_start: usize,
     token_end: usize,
@@ -131,7 +138,7 @@ fn instance(
         token_end,
         start_line: first.span.start_line,
         end_line: last.span.start_line.saturating_add(newlines),
-        unit: anchors[file][token_start],
+        unit: anchored_unit(anchors[file][token_start]),
     }
 }
 
@@ -290,7 +297,7 @@ const fn run_rectangle(run: &Run) -> (usize, usize, usize, usize) {
 
 /// Least significant set bit of a one-based Fenwick index.
 const fn lowbit(index: usize) -> usize {
-    index & index.wrapping_neg()
+    index.isolate_lowest_one()
 }
 
 /// Drop duplicate runs, then every run nested inside a larger run of the
@@ -326,15 +333,19 @@ fn drop_nested(mut all: Vec<Run>) -> Vec<Run> {
     kept
 }
 
-/// Drop every match nested inside a larger match of the same file pair.
+/// Drop every match nested inside a larger match of the same class and file
+/// pair.
 ///
-/// [`FragmentMatch::nested_in`] can only hold between matches of the same
-/// file pair, so matches are bucketed by that pair first and the pairwise
-/// containment check runs inside each bucket instead of scanning all matches.
+/// Nesting can only hold between matches of the same file pair, so matches are
+/// bucketed by that pair first and the pairwise containment check runs inside
+/// each bucket instead of scanning all matches. Class is part of the bucket for
+/// the same reason it is part of the consolidation later on: a verbatim core
+/// inside a renamed region is a second claim about that text rather than a
+/// narrower way of stating the first, and the two are settled after grouping.
 fn drop_nested_matches(matches: Vec<FragmentMatch>) -> Vec<FragmentMatch> {
-    let mut buckets: BTreeMap<(usize, usize), Vec<FragmentMatch>> = BTreeMap::new();
+    let mut buckets: BTreeMap<(CloneClass, usize, usize), Vec<FragmentMatch>> = BTreeMap::new();
     for m in matches {
-        buckets.entry((m.a.0, m.b.0)).or_default().push(m);
+        buckets.entry((m.class, m.a.0, m.b.0)).or_default().push(m);
     }
     let mut kept: Vec<FragmentMatch> = Vec::new();
     for bucket in buckets.values() {
@@ -392,11 +403,16 @@ fn pair_rectangle(pair: &ClonePair) -> ((usize, usize), (usize, usize, usize, us
 ///
 /// Both passes can arrive at one relation between the same two occurrences.
 /// The raw pass reports the equal run its seeds reach inside one segment; the
-/// fragment pass reports the whole fragment where nothing promised the raw
-/// pass a seed for it, and a fragment holding a nested function is exactly
-/// where that happens. Reported side by side, one duplication reaches the
-/// reader as two findings of unequal width, and every count taken over
-/// findings — verdicts among them — reads the restatement as a second result.
+/// fragment pass reports the whole fragment it matched. Reported side by side,
+/// one duplication reaches the reader as two findings of unequal width, and
+/// every count taken over findings — verdicts among them — reads the
+/// restatement as a second result.
+///
+/// This is also the only place a verbatim match is allowed to disappear, and
+/// it disappears against a pair the run actually holds: whichever pass reached
+/// the duplication first, the widest statement of it survives, and a class the
+/// raw pass dropped at its posting cap or never seeded for want of allowance
+/// leaves the fragment pass's statement of it standing.
 ///
 /// A pair is therefore dropped when another pair of the same class, between
 /// the same two files, covers both of its spans. Containment across classes is
@@ -456,7 +472,7 @@ pub(crate) fn fold_restatements(pairs: &mut Vec<ClonePair>) -> usize {
 pub(crate) fn raw_pass(
     files: &[InputFile<'_>],
     segments: &[Vec<SegmentId>],
-    anchors: &[Vec<Option<usize>>],
+    anchors: &[Vec<AnchorId>],
     config: &EngineConfig,
     stats: &mut EngineStats,
     budget: &mut PairBudget,
@@ -566,89 +582,6 @@ pub(crate) fn raw_pass(
     pairs
 }
 
-/// The token positions where a file's segment id can change.
-///
-/// [`segment::segment_ids`] gives every function and method a segment of its
-/// own and keys the gaps between them by how many functions have started, so
-/// the id changes only at a function's first token and just past its last.
-fn segment_breaks(units: &[Unit]) -> Vec<usize> {
-    let mut breaks: Vec<usize> = units
-        .iter()
-        .filter(|unit| matches!(unit.kind, UnitKind::Function | UnitKind::Method))
-        .flat_map(|unit| [unit.token_start, unit.token_end])
-        .collect();
-    breaks.sort_unstable();
-    breaks.dedup();
-    breaks
-}
-
-/// The bounds of the segment holding `[start, end)`, or `None` when the range
-/// reaches over a segment boundary.
-fn enclosing_segment(
-    breaks: &[usize],
-    tokens: usize,
-    start: usize,
-    end: usize,
-) -> Option<(usize, usize)> {
-    let below = breaks.partition_point(|&at| at <= start);
-    if below != breaks.partition_point(|&at| at < end) {
-        return None;
-    }
-    let low = below.checked_sub(1).map_or(0, |index| breaks[index]);
-    let high = breaks.get(below).copied().unwrap_or(tokens).min(tokens);
-    Some((low, high))
-}
-
-/// Whether the raw pass is guaranteed to report a verbatim fragment match.
-///
-/// Winnowing promises a shared fingerprint only for equal runs of at least
-/// `winnow_window + min_clone_tokens - 1` tokens, and the raw pass forms its
-/// k-grams and extends its seeds one segment at a time. So the question is not
-/// how long the fragment is but how long the equal run around it is inside the
-/// segment each side sits in — which is also the extent the raw pass would
-/// report. A match reaching over a function boundary has no promise at all,
-/// however long it is, and neither has a shorter run in the interior of one.
-fn raw_pass_is_guaranteed(
-    files: &[InputFile<'_>],
-    breaks: &[Vec<usize>],
-    config: &EngineConfig,
-    (file_a, from_a, to_a): FragmentRef,
-    (file_b, from_b, to_b): FragmentRef,
-) -> bool {
-    let a = files[file_a].tokens;
-    let b = files[file_b].tokens;
-    let Some((low_a, high_a)) = enclosing_segment(&breaks[file_a], a.len(), from_a, to_a) else {
-        return false;
-    };
-    let Some((low_b, high_b)) = enclosing_segment(&breaks[file_b], b.len(), from_b, to_b) else {
-        return false;
-    };
-    let (mut start_a, mut start_b) = (from_a, from_b);
-    while start_a > low_a && start_b > low_b && tokens_eq(&a[start_a - 1], &b[start_b - 1]) {
-        start_a -= 1;
-        start_b -= 1;
-    }
-    let (mut end_a, mut end_b) = (to_a, to_b);
-    while end_a < high_a && end_b < high_b && tokens_eq(&a[end_a], &b[end_b]) {
-        end_a += 1;
-        end_b += 1;
-    }
-    let length = end_a - start_a;
-    // Two runs of one file that overlap are a self-repetition the raw pass
-    // discards, so it does not report them either.
-    if file_a == file_b {
-        let (first, second) = (start_a.min(start_b), start_a.max(start_b));
-        if first + length > second {
-            return false;
-        }
-    }
-    length
-        >= config
-            .winnow_window
-            .saturating_add(config.min_clone_tokens)
-            .saturating_sub(1)
-}
-
 /// Index every candidate fragment by its normalized content.
 ///
 /// The result is one flat list sorted by class key; the stable sort keeps
@@ -711,17 +644,13 @@ fn verified_classes<'a>(
 /// The Type-2 pass: scope-normalized fragments grouped by content.
 pub(crate) fn fragment_pass(
     files: &[InputFile<'_>],
-    anchors: &[Vec<Option<usize>>],
+    anchors: &[Vec<AnchorId>],
     config: &EngineConfig,
     stats: &mut EngineStats,
     budget: &mut PairBudget,
 ) -> Vec<ClonePair> {
     // Classes ordered rarest-first, class-size cap applied before pairing.
     let flat = fragment_classes(files, config, stats);
-    let breaks: Vec<Vec<usize>> = files
-        .iter()
-        .map(|file| segment_breaks(file.units))
-        .collect();
     let mut kept: Vec<FragmentClass> = Vec::new();
     let mut normalized: Vec<NormToken<'_>> = Vec::new();
     for members in flat.chunk_by(|a, b| a.0 == b.0) {
@@ -768,13 +697,11 @@ pub(crate) fn fragment_pass(
                     .filter(|(ta, tb)| tokens_eq(ta, tb))
                     .count();
                 let class = if raw_eq == a.len() {
-                    // Verbatim. The raw pass reports it at maximal extent
-                    // whenever winnowing and segmentation promise it a seed;
-                    // where they do not, this pass is the only one that saw
-                    // the match and reports it itself.
-                    if raw_pass_is_guaranteed(files, &breaks, config, verified[x], verified[y]) {
-                        continue;
-                    }
+                    // Verbatim, and reported as such. Where the raw pass
+                    // reached the same duplication it states it at maximal
+                    // extent and consolidation keeps that wider statement; the
+                    // decision needs the pairs that pass produced, which this
+                    // one cannot predict from the shape of the token window.
                     CloneClass::Type1
                 } else {
                     CloneClass::Type2
@@ -835,7 +762,7 @@ const fn pair_order(pair: &ClonePair) -> (usize, usize, usize, usize, u64, Conte
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::{SourceSpan, TokenKind};
+    use crate::frontend::{SourceSpan, TokenKind, Unit, UnitKind};
 
     fn token(kind: TokenKind, text: &str) -> Token {
         Token {
@@ -901,7 +828,7 @@ mod tests {
             ..EngineConfig::default()
         };
         let segments = [vec![0; 3], vec![0; 3]];
-        let anchors = [vec![None; 3], vec![None; 3]];
+        let anchors = [vec![segment::NO_ANCHOR; 3], vec![segment::NO_ANCHOR; 3]];
         let mut stats = EngineStats::default();
         let mut budget = PairBudget::new(config.pair_budget);
         let pairs = raw_pass(
@@ -955,7 +882,7 @@ mod tests {
         files: &[InputFile<'_>],
         config: &EngineConfig,
     ) -> (Vec<ClonePair>, EngineStats) {
-        let anchors: Vec<Vec<Option<usize>>> = files
+        let anchors: Vec<Vec<AnchorId>> = files
             .iter()
             .map(|file| segment::anchor_ids(file.tokens, file.units))
             .collect();
@@ -998,12 +925,12 @@ mod tests {
     }
 
     #[test]
-    fn a_verbatim_match_the_raw_pass_will_seed_is_left_to_it() {
-        // One unbroken function body, longer than the winnowing guarantee: the
-        // raw pass reports the copy at maximal extent, so this pass claims no
-        // verbatim match of its own — neither the body nor any statement run
-        // cut inside it. The renamed matches it finds among the statements of
-        // one file are a different question and stay.
+    fn a_verbatim_match_both_passes_reach_is_reported_once_at_the_raw_extent() {
+        // One unbroken function body, longer than the winnowing guarantee, so
+        // both passes reach the copy. The fragment pass states what it
+        // verified; the raw pass states the same duplication at maximal
+        // extent, and consolidation keeps the wider of the two. The fragment
+        // pass does not decide this by predicting the other one.
         let source = "fn f ( ) { a ( ) ; b ( ) ; c ( ) ; d ( ) ; e ( ) ; g ( ) ; }";
         let first = tokens_of(source);
         let second = first.clone();
@@ -1023,18 +950,206 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let (pairs, _) = fragment_pairs(&files, &config);
+        let (alone, _) = fragment_pairs(&files, &config);
         assert!(
-            pairs
-                .iter()
-                .all(|pair| pair.clone_type == CloneClass::Type2),
-            "{pairs:#?}"
+            alone.iter().any(|pair| pair.clone_type == CloneClass::Type1
+                && pair.a.file != pair.b.file
+                && (pair.score - 1.0).abs() < f64::EPSILON),
+            "the pass reports the verbatim copy it verified: {alone:#?}"
+        );
+
+        let segments: Vec<Vec<SegmentId>> = files
+            .iter()
+            .map(|file| segment::segment_ids(file.tokens, file.units))
+            .collect();
+        let anchors: Vec<Vec<AnchorId>> = files
+            .iter()
+            .map(|file| segment::anchor_ids(file.tokens, file.units))
+            .collect();
+        let mut stats = EngineStats::default();
+        let mut raw_budget = PairBudget::new(config.pair_budget);
+        let mut fragment_budget = PairBudget::new(config.pair_budget);
+        let mut pairs = raw_pass(
+            &files,
+            &segments,
+            &anchors,
+            &config,
+            &mut stats,
+            &mut raw_budget,
+        );
+        pairs.extend(fragment_pass(
+            &files,
+            &anchors,
+            &config,
+            &mut stats,
+            &mut fragment_budget,
+        ));
+        let restated = fold_restatements(&mut pairs);
+
+        let verbatim: Vec<&ClonePair> = pairs
+            .iter()
+            .filter(|pair| pair.clone_type == CloneClass::Type1 && pair.a.file != pair.b.file)
+            .collect();
+        assert_eq!(
+            verbatim.len(),
+            1,
+            "one duplication, stated once: {verbatim:#?}"
+        );
+        assert_eq!(
+            (verbatim[0].a.token_start, verbatim[0].a.token_end),
+            (0, first.len()),
+            "and stated at the extent the raw pass reached"
         );
         assert!(
-            !pairs
+            restated > 0,
+            "the narrower statements were folded, not lost"
+        );
+    }
+
+    /// Two copies of one body, plus a third file holding that body twice
+    /// inside one function. Every fingerprint the first two share occurs in
+    /// the third as well, so the raw pass sees a frequent class; the fragment
+    /// pass sees a class of exactly two, because the third file's body is
+    /// twice as long and is a different fragment. That is the shape where a
+    /// ceiling stops the raw pass without stopping this one.
+    fn shared_body_files() -> (Vec<Token>, Vec<Token>, Vec<Token>) {
+        let body =
+            "let acc = base + rate * step ; emit ( acc , base , rate , step ) ; drain ( acc ) ;";
+        (
+            tokens_of(&format!("fn one ( ) {{ {body} }}")),
+            tokens_of(&format!("fn two ( ) {{ {body} }}")),
+            tokens_of(&format!("fn three ( ) {{ {body} {body} }}")),
+        )
+    }
+
+    /// Whether any pair states a duplication between the first two files.
+    fn covers_the_shared_body(pairs: &[ClonePair]) -> bool {
+        pairs
+            .iter()
+            .any(|pair| (pair.a.file, pair.b.file) == (0, 1))
+    }
+
+    fn run_both_passes(
+        files: &[InputFile<'_>],
+        config: &EngineConfig,
+    ) -> (Vec<ClonePair>, Vec<ClonePair>, EngineStats, bool) {
+        let segments: Vec<Vec<SegmentId>> = files
+            .iter()
+            .map(|file| segment::segment_ids(file.tokens, file.units))
+            .collect();
+        let anchors: Vec<Vec<AnchorId>> = files
+            .iter()
+            .map(|file| segment::anchor_ids(file.tokens, file.units))
+            .collect();
+        let mut stats = EngineStats::default();
+        let mut raw_budget = PairBudget::new(config.pair_budget);
+        let mut fragment_budget = PairBudget::new(config.pair_budget);
+        let raw = raw_pass(
+            files,
+            &segments,
+            &anchors,
+            config,
+            &mut stats,
+            &mut raw_budget,
+        );
+        let fragment = fragment_pass(files, &anchors, config, &mut stats, &mut fragment_budget);
+        (raw, fragment, stats, raw_budget.exhausted())
+    }
+
+    #[test]
+    fn a_verbatim_match_survives_a_raw_pass_that_ran_out_of_allowance() {
+        // The raw pass gives up before seeding anything; the fragment pass has
+        // an allowance of its own and verified the same copy. Predicted rather
+        // than observed, this clone is reported by nobody and counted by
+        // nobody.
+        let (first, second, third) = shared_body_files();
+        let units_first = [function(0, first.len())];
+        let units_second = [function(0, second.len())];
+        let units_third = [function(0, third.len())];
+        let files = [
+            InputFile {
+                tokens: &first,
+                units: &units_first,
+            },
+            InputFile {
+                tokens: &second,
+                units: &units_second,
+            },
+            InputFile {
+                tokens: &third,
+                units: &units_third,
+            },
+        ];
+        let config = EngineConfig {
+            min_clone_tokens: 12,
+            max_statement_window: 1,
+            // Enough for the fragment class of two, not for the raw pass's
+            // fingerprint classes of three, which it visits first.
+            pair_budget: 2,
+            ..EngineConfig::default()
+        };
+
+        let (raw, fragment, _, exhausted) = run_both_passes(&files, &config);
+
+        assert!(
+            !covers_the_shared_body(&raw),
+            "the raw pass did not report the copy: {raw:#?}"
+        );
+        assert!(exhausted, "and said its allowance ran out");
+        assert!(
+            fragment
                 .iter()
-                .any(|pair| pair.a.file != pair.b.file && pair.score >= 1.0),
-            "the copy between the two files belongs to the raw pass: {pairs:#?}"
+                .any(|pair| pair.clone_type == CloneClass::Type1
+                    && (pair.a.file, pair.b.file) == (0, 1)),
+            "so the copy is this pass's to report: {fragment:#?}"
+        );
+    }
+
+    #[test]
+    fn a_verbatim_match_survives_a_fingerprint_class_the_posting_cap_dropped() {
+        // The raw pass drops the shared fingerprints as too frequent, which is
+        // the ceiling that fires first on the trees this tool is aimed at. The
+        // fragment class is smaller than the posting cap, so this pass keeps
+        // its own view of the same two occurrences.
+        let (first, second, third) = shared_body_files();
+        let units_first = [function(0, first.len())];
+        let units_second = [function(0, second.len())];
+        let units_third = [function(0, third.len())];
+        let files = [
+            InputFile {
+                tokens: &first,
+                units: &units_first,
+            },
+            InputFile {
+                tokens: &second,
+                units: &units_second,
+            },
+            InputFile {
+                tokens: &third,
+                units: &units_third,
+            },
+        ];
+        let config = EngineConfig {
+            min_clone_tokens: 12,
+            max_statement_window: 1,
+            posting_cap: 2,
+            ..EngineConfig::default()
+        };
+
+        let (raw, fragment, stats, exhausted) = run_both_passes(&files, &config);
+
+        assert!(!exhausted, "the allowance is not what stopped anything");
+        assert!(stats.stop_fingerprints > 0, "the cap fired: {stats:#?}");
+        assert!(
+            !raw.iter().any(|pair| (pair.a.file, pair.b.file) == (0, 1)),
+            "the raw pass did not report the copy: {raw:#?}"
+        );
+        assert!(
+            fragment
+                .iter()
+                .any(|pair| pair.clone_type == CloneClass::Type1
+                    && (pair.a.file, pair.b.file) == (0, 1)),
+            "so the copy is this pass's to report: {fragment:#?}"
         );
     }
 

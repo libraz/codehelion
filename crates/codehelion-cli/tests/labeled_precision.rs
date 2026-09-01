@@ -199,9 +199,12 @@ const CORPORA: &[Expected] = &[
             refuted: 27,
             forward_confirmed: 30,
             forward_refuted: 27,
-            // Five verbatim runs the fragment pass reports and no label speaks
-            // about, the longest a macro arm spelled out twice in full.
-            unjudged: 551,
+            // Verbatim runs the fragment pass reports and no label speaks
+            // about, the longest a macro arm spelled out twice in full. Two of
+            // them only survive because a fragment-pass match is no longer
+            // discarded on the assumption that the raw pass would report the
+            // same span: when the raw pass runs out of allowance, it does not.
+            unjudged: 553,
             conflicting: 1,
         },
     },
@@ -241,7 +244,11 @@ const CORPORA: &[Expected] = &[
             refuted: 2,
             forward_confirmed: 3,
             forward_refuted: 2,
-            unjudged: 227,
+            // Unlabelled verbatim runs. Eleven of them only survive because a
+            // fragment-pass match is no longer discarded on the assumption that
+            // the raw pass would report the same span; a generated flags corpus
+            // exhausts the raw pass's allowance readily, so it often would not.
+            unjudged: 238,
             conflicting: 0,
         },
     },

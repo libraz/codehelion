@@ -360,9 +360,14 @@ pub(crate) fn hydrate_artifact_savings(
     run_id: i64,
     groups: &mut [report::Group],
 ) -> Result<()> {
+    // The run's estimates are read once, not once per group: every group of
+    // one run reads from the same scope, and asking per group made the cost
+    // grow with the square of the number of groups.
+    let mut by_group = store.clone_group_savings_for_run(run_id)?;
     for group in groups {
-        group.artifact_savings = store
-            .clone_group_savings(run_id, &group.fingerprint)?
+        group.artifact_savings = by_group
+            .remove(&group.fingerprint)
+            .unwrap_or_default()
             .into_iter()
             .map(|(analysis_id, entry)| {
                 Ok(report::ArtifactSavings {

@@ -15,9 +15,11 @@
 //! recorded as nodes over their raw token trees. Malformed regions and
 //! CST-depth truncation become [`Shape::Error`] nodes plus byte ranges in
 //! [`SyntaxIrFile::error_ranges`].
-//! Delimiter nesting is checked with the nonrecursive lexer before the Rust
-//! parser constructs its CST, so excessive nesting also becomes explicit
-//! truncation data.
+//! Nesting is checked with the nonrecursive lexer before the Rust parser
+//! constructs its CST — delimiter groups, generic argument lists, assignments
+//! and operator chains all draw on the same depth budget — so excessive nesting
+//! also becomes explicit truncation data instead of driving the parser's
+//! recursive descent off the native stack.
 
 use codehelion_core::discovery::Language;
 use codehelion_core::frontend::{IrAssembly, Lexeme, LiteralKind, Token, TokenKind};
@@ -26,6 +28,8 @@ use codehelion_core::ir::{
     SyntaxIrFile, canonicalize_signatures,
 };
 use ra_ap_syntax::{Edition, SourceFile, SyntaxKind, SyntaxNode};
+
+use crate::item::{self, HeaderToken, ItemKind};
 
 /// Version tag of this structural frontend, used as a fingerprint input. Bump
 /// it whenever a change alters the token stream or the IR tree for unchanged
@@ -51,26 +55,184 @@ const ASSIGN_OPS: &[SyntaxKind] = &[
     SyntaxKind::SHREQ,
 ];
 
+/// Tokens that end both a generic argument list and an expression, so any `<`
+/// or assignment still open in the current group has been given back by the
+/// time one is reached. `for` is deliberately absent: `for<'a>` binders are
+/// part of the type grammar.
+const CHAIN_CLEARING_TOKENS: &[&str] = &[
+    ";", "=>", "let", "if", "while", "loop", "match", "return", "break", "continue",
+];
+
+/// Right-associative assignment operators. Each one makes the parser descend
+/// into the rest of the expression, so `x = y = z` nests as deeply as it is
+/// long.
+const ASSIGNMENT_TOKENS: &[&str] = &[
+    "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=",
+];
+
+/// The nesting one operator token contributes, or `None` when the token is not
+/// an operator. Prefix, infix and postfix operators are charged alike: each one
+/// makes the parser descend once, whichever side its operand is on, and the
+/// resulting CST is that deep no matter which way the operator associates. The
+/// lexer glues `&&` into a single token, so a double reference costs two
+/// levels. `<`, `>` and their glued forms are absent because they are already
+/// charged as generic-argument nesting.
+fn operator_nesting(text: &str) -> Option<usize> {
+    match text {
+        "&&" => Some(2),
+        "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "!" | "?" | "." | "::" | "as" | "||"
+        | ".." | "..=" | "..." | "==" | "!=" | "<=" | ">=" => Some(1),
+        _ => None,
+    }
+}
+
+/// One `{`, `(` or `[` group, together with the nesting opened directly inside
+/// it by constructs that no delimiter pair can span.
+struct NestingFrame {
+    /// The closing token this group expects, or `None` for the file itself.
+    closer: Option<&'static str>,
+    /// Generic-argument and assignment nesting opened inside this group and
+    /// not yet given back.
+    chains: usize,
+    /// Operator nesting accumulated inside this group since the last token
+    /// that ended an expression.
+    operators: usize,
+}
+
+/// Upper bound on the CST depth the recursive Rust parser would reach,
+/// accumulated token by token over the nonrecursive lexer's stream.
+///
+/// Every production that makes the parser descend draws on one budget:
+/// delimiter groups, generic argument lists, assignments and operator chains.
+/// Each group carries its own counts and gives them back when it closes,
+/// because none of those constructs spans a delimiter pair.
+///
+/// Delimiter groups are unambiguous. Angle brackets are not — `a < b` is a
+/// comparison, not a nested type — so they are counted as an upper bound,
+/// cleared by [`CHAIN_CLEARING_TOKENS`] and never by a token a generic argument
+/// list may contain. That is why a `Map<K, Map<K, …>>` chain stays charged for
+/// its full depth even though a comma sits at every level, while a comma does
+/// clear the operator count: a comma always ends the expression it separates.
+struct NestingDepth {
+    /// The file is the outermost frame, so this is never empty.
+    frames: Vec<NestingFrame>,
+    /// Chain depth summed over every open frame.
+    chains: usize,
+    /// Operator depth summed over every open frame.
+    operators: usize,
+}
+
+impl NestingDepth {
+    fn new() -> Self {
+        Self {
+            frames: vec![NestingFrame {
+                closer: None,
+                chains: 0,
+                operators: 0,
+            }],
+            chains: 0,
+            operators: 0,
+        }
+    }
+
+    /// The budget spent so far. The file's own frame is not nesting, so it is
+    /// excluded from the group count.
+    const fn depth(&self) -> usize {
+        self.frames.len() - 1 + self.chains + self.operators
+    }
+
+    /// Open `opened` levels of chain nesting in the innermost group.
+    fn open_chain(&mut self, opened: usize) {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.chains += opened;
+            self.chains += opened;
+        }
+    }
+
+    /// Give back at most `requested` levels of chain nesting.
+    fn close_chain(&mut self, requested: usize) {
+        if let Some(frame) = self.frames.last_mut() {
+            let closed = requested.min(frame.chains);
+            frame.chains -= closed;
+            self.chains -= closed;
+        }
+    }
+
+    /// Open `opened` levels of operator nesting in the innermost group.
+    fn open_operators(&mut self, opened: usize) {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.operators += opened;
+            self.operators += opened;
+        }
+    }
+
+    /// Give back the innermost group's operator nesting, which one ended
+    /// expression cannot carry into the next.
+    fn clear_operators(&mut self) {
+        if let Some(frame) = self.frames.last_mut() {
+            self.operators -= frame.operators;
+            frame.operators = 0;
+        }
+    }
+
+    /// Charge one token against the budget and report the depth it reaches.
+    fn feed(&mut self, text: &str) -> usize {
+        match text {
+            "{" | "(" | "[" => {
+                let closer = match text {
+                    "{" => "}",
+                    "(" => ")",
+                    _ => "]",
+                };
+                self.frames.push(NestingFrame {
+                    closer: Some(closer),
+                    chains: 0,
+                    operators: 0,
+                });
+            }
+            "}" | ")" | "]" => {
+                if self
+                    .frames
+                    .last()
+                    .is_some_and(|frame| frame.closer == Some(text))
+                    && let Some(frame) = self.frames.pop()
+                {
+                    self.chains -= frame.chains;
+                    self.operators -= frame.operators;
+                }
+            }
+            // A closing run reaches the preflight glued into `>>` tokens, so
+            // each one gives back both of the levels it closes.
+            "<" => self.open_chain(1),
+            "<<" => self.open_chain(2),
+            ">" => self.close_chain(1),
+            ">>" => self.close_chain(2),
+            "," => self.clear_operators(),
+            _ => {
+                if let Some(step) = operator_nesting(text) {
+                    self.open_operators(step);
+                } else if ASSIGNMENT_TOKENS.contains(&text) {
+                    self.open_chain(1);
+                } else if CHAIN_CLEARING_TOKENS.contains(&text) {
+                    self.close_chain(self.chains);
+                    self.clear_operators();
+                }
+            }
+        }
+        self.depth()
+    }
+}
+
 /// Return the source range that must not enter the recursive Rust CST parser.
 ///
 /// The Rust lexer is nonrecursive and already treats comments and literals as
-/// atomic tokens, so delimiter text inside either cannot be mistaken for
+/// atomic tokens, so nesting punctuation inside either cannot be mistaken for
 /// syntax here. The parser is only entered while this same nesting budget can
-/// still bound the structural IR it would produce.
-fn delimiter_nesting_overflow(tokens: &[Token], source_len: usize) -> Option<ByteRange> {
-    let mut expected_closers = Vec::new();
+/// still bound both its own recursion and the structural IR it would produce.
+fn nesting_overflow(tokens: &[Token], source_len: usize) -> Option<ByteRange> {
+    let mut nesting = NestingDepth::new();
     for token in tokens {
-        match token.text.as_str() {
-            "{" => expected_closers.push("}"),
-            "(" => expected_closers.push(")"),
-            "[" => expected_closers.push("]"),
-            "}" | ")" | "]" if expected_closers.last() == Some(&token.text.as_str()) => {
-                expected_closers.pop();
-            }
-            _ => continue,
-        }
-
-        if expected_closers.len() > MAX_IR_DEPTH {
+        if nesting.feed(&token.text) > MAX_IR_DEPTH {
             return Some(ByteRange {
                 start: token.span.start_byte,
                 end: source_len,
@@ -81,14 +243,14 @@ fn delimiter_nesting_overflow(tokens: &[Token], source_len: usize) -> Option<Byt
 }
 
 /// Build the explicit partial result returned when preflight blocks CST
-/// construction for excessive delimiter nesting.
+/// construction for excessive nesting.
 ///
 /// `tokens` is the preflight stream over the whole file. Node token indices
 /// address the stream this returns, so the prefix's own parse supplies every
 /// token a node can cover, and the omitted region contributes its tokens after
 /// them under one Error leaf.
 fn depth_error_file(source: &str, tokens: Vec<Token>, range: ByteRange) -> SyntaxIrFile {
-    // The delimiter preflight tells us where recursive parsing must stop, but
+    // The nesting preflight tells us where recursive parsing must stop, but
     // it does not make the source before that point unusable. Parse that
     // prefix independently so healthy functions remain available even when a
     // later generated expression exceeds the depth budget.
@@ -150,21 +312,12 @@ fn depth_error_file(source: &str, tokens: Vec<Token>, range: ByteRange) -> Synta
 /// one explicit Error leaf below.
 fn safe_depth_prefix_end(tokens: &[Token], overflow: ByteRange) -> usize {
     let safe_limit = (MAX_IR_DEPTH / 8).max(1);
-    let mut expected_closers = Vec::new();
+    let mut nesting = NestingDepth::new();
     for token in tokens {
         if token.span.start_byte >= overflow.start {
             break;
         }
-        match token.text.as_str() {
-            "{" => expected_closers.push("}"),
-            "(" => expected_closers.push(")"),
-            "[" => expected_closers.push("]"),
-            "}" | ")" | "]" if expected_closers.last() == Some(&token.text.as_str()) => {
-                expected_closers.pop();
-            }
-            _ => continue,
-        }
-        if expected_closers.len() >= safe_limit {
+        if nesting.feed(&token.text) >= safe_limit {
             return token.span.start_byte;
         }
     }
@@ -186,7 +339,7 @@ impl StructuralFrontend for RustStructuralFrontend {
 
     fn parse(&self, source: &str) -> SyntaxIrFile {
         let (preflight_tokens, _) = crate::lexer::lex(source);
-        if let Some(range) = delimiter_nesting_overflow(&preflight_tokens, source.len()) {
+        if let Some(range) = nesting_overflow(&preflight_tokens, source.len()) {
             return depth_error_file(source, preflight_tokens, range);
         }
 
@@ -251,9 +404,11 @@ enum Mapping {
 fn classify(node: &SyntaxNode) -> Mapping {
     match node.kind() {
         SyntaxKind::FN => Mapping::Emit(fn_shape(node)),
-        SyntaxKind::CLOSURE_EXPR => Mapping::Emit(Shape::Closure),
-        SyntaxKind::STRUCT | SyntaxKind::ENUM | SyntaxKind::UNION => Mapping::Emit(Shape::Record),
-        SyntaxKind::IMPL => Mapping::Emit(Shape::Impl),
+        SyntaxKind::CLOSURE_EXPR => Mapping::Emit(ItemKind::Closure.shape()),
+        SyntaxKind::STRUCT | SyntaxKind::ENUM | SyntaxKind::UNION => {
+            Mapping::Emit(ItemKind::Record.shape())
+        }
+        SyntaxKind::IMPL => Mapping::Emit(ItemKind::Impl.shape()),
         SyntaxKind::TRAIT => Mapping::Native("trait"),
         // `BLOCK_EXPR` and the `STMT_LIST` inside it collapse into one Block:
         // the block emits, the statement list stays transparent.
@@ -276,7 +431,9 @@ fn classify(node: &SyntaxNode) -> Mapping {
         SyntaxKind::CONTINUE_EXPR => Mapping::Emit(Shape::Continue),
         SyntaxKind::TRY_EXPR => Mapping::Emit(Shape::Try),
         SyntaxKind::EXPR_STMT => Mapping::ExprStmt,
-        SyntaxKind::MACRO_RULES | SyntaxKind::MACRO_DEF => Mapping::Emit(Shape::MacroDef),
+        SyntaxKind::MACRO_RULES | SyntaxKind::MACRO_DEF => {
+            Mapping::Emit(ItemKind::MacroDef.shape())
+        }
         SyntaxKind::MACRO_CALL => Mapping::Emit(Shape::MacroCall),
         SyntaxKind::MODULE => Mapping::Native("module"),
         SyntaxKind::EXTERN_BLOCK => Mapping::Native("extern_block"),
@@ -291,15 +448,30 @@ fn classify(node: &SyntaxNode) -> Mapping {
 
 /// An `fn` directly inside an `impl` or `trait` body is a method; anywhere
 /// else (file root, module, nested in another body) it is a free function.
+/// Which of the two it is comes from the rule Fast mode reads as well.
 fn fn_shape(node: &SyntaxNode) -> Shape {
-    if node
+    let directly_in_assoc_body = node
         .parent()
-        .is_some_and(|parent| parent.kind() == SyntaxKind::ASSOC_ITEM_LIST)
-    {
-        Shape::Method
-    } else {
-        Shape::Function
-    }
+        .is_some_and(|parent| parent.kind() == SyntaxKind::ASSOC_ITEM_LIST);
+    ItemKind::of_fn(directly_in_assoc_body).shape()
+}
+
+/// The tokens of an `impl` header: everything the node covers before its body.
+///
+/// The header is handed to the shared naming rule as a flat token sequence,
+/// which is the same shape Fast mode gives it, so both modes name an `impl`
+/// after the same identifier.
+fn impl_header(cst: &SyntaxNode) -> Vec<(TokenKind, String)> {
+    let body_start = cst
+        .children()
+        .find(|child| child.kind() == SyntaxKind::ASSOC_ITEM_LIST)
+        .map(|body| body.text_range().start());
+    cst.descendants_with_tokens()
+        .filter_map(ra_ap_syntax::NodeOrToken::into_token)
+        .filter(|token| !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT))
+        .take_while(|token| body_start.is_none_or(|start| token.text_range().start() < start))
+        .map(|token| (map_token_kind(token.kind()), token.text().to_owned()))
+        .collect()
 }
 
 /// Build the conservative signature side-table entry for one Rust function.
@@ -952,6 +1124,18 @@ impl<'s> IrBuilder<'s> {
             | SyntaxKind::MACRO_RULES
             | SyntaxKind::MACRO_DEF => SyntaxKind::NAME,
             SyntaxKind::MACRO_CALL => SyntaxKind::PATH,
+            // An `impl` declares no name of its own; it is reported under the
+            // type it implements for, which the shared rule reads out of the
+            // header.
+            SyntaxKind::IMPL => {
+                let header = impl_header(cst);
+                let name =
+                    item::impl_self_type_name(header.iter().map(|(kind, text)| HeaderToken {
+                        kind: *kind,
+                        text: text.as_str(),
+                    }))?;
+                return Some(self.assembly.intern(name));
+            }
             _ => return None,
         };
         cst.children()
@@ -1091,6 +1275,161 @@ mod tests {
         );
     }
 
+    /// The stack the pathological-nesting regressions run on. A generous
+    /// default stack hides how close the parser's recursive descent comes to
+    /// overflowing, so these cases are measured against a fixed small one; if
+    /// preflight lets them through, the thread overflows and takes the whole
+    /// process down instead of failing an assertion.
+    const BOUNDED_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+    fn parse_on_bounded_stack(source: String) -> SyntaxIrFile {
+        std::thread::Builder::new()
+            .stack_size(BOUNDED_STACK_BYTES)
+            .spawn(move || parse(&source))
+            .expect("the parse thread must start")
+            .join()
+            .expect("parse must return a file instead of aborting the process")
+    }
+
+    #[test]
+    fn deeply_nested_generics_are_truncated_instead_of_reaching_the_parser() {
+        let nesting = 1_200;
+        let mut source = String::from("fn generated(value: ");
+        source.push_str(&"Vec<".repeat(nesting));
+        source.push_str("u8");
+        source.push_str(&">".repeat(nesting));
+        source.push_str(") { let _ = value; }");
+
+        let source_len = source.len();
+        let file = parse_on_bounded_stack(source);
+        assert_bounded_depth_truncation(&file, source_len);
+    }
+
+    #[test]
+    fn a_long_prefix_operator_chain_is_truncated_instead_of_reaching_the_parser() {
+        let nesting = 20_000;
+        let mut source = String::from("fn generated() -> i64 { ");
+        source.push_str(&"-".repeat(nesting));
+        source.push_str("1 }");
+
+        let source_len = source.len();
+        let file = parse_on_bounded_stack(source);
+        assert_bounded_depth_truncation(&file, source_len);
+    }
+
+    #[test]
+    fn a_long_range_operator_chain_is_truncated_instead_of_reaching_the_parser() {
+        let nesting = 20_000;
+        let mut source = String::from("fn generated() { let _ = ");
+        source.push_str(&"..".repeat(nesting));
+        source.push_str("1; }");
+
+        let source_len = source.len();
+        let file = parse_on_bounded_stack(source);
+        assert_bounded_depth_truncation(&file, source_len);
+    }
+
+    #[test]
+    fn a_long_assignment_chain_is_truncated_instead_of_reaching_the_parser() {
+        // Assignment is right-associative, so the parser descends once per
+        // `=` even though an operand separates them and no chain of prefix
+        // operators is present.
+        let nesting = 20_000;
+        let mut source = String::from("fn generated() { ");
+        source.push_str(&"x = ".repeat(nesting));
+        source.push_str("1; }");
+
+        let source_len = source.len();
+        let file = parse_on_bounded_stack(source);
+        assert_bounded_depth_truncation(&file, source_len);
+    }
+
+    #[test]
+    fn long_operator_chains_are_truncated_instead_of_reaching_the_parser() {
+        // A left-associative chain nests to the left instead of the right, and
+        // arrives as a plain run of operators rather than as nesting
+        // punctuation, but the CST it produces is exactly as deep.
+        let nesting = 20_000;
+        for source in [
+            format!("fn generated() -> i64 {{ {}1 }}", "x + ".repeat(nesting)),
+            format!("fn generated() -> i64 {{ x{} }}", " as i64".repeat(nesting)),
+            format!(
+                "fn generated() {{ let _ = x{}; }}",
+                ".field".repeat(nesting)
+            ),
+            format!(
+                "fn generated() {{ let _ = {}x; }}",
+                "module::".repeat(nesting)
+            ),
+            format!("fn generated() {{ let _ = x{}; }}", "?".repeat(nesting)),
+        ] {
+            let source_len = source.len();
+            let file = parse_on_bounded_stack(source);
+            assert_bounded_depth_truncation(&file, source_len);
+        }
+    }
+
+    #[test]
+    fn nested_generics_stay_charged_across_the_comma_at_every_level() {
+        // A comma separates generic arguments, so clearing the count at one
+        // would leave a `Map<K, Map<K, …>>` chain measured as a single level
+        // and hand the parser the nesting the budget exists to keep out.
+        let nesting = 1_200;
+        let mut source = String::from("fn generated(value: ");
+        source.push_str(&"HashMap<u8, ".repeat(nesting));
+        source.push_str("u8");
+        source.push_str(&">".repeat(nesting));
+        source.push_str(") { let _ = value; }");
+
+        let source_len = source.len();
+        let file = parse_on_bounded_stack(source);
+        assert_bounded_depth_truncation(&file, source_len);
+    }
+
+    #[test]
+    fn a_closing_run_gives_back_every_level_it_closes() {
+        // The lexer glues a closing run into `>>` tokens. Charging one back
+        // per token would leave residue behind every nested type and truncate
+        // a file whose nesting never approaches the budget.
+        use core::fmt::Write as _;
+
+        let parameters = MAX_IR_DEPTH * 2;
+        let mut source = String::from("fn generated(");
+        for index in 0..parameters {
+            let _ = write!(source, "p{index}: Vec<Vec<Vec<u8>>>, ");
+        }
+        source.push_str(") { }");
+
+        let file = parse(&source);
+        assert!(
+            !file.depth_truncated,
+            "balanced generic arguments must not accumulate nesting"
+        );
+    }
+
+    #[test]
+    fn comparisons_do_not_accumulate_against_the_nesting_budget() {
+        // `<` is a comparison as often as it opens a type, and the preflight
+        // cannot tell the two apart. A statement or block keyword ends any
+        // generic argument list, so an unclosed comparison is given back there
+        // rather than left to add up over a long function.
+        use core::fmt::Write as _;
+
+        let statements = MAX_IR_DEPTH * 4;
+        let mut source = String::from("fn generated(a: u64, b: u64) -> u64 { let mut total = 0;\n");
+        for index in 0..statements {
+            let _ = writeln!(source, "if a < b {{ total += {index}; }}");
+        }
+        source.push_str("total }\n");
+
+        let file = parse(&source);
+        assert!(file.error_ranges.is_empty(), "{:?}", file.error_ranges);
+        assert!(
+            !file.depth_truncated,
+            "ordinary comparisons must not exhaust the nesting budget"
+        );
+    }
+
     fn shape_label(shape: &Shape) -> String {
         match shape {
             Shape::Function => "function".to_owned(),
@@ -1213,7 +1552,7 @@ mod app {
 native:module
   record Point
   record Op
-  impl
+  impl Point
     method shift
       block
         assign

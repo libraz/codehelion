@@ -92,7 +92,7 @@ fn build_semantic_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group
                 report::Member {
                     finding_id: stable_id::finding_id(
                         &fingerprint,
-                        Some(&unit.fingerprint),
+                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
                         member_ranks[position],
                     )
                     .to_hex(),
@@ -172,7 +172,7 @@ fn build_semantic_group(inputs: &ReportInputs<'_>, index: usize) -> report::Grou
                 report::Member {
                     finding_id: stable_id::finding_id(
                         &fingerprint,
-                        Some(&unit.fingerprint),
+                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
                         member_ranks[position],
                     )
                     .to_hex(),
@@ -630,7 +630,7 @@ fn build_siblings(inputs: &ReportInputs<'_>) -> Vec<report::GroupSiblings> {
                             member: report::Member {
                                 finding_id: stable_id::finding_id(
                                     &detail.fingerprint,
-                                    Some(&unit.fingerprint),
+                                    stable_id::OccurrenceScope::Unit(&unit.fingerprint),
                                     rank,
                                 )
                                 .to_hex(),
@@ -802,7 +802,7 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                 report::Member {
                     finding_id: stable_id::finding_id(
                         &detail.fingerprint,
-                        Some(&unit.fingerprint),
+                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
                         rank,
                     )
                     .to_hex(),
@@ -909,7 +909,7 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                 report::Member {
                     finding_id: stable_id::finding_id(
                         &pair.fingerprint,
-                        Some(&unit.fingerprint),
+                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
                         rank,
                     )
                     .to_hex(),
@@ -984,7 +984,7 @@ fn build_region(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
                 report::Member {
                     finding_id: stable_id::finding_id(
                         &region.fingerprint,
-                        Some(&unit.fingerprint),
+                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
                         rank,
                     )
                     .to_hex(),

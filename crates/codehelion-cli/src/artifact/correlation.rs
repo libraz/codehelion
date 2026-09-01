@@ -12,6 +12,7 @@ use super::{
     SourceResolvedCall, SourceResolvedSymbol, SourceUnitIdentity, Store, bail, fingerprint_hex, fs,
     metrics,
 };
+use codehelion_core::stable_id::CloneGroupFingerprint;
 use codehelion_store::artifact::ArtifactAnalysisMappingConfidence;
 
 /// Mapping rows established by one explicit source-run correlation request.
@@ -568,10 +569,14 @@ pub(super) fn clone_group_attributions(rows: &CorrelationRows) -> Vec<CloneGroup
     groups
         .into_iter()
         .map(|((group_fingerprint, source_variant), members)| {
+            // The canonical member is the copy this accounting keeps rather
+            // than counts as duplicated. The writer nominates it from content,
+            // so reading its mark here attributes the same bytes to the same
+            // occurrence however the scan reached the group's members.
             let noncanonical = members
                 .iter()
                 .filter(|member| !member.is_canonical)
-                .map(|member| member.finding_id)
+                .map(|member| *member.finding_id.as_bytes())
                 .collect::<BTreeSet<_>>();
             let mut bytes_by_member: BTreeMap<[u8; 16], MemberAttribution> = BTreeMap::new();
             for mapping in group_mappings(rows, source_variant, &noncanonical) {
@@ -598,7 +603,7 @@ pub(super) fn clone_group_attributions(rows: &CorrelationRows) -> Vec<CloneGroup
                 .values()
                 .all(|member| member.whole_symbol_only);
             CloneGroupAttributionReport {
-                clone_group_fingerprint: fingerprint_hex(group_fingerprint),
+                clone_group_fingerprint: fingerprint_hex(*group_fingerprint.as_bytes()),
                 source_build_variant_fingerprint: fingerprint_hex(source_variant),
                 members: members.len(),
                 attributed_noncanonical_members,
@@ -692,7 +697,9 @@ pub(super) fn clone_group_savings(rows: &CorrelationRows) -> Vec<CloneGroupSavin
             let duplicated_bytes = attribution
                 .duplicated_bytes
                 .or(attribution.estimated_duplicated_bytes)?;
-            let group_fingerprint = hex_fingerprint(&attribution.clone_group_fingerprint)?;
+            let group_fingerprint = CloneGroupFingerprint::from_bytes(hex_fingerprint(
+                &attribution.clone_group_fingerprint,
+            )?);
             let source_variant = hex_fingerprint(&attribution.source_build_variant_fingerprint)?;
             let members = rows
                 .clone_fragments
@@ -702,7 +709,7 @@ pub(super) fn clone_group_savings(rows: &CorrelationRows) -> Vec<CloneGroupSavin
                         && fragment.build_variant_fingerprint == source_variant
                         && !fragment.is_canonical
                 })
-                .map(|fragment| fragment.finding_id)
+                .map(|fragment| *fragment.finding_id.as_bytes())
                 .collect::<BTreeSet<_>>();
             let contributing = group_mappings(rows, source_variant, &members)
                 .filter(|mapping| mapping.attributed_bytes.is_some());

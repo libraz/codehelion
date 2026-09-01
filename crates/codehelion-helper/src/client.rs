@@ -749,6 +749,15 @@ pub struct Supervisor {
     poisoned: BTreeMap<UnitRef, Explained>,
     /// Bounded stderr emitted while answering the most recent unavailable unit.
     diagnostics: Vec<String>,
+    /// The diagnostics behind the most recently failed attempt.
+    ///
+    /// Kept apart from `diagnostics`, which the next unit's call clears before
+    /// its own attempt runs. The attempt that finally spends the restart
+    /// budget happened while answering an earlier unit, so by the time a run
+    /// gives up over it `diagnostics` has already been reset for whoever asked
+    /// next. This survives that reset, so give-up carries what was actually
+    /// said rather than the empty span the next call started with.
+    last_failure: Vec<String>,
     /// Whether a helper has ever been started, which is what tells a first
     /// start apart from a restart.
     started: bool,
@@ -788,6 +797,7 @@ impl Supervisor {
             permitted: Vec::new(),
             poisoned: BTreeMap::new(),
             diagnostics: Vec::new(),
+            last_failure: Vec::new(),
             started: false,
             given_up: None,
         }
@@ -961,6 +971,7 @@ impl Supervisor {
             }
         }
         let diagnostics = bounded(diagnostics, 0);
+        self.last_failure.clone_from(&diagnostics);
         Explained {
             reason: unavailability(error),
             diagnostics,
@@ -980,7 +991,7 @@ impl Supervisor {
                 if self.consecutive_restarts >= self.max_restarts {
                     self.given_up = Some(Explained {
                         reason: Unavailability::RestartBudgetExhausted,
-                        diagnostics: self.diagnostics.clone(),
+                        diagnostics: self.last_failure.clone(),
                     });
                     return Ok(Analysis::Missing(Unavailability::RestartBudgetExhausted));
                 }
@@ -1390,5 +1401,55 @@ mod tests {
             error,
             HelperError::Sandbox(SandboxError::NotStarted { .. })
         ));
+    }
+
+    /// A unit reported under an exhausted restart budget must still carry the
+    /// explanation for what spent it.
+    ///
+    /// `attempt` decides a budget is exhausted before it ever spawns a
+    /// process, so the crash that actually spent the budget is reproduced
+    /// through `explained` — the same private path a real dying helper goes
+    /// through — rather than through a real subprocess. `diagnostics` is then
+    /// cleared exactly as `analyze_with_command_and_boundary` clears it at the
+    /// start of the next unit's call, before that unit's own attempt runs.
+    #[test]
+    fn a_unit_that_exhausts_the_restart_budget_still_names_why() {
+        let mut supervisor = Supervisor::new(PathBuf::from("unused"), Vec::new(), DEFAULT_TIMEOUT)
+            .with_max_restarts(2);
+        supervisor.explained(&HelperError::Died {
+            stderr: vec!["the helper crashed analysing src/broken.rs".into()],
+        });
+        supervisor.diagnostics.clear();
+        supervisor.started = true;
+        supervisor.consecutive_restarts = supervisor.max_restarts;
+
+        let next = UnitRef {
+            unit: "crate".into(),
+            file: "src/after.rs".into(),
+            variant: "variant-0".into(),
+        };
+        let outcome = supervisor
+            .attempt(&next, None, None, &[])
+            .expect("giving up is an answer, not a failure");
+        assert_eq!(
+            outcome,
+            Analysis::Missing(Unavailability::RestartBudgetExhausted)
+        );
+        let given_up = supervisor
+            .given_up
+            .as_ref()
+            .expect("the run recorded what stopped it");
+        assert!(
+            !given_up.diagnostics.is_empty(),
+            "a unit reported under an exhausted budget carried no explanation"
+        );
+        assert!(
+            given_up
+                .diagnostics
+                .iter()
+                .any(|line| line.contains("src/broken.rs")),
+            "the explanation lost the crash that actually spent the budget: {:?}",
+            given_up.diagnostics
+        );
     }
 }

@@ -314,6 +314,18 @@ impl HelperProcess {
     }
 }
 
+impl Drop for HelperProcess {
+    fn drop(&mut self) {
+        // The termination this type is owed, paid here so nobody who only
+        // holds a `HelperProcess` — rather than the `Helper` that usually
+        // wraps one — can drop it and leave the child running. Both calls are
+        // no-ops once `reaped` is set, so a caller that already shut this
+        // helper down explicitly does not signal it a second time here.
+        self.terminate();
+        self.wait();
+    }
+}
+
 /// Put the helper in a separate process group so its compiler descendants can
 /// be terminated with it after a request deadline.
 #[cfg(unix)]
@@ -422,6 +434,73 @@ mod tests {
         // nothing to aim at rather than aim at a reused number.
         helper.terminate();
         assert_eq!(helper.signal_target(), None);
+    }
+
+    /// The public `spawn` API is the surface an external caller uses without
+    /// ever seeing the `Helper` wrapper: nothing but `HelperProcess` itself is
+    /// there to end the child once nobody calls `terminate` and `wait`
+    /// explicitly. Its `Drop` is what has to pay that termination.
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_helper_process_kills_and_reaps_the_child_without_an_explicit_terminate() {
+        use nix::errno::Errno;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        let helper = spawn(
+            Path::new("/bin/sh"),
+            &["-c", "sleep 30"],
+            SandboxRequest::unrestricted(),
+        )
+        .expect("start a long-running helper");
+        let pid = i32::try_from(helper.signal_target().expect("a live helper has a pid"))
+            .expect("process id fits pid_t");
+
+        drop(helper);
+
+        // `wait()` inside `Drop` blocks on the immediate child, so its exit is
+        // already collected by the time `drop` has returned: no polling loop
+        // is needed to observe that the number has been released.
+        assert_eq!(
+            kill(Pid::from_raw(pid), None),
+            Err(Errno::ESRCH),
+            "the dropped helper's child was not killed and reaped before drop returned"
+        );
+    }
+
+    /// `Helper::shutdown` already calls `terminate()` then `wait()` on the
+    /// `HelperProcess` it owns before that field is itself dropped. Its `Drop`
+    /// must find the child already reaped and do nothing further, rather than
+    /// aiming a second signal or a second wait at a number the operating
+    /// system may already have handed to an unrelated process.
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_helper_process_after_an_explicit_shutdown_does_not_double_signal() {
+        use std::time::{Duration, Instant};
+
+        let mut helper = spawn(
+            Path::new("/bin/sh"),
+            &["-c", "exit 0"],
+            SandboxRequest::unrestricted(),
+        )
+        .expect("start a helper that ends on its own");
+
+        // Mirrors the sequence `Helper::shutdown` runs before the `Helper`
+        // (and the `HelperProcess` field it owns) goes out of scope.
+        helper.terminate();
+        helper.wait();
+        assert_eq!(
+            helper.signal_target(),
+            None,
+            "an explicit shutdown left a live signal target for drop to find"
+        );
+
+        let started = Instant::now();
+        drop(helper);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "drop after an explicit shutdown should not block on a second wait"
+        );
     }
 
     /// Asking whether a helper has gone reaps it when it has, so that question

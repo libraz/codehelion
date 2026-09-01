@@ -445,10 +445,14 @@ fn an_incomplete_partition_keeps_the_prior_snapshot_readable() {
     );
 }
 
+/// A partition whose staging invocation is gone is what the grace period is
+/// about: nothing will ever finalize it, and the content identities it minted
+/// belong to nobody.
 #[test]
-fn writer_open_reaps_expired_incomplete_partitions_and_orphaned_fingerprints() {
+fn writer_open_reaps_expired_partitions_left_by_another_invocation() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("audit.db");
+    let inherited = directory.path().join("inherited.db");
     let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
 
@@ -462,11 +466,57 @@ fn writer_open_reaps_expired_incomplete_partitions_and_orphaned_fingerprints() {
         assert_eq!(store.abandoned_runs().unwrap()[0].id, run_id);
         assert!(store.table_count("fingerprint").unwrap() > 0);
     }
+    // A copy is a database no live invocation staged anything into, which is
+    // what an interrupted earlier scan leaves behind.
+    std::fs::copy(&database, &inherited).unwrap();
 
-    let store = Store::open(&database).unwrap();
+    let store = Store::open(&inherited).unwrap();
     assert!(store.abandoned_runs().unwrap().is_empty());
     assert_eq!(store.table_count("scan_run").unwrap(), 0);
     assert_eq!(store.table_count("fingerprint").unwrap(), 0);
+}
+
+/// An invocation that outlives the grace period between staging its first
+/// partition and finalizing its last must not meet its own work as abandoned.
+/// The writer is opened once per step, so the reaper runs several times inside
+/// one scan, and a reaped partition would fail finalization and discard every
+/// other partition with it.
+#[test]
+fn a_long_invocation_still_finalizes_the_partition_it_staged() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("audit.db");
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+
+    let staged = {
+        let mut store = Store::open(&database).unwrap();
+        let mut partition = sample_snapshot(&variant, &detectors);
+        // This partition finished long before the grace period expired; the
+        // invocation that staged it is still running.
+        partition.started_at = "2020-01-01T00:00:00Z";
+        partition.finished_at = "2020-01-01T00:00:04Z";
+        store.record_snapshot_part_staged(&partition).unwrap()
+    };
+
+    let mut store = Store::open(&database).unwrap();
+    assert_eq!(store.abandoned_runs().unwrap()[0].id, staged.run_id());
+    store
+        .finalize_snapshot_parts(
+            std::slice::from_ref(&staged),
+            codehelion_store::snapshot::SnapshotComparisons::default(),
+        )
+        .unwrap();
+
+    assert!(store.abandoned_runs().unwrap().is_empty());
+    assert_eq!(store.table_count("scan_run").unwrap(), 1);
+    assert_eq!(
+        store
+            .latest_completed_run("/repo")
+            .unwrap()
+            .expect("the finalized partition")
+            .id,
+        staged.run_id()
+    );
 }
 
 #[test]

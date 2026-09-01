@@ -24,12 +24,13 @@
 //! fuse two clones' histories without any symptom.
 
 use core::fmt;
+use std::collections::BTreeMap;
 
 use crate::clone_class::CloneClass;
 use crate::discovery::{BuildVariant, Language};
 use crate::engine::normalize::{self, LiteralNorm, NormAtom, Resolution};
 use crate::engine::{EngineReport, InputFile};
-use crate::frontend::Token;
+use crate::frontend::{Token, tokens_in_range};
 use crate::semantic::{SOG_SCHEMA_VERSION, SemanticOperationGraph};
 
 /// Version of the identifier-hashing recipe. Bump on any change to the hash
@@ -579,31 +580,169 @@ pub fn structural_clone_group_fingerprint(
     CloneGroupFingerprint(hasher.finish())
 }
 
+/// What tells two occurrences of the same content apart.
+///
+/// Every constructor takes content — a token stream, a unit fingerprint, a
+/// fragment fingerprint, an occurrence identifier — and combining two
+/// discriminators yields another one. There is deliberately no constructor
+/// taking a byte range, a line, a column, a token index or a file path, and
+/// [`occurrence_ranks`] accepts nothing else, so a source position cannot
+/// decide an occurrence rank by accident: it cannot be spelled.
+///
+/// Each constructor hashes under its own domain tag, so a discriminator drawn
+/// from a unit and one drawn from a file never collide even if their bytes
+/// came from the same content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OccurrenceDiscriminator([u8; 16]);
+
+impl OccurrenceDiscriminator {
+    /// Discriminate by the content of a token stream: the file an occurrence
+    /// sits in, or the unit it was cut from.
+    #[must_use]
+    pub fn of_tokens(tokens: &[Token]) -> Self {
+        let mut hasher = IdHasher::new("occurrence-tokens-v1");
+        hasher.write_str(FP_SCHEMA_VERSION);
+        hasher.write_content(tokens, ContentNorm::Raw, None);
+        Self(hasher.finish())
+    }
+
+    /// Discriminate by the unit an occurrence sits in.
+    #[must_use]
+    pub fn of_unit(unit: &UnitFingerprint) -> Self {
+        let mut hasher = IdHasher::new("occurrence-unit-v1");
+        hasher.write_str(FP_SCHEMA_VERSION);
+        hasher.write_bytes(&unit.0);
+        Self(hasher.finish())
+    }
+
+    /// Discriminate by the occurrence's own matched content.
+    #[must_use]
+    pub fn of_fragment(fragment: &FragmentFingerprint) -> Self {
+        let mut hasher = IdHasher::new("occurrence-fragment-v1");
+        hasher.write_str(FP_SCHEMA_VERSION);
+        hasher.write_bytes(&fragment.0);
+        Self(hasher.finish())
+    }
+
+    /// Discriminate by an occurrence's own finding identity.
+    #[must_use]
+    pub fn of_finding(finding: &FindingId) -> Self {
+        let mut hasher = IdHasher::new("occurrence-finding-v1");
+        hasher.write_str(FP_SCHEMA_VERSION);
+        hasher.write_bytes(&finding.0);
+        Self(hasher.finish())
+    }
+
+    /// Both discriminators at once: two occurrences share the result only when
+    /// they agree on each part.
+    #[must_use]
+    pub fn and(self, other: Self) -> Self {
+        let mut hasher = IdHasher::new("occurrence-pair-v1");
+        hasher.write_str(FP_SCHEMA_VERSION);
+        hasher.write_bytes(&self.0);
+        hasher.write_bytes(&other.0);
+        Self(hasher.finish())
+    }
+
+    /// The discriminator's raw bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
+
+/// Rank occurrences inside their own discriminator.
+///
+/// Each occurrence's rank is its ordinal among the occurrences sharing its
+/// discriminator, counted in the order given. Occurrences with different
+/// discriminators never share a rank sequence, so adding, removing or
+/// reordering occurrences that content tells apart — a copy in another unit,
+/// in another file, or of other content — cannot move an existing occurrence's
+/// rank. Only occurrences that content cannot separate at all fall back to the
+/// caller's order, which is the last discrimination left once every
+/// content-derived one has agreed.
+#[must_use]
+pub fn occurrence_ranks(discriminators: &[OccurrenceDiscriminator]) -> Vec<u32> {
+    let mut next: BTreeMap<OccurrenceDiscriminator, u32> = BTreeMap::new();
+    discriminators
+        .iter()
+        .map(|discriminator| {
+            let slot = next.entry(*discriminator).or_insert(0);
+            let rank = *slot;
+            *slot = slot.saturating_add(1);
+            rank
+        })
+        .collect()
+}
+
+/// The canonical occurrence of a set whose members are equally representative.
+///
+/// A clone group nominates one member as its canonical instance: the copy
+/// duplication accounting keeps rather than counts as duplicated. Where
+/// similarity picks that member — a Structural group's medoid — this is not
+/// needed; where every member shares one content and similarity has nothing to
+/// choose between them, the nomination falls to the smallest discriminator, so
+/// it follows content and cannot move because a file was renamed or the walk
+/// order changed. `None` for an empty set.
+#[must_use]
+pub fn canonical_occurrence(discriminators: &[OccurrenceDiscriminator]) -> Option<usize> {
+    discriminators
+        .iter()
+        .enumerate()
+        .min_by_key(|&(_, discriminator)| discriminator)
+        .map(|(index, _)| index)
+}
+
+/// What one occurrence of a group's content is identified inside of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OccurrenceScope<'a> {
+    /// Inside a code unit, identified by that unit's own content fingerprint.
+    Unit(&'a UnitFingerprint),
+    /// Outside every unit — a top-level macro, record or global — where the
+    /// enclosing file's content stands in for a host. Occurrences in files of
+    /// different content therefore rank independently, instead of competing
+    /// for one scan-wide sequence that any new copy anywhere would shift.
+    File(OccurrenceDiscriminator),
+}
+
+impl OccurrenceScope<'_> {
+    /// The content-derived discriminator occurrences of this scope rank under.
+    #[must_use]
+    pub fn discriminator(&self) -> OccurrenceDiscriminator {
+        match *self {
+            Self::Unit(unit) => OccurrenceDiscriminator::of_unit(unit),
+            Self::File(file) => file,
+        }
+    }
+}
+
 /// Identify one occurrence of a group's content.
 ///
-/// Content-identical occurrences share their content fingerprint, so a
-/// finding is discriminated by its host unit's (raw) fingerprint plus its
-/// occurrence rank *within that host* — content-relative inputs, not source
-/// positions. An occurrence outside any unit uses an absent-host marker; two
-/// such occurrences are then told apart by rank alone, which is the weakest
-/// (but position-free) discriminator available at this layer.
+/// Content-identical occurrences share their content fingerprint, so a finding
+/// is discriminated by what it sits inside — its host unit's (raw) fingerprint,
+/// or, outside every unit, its file's content — plus its occurrence rank
+/// *within that scope*. Both inputs are content-relative; neither is a source
+/// position.
 #[must_use]
 pub fn finding_id(
     group: &CloneGroupFingerprint,
-    host: Option<&UnitFingerprint>,
-    rank_in_host: u32,
+    scope: OccurrenceScope<'_>,
+    rank_in_scope: u32,
 ) -> FindingId {
     let mut hasher = IdHasher::new("finding");
     hasher.write_str(FP_SCHEMA_VERSION);
     hasher.write_bytes(&group.0);
-    match host {
-        Some(unit) => {
+    match scope {
+        OccurrenceScope::Unit(unit) => {
             hasher.write_u8(1);
             hasher.write_bytes(&unit.0);
         }
-        None => hasher.write_u8(0),
+        OccurrenceScope::File(file) => {
+            hasher.write_u8(2);
+            hasher.write_bytes(&file.0);
+        }
     }
-    hasher.write_u32(rank_in_host);
+    hasher.write_u32(rank_in_scope);
     FindingId(hasher.finish())
 }
 
@@ -763,6 +902,11 @@ pub struct GroupIds {
 /// gapped groups are identified by
 /// [`structural_clone_group_fingerprint`] instead, which anchors on a
 /// canonical instance rather than on one shared content.
+///
+/// Occurrences are scoped before they are ranked (see [`OccurrenceScope`]), so
+/// an occurrence outside every unit is discriminated by the content of its own
+/// file. Its identity therefore does not depend on how many other occurrences
+/// the scan happened to sort ahead of it.
 #[must_use]
 pub fn report_ids(
     files: &[InputFile<'_>],
@@ -771,67 +915,76 @@ pub fn report_ids(
     report: &EngineReport,
     literals: LiteralNorm,
 ) -> Vec<GroupIds> {
-    report
-        .groups
-        .iter()
-        .map(|group| {
-            let norm = match group.clone_type {
-                CloneClass::Type1 => ContentNorm::Raw,
-                CloneClass::Type2 | CloneClass::Type3 | CloneClass::RestrictedSemantic => {
-                    ContentNorm::Normalized(literals)
-                }
-            };
-            let member_fps: Vec<FragmentFingerprint> = group
-                .members
-                .iter()
-                .map(|member| {
-                    let file = &files[member.file];
-                    let start = member.token_start.min(file.tokens.len());
-                    let end = member.token_end.min(file.tokens.len()).max(start);
-                    let tokens = &file.tokens[start..end];
-                    fragment_fingerprint(variant, &contexts[member.file], "member", tokens, norm)
-                })
-                .collect();
-            let fingerprint = clone_group_fingerprint(variant, group.clone_type, &member_fps);
-
-            // Rank occurrences within their host unit, in member order (which
-            // is deterministic); the rank is content-relative, not positional.
-            let hosts: Vec<Option<UnitFingerprint>> = group
-                .members
-                .iter()
-                .map(|member| {
-                    member.unit.map(|unit_idx| {
-                        let unit = &files[member.file].units[unit_idx];
-                        let file = &files[member.file];
-                        let start = unit.token_start.min(file.tokens.len());
-                        let end = unit.token_end.min(file.tokens.len()).max(start);
-                        let tokens = &file.tokens[start..end];
-                        unit_fingerprint(variant, &contexts[member.file], tokens, ContentNorm::Raw)
-                    })
-                })
-                .collect();
-            let members = member_fps
-                .iter()
-                .zip(hosts.iter())
-                .enumerate()
-                .map(|(i, (content, host))| {
-                    let rank = hosts[..i].iter().filter(|h| *h == host).count();
-                    MemberIds {
-                        content: *content,
-                        finding: finding_id(
-                            &fingerprint,
-                            host.as_ref(),
-                            u32::try_from(rank).unwrap_or(u32::MAX),
-                        ),
-                    }
-                })
-                .collect();
-            GroupIds {
-                fingerprint,
-                members,
+    // One file's content digest serves every occurrence outside a unit in it.
+    let mut file_discriminators: BTreeMap<usize, OccurrenceDiscriminator> = BTreeMap::new();
+    let mut groups = Vec::with_capacity(report.groups.len());
+    for group in &report.groups {
+        let norm = match group.clone_type {
+            CloneClass::Type1 => ContentNorm::Raw,
+            CloneClass::Type2 | CloneClass::Type3 | CloneClass::RestrictedSemantic => {
+                ContentNorm::Normalized(literals)
             }
-        })
-        .collect()
+        };
+        let member_fps: Vec<FragmentFingerprint> = group
+            .members
+            .iter()
+            .map(|member| {
+                let file = &files[member.file];
+                let tokens = tokens_in_range(file.tokens, member.token_start, member.token_end);
+                fragment_fingerprint(variant, &contexts[member.file], "member", tokens, norm)
+            })
+            .collect();
+        let fingerprint = clone_group_fingerprint(variant, group.clone_type, &member_fps);
+
+        let hosts: Vec<Option<UnitFingerprint>> = group
+            .members
+            .iter()
+            .map(|member| {
+                member.unit.map(|unit_idx| {
+                    let file = &files[member.file];
+                    let unit = &file.units[unit_idx];
+                    let tokens = tokens_in_range(file.tokens, unit.token_start, unit.token_end);
+                    unit_fingerprint(variant, &contexts[member.file], tokens, ContentNorm::Raw)
+                })
+            })
+            .collect();
+        #[allow(
+            clippy::option_if_let_else,
+            reason = "the None arm mutably borrows the memo while the Some arm borrows the host, so the closure form the lint asks for does not type-check"
+        )]
+        let scopes: Vec<OccurrenceScope<'_>> = group
+            .members
+            .iter()
+            .zip(&hosts)
+            .map(|(member, host)| match host {
+                Some(unit) => OccurrenceScope::Unit(unit),
+                None => {
+                    OccurrenceScope::File(*file_discriminators.entry(member.file).or_insert_with(
+                        || OccurrenceDiscriminator::of_tokens(files[member.file].tokens),
+                    ))
+                }
+            })
+            .collect();
+
+        // Rank each occurrence inside its own scope: content-relative inputs,
+        // never source positions and never a scan-wide running count.
+        let discriminators: Vec<OccurrenceDiscriminator> =
+            scopes.iter().map(OccurrenceScope::discriminator).collect();
+        let members = member_fps
+            .iter()
+            .zip(&scopes)
+            .zip(occurrence_ranks(&discriminators))
+            .map(|((content, scope), rank)| MemberIds {
+                content: *content,
+                finding: finding_id(&fingerprint, *scope, rank),
+            })
+            .collect();
+        groups.push(GroupIds {
+            fingerprint,
+            members,
+        });
+    }
+    groups
 }
 
 #[cfg(test)]

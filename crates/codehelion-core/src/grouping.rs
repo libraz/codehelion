@@ -216,6 +216,14 @@ pub struct GroupingStats {
     pub linkage_splits: usize,
     /// Members left ungrouped as singletons after refinement.
     pub singletons: usize,
+    /// Pairwise similarities refinement weighed, across every component and
+    /// every regrouping of the members it ejected.
+    ///
+    /// This is what the component ceiling exists to bound. A run that spent its
+    /// time here says so with a number, rather than leaving a reader to infer
+    /// it from a wall clock and a count of oversized components that can
+    /// legitimately be zero.
+    pub refinement_comparisons: usize,
 }
 
 /// The grouping result: refined groups plus statistics.
@@ -278,6 +286,10 @@ pub fn group(
     // and declined.
     let mut piece_of: BTreeMap<usize, u32> = BTreeMap::new();
     let mut next_piece = 0u32;
+    // Where a member sits in the table of the piece being refined. One
+    // allocation for the whole run: a table per piece would cost the unit count
+    // once per piece, which is the shape this module is careful not to have.
+    let mut position = vec![0usize; units.len()];
     for component in &components {
         let cut = component.len() > piece_limit(config);
         for piece in refinable_pieces(component, units, config, &mut stats) {
@@ -287,7 +299,16 @@ pub fn group(
                 }
                 next_piece += 1;
             }
-            refine_component(&piece, units, &sim, config, &mut groups, &mut stats);
+            let similarities = ComponentMatrix::build(&piece, &sim, &mut position, &mut stats);
+            refine_component(
+                &piece,
+                units,
+                &similarities,
+                &sim,
+                config,
+                &mut groups,
+                &mut stats,
+            );
         }
     }
 
@@ -367,6 +388,8 @@ impl SimilarityGraph {
     }
 
     fn similarity(&self, a: usize, b: usize) -> f64 {
+        #[cfg(test)]
+        note_graph_query();
         if a == b {
             return 1.0;
         }
@@ -380,6 +403,84 @@ impl SimilarityGraph {
             return None;
         }
         self.edges.get(&ordered(a, b)).copied()
+    }
+}
+
+// Similarity-graph queries made on this thread. Refinement reads one pair's
+// similarity many times, and how that number grows with component size is the
+// whole of the cost claim this module makes. Tests read it; nothing else does.
+#[cfg(test)]
+thread_local! {
+    static GRAPH_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_graph_query() {
+    GRAPH_QUERIES.with(|queries| queries.set(queries.get() + 1));
+}
+
+/// Take and reset the query count of the current thread.
+#[cfg(test)]
+fn taken_graph_queries() -> usize {
+    GRAPH_QUERIES.with(|queries| queries.replace(0))
+}
+
+/// The similarity of every pair inside one refinable piece, computed once.
+///
+/// Refinement reads a pair's similarity while choosing a medoid, again while
+/// trimming to the cohesion floor, and again at every level of the regrouping
+/// of the members it ejected. Asking the keyed graph each time makes each read
+/// a lookup and pays for the whole level again per level, which is what turns
+/// the documented O(k² log k) into a cubic cost on a component that only sheds
+/// a few members at a time. The piece's own values are held in one flat table
+/// instead — the O(k²) memory [`GroupingConfig::max_component`] is already
+/// sized for — so every later read is an indexed one and the graph is asked
+/// once per pair.
+///
+/// The values are the graph's own, in the graph's own order, so what refinement
+/// decides is unchanged.
+struct ComponentMatrix<'a> {
+    /// Position of a member in this table, indexed by unit. Only the entries
+    /// of this piece's own members are meaningful.
+    position: &'a [usize],
+    /// Members in the table, and so its stride.
+    size: usize,
+    /// Row-major similarities, the diagonal reading as a unit compared with
+    /// itself.
+    values: Vec<f64>,
+}
+
+impl<'a> ComponentMatrix<'a> {
+    fn build(
+        members: &[usize],
+        sim: &SimilarityGraph,
+        position: &'a mut [usize],
+        stats: &mut GroupingStats,
+    ) -> Self {
+        for (index, &member) in members.iter().enumerate() {
+            position[member] = index;
+        }
+        let size = members.len();
+        let mut values = vec![0.0; size.saturating_mul(size)];
+        for (row, &left) in members.iter().enumerate() {
+            values[row * size + row] = 1.0;
+            for (column, &right) in members.iter().enumerate().skip(row + 1) {
+                let similarity = sim.similarity(left, right);
+                values[row * size + column] = similarity;
+                values[column * size + row] = similarity;
+            }
+        }
+        stats.refinement_comparisons += size * size.saturating_sub(1) / 2;
+        Self {
+            position,
+            size,
+            values,
+        }
+    }
+
+    /// The similarity of two members of this piece.
+    fn similarity(&self, a: usize, b: usize) -> f64 {
+        self.values[self.position[a] * self.size + self.position[b]]
     }
 }
 
@@ -434,7 +535,7 @@ fn connected_components(unit_count: usize, edges: &[SimilarityEdge]) -> Vec<Vec<
     buckets.into_values().collect()
 }
 
-fn find(parent: &mut [usize], node: usize) -> usize {
+const fn find(parent: &mut [usize], node: usize) -> usize {
     let mut root = node;
     while parent[root] != root {
         root = parent[root];
@@ -449,7 +550,7 @@ fn find(parent: &mut [usize], node: usize) -> usize {
     root
 }
 
-fn union(parent: &mut [usize], a: usize, b: usize) {
+const fn union(parent: &mut [usize], a: usize, b: usize) {
     let ra = find(parent, a);
     let rb = find(parent, b);
     if ra != rb {
@@ -515,6 +616,7 @@ fn refinable_pieces(
 fn refine_component(
     component: &[usize],
     units: &[GroupingUnit],
+    similarities: &ComponentMatrix<'_>,
     sim: &SimilarityGraph,
     config: &GroupingConfig,
     groups: &mut Vec<StructuralGroup>,
@@ -525,34 +627,47 @@ fn refine_component(
         return;
     }
 
-    let medoid = select_medoid(component, units, sim, config, stats);
+    let medoid = select_medoid(component, units, similarities, config, stats);
 
     // Medoid constraint: keep members close enough to the medoid, eject the
     // rest for independent regrouping.
     let mut kept = Vec::new();
     let mut rest = Vec::new();
     for &member in component {
-        if member == medoid || sim.similarity(member, medoid) >= config.medoid_min_similarity {
+        if member == medoid
+            || similarities.similarity(member, medoid) >= config.medoid_min_similarity
+        {
             kept.push(member);
         } else {
             rest.push(member);
         }
     }
     stats.medoid_ejections += rest.len();
+    stats.refinement_comparisons += component.len();
 
     // Complete-linkage: remove members until the weakest pair clears the floor.
-    complete_linkage_trim(medoid, &mut kept, &mut rest, units, sim, config, stats);
+    complete_linkage_trim(
+        medoid,
+        &mut kept,
+        &mut rest,
+        units,
+        similarities,
+        config,
+        stats,
+    );
 
-    if let Some(built) = build_group(medoid, &kept, units, sim) {
+    if let Some(built) = build_group(medoid, &kept, units, similarities, sim) {
         groups.push(built);
     } else {
         stats.singletons += kept.len();
     }
 
     if !rest.is_empty() {
-        // Regroup the ejected members; deterministic order for recursion.
+        // Regroup the ejected members; deterministic order for recursion. The
+        // piece's table already holds their similarities, so a level costs no
+        // rebuilding of what the level above already weighed.
         rest.sort_by_key(|&m| units[m].key);
-        refine_component(&rest, units, sim, config, groups, stats);
+        refine_component(&rest, units, similarities, sim, config, groups, stats);
     }
 }
 
@@ -564,7 +679,7 @@ fn refine_component(
 fn select_medoid(
     component: &[usize],
     units: &[GroupingUnit],
-    sim: &SimilarityGraph,
+    similarities: &ComponentMatrix<'_>,
     config: &GroupingConfig,
     stats: &mut GroupingStats,
 ) -> usize {
@@ -587,10 +702,11 @@ fn select_medoid(
         stats.sampled_medoid_candidates += candidates.len();
     }
 
+    stats.refinement_comparisons += candidates.len() * component.len().saturating_sub(1);
     let mut best = candidates[0];
-    let mut best_total = total_similarity(best, component, sim);
+    let mut best_total = total_similarity(best, component, similarities);
     for &candidate in &candidates[1..] {
-        let total = total_similarity(candidate, component, sim);
+        let total = total_similarity(candidate, component, similarities);
         // Greater total wins; on a tie the smaller key wins, keeping the pick
         // deterministic without an exact float comparison.
         let better = match total.total_cmp(&best_total) {
@@ -607,10 +723,13 @@ fn select_medoid(
 }
 
 /// Sum of a member's similarity to every other member of the set.
-fn total_similarity(member: usize, set: &[usize], sim: &SimilarityGraph) -> f64 {
+///
+/// Summed in the set's own order, over the piece's own values, so the total a
+/// candidate is judged on does not depend on where the reading came from.
+fn total_similarity(member: usize, set: &[usize], similarities: &ComponentMatrix<'_>) -> f64 {
     set.iter()
         .filter(|&&other| other != member)
-        .map(|&other| sim.similarity(member, other))
+        .map(|&other| similarities.similarity(member, other))
         .sum()
 }
 
@@ -631,17 +750,18 @@ fn complete_linkage_trim(
     kept: &mut Vec<usize>,
     rest: &mut Vec<usize>,
     units: &[GroupingUnit],
-    sim: &SimilarityGraph,
+    similarities: &ComponentMatrix<'_>,
     config: &GroupingConfig,
     stats: &mut GroupingStats,
 ) {
     let members = kept.clone();
+    stats.refinement_comparisons += members.len() * members.len().saturating_sub(1) / 2;
     let mut active = vec![true; members.len()];
     let mut totals = vec![0.0; members.len()];
     let mut pairs = Vec::with_capacity(kept.len().saturating_mul(kept.len().saturating_sub(1)) / 2);
     for (index, &left) in members.iter().enumerate() {
         for (right_index, &right) in members.iter().enumerate().skip(index + 1) {
-            let similarity = sim.similarity(left, right);
+            let similarity = similarities.similarity(left, right);
             totals[index] += similarity;
             totals[right_index] += similarity;
             pairs.push((
@@ -689,9 +809,10 @@ fn complete_linkage_trim(
             }
         };
         active[victim] = false;
+        stats.refinement_comparisons += active_count;
         for (index, &member) in members.iter().enumerate() {
             if active[index] {
-                totals[index] -= sim.similarity(member, members[victim]);
+                totals[index] -= similarities.similarity(member, members[victim]);
             }
         }
         active_count -= 1;
@@ -723,6 +844,7 @@ fn build_group(
     medoid: usize,
     kept: &[usize],
     units: &[GroupingUnit],
+    similarities: &ComponentMatrix<'_>,
     sim: &SimilarityGraph,
 ) -> Option<StructuralGroup> {
     if kept.len() < 2 {
@@ -734,7 +856,7 @@ fn build_group(
 
     let medoid_similarities: Vec<f64> = ordered_members
         .iter()
-        .map(|&member| sim.similarity(medoid, member))
+        .map(|&member| similarities.similarity(medoid, member))
         .collect();
 
     // Weakest class, confidence and pairwise similarity across internal edges.
@@ -743,7 +865,7 @@ fn build_group(
     let mut min_pairwise = 1.0_f64;
     for (i, &left) in ordered_members.iter().enumerate() {
         for &right in &ordered_members[i + 1..] {
-            min_pairwise = min_pairwise.min(sim.similarity(left, right));
+            min_pairwise = min_pairwise.min(similarities.similarity(left, right));
             if let Some(data) = sim.edge(left, right) {
                 clone_type = weaker_class(clone_type, data.class);
                 confidence = weaker_confidence(confidence, data.confidence);

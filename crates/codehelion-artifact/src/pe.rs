@@ -11,6 +11,7 @@ use std::io::Cursor;
 use crate::native::{
     collect_sections, collect_text_symbols, collect_undefined_imports, symbol_fingerprint,
 };
+use crate::support::format_support;
 use crate::x86::X86_NORMALIZATION_VERSION;
 use crate::{
     ArtifactBackend, ArtifactCapabilities, ArtifactError, ArtifactFingerprint, ArtifactFormat,
@@ -46,16 +47,7 @@ impl ArtifactBackend for PeCoffBackend {
     }
 
     fn capabilities(&self) -> ArtifactCapabilities {
-        ArtifactCapabilities {
-            symbols: true,
-            call_graph: false,
-            source_mapping: true,
-            debug_info_unreadable: false,
-            normalized_duplicates: true,
-            independent_data_segments: false,
-            relocations: true,
-            data_segments: true,
-        }
+        format_support(ArtifactFormat::PeCoff).capabilities
     }
 }
 

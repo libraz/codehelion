@@ -189,28 +189,60 @@ impl<'d, 's> Lexer<'d, 's> {
     /// Whether a `\` at the current position splices the line; if so consume
     /// it together with its line break.
     fn try_line_splice(&mut self) -> bool {
-        let marker_width = if self.peek(0) == Some('\\') {
-            1
-        } else if self.matches_ahead("??/") {
-            3
-        } else {
+        let width = self.splice_width_at(0);
+        if width == 0 {
             return false;
-        };
-        match (self.peek(marker_width), self.peek(marker_width + 1)) {
-            (Some('\n'), _) => {
-                for _ in 0..=marker_width {
-                    self.bump();
-                }
-                true
-            }
-            (Some('\r'), Some('\n')) => {
-                for _ in 0..(marker_width + 2) {
-                    self.bump();
-                }
-                true
-            }
-            _ => false,
         }
+        for _ in 0..width {
+            self.bump();
+        }
+        true
+    }
+
+    /// Width, in characters, of the line continuations starting `ahead`
+    /// characters past the current position; zero when there is none.
+    ///
+    /// Line splicing is translation phase 2 and tokenisation is phase 3, so a
+    /// continuation is transparent *inside* a token. Every lookahead that
+    /// decides a token's extent therefore measures across it rather than
+    /// stopping at the backslash. Consecutive continuations count as one run.
+    fn splice_width_at(&self, ahead: usize) -> usize {
+        let mut width = 0;
+        loop {
+            let at = ahead + width;
+            let marker = if self.peek(at) == Some('\\') {
+                1
+            } else if self.matches_ahead_at(at, "??/") {
+                3
+            } else {
+                return width;
+            };
+            match (self.peek(at + marker), self.peek(at + marker + 1)) {
+                (Some('\n'), _) => width += marker + 1,
+                (Some('\r'), Some('\n')) => width += marker + 2,
+                _ => return width,
+            }
+        }
+    }
+
+    /// The character `ahead` positions past the current one, seeing through a
+    /// line continuation that precedes it.
+    fn spliced_char_at(&self, ahead: usize) -> Option<char> {
+        self.peek(ahead + self.splice_width_at(ahead))
+    }
+
+    /// Match `text` against the upcoming characters, seeing through line
+    /// continuations, and return how many raw characters it spans.
+    fn spliced_match(&self, text: &str) -> Option<usize> {
+        let mut ahead = 0usize;
+        for expected in text.chars() {
+            ahead += self.splice_width_at(ahead);
+            if self.peek(ahead) != Some(expected) {
+                return None;
+            }
+            ahead += 1;
+        }
+        Some(ahead)
     }
 
     fn run(self) -> (Vec<Token>, Vec<Diagnostic>) {
@@ -242,12 +274,15 @@ impl<'d, 's> Lexer<'d, 's> {
                 self.bump();
                 continue;
             }
-            if c == '/' && self.peek(1) == Some('/') {
-                self.consume_line_comment();
+            // The comment introducers are matched across line continuations:
+            // `/\<newline>/` opens a line comment, exactly as it would after
+            // the continuations were removed.
+            if let Some(width) = self.spliced_match("//") {
+                self.consume_line_comment(width);
                 continue;
             }
-            if c == '/' && self.peek(1) == Some('*') {
-                self.consume_block_comment();
+            if let Some(width) = self.spliced_match("/*") {
+                self.consume_block_comment(width);
                 continue;
             }
             if self.is_directive_marker() && !self.line_has_token {
@@ -271,7 +306,8 @@ impl<'d, 's> Lexer<'d, 's> {
                 self.consume_char_from(start);
                 continue;
             }
-            if c.is_ascii_digit() || (c == '.' && self.peek(1).is_some_and(|d| d.is_ascii_digit()))
+            if c.is_ascii_digit()
+                || (c == '.' && self.spliced_char_at(1).is_some_and(|d| d.is_ascii_digit()))
             {
                 self.consume_number();
                 continue;
@@ -289,7 +325,12 @@ impl<'d, 's> Lexer<'d, 's> {
         (self.tokens, self.diagnostics, self.conditional_directives)
     }
 
-    fn consume_line_comment(&mut self) {
+    /// Consume a `// ...` comment whose introducer spans `open_width`
+    /// characters (more than two when a line continuation splits it).
+    fn consume_line_comment(&mut self, open_width: usize) {
+        for _ in 0..open_width {
+            self.bump();
+        }
         while let Some(c) = self.peek(0) {
             if self.try_line_splice() {
                 // A spliced line continues the comment.
@@ -302,25 +343,25 @@ impl<'d, 's> Lexer<'d, 's> {
         }
     }
 
-    /// Consume a `/* ... */` comment. C-family block comments do not nest.
-    fn consume_block_comment(&mut self) {
+    /// Consume a `/* ... */` comment whose introducer spans `open_width`
+    /// characters. C-family block comments do not nest.
+    fn consume_block_comment(&mut self, open_width: usize) {
         let start = self.mark();
-        // Skip the opening `/*`.
-        self.bump();
-        self.bump();
+        for _ in 0..open_width {
+            self.bump();
+        }
         loop {
-            match (self.peek(0), self.peek(1)) {
-                (Some('*'), Some('/')) => {
+            if let Some(width) = self.spliced_match("*/") {
+                for _ in 0..width {
                     self.bump();
-                    self.bump();
-                    break;
                 }
-                (Some(_), _) => self.bump(),
-                (None, _) => {
-                    self.diagnose(DiagnosticKind::UnterminatedBlockComment, start);
-                    break;
-                }
+                break;
             }
+            if self.peek(0).is_none() {
+                self.diagnose(DiagnosticKind::UnterminatedBlockComment, start);
+                break;
+            }
+            self.bump();
         }
         // A comment that crossed onto a new line leaves that line still
         // "empty": a `#` after it is that line's first token and may start a
@@ -347,12 +388,12 @@ impl<'d, 's> Lexer<'d, 's> {
                 // line state.
                 break;
             }
-            if c == '/' && self.peek(1) == Some('*') {
-                self.consume_block_comment();
+            if let Some(width) = self.spliced_match("/*") {
+                self.consume_block_comment(width);
                 continue;
             }
-            if c == '/' && self.peek(1) == Some('/') {
-                self.consume_line_comment();
+            if let Some(width) = self.spliced_match("//") {
+                self.consume_line_comment(width);
                 break;
             }
             self.bump();
@@ -364,9 +405,13 @@ impl<'d, 's> Lexer<'d, 's> {
     }
 
     fn matches_ahead(&self, text: &str) -> bool {
+        self.matches_ahead_at(0, text)
+    }
+
+    fn matches_ahead_at(&self, ahead: usize, text: &str) -> bool {
         text.chars()
             .enumerate()
-            .all(|(k, ch)| self.peek(k) == Some(ch))
+            .all(|(k, ch)| self.peek(ahead + k) == Some(ch))
     }
 
     /// Handle encoding-prefixed and raw string/character literals (`L"..."`,
@@ -522,38 +567,50 @@ impl<'d, 's> Lexer<'d, 's> {
         }
     }
 
+    /// Consume a numeric literal. Like an identifier, a number is one token
+    /// across line continuations, so the spelling it carries is the spliced
+    /// one rather than the raw source slice.
     fn consume_number(&mut self) {
         let start = self.mark();
-        let hex = self.peek(0) == Some('0') && matches!(self.peek(1), Some('x' | 'X'));
+        let hex = self.spliced_match("0x").is_some() || self.spliced_match("0X").is_some();
         let mut is_float = false;
-        while let Some(ch) = self.peek(0) {
+        let mut normalized = String::new();
+        loop {
+            if self.try_line_splice() {
+                continue;
+            }
+            let Some(ch) = self.peek(0) else {
+                break;
+            };
             if ch == '.' {
                 // Do not swallow a `...` (GNU case ranges like `1 ... 5`).
-                if self.peek(1) == Some('.') {
+                if self.spliced_char_at(1) == Some('.') {
                     break;
                 }
                 is_float = true;
+                normalized.push(ch);
                 self.bump();
-            } else if !hex && matches!(ch, 'e' | 'E') {
+            } else if (hex && matches!(ch, 'p' | 'P')) || (!hex && matches!(ch, 'e' | 'E')) {
+                // Hexadecimal floats use a `p` exponent, decimal ones `e`.
                 is_float = true;
+                normalized.push(ch);
                 self.bump();
-                if matches!(self.peek(0), Some('+' | '-')) {
-                    self.bump();
-                }
-            } else if hex && matches!(ch, 'p' | 'P') {
-                // Hexadecimal floats use a `p` exponent.
-                is_float = true;
-                self.bump();
-                if matches!(self.peek(0), Some('+' | '-')) {
+                while self.try_line_splice() {}
+                if let Some(sign @ ('+' | '-')) = self.peek(0) {
+                    normalized.push(sign);
                     self.bump();
                 }
             } else if ch == '\''
                 && self.dialect.digit_separators
-                && self.peek(1).is_some_and(|c| c.is_ascii_alphanumeric())
+                && self
+                    .spliced_char_at(1)
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
             {
-                // Digit separator, kept in the raw text.
+                // Digit separator, kept in the token text.
+                normalized.push(ch);
                 self.bump();
             } else if is_ident_continue(ch) {
+                normalized.push(ch);
                 self.bump();
             } else {
                 break;
@@ -564,7 +621,7 @@ impl<'d, 's> Lexer<'d, 's> {
         } else {
             LiteralKind::Integer
         };
-        self.push(TokenKind::Literal(kind), start);
+        self.push_normalized(TokenKind::Literal(kind), start, &normalized);
     }
 
     fn consume_ident(&mut self) {
@@ -591,6 +648,10 @@ impl<'d, 's> Lexer<'d, 's> {
         self.push_normalized(kind, start, &normalized);
     }
 
+    /// Consume a punctuator. Multi-character operators, digraphs and trigraphs
+    /// are matched across line continuations and carry their canonical
+    /// spelling, so `+\<newline>=` is the one `+=` token it becomes in
+    /// translation phase 2.
     fn consume_punct(&mut self) {
         let start = self.mark();
         for &(spelling, normalized) in DIGRAPHS.iter().chain(TRIGRAPHS) {
@@ -601,13 +662,13 @@ impl<'d, 's> Lexer<'d, 's> {
             // the ordinary digraph rule.
             if spelling == "<:"
                 && self.dialect.multi_punct.contains(&"::")
-                && self.matches_ahead("<::")
-                && !matches!(self.peek(3), Some(':' | '>'))
+                && let Some(width) = self.spliced_match("<::")
+                && !matches!(self.spliced_char_at(width), Some(':' | '>'))
             {
                 continue;
             }
-            if self.matches_ahead(spelling) {
-                for _ in spelling.chars() {
+            if let Some(width) = self.spliced_match(spelling) {
+                for _ in 0..width {
                     self.bump();
                 }
                 self.push_normalized(TokenKind::Punctuation, start, normalized);
@@ -615,11 +676,11 @@ impl<'d, 's> Lexer<'d, 's> {
             }
         }
         for op in self.dialect.multi_punct {
-            if self.matches_ahead(op) {
-                for _ in 0..op.chars().count() {
+            if let Some(width) = self.spliced_match(op) {
+                for _ in 0..width {
                     self.bump();
                 }
-                self.push(TokenKind::Punctuation, start);
+                self.push_normalized(TokenKind::Punctuation, start, op);
                 return;
             }
         }
@@ -753,12 +814,27 @@ fn directive(line: &str) -> Option<ConditionalDirective> {
 }
 
 /// Recognise only a whole literal condition; anything richer stays unknown.
+///
+/// A trailing comment is not part of the condition, in either spelling: `#if 0
+/// // off` and `#if 0 /* off */` say the same thing and must classify the same
+/// way.
 fn static_condition(tail: &str) -> StaticCondition {
-    let tail = tail
-        .split_once("//")
-        .map_or(tail, |(before, _)| before)
-        .trim();
-    match tail {
+    let tail = tail.split_once("//").map_or(tail, |(before, _)| before);
+    let mut condition = String::new();
+    let mut rest = tail;
+    while let Some((before, after)) = rest.split_once("/*") {
+        condition.push_str(before);
+        // The comment stood between two lexemes; keep them apart.
+        condition.push(' ');
+        let Some((_, remainder)) = after.split_once("*/") else {
+            // An unterminated comment leaves nothing readable behind it.
+            rest = "";
+            break;
+        };
+        rest = remainder;
+    }
+    condition.push_str(rest);
+    match condition.trim() {
         "0" => StaticCondition::False,
         "1" => StaticCondition::True,
         _ => StaticCondition::Unknown,
@@ -1026,6 +1102,78 @@ mod tests {
                 "int", "split", "=", "1", ";", "int", "more", "=", "split", ";"
             ]
         );
+    }
+
+    #[test]
+    fn a_line_splice_is_transparent_inside_every_kind_of_token() {
+        // Line splicing is translation phase 2 and tokenisation is phase 3,
+        // so a stream lexed with continuations in place must equal the one
+        // lexed from the same text with them removed.
+        for (spliced, joined) in [
+            ("int a = 1; a +\\\n= 1;", "int a = 1; a += 1;"),
+            ("int a = 12\\\n34;", "int a = 1234;"),
+            ("double d = 1.5e\\\n3;", "double d = 1.5e3;"),
+            ("double d = 0x1.8p\\\n3;", "double d = 0x1.8p3;"),
+            ("int a = 0\\\nx1F;", "int a = 0x1F;"),
+            (
+                "int a = 1; /\\\n/ comment\nint b;",
+                "int a = 1; // comment\nint b;",
+            ),
+            (
+                "int a = 1; /\\\n* comment *\\\n/ int b;",
+                "int a = 1; /* comment */ int b;",
+            ),
+            ("int a = 1 <\\\n< 2;", "int a = 1 << 2;"),
+            ("int values ?\\\n?(2:> = 0;", "int values <:2:> = 0;"),
+        ] {
+            let observed: Vec<_> = lex_c(spliced)
+                .0
+                .iter()
+                .map(|token| (token.kind, token.text.to_string()))
+                .collect();
+            let expected: Vec<_> = lex_c(joined)
+                .0
+                .iter()
+                .map(|token| (token.kind, token.text.to_string()))
+                .collect();
+            assert_eq!(observed, expected, "{spliced:?}");
+        }
+    }
+
+    #[test]
+    fn a_condition_classifies_the_same_whichever_comment_syntax_trails_it() {
+        for source in [
+            "#if 0\nint dead_value;\n#endif\nint live_value;\n",
+            "#if 0 // off\nint dead_value;\n#endif\nint live_value;\n",
+            "#if 0 /* off */\nint dead_value;\n#endif\nint live_value;\n",
+            "#if /* why */ 0\nint dead_value;\n#endif\nint live_value;\n",
+        ] {
+            let (tokens, _, directives) = lex_with_directives(source, &dialect::C);
+            let paths = conditional_paths(&tokens, &directives);
+            let path_for = |name: &str| {
+                let index = tokens
+                    .iter()
+                    .position(|token| token.text == name)
+                    .unwrap_or_else(|| panic!("missing {name} in {source:?}"));
+                &paths[index]
+            };
+            assert!(path_for("dead_value").is_unreachable(), "{source:?}");
+            assert!(!path_for("live_value").is_unreachable(), "{source:?}");
+        }
+
+        // A condition the pass cannot read stays unknown, comment or not.
+        for source in [
+            "#if FLAG\nint maybe_value;\n#endif\n",
+            "#if FLAG /* x */\nint maybe_value;\n#endif\n",
+        ] {
+            let (tokens, _, directives) = lex_with_directives(source, &dialect::C);
+            let paths = conditional_paths(&tokens, &directives);
+            let index = tokens
+                .iter()
+                .position(|token| token.text == "maybe_value")
+                .unwrap_or_else(|| panic!("missing maybe_value"));
+            assert!(!paths[index].is_unreachable(), "{source:?}");
+        }
     }
 
     #[test]

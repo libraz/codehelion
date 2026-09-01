@@ -64,6 +64,9 @@ pub(super) struct WalkOutput {
     pub(super) oversized_metadata: u64,
     /// Source files excluded because their language was disabled.
     pub(super) language_excluded: u64,
+    /// Paths that name a source file but are not regular files: FIFOs,
+    /// sockets, device nodes.
+    pub(super) special_files: u64,
     /// Symbolic links deliberately left unresolved by the walker.
     pub(super) symlinks: u64,
     /// Symbolic links that name a file.
@@ -96,6 +99,7 @@ pub(super) fn collect(root: &Path, settings: &WalkSettings) -> WalkOutput {
         too_large: 0,
         oversized_metadata: 0,
         language_excluded: 0,
+        special_files: 0,
         symlinks: 0,
         symlink_files: 0,
         symlink_directories: 0,
@@ -170,8 +174,26 @@ pub(super) fn collect(root: &Path, settings: &WalkSettings) -> WalkOutput {
             }
             continue;
         }
-        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-            continue;
+        match entry.file_type() {
+            Some(file_type) if file_type.is_file() => {}
+            // A directory is the traversal itself, not an entry the walk
+            // decides anything about.
+            Some(file_type) if file_type.is_dir() => continue,
+            // A FIFO, socket or device node named like a source file is not a
+            // file the run can read — opening one is what the walk must not do,
+            // and it holds a source path that reaches no comparison. It is
+            // counted where an unreadable path is counted, apart from the
+            // directory-traversal errors above, rather than dropped: an entry
+            // that reaches no outcome at all is one the report cannot mention.
+            _ => {
+                // Only a path the run would have compared is worth a count;
+                // a special file with an extension nothing reads is as
+                // uninteresting as a regular file with one.
+                if classify(path, settings.header_policy).is_some() {
+                    output.special_files += 1;
+                }
+                continue;
+            }
         }
         let Ok(metadata) = entry.metadata() else {
             output.walk_errors += 1;

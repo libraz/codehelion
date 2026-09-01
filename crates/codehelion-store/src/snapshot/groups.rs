@@ -526,7 +526,7 @@ fn parse_stable_id(hex: &str) -> Result<[u8; 16], StoreError> {
         return Err(malformed());
     }
     let mut bytes = [0_u8; 16];
-    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let digit = core::str::from_utf8(chunk).map_err(|_| malformed())?;
         bytes[index] = u8::from_str_radix(digit, 16).map_err(|_| malformed())?;
     }
@@ -604,26 +604,26 @@ fn write_finding(
         )?),
         None => None,
     };
-    tx.execute(
+    let mut insert = tx.prepare_cached(
         "INSERT INTO finding
              (scan_run_id, clone_group_id, suppression_id,
               clone_confidence, maintenance_risk, refactoring_difficulty,
               final_priority, semantic_confidence,
               source_artifact_mapping_confidence, savings_confidence)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![
-            run_id,
-            group_row_id,
-            suppression_row_id,
-            group.priority.clone_confidence,
-            group.priority.maintenance_risk,
-            group.priority.refactoring_difficulty,
-            group.priority.final_priority,
-            group.priority.semantic_confidence,
-            group.priority.source_artifact_confidence,
-            group.priority.savings_confidence,
-        ],
     )?;
+    insert.execute(params![
+        run_id,
+        group_row_id,
+        suppression_row_id,
+        group.priority.clone_confidence,
+        group.priority.maintenance_risk,
+        group.priority.refactoring_difficulty,
+        group.priority.final_priority,
+        group.priority.semantic_confidence,
+        group.priority.source_artifact_confidence,
+        group.priority.savings_confidence,
+    ])?;
     Ok(group_row_id)
 }
 
@@ -753,39 +753,42 @@ pub(super) fn write_group(
 ) -> Result<i64, StoreError> {
     let group_fp_id =
         upsert_group_fingerprint(tx, group.fingerprint.as_bytes(), snapshot, variant_id)?;
-    tx.execute(
+    let mut insert = tx.prepare_cached(
         "INSERT INTO clone_group
              (scan_run_id, group_fingerprint_id, lineage, lineage_state, clone_type, member_scope,
               member_count, score, entropy_bits, suppress_reason, boilerplate,
               test_code, test_code_evidence, split_pair, width_family, statements, identifier_jaccard,
               has_loop, has_dynamic_allocation, call_count, ranked_down)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
-        params![
-            run_id,
-            group_fp_id,
-            group.history.lineage.as_bytes().as_slice(),
-            lineage_state_name(group.history.state),
-            group.clone_type.name(),
-            group.member_scope.name(),
-            i64::try_from(group.members.len()).unwrap_or(i64::MAX),
-            group.score,
-            group.entropy_bits,
-            group.suppress_reason,
-            group.boilerplate.map(Boilerplate::name),
-            group.test_code,
-            group.test_code_evidence.map(TestCodeEvidence::name),
-            group.split_pair,
-            group.width_family,
-            group.statements,
-            group.identifier_jaccard,
-            group.has_loop,
-            group.has_dynamic_allocation,
-            group
-                .call_count
-                .map(|count| i64::try_from(count).unwrap_or(i64::MAX)),
-            group.ranked_down,
-        ],
     )?;
+    insert.execute(params![
+        run_id,
+        group_fp_id,
+        group.history.lineage.as_bytes().as_slice(),
+        lineage_state_name(group.history.state),
+        group.clone_type.name(),
+        group.member_scope.name(),
+        i64::try_from(group.members.len()).unwrap_or(i64::MAX),
+        group.score,
+        group.entropy_bits,
+        group.suppress_reason,
+        group.boilerplate.map(Boilerplate::name),
+        group.test_code,
+        group.test_code_evidence.map(TestCodeEvidence::name),
+        group.split_pair,
+        group.width_family,
+        group.statements,
+        group.identifier_jaccard,
+        group.has_loop,
+        group.has_dynamic_allocation,
+        group
+            .call_count
+            .map(|count| i64::try_from(count).unwrap_or(i64::MAX)),
+        group.ranked_down,
+    ])?;
+    // End the statement's borrow of the transaction before reading the row id
+    // the insert just allocated.
+    drop(insert);
     let group_row_id = tx.last_insert_rowid();
     write_lineage_parents(tx, group_row_id, group)?;
 
@@ -819,27 +822,41 @@ fn write_lineage_parents(
     group_row_id: i64,
     group: &GroupRow,
 ) -> Result<(), StoreError> {
+    let mut insert = tx.prepare_cached(
+        "INSERT INTO clone_group_lineage_parent
+             (clone_group_id, ordinal, parent_fingerprint, parent_lineage, is_primary,
+              shared_content, compared_content, overlap)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )?;
     for (ordinal, parent) in group.history.parents.iter().enumerate() {
-        tx.execute(
-            "INSERT INTO clone_group_lineage_parent
-                 (clone_group_id, ordinal, parent_fingerprint, parent_lineage, is_primary,
-                  shared_content, compared_content, overlap)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                group_row_id,
-                i64::try_from(ordinal).unwrap_or(i64::MAX),
-                parent.fingerprint.as_bytes().as_slice(),
-                parent.lineage.as_bytes().as_slice(),
-                parent.primary,
-                i64::try_from(parent.shared_content).unwrap_or(i64::MAX),
-                parent
-                    .compared_content
-                    .map(|total| i64::try_from(total).unwrap_or(i64::MAX)),
-                parent.overlap,
-            ],
-        )?;
+        insert.execute(params![
+            group_row_id,
+            i64::try_from(ordinal).unwrap_or(i64::MAX),
+            parent.fingerprint.as_bytes().as_slice(),
+            parent.lineage.as_bytes().as_slice(),
+            parent.primary,
+            i64::try_from(parent.shared_content).unwrap_or(i64::MAX),
+            parent
+                .compared_content
+                .map(|total| i64::try_from(total).unwrap_or(i64::MAX)),
+            parent.overlap,
+        ])?;
     }
     Ok(())
+}
+
+/// Index of the group's canonical member: the occurrence duplication
+/// accounting keeps rather than counts as duplicated.
+///
+/// Both analysis modes nominate it from content and hand it over first —
+/// Structural the medoid its group fingerprint is anchored on, Fast the
+/// smallest position-free occurrence identity among members that all share one
+/// content. The store records that nomination instead of re-deciding it from
+/// row order, which would attribute a group's duplicated bytes by the order the
+/// scan happened to walk the tree in, and so move the byte count when a file is
+/// renamed.
+const fn canonical_member_index() -> usize {
+    0
 }
 
 #[allow(clippy::too_many_arguments)] // transaction hand-off, one call site
@@ -913,7 +930,7 @@ fn write_fragments(
             run_id,
             fragment_row_id,
             member.finding.as_bytes().as_slice(),
-            i64::from(index == 0),
+            i64::from(index == canonical_member_index()),
             member.boilerplate.map(Boilerplate::name),
         ])?;
     }
@@ -1026,24 +1043,24 @@ fn write_group_similarity(
     let Some(similarity) = similarity else {
         return Ok(());
     };
-    tx.execute(
+    let mut insert = tx.prepare_cached(
         "INSERT INTO clone_group_similarity
              (clone_group_id, weight_version, lexical, structural,
               control_flow, type_similarity, api, composite, min_pairwise,
               confidence_band)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![
-            group_row_id,
-            similarity.weight_version,
-            similarity.lexical,
-            similarity.structural,
-            similarity.control_flow,
-            similarity.type_similarity,
-            similarity.api,
-            similarity.composite,
-            similarity.min_pairwise,
-            similarity.confidence_band.name(),
-        ],
     )?;
+    insert.execute(params![
+        group_row_id,
+        similarity.weight_version,
+        similarity.lexical,
+        similarity.structural,
+        similarity.control_flow,
+        similarity.type_similarity,
+        similarity.api,
+        similarity.composite,
+        similarity.min_pairwise,
+        similarity.confidence_band.name(),
+    ])?;
     Ok(())
 }

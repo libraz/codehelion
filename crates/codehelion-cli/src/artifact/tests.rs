@@ -5,6 +5,9 @@ use super::model::*;
 use super::*;
 use crate::cli::{DEFAULT_ARTIFACT_MAX_BYTES, DEFAULT_ARTIFACT_TIMEOUT_SECONDS};
 use boon::{Compiler, Schemas};
+use codehelion_core::stable_id::{
+    CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint,
+};
 
 #[cfg(unix)]
 #[test]
@@ -244,42 +247,20 @@ fn assert_comparison_csv_has_fixed_records(report: &ArtifactComparisonReport) {
     let csv = String::from_utf8(csv).unwrap();
     let mut rows = csv.lines();
     let header: Vec<_> = rows.next().unwrap().split(',').collect();
-    assert_eq!(
-        header,
-        [
-            "record_type",
-            "before_path",
-            "after_path",
-            "before_format",
-            "after_format",
-            "before_fingerprint",
-            "after_fingerprint",
-            "observed_size_reduction_bytes",
-            "duplicated_code_delta_bytes",
-            "duplicated_data_delta_bytes",
-            "estimated_refactor_savings_bytes",
-            "verified_savings_bytes",
-            "source_run",
-            "clone_group_fingerprint",
-            "change_kind",
-            "name",
-            "fingerprint",
-            "symbol_size_delta_bytes",
-            "duplicated_bytes_delta",
-            "members_delta",
-            "warning",
-            "absolute_error_bytes",
-            "relative_error",
-        ]
-    );
-    let rows: Vec<Vec<_>> = rows.map(|row| row.split(',').collect()).collect();
+    assert_eq!(header, COMPARE_CSV_HEADER);
+    // A statement quoted for its own commas still occupies one field, so the
+    // records are read with the quoting rule they were written with.
+    let rows: Vec<Vec<_>> = rows.map(artifact_csv_fields).collect();
     assert!(rows.iter().all(|row| row.len() == header.len()));
-    assert_eq!(rows[0][0], "summary");
-    assert_eq!(rows[0][7], "1");
+    assert_eq!(rows[0][compare_column::RECORD_TYPE], "summary");
+    assert_eq!(rows[0][compare_column::OBSERVED_SIZE_REDUCTION_BYTES], "1");
     let calibration = rows.iter().find(|row| row[0] == "calibration").unwrap();
-    assert_eq!(calibration[10], "-2");
-    assert_eq!(calibration[11], "1");
-    assert_eq!(calibration[12], "7");
+    assert_eq!(
+        calibration[compare_column::ESTIMATED_REFACTOR_SAVINGS_BYTES],
+        "-2"
+    );
+    assert_eq!(calibration[compare_column::VERIFIED_SAVINGS_BYTES], "1");
+    assert_eq!(calibration[compare_column::SOURCE_RUN], "7");
 }
 
 mod correlation;

@@ -811,16 +811,55 @@ pub fn compare_build_variants(units: &[CrossVariantUnit<'_>]) -> Option<CrossVar
             .push(unit);
     }
     let mut groups = Vec::new();
-    for ((language, content), members) in classes {
+    for ((language, content), units) in classes {
         let origins_in_group: BTreeSet<&str> =
-            members.iter().map(|member| member.origin_variant).collect();
+            units.iter().map(|member| member.origin_variant).collect();
         if origins_in_group.len() < 2 {
             continue;
         }
-        let mut members: Vec<CrossVariantMember> = members
+        let language = match language.as_str() {
+            "c" => Language::C,
+            "cpp" => Language::Cpp,
+            _ => Language::Rust,
+        };
+        let group_id =
+            stable_id::cross_variant_group_id(&id, CloneClass::Type1, language, &content);
+
+        // Rank occurrences before anything is sorted for reporting: which
+        // physical occurrence carries which identity follows content, not the
+        // order chosen to display them in. Ranks run inside one origin variant
+        // and language, which the member identity already carries.
+        let mut ranks = vec![0_u32; units.len()];
+        let mut buckets: BTreeMap<(&str, &str), Vec<usize>> = BTreeMap::new();
+        for (index, unit) in units.iter().enumerate() {
+            buckets
+                .entry((unit.origin_variant, unit.language.name()))
+                .or_default()
+                .push(index);
+        }
+        for indices in buckets.into_values() {
+            let discriminators: Vec<stable_id::OccurrenceDiscriminator> = indices
+                .iter()
+                .map(|&index| stable_id::OccurrenceDiscriminator::of_tokens(units[index].tokens))
+                .collect();
+            for (&index, rank) in indices
+                .iter()
+                .zip(stable_id::occurrence_ranks(&discriminators))
+            {
+                ranks[index] = rank;
+            }
+        }
+
+        let mut members: Vec<CrossVariantMember> = units
             .into_iter()
-            .map(|member| CrossVariantMember {
-                id: stable_id::CrossVariantMemberId::from_bytes([0; 16]),
+            .zip(ranks)
+            .map(|(member, rank)| CrossVariantMember {
+                id: stable_id::cross_variant_member_id(
+                    &group_id,
+                    member.origin_variant,
+                    member.language,
+                    rank,
+                ),
                 origin_variant: member.origin_variant.to_string(),
                 language: member.language,
                 file_path: member.file_path.to_string(),
@@ -830,6 +869,7 @@ pub fn compare_build_variants(units: &[CrossVariantUnit<'_>]) -> Option<CrossVar
                 token_count: member.tokens.len(),
             })
             .collect();
+        // Reporting order only; the identities above are already settled.
         members.sort_by(|left, right| {
             left.origin_variant
                 .cmp(&right.origin_variant)
@@ -838,26 +878,6 @@ pub fn compare_build_variants(units: &[CrossVariantUnit<'_>]) -> Option<CrossVar
                 .then_with(|| left.end_line.cmp(&right.end_line))
                 .then_with(|| left.name.cmp(&right.name))
         });
-        let language = match language.as_str() {
-            "c" => Language::C,
-            "cpp" => Language::Cpp,
-            _ => Language::Rust,
-        };
-        let group_id =
-            stable_id::cross_variant_group_id(&id, CloneClass::Type1, language, &content);
-        let mut origin_ranks = BTreeMap::<(&str, &str), u32>::new();
-        for member in &mut members {
-            let rank = origin_ranks
-                .entry((&member.origin_variant, member.language.name()))
-                .or_default();
-            member.id = stable_id::cross_variant_member_id(
-                &group_id,
-                &member.origin_variant,
-                member.language,
-                *rank,
-            );
-            *rank = rank.saturating_add(1);
-        }
         groups.push(CrossVariantGroup {
             id: group_id,
             clone_type: CloneClass::Type1,

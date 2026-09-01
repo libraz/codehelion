@@ -905,30 +905,30 @@ fn build_group(inputs: &BuildInputs<'_>, index: usize) -> report::Group {
                 statements: None,
                 confidence: group.score,
                 entropy_bits: group.entropy_bits,
-                members: group
-                    .members
-                    .iter()
-                    .zip(&inputs.ids[index].members)
-                    .enumerate()
-                    .map(|(position, (instance, member_ids))| {
-                        let source = &inputs.lexed[instance.file];
-                        report::Member {
-                            finding_id: member_ids.finding.to_hex(),
-                            content: member_ids.content.to_hex(),
-                            file: display_path(&source.relative_path),
-                            language: source.language.name().to_string(),
-                            start_line: instance.start_line,
-                            end_line: instance.end_line,
-                            unit: instance
-                                .unit
-                                .and_then(|unit| source.units[unit].name.clone()),
-                            boilerplate: None,
-                            tokens: u64::try_from(instance.token_end - instance.token_start)
-                                .unwrap_or(u64::MAX),
-                            canonical: position == 0,
-                        }
-                    })
-                    .collect(),
+                members: shared::nominated_occurrences(
+                    group.members.iter().zip(&inputs.ids[index].members),
+                )
+                .into_iter()
+                .map(|occurrence| {
+                    let instance = occurrence.instance;
+                    let source = &inputs.lexed[instance.file];
+                    report::Member {
+                        finding_id: occurrence.ids.finding.to_hex(),
+                        content: occurrence.ids.content.to_hex(),
+                        file: display_path(&source.relative_path),
+                        language: source.language.name().to_string(),
+                        start_line: instance.start_line,
+                        end_line: instance.end_line,
+                        unit: instance
+                            .unit
+                            .and_then(|unit| source.units[unit].name.clone()),
+                        boilerplate: None,
+                        tokens: u64::try_from(instance.token_end - instance.token_start)
+                            .unwrap_or(u64::MAX),
+                        canonical: occurrence.canonical,
+                    }
+                })
+                .collect(),
             });
             report_group.suppressed = suppressed;
             report_group

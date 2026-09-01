@@ -302,7 +302,10 @@
         "retained_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "shared_dependency_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "duplicated_data_bytes": { "type": ["integer", "null"], "minimum": 0 },
-        "upper_bound_savings_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "upper_bound_savings_bytes": {
+          "type": ["integer", "null"], "minimum": 0,
+          "description": "Theoretical maximum from directly observed exact duplication of code only; excludes duplicated_data_bytes. An upper bound, not a guaranteed reduction."
+        },
         "estimated_refactor_savings_bytes": { "type": ["integer", "null"] },
         "verified_savings_bytes": { "type": ["integer", "null"] },
         "clone_confidence": { "type": "string" },

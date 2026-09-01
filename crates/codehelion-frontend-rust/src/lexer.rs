@@ -29,6 +29,13 @@ const MULTI_PUNCT: &[&str] = &[
     "%=", "^=", "&=", "|=", "&&", "||", "<<", ">>", "..",
 ];
 
+/// Hex digits a `\xNN` escape takes.
+const HEX_ESCAPE_DIGITS: usize = 2;
+
+/// Characters a `\u{...}` escape may hold between its braces: up to six hex
+/// digits, plus a digit separator around each of them.
+const MAX_UNICODE_ESCAPE_CHARS: usize = 13;
+
 fn is_ident_start(c: char) -> bool {
     c.is_alphabetic() || c == '_'
 }
@@ -303,20 +310,37 @@ impl<'s> Lexer<'s> {
         if self.peek(0) == Some('\\') {
             self.bump();
             match self.peek(0) {
+                // Each escape consumes only what its own grammar allows: two
+                // hex digits here, at most six and a closing brace below.
+                // Reading past that would let one typo swallow the brace that
+                // closes the enclosing block, taking a whole function's unit
+                // with it, and report the delimiter it ate rather than the
+                // literal that is actually broken.
                 Some('x') => {
                     self.bump();
-                    for _ in 0..2 {
+                    for _ in 0..HEX_ESCAPE_DIGITS {
+                        if !self.peek(0).is_some_and(|c| c.is_ascii_hexdigit()) {
+                            break;
+                        }
                         self.bump();
                     }
                 }
                 Some('u') if self.peek(1) == Some('{') => {
                     self.bump();
                     self.bump();
-                    while let Some(ch) = self.peek(0) {
-                        self.bump();
-                        if ch == '}' {
+                    for _ in 0..MAX_UNICODE_ESCAPE_CHARS {
+                        // Digit separators are part of the escape; anything
+                        // else, including a newline or a quote, is not.
+                        if !self
+                            .peek(0)
+                            .is_some_and(|c| c.is_ascii_hexdigit() || c == '_')
+                        {
                             break;
                         }
+                        self.bump();
+                    }
+                    if self.peek(0) == Some('}') {
+                        self.bump();
                     }
                 }
                 Some(_) => self.bump(),
@@ -600,6 +624,59 @@ mod tests {
             .map(|token| token.text.as_str())
             .collect();
         assert_eq!(characters, vec!["'\\x41'", "'\\u{1f980}'", "b'\\xFF'"]);
+        assert!(tokens.iter().any(|token| token.text.as_str() == "tail"));
+    }
+
+    #[test]
+    fn an_unterminated_unicode_escape_stops_inside_its_own_literal() {
+        // A typo in the escape must not reach the brace that closes the block
+        // around it: the following item is still lexed, and the diagnostic
+        // names the literal rather than the delimiter.
+        let source = "fn broken() { let c = '\\u{; }\nfn next() -> u8 { 1 }\n";
+        let (tokens, diagnostics) = lex(source);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.kind == DiagnosticKind::UnterminatedChar)
+                .count(),
+            1
+        );
+        assert_eq!(
+            tokens.iter().filter(|token| token.text == "}").count(),
+            2,
+            "both block-closing braces survive the broken escape"
+        );
+        assert!(tokens.iter().any(|token| token.text == "next"));
+    }
+
+    #[test]
+    fn a_truncated_hex_escape_does_not_cross_a_line() {
+        let (tokens, diagnostics) = lex("let a = '\\x4\nfn next() -> u8 { 1 }");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.kind == DiagnosticKind::UnterminatedChar)
+                .count(),
+            1
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Keyword && token.text == "fn")
+        );
+        assert!(tokens.iter().any(|token| token.text == "next"));
+    }
+
+    #[test]
+    fn a_unicode_escape_with_digit_separators_stays_one_literal() {
+        let (tokens, diagnostics) = lex("let a = '\\u{1_F980}'; let tail = 1;");
+        assert!(diagnostics.is_empty());
+        let characters: Vec<_> = tokens
+            .iter()
+            .filter(|token| token.kind == TokenKind::Literal(LiteralKind::Char))
+            .map(|token| token.text.as_str())
+            .collect();
+        assert_eq!(characters, vec!["'\\u{1_F980}'"]);
         assert!(tokens.iter().any(|token| token.text.as_str() == "tail"));
     }
 

@@ -1239,14 +1239,30 @@ fn readmes_document_current_defaults_and_database_lifecycle() {
 }
 
 #[test]
-fn readmes_distinguish_the_cli_and_rust_helper_toolchain_requirements() {
+fn readmes_state_the_toolchain_requirement_the_manifest_declares() {
+    // Read from the manifest rather than written out again, so raising the
+    // requirement cannot leave either README quoting the old one.
+    let version = env!("CARGO_PKG_RUST_VERSION");
+
     let english = include_str!("../../../README.md");
-    assert!(english.contains("Rust 1.85 or newer"));
-    assert!(english.contains("Rust 1.95-or-newer"));
+    assert!(
+        english.contains(&format!("Rust {version} or newer")),
+        "English README must state Rust {version} as the requirement"
+    );
+    assert!(
+        english.contains(&format!("Rust-{version}%2B")),
+        "English README badge must state Rust {version}"
+    );
 
     let japanese = include_str!("../../../README_ja.md");
-    assert!(japanese.contains("Rust 1.85 以降"));
-    assert!(japanese.contains("Rust 1.95 以降"));
+    assert!(
+        japanese.contains(&format!("Rust {version} 以降")),
+        "Japanese README must state Rust {version} as the requirement"
+    );
+    assert!(
+        japanese.contains(&format!("Rust-{version}%2B")),
+        "Japanese README badge must state Rust {version}"
+    );
 }
 
 #[test]
@@ -1258,7 +1274,7 @@ fn doctor_lists_supported_and_recognised_artifact_formats() {
         .stdout(predicate::str::contains("wasm: available"))
         .stdout(predicate::str::contains("elf: available"))
         .stdout(predicate::str::contains(
-            "macho: available (symbols, relocations, data; matching dSYM source mappings)",
+            "macho: available (symbols, relocations, data segments, normalized duplicates; source mappings from a matching dSYM DWARF image)",
         ));
 }
 
@@ -1779,7 +1795,7 @@ fn artifact_compare_calibrates_against_the_configured_database_without_a_databas
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "calibration needs exactly one matching saved estimate",
+            "calibration found no saved estimate",
         ));
 }
 

@@ -249,7 +249,7 @@ fn median_u64(values: &[u64]) -> Option<f64> {
         return None;
     }
     let middle = values.len().checked_div(2)?;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         Some(f64::midpoint(
             values[middle - 1] as f64,
             values[middle] as f64,
@@ -264,7 +264,7 @@ fn median_f64(values: &[f64]) -> Option<f64> {
         return None;
     }
     let middle = values.len().checked_div(2)?;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         Some(f64::midpoint(values[middle - 1], values[middle]))
     } else {
         Some(values[middle])
@@ -910,60 +910,6 @@ impl Store {
         record_clone_group_savings(&tx, analysis_id, snapshot.clone_group_savings)?;
         tx.commit()?;
         Ok(analysis_id)
-    }
-
-    /// Record one controlled before/after measurement for a saved estimate.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unknown schema or an invalid numeric measurement without
-    /// writing a partial calibration row.
-    pub fn record_artifact_savings_calibration(
-        &mut self,
-        calibration: &ArtifactAnalysisSavingsCalibration,
-    ) -> Result<(), StoreError> {
-        if calibration.schema_version != ARTIFACT_ANALYSIS_SAVINGS_CALIBRATION_SCHEMA_VERSION {
-            return Err(StoreError::InvalidMappingEvidence {
-                reason: "unknown artifact savings calibration schema".to_owned(),
-            });
-        }
-        if calibration
-            .relative_error
-            .is_some_and(|value| !value.is_finite() || value.is_sign_negative())
-        {
-            return Err(StoreError::InvalidMappingEvidence {
-                reason: "calibration relative error must be finite and nonnegative".to_owned(),
-            });
-        }
-        self.conn.execute(
-            "INSERT INTO artifact_analysis_savings_calibration
-                 (schema_version, artifact_analysis_id, source_scan_run_id,
-                  clone_group_fingerprint, source_build_variant_fingerprint,
-                  before_artifact_build_variant_fingerprint, after_artifact_fingerprint,
-                  after_artifact_build_variant_fingerprint, estimated_refactor_savings_bytes,
-                  verified_savings_bytes, absolute_error_bytes, relative_error, recorded_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![
-                calibration.schema_version,
-                calibration.artifact_analysis_id,
-                calibration.source_scan_run_id,
-                calibration.clone_group_fingerprint.as_slice(),
-                calibration.source_build_variant_fingerprint.as_slice(),
-                calibration
-                    .before_artifact_build_variant_fingerprint
-                    .as_slice(),
-                calibration.after_artifact_fingerprint.as_slice(),
-                calibration
-                    .after_artifact_build_variant_fingerprint
-                    .as_slice(),
-                calibration.estimated_refactor_savings_bytes,
-                calibration.verified_savings_bytes,
-                i64::try_from(calibration.absolute_error_bytes).unwrap_or(i64::MAX),
-                calibration.relative_error,
-                calibration.recorded_at,
-            ],
-        )?;
-        Ok(())
     }
 }
 

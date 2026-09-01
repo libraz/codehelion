@@ -162,13 +162,15 @@ fn equal_similarity_ties_choose_the_pair_by_content_key() {
     let mut backward_rest = Vec::new();
     let mut forward_stats = GroupingStats::default();
     let mut backward_stats = GroupingStats::default();
+    let mut position = vec![0usize; units.len()];
+    let similarities = ComponentMatrix::build(&[0, 1, 2], &sim, &mut position, &mut forward_stats);
 
     complete_linkage_trim(
         1,
         &mut forward,
         &mut forward_rest,
         &units,
-        &sim,
+        &similarities,
         &config,
         &mut forward_stats,
     );
@@ -177,7 +179,7 @@ fn equal_similarity_ties_choose_the_pair_by_content_key() {
         &mut backward,
         &mut backward_rest,
         &units,
-        &sim,
+        &similarities,
         &config,
         &mut backward_stats,
     );
@@ -419,4 +421,120 @@ fn grouping_is_deterministic_regardless_of_edge_order() {
     let a = group(&units, &forward, &GroupingConfig::default());
     let b = group(&units, &reversed, &GroupingConfig::default());
     assert_eq!(a.groups, b.groups);
+}
+
+/// Units keyed by index over the whole `u64` range, so a component may hold
+/// more members than a single byte can name.
+fn wide_units(count: usize) -> Vec<GroupingUnit> {
+    (0..count)
+        .map(|index| {
+            let mut key = [0u8; 16];
+            let index = u64::try_from(index).unwrap();
+            key[0..8].copy_from_slice(&index.to_be_bytes());
+            GroupingUnit { key }
+        })
+        .collect()
+}
+
+/// A chain 0-1-2-...-n: one component refinement peels a couple of members
+/// off at a time, so the members it ejects are regrouped as many times as the
+/// chain is long. This is the shape whose cost the module states a bound for.
+fn chain(count: usize) -> Vec<SimilarityEdge> {
+    (0..count.saturating_sub(1))
+        .map(|index| edge(index, index + 1, 0.9))
+        .collect()
+}
+
+/// One member every other member is related to, half of them too weakly to
+/// keep, so refinement both ejects and regroups.
+fn hub(count: usize) -> Vec<SimilarityEdge> {
+    let mut edges: Vec<SimilarityEdge> = (1..count)
+        .map(|index| edge(0, index, if index % 2 == 0 { 0.9 } else { 0.5 }))
+        .collect();
+    edges.extend((1..count).map(|index| edge(index, (index % (count - 1)) + 1, 0.55)));
+    edges
+}
+
+#[test]
+fn refinement_weighs_each_pair_of_a_component_once_however_often_it_regroups() {
+    // Rebuilding what a component knows about itself once per level of the
+    // regrouping multiplies the work by the number of levels, which is what
+    // turns the stated O(k² log k) into a cubic cost on exactly the shapes
+    // this module exists for: a similarity chain, and a family around one
+    // widely copied unit.
+    for shape in [chain as fn(usize) -> Vec<SimilarityEdge>, hub] {
+        let mut previous: Option<(usize, usize)> = None;
+        for &size in &[128usize, 256, 512, 1024] {
+            let units = wide_units(size);
+            let edges = shape(size);
+
+            let _ = taken_graph_queries();
+            let set = group(&units, &edges, &GroupingConfig::default());
+            let queries = taken_graph_queries();
+
+            assert_eq!(set.stats.components, 1, "the shape is one component");
+            assert_eq!(
+                set.stats.oversized_components, 0,
+                "the component ceiling did not fire, so it explains nothing"
+            );
+            assert_eq!(
+                queries,
+                size * (size - 1) / 2,
+                "each pair of a {size}-member component is weighed once"
+            );
+            if let Some((smaller, fewer)) = previous {
+                assert_eq!(size, smaller * 2);
+                // Twice the members is four times the pairs. Eight times would
+                // be a level of regrouping charged for the whole component.
+                assert!(
+                    queries <= fewer * 5,
+                    "{queries} queries at {size} members against {fewer} at {smaller}"
+                );
+            }
+            previous = Some((size, queries));
+        }
+    }
+}
+
+#[test]
+fn refinement_reports_what_it_weighed_even_when_no_ceiling_fired() {
+    let size = 512;
+    let units = wide_units(size);
+
+    let set = group(&units, &hub(size), &GroupingConfig::default());
+
+    assert_eq!(set.stats.oversized_components, 0);
+    assert!(
+        set.stats.refinement_comparisons >= size * (size - 1) / 2,
+        "the comparisons a run spent its time on are reported: {:?}",
+        set.stats
+    );
+}
+
+#[test]
+fn one_components_similarities_do_not_leak_into_another() {
+    // Two components refined one after the other reuse the same position
+    // scratch; a member of the second must read its own table, not whatever
+    // the first left behind.
+    let units = wide_units(6);
+    let edges = vec![
+        edge(0, 1, 0.9),
+        edge(1, 2, 0.9),
+        edge(0, 2, 0.9),
+        edge(3, 4, 0.9),
+        edge(4, 5, 0.9),
+        edge(3, 5, 0.9),
+    ];
+
+    let set = group(&units, &edges, &GroupingConfig::default());
+
+    assert_eq!(set.stats.components, 2);
+    assert_eq!(set.groups.len(), 2);
+    for reported in &set.groups {
+        assert_eq!(reported.members.len(), 3);
+        assert!((reported.min_pairwise - 0.9).abs() < 1e-12);
+        for &similarity in &reported.medoid_similarities {
+            assert!(similarity >= 0.9);
+        }
+    }
 }

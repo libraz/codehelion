@@ -351,6 +351,18 @@ fn verify_pairs(
 }
 
 /// Select complete candidate components for verification under `budget`.
+///
+/// A candidate set is read a fixed number of times whatever it is shaped like:
+/// the traversal that decides which component a unit belongs to labels it at
+/// the same time, and the pairs are then counted and placed by that label. The
+/// alternative — asking each component which of the candidate pairs are its own
+/// — multiplies the candidate count by the number of independent duplicate
+/// families the repository has, which is largest exactly where this ceiling
+/// exists to help (AGENTS.md §2-10). A component the budget cannot afford costs
+/// no scan of its own either.
+///
+/// Components keep the order of their smallest member and their pairs the order
+/// of `pairs`, which is the order a per-component rescan produced.
 fn verification_components(
     pairs: &BTreeSet<(usize, usize)>,
     budget: usize,
@@ -360,38 +372,88 @@ fn verification_components(
         adjacent.entry(a).or_default().push(b);
         adjacent.entry(b).or_default().push(a);
     }
-    let mut visited = BTreeSet::new();
-    let mut remaining = budget;
-    let mut dropped = 0;
-    let mut selected = Vec::new();
+    let mut component_of = BTreeMap::<usize, usize>::new();
+    let mut components = 0;
     for &root in adjacent.keys() {
-        if !visited.insert(root) {
+        if component_of.contains_key(&root) {
             continue;
         }
+        component_of.insert(root, components);
         let mut stack = vec![root];
-        let mut members = BTreeSet::from([root]);
         while let Some(member) = stack.pop() {
             for &next in &adjacent[&member] {
-                if visited.insert(next) {
-                    members.insert(next);
+                if component_of.insert(next, components).is_none() {
                     stack.push(next);
                 }
             }
         }
-        let component: Vec<(usize, usize)> = pairs
-            .iter()
-            .copied()
-            .filter(|(a, b)| members.contains(a) && members.contains(b))
-            .collect();
-        if component.len() > remaining {
-            dropped += component.len();
+        components += 1;
+    }
+
+    // How many pairs each component holds, so the allowance is settled before
+    // anything is copied.
+    let mut held = vec![0usize; components];
+    for &(a, _) in pairs {
+        note_pair_scan();
+        if let Some(&component) = component_of.get(&a) {
+            held[component] += 1;
+        }
+    }
+
+    let mut remaining = budget;
+    let mut dropped = 0;
+    let mut placed = 0;
+    // Where each admitted component's pairs start in the selection, in root
+    // order; `None` for the ones the allowance did not cover.
+    let mut start_of: Vec<Option<usize>> = Vec::with_capacity(components);
+    for &count in &held {
+        if count > remaining {
+            dropped += count;
+            start_of.push(None);
             continue;
         }
-        remaining -= component.len();
-        selected.extend(component);
+        remaining -= count;
+        start_of.push(Some(placed));
+        placed += count;
+    }
+
+    let mut selected = vec![(0usize, 0usize); placed];
+    let mut cursor = vec![0usize; components];
+    for &(a, b) in pairs {
+        note_pair_scan();
+        let Some(&component) = component_of.get(&a) else {
+            continue;
+        };
+        if let Some(start) = start_of[component] {
+            selected[start + cursor[component]] = (a, b);
+            cursor[component] += 1;
+        }
     }
     (selected, dropped)
 }
+
+// Candidate pairs read while sorting them into components, counted on this
+// thread. The cost this partition must not have is one that grows with the
+// number of independent families as well as with the candidate count, and that
+// is a count rather than a duration. Tests read it; nothing else does.
+#[cfg(test)]
+thread_local! {
+    static PAIR_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_pair_scan() {
+    PAIR_SCANS.with(|scans| scans.set(scans.get() + 1));
+}
+
+/// Take and reset the current thread's scan count.
+#[cfg(test)]
+fn taken_pair_scans() -> usize {
+    PAIR_SCANS.with(std::cell::Cell::take)
+}
+
+#[cfg(not(test))]
+const fn note_pair_scan() {}
 
 #[cfg(test)]
 mod tests {
@@ -404,5 +466,132 @@ mod tests {
 
         assert_eq!(selected, vec![(3, 4)]);
         assert_eq!(dropped, 2);
+    }
+
+    /// The per-component rescan this selection replaced, kept as an oracle: the
+    /// way the pairs of one component are found may change, the set that is
+    /// selected and the order it arrives in may not.
+    fn rescanning_components(
+        pairs: &BTreeSet<(usize, usize)>,
+        budget: usize,
+    ) -> (Vec<(usize, usize)>, usize) {
+        let mut adjacent = BTreeMap::<usize, Vec<usize>>::new();
+        for &(a, b) in pairs {
+            adjacent.entry(a).or_default().push(b);
+            adjacent.entry(b).or_default().push(a);
+        }
+        let mut visited = BTreeSet::new();
+        let mut remaining = budget;
+        let mut dropped = 0;
+        let mut selected = Vec::new();
+        for &root in adjacent.keys() {
+            if !visited.insert(root) {
+                continue;
+            }
+            let mut stack = vec![root];
+            let mut members = BTreeSet::from([root]);
+            while let Some(member) = stack.pop() {
+                for &next in &adjacent[&member] {
+                    if visited.insert(next) {
+                        members.insert(next);
+                        stack.push(next);
+                    }
+                }
+            }
+            let component: Vec<(usize, usize)> = pairs
+                .iter()
+                .copied()
+                .filter(|(a, b)| members.contains(a) && members.contains(b))
+                .collect();
+            if component.len() > remaining {
+                dropped += component.len();
+                continue;
+            }
+            remaining -= component.len();
+            selected.extend(component);
+        }
+        (selected, dropped)
+    }
+
+    #[test]
+    fn component_selection_is_the_one_the_per_component_rescan_made() {
+        // Deterministic shapes with chains, hubs, isolated pairs and repeated
+        // endpoints, under allowances that admit all, some and none of them.
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state >> 33
+        };
+        for case in 0..24_u64 {
+            let span = 8 + case * 3;
+            let mut pairs = BTreeSet::new();
+            for _ in 0..64 {
+                let a = usize::try_from(next() % span).unwrap_or(0);
+                let b = usize::try_from(next() % span).unwrap_or(0);
+                if a != b {
+                    pairs.insert((a.min(b), a.max(b)));
+                }
+            }
+            for budget in [0, 1, 3, 7, 16, 64, usize::MAX] {
+                assert_eq!(
+                    verification_components(&pairs, budget),
+                    rescanning_components(&pairs, budget),
+                    "case {case} under a budget of {budget}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sorting_candidates_into_components_does_not_multiply_by_their_number() {
+        // Twenty thousand two-node families: the shape where a component-by-
+        // component rescan reads the whole candidate set once per family.
+        const COMPONENTS: usize = 20_000;
+        let pairs: BTreeSet<(usize, usize)> = (0..COMPONENTS)
+            .map(|component| (component * 2, component * 2 + 1))
+            .collect();
+
+        let _ = taken_pair_scans();
+        let (selected, dropped) = verification_components(&pairs, usize::MAX);
+        let scans = taken_pair_scans();
+
+        assert_eq!(selected.len(), pairs.len());
+        assert_eq!(dropped, 0);
+        assert!(
+            scans <= 4 * pairs.len(),
+            "{scans} reads of {} candidate pairs across {COMPONENTS} components",
+            pairs.len()
+        );
+
+        // The same candidate count in one family costs the same reads, so the
+        // number of families is not a multiplier on the work.
+        let one_family: BTreeSet<(usize, usize)> =
+            (0..pairs.len()).map(|node| (0, node + 1)).collect();
+        let _ = taken_pair_scans();
+        let (selected, _) = verification_components(&one_family, usize::MAX);
+        let family_scans = taken_pair_scans();
+
+        assert_eq!(selected.len(), one_family.len());
+        assert_eq!(scans, family_scans);
+    }
+
+    #[test]
+    fn a_component_the_allowance_cannot_afford_costs_no_scan_of_its_own() {
+        // Two families, one of them refused: the refusal is settled from the
+        // counts, so the reads do not grow with what was refused.
+        let mut pairs = BTreeSet::from([(0, 1)]);
+        for node in 2..2_000 {
+            pairs.insert((2, node));
+        }
+
+        let _ = taken_pair_scans();
+        let (selected, dropped) = verification_components(&pairs, 1);
+        let scans = taken_pair_scans();
+
+        assert_eq!(selected, vec![(0, 1)]);
+        assert_eq!(dropped, pairs.len() - 1);
+        assert!(scans <= 4 * pairs.len(), "{scans} reads");
     }
 }

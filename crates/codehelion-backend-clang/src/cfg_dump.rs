@@ -154,6 +154,16 @@ fn heading_names(function: &DumpFunction, name: &str) -> bool {
         .heading
         .split_once('(')
         .and_then(|(before_parameters, _)| before_parameters.split_whitespace().last())
+        // Clang attaches a pointer/reference declarator directly to the name
+        // with no separating space (`int *pick`, `int &&rref`, `int **pick`),
+        // so the last whitespace-delimited token still carries that leading
+        // punctuation. It is not part of the identifier: strip every leading
+        // `*`/`&` before comparing. A declarator this cannot recover the name
+        // from (for example a function-pointer return type, where the name
+        // sits inside an inner pair of parentheses this split never reaches)
+        // strips down to punctuation only, which cannot equal a real
+        // identifier and so fails closed rather than matching by accident.
+        .map(|declarator| declarator.trim_start_matches(['*', '&']))
         .and_then(|qualified| qualified.rsplit("::").next())
         == Some(name)
 }
@@ -209,7 +219,7 @@ fn append_function(graph: &mut ControlFlowGraph, function: &DumpFunction, anchor
     }
 }
 
-fn edge_kind(block: &DumpBlock, position: usize) -> EdgeKind {
+const fn edge_kind(block: &DumpBlock, position: usize) -> EdgeKind {
     if block.conditional && block.successors.len() == 2 {
         return if position == 0 {
             EdgeKind::Taken
@@ -399,5 +409,72 @@ mod tests {
         };
         assert!(!heading_names(&function, "sum"));
         assert!(heading_names(&function, "total_sum"));
+    }
+
+    /// Every pointer/reference declarator spelling actually observed from
+    /// `debug.DumpCFG` (Apple clang 21 and upstream both print the star or
+    /// ampersand directly against the name, with no separating space).
+    #[test]
+    fn heading_name_strips_leading_pointer_and_reference_punctuation() {
+        let cases = [
+            ("int *pick(int v)", "pick"),
+            ("int **doublepick(int v)", "doublepick"),
+            ("int &ref(S &s)", "ref"),
+            ("int &&rref(S &&s)", "rref"),
+            ("const char *label(int v)", "label"),
+            ("int *volatile *weird(int v)", "weird"),
+            ("int *const &constref(int &v)", "constref"),
+            ("int *U::method(int v)", "method"),
+            ("T &operator=(const T &other)", "operator="),
+            ("int *operator->()", "operator->"),
+        ];
+        for (heading, name) in cases {
+            let function = DumpFunction {
+                heading: heading.to_string(),
+                blocks: Vec::new(),
+            };
+            assert!(heading_names(&function, name), "{heading}");
+        }
+    }
+
+    /// Positive matching must not become loose: a value-returning heading
+    /// still only names its own function.
+    #[test]
+    fn heading_name_still_rejects_a_different_function() {
+        let function = DumpFunction {
+            heading: "int *pick(int v)".to_string(),
+            blocks: Vec::new(),
+        };
+        assert!(!heading_names(&function, "choose"));
+        assert!(!heading_names(&function, "pic"));
+    }
+
+    /// A declarator this format cannot recover a name from — a
+    /// function-pointer return type puts the declared name inside an inner
+    /// pair of parentheses the header's first `(` never reaches — strips down
+    /// to bare punctuation. That can never equal a real identifier, so the
+    /// heading is refused rather than misattributed to whichever function
+    /// happens to be asked about.
+    #[test]
+    fn heading_name_fails_closed_on_a_declarator_it_cannot_parse() {
+        let function = DumpFunction {
+            heading: "int *(*returns_function_pointer(int v))(int)".to_string(),
+            blocks: Vec::new(),
+        };
+        assert!(!heading_names(&function, "returns_function_pointer"));
+
+        // And the same dump must not silently attach to some unrelated
+        // in-scope function either.
+        assert!(
+            from_dump(
+                "int *(*returns_function_pointer(int v))(int)\n [B1]\n  Succs (1): B0\n \
+                 [B0 (EXIT)]\n",
+                &[FunctionAnchor {
+                    name: "returns_function_pointer".to_string(),
+                    anchor: anchor(),
+                }],
+            )
+            .is_none()
+        );
     }
 }

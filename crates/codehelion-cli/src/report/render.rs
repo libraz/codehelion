@@ -202,7 +202,7 @@ fn thousands(value: u64) -> String {
     let digits = value.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(digit);
@@ -1356,7 +1356,44 @@ fn render_unmeasured_in_this_mode(summary: &Summary, out: &mut impl Write) -> io
 
 /// Give a source report a single path to artifact correlation when no group
 /// has been hydrated with saved artifact evidence.
-const ARTIFACT_GUIDANCE: &str = "note: no artifact savings are recorded; provide an artifact at <PATH> retaining symbols/debug info, or a matching companion via --debug-file <PATH>, then run artifact analyze <PATH> --source-run <id> --build-variant <manifest>";
+const ARTIFACT_GUIDANCE: &str = "note: no artifact savings are recorded; run artifact analyze <PATH> --source-run <id> --build-variant <manifest> on a build of this tree, supplying the evidence its format carries:";
+
+/// One guidance line per format, stating what to supply and how precisely the
+/// result can be attributed back to source.
+///
+/// The attribution each line promises is derived from the artifact crate's
+/// format support definitions -- the same definitions every backend declares
+/// its capabilities from -- rather than restated here. A format reaches a
+/// clone group's line range only when its parses attach source line frames to
+/// symbols; a format that merely names symbols says so, and says why, instead
+/// of pointing at a condition it cannot meet. A format added to the boundary
+/// therefore gets a line without this note being edited.
+fn artifact_guidance_lines() -> Vec<String> {
+    codehelion_artifact::FORMAT_SUPPORT
+        .iter()
+        .map(|support| {
+            let evidence = support.source_evidence;
+            let detail = match support.attribution() {
+                codehelion_artifact::SourceAttribution::LineRange => format!(
+                    "supply {}, or a matching companion via --debug-file <PATH>; clone-group line ranges are then attributed",
+                    evidence.carrier
+                ),
+                codehelion_artifact::SourceAttribution::Symbol => format!(
+                    "{} attributes whole symbols only; {}",
+                    evidence.symbol_carrier,
+                    evidence
+                        .line_limit
+                        .unwrap_or("clone-group line ranges are not attributable"),
+                ),
+                codehelion_artifact::SourceAttribution::None => {
+                    "no source correspondence is available; sizes and duplicates are still reported"
+                        .to_owned()
+                }
+            };
+            format!("  {}: {detail}", support.format)
+        })
+        .collect()
+}
 
 fn artifact_guidance_needed<'a>(groups: impl Iterator<Item = &'a Group>) -> bool {
     let mut has_group = false;
@@ -1369,6 +1406,14 @@ fn artifact_guidance_needed<'a>(groups: impl Iterator<Item = &'a Group>) -> bool
     has_group
 }
 
+fn write_artifact_guidance(out: &mut impl Write) -> io::Result<()> {
+    writeln!(out, "{ARTIFACT_GUIDANCE}")?;
+    for line in artifact_guidance_lines() {
+        writeln!(out, "{line}")?;
+    }
+    Ok(())
+}
+
 fn render_artifact_guidance(report: &Report, out: &mut impl Write) -> io::Result<()> {
     if report.run.run_id.is_none() {
         return Ok(());
@@ -1376,7 +1421,7 @@ fn render_artifact_guidance(report: &Report, out: &mut impl Write) -> io::Result
     if !artifact_guidance_needed(report.groups.iter()) {
         return Ok(());
     }
-    writeln!(out, "{ARTIFACT_GUIDANCE}")
+    write_artifact_guidance(out)
 }
 
 /// Render artifact guidance once for a partitioned report envelope.
@@ -1392,7 +1437,7 @@ pub(super) fn render_partition_artifact_guidance(
     ) {
         return Ok(());
     }
-    writeln!(out, "{ARTIFACT_GUIDANCE}")
+    write_artifact_guidance(out)
 }
 
 /// List what the baseline froze that this run no longer reports.
@@ -1804,4 +1849,101 @@ fn render_artifact_savings(savings: &[ArtifactSavings], out: &mut impl Write) ->
         writeln!(out, "        assumptions: {}", savings.assumptions)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+mod artifact_guidance_tests {
+    use super::{ARTIFACT_GUIDANCE, artifact_guidance_lines, write_artifact_guidance};
+    use codehelion_artifact::{FORMAT_SUPPORT, SourceAttribution};
+
+    fn rendered() -> String {
+        let mut out = Vec::new();
+        write_artifact_guidance(&mut out).expect("guidance renders");
+        String::from_utf8(out).expect("guidance is text")
+    }
+
+    /// Every format the boundary reads gets a line, so a format added later
+    /// cannot leave the note describing only the formats that existed before.
+    #[test]
+    fn the_note_covers_every_format_the_boundary_reads() {
+        let note = rendered();
+        assert!(note.starts_with(ARTIFACT_GUIDANCE), "{note}");
+        assert_eq!(artifact_guidance_lines().len(), FORMAT_SUPPORT.len());
+        for support in &FORMAT_SUPPORT {
+            assert!(
+                note.contains(&format!("  {}: ", support.format)),
+                "{} has no line: {note}",
+                support.format
+            );
+        }
+    }
+
+    /// A module whose only symbol evidence is the name section is told what
+    /// that reaches -- whole symbols -- and why a clone group's line range is
+    /// not among it, rather than being asked for debug information that would
+    /// change the size it is being asked about.
+    #[test]
+    fn the_wasm_line_promises_symbols_and_names_the_line_range_limit() {
+        let note = rendered();
+        let line = note
+            .lines()
+            .find(|line| line.trim_start().starts_with("wasm: "))
+            .expect("wasm has a line");
+
+        assert!(line.contains("the name section"), "{line}");
+        assert!(line.contains("attributes whole symbols only"), "{line}");
+        assert!(line.contains("DWARF"), "{line}");
+        assert!(line.contains("changes the size being measured"), "{line}");
+        assert!(
+            !line.contains("clone-group line ranges are then attributed"),
+            "{line}"
+        );
+    }
+
+    /// A format that reaches a source line is told what to supply for it, and
+    /// only such a format is promised clone-group attribution.
+    #[test]
+    fn only_a_format_that_reaches_a_source_line_is_promised_line_attribution() {
+        let note = rendered();
+        for support in &FORMAT_SUPPORT {
+            let prefix = format!("  {}: ", support.format);
+            let line = note
+                .lines()
+                .find(|line| line.starts_with(&prefix))
+                .unwrap_or_else(|| panic!("{} has a line", support.format));
+            let promises_lines = line.contains("clone-group line ranges are then attributed");
+            assert_eq!(
+                promises_lines,
+                support.attribution() == SourceAttribution::LineRange,
+                "{} promises the wrong granularity: {line}",
+                support.format
+            );
+            if promises_lines {
+                assert!(
+                    line.contains(support.source_evidence.carrier),
+                    "{} does not name what to supply: {line}",
+                    support.format
+                );
+            }
+        }
+    }
+
+    /// The note names the state it is printed in and the command that leaves
+    /// it, so a reader whose groups all report unavailable attribution is told
+    /// what that state is rather than being contradicted by the note.
+    #[test]
+    fn the_note_names_the_state_it_reports_and_the_command_that_leaves_it() {
+        let note = rendered();
+        assert!(note.contains("no artifact savings are recorded"), "{note}");
+        assert!(
+            note.contains("artifact analyze <PATH> --source-run <id> --build-variant <manifest>"),
+            "{note}"
+        );
+        // A report with nothing to attribute must not be told that something
+        // was attributed.
+        assert!(!note.contains("attributed bytes"), "{note}");
+        // A run with no groups has nothing to correlate, so it gets no note.
+        assert!(!super::artifact_guidance_needed(std::iter::empty()));
+    }
 }

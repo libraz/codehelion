@@ -100,9 +100,17 @@ pub trait IrMapping {
         c_family_node_name(node, source)
     }
 
+    /// The dialect's reserved words: the same set the Fast lexer reads a
+    /// keyword off. [`classify_token`] reconciles the grammar's view of a leaf
+    /// with this set, so the two modes cannot disagree about what a reserved
+    /// word is.
+    fn keywords(&self) -> &'static [&'static str] {
+        crate::dialect::C.keywords
+    }
+
     /// Map one CST leaf onto the shared [`TokenKind`] vocabulary.
     fn token_kind(&self, kind: &str, is_named: bool, text: &str) -> TokenKind {
-        classify_token(kind, is_named, text)
+        classify_token(kind, is_named, text, self.keywords())
     }
 
     /// Build the function/method signature side-table entry for this node.
@@ -174,8 +182,29 @@ pub fn record_mapping(node: &Node<'_>) -> Mapping {
 /// (operators, delimiters, and directive introducers like `#include`). Named
 /// leaves outside the known kinds — notably the opaque `preproc_arg`
 /// replacement text — classify as [`TokenKind::Unknown`].
+///
+/// A leaf the grammar calls an identifier is then checked against `keywords`,
+/// the dialect's reserved words. Both C-family grammars spell words their
+/// syntax does not model as plain identifier leaves — `static_cast<T>(x)`
+/// parses as a call whose callee is the identifier `static_cast`, and a C
+/// spelling the grammar predates (`_Bool`, `typeof`, `static_assert`) reaches
+/// the walker the same way. Left at that, the structural token stream
+/// disagrees with the Fast lexer, which reads the same word off the same
+/// keyword set — and a keyword read as an identifier is then taken for a
+/// callee name, so a cast or a type enters the API-call profile as though the
+/// code called something. Nothing legitimate is caught: a reserved word cannot
+/// also be a declared name, so an identifier leaf spelling one is the
+/// grammar's artefact and not the program's.
 #[must_use]
-pub fn classify_token(kind: &str, is_named: bool, text: &str) -> TokenKind {
+pub fn classify_token(kind: &str, is_named: bool, text: &str, keywords: &[&str]) -> TokenKind {
+    match classify_grammar_kind(kind, is_named, text) {
+        TokenKind::Identifier if keywords.contains(&text) => TokenKind::Keyword,
+        other => other,
+    }
+}
+
+/// Map a leaf onto a token kind from its grammar kind alone.
+fn classify_grammar_kind(kind: &str, is_named: bool, text: &str) -> TokenKind {
     match kind {
         "identifier"
         | "field_identifier"

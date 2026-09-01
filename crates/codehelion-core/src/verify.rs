@@ -32,10 +32,10 @@
 //! shows. The composite weights are configurable and versioned
 //! ([`WEIGHT_VERSION`]), and that version travels with the detector identity
 //! (AGENTS.md §2-4) so two results can be compared knowing which weights
-//! produced them. Changing the weights changes findings, and before the first
-//! release that invalidates the results recorded under the old ones rather
-//! than raising the version, which stays at v1. Everything here is a pure
-//! function of its inputs.
+//! produced them. Changing the weights changes findings: raise the version
+//! when a stored result must still be readable under the old weights, and
+//! otherwise let the change invalidate what was recorded under them. Everything
+//! here is a pure function of its inputs.
 //!
 //! # What the composite can and cannot separate
 //!

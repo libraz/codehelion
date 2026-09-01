@@ -5,8 +5,9 @@
   "description": "Machine-readable before/after comparison of two locally read artifacts. The direct before-minus-after measurement is named observed_size_reduction_bytes; verified savings occurs only in a controlled calibration.",
   "type": "object",
   "required": [
-    "schema_version", "before", "after", "observed_size_reduction_bytes",
-    "duplicated_code_delta_bytes", "duplicated_data_delta_bytes", "calibration",
+    "schema_version", "before", "after", "containment", "observed_size_reduction_bytes",
+    "duplicated_code_delta_bytes", "duplicated_data_delta_bytes",
+    "code_section_delta_bytes", "data_segment_delta_bytes", "calibration",
     "symbol_changes", "symbol_deltas", "duplicate_group_deltas",
     "build_variant_warning", "assumptions"
   ],
@@ -14,9 +15,18 @@
     "schema_version": { "const": "artifact-comparison-report-v2" },
     "before": { "$ref": "#/$defs/artifact" },
     "after": { "$ref": "#/$defs/artifact" },
+    "containment": { "$ref": "#/$defs/containment" },
     "observed_size_reduction_bytes": { "type": "integer" },
     "duplicated_code_delta_bytes": { "type": "integer" },
     "duplicated_data_delta_bytes": { "type": ["integer", "null"] },
+    "code_section_delta_bytes": {
+      "type": "integer",
+      "description": "Signed change in executable section bytes, so an observed difference can be attributed to code rather than to embedded data."
+    },
+    "data_segment_delta_bytes": {
+      "type": "integer",
+      "description": "Signed change in data segment bytes, the other half of that question."
+    },
     "calibration": { "$ref": "#/$defs/calibration" },
     "symbol_changes": { "$ref": "#/$defs/symbol_changes" },
     "symbol_deltas": { "type": "array", "items": { "$ref": "#/$defs/symbol_delta" } },
@@ -27,7 +37,10 @@
   "$defs": {
     "artifact": {
       "type": "object",
-      "required": ["path", "format", "fingerprint", "architecture", "skipped_architectures", "build_variant", "sizes"],
+      "required": [
+        "path", "format", "fingerprint", "architecture", "skipped_architectures", "build_variant",
+        "code_section_bytes", "data_segment_bytes", "sizes"
+      ],
       "properties": {
         "path": { "type": "string" },
         "format": { "enum": ["wasm", "elf", "macho", "pe-coff", "archive"] },
@@ -35,7 +48,24 @@
         "architecture": { "type": ["string", "null"] },
         "skipped_architectures": { "type": "array", "items": { "type": "string" } },
         "build_variant": { "$ref": "#/$defs/build_variant" },
+        "code_section_bytes": {
+          "type": "integer", "minimum": 0,
+          "description": "Executable section bytes, derived exactly as the single-artifact report derives them, so both surfaces answer \"code or data?\" the same way."
+        },
+        "data_segment_bytes": {
+          "type": "integer", "minimum": 0,
+          "description": "Data segment bytes, derived the same way for the same reason."
+        },
         "sizes": { "$ref": "#/$defs/sizes" }
+      }
+    },
+    "containment": {
+      "type": ["object", "null"],
+      "required": ["max_input_bytes", "worker_timeout_seconds", "worker_memory_limit_bytes"],
+      "properties": {
+        "max_input_bytes": { "type": "integer", "minimum": 0 },
+        "worker_timeout_seconds": { "type": "integer", "minimum": 1 },
+        "worker_memory_limit_bytes": { "type": "integer", "minimum": 1 }
       }
     },
     "build_variant": {
@@ -78,12 +108,25 @@
     "calibration": {
       "type": ["object", "null"],
       "required": [
-        "source_run", "clone_group_fingerprint", "estimated_refactor_savings_bytes",
+        "source_run", "clone_group_fingerprint", "artifact_analysis_id", "matching_analyses",
+        "already_recorded", "estimated_refactor_savings_bytes",
         "verified_savings_bytes", "absolute_error_bytes", "relative_error"
       ],
       "properties": {
         "source_run": { "type": "integer" },
         "clone_group_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "artifact_analysis_id": {
+          "type": "integer",
+          "description": "Saved analysis whose stored estimate this measurement calibrated. Analysing one artifact twice leaves several analyses of one identity, so this names the one the measurement was taken against."
+        },
+        "matching_analyses": {
+          "type": "integer", "minimum": 0,
+          "description": "How many saved analyses held an estimate of that same identity."
+        },
+        "already_recorded": {
+          "type": "boolean",
+          "description": "Whether a measurement of this identity was already on file, in which case recording refreshed that row rather than failing the comparison."
+        },
         "estimated_refactor_savings_bytes": { "type": "integer" },
         "verified_savings_bytes": { "type": "integer" },
         "absolute_error_bytes": { "type": "integer", "minimum": 0 },

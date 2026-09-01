@@ -7,6 +7,7 @@
 //! executes or expands the source; macros and generics pass through as tokens.
 
 pub mod ir;
+mod item;
 mod lexer;
 mod units;
 

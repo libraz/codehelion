@@ -1,6 +1,6 @@
 //! Correlation fallback matching and attribution.
 
-use super::mapping::source_unit_instance_fingerprint;
+use super::mapping::{BuildVariantFingerprint, source_unit_instance_fingerprint};
 use super::{
     ArtifactAnalysisMapping, ArtifactAnalysisSourceKind, ArtifactIr, BTreeMap, BTreeSet, FilePath,
     MappingEvidence, MappingEvidenceFact, SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION,
@@ -288,7 +288,7 @@ pub(in crate::artifact) fn assign_unambiguous_fragment_bytes(
 ) {
     let fragments: BTreeMap<_, _> = fragments
         .iter()
-        .map(|fragment| (fragment.finding_id, fragment))
+        .map(|fragment| (*fragment.finding_id.as_bytes(), fragment))
         .collect();
     let mut fragment_mappings: BTreeMap<[u8; 16], Vec<usize>> = BTreeMap::new();
     for (index, mapping) in mappings.iter().enumerate() {
@@ -448,7 +448,7 @@ pub(in crate::artifact) fn enrich_call_graph_evidence(
             source_targets
                 .entry((
                     source_kind_order(ArtifactAnalysisSourceKind::Unit),
-                    unit.fingerprint,
+                    *unit.fingerprint.as_bytes(),
                     unit.build_variant_fingerprint,
                 ))
                 .or_default()
@@ -458,7 +458,7 @@ pub(in crate::artifact) fn enrich_call_graph_evidence(
             source_targets
                 .entry((
                     source_kind_order(ArtifactAnalysisSourceKind::Fragment),
-                    fragment.fingerprint,
+                    *fragment.fingerprint.as_bytes(),
                     fragment.build_variant_fingerprint,
                 ))
                 .or_default()
@@ -501,7 +501,7 @@ pub(in crate::artifact) fn correlate_generic_origin(
     symbol: &codehelion_artifact::ArtifactSymbol,
     sources: &SourceLocationIndex<'_>,
     instantiations: &InstantiationIndex<'_>,
-    artifact_variant: [u8; 16],
+    artifact_variant: BuildVariantFingerprint,
 ) -> Vec<ArtifactAnalysisMapping> {
     let Some(artifact_name) = symbol.name.as_deref() else {
         return Vec::new();
@@ -566,7 +566,7 @@ pub(in crate::artifact) fn correlate_generic_origin(
             schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
             artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
             source_kind: ArtifactAnalysisSourceKind::Unit,
-            source_fingerprint: unit.fingerprint,
+            source_fingerprint: *unit.fingerprint.as_bytes(),
             source_instance_fingerprint: source_unit_instance_fingerprint(unit),
             source_build_variant_fingerprint: unit.build_variant_fingerprint,
             evidence: MappingEvidence::new(
@@ -579,7 +579,7 @@ pub(in crate::artifact) fn correlate_generic_origin(
                 false,
             ),
             attributed_bytes: None,
-            build_variant_fingerprint: artifact_variant,
+            build_variant_fingerprint: artifact_variant.as_bytes(),
         });
     }
     for ((_, _, instantiation_key, definition), (fragment, translation_units)) in
@@ -589,8 +589,8 @@ pub(in crate::artifact) fn correlate_generic_origin(
             schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
             artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
             source_kind: ArtifactAnalysisSourceKind::Fragment,
-            source_fingerprint: fragment.fingerprint,
-            source_instance_fingerprint: fragment.finding_id,
+            source_fingerprint: *fragment.fingerprint.as_bytes(),
+            source_instance_fingerprint: *fragment.finding_id.as_bytes(),
             source_build_variant_fingerprint: fragment.build_variant_fingerprint,
             evidence: MappingEvidence::new(
                 vec![MappingEvidenceFact::GenericOrigin {
@@ -602,7 +602,7 @@ pub(in crate::artifact) fn correlate_generic_origin(
                 false,
             ),
             attributed_bytes: None,
-            build_variant_fingerprint: artifact_variant,
+            build_variant_fingerprint: artifact_variant.as_bytes(),
         });
     }
     mappings
@@ -616,7 +616,7 @@ pub(in crate::artifact) fn correlate_symbol_name(
     symbol: &codehelion_artifact::ArtifactSymbol,
     sources: &SourceLocationIndex<'_>,
     resolved_symbols: &ResolvedSymbolIndex<'_>,
-    artifact_variant: [u8; 16],
+    artifact_variant: BuildVariantFingerprint,
 ) -> Vec<ArtifactAnalysisMapping> {
     let Some(artifact_name) = symbol.name.as_deref().and_then(canonical_symbol_name) else {
         return Vec::new();
@@ -684,12 +684,12 @@ pub(in crate::artifact) fn correlate_symbol_name(
             schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
             artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
             source_kind: ArtifactAnalysisSourceKind::Unit,
-            source_fingerprint: unit.fingerprint,
+            source_fingerprint: *unit.fingerprint.as_bytes(),
             source_instance_fingerprint: source_unit_instance_fingerprint(unit),
             source_build_variant_fingerprint: unit.build_variant_fingerprint,
             evidence: MappingEvidence::new(facts, unit_candidate_count, false),
             attributed_bytes: None,
-            build_variant_fingerprint: artifact_variant,
+            build_variant_fingerprint: artifact_variant.as_bytes(),
         });
     }
     for (fragment, source_name, macro_definition) in fragment_candidates {
@@ -704,12 +704,12 @@ pub(in crate::artifact) fn correlate_symbol_name(
             schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
             artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
             source_kind: ArtifactAnalysisSourceKind::Fragment,
-            source_fingerprint: fragment.fingerprint,
-            source_instance_fingerprint: fragment.finding_id,
+            source_fingerprint: *fragment.fingerprint.as_bytes(),
+            source_instance_fingerprint: *fragment.finding_id.as_bytes(),
             source_build_variant_fingerprint: fragment.build_variant_fingerprint,
             evidence: MappingEvidence::new(facts, fragment_candidate_count, false),
             attributed_bytes: None,
-            build_variant_fingerprint: artifact_variant,
+            build_variant_fingerprint: artifact_variant.as_bytes(),
         });
     }
     mappings

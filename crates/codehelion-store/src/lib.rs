@@ -12,6 +12,9 @@
 //! - [`query`] — the read path: every SQL query as a typed function,
 //! - [`compiler`] — both directions for the compiler IR, whose shape is
 //!   defined by the helper protocol rather than here,
+//! - [`lifecycle`] — which rows survive: the one recency order, the retention
+//!   contract, and the recording paths that stay safe when a measurement is
+//!   taken twice,
 //!
 //! Opening a new database creates the current baseline. Any incompatible
 //! layout is deliberately rejected; its findings should be recreated by a
@@ -19,6 +22,7 @@
 
 pub mod artifact;
 pub mod compiler;
+pub mod lifecycle;
 pub mod path_key;
 pub mod query;
 pub mod schema;
@@ -26,7 +30,10 @@ pub mod snapshot;
 
 mod preflight;
 
+pub use lifecycle::{CalibrationRecord, CascadedRows, PruneReport, SelectedCloneGroupEstimate};
 pub use path_key::{display_path, path_key, path_label};
+
+use lifecycle::DatabaseKey;
 
 use std::path::Path;
 use std::time::Duration;
@@ -232,6 +239,12 @@ pub enum StoreError {
         /// Why this connection cannot be committed.
         reason: String,
     },
+    /// A measurement named an artifact analysis this database does not hold.
+    #[error("artifact analysis {analysis_id} was not found in this database")]
+    MissingArtifactAnalysis {
+        /// Row id of the absent analysis.
+        analysis_id: i64,
+    },
     /// A full artifact IR would exceed the bounded local storage budget.
     #[error(
         "artifact analysis IR is {size_bytes} bytes, exceeding the storage limit of {maximum_bytes} bytes"
@@ -270,21 +283,9 @@ impl From<rusqlite::Error> for StoreError {
 #[derive(Debug)]
 pub struct Store {
     pub(crate) conn: Connection,
-}
-
-/// Rows removed by one explicit cache-prune operation.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PruneReport {
-    /// Incomplete scan partitions removed.
-    pub abandoned_runs: usize,
-    /// Standalone artifact analyses removed.
-    pub artifact_analyses: usize,
-    /// Cross-build-variant comparisons removed.
-    pub cross_variant_comparisons: usize,
-    /// Cross-language comparisons removed.
-    pub cross_language_comparisons: usize,
-    /// Content identities no remaining scan row references.
-    pub orphaned_fingerprints: usize,
+    /// Which database this handle speaks for, so process-local state about a
+    /// database follows the database rather than the handle.
+    pub(crate) database: DatabaseKey,
 }
 
 /// Allocated `SQLite` pages attributed to one logical table and its indexes.
@@ -294,22 +295,6 @@ pub struct TableStorage {
     pub table: String,
     /// Bytes allocated to the table and its indexes.
     pub bytes: u64,
-}
-
-/// Fingerprints are shared content identities rather than run-owned rows, so
-/// their foreign keys cannot cascade. Retiring runs explicitly removes the
-/// identities no remaining unit, fragment, or group references.
-fn remove_orphaned_fingerprints(tx: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
-    tx.execute(
-        "DELETE FROM fingerprint
-         WHERE NOT EXISTS (SELECT 1 FROM source_unit u WHERE u.fingerprint_id = fingerprint.id)
-           AND NOT EXISTS (SELECT 1 FROM fragment f WHERE f.fingerprint_id = fingerprint.id)
-           AND NOT EXISTS (
-               SELECT 1 FROM clone_group g WHERE g.group_fingerprint_id = fingerprint.id
-           )",
-        [],
-    )?;
-    Ok(())
 }
 
 impl Store {
@@ -349,7 +334,10 @@ impl Store {
             schema::initialize(&mut conn)?;
         }
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        let mut store = Self { conn };
+        let mut store = Self {
+            conn,
+            database: DatabaseKey::for_path(path),
+        };
         store.discard_expired_abandoned_runs()?;
         Ok(store)
     }
@@ -382,7 +370,10 @@ impl Store {
         // connection is acquired. This closes the race between private
         // preflight and the read command's SQLite connection.
         schema::validate_existing(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            database: DatabaseKey::for_path(path),
+        })
     }
 
     /// Open a fresh in-memory database (used by tests and dry runs).
@@ -398,7 +389,10 @@ impl Store {
         conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         schema::initialize(&mut conn)?;
-        let mut store = Self { conn };
+        let mut store = Self {
+            conn,
+            database: DatabaseKey::in_memory(),
+        };
         store.discard_expired_abandoned_runs()?;
         Ok(store)
     }
@@ -440,82 +434,6 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
-    }
-
-    /// Apply explicit retention limits and compact the local database.
-    ///
-    /// The limits reach three tables: the newest artifact analyses and the
-    /// newest of each comparison kind are retained by their recorded
-    /// timestamps, and everything older is removed. Incomplete scan partitions
-    /// are removed outright, because a user pruning under the exclusive
-    /// database lease is the one writer there could be, so any partition still
-    /// marked running was abandoned.
-    ///
-    /// Every other table is history and is kept indefinitely. Completed scan
-    /// runs and the rows they own — scanned files, units, fragments, clone
-    /// groups and their findings — are never pruned, by count or by age, so a
-    /// tree scanned repeatedly accumulates one generation per scan. Nothing
-    /// here bounds the database's size; `cache clear` is what discards
-    /// recorded history. Fingerprints are the exception among the untouched
-    /// tables: they are shared content identities rather than run-owned rows,
-    /// so the ones no remaining row references are removed with the rows that
-    /// referenced them.
-    ///
-    /// # Errors
-    ///
-    /// Returns an underlying database error. The row deletion is atomic;
-    /// compaction runs only after it commits.
-    pub fn prune(
-        &mut self,
-        keep_artifact_analyses: usize,
-        keep_comparisons: usize,
-    ) -> Result<PruneReport, StoreError> {
-        let keep_artifacts = i64::try_from(keep_artifact_analyses).unwrap_or(i64::MAX);
-        let keep_comparisons = i64::try_from(keep_comparisons).unwrap_or(i64::MAX);
-        let tx = self.conn.transaction()?;
-        let fingerprints_before: i64 =
-            tx.query_row("SELECT COUNT(*) FROM fingerprint", [], |row| row.get(0))?;
-        let abandoned_runs = tx.execute("DELETE FROM scan_run WHERE status = 'running'", [])?;
-        let artifact_analyses = tx.execute(
-            "DELETE FROM artifact_analysis
-             WHERE id NOT IN (
-                 SELECT id FROM artifact_analysis
-                 ORDER BY started_at DESC, id DESC LIMIT ?1
-             )",
-            [keep_artifacts],
-        )?;
-        let cross_variant_comparisons = tx.execute(
-            "DELETE FROM cross_variant_comparison
-             WHERE id NOT IN (
-                 SELECT id FROM cross_variant_comparison
-                 ORDER BY started_at DESC, id DESC LIMIT ?1
-             )",
-            [keep_comparisons],
-        )?;
-        let cross_language_comparisons = tx.execute(
-            "DELETE FROM cross_language_comparison
-             WHERE id NOT IN (
-                 SELECT id FROM cross_language_comparison
-                 ORDER BY started_at DESC, id DESC LIMIT ?1
-             )",
-            [keep_comparisons],
-        )?;
-        remove_orphaned_fingerprints(&tx)?;
-        let fingerprints_after: i64 =
-            tx.query_row("SELECT COUNT(*) FROM fingerprint", [], |row| row.get(0))?;
-        tx.commit()?;
-        self.conn
-            .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
-        Ok(PruneReport {
-            abandoned_runs,
-            artifact_analyses,
-            cross_variant_comparisons,
-            cross_language_comparisons,
-            orphaned_fingerprints: usize::try_from(
-                fingerprints_before.saturating_sub(fingerprints_after),
-            )
-            .unwrap_or(usize::MAX),
-        })
     }
 }
 
@@ -596,96 +514,6 @@ mod tests {
                 .any(|entry| entry.table == "scan_run" && entry.bytes > 0)
         );
         assert!(storage.iter().all(|entry| !entry.table.starts_with("idx_")));
-    }
-
-    #[test]
-    fn prune_retains_only_the_newest_artifacts_and_comparisons() {
-        let mut store = Store::open_in_memory().unwrap();
-        for ordinal in 1_u8..=3 {
-            let timestamp = format!("2026-01-0{ordinal}T00:00:00Z");
-            store
-                .conn
-                .execute(
-                    "INSERT INTO artifact_analysis
-                         (schema_version, path, format, content_fingerprint, observed_bytes,
-                          started_at, finished_at, status, ir_json)
-                     VALUES ('artifact-ir-v1', ?1, 'elf', ?2, 1, ?3, ?3, 'completed', '{}')",
-                    rusqlite::params![format!("artifact-{ordinal}"), [ordinal; 16], timestamp],
-                )
-                .unwrap();
-            store
-                .conn
-                .execute(
-                    "INSERT INTO cross_variant_comparison
-                         (comparison_id, policy_version, root_path, started_at, finished_at)
-                     VALUES (?1, 'test', '/repo', ?2, ?2)",
-                    rusqlite::params![[ordinal; 16], timestamp],
-                )
-                .unwrap();
-            store
-                .conn
-                .execute(
-                    "INSERT INTO cross_language_comparison
-                         (comparison_id, policy_version, root_path, started_at, finished_at)
-                     VALUES (?1, 'test', '/repo', ?2, ?2)",
-                    rusqlite::params![[ordinal; 16], timestamp],
-                )
-                .unwrap();
-        }
-
-        let report = store.prune(1, 1).unwrap();
-
-        assert_eq!(report.artifact_analyses, 2);
-        assert_eq!(report.cross_variant_comparisons, 2);
-        assert_eq!(report.cross_language_comparisons, 2);
-        assert_eq!(store.table_count("artifact_analysis").unwrap(), 1);
-        assert_eq!(store.table_count("cross_variant_comparison").unwrap(), 1);
-        assert_eq!(store.table_count("cross_language_comparison").unwrap(), 1);
-    }
-
-    /// Pruning discards the partitions nobody finished and nothing else: a
-    /// completed scan is the history the tool exists to keep, so the retention
-    /// counts that bound the artifact and comparison tables do not reach it.
-    #[test]
-    fn prune_discards_incomplete_partitions_and_keeps_completed_scans() {
-        let mut store = Store::open_in_memory().unwrap();
-        store
-            .conn
-            .execute(
-                "INSERT INTO build_variant
-                     (id, variant_fingerprint, canonical, analysis_mode, normalization_version)
-                 VALUES (1, 'aa', '{}', 'fast', 1)",
-                [],
-            )
-            .unwrap();
-        for (ordinal, status) in [(1_u8, "running"), (2, "completed"), (3, "completed")] {
-            store
-                .conn
-                .execute(
-                    "INSERT INTO scan_run
-                         (build_variant_id, root_path, tool_version, config_hash, config_source,
-                          analysis_mode, started_at, finished_at, status, min_clone_tokens)
-                     VALUES (1, '/repo', 'test', 'hash', 'defaults', 'fast', ?1, ?1, ?2, 20)",
-                    rusqlite::params![format!("2026-01-0{ordinal}T00:00:00Z"), status],
-                )
-                .unwrap();
-        }
-
-        let report = store.prune(1, 1).unwrap();
-
-        assert_eq!(report.abandoned_runs, 1);
-        // Both completed runs survive a prune asked to keep one of everything
-        // it does bound, because no count or age rule applies to them.
-        assert_eq!(store.table_count("scan_run").unwrap(), 2);
-        let statuses: Vec<String> = store
-            .conn
-            .prepare("SELECT status FROM scan_run ORDER BY id")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        assert_eq!(statuses, ["completed", "completed"]);
     }
 
     #[test]

@@ -24,11 +24,8 @@
 //!   `throw` has no cross-language shape and stays native.
 
 use codehelion_core::discovery::Language;
-use codehelion_core::frontend::TokenKind;
 use codehelion_core::ir::{Shape, StructuralFrontend, SyntaxIrFile};
-use codehelion_frontend_c::ir::{
-    IrMapping, Mapping, classify_c, classify_token, parse_to_ir, record_mapping,
-};
+use codehelion_frontend_c::ir::{IrMapping, Mapping, classify_c, parse_to_ir, record_mapping};
 use tree_sitter::Node;
 
 /// Version tag of this structural frontend, used as a fingerprint input. Bump
@@ -59,24 +56,12 @@ impl IrMapping for CppMapping {
         }
     }
 
-    /// The shared table reads a leaf's token kind off its grammar kind, and
-    /// the C++ grammar spells several keywords as plain `identifier` leaves:
-    /// `static_cast<T>(x)` parses as a call whose callee is the identifier
-    /// `static_cast`. Left at that, the structural token stream disagrees with
-    /// the Fast lexer, which reads the same word off the C++ keyword set — and
-    /// a keyword read as an identifier is then taken for a callee name, so a
-    /// cast enters the API-call profile as though the code called something.
-    ///
-    /// Checking the identifier text against the same keyword set the Fast
-    /// lexer uses closes the whole divergence rather than the one word that
-    /// exposed it. Nothing legitimate is caught: a keyword cannot also be a
-    /// declared name, so an `identifier` leaf spelling one is the grammar's
-    /// artefact and not the program's.
-    fn token_kind(&self, kind: &str, is_named: bool, text: &str) -> TokenKind {
-        match classify_token(kind, is_named, text) {
-            TokenKind::Identifier if crate::CPP.keywords.contains(&text) => TokenKind::Keyword,
-            other => other,
-        }
+    /// The C++ dialect's reserved words, the same set the C++ Fast lexer
+    /// reads. The shared classification reconciles identifier leaves against
+    /// it, so the two modes agree on every keyword the C++ grammar does not
+    /// model as one.
+    fn keywords(&self) -> &'static [&'static str] {
+        crate::CPP.keywords
     }
 }
 

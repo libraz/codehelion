@@ -425,6 +425,104 @@ mod tests {
         assert_eq!(records, vec!["Pair"], "{:#?}", out.units);
     }
 
+    /// Every unit as a `(kind, name)` pair, in token order.
+    fn named_units(source: &str) -> Vec<(UnitKind, String)> {
+        lexed(source)
+            .units
+            .iter()
+            .map(|unit| (unit.kind, unit.name.clone().unwrap_or_default()))
+            .collect()
+    }
+
+    #[test]
+    fn an_attribute_specifier_neither_hides_a_record_nor_names_a_function() {
+        let units = named_units("struct __attribute__((packed)) S { int f() {} };");
+        assert_eq!(
+            units,
+            vec![
+                (UnitKind::Record, "S".to_string()),
+                (UnitKind::Method, "f".to_string()),
+            ],
+            "the attribute decorates the record and declares nothing itself"
+        );
+
+        // The Microsoft spelling takes the same shape.
+        let units = named_units("struct __declspec(dllexport) S { int f() {} };");
+        assert_eq!(
+            units,
+            vec![
+                (UnitKind::Record, "S".to_string()),
+                (UnitKind::Method, "f".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_trailing_attribute_leaves_the_function_named_after_its_declarator() {
+        let units = named_units("void f(int x) __attribute__((noinline)) { g(x); }");
+        assert_eq!(units, vec![(UnitKind::Function, "f".to_string())]);
+    }
+
+    #[test]
+    fn a_template_template_parameter_does_not_open_a_second_record() {
+        let units = named_units("template <template <class> class C> struct Holder { C<int> v; };");
+        assert_eq!(units, vec![(UnitKind::Record, "Holder".to_string())]);
+    }
+
+    #[test]
+    fn a_constructor_is_anchored_whether_or_not_its_base_is_templated() {
+        for source in [
+            "struct D : B { D(int x) : B(x) { init(); } };",
+            "struct D : B<int> { D(int x) : B<int>(x) { init(); } };",
+            "struct D : B<A<int>> { D(int x) : B<A<int>>(x) { init(); } };",
+        ] {
+            let units = named_units(source);
+            assert!(
+                units.contains(&(UnitKind::Method, "D".to_string())),
+                "{source}: {units:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_requires_clause_anchors_the_same_function_in_either_position() {
+        for source in [
+            "template <class T> int f(T a) requires Ok<T> { return 0; }",
+            "template <class T> requires Ok<T> int f(T a) { return 0; }",
+            "template <class T> int f(T a) requires (Ok<T> && Other<T>) { return 0; }",
+        ] {
+            let units = named_units(source);
+            assert_eq!(
+                units,
+                vec![(UnitKind::Function, "f".to_string())],
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_generic_lambda_is_a_closure_in_either_template_parameter_spelling() {
+        for spelling in ["class", "typename"] {
+            let source = format!("void h() {{ auto a = []<{spelling} T>(T v) {{ return v; }}; }}");
+            let units = named_units(&source);
+            assert!(
+                units.contains(&(UnitKind::Closure, String::new())),
+                "{source}: {units:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_function_template_specialisation_is_anchored_unqualified() {
+        let units = named_units("template <> void f<int>(int a) { use(a); }");
+        assert_eq!(units, vec![(UnitKind::Function, "f".to_string())]);
+
+        // The qualified member spelling was already anchored; the two
+        // structurally identical declarators stay treated alike.
+        let units = named_units("template <> void Box<int>::fill(int n) { use(n); }");
+        assert_eq!(units, vec![(UnitKind::Function, "fill".to_string())]);
+    }
+
     #[test]
     fn control_flow_and_namespaces_are_not_functions() {
         let src = "namespace app {\n\

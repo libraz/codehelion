@@ -17,6 +17,7 @@ use super::{
     LanguageSelection, LexedSource, LiteralNorm, LiteralNormalization, Path, PathBuf,
     ResolvedConfig, Result, ScanArgs, SourceUnit, bail, discovery, path_key, report, suppress,
 };
+use crate::provenance::{FromScannedTree, OperatorSupplied};
 
 /// Maximum parser workers accepted from either the command line or config.
 ///
@@ -311,6 +312,15 @@ pub(crate) fn parse_work_byte_limit(max_file_bytes: u64, budget: std::time::Dura
 /// discovery order regardless of thread scheduling. Files that vanished since
 /// discovery or exceeded the parse-work budget are counted, not fatal. Returns the
 /// analysed files plus the unreadable and timed-out counts.
+///
+/// A `frontend` panic is not converted into a returned error: the workspace's
+/// release profile sets `panic = "abort"`, so in a shipped build a worker
+/// panic already aborts the whole process before any `Result` could reach
+/// this function's caller. Catching the panic here and reporting it as a
+/// clean `anyhow` error would only ever run in `panic = "unwind"` builds
+/// (tests, `cargo run` in dev), promising a recovery the shipped binary
+/// cannot perform. Resuming the original panic keeps the one behaviour —
+/// an unrecovered panic — consistent across every profile instead.
 pub(crate) fn map_sources<T: Send>(
     sources: &[SourceUnit],
     jobs: usize,
@@ -324,7 +334,6 @@ pub(crate) fn map_sources<T: Send>(
     }
     let next_source = AtomicUsize::new(0);
     let mut indexed_results: Vec<(usize, FileOutcome<T>)> = Vec::with_capacity(sources.len());
-    let mut worker_panicked = false;
     let frontend = &frontend;
     let next_source = &next_source;
     std::thread::scope(|scope| -> Result<()> {
@@ -348,14 +357,15 @@ pub(crate) fn map_sources<T: Send>(
         for handle in handles? {
             match handle.join() {
                 Ok(results) => indexed_results.extend(results),
-                Err(_) => worker_panicked = true,
+                // See the function doc: this can only be reached in
+                // `panic = "unwind"` builds, and resuming the panic is
+                // honest about that instead of downgrading a worker bug
+                // into a message claiming a recovery this build lacks.
+                Err(payload) => std::panic::resume_unwind(payload),
             }
         }
         Ok(())
     })?;
-    if worker_panicked {
-        bail!("a frontend worker thread panicked");
-    }
     indexed_results.sort_unstable_by_key(|(index, _)| *index);
     let mut analysed = Vec::with_capacity(sources.len());
     #[cfg(test)]
@@ -416,11 +426,13 @@ fn lex_one(
         .units
         .iter()
         .map(|unit| {
-            let start = unit.token_start.min(file.tokens.len());
-            let end = unit.token_end.min(file.tokens.len()).max(start);
-            let end_line = file.tokens[start..end]
-                .last()
-                .map_or(unit.span.start_line, |token| token.span.start_line);
+            let end_line = codehelion_core::frontend::tokens_in_range(
+                &file.tokens,
+                unit.token_start,
+                unit.token_end,
+            )
+            .last()
+            .map_or(unit.span.start_line, |token| token.span.start_line);
             (unit.span.start_line, end_line)
         })
         .collect();
@@ -432,19 +444,60 @@ fn lex_one(
         arm_paths,
         units: file.units,
         unit_lines,
-        marker_lines: suppress::marker_lines(&text),
+        marker_lines: suppress::marker_lines(
+            &FromScannedTree::found(text.as_ref()),
+            source.language,
+        ),
         lines: u64::try_from(text.lines().count()).unwrap_or(u64::MAX),
         diagnostics: file.diagnostics.len(),
     }))
 }
 
+/// Where a configuration's database setting came from, which is what decides
+/// whether it is confined.
+enum ConfiguredDatabase<'a> {
+    /// Read out of a configuration file found inside the scanned tree.
+    FromTree(FromScannedTree<&'a Path>),
+    /// Named through `--config`, or this build's own default. Either way the
+    /// tree under audit had no part in choosing it.
+    Chosen(OperatorSupplied<&'a Path>),
+}
+
+/// Attribute the resolved configuration's database setting to whoever chose
+/// it.
+fn configured_database(config: &ResolvedConfig) -> ConfiguredDatabase<'_> {
+    let configured = config.config.database.as_path();
+    match &config.source {
+        ConfigSource::Discovered(_) => {
+            ConfiguredDatabase::FromTree(FromScannedTree::found(configured))
+        }
+        ConfigSource::Explicit(_) => {
+            ConfiguredDatabase::Chosen(OperatorSupplied::from_command_line(configured))
+        }
+        ConfigSource::Defaults => {
+            ConfiguredDatabase::Chosen(OperatorSupplied::from_this_build(configured))
+        }
+    }
+}
+
 /// Resolve the audit-database path with the authority that selected it.
 ///
-/// `--db` is an explicit user instruction and may name storage outside the
+/// `--db` is an explicit operator instruction and may name storage outside the
 /// scan. A database setting from a configuration found at the scan root is
-/// not: it is confined to the repository boundary, including its existing symlink
-/// components. `--untrusted` applies that confinement to any configured path,
-/// even one from an explicitly named configuration file.
+/// not: it is confined to `--path`, including its existing symlink components.
+/// `--untrusted` applies that confinement to any configured path, even one
+/// from an explicitly named configuration file.
+///
+/// The boundary is `--path` and not the repository holding it, because
+/// `--path` is the only directory the operator pointed at. A repository root
+/// is found by looking for a `.git` ancestor, so for the case `--untrusted`
+/// exists for — auditing a vendored subtree of one's own worktree — it sits
+/// above what was selected, and a configuration inside that subtree would be
+/// choosing storage among its siblings. `root` is expected canonical, which is
+/// what every caller resolves before calling.
+///
+/// Where a database *nobody* configured goes is a separate question with a
+/// separate answer: see [`configured_database_path`].
 ///
 /// # Errors
 ///
@@ -459,24 +512,23 @@ pub(crate) fn database_path(
     if let Some(path) = flag {
         return Ok(spelled_natively(path));
     }
-    let boundary = repository_root(root);
-    let discovered = matches!(&config.source, ConfigSource::Discovered(_));
-    if untrusted || discovered {
-        return confined_database_path(
-            &boundary,
-            &config.config.database,
-            if untrusted {
-                "--untrusted"
-            } else {
-                "a configuration discovered in the scanned repository"
-            },
-        )
-        .map(|path| spelled_natively(&path));
-    }
-    Ok(spelled_natively(&configured_database_path(
-        &boundary,
-        &config.config.database,
-    )))
+    let selected_tree = OperatorSupplied::from_command_line(root.to_path_buf());
+    let (configured, authority) = match (configured_database(config), untrusted) {
+        (ConfiguredDatabase::Chosen(configured), false) => {
+            return Ok(spelled_natively(&configured_database_path(
+                &repository_root(root),
+                &configured,
+            )));
+        }
+        (ConfiguredDatabase::Chosen(configured), true) => (configured.distrusted(), "--untrusted"),
+        (ConfiguredDatabase::FromTree(configured), true) => (configured, "--untrusted"),
+        (ConfiguredDatabase::FromTree(configured), false) => (
+            configured,
+            "a configuration discovered in the scanned repository",
+        ),
+    };
+    confined_database_path(&selected_tree, &configured, authority)
+        .map(|path| spelled_natively(&path))
 }
 
 /// What a command does with the audit database it names, which decides
@@ -648,17 +700,40 @@ fn spelled_natively(path: &Path) -> PathBuf {
     path.components().collect()
 }
 
-/// Apply the established, trusted configuration-path behaviour.
-fn configured_database_path(boundary: &Path, configured: &Path) -> PathBuf {
+/// Place a database the tree had no part in choosing.
+///
+/// A relative location is read against the repository holding the scan root,
+/// so that scanning a subtree twice from different directories keeps one audit
+/// history for the project rather than scattering one per subtree. That is a
+/// placement decision, not a confinement one: `configured` is something the
+/// operator named or this build supplies, so there is nothing here to hold to
+/// a boundary — which is why `placement` cannot be passed to
+/// [`confined_database_path`] and this cannot be passed a tree-supplied path.
+fn configured_database_path(
+    placement: &FromScannedTree<PathBuf>,
+    configured: &OperatorSupplied<&Path>,
+) -> PathBuf {
+    let configured = *configured.get();
     if configured.is_absolute() {
         configured.to_path_buf()
     } else {
-        boundary.join(configured)
+        placement.as_default_placement().join(configured)
     }
 }
 
-/// Keep a configuration-controlled database path inside `boundary`.
-fn confined_database_path(boundary: &Path, configured: &Path, authority: &str) -> Result<PathBuf> {
+/// Keep a tree-supplied database path inside the tree the operator selected.
+///
+/// `boundary` is an [`OperatorSupplied`] path on purpose: a directory found by
+/// inspecting the tree can sit anywhere above the one that was selected, so
+/// handing one to this function has to fail to compile rather than quietly
+/// widen what a configuration may reach.
+fn confined_database_path(
+    boundary: &OperatorSupplied<PathBuf>,
+    configured: &FromScannedTree<&Path>,
+    authority: &str,
+) -> Result<PathBuf> {
+    let boundary = boundary.get().as_path();
+    let configured = configured.as_written();
     if configured.is_absolute() {
         bail!(
             "refusing database path {} from {authority}: repository configuration cannot choose storage outside {}; use --db <path> to explicitly choose an external database",
@@ -681,8 +756,8 @@ fn confined_database_path(boundary: &Path, configured: &Path, authority: &str) -
     Ok(candidate)
 }
 
-/// Reject an existing symlink component that would make a lexical relative
-/// path leave the repository boundary.
+/// Reject an existing symlink component that would make a lexically confined
+/// relative path leave `boundary` anyway.
 fn ensure_existing_path_is_confined(
     boundary: &Path,
     configured: &Path,
@@ -730,15 +805,23 @@ fn ensure_existing_path_is_confined(
 
 /// Find the repository containing a scan root, falling back to the scan root
 /// when it is not inside a Git worktree.
-fn repository_root(root: &Path) -> PathBuf {
-    let mut current = Some(root);
-    while let Some(directory) = current {
-        if directory.join(".git").exists() {
-            return directory.to_path_buf();
-        }
-        current = directory.parent();
-    }
-    root.to_path_buf()
+///
+/// This is where a database *nobody configured* is placed, so that one project
+/// keeps one audit history however many of its subtrees get scanned. It is not
+/// a confinement boundary and the return type says so: the directory is found
+/// by inspecting the tree, it can sit above what the operator selected, and a
+/// path a configuration chose is held to `--path` instead (see
+/// [`database_path`]). Falling back to `root` itself when no `.git` ancestor
+/// exists keeps the placement inside the scan either way, rather than widening
+/// to a filesystem root or refusing to scan a tree that simply isn't a Git
+/// worktree.
+///
+/// Delegates the walk to [`crate::find_git_root`] rather than repeating it, so
+/// this placement and the `.gitignore` hints in `doctor` and `scan` (the only
+/// other callers of that walk) can never disagree about which ancestor holds
+/// `.git`.
+fn repository_root(root: &Path) -> FromScannedTree<PathBuf> {
+    FromScannedTree::found(crate::find_git_root(root).unwrap_or_else(|| root.to_path_buf()))
 }
 
 #[cfg(test)]
@@ -746,14 +829,16 @@ fn repository_root(root: &Path) -> PathBuf {
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use codehelion_core::discovery::{ContentHash, TargetKind};
     use codehelion_core::execution::Limits;
     use codehelion_core::ir::{IrNode, MAX_IR_DEPTH, Shape, StructuralFrontend, SyntaxIrFile};
     use codehelion_core::semantic::SemanticCandidateConfig;
 
     use super::{
-        EngineConfig, Language, ProcessLimits, ProcessMemory, StageLimits, engine_config,
-        hold_this_process_to, incompatible_database_replacement, schema_versioned_sibling,
-        spelled_natively, stage_limits,
+        ConfigSource, EngineConfig, FileOutcome, Language, ProcessLimits, ProcessMemory,
+        ResolvedConfig, SourceUnit, StageLimits, database_path, engine_config,
+        hold_this_process_to, incompatible_database_replacement, map_sources, repository_root,
+        schema_versioned_sibling, spelled_natively, stage_limits,
     };
     use crate::config::Config;
     use crate::report::Guardrails;
@@ -1033,5 +1118,147 @@ mod tests {
             let file = parse_structurally(language, &source);
             assert_assembled_alike(language, &source, &file);
         }
+    }
+
+    /// A source unit whose content this test never reads: only its presence
+    /// in the slice `map_sources` walks matters.
+    fn placeholder_source(relative_path: &str) -> SourceUnit {
+        SourceUnit {
+            relative_path: PathBuf::from(relative_path),
+            absolute_path: PathBuf::from(relative_path),
+            language: Language::Rust,
+            is_header: false,
+            content_hash: ContentHash::of(b""),
+            source_bytes: Vec::new().into(),
+            byte_len: 0,
+            package: None,
+            crate_name: None,
+            target_kind: TargetKind::Library,
+        }
+    }
+
+    /// The default database placement (`repository_root`) and the `.gitignore`
+    /// hint walk (`crate::find_git_root`) delegate to the same `.git` search,
+    /// so they cannot silently disagree: inside a Git worktree they name the
+    /// same directory, and outside one, `repository_root`'s documented
+    /// fallback to the scan root is exactly the case `find_git_root` reports
+    /// as `None`.
+    #[test]
+    fn repository_root_and_find_git_root_agree_including_the_no_git_fallback() {
+        let repository = tempfile::tempdir().expect("create repository directory");
+        std::fs::create_dir(repository.path().join(".git")).expect("create .git marker");
+        let nested = repository.path().join("crates/inner");
+        std::fs::create_dir_all(&nested).expect("create nested working directory");
+
+        assert_eq!(
+            repository_root(&nested).as_default_placement(),
+            crate::find_git_root(&nested).expect("a .git ancestor exists")
+        );
+
+        let outside = tempfile::tempdir().expect("create directory outside any repository");
+        assert_eq!(crate::find_git_root(outside.path()), None);
+        assert_eq!(
+            repository_root(outside.path()).as_default_placement(),
+            outside.path()
+        );
+    }
+
+    /// A configuration the tree supplies may not choose storage outside the
+    /// directory the operator pointed at, and `--untrusted` says the same
+    /// about a configuration the operator named. The boundary is `--path`
+    /// rather than the repository holding it: auditing a vendored subtree of
+    /// one's own worktree is what the flag exists for, and there the
+    /// repository root is above what was selected.
+    #[test]
+    fn a_configured_database_is_confined_to_the_selected_tree_not_its_repository() {
+        let worktree = tempfile::tempdir().expect("create worktree directory");
+        std::fs::create_dir(worktree.path().join(".git")).expect("create .git marker");
+        let vendored = worktree.path().join("vendor/hostile");
+        std::fs::create_dir_all(&vendored).expect("create vendored subtree");
+
+        let config = Config {
+            database: PathBuf::from("escaped/audit.db"),
+            ..Config::default()
+        };
+        let discovered = ResolvedConfig {
+            config: config.clone(),
+            source: ConfigSource::Discovered(vendored.join("codehelion.toml")),
+        };
+        let named = ResolvedConfig {
+            config,
+            source: ConfigSource::Explicit(vendored.join("codehelion.toml")),
+        };
+
+        for (resolved, untrusted) in [(&discovered, false), (&discovered, true), (&named, true)] {
+            let resolved_path = database_path(&vendored, None, resolved, untrusted)
+                .expect("a relative path below the selected tree is accepted");
+            assert!(
+                resolved_path.starts_with(&vendored),
+                "{} escaped {}",
+                resolved_path.display(),
+                vendored.display()
+            );
+        }
+
+        // The same setting from a configuration the operator named is theirs
+        // to make, so without `--untrusted` it keeps the established placement
+        // against the repository holding the scan.
+        let trusted = database_path(&vendored, None, &named, false)
+            .expect("an operator-named configuration places freely");
+        assert_eq!(trusted, worktree.path().join("escaped/audit.db"));
+    }
+
+    /// Every refusal a tree-supplied path can earn names the selected tree,
+    /// so the reader is told the boundary that actually applied rather than
+    /// one it happens to sit inside.
+    #[test]
+    fn a_tree_supplied_database_path_that_leaves_the_selected_tree_is_refused() {
+        let worktree = tempfile::tempdir().expect("create worktree directory");
+        std::fs::create_dir(worktree.path().join(".git")).expect("create .git marker");
+        let vendored = worktree.path().join("vendor/hostile");
+        std::fs::create_dir_all(&vendored).expect("create vendored subtree");
+
+        for spelling in ["../escaped/audit.db", "../../escaped/audit.db"] {
+            let config = Config {
+                database: PathBuf::from(spelling),
+                ..Config::default()
+            };
+            let resolved = ResolvedConfig {
+                config,
+                source: ConfigSource::Discovered(vendored.join("codehelion.toml")),
+            };
+            let error = database_path(&vendored, None, &resolved, false)
+                .expect_err("a path climbing out of the selected tree is refused");
+            let message = format!("{error:#}");
+            assert!(message.contains("refusing database path"), "{message}");
+            assert!(
+                message.contains(&vendored.display().to_string()),
+                "the refusal names the selected tree: {message}"
+            );
+        }
+    }
+
+    /// A frontend worker panicking is a bug, not a recoverable condition to
+    /// downgrade into a clean `anyhow` error: the shipping release profile
+    /// sets `panic = "abort"`, so a worker panic there already takes the
+    /// whole process down before any `Result` could reach this function's
+    /// caller. `map_sources` must not pretend otherwise by swallowing the
+    /// panic into `Ok`/`Err` in the builds where it technically could.
+    #[test]
+    #[allow(clippy::panic)]
+    fn a_frontend_worker_panic_propagates_instead_of_becoming_a_swallowed_error() {
+        let sources = vec![placeholder_source("panics.rs")];
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            map_sources(&sources, 1, |_| -> FileOutcome<()> {
+                panic!("a frontend worker panicked");
+            })
+        }));
+        std::panic::set_hook(previous_hook);
+        assert!(
+            outcome.is_err(),
+            "a worker panic must not be observed as a returned Result"
+        );
     }
 }

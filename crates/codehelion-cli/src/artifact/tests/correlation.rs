@@ -21,7 +21,7 @@ fn exact_generic_instantiation_key_maps_the_definition_origin() {
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol);
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -51,9 +51,9 @@ fn exact_generic_instantiation_key_maps_the_definition_origin() {
         },
     ];
     let fragments = [SourceFragmentIdentity {
-        fingerprint: [6; 16],
-        finding_id: [16; 16],
-        clone_group_fingerprint: [17; 16],
+        fingerprint: FragmentFingerprint::from_bytes([6; 16]),
+        finding_id: FindingId::from_bytes([16; 16]),
+        clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
         is_canonical: false,
         clone_confidence: 1.0,
         build_variant_fingerprint: [4; 16],
@@ -70,7 +70,7 @@ fn exact_generic_instantiation_key_maps_the_definition_origin() {
         &instantiations,
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert!(rows.unmapped_symbols.is_empty());
@@ -188,7 +188,7 @@ fn generic_origin_maps_one_source_to_each_instantiated_symbol() {
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols = vec![first.clone(), second.clone()];
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -226,7 +226,7 @@ fn generic_origin_maps_one_source_to_each_instantiated_symbol() {
         &instantiations,
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert!(rows.unmapped_symbols.is_empty());
@@ -269,7 +269,7 @@ fn clang_template_display_key_maps_only_its_demangled_specialization() {
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol);
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -307,7 +307,7 @@ fn clang_template_display_key_maps_only_its_demangled_specialization() {
         &instantiations,
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert!(rows.unmapped_symbols.is_empty());
@@ -341,7 +341,7 @@ fn clang_template_owner_key_maps_only_its_member_specialization() {
         inline_stack: Vec::new(),
     };
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -375,7 +375,7 @@ fn clang_template_owner_key_maps_only_its_member_specialization() {
         &symbol,
         &SourceLocationIndex::new(FilePath::new("/work"), &units, &[]),
         &InstantiationIndex::new(&instantiations),
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert_eq!(mappings.len(), 1);
@@ -408,7 +408,7 @@ fn conflicting_generic_origin_and_name_candidates_remain_ambiguous() {
     artifact.symbols.push(symbol);
     let units = [
         SourceUnitIdentity {
-            fingerprint: [3; 16],
+            fingerprint: UnitFingerprint::from_bytes([3; 16]),
             build_variant_fingerprint: [4; 16],
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
@@ -418,7 +418,7 @@ fn conflicting_generic_origin_and_name_candidates_remain_ambiguous() {
             end_line: Some(10),
         },
         SourceUnitIdentity {
-            fingerprint: [6; 16],
+            fingerprint: UnitFingerprint::from_bytes([6; 16]),
             build_variant_fingerprint: [4; 16],
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
@@ -452,7 +452,7 @@ fn conflicting_generic_origin_and_name_candidates_remain_ambiguous() {
         &instantiations,
         &resolved_symbols,
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert!(rows.unmapped_symbols.is_empty());
@@ -489,7 +489,7 @@ fn linker_map_recovers_an_unmapped_unit_without_basename_guessing() {
     artifact.symbols.push(symbol.clone());
     let units = [
         SourceUnitIdentity {
-            fingerprint: [3; 16],
+            fingerprint: UnitFingerprint::from_bytes([3; 16]),
             build_variant_fingerprint: [4; 16],
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
@@ -499,7 +499,7 @@ fn linker_map_recovers_an_unmapped_unit_without_basename_guessing() {
             end_line: Some(10),
         },
         SourceUnitIdentity {
-            fingerprint: [6; 16],
+            fingerprint: UnitFingerprint::from_bytes([6; 16]),
             build_variant_fingerprint: [4; 16],
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
@@ -528,7 +528,13 @@ fn linker_map_recovers_an_unmapped_unit_without_basename_guessing() {
         ..CorrelationRows::default()
     };
 
-    enrich_linker_map_evidence(&artifact, &units, &entries, [5; 16], &mut rows);
+    enrich_linker_map_evidence(
+        &artifact,
+        &units,
+        &entries,
+        BuildVariantFingerprint::from_bytes([5; 16]),
+        &mut rows,
+    );
 
     assert!(rows.unmapped_symbols.is_empty());
     assert_eq!(rows.mappings.len(), 1);
@@ -623,9 +629,9 @@ fn generic_type_arguments_keep_nested_specializations_intact() {
 fn group_attribution_reports_exact_noncanonical_byte_splits() {
     let fragments = vec![
         SourceFragmentIdentity {
-            fingerprint: [2; 16],
-            finding_id: [10; 16],
-            clone_group_fingerprint: [7; 16],
+            fingerprint: FragmentFingerprint::from_bytes([2; 16]),
+            finding_id: FindingId::from_bytes([10; 16]),
+            clone_group_fingerprint: CloneGroupFingerprint::from_bytes([7; 16]),
             is_canonical: true,
             clone_confidence: 1.0,
             build_variant_fingerprint: [4; 16],
@@ -634,9 +640,9 @@ fn group_attribution_reports_exact_noncanonical_byte_splits() {
             end_line: Some(3),
         },
         SourceFragmentIdentity {
-            fingerprint: [2; 16],
-            finding_id: [11; 16],
-            clone_group_fingerprint: [7; 16],
+            fingerprint: FragmentFingerprint::from_bytes([2; 16]),
+            finding_id: FindingId::from_bytes([11; 16]),
+            clone_group_fingerprint: CloneGroupFingerprint::from_bytes([7; 16]),
             is_canonical: false,
             clone_confidence: 1.0,
             build_variant_fingerprint: [4; 16],
@@ -729,9 +735,9 @@ fn group_attribution_reports_exact_noncanonical_byte_splits() {
 fn line_proportional_rows() -> CorrelationRows {
     let fragments = vec![
         SourceFragmentIdentity {
-            fingerprint: [2; 16],
-            finding_id: [10; 16],
-            clone_group_fingerprint: [7; 16],
+            fingerprint: FragmentFingerprint::from_bytes([2; 16]),
+            finding_id: FindingId::from_bytes([10; 16]),
+            clone_group_fingerprint: CloneGroupFingerprint::from_bytes([7; 16]),
             is_canonical: true,
             clone_confidence: 1.0,
             build_variant_fingerprint: [4; 16],
@@ -740,9 +746,9 @@ fn line_proportional_rows() -> CorrelationRows {
             end_line: Some(3),
         },
         SourceFragmentIdentity {
-            fingerprint: [2; 16],
-            finding_id: [11; 16],
-            clone_group_fingerprint: [7; 16],
+            fingerprint: FragmentFingerprint::from_bytes([2; 16]),
+            finding_id: FindingId::from_bytes([11; 16]),
+            clone_group_fingerprint: CloneGroupFingerprint::from_bytes([7; 16]),
             is_canonical: false,
             clone_confidence: 1.0,
             build_variant_fingerprint: [4; 16],
@@ -887,9 +893,9 @@ fn symbol_assembled_from_two_files() -> codehelion_artifact::ArtifactSymbol {
 /// The fragment covering every line the symbol contributes in `src/main.cpp`.
 fn fragment_over_the_whole_file_extent() -> SourceFragmentIdentity {
     SourceFragmentIdentity {
-        fingerprint: [6; 16],
-        finding_id: [16; 16],
-        clone_group_fingerprint: [17; 16],
+        fingerprint: FragmentFingerprint::from_bytes([6; 16]),
+        finding_id: FindingId::from_bytes([16; 16]),
+        clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
         is_canonical: false,
         clone_confidence: 1.0,
         build_variant_fingerprint: [4; 16],
@@ -907,8 +913,8 @@ fn direct_location_mapping(
         schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
         artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
         source_kind: ArtifactAnalysisSourceKind::Fragment,
-        source_fingerprint: fragment.fingerprint,
-        source_instance_fingerprint: fragment.finding_id,
+        source_fingerprint: *fragment.fingerprint.as_bytes(),
+        source_instance_fingerprint: *fragment.finding_id.as_bytes(),
         source_build_variant_fingerprint: fragment.build_variant_fingerprint,
         evidence: MappingEvidence::new(
             vec![MappingEvidenceFact::Dwarf {
@@ -1064,7 +1070,7 @@ fn same_named_units_remain_ambiguous_name_candidates() {
     artifact.symbols.push(symbol);
     let units = [
         SourceUnitIdentity {
-            fingerprint: [3; 16],
+            fingerprint: UnitFingerprint::from_bytes([3; 16]),
             build_variant_fingerprint: [4; 16],
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
@@ -1074,7 +1080,7 @@ fn same_named_units_remain_ambiguous_name_candidates() {
             end_line: Some(20),
         },
         SourceUnitIdentity {
-            fingerprint: [6; 16],
+            fingerprint: UnitFingerprint::from_bytes([6; 16]),
             build_variant_fingerprint: [4; 16],
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
@@ -1093,7 +1099,7 @@ fn same_named_units_remain_ambiguous_name_candidates() {
         &[],
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert!(rows.unmapped_symbols.is_empty());
@@ -1112,7 +1118,7 @@ fn same_named_units_remain_ambiguous_name_candidates() {
         &[],
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
     assert_eq!(rows, repeated);
     assert_eq!(
@@ -1211,7 +1217,7 @@ fn unreadable_debug_information_has_a_distinct_unmapped_reason() {
         &[],
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert_eq!(rows.unmapped_symbols.len(), 1);
@@ -1238,7 +1244,7 @@ fn resolved_wasm_source_map_token_is_persisted_as_direct_mapping_evidence() {
     let mut artifact = ArtifactIr::empty(BinaryFormat::Wasm, b"fixture");
     artifact.symbols.push(symbol);
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -1255,7 +1261,7 @@ fn resolved_wasm_source_map_token_is_persisted_as_direct_mapping_evidence() {
         &[],
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
     enrich_source_map_evidence(
         &artifact,
@@ -1267,7 +1273,7 @@ fn resolved_wasm_source_map_token_is_persisted_as_direct_mapping_evidence() {
             source_url: "src/lib.rs".to_owned(),
             source_line: Some(5),
         }],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
         &mut rows,
     );
 
@@ -1308,7 +1314,7 @@ fn content_identical_symbol_entries_keep_one_row_per_stored_mapping_identity() {
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"duplicate-symbols");
     artifact.symbols = vec![duplicated_symbol(0), duplicated_symbol(8)];
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -1318,9 +1324,9 @@ fn content_identical_symbol_entries_keep_one_row_per_stored_mapping_identity() {
         end_line: Some(20),
     }];
     let fragments = [SourceFragmentIdentity {
-        fingerprint: [6; 16],
-        finding_id: [16; 16],
-        clone_group_fingerprint: [17; 16],
+        fingerprint: FragmentFingerprint::from_bytes([6; 16]),
+        finding_id: FindingId::from_bytes([16; 16]),
+        clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
         is_canonical: false,
         clone_confidence: 1.0,
         build_variant_fingerprint: [4; 16],
@@ -1337,7 +1343,7 @@ fn content_identical_symbol_entries_keep_one_row_per_stored_mapping_identity() {
         &[],
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     let stored_keys: Vec<_> = rows
@@ -1367,7 +1373,7 @@ fn duplicated_symbol_entries_survive_persistence() {
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"duplicate-symbols");
     artifact.symbols = vec![duplicated_symbol(0), duplicated_symbol(8)];
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -1384,7 +1390,7 @@ fn duplicated_symbol_entries_survive_persistence() {
         &[],
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
     let symbols: Vec<_> = artifact
         .symbols
@@ -1451,7 +1457,7 @@ fn equal_content_declarations_each_receive_their_own_name_mapping() {
     artifact.symbols.push(symbol);
     let units = [
         SourceUnitIdentity {
-            fingerprint: [3; 16],
+            fingerprint: UnitFingerprint::from_bytes([3; 16]),
             build_variant_fingerprint: [4; 16],
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
@@ -1461,7 +1467,7 @@ fn equal_content_declarations_each_receive_their_own_name_mapping() {
             end_line: Some(20),
         },
         SourceUnitIdentity {
-            fingerprint: [3; 16],
+            fingerprint: UnitFingerprint::from_bytes([3; 16]),
             build_variant_fingerprint: [4; 16],
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
@@ -1494,7 +1500,7 @@ fn equal_content_declarations_each_receive_their_own_name_mapping() {
         &[],
         &resolved_symbols,
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert_eq!(rows.mappings.len(), 2);
@@ -1534,7 +1540,7 @@ fn source_map_evidence_removes_a_unit_from_the_unmapped_source_side() {
     let mut artifact = ArtifactIr::empty(BinaryFormat::Wasm, b"fixture");
     artifact.symbols.push(symbol);
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -1551,7 +1557,7 @@ fn source_map_evidence_removes_a_unit_from_the_unmapped_source_side() {
         &[],
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
     assert_eq!(rows.unmapped_sources.len(), 1);
 
@@ -1565,7 +1571,7 @@ fn source_map_evidence_removes_a_unit_from_the_unmapped_source_side() {
             source_url: "src/lib.rs".to_owned(),
             source_line: Some(5),
         }],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
         &mut rows,
     );
     reconcile_unmapped_sources(&units, &[], &mut rows);
@@ -1619,7 +1625,7 @@ fn source_run_with_units(
         .enumerate()
         .map(
             |(position, (file_path, name))| codehelion_store::snapshot::UnitRow {
-                fingerprint: codehelion_core::stable_id::UnitFingerprint::from_bytes(
+                fingerprint: UnitFingerprint::from_bytes(
                     [3_u8.wrapping_add(u8::try_from(position).unwrap()); 16],
                 ),
                 language: codehelion_core::discovery::Language::Rust,
@@ -1844,7 +1850,7 @@ fn symbol_coverage_counts_one_population() {
         },
     ];
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -1862,7 +1868,7 @@ fn symbol_coverage_counts_one_population() {
         &[],
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
     let correlation = ArtifactCorrelationReport::from_rows(7, &artifact, &rows);
 
@@ -1912,7 +1918,7 @@ fn one_file_spelled_with_either_separator_correlates_the_same_way() {
         }],
     });
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -1922,9 +1928,9 @@ fn one_file_spelled_with_either_separator_correlates_the_same_way() {
         end_line: Some(20),
     }];
     let fragments = [SourceFragmentIdentity {
-        fingerprint: [6; 16],
-        finding_id: [16; 16],
-        clone_group_fingerprint: [17; 16],
+        fingerprint: FragmentFingerprint::from_bytes([6; 16]),
+        finding_id: FindingId::from_bytes([16; 16]),
+        clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
         is_canonical: false,
         clone_confidence: 1.0,
         build_variant_fingerprint: [4; 16],
@@ -1950,7 +1956,7 @@ fn one_file_spelled_with_either_separator_correlates_the_same_way() {
         &instantiations,
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert!(rows.unmapped_symbols.is_empty());
@@ -2031,7 +2037,7 @@ fn correlation_input(scale: &CorrelationScale) -> CorrelationInput {
         .map(|position| {
             let ordinal = u32::try_from(position / scale.files).unwrap_or(u32::MAX);
             SourceUnitIdentity {
-                fingerprint: fingerprint_of("unit", position),
+                fingerprint: UnitFingerprint::from_bytes(fingerprint_of("unit", position)),
                 build_variant_fingerprint: [4; 16],
                 unit_kind: "function".to_owned(),
                 occurrence_ordinal: ordinal.saturating_add(1),
@@ -2046,9 +2052,12 @@ fn correlation_input(scale: &CorrelationScale) -> CorrelationInput {
         .map(|position| {
             let ordinal = u32::try_from(position / scale.files).unwrap_or(u32::MAX);
             SourceFragmentIdentity {
-                fingerprint: fingerprint_of("fragment", position),
-                finding_id: fingerprint_of("finding", position),
-                clone_group_fingerprint: fingerprint_of("group", position / 2),
+                fingerprint: FragmentFingerprint::from_bytes(fingerprint_of("fragment", position)),
+                finding_id: FindingId::from_bytes(fingerprint_of("finding", position)),
+                clone_group_fingerprint: CloneGroupFingerprint::from_bytes(fingerprint_of(
+                    "group",
+                    position / 2,
+                )),
                 is_canonical: position % 2 == 0,
                 clone_confidence: 1.0,
                 build_variant_fingerprint: [4; 16],
@@ -2180,7 +2189,7 @@ fn source_run_correlation_stays_within_the_analysis_deadline() {
         &input.instantiations,
         &input.resolved_symbols,
         &input.resolved_calls,
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
     enrich_source_map_evidence(
         &input.artifact,
@@ -2188,10 +2197,16 @@ fn source_run_correlation_stays_within_the_analysis_deadline() {
         &input.units,
         &input.fragments,
         &input.locations,
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
         &mut rows,
     );
-    enrich_linker_map_evidence(&input.artifact, &input.units, &[], [5; 16], &mut rows);
+    enrich_linker_map_evidence(
+        &input.artifact,
+        &input.units,
+        &[],
+        BuildVariantFingerprint::from_bytes([5; 16]),
+        &mut rows,
+    );
     reconcile_unmapped_sources(&input.units, &input.fragments, &mut rows);
     let elapsed = started.elapsed();
 

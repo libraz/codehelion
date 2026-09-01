@@ -282,6 +282,22 @@ pub struct Unit {
     pub span: SourceSpan,
 }
 
+/// The tokens a recorded range covers, clamped to the stream it addresses.
+///
+/// An error-tolerant frontend may hand back a unit whose token range reaches
+/// past the tokens it recovered, and a range recorded against one stream may be
+/// read against another. Every reader clamps here rather than at its own call
+/// site: two call sites that clamp differently would fingerprint the same code
+/// under two identities, which is a worse defect than the out-of-range read the
+/// clamp exists to prevent. A start past the end yields an empty slice, as does
+/// an end before the start.
+#[must_use]
+pub fn tokens_in_range(tokens: &[Token], token_start: usize, token_end: usize) -> &[Token] {
+    let start = token_start.min(tokens.len());
+    let end = token_end.min(tokens.len()).max(start);
+    &tokens[start..end]
+}
+
 /// The result of lexing one source file.
 #[derive(Debug, Clone)]
 pub struct LexedFile {
@@ -420,7 +436,7 @@ impl<'s> IrAssembly<'s> {
     /// Number of tokens appended so far, which is also the index the next one
     /// will take.
     #[must_use]
-    pub fn token_count(&self) -> usize {
+    pub const fn token_count(&self) -> usize {
         self.tokens.len()
     }
 
@@ -525,6 +541,52 @@ mod tests {
             TokenKind::Literal(LiteralKind::Integer).tag(),
             TokenKind::Literal(LiteralKind::String).tag()
         );
+    }
+
+    /// The shared clamp answers exactly what every call site computed for
+    /// itself before, including for the ranges an error-tolerant frontend can
+    /// hand back: a fingerprint that moved because the clamp moved would be a
+    /// worse defect than the out-of-range read the clamp prevents.
+    #[test]
+    fn the_shared_clamp_covers_the_tokens_each_call_site_clamped_to() {
+        let token = |text: &str| Token {
+            kind: TokenKind::Identifier,
+            text: text.into(),
+            span: SourceSpan {
+                start_byte: 0,
+                end_byte: 1,
+                start_line: 1,
+                start_column: 1,
+            },
+        };
+        let tokens = [token("a"), token("b"), token("c")];
+        // What the call sites computed inline before there was one helper.
+        let previous = |start: usize, end: usize| {
+            let start = start.min(tokens.len());
+            let end = end.min(tokens.len()).max(start);
+            &tokens[start..end]
+        };
+
+        for (start, end) in [
+            (0, 3),
+            (1, 2),
+            (2, 2),
+            (0, 9),
+            (5, 9),
+            (3, 3),
+            (2, 1),
+            (9, 1),
+        ] {
+            assert_eq!(
+                tokens_in_range(&tokens, start, end),
+                previous(start, end),
+                "range {start}..{end}"
+            );
+        }
+        assert!(tokens_in_range(&tokens, 5, 9).is_empty());
+        assert!(tokens_in_range(&tokens, 2, 1).is_empty());
+        assert!(tokens_in_range(&[], 0, 4).is_empty());
+        assert_eq!(tokens_in_range(&tokens, 1, 9).len(), 2);
     }
 
     #[test]

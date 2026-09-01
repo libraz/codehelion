@@ -465,7 +465,22 @@ fn a_comparison_lists_what_went_and_a_suppression_does_not() {
     assert!(text.contains("since it was recorded:"), "{text}");
     assert!(text.contains("1 gone"), "{text}");
     assert!(text.contains("repeated tokens"), "{text}");
-    assert!(text.contains("last seen at src/a.rs"), "{text}");
+    // The line names where the frozen group's canonical occurrence sat, and
+    // the two copies of one content are told apart by their occurrence
+    // identities rather than by which the walk reached first. The baseline
+    // holds that nomination, so it is what the comparison must repeat.
+    let baseline: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("baseline.json")).expect("read written baseline"),
+    )
+    .expect("parse baseline JSON");
+    let anchor = baseline["partitions"][0]["entries"][0]["anchor"]["file"]
+        .as_str()
+        .expect("the frozen entry anchors on its canonical occurrence");
+    assert!(
+        ["src/a.rs", "src/b.rs"].contains(&anchor),
+        "the anchor names one of the frozen copies, not {anchor}"
+    );
+    assert!(text.contains(&format!("last seen at {anchor}")), "{text}");
 
     // Suppress mode was asked to hide known duplication; a list of duplication
     // that is no longer there is not what it was asked for.

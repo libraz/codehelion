@@ -97,7 +97,13 @@ pub struct SkipReport {
     pub oversized_metadata: u64,
     /// Files that looked binary (a NUL byte in their head).
     pub binary: u64,
-    /// Files that could not be read.
+    /// Files that could not be read: a read that failed, and a source path
+    /// that is not a regular file at all.
+    ///
+    /// A FIFO, socket or device node carrying a source extension is counted
+    /// here rather than opened — reading one is what a read-only walk must not
+    /// do. It is kept apart from [`Self::walk_errors`], which is about
+    /// traversing directories rather than about one named path.
     pub unreadable: u64,
     /// Source files excluded because their language was disabled.
     pub language_excluded: u64,
@@ -211,6 +217,7 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
         too_large: walked.too_large,
         oversized_metadata: walked.oversized_metadata,
         language_excluded: walked.language_excluded,
+        unreadable: walked.special_files,
         symlinks: walked.symlinks,
         symlink_files: walked.symlink_files,
         symlink_directories: walked.symlink_directories,
@@ -829,6 +836,95 @@ mod tests {
             )
             .unwrap();
         assert_eq!(accounted, 6, "every walked source reached one outcome");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::disallowed_types,
+        reason = "building the fixture needs mkfifo; the walk under test spawns nothing"
+    )]
+    fn a_source_path_that_is_not_a_regular_file_is_counted_rather_than_dropped() {
+        use std::os::unix::net::UnixListener;
+
+        let (_guard, root) = fixture();
+        let fifo = root.join("src/piped.rs");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs on a unix host");
+        assert!(status.success(), "mkfifo failed for {}", fifo.display());
+        let socket = UnixListener::bind(root.join("src/bound.rs")).unwrap();
+        // A special file with no source extension stays as uninteresting as a
+        // regular file with none.
+        let ignored = UnixListener::bind(root.join("src/notes.txt")).unwrap();
+
+        let report = discover(&root, &DiscoveryConfig::default()).unwrap();
+
+        let paths: Vec<_> = report
+            .units
+            .iter()
+            .map(|unit| unit.relative_path.as_path())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![Path::new("src/lib.rs"), Path::new("src/main.rs")]
+        );
+        assert_eq!(
+            report.skipped.unreadable, 2,
+            "the fifo and the socket are both accounted for: {:?}",
+            report.skipped
+        );
+        assert_eq!(report.skipped.walk_errors, 0, "neither is a walk error");
+        assert_eq!(
+            report.skipped.total(),
+            2,
+            "and both are visible in the total: {:?}",
+            report.skipped
+        );
+        drop(socket);
+        drop(ignored);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_walked_entry_reaches_exactly_one_outcome_including_special_files() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
+
+        let (_guard, root) = fixture();
+        fs::write(root.join("src/util.c"), "int value(void) { return 1; }\n").unwrap();
+        fs::write(
+            root.join("src/generated.rs"),
+            "// @generated\nfn generated() {}\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/binary.rs"), b"fn binary() {}\0").unwrap();
+        symlink(root.join("src/lib.rs"), root.join("src/linked.rs")).unwrap();
+        let socket = UnixListener::bind(root.join("src/bound.rs")).unwrap();
+
+        let report = discover(
+            &root,
+            &DiscoveryConfig {
+                languages: LanguageSelection {
+                    rust: true,
+                    c: false,
+                    cpp: false,
+                },
+                ..DiscoveryConfig::default()
+            },
+        )
+        .unwrap();
+
+        let accounted = report.units.len()
+            + report.suppressed_generated.len()
+            + usize::try_from(report.skipped.total()).unwrap();
+        assert_eq!(
+            accounted, 7,
+            "every walked source reached one outcome: {:?}",
+            report.skipped
+        );
+        drop(socket);
     }
 
     #[cfg(unix)]

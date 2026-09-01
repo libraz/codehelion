@@ -12,6 +12,7 @@
 //! inventory and dialect-only literal forms, and the structural CST walker is
 //! parameterized by an [`ir::IrMapping`] carrying the node-mapping table.
 
+mod declarator;
 pub mod dialect;
 pub mod ir;
 pub mod lexer;

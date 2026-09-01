@@ -938,27 +938,31 @@ pub(super) fn semantic_member_ranks<'a>(
         .collect()
 }
 
-/// Derive one host-local occurrence rank before grouping so every consumer
-/// uses the same position-independent identity for the same semantic window.
+/// Derive one occurrence rank per window before grouping so every consumer uses
+/// the same position-independent identity for the same semantic window.
+///
+/// A window is discriminated by what content says about it: the host unit it
+/// sits in and its own normalized content. Nothing about where it sits enters
+/// the ordering, so a doc comment added to one file — which moves every byte
+/// offset after it, and used to swap two windows' ranks and with them their
+/// finding ids — leaves every rank where it was. Windows that content cannot
+/// separate at all keep the order they were extracted in, which is the last
+/// discrimination available once host and content have agreed.
 fn assign_semantic_occurrence_ranks(units: &mut [SemanticUnitGraph], analysis: &StructuralReport) {
-    let mut ordered: Vec<_> = units
+    let discriminators: Vec<stable_id::OccurrenceDiscriminator> = units
         .iter()
-        .enumerate()
-        .map(|(index, member)| {
-            (
-                index,
-                analysis.units[member.unit].fingerprint,
-                member.range,
-                member.content,
-            )
+        .map(|member| {
+            stable_id::OccurrenceDiscriminator::of_unit(&analysis.units[member.unit].fingerprint)
+                .and(stable_id::OccurrenceDiscriminator::of_fragment(
+                    &member.content,
+                ))
         })
         .collect();
-    ordered.sort_by_key(|(_, host, range, content)| (*host, *range, *content));
-    let mut next_by_host = BTreeMap::new();
-    for (index, host, _, _) in ordered {
-        let rank = next_by_host.entry(host).or_insert(0_u32);
-        units[index].occurrence_rank = *rank;
-        *rank = rank.saturating_add(1);
+    for (member, rank) in units
+        .iter_mut()
+        .zip(stable_id::occurrence_ranks(&discriminators))
+    {
+        member.occurrence_rank = rank;
     }
 }
 
@@ -993,14 +997,13 @@ mod occurrence_rank_tests {
         }
     }
 
-    #[test]
-    fn identical_hosts_from_different_units_get_distinct_semantic_ranks() {
+    /// Three windows over two host identities: the first two units are content
+    /// identical, so they share a host fingerprint and their windows share a
+    /// rank sequence; the third has a host of its own.
+    fn analysis_of_two_identical_hosts() -> StructuralReport {
         let host = stable_id::UnitFingerprint::from_bytes([7; 16]);
         let other_host = stable_id::UnitFingerprint::from_bytes([8; 16]);
-        let content = stable_id::FragmentFingerprint::from_bytes([9; 16]);
-        let graph = SemanticOperationGraph::new(Language::Rust, [0; 32], Vec::new(), Vec::new())
-            .expect("empty graph is valid");
-        let analysis = StructuralReport {
+        StructuralReport {
             units: vec![
                 make_unit(0, host),
                 make_unit(1, host),
@@ -1013,26 +1016,21 @@ mod occurrence_rank_tests {
             siblings: Vec::new(),
             near_misses: Vec::new(),
             stats: StructuralStats::default(),
-        };
-        let mut windows = vec![
-            SemanticUnitGraph {
-                unit: 0,
+        }
+    }
+
+    /// One window per unit, each at the byte range it is given.
+    fn windows_at(ranges: [ByteRange; 3]) -> Vec<SemanticUnitGraph> {
+        let content = stable_id::FragmentFingerprint::from_bytes([9; 16]);
+        let graph = SemanticOperationGraph::new(Language::Rust, [0; 32], Vec::new(), Vec::new())
+            .expect("empty graph is valid");
+        ranges
+            .into_iter()
+            .enumerate()
+            .map(|(unit, range)| SemanticUnitGraph {
+                unit,
                 occurrence_rank: 0,
-                range: ByteRange { start: 40, end: 50 },
-                start_line: 4,
-                end_line: 5,
-                token_count: 2,
-                graph: graph.clone(),
-                content,
-                normalization_confidence: 1.0,
-                interactions: Default::default(),
-                data_flows: Default::default(),
-                cfg_shape: None,
-            },
-            SemanticUnitGraph {
-                unit: 1,
-                occurrence_rank: 0,
-                range: ByteRange { start: 10, end: 20 },
+                range,
                 start_line: 1,
                 end_line: 2,
                 token_count: 2,
@@ -1042,29 +1040,72 @@ mod occurrence_rank_tests {
                 interactions: Default::default(),
                 data_flows: Default::default(),
                 cfg_shape: None,
-            },
-            SemanticUnitGraph {
-                unit: 2,
-                occurrence_rank: 0,
-                range: ByteRange { start: 10, end: 20 },
-                start_line: 1,
-                end_line: 2,
-                token_count: 2,
-                graph,
-                content,
-                normalization_confidence: 1.0,
-                interactions: Default::default(),
-                data_flows: Default::default(),
-                cfg_shape: None,
-            },
-        ];
-        assign_semantic_occurrence_ranks(&mut windows, &analysis);
+            })
+            .collect()
+    }
+
+    fn ranked(windows: &mut [SemanticUnitGraph], analysis: &StructuralReport) -> Vec<u32> {
+        assign_semantic_occurrence_ranks(windows, analysis);
+        windows
+            .iter()
+            .map(|window| window.occurrence_rank)
+            .collect()
+    }
+
+    #[test]
+    fn identical_hosts_from_different_units_get_distinct_semantic_ranks() {
+        let analysis = analysis_of_two_identical_hosts();
+        let mut windows = windows_at([
+            ByteRange { start: 40, end: 50 },
+            ByteRange { start: 10, end: 20 },
+            ByteRange { start: 10, end: 20 },
+        ]);
+
+        let ranks = ranked(&mut windows, &analysis);
+
+        assert_eq!(ranks, vec![0, 1, 0]);
+        let identities: std::collections::BTreeSet<_> = windows
+            .iter()
+            .map(|window| {
+                stable_id::semantic_occurrence_fingerprint(
+                    window.content,
+                    &analysis.units[window.unit].fingerprint,
+                    window.occurrence_rank,
+                )
+            })
+            .collect();
         assert_eq!(
-            windows
-                .iter()
-                .map(|window| window.occurrence_rank)
-                .collect::<Vec<_>>(),
-            vec![1, 0, 0]
+            identities.len(),
+            3,
+            "windows that share a host and a content still identify apart"
+        );
+    }
+
+    /// Adding a doc comment to one file moves every byte offset after it. That
+    /// is not a change to any window's content or to the unit hosting it, so no
+    /// window's rank — and so no semantic finding id — may move with it.
+    #[test]
+    fn a_comment_added_to_one_file_moves_no_semantic_occurrence_rank() {
+        let analysis = analysis_of_two_identical_hosts();
+        let mut before = windows_at([
+            ByteRange { start: 40, end: 50 },
+            ByteRange { start: 10, end: 20 },
+            ByteRange { start: 10, end: 20 },
+        ]);
+        // The second file gains a comment above its window, pushing that window
+        // past its twin in byte order.
+        let mut after = windows_at([
+            ByteRange { start: 40, end: 50 },
+            ByteRange {
+                start: 910,
+                end: 920,
+            },
+            ByteRange { start: 10, end: 20 },
+        ]);
+
+        assert_eq!(
+            ranked(&mut before, &analysis),
+            ranked(&mut after, &analysis)
         );
     }
 }

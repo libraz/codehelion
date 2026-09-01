@@ -49,6 +49,124 @@ use crate::cli::{
 };
 use crate::config::ConfigSource;
 
+/// Who supplied a value this run is about to act on.
+///
+/// Two different things reach the tool at once: what the operator typed, and
+/// whatever the directory they pointed at happens to contain. Only the first
+/// may decide where the tool writes, which directory bounds that write, or
+/// what the tool runs — the second is the subject of the audit, not a party to
+/// it. Keeping the two apart as types is what makes the difference impossible
+/// to forget: a value the tree supplied cannot be passed where a path, a
+/// boundary or a piece of text is expected, so the trust decision has to be
+/// made rather than skipped.
+///
+/// The types live in their own module so that their contents stay private to
+/// it. A tuple field declared at the crate root would be readable from every
+/// module in the crate, which is exactly the guarantee this is here to give.
+pub(crate) mod provenance {
+    #![allow(
+        clippy::redundant_pub_crate,
+        reason = "the module is crate-visible; its items keep the crate's own visibility spelling"
+    )]
+
+    use std::path::{Path, PathBuf};
+
+    use codehelion_core::discovery::Language;
+
+    /// A value this run may act on because the operator, not the tree, chose
+    /// it.
+    ///
+    /// The two constructors are the only places that authority is asserted, so
+    /// every assertion of it is one search away.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct OperatorSupplied<T>(T);
+
+    impl<T> OperatorSupplied<T> {
+        /// Record that `value` arrived in this invocation's arguments.
+        pub(crate) const fn from_command_line(value: T) -> Self {
+            Self(value)
+        }
+
+        /// Record that `value` is this build's own default, which the tree
+        /// under audit had no part in choosing.
+        pub(crate) const fn from_this_build(value: T) -> Self {
+            Self(value)
+        }
+
+        /// The value, with the operator's authority behind it.
+        pub(crate) const fn get(&self) -> &T {
+            &self.0
+        }
+
+        /// Read this value as though the tree had supplied it.
+        ///
+        /// `--untrusted` says precisely that about a configuration: the
+        /// operator may have named the file, but this run is not to take its
+        /// word about where the tool writes. Spelling the demotion as a change
+        /// of type keeps the flag's whole effect on storage in one expression
+        /// instead of in a condition each consumer has to repeat.
+        pub(crate) fn distrusted(self) -> FromScannedTree<T> {
+            FromScannedTree(self.0)
+        }
+    }
+
+    /// A value read out of the tree under audit.
+    ///
+    /// There is no accessor that hands the value over unconditionally. What
+    /// there is instead is one narrowing per kind of value: a path is only
+    /// reachable from code that already holds the boundary it is checked
+    /// against, and source text is only readable as the comments the file's
+    /// own language says it holds. Handing one of these values straight to
+    /// something expecting a `&Path` or a `&str` does not compile.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct FromScannedTree<T>(T);
+
+    impl<T> FromScannedTree<T> {
+        /// Record that `value` was read out of the tree being audited.
+        pub(crate) const fn found(value: T) -> Self {
+            Self(value)
+        }
+    }
+
+    impl<'a> FromScannedTree<&'a Path> {
+        /// The path as the tree spelled it.
+        ///
+        /// What a caller does with this is check it against a boundary the
+        /// operator supplied, or quote it back in the refusal that check
+        /// produced. Joining it onto anything else is how a tree ends up
+        /// choosing a location nobody pointed at.
+        pub(crate) const fn as_written(&self) -> &'a Path {
+            self.0
+        }
+    }
+
+    impl FromScannedTree<PathBuf> {
+        /// This directory as the place a database nobody configured is put.
+        ///
+        /// The one thing a directory found by inspecting the tree decides, and
+        /// it is not a trust decision: the default location is this build's,
+        /// and the tree only says where the repository holding it begins.
+        /// Deliberately not a confinement boundary — a boundary decides what a
+        /// *configured* path may not leave, and only a directory the operator
+        /// named can do that.
+        pub(crate) fn as_default_placement(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl<'a> FromScannedTree<&'a str> {
+        /// The comment text this source holds, as `(1-based line, text)`
+        /// pairs, one entry per line a comment covers.
+        ///
+        /// The narrowing that makes tree text safe to act on: whatever the
+        /// file says, only what its own language treats as a comment comes
+        /// back out.
+        pub(crate) fn comments(&self, language: Language) -> Vec<(u32, &'a str)> {
+            crate::suppress::comments_of(self.0, language)
+        }
+    }
+}
+
 /// Digits in a full stable id.
 const FULL_ID_CHARS: usize = 32;
 
@@ -319,23 +437,20 @@ fn interrogate(
 ///
 /// Kept in the composition root alongside helper discovery: format backends
 /// are optional CLI capabilities and are not dependencies of the source
-/// clone engine.
+/// clone engine. Each line is rendered from
+/// [`codehelion_artifact::FORMAT_SUPPORT`] rather than restated by hand, so a
+/// format added there — or a capability changed there — shows up here without
+/// a matching edit to this function.
 fn doctor_artifacts(out: &mut impl Write) -> Result<()> {
     writeln!(out, "  artifacts:")?;
-    writeln!(out, "    wasm: available (core modules; wasmparser)")?;
-    writeln!(out, "    elf: available (sized text symbols; object)")?;
-    writeln!(
-        out,
-        "    macho: available (symbols, relocations, data; matching dSYM source mappings)"
-    )?;
-    writeln!(
-        out,
-        "    pe-coff: available (symbols, relocations, data; matching PDB source mappings)"
-    )?;
-    writeln!(
-        out,
-        "    archive: available (local member enumeration and delegated parsing)"
-    )?;
+    for row in &codehelion_artifact::FORMAT_SUPPORT {
+        writeln!(
+            out,
+            "    {}: available ({})",
+            row.format.name(),
+            row.capability_summary()
+        )?;
+    }
     Ok(())
 }
 
@@ -494,14 +609,14 @@ fn doctor_database(args: &DoctorArgs, out: &mut impl Write) -> Result<()> {
     }
     write_lease_status(&db_abs, out)?;
     doctor_database_directory(&db, &db_abs, args.db.is_some(), out)?;
-    if let Some(repo_root) = find_git_root(&cwd) {
-        if !is_git_ignored(&repo_root, &db_abs) {
-            writeln!(
-                out,
-                "  hint: the local database is not matched by .gitignore; \
+    if let Some(repo_root) = find_git_root(&cwd)
+        && !is_git_ignored(&repo_root, &db_abs)
+    {
+        writeln!(
+            out,
+            "  hint: the local database is not matched by .gitignore; \
                  consider ignoring it (for example, add `.codehelion/`)"
-            )?;
-        }
+        )?;
     }
     Ok(())
 }
@@ -639,6 +754,18 @@ fn write_lease_status(database: &Path, out: &mut impl Write) -> Result<()> {
 }
 
 /// The enclosing git repository root, found by walking up for a `.git` entry.
+///
+/// This is the single walk every caller shares, including
+/// [`scan::runtime`](crate::scan::runtime)'s default database placement, which
+/// wraps this with its own fallback for the no-`.git` case rather than
+/// repeating the walk. Keeping the walk itself in exactly one place means
+/// every caller either sees the same `.git` ancestor or none — they cannot
+/// silently disagree about which directory it is.
+///
+/// What this directory is *not* is a confinement boundary. It is found by
+/// inspecting the tree rather than named by the operator, so it can sit above
+/// the directory the operator pointed at; a path a configuration chose is held
+/// to `--path` instead. See [`provenance`].
 pub(crate) fn find_git_root(start: &Path) -> Option<PathBuf> {
     let mut dir = Some(start);
     while let Some(current) = dir {
@@ -922,7 +1049,22 @@ fn cache_status(path: &Path, out: &mut impl Write) -> Result<Outcome> {
             Ok(store) => {
                 writeln!(out, "schema: {}", store.schema_version()?)?;
                 writeln!(out, "scan runs: {}", store.table_count("scan_run")?)?;
-                writeln!(out, "abandoned runs: {}", store.abandoned_runs()?.len())?;
+                let unfinished = store.abandoned_runs()?.len();
+                // A `running` row is abandoned only once nothing owns it. The
+                // reaper this diagnostic sits beside applies a grace period
+                // before it treats one as abandoned (see
+                // `discard_expired_abandoned_runs`); this line has to make the
+                // same distinction rather than calling every `running` row
+                // abandoned, or it steers the reader toward `cache prune`
+                // while a scan is still writing.
+                if unfinished > 0 && scan_lock::lease_status(path) == scan_lock::LeaseStatus::Held {
+                    writeln!(
+                        out,
+                        "incomplete partitions: {unfinished} (a scan is running)"
+                    )?;
+                } else {
+                    writeln!(out, "abandoned runs: {unfinished}")?;
+                }
                 writeln!(out, "table storage:")?;
                 for table in store.table_storage()? {
                     writeln!(out, "  {}: {} bytes", table.table, table.bytes)?;
@@ -963,6 +1105,19 @@ fn cache_prune(
         pruned.cross_language_comparisons,
         pruned.orphaned_fingerprints
     )?;
+    // The five named counts are what the retention flags asked for. A removed
+    // row takes referencing rows with it, and those live in tables nobody
+    // named — the verified-savings ledger among them, which the reader was
+    // told is kept. Left unsaid, a later statistic taken over that ledger
+    // moves with no visible cause, so the whole deletion is reported and not
+    // just the part that was requested.
+    for cascaded in &pruned.cascaded {
+        writeln!(
+            out,
+            "  also removed {} row(s) from {} that referenced them",
+            cascaded.rows, cascaded.table
+        )?;
+    }
     Ok(Outcome::Success)
 }
 
@@ -988,18 +1143,28 @@ fn cache_clear(path: &Path, out: &mut impl Write) -> Result<Outcome> {
     Ok(Outcome::Success)
 }
 
-/// The main `SQLite` database and the two sidecars created by WAL mode.
-fn database_files(database: &Path) -> [PathBuf; 3] {
+/// The main `SQLite` database and the sidecars a rollback journal or WAL mode
+/// can leave beside it.
+///
+/// `-journal` belongs here alongside `-wal`/`-shm`: schema initialization on a
+/// brand-new database runs under the default rollback journal before WAL mode
+/// takes over, so a run interrupted early enough leaves `-journal` rather than
+/// `-wal`/`-shm`. `codehelion-store` treats all three as sidecars of the same
+/// database (see its own `sidecar_paths`); this list must keep matching that
+/// one so `cache clear` never leaves a file behind that a later `Store::open`
+/// refuses to open.
+fn database_files(database: &Path) -> [PathBuf; 4] {
     [
         database.to_path_buf(),
         database_sidecar_path(database, "-wal"),
+        database_sidecar_path(database, "-journal"),
         database_sidecar_path(database, "-shm"),
     ]
 }
 
 /// Sum the main database and WAL sidecars, distinguishing absent files from
 /// metadata failures that deserve to reach the caller.
-fn database_storage_bytes(files: &[PathBuf; 3]) -> Result<Option<u64>> {
+fn database_storage_bytes(files: &[PathBuf; 4]) -> Result<Option<u64>> {
     let mut size = 0_u64;
     let mut present = false;
     for file in files {
@@ -1064,3 +1229,32 @@ fn resolve_db_at(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests;
+
+/// Covers [`find_git_root`], the single walk that
+/// [`scan::runtime`](crate::scan::runtime)'s default database placement and
+/// the `.gitignore` hints in `doctor`/`scan` all share.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod git_root_tests {
+    use super::find_git_root;
+
+    #[test]
+    fn finds_the_nearest_ancestor_holding_a_dot_git_entry() {
+        let repository = tempfile::tempdir().expect("create repository directory");
+        std::fs::create_dir(repository.path().join(".git")).expect("create .git marker");
+        let nested = repository.path().join("crates/inner");
+        std::fs::create_dir_all(&nested).expect("create nested working directory");
+
+        assert_eq!(
+            find_git_root(&nested),
+            Some(repository.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn finds_nothing_above_a_tree_with_no_dot_git_ancestor() {
+        let outside = tempfile::tempdir().expect("create directory outside any repository");
+
+        assert_eq!(find_git_root(outside.path()), None);
+    }
+}

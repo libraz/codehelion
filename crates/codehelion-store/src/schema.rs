@@ -636,15 +636,13 @@ CREATE TABLE finding (
     savings_confidence                 REAL,
     maintenance_risk                   REAL,
     refactoring_difficulty             REAL,
-    final_priority                     REAL NOT NULL,
-    observed_bytes                     INTEGER,
-    duplicated_bytes                   INTEGER,
-    retained_bytes                     INTEGER,
-    shared_dependency_bytes            INTEGER,
-    duplicated_data_bytes              INTEGER,
-    upper_bound_savings_bytes          INTEGER,
-    estimated_refactor_savings_bytes   INTEGER,
-    verified_savings_bytes             INTEGER
+    final_priority                     REAL NOT NULL
+    -- A finding measures maintainability, not size. Byte values belong to the
+    -- artifact tables, whose keys carry both the source and the artifact build
+    -- variant; one scalar column per finding could not say which pair of build
+    -- variants it was measured under. Older databases keep the columns they
+    -- were created with, and read the same either way, because nothing binds
+    -- or selects them.
 ) STRICT;
 CREATE TABLE fingerprint (
     id                    INTEGER PRIMARY KEY,

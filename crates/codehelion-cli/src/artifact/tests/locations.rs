@@ -76,7 +76,7 @@ fn dwarf_locations_map_only_units_in_the_explicit_source_run() {
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol.clone());
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -86,9 +86,9 @@ fn dwarf_locations_map_only_units_in_the_explicit_source_run() {
         end_line: Some(20),
     }];
     let fragments = [SourceFragmentIdentity {
-        fingerprint: [6; 16],
-        finding_id: [16; 16],
-        clone_group_fingerprint: [17; 16],
+        fingerprint: FragmentFingerprint::from_bytes([6; 16]),
+        finding_id: FindingId::from_bytes([16; 16]),
+        clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
         is_canonical: false,
         clone_confidence: 1.0,
         build_variant_fingerprint: [4; 16],
@@ -104,7 +104,7 @@ fn dwarf_locations_map_only_units_in_the_explicit_source_run() {
         &[],
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert_eq!(rows.mappings.len(), 2);
@@ -182,9 +182,9 @@ fn partial_fragment_attribution_is_proportional_and_not_exact() {
     };
     artifact.symbols.push(symbol.clone());
     let fragment = SourceFragmentIdentity {
-        fingerprint: [6; 16],
-        finding_id: [16; 16],
-        clone_group_fingerprint: [17; 16],
+        fingerprint: FragmentFingerprint::from_bytes([6; 16]),
+        finding_id: FindingId::from_bytes([16; 16]),
+        clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
         is_canonical: false,
         clone_confidence: 1.0,
         build_variant_fingerprint: [4; 16],
@@ -196,8 +196,8 @@ fn partial_fragment_attribution_is_proportional_and_not_exact() {
         schema_version: SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION.to_owned(),
         artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),
         source_kind: ArtifactAnalysisSourceKind::Fragment,
-        source_fingerprint: fragment.fingerprint,
-        source_instance_fingerprint: fragment.finding_id,
+        source_fingerprint: *fragment.fingerprint.as_bytes(),
+        source_instance_fingerprint: *fragment.finding_id.as_bytes(),
         source_build_variant_fingerprint: fragment.build_variant_fingerprint,
         evidence: MappingEvidence::new(
             vec![MappingEvidenceFact::Dwarf {
@@ -253,7 +253,7 @@ fn pdb_location_maps_with_pdb_evidence() {
     let mut artifact = ArtifactIr::empty(BinaryFormat::PeCoff, b"fixture");
     artifact.symbols.push(symbol);
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -271,7 +271,7 @@ fn pdb_location_maps_with_pdb_evidence() {
         &[],
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert_eq!(rows.mappings.len(), 1);
@@ -308,7 +308,7 @@ fn dwarf_frame_without_line_does_not_map_clone_fragments() {
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol);
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -319,9 +319,9 @@ fn dwarf_frame_without_line_does_not_map_clone_fragments() {
     }];
     let fragments = [
         SourceFragmentIdentity {
-            fingerprint: [6; 16],
-            finding_id: [16; 16],
-            clone_group_fingerprint: [17; 16],
+            fingerprint: FragmentFingerprint::from_bytes([6; 16]),
+            finding_id: FindingId::from_bytes([16; 16]),
+            clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
             is_canonical: false,
             clone_confidence: 1.0,
             build_variant_fingerprint: [4; 16],
@@ -330,9 +330,9 @@ fn dwarf_frame_without_line_does_not_map_clone_fragments() {
             end_line: Some(13),
         },
         SourceFragmentIdentity {
-            fingerprint: [7; 16],
-            finding_id: [18; 16],
-            clone_group_fingerprint: [17; 16],
+            fingerprint: FragmentFingerprint::from_bytes([7; 16]),
+            finding_id: FindingId::from_bytes([18; 16]),
+            clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
             is_canonical: true,
             clone_confidence: 1.0,
             build_variant_fingerprint: [4; 16],
@@ -350,7 +350,7 @@ fn dwarf_frame_without_line_does_not_map_clone_fragments() {
         &[],
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert_eq!(rows.mappings.len(), 1);
@@ -408,7 +408,7 @@ fn inline_stack_retains_every_source_origin_without_double_counting_symbol_bytes
     artifact.symbols.push(symbol);
     let units = [
         SourceUnitIdentity {
-            fingerprint: [1; 16],
+            fingerprint: UnitFingerprint::from_bytes([1; 16]),
             build_variant_fingerprint: [4; 16],
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
@@ -418,7 +418,7 @@ fn inline_stack_retains_every_source_origin_without_double_counting_symbol_bytes
             end_line: Some(15),
         },
         SourceUnitIdentity {
-            fingerprint: [2; 16],
+            fingerprint: UnitFingerprint::from_bytes([2; 16]),
             build_variant_fingerprint: [4; 16],
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
@@ -430,9 +430,9 @@ fn inline_stack_retains_every_source_origin_without_double_counting_symbol_bytes
     ];
     let fragments = [
         SourceFragmentIdentity {
-            fingerprint: [5; 16],
-            finding_id: [6; 16],
-            clone_group_fingerprint: [7; 16],
+            fingerprint: FragmentFingerprint::from_bytes([5; 16]),
+            finding_id: FindingId::from_bytes([6; 16]),
+            clone_group_fingerprint: CloneGroupFingerprint::from_bytes([7; 16]),
             is_canonical: false,
             clone_confidence: 1.0,
             build_variant_fingerprint: [4; 16],
@@ -441,9 +441,9 @@ fn inline_stack_retains_every_source_origin_without_double_counting_symbol_bytes
             end_line: Some(11),
         },
         SourceFragmentIdentity {
-            fingerprint: [8; 16],
-            finding_id: [9; 16],
-            clone_group_fingerprint: [7; 16],
+            fingerprint: FragmentFingerprint::from_bytes([8; 16]),
+            finding_id: FindingId::from_bytes([9; 16]),
+            clone_group_fingerprint: CloneGroupFingerprint::from_bytes([7; 16]),
             is_canonical: true,
             clone_confidence: 1.0,
             build_variant_fingerprint: [4; 16],
@@ -461,7 +461,7 @@ fn inline_stack_retains_every_source_origin_without_double_counting_symbol_bytes
         &[],
         &[],
         &[],
-        [10; 16],
+        BuildVariantFingerprint::from_bytes([10; 16]),
     );
 
     assert_eq!(rows.mappings.len(), 4);
@@ -493,7 +493,7 @@ fn inline_stack_retains_every_source_origin_without_double_counting_symbol_bytes
 fn source_findings_without_artifact_evidence_are_explicitly_unmapped() {
     let artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -503,9 +503,9 @@ fn source_findings_without_artifact_evidence_are_explicitly_unmapped() {
         end_line: Some(2),
     }];
     let fragments = [SourceFragmentIdentity {
-        fingerprint: [6; 16],
-        finding_id: [16; 16],
-        clone_group_fingerprint: [17; 16],
+        fingerprint: FragmentFingerprint::from_bytes([6; 16]),
+        finding_id: FindingId::from_bytes([16; 16]),
+        clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
         is_canonical: false,
         clone_confidence: 1.0,
         build_variant_fingerprint: [4; 16],
@@ -523,7 +523,7 @@ fn source_findings_without_artifact_evidence_are_explicitly_unmapped() {
         &[],
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert!(rows.mappings.is_empty());
@@ -560,7 +560,7 @@ fn equal_content_source_units_keep_distinct_unmapped_occurrences() {
     let artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     let units = [
         SourceUnitIdentity {
-            fingerprint: [3; 16],
+            fingerprint: UnitFingerprint::from_bytes([3; 16]),
             build_variant_fingerprint: [4; 16],
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
@@ -570,7 +570,7 @@ fn equal_content_source_units_keep_distinct_unmapped_occurrences() {
             end_line: Some(3),
         },
         SourceUnitIdentity {
-            fingerprint: [3; 16],
+            fingerprint: UnitFingerprint::from_bytes([3; 16]),
             build_variant_fingerprint: [4; 16],
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
@@ -589,7 +589,7 @@ fn equal_content_source_units_keep_distinct_unmapped_occurrences() {
         &[],
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert_eq!(rows.unmapped_sources.len(), 2);
@@ -602,7 +602,7 @@ fn equal_content_source_units_keep_distinct_unmapped_occurrences() {
 #[test]
 fn source_unit_instance_identity_ignores_anchors_but_keeps_duplicate_occurrences() {
     let unit = SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -650,7 +650,7 @@ fn demangled_name_maps_one_named_unit_as_weak_evidence() {
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol);
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -668,7 +668,7 @@ fn demangled_name_maps_one_named_unit_as_weak_evidence() {
         &[],
         &[],
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert!(rows.unmapped_symbols.is_empty());
@@ -704,7 +704,7 @@ fn macro_definition_anchor_beats_an_unrelated_unit_label() {
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol);
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -723,9 +723,9 @@ fn macro_definition_anchor_beats_an_unrelated_unit_label() {
         }),
     }];
     let fragments = [SourceFragmentIdentity {
-        fingerprint: [6; 16],
-        finding_id: [16; 16],
-        clone_group_fingerprint: [17; 16],
+        fingerprint: FragmentFingerprint::from_bytes([6; 16]),
+        finding_id: FindingId::from_bytes([16; 16]),
+        clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
         is_canonical: false,
         clone_confidence: 1.0,
         build_variant_fingerprint: [4; 16],
@@ -742,7 +742,7 @@ fn macro_definition_anchor_beats_an_unrelated_unit_label() {
         &[],
         &resolved,
         &[],
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     assert!(rows.unmapped_symbols.is_empty());
@@ -826,7 +826,7 @@ fn matching_static_calls_add_independent_neighborhood_evidence() {
         unresolved: None,
     });
     let units = [SourceUnitIdentity {
-        fingerprint: [3; 16],
+        fingerprint: UnitFingerprint::from_bytes([3; 16]),
         build_variant_fingerprint: [4; 16],
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
@@ -847,9 +847,9 @@ fn matching_static_calls_add_independent_neighborhood_evidence() {
         line: 3,
     }];
     let fragments = [SourceFragmentIdentity {
-        fingerprint: [6; 16],
-        finding_id: [16; 16],
-        clone_group_fingerprint: [17; 16],
+        fingerprint: FragmentFingerprint::from_bytes([6; 16]),
+        finding_id: FindingId::from_bytes([16; 16]),
+        clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
         is_canonical: false,
         clone_confidence: 1.0,
         build_variant_fingerprint: [4; 16],
@@ -866,7 +866,7 @@ fn matching_static_calls_add_independent_neighborhood_evidence() {
         &[],
         &resolved_symbols,
         &resolved_calls,
-        [5; 16],
+        BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
     let mapping = rows

@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::*;
 use crate::discovery::LanguageSelection;
 use crate::frontend::{LiteralKind, SourceSpan, TokenKind};
@@ -104,6 +106,113 @@ fn report_ids_clamp_both_ends_of_malformed_token_ranges() {
         report_ids(&files, &contexts, &variant(), &report, LiteralNorm::Full).len(),
         1
     );
+}
+
+/// A file with no units at all: its copy of the sample statement is preceded
+/// by `distinct`, so the files differ in content while the copies do not. This
+/// is the C and C++ shape a duplicated top-level macro, record or global takes,
+/// where the occurrence sits outside every unit.
+fn file_without_units(distinct: &str) -> Vec<Token> {
+    let mut tokens = toks(&[(Id, distinct), (Pu, ";")]);
+    tokens.extend(sample());
+    tokens
+}
+
+/// One Type-1 group over the sample statement in each of `files`, none of the
+/// occurrences inside a unit.
+fn report_over_files_without_units(files: &[Vec<Token>]) -> EngineReport {
+    EngineReport {
+        groups: vec![crate::engine::CloneGroup {
+            content_key: 0,
+            clone_type: CloneClass::Type1,
+            score: 1.0,
+            members: files
+                .iter()
+                .enumerate()
+                .map(|(index, tokens)| crate::engine::Instance {
+                    file: index,
+                    token_start: tokens.len() - sample().len(),
+                    token_end: tokens.len(),
+                    start_line: 1,
+                    end_line: 1,
+                    unit: None,
+                })
+                .collect(),
+            entropy_bits: 0.0,
+            suppressed: None,
+        }],
+        stats: crate::engine::EngineStats::default(),
+    }
+}
+
+/// Pasting one more copy of known content in a new file leaves the identifiers
+/// of the occurrences already reported exactly where they were, even when the
+/// new copy is walked first and so is inserted ahead of them in member order.
+///
+/// The group fingerprint is deliberately unchanged too: it folds deduplicated
+/// content, so another copy of known content is not a new group. An identifier
+/// that moved here would silently redirect a recorded `explain` argument and a
+/// `stable_clone_id` suppression onto a different occurrence.
+#[test]
+fn a_duplicate_pasted_in_another_file_moves_no_existing_finding_id() {
+    fn inputs<'a>(
+        files: &'a [Vec<Token>],
+        no_units: &'a [crate::frontend::Unit],
+    ) -> Vec<InputFile<'a>> {
+        files
+            .iter()
+            .map(|tokens| InputFile {
+                tokens,
+                units: no_units,
+            })
+            .collect()
+    }
+
+    let existing = [file_without_units("alpha"), file_without_units("beta")];
+    let with_new_copy = [
+        file_without_units("aardvark"),
+        file_without_units("alpha"),
+        file_without_units("beta"),
+    ];
+    let no_units: Vec<crate::frontend::Unit> = Vec::new();
+    let contexts = [ctx(); 3];
+    let ids = |files: &[Vec<Token>]| {
+        report_ids(
+            &inputs(files, &no_units),
+            &contexts[..files.len()],
+            &variant(),
+            &report_over_files_without_units(files),
+            LiteralNorm::Full,
+        )
+    };
+
+    let before = ids(&existing);
+    let after = ids(&with_new_copy);
+
+    assert_eq!(
+        before[0].fingerprint, after[0].fingerprint,
+        "another copy of known content is the same group"
+    );
+    assert_eq!(before[0].members.len(), 2);
+    assert_eq!(after[0].members.len(), 3);
+    assert_eq!(
+        before[0]
+            .members
+            .iter()
+            .map(|member| member.finding)
+            .collect::<Vec<_>>(),
+        after[0].members[1..]
+            .iter()
+            .map(|member| member.finding)
+            .collect::<Vec<_>>(),
+        "the occurrences that did not change keep their identifiers"
+    );
+    let distinct: BTreeSet<FindingId> = after[0]
+        .members
+        .iter()
+        .map(|member| member.finding)
+        .collect();
+    assert_eq!(distinct.len(), 3, "each occurrence keeps its own identity");
 }
 
 #[test]
@@ -478,13 +587,111 @@ fn finding_ids_discriminate_host_and_rank() {
         )],
     );
     let host = unit_fingerprint(&variant(), &ctx(), &sample(), ContentNorm::Raw);
-    let first = finding_id(&group, Some(&host), 0);
-    let second = finding_id(&group, Some(&host), 1);
-    let hostless = finding_id(&group, None, 0);
+    let file = OccurrenceDiscriminator::of_tokens(&sample());
+    let first = finding_id(&group, OccurrenceScope::Unit(&host), 0);
+    let second = finding_id(&group, OccurrenceScope::Unit(&host), 1);
+    let outside_units = finding_id(&group, OccurrenceScope::File(file), 0);
     assert_ne!(first, second);
-    assert_ne!(first, hostless);
+    assert_ne!(first, outside_units);
     // Deterministic: same inputs, same id.
-    assert_eq!(first, finding_id(&group, Some(&host), 0));
+    assert_eq!(first, finding_id(&group, OccurrenceScope::Unit(&host), 0));
+}
+
+/// An occurrence outside every unit is identified inside its own file, so two
+/// such occurrences in files of different content never share a rank sequence
+/// and never collide.
+#[test]
+fn occurrences_outside_units_are_identified_inside_their_own_file() {
+    let group = clone_group_fingerprint(
+        &variant(),
+        CloneClass::Type1,
+        &[fragment_fingerprint(
+            &variant(),
+            &ctx(),
+            "member",
+            &sample(),
+            ContentNorm::Raw,
+        )],
+    );
+    let here = OccurrenceDiscriminator::of_tokens(&sample());
+    let there = OccurrenceDiscriminator::of_tokens(&renamed_sample());
+    assert_ne!(here, there);
+    assert_ne!(
+        finding_id(&group, OccurrenceScope::File(here), 0),
+        finding_id(&group, OccurrenceScope::File(there), 0),
+        "two files of different content discriminate their own occurrences"
+    );
+    // A unit and a file never share a scope even when the bytes behind them do.
+    let host = unit_fingerprint(&variant(), &ctx(), &sample(), ContentNorm::Raw);
+    assert_ne!(
+        OccurrenceScope::Unit(&host).discriminator(),
+        OccurrenceScope::File(here).discriminator()
+    );
+}
+
+/// The canonical nomination follows content, so the order the occurrences
+/// arrive in — the tree walk, and therefore any file rename — cannot move it.
+#[test]
+fn the_canonical_occurrence_does_not_follow_the_order_it_is_given_in() {
+    let alpha = OccurrenceDiscriminator::of_tokens(&sample());
+    let zeta = OccurrenceDiscriminator::of_tokens(&renamed_sample());
+    let nominated =
+        |order: &[OccurrenceDiscriminator]| canonical_occurrence(order).map(|index| order[index]);
+
+    assert_eq!(nominated(&[alpha, zeta]), nominated(&[zeta, alpha]));
+    assert_eq!(nominated(&[alpha, zeta, alpha]), nominated(&[zeta, alpha]));
+    assert_eq!(canonical_occurrence(&[]), None);
+}
+
+/// Ranks separate occurrences their discriminator cannot, and nothing else.
+#[test]
+fn occurrence_ranks_restart_inside_every_discriminator() {
+    let first = OccurrenceDiscriminator::of_tokens(&sample());
+    let second = OccurrenceDiscriminator::of_tokens(&renamed_sample());
+    assert_eq!(
+        occurrence_ranks(&[first, second, first, second, first]),
+        vec![0, 0, 1, 1, 2]
+    );
+    assert!(occurrence_ranks(&[]).is_empty());
+}
+
+/// Adding a copy of known content elsewhere leaves the identifiers of the
+/// occurrences already reported exactly where they were, whether they sit
+/// inside a unit or outside every unit.
+#[test]
+fn a_further_copy_elsewhere_moves_no_existing_identifier() {
+    let group = clone_group_fingerprint(
+        &variant(),
+        CloneClass::Type1,
+        &[fragment_fingerprint(
+            &variant(),
+            &ctx(),
+            "member",
+            &sample(),
+            ContentNorm::Raw,
+        )],
+    );
+    let host = unit_fingerprint(&variant(), &ctx(), &sample(), ContentNorm::Raw);
+    let here = OccurrenceDiscriminator::of_tokens(&sample());
+    let there = OccurrenceDiscriminator::of_tokens(&renamed_sample());
+
+    let before = [OccurrenceScope::Unit(&host), OccurrenceScope::File(here)];
+    // The new copy sorts ahead of both, as a new file walked first would.
+    let after = [
+        OccurrenceScope::File(there),
+        OccurrenceScope::Unit(&host),
+        OccurrenceScope::File(here),
+    ];
+    let ids = |scopes: &[OccurrenceScope<'_>]| -> Vec<FindingId> {
+        let discriminators: Vec<_> = scopes.iter().map(OccurrenceScope::discriminator).collect();
+        scopes
+            .iter()
+            .zip(occurrence_ranks(&discriminators))
+            .map(|(scope, rank)| finding_id(&group, *scope, rank))
+            .collect()
+    };
+
+    assert_eq!(ids(&before), ids(&after)[1..]);
 }
 
 /// Literal digests of every identifier recipe, so a change to a hash input,
@@ -538,8 +745,13 @@ mod golden {
         ("group/structural", "5e5aafde805206ea470409037e0a8484"),
         ("group/semantic", "6cda7c75620e742ffc9c619149be49b2"),
         ("group-lineage", "d935a760b7b58b6ed4d7583d812a2083"),
+        ("occurrence/tokens", "04bc4899e55afb6a38e81a9ee5e069e4"),
+        ("occurrence/unit", "ca8da0431af8266dbd15f26479bb6555"),
+        ("occurrence/fragment", "df2b6109841c444d0c39c8a44ee3e9c1"),
+        ("occurrence/finding", "5fce062c3959385b5e8bf406124d835c"),
+        ("occurrence/pair", "342c168d89f6caba98565f2e416f49ed"),
         ("finding", "f71e71af3b692afdcd12c56d15ce20ab"),
-        ("finding/hostless", "98d994aa6d1f0a545a5570358bfbe6f3"),
+        ("finding/outside-units", "7ac55433389a44dfdd2c0f82da6a132e"),
         (
             "cross-variant/comparison",
             "259aa78892a91311fa96b6acd0a10a6e",
@@ -719,8 +931,46 @@ mod golden {
                 .to_hex(),
             ),
             ("group-lineage", group_lineage_id(&group).to_hex()),
-            ("finding", finding_id(&group, Some(&unit_raw), 0).to_hex()),
-            ("finding/hostless", finding_id(&group, None, 0).to_hex()),
+            (
+                "occurrence/tokens",
+                hex(OccurrenceDiscriminator::of_tokens(tokens).as_bytes()),
+            ),
+            (
+                "occurrence/unit",
+                hex(OccurrenceDiscriminator::of_unit(&unit_raw).as_bytes()),
+            ),
+            (
+                "occurrence/fragment",
+                hex(OccurrenceDiscriminator::of_fragment(&fragment_raw).as_bytes()),
+            ),
+            (
+                "occurrence/finding",
+                hex(OccurrenceDiscriminator::of_finding(&finding_id(
+                    &group,
+                    OccurrenceScope::Unit(&unit_raw),
+                    0,
+                ))
+                .as_bytes()),
+            ),
+            (
+                "occurrence/pair",
+                hex(OccurrenceDiscriminator::of_unit(&unit_raw)
+                    .and(OccurrenceDiscriminator::of_fragment(&fragment_raw))
+                    .as_bytes()),
+            ),
+            (
+                "finding",
+                finding_id(&group, OccurrenceScope::Unit(&unit_raw), 0).to_hex(),
+            ),
+            (
+                "finding/outside-units",
+                finding_id(
+                    &group,
+                    OccurrenceScope::File(OccurrenceDiscriminator::of_tokens(tokens)),
+                    0,
+                )
+                .to_hex(),
+            ),
             (
                 "cross-variant/comparison",
                 cross_variant_comparison.to_hex(),

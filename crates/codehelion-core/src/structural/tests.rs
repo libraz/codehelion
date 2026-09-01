@@ -1,11 +1,11 @@
 use super::regions::Dropped;
 use super::reporting::{PairEvidence, group_detail, group_fingerprint, verifier_calls};
 use super::{
-    Boilerplate, CloneClass, Confirmed, CrossVariantUnit, DirectoryPartition, RegionOccurrence,
-    RegionSide, ResolvedTypes, SignatureSiblingSweepStats, StructuralConfig, StructuralRegion,
-    Unit, compare_build_variants, covers_run, dominant_boilerplate, drop_subsumed, features,
-    flatten_units, fold_by_content, is_allocation_api, merge_adjacent, set_jaccard, unit_evidence,
-    unrepresented_pairs, view,
+    Boilerplate, CloneClass, Confirmed, CrossVariantComparison, CrossVariantUnit,
+    DirectoryPartition, RegionOccurrence, RegionSide, ResolvedTypes, SignatureSiblingSweepStats,
+    StructuralConfig, StructuralRegion, Unit, compare_build_variants, covers_run,
+    dominant_boilerplate, drop_subsumed, features, flatten_units, fold_by_content,
+    is_allocation_api, merge_adjacent, set_jaccard, unit_evidence, unrepresented_pairs, view,
 };
 use crate::candidate::StatementRun;
 use crate::conditional::{ArmPath, ArmTracker, StaticCondition};
@@ -1786,6 +1786,66 @@ fn cross_variant_comparison_keeps_origins_and_is_order_stable() {
             .iter()
             .map(|member| member.id)
             .collect::<Vec<_>>()
+    );
+}
+
+/// Two content-identical units of one origin keep the identities they were
+/// given when one of the files is renamed. The reporting order follows the new
+/// paths; the identities do not follow the reporting order.
+#[test]
+fn renaming_a_file_moves_no_cross_variant_member_identity() {
+    let tokens = [Token {
+        kind: TokenKind::Identifier,
+        text: "same".into(),
+        span: SourceSpan {
+            start_byte: 0,
+            end_byte: 4,
+            start_line: 1,
+            start_column: 1,
+        },
+    }];
+    let unit = |origin_variant, file_path, start_line| CrossVariantUnit {
+        origin_variant,
+        language: Language::C,
+        file_path,
+        start_line,
+        end_line: start_line + 2,
+        name: Some("same"),
+        tokens: &tokens,
+    };
+    let identities = |comparison: &CrossVariantComparison| {
+        comparison
+            .groups
+            .iter()
+            .flat_map(|group| group.members.iter().map(|member| member.id))
+            .collect::<BTreeSet<_>>()
+    };
+
+    let units = [
+        unit("a", "src/alpha.c", 1),
+        unit("a", "src/zeta.c", 40),
+        unit("b", "other/alpha.c", 1),
+    ];
+    let before = compare_build_variants(&units).expect("two origins");
+    // The same tree with one file renamed past its sibling in path order.
+    let renamed = [
+        unit("a", "src/omega.c", 1),
+        unit("a", "src/zeta.c", 40),
+        unit("b", "other/alpha.c", 1),
+    ];
+    let after = compare_build_variants(&renamed).expect("two origins");
+
+    assert_eq!(before.groups.len(), 1);
+    assert_eq!(before.groups[0].members.len(), 3);
+    assert_eq!(identities(&before), identities(&after));
+    assert_eq!(
+        after.groups[0]
+            .members
+            .iter()
+            .map(|member| member.file_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["src/omega.c", "src/zeta.c", "other/alpha.c"],
+        "the reporting order still follows the origin variant and then the paths"
     );
 }
 

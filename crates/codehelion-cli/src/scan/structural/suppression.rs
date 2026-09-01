@@ -465,8 +465,11 @@ pub(super) fn evaluate_suppression(
                 .zip(ranks)
                 .map(|(sibling, rank)| {
                     let unit = &analysis.units[sibling.unit];
-                    let finding =
-                        stable_id::finding_id(&detail.fingerprint, Some(&unit.fingerprint), rank);
+                    let finding = stable_id::finding_id(
+                        &detail.fingerprint,
+                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
+                        rank,
+                    );
                     shared::SuppressionPriority::first(|| {
                         rules.rules.clone_id_rule(&finding.to_hex())
                     })

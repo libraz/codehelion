@@ -383,9 +383,10 @@ pub struct ArtifactArgs {
     /// Replace an existing output file.
     #[arg(long, requires = "output")]
     pub force: bool,
-    /// Include every extracted symbol in a text report.
-    #[arg(short, long, action = clap::ArgAction::Count)]
-    pub verbose: u8,
+    /// Add every extracted import, relocation, data segment, and symbol to a
+    /// text report; JSON and CSV already carry them regardless of this flag.
+    #[arg(short, long)]
+    pub verbose: bool,
     /// Reject an artifact larger than this many bytes before parsing it.
     #[arg(long, default_value_t = DEFAULT_ARTIFACT_MAX_BYTES)]
     pub max_bytes: u64,
@@ -486,9 +487,10 @@ pub struct ArtifactReportArgs {
     /// Replace an existing output file.
     #[arg(long, requires = "output")]
     pub force: bool,
-    /// Include every extracted symbol in a text report.
-    #[arg(short, long, action = clap::ArgAction::Count)]
-    pub verbose: u8,
+    /// Add every extracted import, relocation, data segment, and symbol to a
+    /// text report; JSON and CSV already carry them regardless of this flag.
+    #[arg(short, long)]
+    pub verbose: bool,
 }
 
 /// Private file-based request passed from an artifact command to its worker.
@@ -587,7 +589,10 @@ pub struct ArtifactCompareArgs {
     /// whole-artifact difference is never assigned to a group by inference.
     /// `--db` is optional here and resolves to the same local database every
     /// other command resolves; it is the pair above that decides whether a
-    /// calibration is recorded at all.
+    /// calibration is recorded at all. The resulting `verified_savings_bytes`
+    /// attributes the whole observed artifact difference to this clone group,
+    /// which holds only when the two artifacts differ in nothing else besides
+    /// the refactoring being measured.
     #[arg(long)]
     pub source_run: Option<i64>,
     /// Stable clone-group fingerprint to evaluate against this comparison.
@@ -758,6 +763,9 @@ pub struct ScanArgs {
     /// is discovered inside the tree being scanned, so a repository could set
     /// its own trust level — which is the one setting whose whole point is that
     /// its subject does not choose it.
+    ///
+    /// A configured database path must remain inside `--path`; an explicit
+    /// `--db` remains a deliberate operator choice.
     ///
     /// Semantic mode additionally requires an OS-enforced helper memory
     /// ceiling, so `--untrusted --mode semantic` runs on Linux only.
@@ -1465,6 +1473,37 @@ mod tests {
         ] {
             let error = Cli::try_parse_from(args).expect_err("force without output is rejected");
             assert!(error.to_string().contains("--output"));
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Parsed verbose state and its rejection are the test subject.
+    fn artifact_verbose_is_a_single_switch_not_a_repeatable_depth() {
+        for args in [
+            vec!["codehelion", "artifact", "analyze", "fixture.wasm", "-v"],
+            vec!["codehelion", "artifact", "report", "--analysis", "1", "-v"],
+        ] {
+            let parsed = Cli::try_parse_from(args).expect("a single -v parses");
+            match parsed.command {
+                Command::Artifact {
+                    action: ArtifactAction::Analyze(args),
+                } => assert!(args.verbose),
+                Command::Artifact {
+                    action: ArtifactAction::Report(args),
+                } => assert!(args.verbose),
+                other => unreachable!("unexpected command: {other:?}"),
+            }
+        }
+
+        // A second repetition offers no output the first level does not
+        // already produce, so the flag no longer syntactically accepts it.
+        for args in [
+            vec!["codehelion", "artifact", "analyze", "fixture.wasm", "-vv"],
+            vec!["codehelion", "artifact", "report", "--analysis", "1", "-vv"],
+        ] {
+            let error = Cli::try_parse_from(args)
+                .expect_err("a repeated -v is rejected rather than silently accepted");
+            assert!(error.to_string().contains("--verbose"), "{error}");
         }
     }
 }

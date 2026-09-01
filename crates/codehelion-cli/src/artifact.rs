@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::Path as FilePath;
 #[cfg(test)]
 use std::time::Duration;
@@ -38,7 +38,7 @@ use codehelion_store::query::{
     SourceFragmentIdentity, SourceInstantiation, SourceResolvedCall, SourceResolvedSymbol,
     SourceUnitIdentity,
 };
-use codehelion_store::{Store, fingerprint_hex};
+use codehelion_store::{CalibrationRecord, Store, fingerprint_hex};
 use serde::{Deserialize, Serialize};
 
 use crate::Outcome;
@@ -164,7 +164,7 @@ fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
     match args.format {
         ArtifactFormat::Json => serde_json::to_writer_pretty(&mut rendered, &report)?,
         ArtifactFormat::Csv => render_csv(&report, &mut rendered)?,
-        ArtifactFormat::Text => render_text(&report, args.verbose > 0, &mut rendered)?,
+        ArtifactFormat::Text => render_text(&report, args.verbose, &mut rendered)?,
     }
     rendered.push(b'\n');
     if let Some(path) = &args.output {
@@ -176,6 +176,21 @@ fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
 }
 
 fn untrusted_containment(args: &ArtifactArgs) -> Option<ArtifactContainment> {
+    if !args.untrusted {
+        return None;
+    }
+    let memory = args.max_memory_bytes?;
+    Some(ArtifactContainment {
+        max_input_bytes: args.max_bytes,
+        worker_timeout_seconds: args.timeout_seconds,
+        worker_memory_limit_bytes: memory,
+    })
+}
+
+/// The `artifact compare` twin of [`untrusted_containment`]: both artifacts
+/// were clamped under the same `--untrusted` preset, so one containment
+/// statement covers the whole comparison.
+fn compare_untrusted_containment(args: &ArtifactCompareArgs) -> Option<ArtifactContainment> {
     if !args.untrusted {
         return None;
     }
@@ -245,7 +260,7 @@ pub fn report(args: &ArtifactReportArgs, out: &mut impl Write) -> Result<Outcome
     match args.format {
         ArtifactFormat::Json => serde_json::to_writer_pretty(&mut rendered, &report)?,
         ArtifactFormat::Csv => render_csv(&report, &mut rendered)?,
-        ArtifactFormat::Text => render_text(&report, args.verbose > 0, &mut rendered)?,
+        ArtifactFormat::Text => render_text(&report, args.verbose, &mut rendered)?,
     }
     rendered.push(b'\n');
     if let Some(path) = &args.output {
@@ -318,6 +333,89 @@ fn recorded_correlation(
     Ok(Some(ArtifactCorrelationReport::from_rows(
         source_run, artifact, &rows,
     )))
+}
+
+/// A named output destination claimed before any durable work starts.
+///
+/// `artifact analyze` and `artifact compare` commit rows from a private worker
+/// process, and nothing can take those rows back once the worker has exited.
+/// Claiming the destination first is what keeps a refusal to overwrite from
+/// arriving after such a commit: whichever way the run then ends, whether the
+/// report could be written was already settled.
+///
+/// A destination this claim created is removed again unless the report is
+/// written into it, so a failed run leaves nothing behind to refuse the retry.
+/// A file that was already there is left exactly as it was found.
+struct OutputReservation {
+    path: std::path::PathBuf,
+    file: fs::File,
+    /// Whether the claim brought the file into existence.
+    created: bool,
+    /// Whether the report reached the file, which is what retires the claim.
+    written: bool,
+}
+
+impl OutputReservation {
+    /// Claim `path` under the same `force` decision the write would make.
+    fn claim(path: &FilePath, force: bool) -> Result<Self> {
+        let reserve = |file, created| Self {
+            path: path.to_path_buf(),
+            file,
+            created,
+            written: false,
+        };
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(file) => Ok(reserve(file, true)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !force {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "writing {} (refusing to overwrite an existing file; pass --force to replace it)",
+                            path.display()
+                        )
+                    });
+                }
+                // Opening the existing file establishes that replacing it is
+                // permitted, and leaves its current contents alone until the
+                // report is ready.
+                let file = fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                Ok(reserve(file, false))
+            }
+            Err(error) => Err(error).with_context(|| format!("writing {}", path.display())),
+        }
+    }
+
+    /// Write the finished report into the claimed destination.
+    fn commit(mut self, bytes: &[u8]) -> Result<()> {
+        self.replace_contents(bytes)
+            .with_context(|| format!("writing {}", self.path.display()))?;
+        self.written = true;
+        Ok(())
+    }
+
+    fn replace_contents(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.file.set_len(0)?;
+        self.file.seek(std::io::SeekFrom::Start(0))?;
+        self.file.write_all(bytes)
+    }
+}
+
+impl Drop for OutputReservation {
+    fn drop(&mut self) {
+        if self.written || !self.created {
+            return;
+        }
+        // The failure the caller reports is what it acts on; a placeholder
+        // that cannot be removed leaves nothing else to try.
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 fn write_output(path: &FilePath, bytes: &[u8], force: bool) -> Result<()> {
@@ -614,6 +712,7 @@ fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Ou
         &after,
         after_variant.as_ref().map(BuildVariantEvidence::for_report),
     );
+    report.containment = compare_untrusted_containment(args);
     worker::set_stage("calibration persistence");
     report.calibration = record_comparison_calibration(
         args,
@@ -692,24 +791,24 @@ fn record_comparison_calibration(
     let db = database.ok_or_else(|| anyhow::anyhow!("calibration database is absent"))?;
     let mut store = Store::open_existing(db)
         .with_context(|| format!("opening calibration database {}", db.display()))?;
-    let candidates = store.clone_group_savings(source_run, clone_group)?;
-    let mut matching = Vec::new();
-    for (analysis_id, estimate) in candidates {
-        let identity = store
-            .artifact_analysis_identity(analysis_id)?
-            .ok_or_else(|| anyhow::anyhow!("saved estimate refers to missing artifact analysis"))?;
-        if estimate.artifact_build_variant_fingerprint == before_variant.fingerprint.as_bytes()
-            && identity.content_fingerprint == before.fingerprint.as_bytes()
-            && identity.build_variant_fingerprint == Some(before_variant.fingerprint.as_bytes())
-        {
-            matching.push((analysis_id, estimate));
-        }
-    }
-    let [(analysis_id, estimate)] = matching.as_slice() else {
-        bail!(
-            "calibration needs exactly one matching saved estimate for this source run, group, artifact, and build variant"
-        );
-    };
+    // Analysing the same artifact twice leaves two rows describing one
+    // measurement. The store resolves them under its own recency order and
+    // names the analysis it took, so re-analysing never makes this path
+    // unusable.
+    let selected = store
+        .select_clone_group_estimate(
+            source_run,
+            clone_group,
+            before.fingerprint.as_bytes(),
+            before_variant.fingerprint.as_bytes(),
+        )?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "calibration found no saved estimate for this source run, group, artifact, and build variant"
+            )
+        })?;
+    let analysis_id = selected.artifact_analysis_id;
+    let estimate = &selected.estimate;
     let verified =
         i64::try_from(i128::from(before.observed_bytes) - i128::from(after.observed_bytes))
             .map_err(|_| anyhow::anyhow!("artifact size difference exceeds calibration range"))?;
@@ -726,7 +825,7 @@ fn record_comparison_calibration(
         (verified != 0).then(|| absolute_error as f64 / verified.unsigned_abs() as f64);
     let calibration = ArtifactAnalysisSavingsCalibration {
         schema_version: ARTIFACT_ANALYSIS_SAVINGS_CALIBRATION_SCHEMA_VERSION.to_owned(),
-        artifact_analysis_id: *analysis_id,
+        artifact_analysis_id: analysis_id,
         source_scan_run_id: source_run,
         clone_group_fingerprint: estimate.clone_group_fingerprint,
         source_build_variant_fingerprint: estimate.source_build_variant_fingerprint,
@@ -739,7 +838,9 @@ fn record_comparison_calibration(
         relative_error,
         recorded_at: crate::scan::rfc3339_now(),
     };
-    store.record_artifact_savings_calibration(&calibration)?;
+    // Recording is idempotent, so taking the measurement again reports the
+    // same comparison instead of failing the whole command.
+    let record = store.record_artifact_savings_calibration(&calibration)?;
     Ok(Some(CalibrationReport {
         source_run,
         clone_group_fingerprint: clone_group.to_owned(),
@@ -749,6 +850,9 @@ fn record_comparison_calibration(
         verified_savings_bytes: VerifiedSavingsBytes(verified),
         absolute_error_bytes: absolute_error,
         relative_error,
+        artifact_analysis_id: analysis_id,
+        matching_analyses: selected.matching_analyses,
+        already_recorded: matches!(record, CalibrationRecord::ReRecorded),
     }))
 }
 
@@ -905,6 +1009,14 @@ fn resolve_wasm_source_map(
     }
     let Some(parent) = artifact_path.parent() else {
         return unavailable("artifact_parent_unavailable");
+    };
+    // A bare filename's parent is the empty path, not the current directory,
+    // even though that is where it resolves. Left as-is, canonicalizing it
+    // fails and blames a parent that is not in fact unavailable.
+    let parent = if parent.as_os_str().is_empty() {
+        FilePath::new(".")
+    } else {
+        parent
     };
     let Ok(root) = codehelion_core::paths::canonical(parent) else {
         return unavailable("artifact_parent_unavailable");

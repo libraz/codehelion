@@ -4,7 +4,7 @@
 [![crates.io](https://img.shields.io/crates/v/codehelion.svg)](https://crates.io/crates/codehelion)
 [![codecov](https://codecov.io/gh/libraz/codehelion/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/codehelion)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/libraz/codehelion/blob/main/LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange?logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-1.98%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](https://github.com/libraz/codehelion)
 
 Find duplicated logic in Rust, C and C++ — and keep finding the same duplication
@@ -141,9 +141,9 @@ bundled. To build from a checkout instead:
 cargo install --path crates/codehelion-cli
 ```
 
-The CLI and every non-semantic component require Rust 1.85 or newer. The
-optional Rust semantic helper has a separate Rust 1.95-or-newer build
-requirement; its higher toolchain need does not change the CLI's MSRV.
+Everything here requires Rust 1.98 or newer, the optional Rust semantic helper
+included. The analysis libraries that helper is built on set the floor, and it
+is one floor rather than one per component.
 
 Semantic scanning additionally needs the helper for each language you want to
 analyse. Install the helpers onto `PATH`, then use `doctor` to confirm their
@@ -310,6 +310,31 @@ DWARF for ELF, a matching dSYM for Mach-O, a matching PDB for PE/COFF, a
 recorded source-map URL for WASM. A quantity the format cannot supply is
 reported as unavailable beside an assumption naming what was missing, rather
 than as a number.
+
+These commands measure the artifact as it was built; they do not forecast what
+consolidating duplication in the source would take out of it. The gap between
+the two is wide. In one measured project, removing 238 lines of real code —
+2,714 duplicated tokens — took 3,554 bytes (0.14%) off the uncompressed build
+and 584 bytes (0.09%) off the Brotli-compressed one; two releases later,
+consolidating 14 clone groups took off 15,323 bytes (0.56%) uncompressed and
+928 bytes (0.13%) compressed, 6% of the uncompressed figure. The reason sits
+upstream of the refactor: the linker and `wasm-opt` fold identical code before
+it ships, and a 2.6 MiB shipped WASM module was measured to hold 20 bytes of
+byte-identical duplicate in all. Consolidating duplication in the source is
+worth doing where the size ceiling is an uncompressed number — a memory-mapped
+image, a firmware image, a WASM module measured before transport encoding —
+and buys close to nothing where the ceiling is measured after gzip or Brotli.
+
+How many copies exist in the source and how many instantiations exist in the
+binary are different axes, and only the first is in codehelion's search model.
+In one measured tree, 1,730 of the 2,726 bytes recovered — 63% — came from a
+single source-level template that the compiler had turned into 14 distinct
+instantiations, because the predicate closure type differed at every call
+site. There is one copy to find in the source, so no clone group describes the
+multiplicity; the group codehelion did report on that tree accounted for the
+other 996 bytes, the smaller half. Where a binary's size is dominated by how
+many times something was instantiated rather than by how many times it was
+copied, this is not the tool that measures it.
 
 ```sh
 codehelion artifact analyze path/to/binary
@@ -512,6 +537,19 @@ a candidate beyond the sibling-search ceiling can still keep a copy out;
 codehelion is not a mirror-consistency checker. It does not prove that every
 mirror has been found or that two same-signature bodies behave alike.
 
+An intact copy is maintenance debt; a copy that has drifted is a bug today —
+and the drifted one is the harder of the two to detect, which is the reverse
+of the order a mirror audit wants. In one measured case an enum-to-string
+mapping had been hand-mirrored across three surfaces: the three intact copies
+were all grouped, and the one copy actually missing three names — the copy
+causing a live bug — landed in no group at all. In another, three functions
+built the same path; the two exact ones were grouped, and the third,
+differing only in taking an early return where the others used an else
+branch, appeared neither under `--show-siblings` nor under
+`--show-near-misses`. Both were found by hand, with `grep`. So when a group is
+reported, read what sits beside it: the same-shaped neighbours the group does
+not include are where a drifted copy is most likely to be.
+
 **A layer built on one signature gets nothing from that channel.** Where a
 dispatch or callback table gives a hundred functions the same callable shape,
 the signature separates nothing, and the channel has no evidence to offer
@@ -526,12 +564,24 @@ by the ceilings rather than by disk.
 
 **Artifact inspection depends on symbols.** A stripped binary yields almost
 nothing; supply the unstripped build or a verified debug companion. Duplicate
-detection that sees past register and immediate differences is implemented for
-x86 only — on other architectures, only byte-identical duplicates are found.
-Correlating an artifact back to the sources reads a name out of each symbol,
-which is done for Rust and for the Itanium C++ ABI; a C++ artifact decorated
-for the Microsoft ABI is still read for size and duplication, but reports no
-source correspondence rather than a guessed one.
+detection that sees past register and immediate differences covers native
+machine code built for x86 and, separately, WebAssembly, which is normalized
+over its own opcode stream; on a native artifact built for another
+architecture, only byte-identical duplicates are found. Correlating an artifact
+back to the sources reads a name out of each symbol, which is done for Rust and
+for the Itanium C++ ABI; a C++ artifact decorated for the Microsoft ABI is
+still read for size and duplication, but reports no source correspondence
+rather than a guessed one.
+
+**A WebAssembly module correlates to source one symbol at a time.** ELF, Mach-O
+and PE/COFF reach a source line through DWARF, a matching dSYM or a matching
+PDB, and a source line is what lets a clone group's line range be attributed
+bytes. A core module carries function names in its name section and no line
+information, so correlation names whole functions and leaves clone-group byte
+attribution unavailable. Building the module with DWARF would change the size
+being measured, which is usually the reason to inspect it, so the reports say
+what the name section can and cannot support instead of asking for a build that
+answers a different question.
 
 **The audit database is not migrated.** A database written under a different
 schema is never converted, so no history carries across one. At the default

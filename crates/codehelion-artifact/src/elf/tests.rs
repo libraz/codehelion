@@ -134,6 +134,79 @@ fn linked_call_fixture() -> Vec<u8> {
     object.write().expect("write linked ELF call fixture")
 }
 
+/// One exported function whose only call is `call *%rax`, which is how a C++
+/// virtual dispatch is compiled.
+fn indirect_call_fixture() -> Vec<u8> {
+    let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+    let text = object.section_id(StandardSection::Text);
+    let caller_offset = object.append_section_data(text, &[0xff, 0xd0, 0xc3], 1);
+    let callee_offset = object.append_section_data(text, &[0xc3], 1);
+    object.add_symbol(Symbol {
+        name: b"caller".to_vec(),
+        value: caller_offset,
+        size: 3,
+        kind: SymbolKind::Text,
+        scope: SymbolScope::Linkage,
+        weak: false,
+        section: SymbolSection::Section(text),
+        flags: SymbolFlags::None,
+    });
+    object.add_symbol(Symbol {
+        name: b"reached_only_indirectly".to_vec(),
+        value: callee_offset,
+        size: 1,
+        kind: SymbolKind::Text,
+        scope: SymbolScope::Compilation,
+        weak: false,
+        section: SymbolSection::Section(text),
+        flags: SymbolFlags::None,
+    });
+    object.write().expect("write ELF indirect call fixture")
+}
+
+/// A direct call relocated to a symbol this object does not define.
+fn undefined_target_call_fixture() -> Vec<u8> {
+    let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+    let text = object.section_id(StandardSection::Text);
+    let caller_offset = object.append_section_data(text, &[0xe8, 0, 0, 0, 0, 0xc3], 1);
+    let external = object.add_symbol(Symbol {
+        name: b"defined_elsewhere".to_vec(),
+        value: 0,
+        size: 0,
+        kind: SymbolKind::Text,
+        scope: SymbolScope::Dynamic,
+        weak: false,
+        section: SymbolSection::Undefined,
+        flags: SymbolFlags::None,
+    });
+    object.add_symbol(Symbol {
+        name: b"caller".to_vec(),
+        value: caller_offset,
+        size: 6,
+        kind: SymbolKind::Text,
+        scope: SymbolScope::Linkage,
+        weak: false,
+        section: SymbolSection::Section(text),
+        flags: SymbolFlags::None,
+    });
+    object
+        .add_relocation(
+            text,
+            Relocation {
+                offset: caller_offset + 1,
+                symbol: external,
+                addend: -4,
+                flags: RelocationFlags::Generic {
+                    kind: RelocationKind::PltRelative,
+                    encoding: RelocationEncoding::X86Branch,
+                    size: 32,
+                },
+            },
+        )
+        .expect("add external call relocation");
+    object.write().expect("write ELF external call fixture")
+}
+
 fn init_array_fixture() -> Vec<u8> {
     let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
     let text = object.section_id(StandardSection::Text);
@@ -468,6 +541,65 @@ fn relocatable_call_join_uses_section_and_address() {
         assert_eq!(call.target, Some(symbol.fingerprint));
         assert!(call.unresolved.is_none());
     }
+}
+
+/// A call through a register reaches a callee this backend cannot name, so it
+/// contributes an unresolved edge. Without one, a function that only virtual
+/// dispatch reaches is reported as provably dead.
+#[test]
+fn an_indirect_call_records_an_unresolved_edge_instead_of_disappearing() {
+    let artifact = ElfBackend
+        .parse(&indirect_call_fixture())
+        .expect("indirect call fixture parses");
+    let caller = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name.as_deref() == Some("caller"))
+        .expect("caller symbol");
+
+    assert_eq!(artifact.calls.len(), 1, "{artifact:#?}");
+    assert_eq!(artifact.calls[0].caller, caller.fingerprint);
+    assert_eq!(artifact.calls[0].target, None);
+    assert_eq!(
+        artifact.calls[0].unresolved,
+        Some(UnresolvedCall::NativeIndirect)
+    );
+
+    let dead =
+        crate::metrics::dead_code_candidates(&artifact).expect("an export establishes roots");
+    assert!(!dead.definitive, "{dead:#?}");
+    assert_eq!(
+        crate::metrics::classify_sizes(&artifact).retained_bytes,
+        None
+    );
+}
+
+/// The ELF backend records an external import for a relocation whose local
+/// symbol it did not collect as well as for a genuinely external one, so it
+/// may not be read as proof that no local edge is missing.
+#[test]
+fn an_external_call_target_keeps_reachability_sizes_unavailable() {
+    let artifact = ElfBackend
+        .parse(&undefined_target_call_fixture())
+        .expect("external call fixture parses");
+
+    assert_eq!(
+        artifact.calls[0].unresolved,
+        Some(UnresolvedCall::ExternalImport)
+    );
+    let sizes = crate::metrics::classify_sizes(&artifact);
+    assert_eq!(sizes.retained_bytes, None);
+    assert_eq!(sizes.shared_dependency_bytes, None);
+    assert!(crate::metrics::retained_sizes(&artifact).is_none());
+    assert!(
+        sizes.assumptions.iter().any(|assumption| assumption
+            .contains("need every dispatch that may reach a local symbol to be resolved")),
+        "{:?}",
+        sizes.assumptions
+    );
+    let dead =
+        crate::metrics::dead_code_candidates(&artifact).expect("an export establishes roots");
+    assert!(!dead.definitive);
 }
 
 #[test]

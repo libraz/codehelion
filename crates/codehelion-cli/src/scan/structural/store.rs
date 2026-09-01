@@ -272,7 +272,7 @@ fn sibling_rows(
                         content: unit.content,
                         finding: stable_id::finding_id(
                             &detail.fingerprint,
-                            Some(&unit.fingerprint),
+                            stable_id::OccurrenceScope::Unit(&unit.fingerprint),
                             rank,
                         ),
                         basis: sibling.basis,
@@ -867,7 +867,7 @@ fn semantic_pair_row(
                     content: member.content,
                     finding: stable_id::finding_id(
                         &fingerprint,
-                        Some(&unit.fingerprint),
+                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
                         member_ranks[position],
                     ),
                     language: file.language,
@@ -958,7 +958,7 @@ fn semantic_group_row(
                     content: member.content,
                     finding: stable_id::finding_id(
                         &fingerprint,
-                        Some(&unit.fingerprint),
+                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
                         member_ranks[position],
                     ),
                     language: file.language,
@@ -1059,7 +1059,7 @@ fn unit_group_row(
                     content: unit.content,
                     finding: stable_id::finding_id(
                         &detail.fingerprint,
-                        Some(&unit.fingerprint),
+                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
                         rank,
                     ),
                     language: file.language,
@@ -1150,7 +1150,7 @@ fn split_pair_row(
                     content: unit.content,
                     finding: stable_id::finding_id(
                         &pair.fingerprint,
-                        Some(&unit.fingerprint),
+                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
                         rank,
                     ),
                     language: file.language,
@@ -1221,7 +1221,7 @@ fn region_row(
                     content: occurrence.content,
                     finding: stable_id::finding_id(
                         &region.fingerprint,
-                        Some(&unit.fingerprint),
+                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
                         rank,
                     ),
                     language: file.language,

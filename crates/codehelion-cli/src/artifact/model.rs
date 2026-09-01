@@ -145,7 +145,13 @@ impl ArtifactReport {
         let duplicates = metrics::find_duplicates(artifact);
         let data =
             metrics::find_duplicate_data(artifact, metrics::DEFAULT_MIN_DUPLICATE_DATA_BYTES);
-        let sizes = metrics::classify_sizes_from_duplicates(artifact, &duplicates, &data);
+        // Size categories, the reachability verdict and retained sizes are
+        // three questions about one call graph and one soundness verdict.
+        // Walking the artifact once for all three is what keeps them from
+        // answering the soundness question differently.
+        let graph = metrics::CallGraph::from_ir(artifact);
+        let mut sizes = graph.classify_sizes_from_duplicates(&duplicates, &data);
+        qualify_sizes(&mut sizes, &artifact.skipped_architectures);
         Self {
             schema_version: ARTIFACT_REPORT_SCHEMA_VERSION,
             path: path.display().to_string(),
@@ -158,17 +164,8 @@ impl ArtifactReport {
             observed_bytes: artifact.observed_bytes,
             architecture: artifact.architecture.clone(),
             skipped_architectures: artifact.skipped_architectures.clone(),
-            code_section_bytes: artifact
-                .sections
-                .iter()
-                .filter(|section| section.executable)
-                .map(|section| section.size)
-                .sum(),
-            data_segment_bytes: artifact
-                .data_segments
-                .iter()
-                .map(|segment| segment.bytes.len() as u64)
-                .sum(),
+            code_section_bytes: code_section_bytes(artifact),
+            data_segment_bytes: data_segment_bytes(artifact),
             sections: artifact.sections.len(),
             section_details: section_reports(artifact),
             imports: artifact.imports.len(),
@@ -208,8 +205,8 @@ impl ArtifactReport {
             data_segment_details: data_segment_reports(artifact),
             capabilities: artifact.capabilities,
             sizes,
-            dead_code: metrics::dead_code_candidates(artifact),
-            retained_sizes: metrics::retained_sizes(artifact),
+            dead_code: graph.dead_code_candidates(),
+            retained_sizes: graph.retained_sizes(),
             duplicates: DuplicateSummary {
                 exact_groups: duplicates.exact.len(),
                 exact_duplicated_bytes: duplicates
@@ -338,9 +335,15 @@ pub(super) struct ArtifactComparisonReport {
     pub(super) schema_version: &'static str,
     pub(super) before: ComparisonArtifact,
     pub(super) after: ComparisonArtifact,
+    pub(super) containment: Option<ArtifactContainment>,
     pub(super) observed_size_reduction_bytes: ObservedSizeReductionBytes,
     pub(super) duplicated_code_delta_bytes: i128,
     pub(super) duplicated_data_delta_bytes: Option<i128>,
+    /// Signed change in executable section bytes, so an observed difference
+    /// can be attributed to code rather than to embedded data.
+    pub(super) code_section_delta_bytes: i128,
+    /// Signed change in data segment bytes, the other half of that question.
+    pub(super) data_segment_delta_bytes: i128,
     pub(super) calibration: Option<CalibrationReport>,
     pub(super) symbol_changes: SymbolChanges,
     pub(super) symbol_deltas: Vec<SymbolDelta>,
@@ -354,6 +357,17 @@ pub(super) struct ArtifactComparisonReport {
 pub(super) struct CalibrationReport {
     pub(super) source_run: i64,
     pub(super) clone_group_fingerprint: String,
+    /// Saved analysis whose stored estimate this measurement calibrated.
+    ///
+    /// Analysing one artifact twice leaves several analyses of one identity,
+    /// so the report names the one the measurement was taken against instead
+    /// of leaving the choice invisible.
+    pub(super) artifact_analysis_id: i64,
+    /// How many saved analyses held an estimate of that same identity.
+    pub(super) matching_analyses: usize,
+    /// Whether a measurement of this identity was already on file, in which
+    /// case recording refreshed that row rather than failing the comparison.
+    pub(super) already_recorded: bool,
     pub(super) estimated_refactor_savings_bytes: EstimatedRefactorSavingsBytes,
     pub(super) verified_savings_bytes: VerifiedSavingsBytes,
     pub(super) absolute_error_bytes: u64,
@@ -368,6 +382,11 @@ pub(super) struct ComparisonArtifact {
     pub(super) architecture: Option<String>,
     pub(super) skipped_architectures: Vec<String>,
     pub(super) build_variant: Option<ComparisonBuildVariant>,
+    /// Executable section bytes, derived exactly as the single-artifact report
+    /// derives them, so both surfaces answer "code or data?" the same way.
+    pub(super) code_section_bytes: u64,
+    /// Data segment bytes, derived the same way for the same reason.
+    pub(super) data_segment_bytes: u64,
     pub(super) sizes: metrics::SizeClassification,
 }
 
@@ -432,13 +451,15 @@ impl ArtifactComparisonReport {
         let before_duplicates = metrics::find_duplicates(before);
         let before_data =
             metrics::find_duplicate_data(before, metrics::DEFAULT_MIN_DUPLICATE_DATA_BYTES);
-        let before_sizes =
-            metrics::classify_sizes_from_duplicates(before, &before_duplicates, &before_data);
+        let mut before_sizes = metrics::CallGraph::from_ir(before)
+            .classify_sizes_from_duplicates(&before_duplicates, &before_data);
+        qualify_sizes(&mut before_sizes, &before.skipped_architectures);
         let after_duplicates = metrics::find_duplicates(after);
         let after_data =
             metrics::find_duplicate_data(after, metrics::DEFAULT_MIN_DUPLICATE_DATA_BYTES);
-        let after_sizes =
-            metrics::classify_sizes_from_duplicates(after, &after_duplicates, &after_data);
+        let mut after_sizes = metrics::CallGraph::from_ir(after)
+            .classify_sizes_from_duplicates(&after_duplicates, &after_data);
+        qualify_sizes(&mut after_sizes, &after.skipped_architectures);
         let before_symbols = symbol_counts(before);
         let after_symbols = symbol_counts(after);
         let added = count_difference(&after_symbols, &before_symbols);
@@ -456,6 +477,7 @@ impl ArtifactComparisonReport {
                 .to_owned(),
             "observed_size_reduction_bytes is a measured artifact-byte difference, not a refactoring estimate"
                 .to_owned(),
+            VERIFIED_SAVINGS_NEEDS_CONTROL.to_owned(),
         ];
         if before.format != after.format {
             assumptions.push(
@@ -463,11 +485,13 @@ impl ArtifactComparisonReport {
                     .to_owned(),
             );
         }
+        if !before.skipped_architectures.is_empty() || !after.skipped_architectures.is_empty() {
+            assumptions.push(CONTAINER_WIDE_OBSERVED_BYTES.to_owned());
+        }
+        // The warning has a reported field of its own, and one condition
+        // stated twice reads as two independent conditions.
         let build_variant_warning =
             build_variant_warning(before_variant.as_ref(), after_variant.as_ref());
-        if let Some(warning) = &build_variant_warning {
-            assumptions.push(warning.clone());
-        }
         Self {
             schema_version: ARTIFACT_COMPARISON_REPORT_SCHEMA_VERSION,
             before: ComparisonArtifact {
@@ -477,6 +501,8 @@ impl ArtifactComparisonReport {
                 architecture: before.architecture.clone(),
                 skipped_architectures: before.skipped_architectures.clone(),
                 build_variant: before_variant,
+                code_section_bytes: code_section_bytes(before),
+                data_segment_bytes: data_segment_bytes(before),
                 sizes: before_sizes.clone(),
             },
             after: ComparisonArtifact {
@@ -486,8 +512,11 @@ impl ArtifactComparisonReport {
                 architecture: after.architecture.clone(),
                 skipped_architectures: after.skipped_architectures.clone(),
                 build_variant: after_variant,
+                code_section_bytes: code_section_bytes(after),
+                data_segment_bytes: data_segment_bytes(after),
                 sizes: after_sizes.clone(),
             },
+            containment: None,
             observed_size_reduction_bytes: ObservedSizeReductionBytes(
                 i128::from(before_sizes.observed_bytes) - i128::from(after_sizes.observed_bytes),
             ),
@@ -499,6 +528,14 @@ impl ArtifactComparisonReport {
                 .duplicated_data_bytes
                 .zip(before_sizes.duplicated_data_bytes)
                 .map(|(after, before)| difference(after, before)),
+            code_section_delta_bytes: difference(
+                code_section_bytes(after),
+                code_section_bytes(before),
+            ),
+            data_segment_delta_bytes: difference(
+                data_segment_bytes(after),
+                data_segment_bytes(before),
+            ),
             calibration: None,
             symbol_changes: SymbolChanges {
                 added,
@@ -692,6 +729,383 @@ pub(super) fn modified_named_symbols(before: &ArtifactIr, after: &ArtifactIr) ->
 
 pub(super) fn difference(after: u64, before: u64) -> i128 {
     i128::from(after) - i128::from(before)
+}
+
+/// Executable section bytes observed in one artifact.
+pub(super) fn code_section_bytes(artifact: &ArtifactIr) -> u64 {
+    artifact
+        .sections
+        .iter()
+        .filter(|section| section.executable)
+        .map(|section| section.size)
+        .sum()
+}
+
+/// Data segment bytes observed in one artifact.
+pub(super) fn data_segment_bytes(artifact: &ArtifactIr) -> u64 {
+    artifact
+        .data_segments
+        .iter()
+        .map(|segment| segment.bytes.len() as u64)
+        .sum()
+}
+
+/// Where in a report one qualifying statement belongs.
+///
+/// Text prints a statement under the block whose numbers it qualifies, CSV
+/// names that block in a column, and JSON carries it inside that block. The
+/// scope is what lets three renderings place one statement without any of them
+/// inventing a fourth statement, dropping one, or printing one twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AssumptionScope {
+    /// Qualifies the size categories.
+    Sizes,
+    /// States why reachability-derived sizes are absent.
+    RetainedSizes,
+    /// Qualifies the reachability verdict.
+    DeadCode,
+    /// The build-condition warning, which the report also exposes as its own
+    /// field and which therefore has exactly one place in each rendering.
+    BuildVariant,
+    /// Qualifies a before/after comparison as a whole.
+    Comparison,
+}
+
+impl AssumptionScope {
+    /// The CSV spelling of this scope.
+    pub(super) const fn field(self) -> &'static str {
+        match self {
+            Self::Sizes => "sizes",
+            Self::RetainedSizes => "retained_sizes",
+            Self::DeadCode => "dead_code",
+            Self::BuildVariant => "build_variant",
+            Self::Comparison => "comparison",
+        }
+    }
+}
+
+/// One qualifying statement together with the block it qualifies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ReportAssumption<'a> {
+    /// The reported block this statement qualifies.
+    pub(super) scope: AssumptionScope,
+    /// The statement itself, as the report carries it.
+    pub(super) text: &'a str,
+}
+
+/// How the metrics crate opens each reason it withdraws a reachability size.
+///
+/// Those reasons name the condition that actually held for one artifact, so a
+/// report states them instead of asserting a single canned cause.
+const WITHDRAWN_SIZE_PREFIX: &str = "retained and shared dependency sizes need";
+
+/// The upper bound is a code total, and duplicate data is reported beside it.
+const UPPER_BOUND_EXCLUDES_DATA: &str =
+    "upper_bound_savings_bytes counts duplicate code only and excludes duplicated_data_bytes";
+
+/// Byte counts read from a container outlive the slice selected inside it.
+const CONTAINER_WIDE_OBSERVED_BYTES: &str = "observed byte counts cover the whole container, including the skipped architecture slices; only section, symbol and duplicate counts are limited to the selected architecture";
+
+/// A verified saving belongs to one refactoring only under a controlled pair.
+const VERIFIED_SAVINGS_NEEDS_CONTROL: &str = "verified_savings_bytes attributes the whole observed artifact difference to the calibrated clone group, which holds only when the two artifacts differ in nothing else; this comparison establishes the artifact format and the build variant and nothing further";
+
+/// State what the reported size fields leave out, beside what their derivation
+/// already assumed.
+///
+/// These reach every rendering because they are added while the report is
+/// built: JSON serializes them from the same vector text and CSV read.
+pub(super) fn qualify_sizes(
+    sizes: &mut metrics::SizeClassification,
+    skipped_architectures: &[String],
+) {
+    if sizes.upper_bound_savings_bytes.is_some() {
+        sizes.assumptions.push(UPPER_BOUND_EXCLUDES_DATA.to_owned());
+    }
+    if !skipped_architectures.is_empty() {
+        sizes
+            .assumptions
+            .push(CONTAINER_WIDE_OBSERVED_BYTES.to_owned());
+    }
+}
+
+/// Every statement qualifying one artifact report, each stated once.
+pub(super) fn report_assumptions(report: &ArtifactReport) -> Vec<ReportAssumption<'_>> {
+    let withdrawn = report.retained_sizes.is_none();
+    let mut assumptions: Vec<_> = report
+        .sizes
+        .assumptions
+        .iter()
+        .map(|text| ReportAssumption {
+            scope: if withdrawn && text.starts_with(WITHDRAWN_SIZE_PREFIX) {
+                AssumptionScope::RetainedSizes
+            } else {
+                AssumptionScope::Sizes
+            },
+            text: text.as_str(),
+        })
+        .collect();
+    if let Some(dead_code) = &report.dead_code {
+        assumptions.extend(dead_code.assumptions.iter().map(|text| ReportAssumption {
+            scope: AssumptionScope::DeadCode,
+            text: text.as_str(),
+        }));
+    }
+    stated_once(assumptions)
+}
+
+/// Every statement qualifying one comparison, each stated once.
+pub(super) fn comparison_assumptions(
+    report: &ArtifactComparisonReport,
+) -> Vec<ReportAssumption<'_>> {
+    let mut assumptions: Vec<_> = report
+        .build_variant_warning
+        .iter()
+        .map(|text| ReportAssumption {
+            scope: AssumptionScope::BuildVariant,
+            text: text.as_str(),
+        })
+        .collect();
+    assumptions.extend(report.assumptions.iter().map(|text| ReportAssumption {
+        scope: AssumptionScope::Comparison,
+        text: text.as_str(),
+    }));
+    stated_once(assumptions)
+}
+
+/// Drop a statement that repeats one already collected.
+fn stated_once(assumptions: Vec<ReportAssumption<'_>>) -> Vec<ReportAssumption<'_>> {
+    let mut stated = BTreeSet::new();
+    assumptions
+        .into_iter()
+        .filter(|assumption| stated.insert(assumption.text))
+        .collect()
+}
+
+/// Why a report carries no reachability verdict, naming the condition that
+/// actually held rather than one of the two that could have.
+pub(super) const fn dead_code_unavailability(report: &ArtifactReport) -> &'static str {
+    if report.capabilities.call_graph {
+        "no parser-established root: this artifact declares no export, entry point, or recorded function reference"
+    } else {
+        "this format backend establishes no call edges"
+    }
+}
+
+/// Why a report carries no retained sizes, naming each condition that held.
+///
+/// The reasons come from the walk that withdrew the values, so a report never
+/// explains an absent number with a condition that did not fire.
+pub(super) fn retained_size_unavailability(report: &ArtifactReport) -> Vec<&str> {
+    report
+        .sizes
+        .assumptions
+        .iter()
+        .filter(|text| text.starts_with(WITHDRAWN_SIZE_PREFIX))
+        .map(String::as_str)
+        .collect()
+}
+
+/// Every artifact CSV column, in the order they are written.
+///
+/// The CSV is one union table discriminated by `record_type`. A column is
+/// named for exactly one quantity: a record that has no such quantity leaves
+/// it empty rather than borrowing a neighbouring column, and a quantity the
+/// text or JSON rendering states has a column of its own. Columns are only
+/// ever appended, so a consumer reading by position keeps reading the same
+/// value after a release adds one.
+pub(super) const ARTIFACT_CSV_HEADER: &[&str] = &[
+    "record_type",
+    "path",
+    "format",
+    "kind",
+    "fingerprint",
+    "name",
+    "offset",
+    "size",
+    "duplicated_bytes",
+    "retained_bytes",
+    "dead_code_status",
+    "observed_bytes",
+    "source_run",
+    "mappings",
+    "mapped_symbols",
+    "unmapped_symbols",
+    "upper_bound_savings_bytes",
+    "estimated_refactor_savings_bytes",
+    "verified_savings_bytes",
+    "origin_build_variant_fingerprint",
+    "instantiations",
+    "translation_units",
+    "source_build_variant_fingerprint",
+    "artifact_build_variant_fingerprint",
+    "mapping_confidence",
+    "clone_confidence",
+    "model_confidence",
+    "savings_confidence",
+    "model_schema_version",
+    "estimate_assumptions_json",
+    "section",
+    "executable",
+    "module",
+    "duplicated_bytes_normalized",
+    "estimated_duplicated_bytes",
+    "attribution_basis",
+    "shared_dependency_bytes",
+    "code_section_bytes",
+    "data_segment_bytes",
+    "artifact_symbols",
+    "definition_path_count",
+    "members",
+    "attributed_noncanonical_members",
+    "assumption_scope",
+    "assumption",
+    "max_input_bytes",
+    "worker_timeout_seconds",
+    "worker_memory_limit_bytes",
+    "source_map_uri",
+    "source_map_local_path",
+    "source_map_sources",
+];
+
+// Columns are only ever appended, so the published width never shrinks.
+const _: () = assert!(ARTIFACT_CSV_HEADER.len() >= super::ARTIFACT_CSV_COLUMNS);
+
+/// Column positions in [`ARTIFACT_CSV_HEADER`], named as the header names them.
+pub(super) mod column {
+    pub(in crate::artifact) const RECORD_TYPE: usize = 0;
+    pub(in crate::artifact) const PATH: usize = 1;
+    pub(in crate::artifact) const FORMAT: usize = 2;
+    pub(in crate::artifact) const KIND: usize = 3;
+    pub(in crate::artifact) const FINGERPRINT: usize = 4;
+    pub(in crate::artifact) const NAME: usize = 5;
+    pub(in crate::artifact) const OFFSET: usize = 6;
+    pub(in crate::artifact) const SIZE: usize = 7;
+    pub(in crate::artifact) const DUPLICATED_BYTES: usize = 8;
+    pub(in crate::artifact) const RETAINED_BYTES: usize = 9;
+    pub(in crate::artifact) const DEAD_CODE_STATUS: usize = 10;
+    pub(in crate::artifact) const OBSERVED_BYTES: usize = 11;
+    pub(in crate::artifact) const SOURCE_RUN: usize = 12;
+    pub(in crate::artifact) const MAPPINGS: usize = 13;
+    pub(in crate::artifact) const MAPPED_SYMBOLS: usize = 14;
+    pub(in crate::artifact) const UNMAPPED_SYMBOLS: usize = 15;
+    pub(in crate::artifact) const UPPER_BOUND_SAVINGS_BYTES: usize = 16;
+    pub(in crate::artifact) const ESTIMATED_REFACTOR_SAVINGS_BYTES: usize = 17;
+    pub(in crate::artifact) const VERIFIED_SAVINGS_BYTES: usize = 18;
+    pub(in crate::artifact) const ORIGIN_BUILD_VARIANT_FINGERPRINT: usize = 19;
+    pub(in crate::artifact) const INSTANTIATIONS: usize = 20;
+    pub(in crate::artifact) const TRANSLATION_UNITS: usize = 21;
+    pub(in crate::artifact) const SOURCE_BUILD_VARIANT_FINGERPRINT: usize = 22;
+    pub(in crate::artifact) const ARTIFACT_BUILD_VARIANT_FINGERPRINT: usize = 23;
+    pub(in crate::artifact) const MAPPING_CONFIDENCE: usize = 24;
+    pub(in crate::artifact) const CLONE_CONFIDENCE: usize = 25;
+    pub(in crate::artifact) const MODEL_CONFIDENCE: usize = 26;
+    pub(in crate::artifact) const SAVINGS_CONFIDENCE: usize = 27;
+    pub(in crate::artifact) const MODEL_SCHEMA_VERSION: usize = 28;
+    pub(in crate::artifact) const ESTIMATE_ASSUMPTIONS_JSON: usize = 29;
+    pub(in crate::artifact) const SECTION: usize = 30;
+    pub(in crate::artifact) const EXECUTABLE: usize = 31;
+    pub(in crate::artifact) const MODULE: usize = 32;
+    pub(in crate::artifact) const DUPLICATED_BYTES_NORMALIZED: usize = 33;
+    pub(in crate::artifact) const ESTIMATED_DUPLICATED_BYTES: usize = 34;
+    pub(in crate::artifact) const ATTRIBUTION_BASIS: usize = 35;
+    pub(in crate::artifact) const SHARED_DEPENDENCY_BYTES: usize = 36;
+    pub(in crate::artifact) const CODE_SECTION_BYTES: usize = 37;
+    pub(in crate::artifact) const DATA_SEGMENT_BYTES: usize = 38;
+    pub(in crate::artifact) const ARTIFACT_SYMBOLS: usize = 39;
+    pub(in crate::artifact) const DEFINITION_PATH_COUNT: usize = 40;
+    pub(in crate::artifact) const MEMBERS: usize = 41;
+    pub(in crate::artifact) const ATTRIBUTED_NONCANONICAL_MEMBERS: usize = 42;
+    pub(in crate::artifact) const ASSUMPTION_SCOPE: usize = 43;
+    pub(in crate::artifact) const ASSUMPTION: usize = 44;
+    pub(in crate::artifact) const MAX_INPUT_BYTES: usize = 45;
+    pub(in crate::artifact) const WORKER_TIMEOUT_SECONDS: usize = 46;
+    pub(in crate::artifact) const WORKER_MEMORY_LIMIT_BYTES: usize = 47;
+    pub(in crate::artifact) const SOURCE_MAP_URI: usize = 48;
+    pub(in crate::artifact) const SOURCE_MAP_LOCAL_PATH: usize = 49;
+    pub(in crate::artifact) const SOURCE_MAP_SOURCES: usize = 50;
+}
+
+/// Every comparison CSV column, in the order they are written, under the same
+/// union-table rules as [`ARTIFACT_CSV_HEADER`].
+pub(super) const COMPARE_CSV_HEADER: &[&str] = &[
+    "record_type",
+    "before_path",
+    "after_path",
+    "before_format",
+    "after_format",
+    "before_fingerprint",
+    "after_fingerprint",
+    "observed_size_reduction_bytes",
+    "duplicated_code_delta_bytes",
+    "duplicated_data_delta_bytes",
+    "estimated_refactor_savings_bytes",
+    "verified_savings_bytes",
+    "source_run",
+    "clone_group_fingerprint",
+    "change_kind",
+    "name",
+    "fingerprint",
+    "symbol_size_delta_bytes",
+    "duplicated_bytes_delta",
+    "members_delta",
+    "warning",
+    "absolute_error_bytes",
+    "relative_error",
+    "before_code_section_bytes",
+    "after_code_section_bytes",
+    "code_section_delta_bytes",
+    "before_data_segment_bytes",
+    "after_data_segment_bytes",
+    "data_segment_delta_bytes",
+    "assumption_scope",
+    "assumption",
+    "max_input_bytes",
+    "worker_timeout_seconds",
+    "worker_memory_limit_bytes",
+    "artifact_analysis_id",
+    "matching_analyses",
+    "calibration_record",
+];
+
+/// Column positions in [`COMPARE_CSV_HEADER`].
+pub(super) mod compare_column {
+    pub(in crate::artifact) const RECORD_TYPE: usize = 0;
+    pub(in crate::artifact) const BEFORE_PATH: usize = 1;
+    pub(in crate::artifact) const AFTER_PATH: usize = 2;
+    pub(in crate::artifact) const BEFORE_FORMAT: usize = 3;
+    pub(in crate::artifact) const AFTER_FORMAT: usize = 4;
+    pub(in crate::artifact) const BEFORE_FINGERPRINT: usize = 5;
+    pub(in crate::artifact) const AFTER_FINGERPRINT: usize = 6;
+    pub(in crate::artifact) const OBSERVED_SIZE_REDUCTION_BYTES: usize = 7;
+    pub(in crate::artifact) const DUPLICATED_CODE_DELTA_BYTES: usize = 8;
+    pub(in crate::artifact) const DUPLICATED_DATA_DELTA_BYTES: usize = 9;
+    pub(in crate::artifact) const ESTIMATED_REFACTOR_SAVINGS_BYTES: usize = 10;
+    pub(in crate::artifact) const VERIFIED_SAVINGS_BYTES: usize = 11;
+    pub(in crate::artifact) const SOURCE_RUN: usize = 12;
+    pub(in crate::artifact) const CLONE_GROUP_FINGERPRINT: usize = 13;
+    pub(in crate::artifact) const CHANGE_KIND: usize = 14;
+    pub(in crate::artifact) const NAME: usize = 15;
+    pub(in crate::artifact) const FINGERPRINT: usize = 16;
+    pub(in crate::artifact) const SYMBOL_SIZE_DELTA_BYTES: usize = 17;
+    pub(in crate::artifact) const DUPLICATED_BYTES_DELTA: usize = 18;
+    pub(in crate::artifact) const MEMBERS_DELTA: usize = 19;
+    pub(in crate::artifact) const WARNING: usize = 20;
+    pub(in crate::artifact) const ABSOLUTE_ERROR_BYTES: usize = 21;
+    pub(in crate::artifact) const RELATIVE_ERROR: usize = 22;
+    pub(in crate::artifact) const BEFORE_CODE_SECTION_BYTES: usize = 23;
+    pub(in crate::artifact) const AFTER_CODE_SECTION_BYTES: usize = 24;
+    pub(in crate::artifact) const CODE_SECTION_DELTA_BYTES: usize = 25;
+    pub(in crate::artifact) const BEFORE_DATA_SEGMENT_BYTES: usize = 26;
+    pub(in crate::artifact) const AFTER_DATA_SEGMENT_BYTES: usize = 27;
+    pub(in crate::artifact) const DATA_SEGMENT_DELTA_BYTES: usize = 28;
+    pub(in crate::artifact) const ASSUMPTION_SCOPE: usize = 29;
+    pub(in crate::artifact) const ASSUMPTION: usize = 30;
+    pub(in crate::artifact) const MAX_INPUT_BYTES: usize = 31;
+    pub(in crate::artifact) const WORKER_TIMEOUT_SECONDS: usize = 32;
+    pub(in crate::artifact) const WORKER_MEMORY_LIMIT_BYTES: usize = 33;
+    pub(in crate::artifact) const ARTIFACT_ANALYSIS_ID: usize = 34;
+    pub(in crate::artifact) const MATCHING_ANALYSES: usize = 35;
+    pub(in crate::artifact) const CALIBRATION_RECORD: usize = 36;
 }
 
 #[cfg(test)]

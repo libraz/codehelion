@@ -601,26 +601,106 @@ fn token_stream_classification_and_spans() {
     assert_eq!(double.span.start_column, 13);
 }
 
+/// The [`TokenKind`] both modes give the first occurrence of `word` in
+/// `source`, or `None` where a mode did not produce that lexeme at all.
+fn token_kinds_of(source: &str, word: &str) -> (Option<TokenKind>, Option<TokenKind>) {
+    let structural = parse(source);
+    let (fast, _) = crate::lexer::lex(source, &crate::dialect::C);
+    let structural_kind = structural
+        .tokens
+        .iter()
+        .find(|token| token.text == word)
+        .map(|token| token.kind);
+    let fast_kind = fast
+        .iter()
+        .find(|token| token.text == word)
+        .map(|token| token.kind);
+    (fast_kind, structural_kind)
+}
+
 #[test]
 fn both_modes_read_a_boolean_constant_as_the_same_token() {
     // A pair of units differing only in a boolean constant must be told apart
     // the same way whichever mode read them, so the two frontends have to
     // agree on what kind of token the constant is.
     let source = "int f(void) { return g(true) + h(false); }";
-    let structural = parse(source);
-    let (fast, _) = crate::lexer::lex(source, &crate::dialect::C);
     for word in ["true", "false"] {
-        let structural_kind = structural
-            .tokens
-            .iter()
-            .find(|token| token.text == word)
-            .map(|token| token.kind);
-        let fast_kind = fast
-            .iter()
-            .find(|token| token.text == word)
-            .map(|token| token.kind);
-        assert_eq!(structural_kind, Some(TokenKind::Keyword), "{word}");
-        assert_eq!(fast_kind, structural_kind, "{word} in both modes");
+        let (fast, structural) = token_kinds_of(source, word);
+        assert_eq!(structural, Some(TokenKind::Keyword), "{word}");
+        assert_eq!(fast, structural, "{word} in both modes");
+    }
+}
+
+#[test]
+fn both_modes_read_every_reserved_word_as_a_keyword() {
+    // Spellings the structural grammar does not model surface as identifier
+    // leaves. Read as identifiers they would enter the API-call profile as
+    // callees and would alpha-normalize against user type names, so both
+    // modes must agree that a reserved word is a keyword — for the whole
+    // dialect vocabulary, not for the words that happened to expose it.
+    for word in crate::dialect::C.keywords {
+        // A declaration context every spelling can stand in without the
+        // grammar rewriting the lexeme itself.
+        let source = format!("int probe(void) {{ {word} ; }}");
+        let (fast, structural) = token_kinds_of(&source, word);
+        assert_eq!(fast, Some(TokenKind::Keyword), "{word} in fast mode");
+        assert_eq!(structural, fast, "{word} in both modes");
+    }
+}
+
+#[test]
+fn the_keyword_set_is_what_lifts_an_identifier_leaf_to_a_keyword() {
+    // Without the dialect's vocabulary the grammar's own view stands, and a
+    // spelling it does not model reads as an identifier. This is the step that
+    // keeps the structural stream in line with the Fast lexer, so it is
+    // asserted directly rather than only through its effect.
+    for word in ["_Bool", "typeof", "static_assert"] {
+        assert_eq!(
+            classify_token("identifier", true, word, &[]),
+            TokenKind::Identifier,
+            "{word}"
+        );
+        assert_eq!(
+            classify_token("identifier", true, word, crate::dialect::C.keywords),
+            TokenKind::Keyword,
+            "{word}"
+        );
+    }
+    // A declared name that is not reserved keeps its own kind.
+    assert_eq!(
+        classify_token(
+            "identifier",
+            true,
+            "typeof_helper",
+            crate::dialect::C.keywords
+        ),
+        TokenKind::Identifier
+    );
+}
+
+#[test]
+fn both_modes_agree_on_reserved_words_the_grammar_leaves_as_identifiers() {
+    let source = "\
+_Static_assert(1, \"ok\");\n\
+static_assert(1, \"ok\");\n\
+_Thread_local int counter;\n\
+int classify(int n) {\n\
+    _Bool flag = 0;\n\
+    typeof(n) copy = n;\n\
+    switch (n) { default: break; }\n\
+    return flag + copy;\n\
+}\n";
+    for word in [
+        "_Bool",
+        "_Static_assert",
+        "static_assert",
+        "typeof",
+        "_Thread_local",
+        "default",
+    ] {
+        let (fast, structural) = token_kinds_of(source, word);
+        assert_eq!(fast, Some(TokenKind::Keyword), "{word} in fast mode");
+        assert_eq!(structural, fast, "{word} in both modes");
     }
 }
 

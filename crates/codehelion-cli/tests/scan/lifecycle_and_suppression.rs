@@ -283,6 +283,112 @@ fn report_reformats_a_recorded_run_without_scanning_again() {
     assert_eq!(document["version"], "2.1.0");
 }
 
+/// One occurrence as a view lists it: its file, its finding id, and whether it
+/// is the group's canonical copy.
+type ReportedMember = (String, String, bool);
+
+/// One group as a view lists it: its fingerprint and its occurrences in order.
+type ReportedGroup = (String, Vec<ReportedMember>);
+
+/// Every group's occurrences, as the fingerprint they belong to and the
+/// `(file, finding id, canonical)` of each, in the order the view lists them.
+fn member_order(report: &serde_json::Value) -> Vec<ReportedGroup> {
+    report["groups"]
+        .as_array()
+        .expect("a report lists its groups")
+        .iter()
+        .map(|group| {
+            let members = group["members"]
+                .as_array()
+                .expect("a group lists its members")
+                .iter()
+                .map(|member| {
+                    (
+                        member["file"].as_str().expect("member file").to_string(),
+                        member["finding_id"]
+                            .as_str()
+                            .expect("member finding id")
+                            .to_string(),
+                        member["canonical"].as_bool().expect("canonical mark"),
+                    )
+                })
+                .collect();
+            (
+                group["fingerprint"]
+                    .as_str()
+                    .expect("group fingerprint")
+                    .to_string(),
+                members,
+            )
+        })
+        .collect()
+}
+
+/// The canonical occurrence of each group, keyed by the group's fingerprint.
+fn canonical_members(report: &serde_json::Value) -> std::collections::BTreeMap<String, String> {
+    member_order(report)
+        .into_iter()
+        .map(|(fingerprint, members)| {
+            let canonical = members
+                .into_iter()
+                .find(|(_, _, canonical)| *canonical)
+                .map(|(file, finding, _)| format!("{file} {finding}"))
+                .expect("every group nominates one occurrence");
+            (fingerprint, canonical)
+        })
+        .collect()
+}
+
+#[test]
+fn a_replay_nominates_the_occurrence_the_scan_nominated() {
+    let dir = fixture();
+    let scanned = scan_json(dir.path());
+    let run_id = scanned["run"]["run_id"]
+        .as_i64()
+        .expect("scan JSON carries the recorded run id");
+
+    let replayed = cmd()
+        .current_dir(dir.path())
+        .args(["report", "--run", &run_id.to_string(), "--format", "json"])
+        .output()
+        .expect("replay the recorded run");
+    assert!(replayed.status.success(), "{replayed:?}");
+    let replayed: serde_json::Value =
+        serde_json::from_slice(&replayed.stdout).expect("report stdout is JSON");
+
+    // The scan and the replay are two views of one verdict: the same
+    // occurrences, in the same order, with the same one kept rather than
+    // counted as duplicated.
+    let scanned_members = member_order(&scanned);
+    assert!(
+        scanned_members.iter().any(|(_, members)| members.len() > 2),
+        "the fixture has a group large enough for the order to be visible"
+    );
+    assert_eq!(scanned_members, member_order(&replayed));
+    for (fingerprint, members) in &scanned_members {
+        let marked: Vec<usize> = members
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, _, canonical))| *canonical)
+            .map(|(position, _)| position)
+            .collect();
+        assert_eq!(
+            marked,
+            vec![0],
+            "group {fingerprint} marks exactly its first occurrence"
+        );
+    }
+
+    // The nomination is made from the occurrences' own identities, so moving a
+    // file cannot move it. Under the walk order it would: renaming the first
+    // file scanned hands that place to another occurrence.
+    let before = canonical_members(&scanned);
+    std::fs::rename(dir.path().join("src/a.rs"), dir.path().join("src/z.rs"))
+        .expect("rename a source file");
+    let renamed = scan_json(dir.path());
+    assert_eq!(before, canonical_members(&renamed));
+}
+
 #[test]
 fn recorded_artifact_savings_reach_json_text_and_sarif_reports() {
     let dir = fixture();
@@ -397,7 +503,16 @@ fn a_reused_scan_hydrates_artifact_savings_before_text_guidance() {
     );
     assert!(
         before_notes.contains(
-            "note: no artifact savings are recorded; provide an artifact at <PATH> retaining symbols/debug info, or a matching companion via --debug-file <PATH>, then run artifact analyze <PATH> --source-run <id> --build-variant <manifest>\n"
+            "note: no artifact savings are recorded; run artifact analyze <PATH> --source-run <id> --build-variant <manifest> on a build of this tree, supplying the evidence its format carries:\n"
+        ),
+        "{before_notes}"
+    );
+    // The guidance is now one line per format rather than a single sentence;
+    // pin the WASM line specifically, since it is the one format whose name
+    // section attributes whole symbols without a line range.
+    assert!(
+        before_notes.contains(
+            "  wasm: the name section attributes whole symbols only; source line ranges need DWARF, and emitting it changes the size being measured\n"
         ),
         "{before_notes}"
     );
@@ -1267,4 +1382,112 @@ fn fast_mode_reports_suppression_policies_it_cannot_apply() {
             .is_none(),
         "structural mode applies the policies: {structural}"
     );
+}
+
+/// A database left behind by a run interrupted while schema initialization
+/// was still under the default rollback journal (before `WAL` mode took
+/// over) has a `-journal` sidecar rather than `-wal`/`-shm`. `cache clear`
+/// has to remove it along with the others, or the next `scan` fails opening
+/// what looks like an orphaned sidecar.
+#[test]
+fn cache_clear_removes_a_leftover_rollback_journal_so_the_next_scan_succeeds() {
+    let dir = fixture();
+    let database = dir.path().join(".codehelion/audit.db");
+    std::fs::create_dir_all(database.parent().expect("database has a parent")).unwrap();
+    std::fs::write(&database, b"").unwrap();
+    let journal = format!("{}-journal", database.display());
+    std::fs::write(&journal, b"leftover").unwrap();
+
+    let status = cmd()
+        .current_dir(dir.path())
+        .args([
+            "cache",
+            "status",
+            "--db",
+            database.to_str().expect("utf-8 database path"),
+        ])
+        .output()
+        .expect("run cache status");
+    assert!(status.status.success(), "{status:?}");
+    let status = String::from_utf8(status.stdout).expect("cache status is UTF-8");
+    let counted_bytes =
+        std::fs::metadata(&database).unwrap().len() + std::fs::metadata(&journal).unwrap().len();
+    assert!(
+        status.contains(&format!("({counted_bytes} bytes)")),
+        "the reported size covers the -journal sidecar: {status}"
+    );
+
+    cmd()
+        .current_dir(dir.path())
+        .args([
+            "cache",
+            "clear",
+            "--force",
+            "--db",
+            database.to_str().expect("utf-8 database path"),
+        ])
+        .assert()
+        .success();
+    assert!(
+        !Path::new(&journal).exists(),
+        "cache clear must remove the -journal sidecar along with the database"
+    );
+
+    cmd()
+        .current_dir(dir.path())
+        .args([
+            "scan",
+            ".",
+            "--db",
+            database.to_str().expect("utf-8 database path"),
+        ])
+        .assert()
+        .success();
+}
+
+/// `cache status` sits beside `discard_expired_abandoned_runs`, which grants a
+/// grace period before it treats a `running` partition as abandoned. The
+/// diagnostic has to make the same distinction: while the database lease is
+/// held, an unfinished partition belongs to the scan currently writing it,
+/// not to one that was left behind.
+#[test]
+fn cache_status_calls_a_lease_held_partition_incomplete_not_abandoned() {
+    let dir = fixture();
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    let database = dir.path().join(".codehelion/audit.db");
+    {
+        let connection = Connection::open(&database).expect("open the scan database");
+        connection
+            .execute(
+                "INSERT INTO scan_run
+                     (build_variant_id, root_path, tool_version, config_hash, config_source,
+                      analysis_mode, started_at, finished_at, status, min_clone_tokens)
+                 VALUES (1, '.', 'test', 'hash', 'defaults', 'fast',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', 'running', 20)",
+                [],
+            )
+            .expect("record an in-flight partition");
+    }
+
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.path().join(".codehelion/audit.db.lock"))
+        .expect("scan created its database lock");
+    FileExt::try_lock_exclusive(&lock).expect("test owns the scan lock");
+
+    cmd()
+        .current_dir(dir.path())
+        .args(["cache", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "incomplete partitions: 1 (a scan is running)",
+        ))
+        .stdout(predicate::str::contains("abandoned runs").not());
 }

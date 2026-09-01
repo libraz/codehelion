@@ -24,10 +24,10 @@ pub(crate) fn brace_pairs(tokens: &[Token]) -> HashMap<usize, usize> {
         if token.kind == TokenKind::Punctuation {
             if token.text == "{" {
                 stack.push(i);
-            } else if token.text == "}" {
-                if let Some(open) = stack.pop() {
-                    pairs.insert(open, i);
-                }
+            } else if token.text == "}"
+                && let Some(open) = stack.pop()
+            {
+                pairs.insert(open, i);
             }
         }
     }
@@ -82,12 +82,36 @@ pub(crate) fn segment_ids(tokens: &[Token], units: &[Unit]) -> Vec<SegmentId> {
     seg
 }
 
+/// A token's innermost enclosing unit, as an index into one file's `units`.
+///
+/// One entry exists per token of the whole corpus, so the width of this is a
+/// per-token cost on every scan. The value it holds is an index into the units
+/// of a single file, which the file-size ceiling keeps far inside `u32`, and
+/// [`NO_ANCHOR`] stands for the tokens no unit encloses — the same four bytes
+/// [`SegmentId`] uses for the other per-token table.
+pub(crate) type AnchorId = u32;
+
+/// The anchor of a token that sits inside no unit at all.
+pub(crate) const NO_ANCHOR: AnchorId = AnchorId::MAX;
+
+/// The unit an anchor names, or `None` where no unit encloses the token.
+pub(crate) const fn anchored_unit(anchor: AnchorId) -> Option<usize> {
+    if anchor == NO_ANCHOR {
+        None
+    } else {
+        Some(anchor as usize)
+    }
+}
+
 /// For every token, the index (into `units`) of its innermost enclosing unit.
 ///
 /// This is the clone-report anchor: a partial match is reported as a range
-/// inside its nearest enclosing function, method, impl block or closure.
-pub(crate) fn anchor_ids(tokens: &[Token], units: &[Unit]) -> Vec<Option<usize>> {
-    let mut anchor: Vec<Option<usize>> = vec![None; tokens.len()];
+/// inside its nearest enclosing function, method, impl block or closure. A file
+/// holding more units than an [`AnchorId`] can name leaves the ones past that
+/// unanchored rather than misattributed; the file-size ceiling puts that far
+/// out of reach of real input.
+pub(crate) fn anchor_ids(tokens: &[Token], units: &[Unit]) -> Vec<AnchorId> {
+    let mut anchor: Vec<AnchorId> = vec![NO_ANCHOR; tokens.len()];
     let mut order: Vec<(usize, usize)> = units
         .iter()
         .enumerate()
@@ -96,12 +120,13 @@ pub(crate) fn anchor_ids(tokens: &[Token], units: &[Unit]) -> Vec<Option<usize>>
     order.sort_by_key(|&(len, idx)| (std::cmp::Reverse(len), idx));
     for (_, idx) in order {
         let unit = &units[idx];
+        let id = AnchorId::try_from(idx).unwrap_or(NO_ANCHOR);
         for a in anchor
             .iter_mut()
             .take(unit.token_end.min(tokens.len()))
             .skip(unit.token_start)
         {
-            *a = Some(idx);
+            *a = id;
         }
     }
     anchor
@@ -185,10 +210,9 @@ pub(crate) fn fragments(
         if matches!(
             unit.kind,
             UnitKind::Function | UnitKind::Method | UnitKind::Closure
-        ) {
-            if let Some((open, close)) = body_braces(tokens, braces, unit) {
-                blocks.push((FragmentKind::Body, open, close));
-            }
+        ) && let Some((open, close)) = body_braces(tokens, braces, unit)
+        {
+            blocks.push((FragmentKind::Body, open, close));
         }
     }
 
@@ -485,8 +509,55 @@ mod tests {
             unit(UnitKind::Closure, 5, 11),
         ];
         let anchor = anchor_ids(&tokens, &units);
-        assert_eq!(anchor[1], Some(0), "fn name anchors to the function");
-        assert_eq!(anchor[6], Some(1), "closure body anchors to the closure");
+        assert_eq!(
+            anchored_unit(anchor[1]),
+            Some(0),
+            "fn name anchors to the function"
+        );
+        assert_eq!(
+            anchored_unit(anchor[6]),
+            Some(1),
+            "closure body anchors to the closure"
+        );
+    }
+
+    #[test]
+    fn the_per_token_tables_are_as_wide_as_their_values_need() {
+        // Both tables exist once per token of the whole corpus, so their
+        // element width is a memory cost that scales with the tree rather than
+        // with any of the ceilings a run is configured with. An anchor names a
+        // unit of one file and a segment id a region of one file; neither has a
+        // value range a machine word is needed for.
+        let tokens = quick("fn a ( ) { x } fn b ( ) { y }");
+        let units = vec![
+            unit(UnitKind::Function, 0, 7),
+            unit(UnitKind::Function, 7, 14),
+        ];
+
+        let anchors = anchor_ids(&tokens, &units);
+        let segments = segment_ids(&tokens, &units);
+
+        assert_eq!(size_of::<AnchorId>(), 4);
+        assert_eq!(size_of::<AnchorId>(), size_of::<SegmentId>());
+        assert_eq!(size_of_val(&anchors[0]) * tokens.len(), 4 * tokens.len());
+        assert_eq!(size_of_val(&segments[0]) * tokens.len(), 4 * tokens.len());
+        // The token no unit encloses is still a token with an entry.
+        assert_eq!(anchors.len(), tokens.len());
+        assert_eq!(anchored_unit(anchors[0]), Some(0));
+    }
+
+    #[test]
+    fn a_token_outside_every_unit_has_no_anchor() {
+        let tokens = quick("let x = 1 ;");
+
+        let anchors = anchor_ids(&tokens, &[]);
+
+        assert!(anchors.iter().all(|&anchor| anchor == NO_ANCHOR));
+        assert!(
+            anchors
+                .iter()
+                .all(|&anchor| anchored_unit(anchor).is_none())
+        );
     }
 
     #[test]

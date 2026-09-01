@@ -2178,10 +2178,19 @@ fn artifact_guidance_appears_only_when_every_group_lacks_savings() {
     let notes = String::from_utf8(notes).unwrap();
     assert!(
         notes.contains(
-            "note: no artifact savings are recorded; provide an artifact at <PATH> retaining symbols/debug info, or a matching companion via --debug-file <PATH>, then run artifact analyze <PATH> --source-run <id> --build-variant <manifest>\n"
+            "note: no artifact savings are recorded; run artifact analyze <PATH> --source-run <id> --build-variant <manifest> on a build of this tree, supplying the evidence its format carries:\n"
         ),
         "{notes}"
     );
+    // The note names each format's real attribution granularity rather than
+    // asking for one condition every format is assumed to meet. A WebAssembly
+    // module cannot carry line frames through its name section, so its line
+    // has to say so instead of promising line ranges.
+    assert!(
+        notes.contains("wasm: the name section attributes whole symbols only"),
+        "{notes}"
+    );
+    assert!(notes.contains("elf: supply "), "{notes}");
 
     report.groups[0].artifact_savings.push(ArtifactSavings {
         artifact_analysis_id: 17,
@@ -2221,7 +2230,7 @@ fn artifact_guidance_appears_only_when_every_group_lacks_savings() {
 
 #[test]
 fn partition_artifact_guidance_is_aggregated_over_all_models() {
-    const GUIDANCE: &str = "note: no artifact savings are recorded; provide an artifact at <PATH> retaining symbols/debug info, or a matching companion via --debug-file <PATH>, then run artifact analyze <PATH> --source-run <id> --build-variant <manifest>";
+    const GUIDANCE: &str = "note: no artifact savings are recorded; run artifact analyze <PATH> --source-run <id> --build-variant <manifest> on a build of this tree, supplying the evidence its format carries:";
 
     let reports = [sample_report(), sample_report()];
     let mut notes = Vec::new();

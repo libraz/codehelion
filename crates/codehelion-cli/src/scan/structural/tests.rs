@@ -252,8 +252,16 @@ fn a_sibling_answers_to_the_finding_id_its_own_run_reports() {
     // The rank a sibling's own host fingerprint reaches after the primary
     // members carrying it, which is what the report and the audit database
     // compose its finding id from.
-    let sibling_finding = codehelion_core::stable_id::finding_id(&fingerprint, Some(&host), 2);
-    let member_finding = codehelion_core::stable_id::finding_id(&fingerprint, Some(&host), 0);
+    let sibling_finding = codehelion_core::stable_id::finding_id(
+        &fingerprint,
+        codehelion_core::stable_id::OccurrenceScope::Unit(&host),
+        2,
+    );
+    let member_finding = codehelion_core::stable_id::finding_id(
+        &fingerprint,
+        codehelion_core::stable_id::OccurrenceScope::Unit(&host),
+        0,
+    );
     let verdict = |clone_id: &str| {
         let mut config = Config::default();
         config.suppression.clone_ids = vec![clone_id.to_string()];

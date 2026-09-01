@@ -17,7 +17,10 @@
 //! - **inline markers**: a comment line containing `codehelion:ignore`
 //!   suppresses the unit it appears in, or — when it sits between units —
 //!   the next unit that starts below it. An occurrence outside any unit is
-//!   suppressed when a marker line falls inside its own line range.
+//!   suppressed when a marker line falls inside its own line range. Only a
+//!   comment counts: the same characters in a string literal, a character
+//!   literal or an identifier suppress nothing, because a rule the tree could
+//!   write by accident is not a rule anybody decided on.
 //!
 //! A group's finding is suppressed only when *every* member is suppressed:
 //! as long as one occurrence lives in unsuppressed code, the duplication is
@@ -42,11 +45,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
+use codehelion_core::discovery::Language;
 use codehelion_store::snapshot::SuppressionRuleRow;
 use globset::{Glob, GlobMatcher};
 
 use crate::FULL_ID_CHARS;
 use crate::config::Suppression;
+use crate::provenance::FromScannedTree;
 
 /// The marker text an inline suppression comment must contain.
 pub(crate) const INLINE_MARKER: &str = "codehelion:ignore";
@@ -82,13 +87,368 @@ pub(crate) struct UnitSpan<'a> {
     pub(crate) name: Option<&'a str>,
 }
 
-/// 1-based lines of `text` that contain the inline marker.
-pub(crate) fn marker_lines(text: &str) -> Vec<u32> {
-    text.lines()
-        .enumerate()
-        .filter(|(_, line)| line.contains(INLINE_MARKER))
-        .map(|(index, _)| u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1))
-        .collect()
+/// Longest delimiter a C++ raw string literal may carry.
+const MAX_RAW_STRING_DELIMITER: usize = 16;
+
+/// 1-based lines of one source file that carry the inline marker in a comment.
+///
+/// The marker hides findings, so the tree must not be able to write one
+/// anywhere it likes. Only text the file's own language treats as a comment
+/// counts: the same characters inside a string literal, a character literal or
+/// an identifier are the text they are, not an instruction. A file listing the
+/// markers a project uses, a template it embeds, or a test asserting on this
+/// tool's own output therefore reports its duplication as usual.
+///
+/// The argument type is what keeps that true — raw source text cannot reach
+/// this function, only text narrowed to its comments.
+pub(crate) fn marker_lines(source: &FromScannedTree<&str>, language: Language) -> Vec<u32> {
+    let mut lines: Vec<u32> = source
+        .comments(language)
+        .into_iter()
+        .filter(|(_, comment)| comment.contains(INLINE_MARKER))
+        .map(|(line, _)| line)
+        .collect();
+    lines.dedup();
+    lines
+}
+
+/// The comment text `text` holds, as `(1-based line, text)` pairs.
+///
+/// One entry per line a comment covers, so a marker inside a block comment is
+/// attributed to the line it was written on rather than to the line the
+/// comment opened on.
+///
+/// This is reached through [`FromScannedTree::comments`], which is what makes
+/// it the only way suppression reads a scanned file.
+pub(crate) fn comments_of(text: &str, language: Language) -> Vec<(u32, &str)> {
+    CommentScan::new(text, language).run()
+}
+
+/// Walks a source file and keeps only what its language calls a comment.
+///
+/// Not a parser: it recognises comments, string and character literals, and
+/// nothing else. Every ambiguity is resolved towards *not* a comment, because
+/// the two mistakes are not symmetric. Skipping a comment loses a marker,
+/// which reports a finding that could have been suppressed — visible, and
+/// undone by writing the marker somewhere this can read. Mistaking code for a
+/// comment hides a finding nobody chose to hide, which is the failure that
+/// cannot be seen from the report.
+struct CommentScan<'a> {
+    /// The whole file.
+    text: &'a str,
+    /// Whose comment syntax to read it under.
+    language: Language,
+    /// Byte offset of the cursor.
+    index: usize,
+    /// 1-based line the cursor sits on.
+    line: u32,
+    /// What has been recognised so far.
+    comments: Vec<(u32, &'a str)>,
+}
+
+impl<'a> CommentScan<'a> {
+    const fn new(text: &'a str, language: Language) -> Self {
+        Self {
+            text,
+            language,
+            index: 0,
+            line: 1,
+            comments: Vec::new(),
+        }
+    }
+
+    /// Every comment in the file, in the order they are written.
+    fn run(mut self) -> Vec<(u32, &'a str)> {
+        while self.index < self.text.len() {
+            match self.byte(0) {
+                Some(b'/') if self.byte(1) == Some(b'/') => self.line_comment(),
+                Some(b'/') if self.byte(1) == Some(b'*') => self.block_comment(),
+                Some(b'"') => self.quoted(b'"'),
+                Some(b'\'') => self.character_literal(),
+                _ => {
+                    if !self.raw_string() {
+                        self.advance(1);
+                    }
+                }
+            }
+        }
+        self.comments
+    }
+
+    /// The byte `offset` positions ahead of the cursor.
+    ///
+    /// Every delimiter this looks for is ASCII, and no byte of a multi-byte
+    /// character can equal one, so walking bytes never cuts a character in
+    /// half.
+    fn byte(&self, offset: usize) -> Option<u8> {
+        self.text
+            .as_bytes()
+            .get(self.index.saturating_add(offset))
+            .copied()
+    }
+
+    /// Move the cursor on by `count` bytes, counting the lines crossed.
+    fn advance(&mut self, count: usize) {
+        for _ in 0..count {
+            if self.byte(0) == Some(b'\n') {
+                self.line = self.line.saturating_add(1);
+            }
+            self.index = self.index.saturating_add(1);
+        }
+        self.index = self.index.min(self.text.len());
+    }
+
+    /// Record the comment running from `start` to the cursor.
+    fn record(&mut self, start: usize, start_line: u32) {
+        let body = self.text.get(start..self.index).unwrap_or_default();
+        for (offset, fragment) in body.split('\n').enumerate() {
+            if fragment.is_empty() {
+                continue;
+            }
+            let line = start_line.saturating_add(u32::try_from(offset).unwrap_or(u32::MAX));
+            self.comments.push((line, fragment));
+        }
+    }
+
+    /// Whether the byte before the cursor could end an identifier or a number.
+    fn preceded_by_identifier(&self) -> bool {
+        self.text
+            .as_bytes()
+            .get(..self.index)
+            .and_then(<[u8]>::last)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    }
+
+    /// Consume `//` to the end of the line.
+    ///
+    /// C and C++ splice a line ending in a backslash onto the next one, and a
+    /// comment spliced that way runs on. Rust has no such splice.
+    fn line_comment(&mut self) {
+        let (start, start_line) = (self.index, self.line);
+        self.advance(2);
+        while let Some(byte) = self.byte(0) {
+            if byte == b'\n' {
+                if self.spliced() {
+                    self.advance(1);
+                    continue;
+                }
+                break;
+            }
+            self.advance(1);
+        }
+        self.record(start, start_line);
+    }
+
+    /// Whether the newline at the cursor joins its line to the next one.
+    fn spliced(&self) -> bool {
+        if matches!(self.language, Language::Rust) {
+            return false;
+        }
+        let before = self.text.as_bytes().get(..self.index).unwrap_or_default();
+        let before = before.strip_suffix(b"\r").unwrap_or(before);
+        before.last() == Some(&b'\\')
+    }
+
+    /// Consume `/* ... */`. Rust nests these; C and C++ do not.
+    ///
+    /// An unterminated one runs to the end of the file, which is what the
+    /// compilers do with it too.
+    fn block_comment(&mut self) {
+        let (start, start_line) = (self.index, self.line);
+        let nests = matches!(self.language, Language::Rust);
+        self.advance(2);
+        let mut depth = 1usize;
+        while self.index < self.text.len() {
+            if nests && self.byte(0) == Some(b'/') && self.byte(1) == Some(b'*') {
+                depth = depth.saturating_add(1);
+                self.advance(2);
+                continue;
+            }
+            if self.byte(0) == Some(b'*') && self.byte(1) == Some(b'/') {
+                depth = depth.saturating_sub(1);
+                self.advance(2);
+                if depth == 0 {
+                    break;
+                }
+                continue;
+            }
+            self.advance(1);
+        }
+        self.record(start, start_line);
+    }
+
+    /// Consume a literal delimited by `terminator`, honouring backslash
+    /// escapes.
+    ///
+    /// An unterminated one runs to the end of the file: skipping too much can
+    /// only lose a marker, whereas stopping early would let the text after it
+    /// read as code.
+    fn quoted(&mut self, terminator: u8) {
+        self.advance(1);
+        while let Some(byte) = self.byte(0) {
+            if byte == b'\\' {
+                self.advance(2);
+                continue;
+            }
+            self.advance(1);
+            if byte == terminator {
+                return;
+            }
+        }
+    }
+
+    /// Consume a character literal, or step over an apostrophe that is not
+    /// one.
+    fn character_literal(&mut self) {
+        match self.language {
+            Language::Rust => self.rust_character_literal(),
+            Language::C | Language::Cpp => self.c_character_literal(),
+        }
+    }
+
+    /// A Rust apostrophe opens a character literal or names a lifetime, and
+    /// reading `'static` as a literal would swallow the code after it.
+    fn rust_character_literal(&mut self) {
+        if self.byte(1) == Some(b'\\') {
+            self.quoted(b'\'');
+            return;
+        }
+        let rest = self
+            .text
+            .get(self.index.saturating_add(1)..)
+            .unwrap_or_default();
+        let width = rest.chars().next().map_or(0, char::len_utf8);
+        // One character followed by a closing quote is a literal; anything
+        // else is a lifetime, which is the apostrophe alone.
+        if width > 0 && self.byte(width.saturating_add(1)) == Some(b'\'') {
+            self.advance(width.saturating_add(2));
+        } else {
+            self.advance(1);
+        }
+    }
+
+    /// A C or C++ apostrophe opens a character literal, separates the digits
+    /// of a number, or is prose in a preprocessor message.
+    fn c_character_literal(&mut self) {
+        // `1'000'000`: a separator, not a literal.
+        if self.preceded_by_identifier() {
+            self.advance(1);
+            return;
+        }
+        // A character literal cannot cross a line, so an apostrophe with no
+        // partner on its own line is not one.
+        let rest = self
+            .text
+            .get(self.index.saturating_add(1)..)
+            .unwrap_or_default();
+        let line = rest.split('\n').next().unwrap_or_default();
+        if holds_closing_quote(line) {
+            self.quoted(b'\'');
+        } else {
+            self.advance(1);
+        }
+    }
+
+    /// Consume a raw string literal at the cursor, reporting whether one was
+    /// there.
+    ///
+    /// A raw string is the one literal whose closing quote need not be the
+    /// next one: reading `r#"a "b" // c"#` as an ordinary string would end it
+    /// at `"b`, and the rest of the line would then read as code carrying a
+    /// comment.
+    fn raw_string(&mut self) -> bool {
+        if self.preceded_by_identifier() {
+            return false;
+        }
+        match self.language {
+            Language::Rust => self.rust_raw_string(),
+            Language::Cpp => self.cpp_raw_string(),
+            Language::C => false,
+        }
+    }
+
+    /// `r"..."`, `br"..."` and `cr"..."`, each with any number of `#` pads.
+    fn rust_raw_string(&mut self) -> bool {
+        let prefix = usize::from(matches!(self.byte(0), Some(b'b' | b'c')));
+        if self.byte(prefix) != Some(b'r') {
+            return false;
+        }
+        let opening = prefix.saturating_add(1);
+        let mut hashes = 0usize;
+        while self.byte(opening.saturating_add(hashes)) == Some(b'#') {
+            hashes = hashes.saturating_add(1);
+        }
+        if self.byte(opening.saturating_add(hashes)) != Some(b'"') {
+            return false;
+        }
+        self.advance(opening.saturating_add(hashes).saturating_add(1));
+        while self.index < self.text.len() {
+            if self.byte(0) == Some(b'"')
+                && (1..=hashes).all(|offset| self.byte(offset) == Some(b'#'))
+            {
+                self.advance(hashes.saturating_add(1));
+                return true;
+            }
+            self.advance(1);
+        }
+        true
+    }
+
+    /// `R"delimiter( ... )delimiter"`, with any of the encoding prefixes.
+    fn cpp_raw_string(&mut self) -> bool {
+        let prefix = match (self.byte(0), self.byte(1), self.byte(2)) {
+            (Some(b'R'), _, _) => 0usize,
+            (Some(b'L' | b'u' | b'U'), Some(b'R'), _) => 1,
+            (Some(b'u'), Some(b'8'), Some(b'R')) => 2,
+            _ => return false,
+        };
+        if self.byte(prefix.saturating_add(1)) != Some(b'"') {
+            return false;
+        }
+        let opening = self.index.saturating_add(prefix).saturating_add(2);
+        let rest = self.text.get(opening..).unwrap_or_default();
+        let Some(length) = rest.find('(') else {
+            return false;
+        };
+        let Some(delimiter) = rest.get(..length) else {
+            return false;
+        };
+        if length > MAX_RAW_STRING_DELIMITER
+            || delimiter
+                .bytes()
+                .any(|byte| byte == b')' || byte == b'\\' || byte.is_ascii_whitespace())
+        {
+            return false;
+        }
+        let terminator = format!("){delimiter}\"");
+        self.advance(
+            prefix
+                .saturating_add(2)
+                .saturating_add(length)
+                .saturating_add(1),
+        );
+        let body = self.text.get(self.index..).unwrap_or_default();
+        let consumed = body
+            .find(&terminator)
+            .map_or(body.len(), |at| at.saturating_add(terminator.len()));
+        self.advance(consumed);
+        true
+    }
+}
+
+/// Whether `line` holds an unescaped apostrophe.
+fn holds_closing_quote(line: &str) -> bool {
+    let mut bytes = line.as_bytes().iter();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'\\' => {
+                bytes.next();
+            }
+            b'\'' => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Compiled suppression rules for one scan.
@@ -496,11 +856,133 @@ fn suppressed_units(markers: &[u32], unit_lines: &[(u32, u32)]) -> Vec<bool> {
 mod tests {
     use super::*;
 
+    /// The marker lines of `text`, read as `language`.
+    fn markers(text: &str, language: Language) -> Vec<u32> {
+        marker_lines(&FromScannedTree::found(text), language)
+    }
+
     #[test]
     fn marker_lines_are_one_based() {
         let text = "fn a() {}\n// codehelion:ignore\nfn b() {}\n";
-        assert_eq!(marker_lines(text), vec![2]);
-        assert!(marker_lines("fn clean() {}\n").is_empty());
+        assert_eq!(markers(text, Language::Rust), vec![2]);
+        assert!(markers("fn clean() {}\n", Language::Rust).is_empty());
+    }
+
+    /// The marker is an instruction only where the language says a comment
+    /// is. A project that lists the markers it uses, embeds a template, or
+    /// asserts on this tool's own output writes the same characters into a
+    /// string, and none of that is a decision to hide anything.
+    #[test]
+    fn a_marker_in_a_literal_or_an_identifier_suppresses_nothing() {
+        let rust = concat!(
+            "fn documented() {\n",
+            "    let listed = \"codehelion:ignore\";\n",
+            "    let escaped = \"say \\\" codehelion:ignore\";\n",
+            "    let raw = r#\"a \"quoted\" // codehelion:ignore\"#;\n",
+            "    let byte = br\"codehelion:ignore\";\n",
+            "    let slash = '/';\n",
+            "    let codehelion_ignore_count = 0;\n",
+            "}\n",
+        );
+        assert!(
+            markers(rust, Language::Rust).is_empty(),
+            "{:?}",
+            markers(rust, Language::Rust)
+        );
+
+        let c_family = concat!(
+            "void documented(void) {\n",
+            "    const char *listed = \"codehelion:ignore\";\n",
+            "    const char *escaped = \"say \\\" codehelion:ignore\";\n",
+            "    char slash = '/';\n",
+            "    long grouped = 1'000'000;\n",
+            "}\n",
+        );
+        for language in [Language::C, Language::Cpp] {
+            assert!(
+                markers(c_family, language).is_empty(),
+                "{language:?}: {:?}",
+                markers(c_family, language)
+            );
+        }
+
+        let cpp_raw = "auto embedded = R\"sql(a \"b\" // codehelion:ignore)sql\";\n";
+        assert!(markers(cpp_raw, Language::Cpp).is_empty());
+    }
+
+    /// Every comment spelling each language has, including a marker trailing
+    /// the code it is written about, which is the established way to write
+    /// one.
+    #[test]
+    fn a_marker_in_any_comment_spelling_is_read() {
+        let rust = concat!(
+            "// codehelion:ignore\n",
+            "/// codehelion:ignore\n",
+            "/* codehelion:ignore */\n",
+            "/*\n",
+            " codehelion:ignore\n",
+            "*/\n",
+            "/* /* codehelion:ignore */ still a comment */\n",
+            "let trailing = 1; // codehelion:ignore\n",
+        );
+        assert_eq!(markers(rust, Language::Rust), vec![1, 2, 3, 5, 7, 8]);
+
+        let c_family = concat!(
+            "// codehelion:ignore\n",
+            "/* codehelion:ignore */\n",
+            "int trailing = 1; /* codehelion:ignore */\n",
+        );
+        for language in [Language::C, Language::Cpp] {
+            assert_eq!(markers(c_family, language), vec![1, 2, 3], "{language:?}");
+        }
+    }
+
+    /// A lifetime is not a character literal, so the code after one is still
+    /// read — a marker written below `'static` has to keep working.
+    #[test]
+    fn a_rust_lifetime_does_not_swallow_the_comment_after_it() {
+        let text = concat!(
+            "fn borrow<'a>(value: &'a str) -> &'a str {\n",
+            "    // codehelion:ignore\n",
+            "    value\n",
+            "}\n",
+        );
+        assert_eq!(markers(text, Language::Rust), vec![2]);
+    }
+
+    /// An apostrophe in a preprocessor message is prose, not an unterminated
+    /// character literal, and must not swallow the rest of the file.
+    #[test]
+    fn a_c_apostrophe_outside_a_literal_does_not_swallow_the_file() {
+        let text = concat!(
+            "#error don't do that\n",
+            "// codehelion:ignore\n",
+            "int kept(void) { return 0; }\n",
+        );
+        for language in [Language::C, Language::Cpp] {
+            assert_eq!(markers(text, language), vec![2], "{language:?}");
+        }
+    }
+
+    /// A comment ending in a backslash is spliced onto the next line in C and
+    /// C++, so what looks like code below it is still inside the comment.
+    /// Rust has no such splice.
+    #[test]
+    fn a_spliced_line_comment_carries_on_in_c_but_not_in_rust() {
+        let text = "// spliced \\\ncodehelion:ignore\n";
+        for language in [Language::C, Language::Cpp] {
+            assert_eq!(markers(text, language), vec![2], "{language:?}");
+        }
+        assert!(markers(text, Language::Rust).is_empty());
+    }
+
+    /// A file that ends mid-literal is malformed, and reading the rest of it
+    /// as comments would let a truncated string open one. Losing a marker is
+    /// the safe direction: the finding is reported.
+    #[test]
+    fn an_unterminated_literal_does_not_open_a_comment() {
+        let text = "let broken = \"unterminated\n// codehelion:ignore\n";
+        assert!(markers(text, Language::Rust).is_empty());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! pairs are recovered at the right places.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use codehelion_core::clone_class::CloneClass;
@@ -154,4 +155,103 @@ fn corpus_detection_is_deterministic() {
         assert_eq!(a.content_key, b.content_key);
         assert_eq!(a.members, b.members);
     }
+}
+
+/// The units of `lexed`, with every record definition removed.
+fn callable_units(lexed: &LexedFile) -> Vec<codehelion_core::frontend::Unit> {
+    lexed
+        .units
+        .iter()
+        .filter(|unit| unit.kind != codehelion_core::frontend::UnitKind::Record)
+        .cloned()
+        .collect()
+}
+
+/// The shape of a report that does not depend on which units were supplied:
+/// one entry per group member, in order.
+fn member_ranges(report: &engine::EngineReport) -> Vec<(CloneClass, usize, usize, usize)> {
+    report
+        .groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .members
+                .iter()
+                .map(move |m| (group.clone_type, m.file, m.token_start, m.token_end))
+        })
+        .collect()
+}
+
+#[test]
+fn a_record_definition_anchors_a_clone_without_regrouping_it() {
+    // Duplicated record definitions are found by the same token-run search
+    // whether or not records are units: a record body contributes no candidate
+    // fragment and no segment. What a record unit adds is the anchor, so the
+    // duplicate is reported under the name of the record holding it instead of
+    // under nothing.
+    let mut fields = String::new();
+    for index in 0..24 {
+        let _ = writeln!(fields, "    f{index}: i32,");
+    }
+    let sources = [
+        format!("struct Point {{\n{fields}}}\nfn a() -> i32 {{ 1 }}\n"),
+        format!("struct Other {{\n{fields}}}\nfn b() -> i32 {{ 2 }}\n"),
+    ];
+    let lexed: Vec<LexedFile> = sources.iter().map(|s| RustFrontend.lex(s)).collect();
+    let without: Vec<Vec<codehelion_core::frontend::Unit>> =
+        lexed.iter().map(callable_units).collect();
+
+    let with_records = engine::detect(
+        &lexed
+            .iter()
+            .map(|l| InputFile {
+                tokens: &l.tokens,
+                units: &l.units,
+            })
+            .collect::<Vec<_>>(),
+        &EngineConfig::default(),
+    );
+    let without_records = engine::detect(
+        &lexed
+            .iter()
+            .zip(&without)
+            .map(|(l, units)| InputFile {
+                tokens: &l.tokens,
+                units,
+            })
+            .collect::<Vec<_>>(),
+        &EngineConfig::default(),
+    );
+
+    assert_eq!(
+        with_records.groups.len(),
+        without_records.groups.len(),
+        "records changed how many groups are reported"
+    );
+    assert_eq!(
+        member_ranges(&with_records),
+        member_ranges(&without_records),
+        "records changed which ranges are grouped"
+    );
+
+    let anchored: Vec<Option<&str>> = with_records
+        .groups
+        .iter()
+        .flat_map(|group| group.members.iter())
+        .map(|m| {
+            m.unit
+                .and_then(|index| lexed[m.file].units[index].name.as_deref())
+        })
+        .collect();
+    let unanchored: Vec<Option<&str>> = without_records
+        .groups
+        .iter()
+        .flat_map(|group| group.members.iter())
+        .map(|m| {
+            m.unit
+                .and_then(|index| without[m.file][index].name.as_deref())
+        })
+        .collect();
+    assert_eq!(anchored, vec![Some("Point"), Some("Other")]);
+    assert_eq!(unanchored, vec![None, None]);
 }
