@@ -73,6 +73,14 @@ What a merged change looks like:
 - **Document the reasoning, not just the behaviour.** Module-level docs in
   `codehelion-core` are where the design decisions live; a constant that was
   chosen by measurement should say what the measurement was.
+- **User-facing documentation lives in `docs/en` and `docs/ja`, as a pair.**
+  English is the source of truth and the two trees mirror each other page for
+  page; the README stays an overview that links into them rather than a second
+  copy. Diagrams are hand-authored SVG in `docs/images/`, one file per language.
+  Several tests read these pages with `include_str!` to check that what the tool
+  does and what the documents claim have not drifted apart — which also means a
+  reflowed English paragraph can fail a test by splitting a pinned sentence
+  across two lines.
 
 ## Changing detection
 
@@ -81,13 +89,14 @@ higher standard of writing, just more to record, because they move numbers
 people compare across runs. Most of this ends up being a conversation in
 review rather than something to get right in advance.
 
-- Leave the version constants alone. Every stage carries one — normalization,
-  feature extraction, verification weights, grouping rules — and they all reach
-  the report header so that two results can be compared honestly. Until the
-  first release tag they are all at v1 and stay there: nothing has shipped, so a
-  second number can only describe a database or baseline somebody still has on
-  disk, and re-running the scan is the whole of the recovery. They start moving
-  when there is a released version for them to be moving away from.
+- Move a version constant only when something cannot be read back. Every stage
+  carries one — normalization, feature extraction, verification weights,
+  grouping rules — and they all reach the report header so that two results can
+  be compared honestly. A change that leaves an existing database or baseline
+  readable does not need a new number; one that does not, needs the number and a
+  release note saying the record has to be recreated. What a version says is
+  which released behaviour a result is moving away from, so raising one out of
+  habit costs the reader the one thing it is for.
 - Accuracy is measured against `corpus/`. `make eval` prints the current
   numbers, and putting them before and after the change in the pull request
   helps, though the accuracy job runs on CI either way. The synthetic corpora
