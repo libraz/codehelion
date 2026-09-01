@@ -1123,6 +1123,238 @@ pub(super) const ARTIFACT_CSV_HEADER: &[&str] = &[
     "max_debug_derived_items",
 ];
 
+/// The columns one kind of record in the artifact CSV carries.
+///
+/// A record fills a subset of one wide row, and which subset was written down
+/// nowhere: a reader could only find out by running the tool, and a writer
+/// could start filling a column meant for something else without anything
+/// saying so. This is the one description of that, checked against what the
+/// writers actually produce.
+#[cfg(test)]
+pub(super) struct RecordColumns {
+    /// The `record_type` value the record is written under.
+    pub(super) record_type: &'static str,
+    /// Columns the record carries beyond [`EVERY_RECORD`].
+    pub(super) columns: &'static [usize],
+}
+
+/// Columns every record carries, whatever kind it is: what it is, which
+/// artifact it is about, and what format that artifact was read as.
+#[cfg(test)]
+pub(super) const EVERY_RECORD: &[usize] = &[column::RECORD_TYPE, column::PATH, column::FORMAT];
+
+/// What each kind of record carries.
+///
+/// Ordered as `render_csv` writes them. A record that fills a column absent
+/// from its entry fails the check that reads this, so a field added to a
+/// record has to say which column carries it before it can appear — which is
+/// also where a reader looks to find out what a record type means.
+#[cfg(test)]
+pub(super) const RECORD_COLUMNS: &[RecordColumns] = &[
+    RecordColumns {
+        record_type: "summary",
+        columns: &[
+            column::FINGERPRINT,
+            column::OBSERVED_BYTES,
+            column::DUPLICATED_BYTES,
+            column::DUPLICATED_BYTES_NORMALIZED,
+            column::RETAINED_BYTES,
+            column::SHARED_DEPENDENCY_BYTES,
+            column::DUPLICATED_DATA_BYTES,
+            column::UPPER_BOUND_SAVINGS_BYTES,
+            column::ESTIMATED_REFACTOR_SAVINGS_BYTES,
+            column::VERIFIED_SAVINGS_BYTES,
+            column::SOURCE_RUN,
+            column::MAPPINGS,
+            column::MAPPED_SYMBOLS,
+            column::UNMAPPED_SYMBOLS,
+            column::CODE_SECTION_BYTES,
+            column::DATA_SEGMENT_BYTES,
+            column::CLONE_CONFIDENCE,
+            column::SAVINGS_CONFIDENCE,
+            column::ARTIFACT_SYMBOLS,
+        ],
+    },
+    RecordColumns {
+        record_type: "build-variant",
+        columns: &[column::FINGERPRINT, column::NAME],
+    },
+    RecordColumns {
+        record_type: "containment",
+        columns: &[
+            column::MAX_INPUT_BYTES,
+            column::WORKER_TIMEOUT_SECONDS,
+            column::WORKER_MEMORY_LIMIT_BYTES,
+            column::MAX_DEBUG_DERIVED_ITEMS,
+        ],
+    },
+    RecordColumns {
+        record_type: "archive-member",
+        columns: &[
+            column::KIND,
+            column::FINGERPRINT,
+            column::NAME,
+            column::OFFSET,
+            column::SIZE,
+            column::DEAD_CODE_STATUS,
+        ],
+    },
+    RecordColumns {
+        record_type: "source-map",
+        columns: &[
+            column::KIND,
+            column::SOURCE_MAP_URI,
+            column::SOURCE_MAP_LOCAL_PATH,
+            column::SOURCE_MAP_SOURCES,
+        ],
+    },
+    RecordColumns {
+        record_type: "section",
+        columns: &[
+            column::KIND,
+            column::NAME,
+            column::OFFSET,
+            column::SIZE,
+            column::EXECUTABLE,
+        ],
+    },
+    RecordColumns {
+        record_type: "import",
+        columns: &[column::KIND, column::NAME, column::MODULE],
+    },
+    RecordColumns {
+        record_type: "relocation",
+        columns: &[column::KIND, column::NAME, column::OFFSET, column::SECTION],
+    },
+    RecordColumns {
+        record_type: "data-segment",
+        columns: &[
+            column::KIND,
+            column::FINGERPRINT,
+            column::OFFSET,
+            column::SIZE,
+            column::SECTION,
+        ],
+    },
+    RecordColumns {
+        record_type: "duplicate-group",
+        columns: &[
+            column::KIND,
+            column::FINGERPRINT,
+            column::DUPLICATED_BYTES,
+            column::MEMBERS,
+        ],
+    },
+    RecordColumns {
+        record_type: "duplicate-member",
+        columns: &[
+            column::KIND,
+            column::FINGERPRINT,
+            column::OFFSET,
+            column::SIZE,
+        ],
+    },
+    RecordColumns {
+        record_type: "dead-code",
+        columns: &[column::FINGERPRINT, column::DEAD_CODE_STATUS],
+    },
+    RecordColumns {
+        record_type: "retained-size",
+        columns: &[column::FINGERPRINT, column::RETAINED_BYTES],
+    },
+    RecordColumns {
+        record_type: "clone-group-attribution",
+        columns: &[
+            column::KIND,
+            column::FINGERPRINT,
+            column::DUPLICATED_BYTES,
+            column::ESTIMATED_DUPLICATED_BYTES,
+            column::CONTAINING_SYMBOLS,
+            column::CONTAINING_SYMBOL_BYTES,
+            column::MEMBERS,
+            column::ATTRIBUTED_NONCANONICAL_MEMBERS,
+            column::SOURCE_BUILD_VARIANT_FINGERPRINT,
+            column::CLONE_CONFIDENCE,
+            column::ATTRIBUTION_BASIS,
+        ],
+    },
+    RecordColumns {
+        record_type: "multiply-emitted-unit",
+        columns: &[
+            column::KIND,
+            column::FINGERPRINT,
+            column::NAME,
+            column::SIZE,
+            column::EMITTED_BODIES,
+            column::SOURCE_BUILD_VARIANT_FINGERPRINT,
+            column::MAPPING_CONFIDENCE,
+        ],
+    },
+    RecordColumns {
+        record_type: "clone-group-savings",
+        columns: &[
+            column::KIND,
+            column::FINGERPRINT,
+            column::DUPLICATED_BYTES,
+            column::ESTIMATED_DUPLICATED_BYTES,
+            column::ATTRIBUTION_BASIS,
+            column::ESTIMATED_REFACTOR_SAVINGS_BYTES,
+            column::SOURCE_BUILD_VARIANT_FINGERPRINT,
+            column::ARTIFACT_BUILD_VARIANT_FINGERPRINT,
+            column::MAPPING_CONFIDENCE,
+            column::CLONE_CONFIDENCE,
+            column::MODEL_CONFIDENCE,
+            column::SAVINGS_CONFIDENCE,
+            column::MODEL_SCHEMA_VERSION,
+            column::ESTIMATE_ASSUMPTIONS_JSON,
+        ],
+    },
+    RecordColumns {
+        record_type: "generic-origin",
+        columns: &[
+            column::KIND,
+            column::FINGERPRINT,
+            column::NAME,
+            column::SIZE,
+            column::DUPLICATED_BYTES,
+            column::RETAINED_BYTES,
+            column::ORIGIN_BUILD_VARIANT_FINGERPRINT,
+            column::INSTANTIATIONS,
+            column::TRANSLATION_UNITS,
+            column::ARTIFACT_SYMBOLS,
+        ],
+    },
+    RecordColumns {
+        record_type: "generic-specialization",
+        columns: &[
+            column::KIND,
+            column::FINGERPRINT,
+            column::NAME,
+            column::SIZE,
+            column::ORIGIN_BUILD_VARIANT_FINGERPRINT,
+            column::INSTANTIATIONS,
+            column::TRANSLATION_UNITS,
+            column::ARTIFACT_SYMBOLS,
+        ],
+    },
+    RecordColumns {
+        record_type: "macro-origin",
+        columns: &[
+            column::KIND,
+            column::FINGERPRINT,
+            column::NAME,
+            column::SIZE,
+            column::ORIGIN_BUILD_VARIANT_FINGERPRINT,
+            column::ARTIFACT_SYMBOLS,
+            column::DEFINITION_PATH_COUNT,
+        ],
+    },
+    RecordColumns {
+        record_type: "assumption",
+        columns: &[column::ASSUMPTION_SCOPE, column::ASSUMPTION],
+    },
+];
+
 // Columns are only ever appended, so the published width never shrinks.
 const _: () = assert!(ARTIFACT_CSV_HEADER.len() >= super::ARTIFACT_CSV_COLUMNS);
 

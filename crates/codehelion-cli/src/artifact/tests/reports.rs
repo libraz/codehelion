@@ -2598,6 +2598,115 @@ fn a_build_variant_warning_is_stated_once_per_comparison() {
     );
 }
 
+/// A report exercising every kind of record the CSV can write.
+///
+/// Some kinds come out of the analysis and some are attached afterwards, so
+/// the ones the fixture cannot produce are set on the report directly. What
+/// matters is that each kind appears: a kind nothing exercises is a
+/// declaration nothing checks.
+fn report_of_every_record_kind() -> ArtifactReport {
+    let artifact = resolved_call_graph_artifact();
+    let mut report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None)
+        .with_correlation(Some(populated_correlation()));
+    report.containment = Some(ArtifactContainment {
+        max_input_bytes: 4096,
+        worker_timeout_seconds: 30,
+        worker_memory_limit_bytes: 8192,
+        max_debug_derived_items: 4096,
+    });
+    report.build_variant = Some(
+        BuildVariantEvidence {
+            manifest_path: "build-variant.json".to_owned(),
+            fingerprint: codehelion_artifact::ArtifactFingerprint::from_content(
+                "artifact-build-variant",
+                b"variant",
+            ),
+        }
+        .for_report(),
+    );
+    report.archive_members = vec![ArchiveMemberReport {
+        name: "member.o".to_owned(),
+        fingerprint: "bb".repeat(16),
+        offset: Some(32),
+        size: Some(8),
+        format: Some(BinaryFormat::Elf),
+        thin: false,
+        parse_error: None,
+    }];
+    report.import_details = vec![ImportReport {
+        module: Some("env".to_owned()),
+        name: Some("host".to_owned()),
+        kind: codehelion_artifact::ArtifactImportKind::Function,
+    }];
+    report.relocation_details = vec![RelocationReport {
+        section: Some(1),
+        offset: 4,
+        kind: "call".to_owned(),
+        target: Some("cc".repeat(16)),
+    }];
+    report.source_maps = vec![SourceMapResolution {
+        uri: "app.wasm.map".to_owned(),
+        status: SourceMapResolutionStatus::Resolved {
+            local_path: "dist/app.wasm.map".to_owned(),
+            sources: vec!["src/app.rs".to_owned()],
+            locations: Vec::new(),
+        },
+    }];
+    report.dead_code = Some(metrics::DeadCodeReport {
+        symbols: vec![artifact.symbols[0].fingerprint],
+        definitive: true,
+        assumptions: Vec::new(),
+    });
+    report.retained_sizes = Some(vec![metrics::RetainedSize {
+        symbol: artifact.symbols[0].fingerprint,
+        retained_bytes: 4,
+    }]);
+    report
+}
+
+/// No record fills a column its kind was not declared to carry, and every
+/// declared kind is one this check actually meets.
+///
+/// The CSV is one wide row and each kind of record fills a subset of it, so
+/// nothing about a row says which columns belong to it. A writer that started
+/// filling a column meant for another kind would produce a document a consumer
+/// reads as saying something it does not.
+#[test]
+fn every_csv_record_fills_only_the_columns_its_kind_declares() {
+    let report = report_of_every_record_kind();
+    let mut met: BTreeSet<&str> = BTreeSet::new();
+    for record in artifact_csv_records(&report) {
+        let kind = record[column::RECORD_TYPE].as_str();
+        assert!(
+            RECORD_COLUMNS.iter().any(|entry| entry.record_type == kind),
+            "no columns are declared for a {kind} record"
+        );
+        let declared = RECORD_COLUMNS
+            .iter()
+            .find(|entry| entry.record_type == kind)
+            .expect("the declarations were just checked to hold this kind");
+        met.insert(declared.record_type);
+        for (index, field) in record.iter().enumerate() {
+            assert!(
+                field.is_empty()
+                    || EVERY_RECORD.contains(&index)
+                    || declared.columns.contains(&index),
+                "a {kind} record fills {}, which its kind does not carry",
+                ARTIFACT_CSV_HEADER[index]
+            );
+        }
+    }
+    let unmet: Vec<&str> = RECORD_COLUMNS
+        .iter()
+        .map(|entry| entry.record_type)
+        .filter(|kind| !met.contains(kind))
+        .collect();
+    assert!(
+        unmet.is_empty(),
+        "no record of these kinds was produced, so their columns are declared and unchecked: {unmet:?}"
+    );
+}
+
 /// A named CSV column carries the quantity its name states, for every record
 /// type that fills it.
 #[test]
