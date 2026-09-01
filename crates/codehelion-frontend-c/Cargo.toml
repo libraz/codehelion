@@ -9,7 +9,7 @@ homepage.workspace = true
 description = "C Fast-mode lexer and unit-boundary frontend for the codehelion source-audit tool."
 
 [dependencies]
-codehelion-core = { version = "0.4.0", path = "../codehelion-core" }
+codehelion-core = { version = "0.5.0", path = "../codehelion-core" }
 tree-sitter = "0.27"
 tree-sitter-c = "0.24"
 
