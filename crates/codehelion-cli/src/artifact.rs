@@ -23,6 +23,7 @@ use codehelion_artifact::{
     detect_format, metrics,
     metrics::{EstimatedRefactorSavingsBytes, EvidenceConfidence, VerifiedSavingsBytes},
 };
+use codehelion_store::BuildVariantFingerprint;
 use codehelion_store::artifact::{
     ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION,
     ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION,
@@ -265,7 +266,7 @@ pub fn report(args: &ArtifactReportArgs, out: &mut impl Write) -> Result<Outcome
         .zip(analysis.build_variant_fingerprint)
         .map(|(manifest_path, fingerprint)| ComparisonBuildVariant {
             manifest_path,
-            fingerprint: fingerprint_hex(fingerprint),
+            fingerprint: fingerprint_hex(fingerprint.as_bytes()),
         });
     let report = ArtifactReport::from_ir(
         FilePath::new(&analysis.path),
@@ -606,7 +607,8 @@ fn record(
         observed_bytes: artifact.observed_bytes,
         ir_json: &ir_json,
         build_variant_manifest_path: build_variant.map(|value| value.manifest_path.as_str()),
-        build_variant_fingerprint: build_variant.map(|value| value.fingerprint.as_bytes()),
+        build_variant_fingerprint: build_variant
+            .map(|value| BuildVariantFingerprint::from_bytes(value.fingerprint.as_bytes())),
         started_at,
         finished_at,
         symbols: &symbols,
@@ -862,9 +864,13 @@ fn record_comparison_calibration(
         source_scan_run_id: source_run,
         clone_group_fingerprint: estimate.clone_group_fingerprint,
         source_build_variant_fingerprint: estimate.source_build_variant_fingerprint,
-        before_artifact_build_variant_fingerprint: before_variant.fingerprint.as_bytes(),
+        before_artifact_build_variant_fingerprint: BuildVariantFingerprint::from_bytes(
+            before_variant.fingerprint.as_bytes(),
+        ),
         after_artifact_fingerprint: after.fingerprint.as_bytes(),
-        after_artifact_build_variant_fingerprint: after_variant.fingerprint.as_bytes(),
+        after_artifact_build_variant_fingerprint: BuildVariantFingerprint::from_bytes(
+            after_variant.fingerprint.as_bytes(),
+        ),
         estimated_refactor_savings_bytes: estimate.estimated_refactor_savings_bytes,
         verified_savings_bytes: verified,
         absolute_error_bytes: absolute_error,

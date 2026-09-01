@@ -19,7 +19,7 @@ use codehelion_store::artifact::{
     ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION, ArtifactAnalysisCloneGroupSavings,
     ArtifactAnalysisCorrelation, ArtifactAnalysisSavingsConfidence, ArtifactAnalysisSnapshot,
 };
-use codehelion_store::{Store, fingerprint_hex};
+use codehelion_store::{BuildVariantFingerprint, Store, fingerprint_hex};
 use predicates::prelude::*;
 
 /// The smallest byte sequence every backend recognises as a WASM module.
@@ -58,10 +58,12 @@ fn table_count(database: &Path, table: &str) -> i64 {
 }
 
 /// The fingerprint an artifact command derives from a build-variant manifest.
-fn build_variant_fingerprint(manifest: &str) -> [u8; 16] {
+fn build_variant_fingerprint(manifest: &str) -> BuildVariantFingerprint {
     let value: serde_json::Value = serde_json::from_str(manifest).expect("manifest is JSON");
     let normalized = serde_json::to_vec(&value).expect("manifest normalizes");
-    ArtifactFingerprint::from_content("artifact-build-variant", &normalized).as_bytes()
+    BuildVariantFingerprint::from_bytes(
+        ArtifactFingerprint::from_content("artifact-build-variant", &normalized).as_bytes(),
+    )
 }
 
 /// An analysis whose identity is the one a comparison of `WASM` looks for,
@@ -101,7 +103,7 @@ fn seed_saved_estimate(database: &Path, source_run: i64) {
                 schema_version: ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION.to_owned(),
                 source_scan_run_id: source_run,
                 clone_group_fingerprint: CLONE_GROUP,
-                source_build_variant_fingerprint: [5; 16],
+                source_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([5; 16]),
                 artifact_build_variant_fingerprint: variant,
                 duplicated_bytes: 24,
                 estimated_refactor_savings_bytes: 9,

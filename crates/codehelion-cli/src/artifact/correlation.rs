@@ -13,6 +13,7 @@ use super::{
     metrics,
 };
 use codehelion_core::stable_id::CloneGroupFingerprint;
+use codehelion_store::BuildVariantFingerprint;
 use codehelion_store::artifact::ArtifactAnalysisMappingConfidence;
 
 /// Mapping rows established by one explicit source-run correlation request.
@@ -324,10 +325,10 @@ pub(super) fn stored_clone_group_savings(
             let clone_group_fingerprint = hex_fingerprint(&estimate.clone_group_fingerprint)
                 .context("encoding clone-group savings fingerprint")?;
             let source_build_variant_fingerprint =
-                hex_fingerprint(&estimate.source_build_variant_fingerprint)
+                hex_build_variant(&estimate.source_build_variant_fingerprint)
                     .context("encoding source savings build variant")?;
             let artifact_build_variant_fingerprint =
-                hex_fingerprint(&estimate.artifact_build_variant_fingerprint)
+                hex_build_variant(&estimate.artifact_build_variant_fingerprint)
                     .context("encoding artifact savings build variant")?;
             Ok(ArtifactAnalysisCloneGroupSavings {
                 schema_version: ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION.to_owned(),
@@ -583,7 +584,7 @@ impl ArtifactCorrelationReport {
                 GenericOriginReport {
                     definition,
                     origin_fingerprint,
-                    origin_build_variant_fingerprint: fingerprint_hex(variant),
+                    origin_build_variant_fingerprint: fingerprint_hex(variant.as_bytes()),
                     instantiations: specializations.len(),
                     translation_units: translation_units.len(),
                     artifact_symbols: symbols.len(),
@@ -630,7 +631,7 @@ impl ArtifactCorrelationReport {
             .map(
                 |((origin, variant), (definition_paths, symbols))| MacroOriginReport {
                     origin_fingerprint: fingerprint_hex(origin),
-                    origin_build_variant_fingerprint: fingerprint_hex(variant),
+                    origin_build_variant_fingerprint: fingerprint_hex(variant.as_bytes()),
                     definition_paths: definition_paths.into_iter().collect(),
                     artifact_symbols: symbols.len(),
                     observed_symbol_bytes: observed_symbol_bytes_for(artifact, &symbols),
@@ -794,7 +795,7 @@ fn attributed_groups(rows: &CorrelationRows) -> Vec<AttributedGroup> {
                 .all(|member| member.whole_symbol_only);
             AttributedGroup {
                 clone_group_fingerprint: fingerprint_hex(*group_fingerprint.as_bytes()),
-                source_build_variant_fingerprint: fingerprint_hex(source_variant),
+                source_build_variant_fingerprint: fingerprint_hex(source_variant.as_bytes()),
                 members: members.len(),
                 attributed_noncanonical_members,
                 duplicated_bytes: (complete && whole_symbol_only).then(total),
@@ -849,7 +850,10 @@ pub(super) fn multiply_emitted_units(
     artifact: &ArtifactIr,
     rows: &CorrelationRows,
 ) -> Vec<MultiplyEmittedUnitReport> {
-    let mut units: BTreeMap<([u8; 16], [u8; 16]), MultiplyEmittedUnit> = BTreeMap::new();
+    // Keyed by the source occurrence and the build that minted it: the two
+    // digests name different things, and the key says which is which.
+    let mut units: BTreeMap<([u8; 16], BuildVariantFingerprint), MultiplyEmittedUnit> =
+        BTreeMap::new();
     for mapping in &rows.mappings {
         if mapping.source_kind != ArtifactAnalysisSourceKind::Unit
             || !places_one_source_unit(mapping)
@@ -891,7 +895,7 @@ pub(super) fn multiply_emitted_units(
             // unit the artifact repeated says something the source did not.
             (emitted_bodies > 1).then(|| MultiplyEmittedUnitReport {
                 source_fingerprint: fingerprint_hex(unit.content),
-                source_build_variant_fingerprint: fingerprint_hex(variant),
+                source_build_variant_fingerprint: fingerprint_hex(variant.as_bytes()),
                 name: unit.name,
                 emitted_bodies,
                 observed_symbol_bytes,
@@ -956,7 +960,7 @@ const fn weaker_of(
 /// Mappings whose attributed bytes belong to one group under one source variant.
 fn group_mappings<'rows>(
     rows: &'rows CorrelationRows,
-    source_variant: [u8; 16],
+    source_variant: BuildVariantFingerprint,
     noncanonical: &'rows BTreeSet<[u8; 16]>,
 ) -> impl Iterator<Item = &'rows ArtifactAnalysisMapping> + Clone {
     rows.mappings.iter().filter(move |mapping| {
@@ -1019,7 +1023,7 @@ pub(super) fn clone_group_savings(rows: &CorrelationRows) -> Vec<CloneGroupSavin
             let group_fingerprint = CloneGroupFingerprint::from_bytes(hex_fingerprint(
                 &attribution.clone_group_fingerprint,
             )?);
-            let source_variant = hex_fingerprint(&attribution.source_build_variant_fingerprint)?;
+            let source_variant = hex_build_variant(&attribution.source_build_variant_fingerprint)?;
             let members = rows
                 .clone_fragments
                 .iter()
@@ -1052,7 +1056,7 @@ pub(super) fn clone_group_savings(rows: &CorrelationRows) -> Vec<CloneGroupSavin
             Some(CloneGroupSavingsReport {
                 clone_group_fingerprint: attribution.clone_group_fingerprint,
                 source_build_variant_fingerprint: attribution.source_build_variant_fingerprint,
-                artifact_build_variant_fingerprint: fingerprint_hex(artifact_variant),
+                artifact_build_variant_fingerprint: fingerprint_hex(artifact_variant.as_bytes()),
                 duplicated_bytes,
                 duplicated_bytes_basis: basis,
                 estimated_refactor_savings_bytes,
@@ -1111,6 +1115,15 @@ pub(super) fn estimate_refactor_savings_bytes(
         Err(_) if estimate.is_negative() => i64::MIN,
         Err(_) => i64::MAX,
     }
+}
+
+/// The same read, for the one digest that names a build rather than code.
+///
+/// A separate entry point instead of a cast at each call, for the reason the
+/// storage layer has one: the point of the type is that a reader can see which
+/// digest is being treated as which.
+pub(super) fn hex_build_variant(value: &str) -> Option<BuildVariantFingerprint> {
+    hex_fingerprint(value).map(BuildVariantFingerprint::from_bytes)
 }
 
 pub(super) fn hex_fingerprint(value: &str) -> Option<[u8; 16]> {

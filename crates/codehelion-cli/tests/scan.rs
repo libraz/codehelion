@@ -14,13 +14,13 @@ use assert_cmd::Command;
 use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_eval::detected;
 use codehelion_eval::metrics::stability;
-use codehelion_store::Store;
 use codehelion_store::artifact::{
     ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION,
     ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION, ArtifactAnalysisCloneGroupSavings,
     ArtifactAnalysisCorrelation, ArtifactAnalysisSavingsConfidence, ArtifactAnalysisSnapshot,
 };
 use codehelion_store::snapshot::{Snapshot, SummaryRow};
+use codehelion_store::{BuildVariantFingerprint, Store};
 use fs2::FileExt;
 use predicates::prelude::*;
 

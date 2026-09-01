@@ -10,6 +10,8 @@
 //! - [`schema`] — the current local database baseline,
 //! - [`snapshot`] — the write path: one scan, one atomic transaction,
 //! - [`query`] — the read path: every SQL query as a typed function,
+//! - [`fingerprint`] — the stored identity that names a build rather than a
+//!   piece of code, kept apart from the ones that do,
 //! - [`compiler`] — both directions for the compiler IR, whose shape is
 //!   defined by the helper protocol rather than here,
 //! - [`lifecycle`] — which rows survive: the one recency order, the retention
@@ -22,6 +24,7 @@
 
 pub mod artifact;
 pub mod compiler;
+pub mod fingerprint;
 pub mod lifecycle;
 pub mod path_key;
 pub mod query;
@@ -30,6 +33,7 @@ pub mod snapshot;
 
 mod preflight;
 
+pub use fingerprint::BuildVariantFingerprint;
 pub use lifecycle::{CalibrationRecord, CascadedRows, PruneReport, SelectedCloneGroupEstimate};
 pub use path_key::{display_path, path_key, path_label};
 

@@ -373,10 +373,10 @@ pub(crate) fn hydrate_artifact_savings(
                 Ok(report::ArtifactSavings {
                     artifact_analysis_id: analysis_id,
                     source_build_variant_fingerprint: fingerprint_hex(
-                        entry.source_build_variant_fingerprint,
+                        entry.source_build_variant_fingerprint.as_bytes(),
                     ),
                     artifact_build_variant_fingerprint: fingerprint_hex(
-                        entry.artifact_build_variant_fingerprint,
+                        entry.artifact_build_variant_fingerprint.as_bytes(),
                     ),
                     duplicated_bytes: entry.duplicated_bytes,
                     estimated_refactor_savings_bytes: entry.estimated_refactor_savings_bytes,

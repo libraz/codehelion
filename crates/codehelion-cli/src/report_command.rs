@@ -972,9 +972,11 @@ pub(crate) fn explain_occurrence(
             artifact_analysis_id: mapping.analysis_id,
             artifact_symbol_fingerprint: fingerprint_hex(mapping.artifact_symbol_fingerprint),
             source_build_variant_fingerprint: fingerprint_hex(
-                mapping.source_build_variant_fingerprint,
+                mapping.source_build_variant_fingerprint.as_bytes(),
             ),
-            artifact_build_variant_fingerprint: fingerprint_hex(mapping.build_variant_fingerprint),
+            artifact_build_variant_fingerprint: fingerprint_hex(
+                mapping.build_variant_fingerprint.as_bytes(),
+            ),
             confidence: mapping.confidence.to_string(),
             evidence: mapping.evidence,
             attributed_bytes: mapping.attributed_bytes,
@@ -987,10 +989,10 @@ pub(crate) fn explain_occurrence(
             Ok(report::CloneGroupSavingsDetail {
                 artifact_analysis_id,
                 source_build_variant_fingerprint: fingerprint_hex(
-                    savings.source_build_variant_fingerprint,
+                    savings.source_build_variant_fingerprint.as_bytes(),
                 ),
                 artifact_build_variant_fingerprint: fingerprint_hex(
-                    savings.artifact_build_variant_fingerprint,
+                    savings.artifact_build_variant_fingerprint.as_bytes(),
                 ),
                 duplicated_bytes: savings.duplicated_bytes,
                 estimated_refactor_savings_bytes: savings.estimated_refactor_savings_bytes,

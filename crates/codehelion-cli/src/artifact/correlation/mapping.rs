@@ -21,23 +21,13 @@ use crate::artifact::SourceMapLocation;
 ///
 /// Every value correlation handles is a 128-bit digest, and the build variant
 /// is the one that is not an identity of any code: it says which build the
-/// source and artifact identities beside it are only comparable within. Keeping
-/// it in its own type means a source, symbol or occurrence identity cannot be
-/// passed where a variant belongs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::artifact) struct BuildVariantFingerprint([u8; 16]);
-
-impl BuildVariantFingerprint {
-    /// Wrap a variant reference recorded earlier by this tool.
-    pub(in crate::artifact) const fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(bytes)
-    }
-
-    /// The reference's raw bytes, as persistence and evidence records spell it.
-    pub(in crate::artifact) const fn as_bytes(self) -> [u8; 16] {
-        self.0
-    }
-}
+/// source and artifact identities beside it are only comparable within.
+///
+/// The storage layer's own type rather than a second one shaped like it. A
+/// correlation is written down and read back, and two types for one digest
+/// would have to be converted at that boundary — which is a cast, and a cast
+/// is what this type exists to make unnecessary.
+pub(in crate::artifact) use codehelion_store::BuildVariantFingerprint;
 
 /// Storage identity of one source-to-artifact correspondence.
 ///
@@ -334,9 +324,7 @@ pub(in crate::artifact) fn enrich_source_map_evidence(
                     source_kind: ArtifactAnalysisSourceKind::Unit,
                     source_fingerprint: *unit.fingerprint.as_bytes(),
                     source_instance_fingerprint: source_unit_instance_fingerprint(unit),
-                    source_build_variant: BuildVariantFingerprint::from_bytes(
-                        unit.build_variant_fingerprint,
-                    ),
+                    source_build_variant: unit.build_variant_fingerprint,
                     source_url: &location.source_url,
                     candidate_count,
                     artifact_build_variant: artifact_variant,
@@ -351,9 +339,7 @@ pub(in crate::artifact) fn enrich_source_map_evidence(
                     source_kind: ArtifactAnalysisSourceKind::Fragment,
                     source_fingerprint: *fragment.fingerprint.as_bytes(),
                     source_instance_fingerprint: *fragment.finding_id.as_bytes(),
-                    source_build_variant: BuildVariantFingerprint::from_bytes(
-                        fragment.build_variant_fingerprint,
-                    ),
+                    source_build_variant: fragment.build_variant_fingerprint,
                     source_url: &location.source_url,
                     candidate_count,
                     artifact_build_variant: artifact_variant,
@@ -404,7 +390,7 @@ fn source_map_mapping(correspondence: &SourceMapCorrespondence<'_>) -> ArtifactA
         source_kind: correspondence.source_kind,
         source_fingerprint: correspondence.source_fingerprint,
         source_instance_fingerprint: correspondence.source_instance_fingerprint,
-        source_build_variant_fingerprint: correspondence.source_build_variant.as_bytes(),
+        source_build_variant_fingerprint: correspondence.source_build_variant,
         evidence: MappingEvidence::new(
             vec![MappingEvidenceFact::SourceMap {
                 source_url: correspondence.source_url.to_owned(),
@@ -413,7 +399,7 @@ fn source_map_mapping(correspondence: &SourceMapCorrespondence<'_>) -> ArtifactA
             false,
         ),
         attributed_bytes: None,
-        build_variant_fingerprint: correspondence.artifact_build_variant.as_bytes(),
+        build_variant_fingerprint: correspondence.artifact_build_variant,
     }
 }
 
@@ -612,7 +598,7 @@ pub(in crate::artifact) fn enrich_linker_map_evidence(
                 source_build_variant_fingerprint: unit.build_variant_fingerprint,
                 evidence: MappingEvidence::new(facts, candidate_count, has_conflict),
                 attributed_bytes: None,
-                build_variant_fingerprint: artifact_variant.as_bytes(),
+                build_variant_fingerprint: artifact_variant,
             });
         }
         rows.unmapped_symbols.retain(|unmapped| {
@@ -692,7 +678,7 @@ pub(in crate::artifact) fn correlate_debug_locations(
                         false,
                     ),
                     attributed_bytes: None,
-                    build_variant_fingerprint: artifact_variant.as_bytes(),
+                    build_variant_fingerprint: artifact_variant,
                 });
                 mapped = true;
             }
@@ -712,7 +698,7 @@ pub(in crate::artifact) fn correlate_debug_locations(
                         false,
                     ),
                     attributed_bytes: None,
-                    build_variant_fingerprint: artifact_variant.as_bytes(),
+                    build_variant_fingerprint: artifact_variant,
                 });
                 mapped = true;
             }
@@ -810,7 +796,7 @@ pub(in crate::artifact) fn source_unit_instance_fingerprint(unit: &SourceUnitIde
     }
     bytes.extend(*unit.fingerprint.as_bytes());
     bytes.extend(unit.occurrence_ordinal.to_le_bytes());
-    bytes.extend(unit.build_variant_fingerprint);
+    bytes.extend(unit.build_variant_fingerprint.as_bytes());
     codehelion_artifact::ArtifactFingerprint::from_content("source-unit-instance-v1", &bytes)
         .as_bytes()
 }

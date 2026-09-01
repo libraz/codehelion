@@ -78,7 +78,7 @@ fn dwarf_locations_map_only_units_in_the_explicit_source_run() {
     artifact.symbols.push(symbol.clone());
     let units = [SourceUnitIdentity {
         fingerprint: UnitFingerprint::from_bytes([3; 16]),
-        build_variant_fingerprint: [4; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
         file_path: "src/main.cpp".to_owned(),
@@ -92,7 +92,7 @@ fn dwarf_locations_map_only_units_in_the_explicit_source_run() {
         clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
         is_canonical: false,
         clone_confidence: 1.0,
-        build_variant_fingerprint: [4; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
         file_path: "src/main.cpp".to_owned(),
         start_line: Some(11),
         end_line: Some(13),
@@ -115,8 +115,14 @@ fn dwarf_locations_map_only_units_in_the_explicit_source_run() {
         symbol.fingerprint.as_bytes()
     );
     assert_eq!(rows.mappings[0].source_fingerprint, [3; 16]);
-    assert_eq!(rows.mappings[0].source_build_variant_fingerprint, [4; 16]);
-    assert_eq!(rows.mappings[0].build_variant_fingerprint, [5; 16]);
+    assert_eq!(
+        rows.mappings[0].source_build_variant_fingerprint.as_bytes(),
+        [4; 16]
+    );
+    assert_eq!(
+        rows.mappings[0].build_variant_fingerprint.as_bytes(),
+        [5; 16]
+    );
     assert_eq!(
         rows.mappings[0].evidence.confidence(),
         Some(codehelion_store::artifact::ArtifactAnalysisMappingConfidence::Exact)
@@ -189,7 +195,7 @@ fn partial_fragment_attribution_is_proportional_and_not_exact() {
         clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
         is_canonical: false,
         clone_confidence: 1.0,
-        build_variant_fingerprint: [4; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
         file_path: "src/main.cpp".to_owned(),
         start_line: Some(101),
         end_line: Some(110),
@@ -209,7 +215,7 @@ fn partial_fragment_attribution_is_proportional_and_not_exact() {
             false,
         ),
         attributed_bytes: None,
-        build_variant_fingerprint: [5; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([5; 16]),
     }];
 
     assign_unambiguous_fragment_bytes(
@@ -257,7 +263,7 @@ fn pdb_location_maps_with_pdb_evidence() {
     artifact.symbols.push(symbol);
     let units = [SourceUnitIdentity {
         fingerprint: UnitFingerprint::from_bytes([3; 16]),
-        build_variant_fingerprint: [4; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
         file_path: "src/main.cpp".to_owned(),
@@ -313,7 +319,7 @@ fn dwarf_frame_without_line_does_not_map_clone_fragments() {
     artifact.symbols.push(symbol);
     let units = [SourceUnitIdentity {
         fingerprint: UnitFingerprint::from_bytes([3; 16]),
-        build_variant_fingerprint: [4; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
         file_path: "src/main.cpp".to_owned(),
@@ -328,7 +334,7 @@ fn dwarf_frame_without_line_does_not_map_clone_fragments() {
             clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
             is_canonical: false,
             clone_confidence: 1.0,
-            build_variant_fingerprint: [4; 16],
+            build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
             file_path: "src/main.cpp".to_owned(),
             start_line: Some(10),
             end_line: Some(13),
@@ -339,7 +345,7 @@ fn dwarf_frame_without_line_does_not_map_clone_fragments() {
             clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
             is_canonical: true,
             clone_confidence: 1.0,
-            build_variant_fingerprint: [4; 16],
+            build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
             file_path: "src/main.cpp".to_owned(),
             start_line: Some(20),
             end_line: Some(23),
@@ -414,7 +420,7 @@ fn inline_stack_retains_every_source_origin_without_double_counting_symbol_bytes
     let units = [
         SourceUnitIdentity {
             fingerprint: UnitFingerprint::from_bytes([1; 16]),
-            build_variant_fingerprint: [4; 16],
+            build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
             file_path: "src/a.cpp".to_owned(),
@@ -424,7 +430,7 @@ fn inline_stack_retains_every_source_origin_without_double_counting_symbol_bytes
         },
         SourceUnitIdentity {
             fingerprint: UnitFingerprint::from_bytes([2; 16]),
-            build_variant_fingerprint: [4; 16],
+            build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
             file_path: "src/b.cpp".to_owned(),
@@ -440,7 +446,7 @@ fn inline_stack_retains_every_source_origin_without_double_counting_symbol_bytes
             clone_group_fingerprint: CloneGroupFingerprint::from_bytes([7; 16]),
             is_canonical: false,
             clone_confidence: 1.0,
-            build_variant_fingerprint: [4; 16],
+            build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
             file_path: "src/a.cpp".to_owned(),
             start_line: Some(9),
             end_line: Some(11),
@@ -451,7 +457,7 @@ fn inline_stack_retains_every_source_origin_without_double_counting_symbol_bytes
             clone_group_fingerprint: CloneGroupFingerprint::from_bytes([7; 16]),
             is_canonical: true,
             clone_confidence: 1.0,
-            build_variant_fingerprint: [4; 16],
+            build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
             file_path: "src/b.cpp".to_owned(),
             start_line: Some(19),
             end_line: Some(21),
@@ -499,7 +505,7 @@ fn source_findings_without_artifact_evidence_are_explicitly_unmapped() {
     let artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     let units = [SourceUnitIdentity {
         fingerprint: UnitFingerprint::from_bytes([3; 16]),
-        build_variant_fingerprint: [4; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
         file_path: "src/unmatched.cpp".to_owned(),
@@ -513,7 +519,7 @@ fn source_findings_without_artifact_evidence_are_explicitly_unmapped() {
         clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
         is_canonical: false,
         clone_confidence: 1.0,
-        build_variant_fingerprint: [4; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
         file_path: "src/unmatched.cpp".to_owned(),
         start_line: Some(1),
         end_line: Some(2),
@@ -539,14 +545,14 @@ fn source_findings_without_artifact_evidence_are_explicitly_unmapped() {
                 source_kind: ArtifactAnalysisSourceKind::Unit,
                 source_fingerprint: [3; 16],
                 source_instance_fingerprint: unit_instance,
-                source_build_variant_fingerprint: [4; 16],
+                source_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
                 reason: ArtifactAnalysisUnmappedSourceReason::NoArtifactEvidence,
             },
             ArtifactAnalysisUnmappedSource {
                 source_kind: ArtifactAnalysisSourceKind::Fragment,
                 source_fingerprint: [6; 16],
                 source_instance_fingerprint: [16; 16],
-                source_build_variant_fingerprint: [4; 16],
+                source_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
                 reason: ArtifactAnalysisUnmappedSourceReason::NoArtifactEvidence,
             },
         ]
@@ -566,7 +572,7 @@ fn equal_content_source_units_keep_distinct_unmapped_occurrences() {
     let units = [
         SourceUnitIdentity {
             fingerprint: UnitFingerprint::from_bytes([3; 16]),
-            build_variant_fingerprint: [4; 16],
+            build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
             file_path: "src/left.cpp".to_owned(),
@@ -576,7 +582,7 @@ fn equal_content_source_units_keep_distinct_unmapped_occurrences() {
         },
         SourceUnitIdentity {
             fingerprint: UnitFingerprint::from_bytes([3; 16]),
-            build_variant_fingerprint: [4; 16],
+            build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
             unit_kind: "function".to_owned(),
             occurrence_ordinal: 1,
             file_path: "src/right.cpp".to_owned(),
@@ -608,7 +614,7 @@ fn equal_content_source_units_keep_distinct_unmapped_occurrences() {
 fn source_unit_instance_identity_ignores_anchors_but_keeps_duplicate_occurrences() {
     let unit = SourceUnitIdentity {
         fingerprint: UnitFingerprint::from_bytes([3; 16]),
-        build_variant_fingerprint: [4; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
         file_path: "src/widget.cpp".to_owned(),
@@ -657,7 +663,7 @@ fn demangled_name_maps_one_named_unit_as_weak_evidence() {
     artifact.symbols.push(symbol);
     let units = [SourceUnitIdentity {
         fingerprint: UnitFingerprint::from_bytes([3; 16]),
-        build_variant_fingerprint: [4; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
         file_path: "src/widget.cpp".to_owned(),
@@ -712,7 +718,7 @@ fn macro_definition_anchor_beats_an_unrelated_unit_label() {
     artifact.symbols.push(symbol);
     let units = [SourceUnitIdentity {
         fingerprint: UnitFingerprint::from_bytes([3; 16]),
-        build_variant_fingerprint: [4; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
         file_path: "src/widget.cpp".to_owned(),
@@ -735,7 +741,7 @@ fn macro_definition_anchor_beats_an_unrelated_unit_label() {
         clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
         is_canonical: false,
         clone_confidence: 1.0,
-        build_variant_fingerprint: [4; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
         file_path: "src/widget.cpp".to_owned(),
         start_line: Some(11),
         end_line: Some(13),
@@ -836,7 +842,7 @@ fn matching_static_calls_add_independent_neighborhood_evidence() {
     });
     let units = [SourceUnitIdentity {
         fingerprint: UnitFingerprint::from_bytes([3; 16]),
-        build_variant_fingerprint: [4; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
         unit_kind: "function".to_owned(),
         occurrence_ordinal: 1,
         file_path: "src/render.rs".to_owned(),
@@ -861,7 +867,7 @@ fn matching_static_calls_add_independent_neighborhood_evidence() {
         clone_group_fingerprint: CloneGroupFingerprint::from_bytes([17; 16]),
         is_canonical: false,
         clone_confidence: 1.0,
-        build_variant_fingerprint: [4; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
         file_path: "src/render.rs".to_owned(),
         start_line: Some(1),
         end_line: Some(10),

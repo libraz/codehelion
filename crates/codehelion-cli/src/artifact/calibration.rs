@@ -199,7 +199,9 @@ fn calibration_strata(
             .push(measurement.clone());
         variants
             .entry(fingerprint_hex(
-                measurement.before_artifact_build_variant_fingerprint,
+                measurement
+                    .before_artifact_build_variant_fingerprint
+                    .as_bytes(),
             ))
             .or_default()
             .push(measurement.clone());

@@ -280,14 +280,10 @@ impl Store {
             calibration.artifact_analysis_id,
             calibration.source_scan_run_id,
             calibration.clone_group_fingerprint.as_slice(),
-            calibration.source_build_variant_fingerprint.as_slice(),
-            calibration
-                .before_artifact_build_variant_fingerprint
-                .as_slice(),
+            calibration.source_build_variant_fingerprint,
+            calibration.before_artifact_build_variant_fingerprint,
             calibration.after_artifact_fingerprint.as_slice(),
-            calibration
-                .after_artifact_build_variant_fingerprint
-                .as_slice(),
+            calibration.after_artifact_build_variant_fingerprint,
         ];
         let analysis_exists: Option<i64> = tx
             .query_row(
@@ -338,14 +334,10 @@ impl Store {
                 calibration.artifact_analysis_id,
                 calibration.source_scan_run_id,
                 calibration.clone_group_fingerprint.as_slice(),
-                calibration.source_build_variant_fingerprint.as_slice(),
-                calibration
-                    .before_artifact_build_variant_fingerprint
-                    .as_slice(),
+                calibration.source_build_variant_fingerprint,
+                calibration.before_artifact_build_variant_fingerprint,
                 calibration.after_artifact_fingerprint.as_slice(),
-                calibration
-                    .after_artifact_build_variant_fingerprint
-                    .as_slice(),
+                calibration.after_artifact_build_variant_fingerprint,
                 calibration.estimated_refactor_savings_bytes,
                 calibration.verified_savings_bytes,
                 i64::try_from(calibration.absolute_error_bytes).unwrap_or(i64::MAX),

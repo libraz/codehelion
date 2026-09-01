@@ -7,7 +7,8 @@ use crate::artifact::{
 use crate::lifecycle::{ARTIFACT_ANALYSIS_RECENCY, SelectedCloneGroupEstimate};
 
 use super::common::{
-    decode_artifact_mapping, fingerprint_from_blob, nonnegative_u64, parse_hex_id,
+    build_variant_from_blob, decode_artifact_mapping, fingerprint_from_blob, nonnegative_u64,
+    parse_hex_id,
 };
 use super::{
     ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION,
@@ -81,7 +82,7 @@ impl Store {
                     )?,
                     build_variant_fingerprint: build_variant_fingerprint
                         .map(|value| {
-                            fingerprint_from_blob(
+                            build_variant_from_blob(
                                 "artifact_analysis.build_variant_fingerprint",
                                 value,
                             )
@@ -128,7 +129,7 @@ impl Store {
                         build_variant_manifest_path,
                         build_variant_fingerprint: build_variant_fingerprint
                             .map(|value| {
-                                fingerprint_from_blob(
+                                build_variant_from_blob(
                                     "artifact_analysis.build_variant_fingerprint",
                                     value,
                                 )
@@ -427,7 +428,7 @@ impl Store {
                             reason: "source build variant is absent".to_owned(),
                         })
                         .and_then(|value| {
-                            fingerprint_from_blob(
+                            build_variant_from_blob(
                                 "artifact_analysis_unmapped_source.source_build_variant_fingerprint",
                                 value,
                             )
@@ -532,11 +533,11 @@ impl Store {
                     artifact_analysis_id,
                     source_scan_run_id,
                     clone_group_fingerprint: fingerprint,
-                    source_build_variant_fingerprint: fingerprint_from_blob(
+                    source_build_variant_fingerprint: build_variant_from_blob(
                         "artifact_analysis_savings_calibration.source_build_variant_fingerprint",
                         source_build_variant_fingerprint,
                     )?,
-                    before_artifact_build_variant_fingerprint: fingerprint_from_blob(
+                    before_artifact_build_variant_fingerprint: build_variant_from_blob(
                         "artifact_analysis_savings_calibration.before_artifact_build_variant_fingerprint",
                         before_artifact_build_variant_fingerprint,
                     )?,
@@ -544,7 +545,7 @@ impl Store {
                         "artifact_analysis_savings_calibration.after_artifact_fingerprint",
                         after_artifact_fingerprint,
                     )?,
-                    after_artifact_build_variant_fingerprint: fingerprint_from_blob(
+                    after_artifact_build_variant_fingerprint: build_variant_from_blob(
                         "artifact_analysis_savings_calibration.after_artifact_build_variant_fingerprint",
                         after_artifact_build_variant_fingerprint,
                     )?,
@@ -874,11 +875,11 @@ impl CloneGroupSavingsSqlRow {
                 "artifact_analysis_clone_group_savings.clone_group_fingerprint",
                 self.clone_group_fingerprint,
             )?,
-            source_build_variant_fingerprint: fingerprint_from_blob(
+            source_build_variant_fingerprint: build_variant_from_blob(
                 "artifact_analysis_clone_group_savings.source_build_variant_fingerprint",
                 self.source_build_variant_fingerprint,
             )?,
-            artifact_build_variant_fingerprint: fingerprint_from_blob(
+            artifact_build_variant_fingerprint: build_variant_from_blob(
                 "artifact_analysis_clone_group_savings.artifact_build_variant_fingerprint",
                 self.artifact_build_variant_fingerprint,
             )?,

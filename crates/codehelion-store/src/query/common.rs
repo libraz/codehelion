@@ -1,3 +1,4 @@
+use super::BuildVariantFingerprint;
 use super::{
     ArtifactAnalysisMappingConfidence, ArtifactAnalysisSourceKind, ArtifactMappingSqlRow, BTreeSet,
     CrossLanguageGroupDetail, CrossLanguageGroupMember, CrossVariantGroupDetail,
@@ -538,7 +539,7 @@ pub(super) fn decode_artifact_mapping(
                 reason: "source build variant is absent".to_owned(),
             })
             .and_then(|value| {
-                fingerprint_from_blob(
+                build_variant_from_blob(
                     "artifact_analysis_source_mapping.source_build_variant_fingerprint",
                     value,
                 )
@@ -552,11 +553,24 @@ pub(super) fn decode_artifact_mapping(
                 field: "artifact_analysis_source_mapping.attributed_bytes",
                 value: attributed_bytes.unwrap_or_default().to_string(),
             })?,
-        build_variant_fingerprint: fingerprint_from_blob(
+        build_variant_fingerprint: build_variant_from_blob(
             "artifact_analysis_source_mapping.build_variant_fingerprint",
             build_variant_fingerprint,
         )?,
     })
+}
+
+/// The same read, for the one digest that names a build rather than code.
+///
+/// A separate entry point instead of a cast at each call: the point of the
+/// type is that a reader can see which digest is being treated as which, and
+/// a conversion spelled the same way for both would put that back where it
+/// was.
+pub(super) fn build_variant_from_blob(
+    field: &'static str,
+    value: Vec<u8>,
+) -> Result<BuildVariantFingerprint, StoreError> {
+    fingerprint_from_blob(field, value).map(BuildVariantFingerprint::from_bytes)
 }
 
 pub(super) fn fingerprint_from_blob(
@@ -593,7 +607,9 @@ pub(super) fn positive_line(
 /// rows use the project's standard 128-bit fingerprint width. Taking the
 /// leading bytes preserves a deterministic reference without confusing this
 /// representation with one of the stable IDs parsed by [`parse_hex_id`].
-pub(super) fn parse_build_variant_reference(hex: &str) -> Result<[u8; 16], StoreError> {
+pub(super) fn parse_build_variant_reference(
+    hex: &str,
+) -> Result<BuildVariantFingerprint, StoreError> {
     let malformed = || StoreError::MalformedId { id: hex.to_owned() };
     if hex.len() != 64 || !hex.chars().all(|character| character.is_ascii_hexdigit()) {
         return Err(malformed());
@@ -610,7 +626,7 @@ pub(super) fn parse_build_variant_reference(hex: &str) -> Result<[u8; 16], Store
         let pair = core::str::from_utf8(chunk).map_err(|_| malformed())?;
         out[index] = u8::from_str_radix(pair, 16).map_err(|_| malformed())?;
     }
-    Ok(out)
+    Ok(BuildVariantFingerprint::from_bytes(out))
 }
 
 pub(super) fn nonnegative_u64(field: &'static str, value: i64) -> Result<u64, StoreError> {
@@ -658,7 +674,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            parsed,
+            parsed.as_bytes(),
             [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
         );
         assert!(parse_build_variant_reference("00010203").is_err());

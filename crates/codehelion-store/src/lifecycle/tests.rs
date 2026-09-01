@@ -1,5 +1,6 @@
 use super::*;
 use crate::artifact::ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION;
+use crate::fingerprint::BuildVariantFingerprint;
 use crate::schema;
 
 /// The build variant and completed scan run every artifact row references.
@@ -85,10 +86,10 @@ fn calibration(analysis_id: i64, group: u8, verified: i64) -> ArtifactAnalysisSa
         artifact_analysis_id: analysis_id,
         source_scan_run_id: 1,
         clone_group_fingerprint: [group; 16],
-        source_build_variant_fingerprint: [9; 16],
-        before_artifact_build_variant_fingerprint: [5; 16],
+        source_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([9; 16]),
+        before_artifact_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([5; 16]),
         after_artifact_fingerprint: [13; 16],
-        after_artifact_build_variant_fingerprint: [5; 16],
+        after_artifact_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([5; 16]),
         estimated_refactor_savings_bytes: -2,
         verified_savings_bytes: verified,
         absolute_error_bytes: 5,

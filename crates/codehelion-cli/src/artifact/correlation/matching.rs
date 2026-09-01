@@ -579,7 +579,7 @@ pub(in crate::artifact) fn correlate_generic_origin(
                 false,
             ),
             attributed_bytes: None,
-            build_variant_fingerprint: artifact_variant.as_bytes(),
+            build_variant_fingerprint: artifact_variant,
         });
     }
     for ((_, _, instantiation_key, definition), (fragment, translation_units)) in
@@ -602,7 +602,7 @@ pub(in crate::artifact) fn correlate_generic_origin(
                 false,
             ),
             attributed_bytes: None,
-            build_variant_fingerprint: artifact_variant.as_bytes(),
+            build_variant_fingerprint: artifact_variant,
         });
     }
     mappings
@@ -689,7 +689,7 @@ pub(in crate::artifact) fn correlate_symbol_name(
             source_build_variant_fingerprint: unit.build_variant_fingerprint,
             evidence: MappingEvidence::new(facts, unit_candidate_count, false),
             attributed_bytes: None,
-            build_variant_fingerprint: artifact_variant.as_bytes(),
+            build_variant_fingerprint: artifact_variant,
         });
     }
     for (fragment, source_name, macro_definition) in fragment_candidates {
@@ -709,7 +709,7 @@ pub(in crate::artifact) fn correlate_symbol_name(
             source_build_variant_fingerprint: fragment.build_variant_fingerprint,
             evidence: MappingEvidence::new(facts, fragment_candidate_count, false),
             attributed_bytes: None,
-            build_variant_fingerprint: artifact_variant.as_bytes(),
+            build_variant_fingerprint: artifact_variant,
         });
     }
     mappings
@@ -764,9 +764,15 @@ pub(in crate::artifact) fn combine_fallback_mappings(
     generic_mappings
 }
 
+/// What identifies the source side of one correspondence.
+///
+/// The build variant is part of it and is spelled as itself: the same source
+/// occurrence read under two builds is two correspondences, and a key that
+/// held the variant as bare bytes beside two code identities could be built
+/// with them in any order.
 const fn mapping_source_key(
     mapping: &ArtifactAnalysisMapping,
-) -> (u8, [u8; 16], [u8; 16], [u8; 16]) {
+) -> (u8, [u8; 16], [u8; 16], BuildVariantFingerprint) {
     (
         source_kind_order(mapping.source_kind),
         mapping.source_fingerprint,

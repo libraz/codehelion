@@ -23,6 +23,7 @@ use crate::artifact::{
     ArtifactAnalysisSavingsConfidence, ArtifactAnalysisSourceKind, ArtifactAnalysisUnmappedReason,
     ArtifactAnalysisUnmappedSourceReason, MappingEvidence, SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION,
 };
+use crate::fingerprint::BuildVariantFingerprint;
 use crate::snapshot::{
     FileCountsRow, FunnelDropRow, FunnelStageRow, GuardrailsRow, SummaryRow, UnparsedRow,
     UnusedRuleRow,
@@ -67,7 +68,7 @@ pub struct StoredArtifactAnalysisIdentity {
     /// Content-derived artifact identity.
     pub content_fingerprint: [u8; 16],
     /// Build-configuration identity, when one was supplied at analysis time.
-    pub build_variant_fingerprint: Option<[u8; 16]>,
+    pub build_variant_fingerprint: Option<BuildVariantFingerprint>,
 }
 
 /// Complete persisted input needed to re-render one standalone artifact analysis.
@@ -84,7 +85,7 @@ pub struct StoredArtifactAnalysis {
     /// Manifest path for the recorded build variant, when supplied.
     pub build_variant_manifest_path: Option<String>,
     /// Content-derived build-variant identity, when supplied.
-    pub build_variant_fingerprint: Option<[u8; 16]>,
+    pub build_variant_fingerprint: Option<BuildVariantFingerprint>,
 }
 
 /// Where a recorded run came from: enough of its identity to say whether a
@@ -709,7 +710,7 @@ pub struct StoredArtifactMapping {
     /// Stable discriminator of this source occurrence (`FindingId` for fragments).
     pub source_instance_fingerprint: [u8; 16],
     /// Build variant that minted the source identity.
-    pub source_build_variant_fingerprint: [u8; 16],
+    pub source_build_variant_fingerprint: BuildVariantFingerprint,
     /// Versioned independent facts that justify the correspondence.
     pub evidence: MappingEvidence,
     /// Confidence that the stored evidence supports the correspondence.
@@ -717,7 +718,7 @@ pub struct StoredArtifactMapping {
     /// Bytes attributed to this source, when the evidence supports a split.
     pub attributed_bytes: Option<u64>,
     /// Build variant under which the correspondence was established.
-    pub build_variant_fingerprint: [u8; 16],
+    pub build_variant_fingerprint: BuildVariantFingerprint,
 }
 
 /// Raw mapping columns read before their versioned fields are validated.
@@ -754,7 +755,7 @@ pub struct StoredArtifactUnmappedSource {
     /// Stable discriminator of this unmatched source occurrence.
     pub source_instance_fingerprint: [u8; 16],
     /// Build variant that minted the source identity.
-    pub source_build_variant_fingerprint: [u8; 16],
+    pub source_build_variant_fingerprint: BuildVariantFingerprint,
     /// Parser- or correlation-established reason for the absence.
     pub reason: ArtifactAnalysisUnmappedSourceReason,
 }
@@ -789,7 +790,7 @@ pub struct SourceUnitIdentity {
     /// Content-derived stable unit identity.
     pub fingerprint: UnitFingerprint,
     /// Build variant that minted this unit identity.
-    pub build_variant_fingerprint: [u8; 16],
+    pub build_variant_fingerprint: BuildVariantFingerprint,
     /// Path relative to the scan root.
     pub file_path: String,
     /// Best-effort declared unit name, when the frontend established one.
@@ -872,7 +873,7 @@ pub struct SourceFragmentIdentity {
     /// Clone similarity score recorded for the owning group.
     pub clone_confidence: f64,
     /// Build variant that minted this fragment identity.
-    pub build_variant_fingerprint: [u8; 16],
+    pub build_variant_fingerprint: BuildVariantFingerprint,
     /// Path containing this finding occurrence.
     pub file_path: String,
     /// First source line covered by the occurrence, when available.

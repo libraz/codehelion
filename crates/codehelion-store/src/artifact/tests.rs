@@ -1,4 +1,5 @@
 use super::*;
+use crate::fingerprint::BuildVariantFingerprint;
 
 const ARTIFACT_IR_SCHEMA: &str = "artifact-ir-v1";
 
@@ -36,10 +37,10 @@ fn calibration_statistics_keep_relative_errors_separate_from_zero_measurements()
         artifact_analysis_id: 1,
         source_scan_run_id: 2,
         clone_group_fingerprint: [3; 16],
-        source_build_variant_fingerprint: [4; 16],
-        before_artifact_build_variant_fingerprint: [5; 16],
+        source_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
+        before_artifact_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([5; 16]),
         after_artifact_fingerprint: [6; 16],
-        after_artifact_build_variant_fingerprint: [5; 16],
+        after_artifact_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([5; 16]),
         estimated_refactor_savings_bytes: 0,
         verified_savings_bytes: 0,
         absolute_error_bytes,
@@ -218,10 +219,10 @@ fn a_mapping_without_evidence_is_rejected_without_persisting_the_analysis() {
         source_kind: ArtifactAnalysisSourceKind::Unit,
         source_fingerprint: [3; 16],
         source_instance_fingerprint: [3; 16],
-        source_build_variant_fingerprint: [4; 16],
+        source_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
         evidence: MappingEvidence::new(Vec::new(), 0, false),
         attributed_bytes: None,
-        build_variant_fingerprint: [5; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([5; 16]),
     }];
 
     let error = store
@@ -259,8 +260,10 @@ fn a_mapping_without_evidence_is_rejected_without_persisting_the_analysis() {
 #[test]
 fn artifact_analyses_with_distinct_build_variants_stay_distinct() {
     let mut store = Store::open_in_memory().unwrap();
-    for (content_fingerprint, build_variant_fingerprint) in [([1; 16], [2; 16]), ([3; 16], [4; 16])]
-    {
+    for (content_fingerprint, build_variant_fingerprint) in [
+        ([1; 16], BuildVariantFingerprint::from_bytes([2; 16])),
+        ([3; 16], BuildVariantFingerprint::from_bytes([4; 16])),
+    ] {
         store
             .record_artifact_analysis(&ArtifactAnalysisSnapshot {
                 schema_version: ARTIFACT_IR_SCHEMA,
@@ -340,7 +343,7 @@ fn standalone_analysis_and_symbols_commit_together() {
         source_kind: ArtifactAnalysisSourceKind::Fragment,
         source_fingerprint: [6; 16],
         source_instance_fingerprint: [11; 16],
-        source_build_variant_fingerprint: [9; 16],
+        source_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([9; 16]),
         evidence: MappingEvidence::new(
             vec![MappingEvidenceFact::Dwarf {
                 source_path: "src/lib.rs".to_owned(),
@@ -349,7 +352,7 @@ fn standalone_analysis_and_symbols_commit_together() {
             false,
         ),
         attributed_bytes: Some(8),
-        build_variant_fingerprint: [5; 16],
+        build_variant_fingerprint: BuildVariantFingerprint::from_bytes([5; 16]),
     }];
     let source_maps = [
         ArtifactAnalysisSourceMap {
@@ -380,14 +383,14 @@ fn standalone_analysis_and_symbols_commit_together() {
             source_kind: ArtifactAnalysisSourceKind::Unit,
             source_fingerprint: [8; 16],
             source_instance_fingerprint: [8; 16],
-            source_build_variant_fingerprint: [9; 16],
+            source_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([9; 16]),
             reason: ArtifactAnalysisUnmappedSourceReason::InlinedAway,
         },
         ArtifactAnalysisUnmappedSource {
             source_kind: ArtifactAnalysisSourceKind::Unit,
             source_fingerprint: [10; 16],
             source_instance_fingerprint: [10; 16],
-            source_build_variant_fingerprint: [9; 16],
+            source_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([9; 16]),
             reason: ArtifactAnalysisUnmappedSourceReason::NoArtifactEvidence,
         },
     ];
@@ -395,8 +398,8 @@ fn standalone_analysis_and_symbols_commit_together() {
         schema_version: ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION.to_owned(),
         source_scan_run_id: 1,
         clone_group_fingerprint: [12; 16],
-        source_build_variant_fingerprint: [9; 16],
-        artifact_build_variant_fingerprint: [5; 16],
+        source_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([9; 16]),
+        artifact_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([5; 16]),
         duplicated_bytes: 8,
         estimated_refactor_savings_bytes: -2,
         mapping_confidence: ArtifactAnalysisSavingsConfidence::High,
@@ -415,7 +418,7 @@ fn standalone_analysis_and_symbols_commit_together() {
             observed_bytes: 12,
             ir_json: r#"{"schema_version":"artifact-ir-v1"}"#,
             build_variant_manifest_path: Some("build-variant.json"),
-            build_variant_fingerprint: Some([5; 16]),
+            build_variant_fingerprint: Some(BuildVariantFingerprint::from_bytes([5; 16])),
             started_at: "2026-07-30T00:00:00Z",
             finished_at: "2026-07-30T00:00:01Z",
             symbols: &symbols,
@@ -471,7 +474,7 @@ fn standalone_analysis_and_symbols_commit_together() {
             analysis_id: id,
             format: "wasm".to_owned(),
             content_fingerprint: [1; 16],
-            build_variant_fingerprint: Some([5; 16]),
+            build_variant_fingerprint: Some(BuildVariantFingerprint::from_bytes([5; 16])),
         })
     );
     let mapping: (String, String, i64) = store
@@ -503,7 +506,12 @@ fn standalone_analysis_and_symbols_commit_together() {
     );
     assert_eq!(stored_mappings[0].source_fingerprint, [6; 16]);
     assert_eq!(stored_mappings[0].source_instance_fingerprint, [11; 16]);
-    assert_eq!(stored_mappings[0].source_build_variant_fingerprint, [9; 16]);
+    assert_eq!(
+        stored_mappings[0]
+            .source_build_variant_fingerprint
+            .as_bytes(),
+        [9; 16]
+    );
     assert_eq!(
         stored_mappings[0].confidence,
         ArtifactAnalysisMappingConfidence::Exact
@@ -578,10 +586,10 @@ fn standalone_analysis_and_symbols_commit_together() {
         artifact_analysis_id: id,
         source_scan_run_id: 1,
         clone_group_fingerprint: [12; 16],
-        source_build_variant_fingerprint: [9; 16],
-        before_artifact_build_variant_fingerprint: [5; 16],
+        source_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([9; 16]),
+        before_artifact_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([5; 16]),
         after_artifact_fingerprint: [13; 16],
-        after_artifact_build_variant_fingerprint: [5; 16],
+        after_artifact_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([5; 16]),
         estimated_refactor_savings_bytes: -2,
         verified_savings_bytes: 3,
         absolute_error_bytes: 5,
@@ -638,7 +646,9 @@ fn standalone_analysis_and_symbols_commit_together() {
     );
     assert_eq!(stored_unmapped_sources[0].source_fingerprint, [8; 16]);
     assert_eq!(
-        stored_unmapped_sources[0].source_build_variant_fingerprint,
+        stored_unmapped_sources[0]
+            .source_build_variant_fingerprint
+            .as_bytes(),
         [9; 16]
     );
     assert_eq!(

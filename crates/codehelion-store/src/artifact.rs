@@ -8,6 +8,7 @@ use rusqlite::{Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::fingerprint::BuildVariantFingerprint;
 use crate::{Store, StoreError};
 
 /// Largest versioned artifact IR document retained for one analysis.
@@ -36,7 +37,7 @@ pub struct ArtifactAnalysisSnapshot<'a> {
     /// User-supplied build manifest path, when the artifact has such evidence.
     pub build_variant_manifest_path: Option<&'a str>,
     /// Content-derived identity of that build manifest.
-    pub build_variant_fingerprint: Option<[u8; 16]>,
+    pub build_variant_fingerprint: Option<BuildVariantFingerprint>,
     /// RFC 3339 timestamp taken before parsing.
     pub started_at: &'a str,
     /// RFC 3339 timestamp taken after parsing.
@@ -240,9 +241,9 @@ pub struct ArtifactAnalysisCloneGroupSavings {
     /// Stable clone-group fingerprint.
     pub clone_group_fingerprint: [u8; 16],
     /// Build variant that minted the source group.
-    pub source_build_variant_fingerprint: [u8; 16],
+    pub source_build_variant_fingerprint: BuildVariantFingerprint,
     /// Build variant of the artifact receiving the attribution.
-    pub artifact_build_variant_fingerprint: [u8; 16],
+    pub artifact_build_variant_fingerprint: BuildVariantFingerprint,
     /// Fully attributed observed duplicate bytes for the group.
     pub duplicated_bytes: u64,
     /// Model-derived refactoring estimate; it may be negative.
@@ -320,13 +321,13 @@ pub struct ArtifactAnalysisSavingsCalibration {
     /// Stable clone-group identity.
     pub clone_group_fingerprint: [u8; 16],
     /// Build variants remain separate rather than being inferred from paths.
-    pub source_build_variant_fingerprint: [u8; 16],
+    pub source_build_variant_fingerprint: BuildVariantFingerprint,
     /// Build variant of the analyzed before artifact.
-    pub before_artifact_build_variant_fingerprint: [u8; 16],
+    pub before_artifact_build_variant_fingerprint: BuildVariantFingerprint,
     /// Content-derived identity of the measured after artifact.
     pub after_artifact_fingerprint: [u8; 16],
     /// Build variant of the measured after artifact.
-    pub after_artifact_build_variant_fingerprint: [u8; 16],
+    pub after_artifact_build_variant_fingerprint: BuildVariantFingerprint,
     /// Estimate retained verbatim; it may be negative.
     pub estimated_refactor_savings_bytes: i64,
     /// Observed before-minus-after size difference; it may be negative.
@@ -477,13 +478,13 @@ pub struct ArtifactAnalysisMapping {
     /// clone occurrences without relying on a source position or database row.
     pub source_instance_fingerprint: [u8; 16],
     /// Build variant that minted the source identity.
-    pub source_build_variant_fingerprint: [u8; 16],
+    pub source_build_variant_fingerprint: BuildVariantFingerprint,
     /// Versioned independent evidence facts for the correspondence.
     pub evidence: MappingEvidence,
     /// Bytes attributed to this source, or absent when the evidence has no split.
     pub attributed_bytes: Option<u64>,
     /// Build variant that made this correspondence meaningful.
-    pub build_variant_fingerprint: [u8; 16],
+    pub build_variant_fingerprint: BuildVariantFingerprint,
 }
 
 /// Current record shape for source-to-artifact correspondences.
@@ -792,7 +793,7 @@ pub struct ArtifactAnalysisUnmappedSource {
     /// the member's `FindingId`.
     pub source_instance_fingerprint: [u8; 16],
     /// Build variant that minted the source identity.
-    pub source_build_variant_fingerprint: [u8; 16],
+    pub source_build_variant_fingerprint: BuildVariantFingerprint,
     /// Parser- or correlation-established reason for the absence.
     pub reason: ArtifactAnalysisUnmappedSourceReason,
 }
@@ -979,9 +980,7 @@ impl Store {
                 i64::try_from(snapshot.observed_bytes).unwrap_or(i64::MAX),
                 snapshot.ir_json,
                 snapshot.build_variant_manifest_path,
-                snapshot
-                    .build_variant_fingerprint
-                    .map(|value| value.to_vec()),
+                snapshot.build_variant_fingerprint,
                 snapshot.started_at,
                 snapshot.finished_at,
             ],
@@ -1035,7 +1034,7 @@ impl Store {
                     unmapped.source_kind.as_sql(),
                     unmapped.source_fingerprint.as_slice(),
                     unmapped.reason.as_sql(),
-                    unmapped.source_build_variant_fingerprint.as_slice(),
+                    unmapped.source_build_variant_fingerprint,
                     unmapped.source_instance_fingerprint.as_slice(),
                 ],
             )?;
@@ -1136,8 +1135,8 @@ fn record_clone_group_savings(
                 analysis_id,
                 estimate.source_scan_run_id,
                 estimate.clone_group_fingerprint.as_slice(),
-                estimate.source_build_variant_fingerprint.as_slice(),
-                estimate.artifact_build_variant_fingerprint.as_slice(),
+                estimate.source_build_variant_fingerprint,
+                estimate.artifact_build_variant_fingerprint,
                 i64::try_from(estimate.duplicated_bytes).unwrap_or(i64::MAX),
                 estimate.estimated_refactor_savings_bytes,
                 estimate.mapping_confidence.as_sql(),
@@ -1263,8 +1262,8 @@ fn record_mappings(
                 mapping
                     .attributed_bytes
                     .map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
-                mapping.build_variant_fingerprint.as_slice(),
-                mapping.source_build_variant_fingerprint.as_slice(),
+                mapping.build_variant_fingerprint,
+                mapping.source_build_variant_fingerprint,
                 mapping.source_instance_fingerprint.as_slice(),
             ],
         )?;
