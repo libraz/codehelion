@@ -332,9 +332,16 @@ single source-level template that the compiler had turned into 14 distinct
 instantiations, because the predicate closure type differed at every call
 site. There is one copy to find in the source, so no clone group describes the
 multiplicity; the group codehelion did report on that tree accounted for the
-other 996 bytes, the smaller half. Where a binary's size is dominated by how
-many times something was instantiated rather than by how many times it was
-copied, this is not the tool that measures it.
+other 996 bytes, the smaller half.
+
+Clone detection still has one copy to find, so no clone group will ever describe
+that multiplicity. Correlating a source run reports it separately:
+`artifact analyze --source-run` lists the source units the artifact emitted as
+more than one body, with how many bodies and their observed size. Those bytes
+are what the artifact spends today and not a saving — consolidating the one
+source copy removes none of the bodies, and shrinking that figure means emitting
+fewer of them. The count needs only that a mapping named a single source unit,
+so symbol names are enough for it and debug line information is not required.
 
 ```sh
 codehelion artifact analyze path/to/binary

@@ -353,7 +353,8 @@
             "required": [
               "clone_group_fingerprint", "source_build_variant_fingerprint", "members",
               "attributed_noncanonical_members", "duplicated_bytes",
-              "estimated_duplicated_bytes", "clone_confidence"
+              "estimated_duplicated_bytes", "containing_symbols",
+              "containing_symbol_bytes", "clone_confidence"
             ],
             "properties": {
               "clone_group_fingerprint": { "$ref": "#/$defs/fingerprint" },
@@ -367,6 +368,14 @@
               "estimated_duplicated_bytes": {
                 "type": ["integer", "null"], "minimum": 0,
                 "description": "Total attributed bytes when at least one member's share was divided across its symbol's source lines. That division is a construction, so this value is an estimate and is never reported as observed."
+              },
+              "containing_symbols": {
+                "type": "integer", "minimum": 0,
+                "description": "Distinct artifact symbols the group's noncanonical members were placed in. A format carrying symbol names but no line frames settles which symbol holds a member and nothing finer, so this is what such a format can state."
+              },
+              "containing_symbol_bytes": {
+                "type": ["integer", "null"], "minimum": 0,
+                "description": "Observed size of those symbols, counted once per symbol. The symbols hold the members and are usually larger than them, so this bounds what the group occupies rather than measuring it, and is never a duplicated-byte total."
               },
               "clone_confidence": { "type": "number", "minimum": 0, "maximum": 1 }
             }
@@ -425,6 +434,38 @@
                 }
               },
               "model_schema_version": { "type": "string" }
+            }
+          }
+        },
+        "multiply_emitted_units": {
+          "type": "array",
+          "description": "Source units the artifact emitted as more than one body. A source copy and an emitted body are different populations: a generic written once is emitted once per instantiation, so consolidating the single copy removes none of the bodies. Every value here is an observation about the artifact as it stands and none of them is a saving.",
+          "items": {
+            "type": "object",
+            "required": [
+              "source_fingerprint", "source_build_variant_fingerprint", "name",
+              "emitted_bodies", "observed_symbol_bytes", "mapping_confidence"
+            ],
+            "properties": {
+              "source_fingerprint": { "$ref": "#/$defs/fingerprint" },
+              "source_build_variant_fingerprint": { "$ref": "#/$defs/fingerprint" },
+              "name": {
+                "type": ["string", "null"],
+                "description": "Symbol spelling the correspondence matched on, kept as display evidence."
+              },
+              "emitted_bodies": {
+                "type": "integer", "minimum": 2,
+                "description": "Distinct artifact symbols this one source unit was mapped to. A unit emitted once says nothing reading the source did not already say, so only units above one appear."
+              },
+              "observed_symbol_bytes": {
+                "type": "integer", "minimum": 0,
+                "description": "Observed sizes of those symbols, summed. This is what the artifact spends on the unit today, not what removing anything would return."
+              },
+              "mapping_confidence": {
+                "type": "string",
+                "description": "Weakest grade among the mappings counted, so a name-only correspondence is distinguishable from a debug-located one.",
+                "enum": ["high", "medium", "low", "unavailable"]
+              }
             }
           }
         },

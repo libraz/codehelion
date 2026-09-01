@@ -169,15 +169,45 @@ pub(super) fn render_text(
             for attribution in &correlation.clone_group_attributions {
                 writeln!(
                     out,
-                    "  {} ({}): {} / {} noncanonical members attributed, observed duplicated bytes: {}, line-proportional duplicated bytes: {} (estimated)",
+                    "  {} ({}): {} / {} noncanonical members attributed, observed duplicated bytes: {}, line-proportional duplicated bytes: {} (estimated), in {} symbol(s) totalling {} observed bytes",
                     attribution.clone_group_fingerprint,
                     attribution.source_build_variant_fingerprint,
                     attribution.attributed_noncanonical_members,
                     attribution.members.saturating_sub(1),
                     optional_bytes(attribution.duplicated_bytes),
                     optional_bytes(attribution.estimated_duplicated_bytes),
+                    attribution.containing_symbols,
+                    optional_bytes(attribution.containing_symbol_bytes),
                 )?;
             }
+            writeln!(
+                out,
+                "  note: the containing symbols hold the members and are usually larger than them, so their size bounds what the group occupies rather than measuring it",
+            )?;
+        }
+        if !correlation.multiply_emitted_units.is_empty() {
+            writeln!(
+                out,
+                "source units emitted as several bodies (observed, not savings):"
+            )?;
+            for unit in &correlation.multiply_emitted_units {
+                writeln!(
+                    out,
+                    "  {} ({}){}: {} bodies, {} observed bytes, mapping {:?}",
+                    unit.source_fingerprint,
+                    unit.source_build_variant_fingerprint,
+                    unit.name
+                        .as_deref()
+                        .map_or_else(String::new, |name| format!(" {name}")),
+                    unit.emitted_bodies,
+                    unit.observed_symbol_bytes,
+                    unit.mapping_confidence,
+                )?;
+            }
+            writeln!(
+                out,
+                "  note: one source copy emitted as several bodies is not duplicated source, so consolidating the copy removes none of them; reducing the count means emitting fewer bodies",
+            )?;
         }
         if !correlation.estimated_refactor_savings.is_empty() {
             writeln!(out, "clone group refactoring estimates (not guaranteed):")?;
@@ -732,6 +762,29 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
                 .map_or_else(String::new, |basis| {
                     attribution_basis_field(basis).to_owned()
                 });
+            // Where the members sit and what they were charged are different
+            // measurements, so the containing size takes a column of its own
+            // rather than standing in for a duplicated-byte total.
+            row[column::CONTAINING_SYMBOLS] = attribution.containing_symbols.to_string();
+            row[column::CONTAINING_SYMBOL_BYTES] =
+                optional_bytes(attribution.containing_symbol_bytes);
+            write_artifact_csv_row(out, &row)?;
+        }
+        for unit in &correlation.multiply_emitted_units {
+            let mut row = artifact_csv_row("multiply-emitted-unit", report);
+            "multiply-emitted-unit".clone_into(&mut row[column::KIND]);
+            row[column::FINGERPRINT].clone_from(&unit.source_fingerprint);
+            if let Some(name) = &unit.name {
+                row[column::NAME] = csv(name);
+            }
+            row[column::SIZE] = unit.observed_symbol_bytes.to_string();
+            // The count takes the column that names it here and in the other
+            // two formats. Writing it into the general symbol-count column as
+            // well would give one number two spellings on one row.
+            row[column::EMITTED_BODIES] = unit.emitted_bodies.to_string();
+            row[column::SOURCE_BUILD_VARIANT_FINGERPRINT]
+                .clone_from(&unit.source_build_variant_fingerprint);
+            row[column::MAPPING_CONFIDENCE] = format!("{:?}", unit.mapping_confidence);
             write_artifact_csv_row(out, &row)?;
         }
         for estimate in &correlation.estimated_refactor_savings {

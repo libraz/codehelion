@@ -1087,6 +1087,9 @@ pub(super) const ARTIFACT_CSV_HEADER: &[&str] = &[
     "source_map_local_path",
     "source_map_sources",
     "duplicated_data_bytes",
+    "containing_symbols",
+    "containing_symbol_bytes",
+    "emitted_bodies",
 ];
 
 // Columns are only ever appended, so the published width never shrinks.
@@ -1146,6 +1149,9 @@ pub(super) mod column {
     pub(in crate::artifact) const SOURCE_MAP_LOCAL_PATH: usize = 49;
     pub(in crate::artifact) const SOURCE_MAP_SOURCES: usize = 50;
     pub(in crate::artifact) const DUPLICATED_DATA_BYTES: usize = 51;
+    pub(in crate::artifact) const CONTAINING_SYMBOLS: usize = 52;
+    pub(in crate::artifact) const CONTAINING_SYMBOL_BYTES: usize = 53;
+    pub(in crate::artifact) const EMITTED_BODIES: usize = 54;
 }
 
 /// Every comparison CSV column, in the order they are written, under the same

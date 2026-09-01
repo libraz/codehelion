@@ -727,12 +727,26 @@ pub(in crate::artifact) fn correlate_debug_locations(
             ledger.extend(fallback_mappings);
         }
         if !mapped {
+            // The reason names the evidence that was actually absent, in the
+            // order the correspondence looked for it. Line frames are tried
+            // first and a name second, so a symbol with neither is reported as
+            // the nameless one it is rather than as debug information nobody
+            // could have supplied: stripping a WebAssembly name section leaves
+            // exactly this symbol, and telling its owner to rebuild with debug
+            // information sends them after the wrong artifact.
             let reason = if artifact.capabilities.debug_info_unreadable {
                 ArtifactAnalysisUnmappedReason::DebugInfoUnreadable
-            } else if symbol.inline_stack.is_empty() {
-                ArtifactAnalysisUnmappedReason::DebugInfoMissing
-            } else {
+            } else if !symbol.inline_stack.is_empty() {
                 ArtifactAnalysisUnmappedReason::OutsideSourceScope
+            } else if symbol
+                .name
+                .as_deref()
+                .and_then(canonical_symbol_name)
+                .is_none()
+            {
+                ArtifactAnalysisUnmappedReason::DemangleFailed
+            } else {
+                ArtifactAnalysisUnmappedReason::DebugInfoMissing
             };
             rows.unmapped_symbols.push(ArtifactAnalysisUnmappedSymbol {
                 artifact_symbol_fingerprint: symbol.fingerprint.as_bytes(),

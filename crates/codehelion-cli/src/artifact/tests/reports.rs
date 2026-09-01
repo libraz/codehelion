@@ -237,6 +237,8 @@ fn populated_correlation() -> ArtifactCorrelationReport {
             attributed_noncanonical_members: 1,
             duplicated_bytes: None,
             estimated_duplicated_bytes: Some(9),
+            containing_symbols: 1,
+            containing_symbol_bytes: Some(12),
             clone_confidence: 1.0,
         }],
         estimated_refactor_savings: vec![CloneGroupSavingsReport {
@@ -283,6 +285,14 @@ fn populated_correlation() -> ArtifactCorrelationReport {
             definition_paths: vec!["src/lib.rs".to_owned()],
             artifact_symbols: 1,
             observed_symbol_bytes: 4,
+        }],
+        multiply_emitted_units: vec![MultiplyEmittedUnitReport {
+            source_fingerprint: fingerprint_hex([3; 16]),
+            source_build_variant_fingerprint: fingerprint_hex([4; 16]),
+            name: Some("firstEntryFrom".to_owned()),
+            emitted_bodies: 3,
+            observed_symbol_bytes: 12,
+            mapping_confidence: EvidenceConfidence::Low,
         }],
     }
 }
