@@ -39,10 +39,12 @@ pub(super) fn render_text(
     if let Some(containment) = &report.containment {
         writeln!(
             out,
-            "untrusted containment: input {} bytes, worker timeout {}s, worker memory {} bytes",
+            "untrusted containment: input {} bytes, worker timeout {}s, worker memory {} bytes, \
+             debug-derived structures {}",
             containment.max_input_bytes,
             containment.worker_timeout_seconds,
             containment.worker_memory_limit_bytes,
+            containment.max_debug_derived_items,
         )?;
     }
     writeln!(out, "observed bytes: {}", report.observed_bytes)?;
@@ -603,6 +605,7 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
         row[column::MAX_INPUT_BYTES] = containment.max_input_bytes.to_string();
         row[column::WORKER_TIMEOUT_SECONDS] = containment.worker_timeout_seconds.to_string();
         row[column::WORKER_MEMORY_LIMIT_BYTES] = containment.worker_memory_limit_bytes.to_string();
+        row[column::MAX_DEBUG_DERIVED_ITEMS] = containment.max_debug_derived_items.to_string();
         write_artifact_csv_row(out, &row)?;
     }
     for member in &report.archive_members {

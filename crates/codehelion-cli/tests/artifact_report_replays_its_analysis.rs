@@ -271,17 +271,23 @@ fn every_rendering_states_the_ceilings_a_saved_analysis_ran_under() {
 
     assert!(
         rendered("text").contains(
-            "untrusted containment: input 4096 bytes, worker timeout 30s, worker memory 8192 bytes"
+            "untrusted containment: input 4096 bytes, worker timeout 30s, worker memory 8192 \
+             bytes, debug-derived structures 4096"
         ),
         "{}",
         rendered("text")
     );
+    // The bound on debug-derived structures is the input ceiling: a structure
+    // built out of debug information takes at least a byte of it to describe,
+    // so a replay states it from what it recorded rather than from a second
+    // number stored beside it.
     assert_eq!(
         containment(&rendered("json")),
         serde_json::json!({
             "max_input_bytes": 4096,
             "worker_timeout_seconds": 30,
             "worker_memory_limit_bytes": 8192,
+            "max_debug_derived_items": 4096,
         })
     );
     let csv = rendered("csv");

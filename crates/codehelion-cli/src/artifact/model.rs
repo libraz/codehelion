@@ -51,6 +51,15 @@ pub(super) struct ArtifactContainment {
     pub(super) max_input_bytes: u64,
     pub(super) worker_timeout_seconds: u64,
     pub(super) worker_memory_limit_bytes: u64,
+    /// How many structures the parse would build out of debug information
+    /// before it stopped and reported the debug information as not fully read.
+    ///
+    /// Stated because the input ceiling alone does not imply it: debug
+    /// metadata describes address ranges and line rows far more compactly than
+    /// the structures a reader builds from them, so a reader who knows only
+    /// how many bytes were accepted cannot tell how far those bytes were
+    /// allowed to expand.
+    pub(super) max_debug_derived_items: u64,
 }
 
 /// Display-safe section facts, including the size breakdown omitted from the
@@ -1111,6 +1120,7 @@ pub(super) const ARTIFACT_CSV_HEADER: &[&str] = &[
     "containing_symbols",
     "containing_symbol_bytes",
     "emitted_bodies",
+    "max_debug_derived_items",
 ];
 
 // Columns are only ever appended, so the published width never shrinks.
@@ -1173,6 +1183,7 @@ pub(super) mod column {
     pub(in crate::artifact) const CONTAINING_SYMBOLS: usize = 52;
     pub(in crate::artifact) const CONTAINING_SYMBOL_BYTES: usize = 53;
     pub(in crate::artifact) const EMITTED_BODIES: usize = 54;
+    pub(in crate::artifact) const MAX_DEBUG_DERIVED_ITEMS: usize = 55;
 }
 
 /// Every comparison CSV column, in the order they are written, under the same

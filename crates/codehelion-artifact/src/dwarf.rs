@@ -20,7 +20,7 @@ const MAX_DWARF_DEBUG_BYTES: u64 = 64 * 1024 * 1024;
 /// reports the debug information as not fully readable, keeping the mappings
 /// established so far.
 #[derive(Debug, Clone, Copy)]
-struct DwarfBudget {
+pub struct DwarfBudget {
     /// Retained subprogram address ranges.
     frames: usize,
     /// Retained line-table rows.
@@ -35,6 +35,35 @@ struct DwarfBudget {
     inline_frames: usize,
     /// Source-path bytes copied into retained inline frames.
     inline_source_bytes: usize,
+}
+
+impl DwarfBudget {
+    /// The same bounds, none of them above the number of bytes the parse was
+    /// given to read.
+    ///
+    /// Every structure a reader builds out of debug information takes at least
+    /// one byte of that information to describe it, so a ceiling on the input
+    /// is a ceiling on each of these counts as well. An operator who has said
+    /// how many bytes an untrusted artifact may be read from has therefore
+    /// already said how far the structures those bytes expand into may go, and
+    /// this is that instruction reaching them — rather than a second set of
+    /// numbers for the same decision that nobody set.
+    ///
+    /// Only ever narrows: an input ceiling above a default leaves the default
+    /// standing, because these bounds are also what this build can afford.
+    #[must_use]
+    pub fn bounded_by(self, bytes: u64) -> Self {
+        let bound = usize::try_from(bytes).unwrap_or(usize::MAX);
+        Self {
+            frames: self.frames.min(bound),
+            line_records: self.line_records.min(bound),
+            frame_matches: self.frame_matches.min(bound),
+            symbol_candidates: self.symbol_candidates.min(bound),
+            symbol_inline_frames: self.symbol_inline_frames.min(bound),
+            inline_frames: self.inline_frames.min(bound),
+            inline_source_bytes: self.inline_source_bytes.min(bound),
+        }
+    }
 }
 
 impl Default for DwarfBudget {
@@ -59,8 +88,9 @@ pub fn attach_dwarf_frames<S: BuildHasher>(
     file: &object::File<'_>,
     symbol_addresses: &HashMap<ArtifactFingerprint, (u64, u64), S>,
     ir: &mut ArtifactIr,
+    budget: DwarfBudget,
 ) {
-    attach_dwarf_frames_within(file, symbol_addresses, ir, DwarfBudget::default());
+    attach_dwarf_frames_within(file, symbol_addresses, ir, budget);
 }
 
 #[allow(
@@ -1077,6 +1107,41 @@ mod tests {
             (2..=5)
                 .map(|line| ("/work/unit.c".to_owned(), Some(line), None))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// An input ceiling reaches the structures the input expands into.
+    ///
+    /// Debug metadata describes far more than it occupies, so a parse held to
+    /// N bytes can still build far more than N frames unless something says
+    /// otherwise. This is that something, and it is the only knob an operator
+    /// has to turn: the numbers here are the ones they already set.
+    #[test]
+    fn an_input_ceiling_bounds_what_the_debug_information_expands_into() {
+        let fixture = DwarfFixture {
+            functions: 2,
+            subprograms: 0,
+            overlapping_ranges: false,
+            line_rows: 12,
+            distinct_row_lines: true,
+            second_source: None,
+        };
+
+        let full = attach_within(&fixture, DwarfBudget::default());
+        let bounded = attach_within(&fixture, DwarfBudget::default().bounded_by(4));
+
+        assert!(!full.capabilities.debug_info_unreadable);
+        assert_eq!(attached_frames(&full), 12);
+        assert!(bounded.capabilities.debug_info_unreadable);
+        assert!(attached_frames(&bounded) < attached_frames(&full));
+
+        // Only ever narrows: a ceiling above what this build can afford leaves
+        // this build's own bounds standing.
+        let generous = DwarfBudget::default().bounded_by(u64::MAX);
+        assert_eq!(generous.frames, DwarfBudget::default().frames);
+        assert_eq!(
+            generous.inline_source_bytes,
+            DwarfBudget::default().inline_source_bytes
         );
     }
 

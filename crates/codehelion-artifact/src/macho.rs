@@ -87,6 +87,31 @@ impl MachOBackend {
         debug_companion: Option<&[u8]>,
         architecture: Option<&str>,
     ) -> Result<ArtifactIr, ArtifactError> {
+        self.parse_within(
+            bytes,
+            debug_companion,
+            architecture,
+            crate::dwarf::DwarfBudget::default(),
+        )
+    }
+
+    /// The same parse, under bounds an operator narrowed.
+    ///
+    /// Debug information describes address ranges and line rows far more
+    /// compactly than the structures a reader builds from them, so the number
+    /// of bytes accepted does not on its own bound what they expand into.
+    /// This is where an operator's ceiling reaches those structures.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::parse_with_architecture`].
+    pub fn parse_within(
+        &self,
+        bytes: &[u8],
+        debug_companion: Option<&[u8]>,
+        architecture: Option<&str>,
+        budget: crate::dwarf::DwarfBudget,
+    ) -> Result<ArtifactIr, ArtifactError> {
         if !self.detects(bytes) {
             return Err(ArtifactError::WrongFormat {
                 expected: ArtifactFormat::MachO,
@@ -145,6 +170,7 @@ impl MachOBackend {
             debug_file.as_ref().unwrap_or(&file),
             &symbol_addresses,
             &mut ir,
+            budget,
         );
         shift_file_offsets(&mut ir, offset);
         ir.capabilities = ArtifactCapabilities {

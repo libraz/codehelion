@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use codehelion_artifact::archive::ArchiveBackend;
+use codehelion_artifact::dwarf::DwarfBudget;
 use codehelion_artifact::elf::ElfBackend;
 use codehelion_artifact::macho::MachOBackend;
 use codehelion_artifact::pe::PeCoffBackend;
@@ -137,6 +138,7 @@ fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
         args.input_format,
         args.debug_file.as_deref(),
         args.arch.as_deref(),
+        args.untrusted,
     )?;
     worker::set_stage("source-map correlation");
     let source_maps = resolve_wasm_source_maps(&args.path, &artifact, args.max_bytes);
@@ -193,6 +195,7 @@ fn untrusted_containment(args: &ArtifactArgs) -> Option<ArtifactContainment> {
         max_input_bytes: args.max_bytes,
         worker_timeout_seconds: args.timeout_seconds,
         worker_memory_limit_bytes: memory,
+        max_debug_derived_items: args.max_bytes,
     })
 }
 
@@ -208,6 +211,7 @@ fn compare_untrusted_containment(args: &ArtifactCompareArgs) -> Option<ArtifactC
         max_input_bytes: args.max_bytes,
         worker_timeout_seconds: args.timeout_seconds,
         worker_memory_limit_bytes: memory,
+        max_debug_derived_items: args.max_bytes,
     })
 }
 
@@ -718,6 +722,7 @@ fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Ou
         args.input_format,
         None,
         args.arch.as_deref(),
+        args.untrusted,
     )?;
     worker::set_stage("parsing after artifact");
     let after = inspect(
@@ -726,6 +731,7 @@ fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Ou
         args.input_format,
         None,
         args.arch.as_deref(),
+        args.untrusted,
     )?;
     let before_variant = read_build_variant(args.before_build_variant.as_deref())?;
     let after_variant = read_build_variant(args.after_build_variant.as_deref())?;
@@ -908,7 +914,18 @@ fn inspect(
     required_format: Option<ArtifactInputFormat>,
     debug_file: Option<&std::path::Path>,
     architecture: Option<&str>,
+    untrusted: bool,
 ) -> Result<ArtifactIr> {
+    // An operator who capped how many bytes an untrusted artifact may be read
+    // from has already capped the structures those bytes expand into: each one
+    // takes at least a byte of debug information to describe. Applying that
+    // same ceiling here is what carries the instruction through to them,
+    // instead of leaving one bound nobody set.
+    let budget = if untrusted {
+        DwarfBudget::default().bounded_by(max_bytes)
+    } else {
+        DwarfBudget::default()
+    };
     let bytes = read_artifact_input(path, max_bytes, "artifact")?;
     let (debug_companion, automatically_discovered) = match debug_file {
         Some(path) => (
@@ -924,18 +941,20 @@ fn inspect(
             None => (None, None),
         },
     };
-    match parse_input_format(
+    match parse_input_format_within(
         &bytes,
         required_format,
         debug_companion.as_deref(),
         architecture,
+        budget,
     ) {
         Ok(artifact) => Ok(artifact),
         Err(error) if let Some(path) = automatically_discovered => {
             // An automatically discovered bundle is optional evidence. Its
             // malformed bytes or a stale UUID must not make a valid artifact
             // unanalyzable; an explicitly supplied companion remains strict.
-            let artifact = parse_input_format(&bytes, required_format, None, architecture)?;
+            let artifact =
+                parse_input_format_within(&bytes, required_format, None, architecture, budget)?;
             eprintln!(
                 "warning: automatically discovered dSYM {} was ignored: {error}",
                 path.display()
@@ -1191,6 +1210,11 @@ fn recorded_containment(store: &Store, analysis_id: i64) -> Result<Option<Artifa
             max_input_bytes: containment.max_input_bytes,
             worker_timeout_seconds: containment.worker_timeout_seconds,
             worker_memory_limit_bytes: containment.worker_memory_limit_bytes,
+            // Derived from the input ceiling rather than stored beside it,
+            // because that is what it was derived from when the analysis ran:
+            // storing it would be a second copy of one decision, and the copy
+            // is what a replay would eventually disagree with.
+            max_debug_derived_items: containment.max_input_bytes,
         }))
 }
 
@@ -1205,11 +1229,17 @@ fn source_map_locations(source_maps: &[SourceMapResolution]) -> Vec<SourceMapLoc
         .collect()
 }
 
-fn parse_input_format(
+/// Read one artifact, bounding what its debug information may expand into.
+///
+/// `budget` is the ceiling on structures derived from debug bytes. It travels
+/// with the parse rather than being a property of the backend, because the
+/// same backend reads a tree the operator vouches for and one they do not.
+fn parse_input_format_within(
     bytes: &[u8],
     required_format: Option<ArtifactInputFormat>,
     debug_companion: Option<&[u8]>,
     architecture: Option<&str>,
+    budget: DwarfBudget,
 ) -> Result<ArtifactIr> {
     let detected = detect_format(bytes).ok_or_else(|| {
         anyhow::anyhow!("could not recognise input as a supported artifact format")
@@ -1218,7 +1248,25 @@ fn parse_input_format(
     if format != detected {
         bail!("detected input format {detected} conflicts with requested input format {format}");
     }
-    parse(format, bytes, debug_companion, architecture)
+    parse(format, bytes, debug_companion, architecture, budget)
+}
+
+/// The same read, under what this build can afford rather than what an
+/// operator narrowed.
+#[cfg(test)]
+fn parse_input_format(
+    bytes: &[u8],
+    required_format: Option<ArtifactInputFormat>,
+    debug_companion: Option<&[u8]>,
+    architecture: Option<&str>,
+) -> Result<ArtifactIr> {
+    parse_input_format_within(
+        bytes,
+        required_format,
+        debug_companion,
+        architecture,
+        DwarfBudget::default(),
+    )
 }
 
 const fn input_format(format: ArtifactInputFormat) -> BinaryFormat {
@@ -1236,6 +1284,7 @@ fn parse(
     bytes: &[u8],
     debug_companion: Option<&[u8]>,
     architecture: Option<&str>,
+    budget: DwarfBudget,
 ) -> Result<ArtifactIr> {
     if architecture.is_some() && format != BinaryFormat::MachO {
         bail!("--arch is only supported for Mach-O artifacts");
@@ -1245,13 +1294,15 @@ fn parse(
             if debug_companion.is_some() {
                 bail!("--debug-file is only supported for ELF, Mach-O, and PE artifacts");
             }
+            // A WebAssembly module carries no DWARF, so nothing here expands
+            // out of debug bytes and the budget has nothing to bound.
             WasmBackend.parse(bytes).map_err(Into::into)
         }
         BinaryFormat::Elf => ElfBackend
-            .parse_with_debug_companion(bytes, debug_companion)
+            .parse_within(bytes, debug_companion, budget)
             .map_err(Into::into),
         BinaryFormat::MachO => MachOBackend
-            .parse_with_architecture(bytes, debug_companion, architecture)
+            .parse_within(bytes, debug_companion, architecture, budget)
             .map_err(Into::into),
         BinaryFormat::PeCoff => PeCoffBackend
             .parse_with_pdb(bytes, debug_companion)
@@ -1260,7 +1311,9 @@ fn parse(
             if debug_companion.is_some() {
                 bail!("--debug-file is not supported for archive artifacts");
             }
-            ArchiveBackend.parse(bytes).map_err(Into::into)
+            ArchiveBackend
+                .parse_within(bytes, budget)
+                .map_err(Into::into)
         }
     }
 }

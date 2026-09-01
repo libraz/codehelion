@@ -153,6 +153,7 @@ fn artifact_container_facts_reach_json_text_and_csv_without_raw_data() {
                 max_input_bytes: 1024,
                 worker_timeout_seconds: 10,
                 worker_memory_limit_bytes: 4096,
+                max_debug_derived_items: 1_024,
             }));
 
     let json = serde_json::to_value(&report).unwrap();
@@ -402,6 +403,7 @@ fn artifact_json_field_names_appear_in_the_shipped_schema() {
         max_input_bytes: 1024,
         worker_timeout_seconds: 10,
         worker_memory_limit_bytes: 4096,
+        max_debug_derived_items: 1_024,
     }))
     .with_source_maps(vec![
         SourceMapResolution {
@@ -1641,7 +1643,7 @@ fn an_archive_with_repeated_member_identities_reports_no_reachability() {
 fn input_limit_is_checked_before_reading_or_parsing() {
     let file = tempfile::NamedTempFile::new().unwrap();
     fs::write(file.path(), b"more than eight bytes").unwrap();
-    let error = inspect(file.path(), 8, None, None, None).unwrap_err();
+    let error = inspect(file.path(), 8, None, None, None, false).unwrap_err();
     assert!(error.to_string().contains("configured maximum of 8 bytes"));
 }
 
@@ -2705,6 +2707,7 @@ fn untrusted_containment_reaches_every_rendering() {
             max_input_bytes: 1024,
             worker_timeout_seconds: 10,
             worker_memory_limit_bytes: 4096,
+            max_debug_derived_items: 1_024,
         }));
 
     assert!(rendered_text(&report, false).contains(
@@ -2731,6 +2734,7 @@ fn untrusted_containment_reaches_every_rendering() {
         max_input_bytes: 2048,
         worker_timeout_seconds: 20,
         worker_memory_limit_bytes: 8192,
+        max_debug_derived_items: 1_024,
     });
     assert!(rendered_compare_text(&comparison).contains(
         "untrusted containment: input 2048 bytes, worker timeout 20s, worker memory 8192 bytes"

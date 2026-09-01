@@ -3,7 +3,7 @@
 //! The backend reads bytes through the safe `object` API and never maps or
 //! executes the artifact.
 
-use crate::dwarf::attach_dwarf_frames;
+use crate::dwarf::{DwarfBudget, attach_dwarf_frames};
 use crate::native::{collect_sections, collect_text_symbol_ranges, collect_undefined_imports};
 use crate::support::format_support;
 use crate::x86::X86_NORMALIZATION_VERSION;
@@ -65,6 +65,29 @@ impl ElfBackend {
         bytes: &[u8],
         debug_companion: Option<&[u8]>,
     ) -> Result<ArtifactIr, ArtifactError> {
+        self.parse_within(bytes, debug_companion, DwarfBudget::default())
+    }
+
+    /// The same parse, under bounds an operator narrowed.
+    ///
+    /// Debug information describes address ranges and line rows far more
+    /// compactly than the structures a reader builds from them, so the number
+    /// of bytes accepted does not on its own bound what they expand into.
+    /// This is where an operator's ceiling reaches those structures.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::parse_with_debug_companion`].
+    #[allow(
+        clippy::too_many_lines,
+        reason = "parsing one artifact keeps all fallible format reads in one transaction"
+    )]
+    pub fn parse_within(
+        &self,
+        bytes: &[u8],
+        debug_companion: Option<&[u8]>,
+        budget: DwarfBudget,
+    ) -> Result<ArtifactIr, ArtifactError> {
         if !self.detects(bytes) {
             return Err(ArtifactError::WrongFormat {
                 expected: ArtifactFormat::Elf,
@@ -114,6 +137,7 @@ impl ElfBackend {
             debug_file.as_ref().unwrap_or(&file),
             &text.addresses,
             &mut ir,
+            budget,
         );
         ir.capabilities = ArtifactCapabilities {
             symbols: !ir.symbols.is_empty(),

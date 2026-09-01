@@ -315,11 +315,12 @@
     },
     "containment": {
       "type": ["object", "null"],
-      "required": ["max_input_bytes", "worker_timeout_seconds", "worker_memory_limit_bytes"],
+      "required": ["max_input_bytes", "worker_timeout_seconds", "worker_memory_limit_bytes", "max_debug_derived_items"],
       "properties": {
         "max_input_bytes": { "type": "integer", "minimum": 0 },
         "worker_timeout_seconds": { "type": "integer", "minimum": 1 },
-        "worker_memory_limit_bytes": { "type": "integer", "minimum": 1 }
+        "worker_memory_limit_bytes": { "type": "integer", "minimum": 1 },
+        "max_debug_derived_items": { "type": "integer", "minimum": 0, "description": "How many structures the parse would build out of debug information before stopping and reporting that information as not fully read. Stated because the input ceiling alone does not imply it: debug metadata describes address ranges and line rows far more compactly than the structures a reader builds from them." }
       }
     },
     "correlation": {

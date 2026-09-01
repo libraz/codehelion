@@ -39,6 +39,29 @@ impl ArtifactBackend for ArchiveBackend {
     }
 
     fn parse(&self, bytes: &[u8]) -> Result<ArtifactIr, ArtifactError> {
+        self.parse_within(bytes, crate::dwarf::DwarfBudget::default())
+    }
+
+    fn capabilities(&self) -> ArtifactCapabilities {
+        format_support(ArtifactFormat::Archive).capabilities
+    }
+}
+
+impl ArchiveBackend {
+    /// The same parse, under bounds an operator narrowed.
+    ///
+    /// The bounds travel to the members: an archive is read by reading what it
+    /// holds, so a ceiling that stopped at the container would leave the parse
+    /// it delegates to unbounded.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`ArtifactBackend::parse`].
+    pub fn parse_within(
+        &self,
+        bytes: &[u8],
+        budget: crate::dwarf::DwarfBudget,
+    ) -> Result<ArtifactIr, ArtifactError> {
         // The reader below also accepts archive flavours this backend does not
         // claim. Without this guard a caller trying backends in turn would see
         // input of another format reported as a broken archive, and would stop
@@ -126,7 +149,7 @@ impl ArtifactBackend for ArchiveBackend {
                         .to_owned(),
                 );
             } else if let Some(format) = format {
-                match parse_member(format, data) {
+                match parse_member(format, data, budget) {
                     Ok(member_ir) => merge_member(&mut ir, member_ir, &provenance, offset),
                     Err(error) => provenance.parse_error = Some(error.to_string()),
                 }
@@ -152,10 +175,6 @@ impl ArtifactBackend for ArchiveBackend {
         };
         Ok(ir)
     }
-
-    fn capabilities(&self) -> ArtifactCapabilities {
-        format_support(ArtifactFormat::Archive).capabilities
-    }
 }
 
 /// Record an unreadable archive member without discarding earlier members.
@@ -179,11 +198,17 @@ fn incomplete_member(name: String, offset: u64, size: u64, error: &str) -> Artif
     }
 }
 
-fn parse_member(format: ArtifactFormat, bytes: &[u8]) -> Result<ArtifactIr, ArtifactError> {
+/// Read one member with the backend its magic names, under the same bounds
+/// the archive was read under.
+fn parse_member(
+    format: ArtifactFormat,
+    bytes: &[u8],
+    budget: crate::dwarf::DwarfBudget,
+) -> Result<ArtifactIr, ArtifactError> {
     match format {
         ArtifactFormat::Wasm => WasmBackend.parse(bytes),
-        ArtifactFormat::Elf => ElfBackend.parse(bytes),
-        ArtifactFormat::MachO => MachOBackend.parse(bytes),
+        ArtifactFormat::Elf => ElfBackend.parse_within(bytes, None, budget),
+        ArtifactFormat::MachO => MachOBackend.parse_within(bytes, None, None, budget),
         ArtifactFormat::PeCoff => PeCoffBackend.parse(bytes),
         ArtifactFormat::Archive => Err(ArtifactError::Unsupported {
             format: ArtifactFormat::Archive,
