@@ -474,7 +474,7 @@ impl ContainmentIndex {
 
 /// Least significant set bit of a one-based Fenwick index.
 const fn lowbit(index: usize) -> usize {
-    index & index.wrapping_neg()
+    index.isolate_lowest_one()
 }
 
 /// Collapse pairwise regions into one entry per duplicated run.
@@ -529,7 +529,7 @@ fn share(regions: &[CloneRegion]) -> Vec<SharedRegion> {
     shared
 }
 
-fn find(parent: &mut [usize], mut node: usize) -> usize {
+const fn find(parent: &mut [usize], mut node: usize) -> usize {
     while parent[node] != node {
         parent[node] = parent[parent[node]];
         node = parent[node];

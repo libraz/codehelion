@@ -441,11 +441,11 @@ pub fn declared_test_modules(files: &[ModuleFile<'_>]) -> Vec<bool> {
     let mut pending = VecDeque::new();
     let enter = |name: &str, from: &Path, suite: &mut Vec<bool>, pending: &mut VecDeque<_>| {
         for candidate in module_bodies(from, name) {
-            if let Some(&index) = by_path.get(candidate.as_path()) {
-                if !suite[index] {
-                    suite[index] = true;
-                    pending.push_back(index);
-                }
+            if let Some(&index) = by_path.get(candidate.as_path())
+                && !suite[index]
+            {
+                suite[index] = true;
+                pending.push_back(index);
             }
         }
     };

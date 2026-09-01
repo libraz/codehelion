@@ -193,7 +193,7 @@ fn skip_until(bytes: &[u8], needle: &[u8]) -> usize {
 /// Bytes of the literal starting at `bytes[0]`, closing on an unescaped
 /// `quote`. An unterminated literal swallows the rest, which is the reading
 /// that cannot loop.
-fn skip_literal(bytes: &[u8], quote: u8) -> usize {
+const fn skip_literal(bytes: &[u8], quote: u8) -> usize {
     let mut index = 1;
     while index < bytes.len() {
         match bytes[index] {

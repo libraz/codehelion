@@ -783,10 +783,10 @@ fn callee_name(call: &IrNode, tokens: &[Token]) -> Option<Lexeme> {
 fn api_feature(unit: &IrNode, tokens: &[Token]) -> ApiCallFeature {
     let mut names: Vec<Lexeme> = Vec::new();
     unit.walk(&mut |node| {
-        if matches!(node.shape, Shape::Call) {
-            if let Some(name) = callee_name(node, tokens) {
-                names.push(name);
-            }
+        if matches!(node.shape, Shape::Call)
+            && let Some(name) = callee_name(node, tokens)
+        {
+            names.push(name);
         }
     });
 

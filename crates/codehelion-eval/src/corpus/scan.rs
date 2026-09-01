@@ -118,15 +118,15 @@ fn c_item_key(trimmed: &str, allow_class: bool) -> Option<String> {
         if keyword == "class" && !allow_class {
             continue;
         }
-        if let Some(rest) = body.strip_prefix(keyword) {
-            if rest.starts_with(' ') {
-                let after = rest.trim_start();
-                let name: String = after.chars().take_while(|&c| is_ident_char(c)).collect();
-                // Only a bare record header (`struct Name {`) is an item; a
-                // declaration with an initializer list is not.
-                if !name.is_empty() && after[name.len()..].trim().is_empty() {
-                    return Some(format!("{keyword} {name}"));
-                }
+        if let Some(rest) = body.strip_prefix(keyword)
+            && rest.starts_with(' ')
+        {
+            let after = rest.trim_start();
+            let name: String = after.chars().take_while(|&c| is_ident_char(c)).collect();
+            // Only a bare record header (`struct Name {`) is an item; a
+            // declaration with an initializer list is not.
+            if !name.is_empty() && after[name.len()..].trim().is_empty() {
+                return Some(format!("{keyword} {name}"));
             }
         }
     }
@@ -196,22 +196,20 @@ pub fn scan_items(text: &str, language: Language) -> Result<Vec<Item>, ScanError
 
         if !trimmed.is_empty() && !trimmed.starts_with("//") {
             let is_header_position = depth == 0 || (depth == 1 && !open.is_empty());
-            if is_header_position {
-                if let Some(key) = item_key(trimmed, language) {
-                    let nested = depth == 1;
-                    if !nested || key.starts_with("fn ") {
-                        items.push(Item {
-                            key,
-                            start_line: line_no,
-                            end_line: line_no,
-                            nested,
-                        });
-                        if balance > 0 {
-                            open.push((items.len() - 1, depth));
-                        }
-                        // A braceless single-line item (`struct X;`) is
-                        // already complete with start == end.
+            if is_header_position && let Some(key) = item_key(trimmed, language) {
+                let nested = depth == 1;
+                if !nested || key.starts_with("fn ") {
+                    items.push(Item {
+                        key,
+                        start_line: line_no,
+                        end_line: line_no,
+                        nested,
+                    });
+                    if balance > 0 {
+                        open.push((items.len() - 1, depth));
                     }
+                    // A braceless single-line item (`struct X;`) is
+                    // already complete with start == end.
                 }
             }
         }

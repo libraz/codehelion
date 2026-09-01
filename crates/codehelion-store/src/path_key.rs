@@ -58,7 +58,7 @@ pub fn display_path(key: &str) -> String {
         return key.to_string();
     };
     let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for pair in hex.as_bytes().chunks_exact(2) {
+    for pair in hex.as_bytes().as_chunks::<2>().0 {
         let Some(high) = char::from(pair[0]).to_digit(16) else {
             return "<invalid stored path key>".to_string();
         };

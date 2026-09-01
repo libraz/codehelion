@@ -172,7 +172,7 @@ impl CompileCommands {
 
     /// Number of distinct translation units.
     #[must_use]
-    pub fn translation_unit_count(&self) -> usize {
+    pub const fn translation_unit_count(&self) -> usize {
         self.entries.len()
     }
 

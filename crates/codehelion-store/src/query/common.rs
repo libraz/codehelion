@@ -599,7 +599,14 @@ pub(super) fn parse_build_variant_reference(hex: &str) -> Result<[u8; 16], Store
         return Err(malformed());
     }
     let mut out = [0_u8; 16];
-    for (index, chunk) in hex.as_bytes().chunks_exact(2).take(out.len()).enumerate() {
+    for (index, chunk) in hex
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .take(out.len())
+        .enumerate()
+    {
         let pair = core::str::from_utf8(chunk).map_err(|_| malformed())?;
         out[index] = u8::from_str_radix(pair, 16).map_err(|_| malformed())?;
     }
@@ -622,7 +629,7 @@ pub(super) fn parse_hex_id(hex: &str) -> Result<[u8; 16], StoreError> {
         return Err(malformed());
     }
     let mut out = [0u8; 16];
-    for (i, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+    for (i, chunk) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let pair = core::str::from_utf8(chunk).map_err(|_| malformed())?;
         out[i] = u8::from_str_radix(pair, 16).map_err(|_| malformed())?;
     }

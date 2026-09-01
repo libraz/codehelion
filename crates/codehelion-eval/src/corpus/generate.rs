@@ -715,7 +715,7 @@ fn reindent(lines: &mut [Line], unit: u8, variant: &str, item: &str) -> Result<(
             continue;
         }
         let indent = leading_whitespace(&line.text);
-        if indent.chars().any(|c| c != ' ') || indent.len() % 4 != 0 {
+        if indent.chars().any(|c| c != ' ') || !indent.len().is_multiple_of(4) {
             return Err(Error::DisallowedEdit {
                 variant: variant.to_string(),
                 item: item.to_string(),
@@ -747,14 +747,15 @@ fn mapped_range(lines: &[Line], seed_start: u32, seed_end: u32) -> Option<(u32, 
     let mut first = None;
     let mut last = None;
     for (index, line) in lines.iter().enumerate() {
-        if let Some(seed) = line.seed_line {
-            if seed >= seed_start && seed <= seed_end {
-                let line_no = to_u32(index + 1);
-                if first.is_none() {
-                    first = Some(line_no);
-                }
-                last = Some(line_no);
+        if let Some(seed) = line.seed_line
+            && seed >= seed_start
+            && seed <= seed_end
+        {
+            let line_no = to_u32(index + 1);
+            if first.is_none() {
+                first = Some(line_no);
             }
+            last = Some(line_no);
         }
     }
     first.zip(last)

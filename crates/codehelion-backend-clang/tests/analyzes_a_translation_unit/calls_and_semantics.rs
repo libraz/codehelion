@@ -337,7 +337,7 @@ fn direct_standard_lock_guard_lifetimes_are_reported_at_function_scope() {
         })
         .collect::<Vec<_>>();
     assert_eq!(lifetimes.len(), 4, "{:?}", ir.semantic_constructs);
-    for pair in lifetimes.chunks_exact(2) {
+    for pair in lifetimes.as_chunks::<2>().0 {
         assert_eq!(pair[0].kind, SemanticConstructKind::AcquireResource);
         assert_eq!(pair[1].kind, SemanticConstructKind::ReleaseResource);
         assert_eq!(pair[0].resource_kind.as_deref(), Some("lock"));
@@ -384,7 +384,7 @@ fn direct_standard_unique_lock_lifetimes_are_reported_at_function_scope() {
         })
         .collect::<Vec<_>>();
     assert_eq!(lifetimes.len(), 4, "{:?}", ir.semantic_constructs);
-    for pair in lifetimes.chunks_exact(2) {
+    for pair in lifetimes.as_chunks::<2>().0 {
         assert_eq!(pair[0].kind, SemanticConstructKind::AcquireResource);
         assert_eq!(pair[1].kind, SemanticConstructKind::ReleaseResource);
         assert_eq!(pair[0].resource_kind.as_deref(), Some("lock"));
