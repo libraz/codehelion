@@ -79,6 +79,21 @@ fn wrapper_touching(marker: &Path, at: &Path) -> PathBuf {
     script
 }
 
+/// The same project, carrying a build script.
+///
+/// Only the tree whose test permits running build scripts gets one, and it gets
+/// one because the permission has to have something to buy: without a build
+/// script, whether the named wrapper is reached at all depends on whether the
+/// workspace load also compiles the library, which is the project-model crate's
+/// decision rather than the permission's. Every other tree here stays without
+/// one, since a declared build script is refused on its own account and would
+/// stand in for the key each of those tests is about.
+fn tree_building_a_script(wrapper: &Path) -> TreeNamingAProgram {
+    let tree = tree_naming(wrapper);
+    std::fs::write(tree.root.join("build.rs"), "fn main() {}\n").expect("write the build script");
+    tree
+}
+
 /// The same project, carrying a configuration that starts nothing.
 fn tree_starting_nothing() -> TreeNamingAProgram {
     let tree = tree_naming(Path::new("/nowhere/at/all/wrapper"));
@@ -110,6 +125,37 @@ fn helper_inheriting(wrapper: &Path, at: &Path) -> PathBuf {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
         .expect("make the starting script startable");
     script
+}
+
+/// Start the helper through a script this process wrote a moment ago.
+///
+/// A script is refused for as long as anything still holds it open for writing,
+/// and a process spawned by a test running beside this one inherits every
+/// descriptor open at the instant it forks — including this one, until the
+/// child reaches its own program. The file is closed before it is named here,
+/// so the refusal describes the machine rather than the script, and the only
+/// thing to do with it is let it pass.
+#[cfg(unix)]
+fn start_through(script: &Path) -> Helper {
+    use codehelion_helper::{HelperError, SandboxError};
+
+    fn still_being_written(error: &HelperError) -> bool {
+        matches!(
+            error,
+            HelperError::Sandbox(SandboxError::NotStarted { source, .. })
+                if source.kind() == std::io::ErrorKind::ExecutableFileBusy
+        )
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut started = Helper::start(script, PATIENT);
+    while matches!(&started, Err(error) if still_being_written(error))
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(50));
+        started = Helper::start(script, PATIENT);
+    }
+    started.expect("the helper should start and shake hands")
 }
 
 /// The tree names a program, nothing permitted running one, so nothing runs it
@@ -159,12 +205,15 @@ fn permitting_execution_lets_the_tree_choose_its_wrapper() {
     let holder = tempfile::tempdir().expect("a temporary directory");
     let marker = holder.path().join("marker");
     let wrapper = wrapper_touching(&marker, holder.path());
-    let tree = tree_naming(&wrapper);
+    let tree = tree_building_a_script(&wrapper);
 
     let mut helper = helper().permitting(vec![Execution::BuildScript]);
     let answer = helper
         .analyze(&tree.unit(), &[Capability::Types])
         .expect("the helper should answer");
+    // Read before the helper stops, since a build that declined to run says so
+    // on the stream and the marker alone cannot say why it is absent.
+    let said = helper.diagnostics();
     helper.shutdown().expect("the helper should stop cleanly");
 
     assert!(
@@ -173,7 +222,7 @@ fn permitting_execution_lets_the_tree_choose_its_wrapper() {
     );
     assert!(
         marker.exists(),
-        "{} is missing: the permission bought the tree nothing it asked for",
+        "{} is missing: the permission bought the tree nothing it asked for; the helper said {said:?}",
         marker.display()
     );
 }
@@ -228,8 +277,7 @@ fn a_wrapper_inherited_from_the_environment_is_not_run_for_the_tree() {
     let wrapper = wrapper_touching(&marker, holder.path());
     let tree = tree_starting_nothing();
 
-    let mut helper = Helper::start(&helper_inheriting(&wrapper, holder.path()), PATIENT)
-        .expect("the helper should start and shake hands");
+    let mut helper = start_through(&helper_inheriting(&wrapper, holder.path()));
     let described = helper.describe(&tree.root);
     let answer = helper
         .analyze(&tree.unit(), &[Capability::Types])
