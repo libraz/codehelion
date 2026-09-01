@@ -228,7 +228,8 @@ pub struct ViewArgs {
     #[arg(short, long, conflicts_with = "verbose")]
     pub quiet: bool,
     /// List at most this many groups; `0` lists every group and every
-    /// occurrence.
+    /// occurrence. Left out, a text report lists 10 groups with 5 occurrences
+    /// under each; any value other than `0` changes the group count alone.
     #[arg(long, value_name = "N")]
     pub limit: Option<usize>,
     /// When to colour the report.

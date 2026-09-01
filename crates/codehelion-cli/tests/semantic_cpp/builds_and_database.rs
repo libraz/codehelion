@@ -169,7 +169,7 @@ fn a_cpp_source_missing_from_the_database_is_recorded_as_no_build_information() 
     let no_build = partitions
         .iter()
         .find(|partition| {
-            partition["summary"]["compiler"]["unavailable"]["no_build_information"].as_u64()
+            partition["summary"]["compiler"]["not_asked_reasons"]["no_build_information"].as_u64()
                 == Some(1)
         })
         .expect("an explicit no-build report");

@@ -203,7 +203,7 @@ fn attach_dwarf_frames_within<S: BuildHasher>(
         .enumerate()
         .map(|(index, symbol)| (symbol.fingerprint, index))
         .collect();
-    let mut source_paths = BTreeSet::new();
+    let mut source_paths: BTreeSet<&str> = BTreeSet::new();
     let mut remaining_frames = budget.inline_frames;
     let mut remaining_source_bytes = budget.inline_source_bytes;
     for ((fingerprint, address, size), frame_indexes) in
@@ -218,7 +218,7 @@ fn attach_dwarf_frames_within<S: BuildHasher>(
             .into_iter()
             .take(budget.symbol_candidates)
             .filter_map(|index| frames.get(index))
-            .map(|frame| (frame.depth, frame.frame.inline_frame(&line_paths)))
+            .map(|frame| (frame.depth, frame.frame))
             .collect();
         let symbol_end = address.saturating_add(size);
         let line_start = line_records.partition_point(|candidate| candidate.address < address);
@@ -232,11 +232,17 @@ fn attach_dwarf_frames_within<S: BuildHasher>(
                 truncated = true;
                 break;
             }
-            matching.push((isize::MAX, candidate.inline_frame(&line_paths)));
+            matching.push((isize::MAX, candidate.interned_frame()));
         }
+        // Candidates are ordered and deduplicated while their paths are still
+        // interned, and only what survives the retention limits below is copied
+        // out. Ordering reads the paths through the interner rather than
+        // comparing their indexes, which record the order the paths were read
+        // in and not the order they sort in.
         matching.sort_by(|left, right| {
-            (&left.1.source, left.1.line, left.1.column, left.0).cmp(&(
-                &right.1.source,
+            let path_of = |source| line_paths.get(source);
+            (path_of(left.1.source), left.1.line, left.1.column, left.0).cmp(&(
+                path_of(right.1.source),
                 right.1.line,
                 right.1.column,
                 right.0,
@@ -245,7 +251,7 @@ fn attach_dwarf_frames_within<S: BuildHasher>(
         matching.dedup_by(|left, right| left.1 == right.1);
         let retained = matching.len().min(budget.symbol_inline_frames).min(
             source_path_prefix_within(
-                matching.iter().map(|(_, frame)| frame.source.len()),
+                candidate_source_bytes(&matching, &line_paths),
                 remaining_source_bytes,
             )
             .min(remaining_frames),
@@ -256,7 +262,7 @@ fn attach_dwarf_frames_within<S: BuildHasher>(
         }
         remaining_frames -= matching.len();
         remaining_source_bytes = remaining_source_bytes
-            .saturating_sub(matching.iter().map(|(_, frame)| frame.source.len()).sum());
+            .saturating_sub(candidate_source_bytes(&matching, &line_paths).sum());
         if truncated {
             ir.capabilities.debug_info_unreadable = true;
         }
@@ -264,20 +270,35 @@ fn attach_dwarf_frames_within<S: BuildHasher>(
             continue;
         }
         if let Some(index) = symbol_rows.get(&fingerprint) {
-            let symbol = &mut ir.symbols[*index];
-            symbol.inline_stack = matching.into_iter().map(|(_, frame)| frame).collect();
-            source_paths.extend(symbol.inline_stack.iter().map(|frame| frame.source.clone()));
+            source_paths.extend(
+                matching
+                    .iter()
+                    .map(|(_, frame)| line_paths.get(frame.source)),
+            );
+            ir.symbols[*index].inline_stack = matching
+                .into_iter()
+                .map(|(_, frame)| frame.inline_frame(&line_paths))
+                .collect();
         }
     }
-    ir.source_mappings.extend(
-        source_paths
-            .into_iter()
-            .map(|uri| ArtifactSourceMapping { uri }),
-    );
+    ir.source_mappings
+        .extend(source_paths.into_iter().map(|uri| ArtifactSourceMapping {
+            uri: uri.to_owned(),
+        }));
 }
 
 const fn supports_address_join(kind: ObjectKind) -> bool {
     !matches!(kind, ObjectKind::Relocatable)
+}
+
+/// Source-path lengths of candidates, read without copying a path.
+fn candidate_source_bytes<'a>(
+    candidates: &'a [(isize, InternedFrame)],
+    paths: &'a DwarfPathInterner,
+) -> impl Iterator<Item = usize> + 'a {
+    candidates
+        .iter()
+        .map(|(_, frame)| paths.get(frame.source).len())
 }
 
 /// Longest prefix of source paths whose bytes fit in a byte budget.
@@ -375,6 +396,17 @@ struct InternedFrame {
     column: Option<u32>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Source paths copied into an attached position on the current thread.
+    ///
+    /// Copying a path is the allocation the retention budgets bound, so a test
+    /// counts the copies directly instead of timing the collection. Each test
+    /// runs on its own thread, which keeps a count local to the collection it
+    /// observes.
+    static MATERIALIZED_SOURCE_PATHS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl InternedFrame {
     fn intern(frame: ArtifactInlineFrame, paths: &mut DwarfPathInterner) -> Option<Self> {
         Some(Self {
@@ -385,6 +417,8 @@ impl InternedFrame {
     }
 
     fn inline_frame(self, paths: &DwarfPathInterner) -> ArtifactInlineFrame {
+        #[cfg(test)]
+        MATERIALIZED_SOURCE_PATHS.with(|count| count.set(count.get() + 1));
         ArtifactInlineFrame {
             evidence_kind: crate::ArtifactSourceLocationEvidenceKind::Dwarf,
             source: paths.get(self.source).to_owned(),
@@ -404,12 +438,16 @@ struct DwarfLineFrame {
 }
 
 impl DwarfLineFrame {
-    fn inline_frame(&self, paths: &DwarfPathInterner) -> ArtifactInlineFrame {
-        ArtifactInlineFrame {
-            evidence_kind: crate::ArtifactSourceLocationEvidenceKind::Dwarf,
-            source: paths.get(self.source).to_owned(),
+    /// The position this row names, in the shape a declaration takes.
+    const fn interned_frame(&self) -> InternedFrame {
+        InternedFrame {
+            source: self.source,
             line: Some(self.line),
-            column: (self.column != 0).then_some(self.column),
+            column: if self.column == 0 {
+                None
+            } else {
+                Some(self.column)
+            },
         }
     }
 }
@@ -625,6 +663,7 @@ mod tests {
     /// Debug metadata describes address ranges and line-table rows in far fewer
     /// bytes than the structures a reader derives from them, which is what a
     /// hostile input exploits.
+    #[derive(Debug)]
     struct DwarfFixture {
         /// Text symbols, each covering one eight-byte function.
         functions: usize,
@@ -637,6 +676,11 @@ mod tests {
         line_rows: usize,
         /// Whether each row advances the line as well as the address.
         distinct_row_lines: bool,
+        /// A second declared file, named by every subprogram declaration while
+        /// the rows keep naming the unit's own source. Declarations are read
+        /// before rows, so this path is read first and, when it sorts after the
+        /// unit source, the order paths are read in is not their sorted order.
+        second_source: Option<&'static str>,
     }
 
     impl DwarfFixture {
@@ -669,7 +713,7 @@ mod tests {
                 (".debug_info", self.debug_info()),
                 (
                     ".debug_line",
-                    debug_line(self.line_rows, self.distinct_row_lines),
+                    debug_line(self.line_rows, self.distinct_row_lines, self.second_source),
                 ),
             ] {
                 let section = object.add_section(
@@ -709,7 +753,7 @@ mod tests {
                 unit.push(2);
                 unit.extend(format!("subprogram{index}").into_bytes());
                 unit.push(0);
-                unit.push(1);
+                unit.push(u8::from(self.second_source.is_some()) + 1);
                 unit.extend(u16::try_from(index % 60_000).unwrap().to_le_bytes());
                 unit.extend(low_pc.to_le_bytes());
                 unit.extend(length.to_le_bytes());
@@ -771,7 +815,11 @@ mod tests {
                     (".debug_info", self.unit.debug_info()),
                     (
                         ".debug_line",
-                        debug_line(self.unit.line_rows, self.unit.distinct_row_lines),
+                        debug_line(
+                            self.unit.line_rows,
+                            self.unit.distinct_row_lines,
+                            self.unit.second_source,
+                        ),
                     ),
                 ] {
                     // Each container spells the same debug section its own way.
@@ -842,8 +890,9 @@ mod tests {
     ///
     /// The opcode advances the address by one, so the rows land in the text
     /// section's first functions; it either repeats one line or advances the
-    /// line with the address.
-    fn debug_line(rows: usize, distinct_lines: bool) -> Vec<u8> {
+    /// line with the address. The rows always name the first declared file,
+    /// leaving a second declared file for the declarations to name.
+    fn debug_line(rows: usize, distinct_lines: bool, second_source: Option<&str>) -> Vec<u8> {
         let mut header = vec![
             1,    // minimum instruction length
             1,    // maximum operations per instruction
@@ -856,6 +905,10 @@ mod tests {
         header.push(0); // no include directories
         header.extend(UNIT_SOURCE.as_bytes());
         header.extend([0, 0, 0, 0]); // directory, modification time, length
+        if let Some(source) = second_source {
+            header.extend(source.as_bytes());
+            header.extend([0, 0, 0, 0]); // directory, modification time, length
+        }
         header.push(0); // no further file names
 
         let mut program = vec![0, 9, 0x02];
@@ -938,6 +991,7 @@ mod tests {
                     overlapping_ranges: false,
                     line_rows: 12,
                     distinct_row_lines: false,
+                    second_source: None,
                 }
                 .build(),
                 None,
@@ -1002,6 +1056,7 @@ mod tests {
             overlapping_ranges: false,
             line_rows: 12,
             distinct_row_lines: true,
+            second_source: None,
         };
 
         let full = attach_within(&fixture, DwarfBudget::default());
@@ -1033,6 +1088,7 @@ mod tests {
             overlapping_ranges: false,
             line_rows: 12,
             distinct_row_lines: true,
+            second_source: None,
         };
 
         let ir = attach_within(
@@ -1065,6 +1121,7 @@ mod tests {
             overlapping_ranges: false,
             line_rows: 12,
             distinct_row_lines: true,
+            second_source: None,
         };
 
         let ir = attach_within(
@@ -1092,6 +1149,7 @@ mod tests {
             overlapping_ranges: false,
             line_rows: 20,
             distinct_row_lines: true,
+            second_source: None,
         };
 
         let by_count = attach_within(
@@ -1124,6 +1182,7 @@ mod tests {
             overlapping_ranges: true,
             line_rows: 3_000_000,
             distinct_row_lines: true,
+            second_source: None,
         }
         .build();
 
@@ -1156,19 +1215,64 @@ mod tests {
         let retained = budget.frames * size_of::<DwarfFrame>()
             + budget.line_records * size_of::<DwarfLineFrame>()
             + budget.frame_matches * size_of::<usize>()
-            + budget.symbol_candidates * size_of::<(isize, ArtifactInlineFrame)>()
+            + budget.symbol_candidates * size_of::<(isize, InternedFrame)>()
             + budget.inline_frames * size_of::<ArtifactInlineFrame>()
             + budget.inline_source_bytes;
 
         assert!(size_of::<DwarfFrame>() <= 48);
+        // A candidate carries no path of its own, so the candidate list of one
+        // symbol costs less than the positions it is narrowed down to.
+        assert!(size_of::<(isize, InternedFrame)>() < size_of::<ArtifactInlineFrame>());
         assert!(
             retained <= 256 * 1024 * 1024,
             "derived structures reserve {retained} bytes"
         );
     }
 
+    /// Unit shapes whose attached positions are pinned by an exact expectation.
+    ///
+    /// Between them the shapes cover a declaration per function, declarations
+    /// that all cover the same text, rows that repeat one position, and rows
+    /// that walk the lines of a function they share with a declaration.
+    fn pinned_unit_shapes() -> Vec<DwarfFixture> {
+        vec![
+            DwarfFixture {
+                functions: 3,
+                subprograms: 3,
+                overlapping_ranges: false,
+                line_rows: 12,
+                distinct_row_lines: false,
+                second_source: None,
+            },
+            DwarfFixture {
+                functions: 3,
+                subprograms: 3,
+                overlapping_ranges: false,
+                line_rows: 12,
+                distinct_row_lines: true,
+                second_source: None,
+            },
+            DwarfFixture {
+                functions: 3,
+                subprograms: 5,
+                overlapping_ranges: true,
+                line_rows: 9,
+                distinct_row_lines: true,
+                second_source: None,
+            },
+        ]
+    }
+
     /// One attached source position: its path, line, and column.
     type Position = (String, Option<u32>, Option<u32>);
+
+    /// Positions naming consecutive lines of one source path.
+    fn positions(path: &str, lines: impl IntoIterator<Item = u32>) -> Vec<Position> {
+        lines
+            .into_iter()
+            .map(|line| (path.to_owned(), Some(line), None))
+            .collect()
+    }
 
     /// Source positions of every code record, in the order they were attached.
     fn inline_stacks(ir: &ArtifactIr) -> Vec<Vec<Position>> {
@@ -1192,6 +1296,100 @@ mod tests {
     }
 
     #[test]
+    fn every_unit_shape_maps_its_symbols_to_a_fixed_set_of_positions() {
+        const UNIT: &str = "/work/unit.c";
+        let expected = vec![
+            vec![
+                positions(UNIT, [0, 1]),
+                positions(UNIT, [1]),
+                positions(UNIT, [2]),
+            ],
+            vec![
+                [positions(UNIT, [0]), positions(UNIT, 2..=8)].concat(),
+                [positions(UNIT, [1]), positions(UNIT, 9..=13)].concat(),
+                positions(UNIT, [2]),
+            ],
+            vec![
+                positions(UNIT, 0..=8),
+                [positions(UNIT, 0..=4), positions(UNIT, 9..=10)].concat(),
+                positions(UNIT, 0..=4),
+            ],
+        ];
+
+        for (fixture, expected) in pinned_unit_shapes().into_iter().zip(expected) {
+            let ir = attach_within(&fixture, DwarfBudget::default());
+
+            assert_eq!(inline_stacks(&ir), expected, "{fixture:?}");
+            assert_eq!(source_uris(&ir), vec![UNIT.to_owned()], "{fixture:?}");
+            assert!(!ir.capabilities.debug_info_unreadable, "{fixture:?}");
+        }
+    }
+
+    #[test]
+    fn positions_of_one_symbol_are_ordered_by_source_path_not_by_when_it_was_read() {
+        // Declarations are read before line-table rows, so this unit's
+        // declared file is read first while sorting after the file its rows
+        // name. Attached positions follow the paths, not the reading order.
+        let ir = attach_within(
+            &DwarfFixture {
+                functions: 2,
+                subprograms: 2,
+                overlapping_ranges: true,
+                line_rows: 6,
+                distinct_row_lines: true,
+                second_source: Some("/zzz.c"),
+            },
+            DwarfBudget::default(),
+        );
+
+        assert_eq!(
+            inline_stack(&ir, "function0"),
+            [positions("/work/unit.c", 2..=7), positions("/zzz.c", 0..=1)].concat()
+        );
+        assert_eq!(
+            source_uris(&ir),
+            vec!["/work/unit.c".to_owned(), "/zzz.c".to_owned()]
+        );
+        assert!(!ir.capabilities.debug_info_unreadable);
+    }
+
+    /// Run a collection, reporting the source paths it copied out of the
+    /// interner alongside its result.
+    fn source_paths_copied<T>(collect: impl FnOnce() -> T) -> (T, usize) {
+        super::MATERIALIZED_SOURCE_PATHS.with(|copied| copied.set(0));
+        let value = collect();
+        (
+            value,
+            super::MATERIALIZED_SOURCE_PATHS.with(std::cell::Cell::get),
+        )
+    }
+
+    #[test]
+    fn source_paths_are_copied_only_for_the_positions_a_symbol_retains() {
+        let budget = DwarfBudget::default();
+        let bytes = DwarfFixture {
+            functions: 64,
+            subprograms: 100_000,
+            overlapping_ranges: true,
+            line_rows: 200_000,
+            distinct_row_lines: true,
+            second_source: None,
+        }
+        .build();
+
+        let (ir, copied) = source_paths_copied(|| {
+            crate::elf::ElfBackend
+                .parse_with_debug_companion(&bytes, None)
+                .unwrap()
+        });
+
+        // Candidates outnumber retained positions here by more than an order of
+        // magnitude, so a copy per candidate would leave the budget behind.
+        assert_eq!(copied, attached_frames(&ir), "{copied} paths copied");
+        assert!(copied <= budget.inline_frames, "{copied} paths copied");
+    }
+
+    #[test]
     fn a_stripped_image_and_its_debug_companion_map_what_the_same_code_maps_elsewhere() {
         let unit = || DwarfFixture {
             functions: 3,
@@ -1199,6 +1397,7 @@ mod tests {
             overlapping_ranges: false,
             line_rows: 12,
             distinct_row_lines: false,
+            second_source: None,
         };
         let split = |text_symbols, debug_information, format| {
             SplitDebugFixture {
@@ -1401,7 +1600,10 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(paths.values.len(), 1);
-        assert_eq!(frame.inline_frame(&paths).source, "/work/src/lib.rs");
+        assert_eq!(
+            frame.interned_frame().inline_frame(&paths).source,
+            "/work/src/lib.rs"
+        );
     }
 
     #[test]

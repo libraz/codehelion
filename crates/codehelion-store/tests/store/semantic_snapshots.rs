@@ -343,6 +343,8 @@ fn an_artifact_referenced_source_scan_survives_a_later_source_scan() {
             started_at: "2026-07-24T00:00:06Z",
             finished_at: "2026-07-24T00:00:07Z",
             symbols: &[],
+            source_maps: &[],
+            containment: None,
             mappings: &[],
             unmapped_symbols: &[],
             unmapped_sources: &[],

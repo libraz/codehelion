@@ -8,7 +8,6 @@ use object::{
     SymbolFlags, SymbolKind, SymbolScope,
 };
 use proptest::prelude::*;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 fn fixture() -> Vec<u8> {
     let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
@@ -437,14 +436,23 @@ fn external_debug_companion_with_the_same_build_id_is_accepted() {
 
 proptest! {
     #[test]
-    fn arbitrary_and_truncated_elf_bytes_never_panic(
+    fn arbitrary_prefixed_and_damaged_bytes_never_panic(
         bytes in prop::collection::vec(any::<u8>(), 0..2048),
+        position in any::<prop::sample::Index>(),
+        mask in 1_u8..=u8::MAX,
+        cut in any::<prop::sample::Index>(),
     ) {
-        let mut truncated = b"\x7fELF".to_vec();
-        truncated.extend(&bytes);
-        for input in [&bytes, &truncated] {
-            let result = catch_unwind(AssertUnwindSafe(|| ElfBackend.parse(input)));
-            prop_assert!(result.is_ok());
+        let fixture = fixture();
+        let mut flipped = fixture.clone();
+        let at = position.index(flipped.len());
+        flipped[at] ^= mask;
+        let truncated = fixture[..cut.index(fixture.len())].to_vec();
+        let mut magic = b"\x7fELF".to_vec();
+        magic.extend(&bytes);
+        for input in [&bytes, &flipped, &truncated, &magic] {
+            if let Err(failure) = crate::check_parse_answers(&ElfBackend, input) {
+                return Err(TestCaseError::fail(failure));
+            }
         }
     }
 }

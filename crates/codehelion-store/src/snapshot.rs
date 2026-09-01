@@ -626,8 +626,16 @@ pub struct SummaryRow {
     pub excluded_generated: u64,
     /// Files dropped by the configured include/exclude globs.
     pub excluded_by_glob: u64,
-    /// Files dropped because they exceeded the configured size ceiling.
+    /// Source files dropped because they exceeded the configured size ceiling.
     pub excluded_too_large: u64,
+    /// Recognised build-metadata files dropped for exceeding that same
+    /// ceiling.
+    ///
+    /// Counted apart from [`Self::excluded_too_large`] because the two cost a
+    /// run different things: a source file missing from the comparison, versus
+    /// a compilation database or manifest whose build description nothing
+    /// else supplies.
+    pub excluded_oversized_metadata: u64,
     /// Files dropped because their head identified them as binary.
     pub excluded_binary: u64,
     /// Files the walker or selected frontend could not read.
@@ -692,6 +700,11 @@ pub struct FileCountsRow {
 }
 
 /// Concrete resource ceilings a scan applied for one profile.
+///
+/// The ceilings every source mode holds are recorded outright. The rest belong
+/// to stages only some modes run, so each is `None` when the recorded run's
+/// mode never consulted it: storing a number the run did not enforce would let
+/// a replayed report state a bound that never applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuardrailsRow {
     /// Name of the applied profile.
@@ -707,30 +720,30 @@ pub struct GuardrailsRow {
     /// Largest candidate-pair budget per pass.
     pub pair_budget: u64,
     /// IEEE-754 bits of the Structural near-miss diagnostic band.
-    pub near_miss_delta_bits: u64,
+    pub near_miss_delta_bits: Option<u64>,
     /// Maximum Structural near-miss diagnostics retained.
-    pub near_miss_cap: u64,
+    pub near_miss_cap: Option<u64>,
     /// Largest Structural pairs passed to precise verification.
-    pub verification_budget: u64,
+    pub verification_budget: Option<u64>,
     /// Largest dynamic-programming cell count for one Structural alignment.
-    pub max_alignment_cells: u64,
+    pub max_alignment_cells: Option<u64>,
     /// Largest number of post-grouping sibling candidates compared in one run.
-    pub sibling_candidate_budget: u64,
+    pub sibling_candidate_budget: Option<u64>,
     /// Largest number of sibling findings retained for one clone group.
-    pub sibling_per_group_cap: u64,
+    pub sibling_per_group_cap: Option<u64>,
     /// Largest number of sibling findings retained across one run.
-    pub sibling_total_cap: u64,
+    pub sibling_total_cap: Option<u64>,
     /// Largest number of signature-sibling candidates compared in one run.
-    pub signature_sibling_candidate_budget: u64,
+    pub signature_sibling_candidate_budget: Option<u64>,
     /// Largest number of signature siblings retained for one clone group.
-    pub signature_sibling_per_group_cap: u64,
+    pub signature_sibling_per_group_cap: Option<u64>,
     /// Largest number of signature siblings retained across one run.
-    pub signature_sibling_total_cap: u64,
+    pub signature_sibling_total_cap: Option<u64>,
     /// Largest number of units that may share a signature before that
     /// signature stops being sibling evidence.
-    pub signature_sibling_max_units_per_signature: u64,
+    pub signature_sibling_max_units_per_signature: Option<u64>,
     /// Largest related component refined together.
-    pub max_component: u64,
+    pub max_component: Option<u64>,
 }
 
 /// How much of the source the parser could not follow.

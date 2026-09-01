@@ -1268,9 +1268,12 @@ mod tests {
         CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint,
     };
 
+    use codehelion_helper::ir::{CompilerIr, Unavailability, UnitRef};
+    use codehelion_helper::protocol::{Capability, HelperIdentity};
+
     use super::{
-        MemberRow, PriorityRow, UnitRow, collapse_stored_group_rows, collapse_stored_member_rows,
-        shared, stored_unit_descriptor,
+        MemberRow, PriorityRow, Snapshot, SummaryRow, UnitRow, collapse_stored_group_rows,
+        collapse_stored_member_rows, compiler_rows, shared, stored_unit_descriptor,
     };
 
     fn group(score: f64) -> codehelion_store::snapshot::GroupRow {
@@ -1414,5 +1417,111 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains(&FindingId::from_bytes([9; 16]).to_string()));
         assert!(message.contains("out-of-range host unit 9"));
+    }
+
+    /// One unit of every outcome, from a run where a helper died before it
+    /// could say who it was.
+    ///
+    /// Two backends were installed: one answered and is in the run's helper
+    /// list, the other fell over before its handshake and is in nobody's, so
+    /// the unit it failed on names no helper at all.
+    fn answers_from_a_run_whose_helper_died() -> crate::semantic::Answers {
+        let unit = |file: &str| UnitRef {
+            unit: "crate".to_string(),
+            file: file.to_string(),
+            variant: "target=host".to_string(),
+        };
+        crate::semantic::Answers {
+            helpers: vec![crate::semantic::Answered {
+                identity: HelperIdentity {
+                    name: "codehelion-backend-rust".to_string(),
+                    version: "0.1.0".to_string(),
+                    protocol: 2,
+                    toolchains: vec!["1.98.0".to_string()],
+                    capabilities: vec![Capability::Types],
+                    executes: Vec::new(),
+                },
+                restarts: 1,
+            }],
+            per_source: vec![
+                crate::semantic::Answer::Analyzed {
+                    helper: 0,
+                    ir: Box::new(CompilerIr::empty(unit("src/answered.rs"))),
+                },
+                crate::semantic::Answer::Unavailable {
+                    helper: None,
+                    unit: unit("src/crashed.rs"),
+                    reason: Unavailability::HelperDied,
+                    diagnostics: vec!["the helper stopped before answering".to_string()],
+                },
+                crate::semantic::Answer::NotAsked {
+                    unit: unit("vendor/blob.c"),
+                    reason: Unavailability::NotSupported,
+                },
+            ],
+        }
+    }
+
+    /// What a run says about itself and what a later `report --run` says about
+    /// it are one claim read twice, so a helper that died has to be a helper
+    /// that died in both. The record has only the reason to go on — a helper
+    /// that never introduced itself leaves no row to name — and reading the
+    /// gap in the helper column instead turns the diagnosis into its opposite
+    /// on the only path that replays a finished run.
+    #[test]
+    fn a_dead_helper_reads_back_as_the_split_the_run_reported() {
+        let asked = answers_from_a_run_whose_helper_died();
+        let live = crate::scan::structural::coverage(&asked);
+        let (helpers, units) = compiler_rows(&asked);
+
+        let directory = tempfile::tempdir().expect("a directory for the audit database");
+        let mut store = codehelion_store::Store::open(&directory.path().join("audit.db"))
+            .expect("a database on disk");
+        let variant = codehelion_core::discovery::BuildVariant::fast(
+            codehelion_core::discovery::LanguageSelection::default(),
+            Language::Rust,
+        );
+        let run = store
+            .record_snapshot(&Snapshot {
+                root_path: "/work",
+                tool_version: "0.0.0",
+                config_hash: "cfg-hash",
+                config_source: "defaults",
+                config_path: None,
+                started_at: "2026-01-01T00:00:00Z",
+                finished_at: "2026-01-01T00:00:01Z",
+                variant: &variant,
+                min_clone_tokens: 20,
+                detector_versions: &[],
+                suppressions: Vec::new(),
+                units: Vec::new(),
+                groups: Vec::new(),
+                sibling_groups: Vec::new(),
+                near_misses: Vec::new(),
+                files: Vec::new(),
+                compiler_helpers: helpers,
+                compiler_units: units,
+                summary: SummaryRow::default(),
+            })
+            .expect("a recorded run");
+        let stored = store
+            .run_compiler_coverage(run)
+            .expect("the recorded coverage")
+            .expect("a compiler was asked about this run");
+        let replayed = crate::report_command::restored_compiler_coverage(stored);
+
+        assert_eq!(live.answered, 1);
+        assert_eq!(live.not_asked, 1);
+        assert_eq!(live.unavailable["helper_died"], 1);
+        // The unasked file is named by the reason it went unasked about, in
+        // both readings: a total the reader cannot attribute is what the
+        // by-reason breakdown exists to prevent.
+        assert_eq!(live.not_asked_reasons["not_supported"], 1);
+        assert_eq!(replayed.answered, live.answered);
+        assert_eq!(replayed.not_asked, live.not_asked);
+        assert_eq!(replayed.not_asked_reasons, live.not_asked_reasons);
+        assert_eq!(replayed.unavailable, live.unavailable);
+        assert_eq!(replayed.diagnostics, live.diagnostics);
+        assert_eq!(replayed.restarts, live.restarts);
     }
 }

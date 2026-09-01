@@ -369,6 +369,22 @@ pub struct ArtifactSymbol {
     pub code: Vec<u8>,
     /// Versioned normalized instruction stream, when decoding is supported.
     pub normalized: Option<NormalizedInstructions>,
+    /// Content identity of this symbol's own instruction bytes, immediates
+    /// included.
+    ///
+    /// [`Self::normalized`] drops every immediate, and [`Self::fingerprint`]
+    /// is built from that stream, so two builds whose constants or LEB128
+    /// widths differ carry one identity. This second identity keeps the
+    /// immediates and leaves out only the container-local indices that
+    /// renumber when a neighbouring definition is inserted or removed, which
+    /// is what lets a before/after comparison see a body that changed without
+    /// seeing one that merely moved.
+    ///
+    /// It is `None` for a backend that does not decode operands, and a
+    /// consumer that finds it absent on either side has no evidence about the
+    /// immediates rather than evidence that they are equal.
+    #[serde(default)]
+    pub body_fingerprint: Option<ArtifactFingerprint>,
     /// Inline source locations, when debug information established them.
     pub inline_stack: Vec<ArtifactInlineFrame>,
 }

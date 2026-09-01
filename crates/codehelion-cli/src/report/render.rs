@@ -13,7 +13,7 @@ use super::{
     ArtifactSavings, BASELINE_COMPARE, BaselineStatus, Decoration, GONE_LISTED, GROUP_EXPANDED,
     GROUP_NEW, Group, IDENTITY_ADOPTED, IDENTITY_RETAINED, Member, Report, SCOPE_FRAGMENT, Summary,
     TextOptions, UnusedRule, Write, budget_note, canonical_position, depth_truncation_files,
-    duplicated_tokens, io, search_truncation_note, severed_note,
+    duplicated_tokens, io, nesting_truncation_bodies, search_truncation_note, severed_note,
 };
 
 /// Ranking value at and above which a group is drawn as the report's own
@@ -469,14 +469,19 @@ impl Report {
         let summary = &self.summary;
         let groups = &summary.groups;
         // Every line names the total it is a part of. These counts are read
-        // against three different totals — two of them describe groups that
-        // were listed, one describes runs that never reached the listing —
-        // and a pronoun standing in for the total made them read as one.
-        let listed = plural(groups.total, "listed group");
+        // against three different totals — two of them describe groups this
+        // report holds, one describes runs that never reached it — and a
+        // pronoun standing in for the total made them read as one.
+        //
+        // "reported", not "listed": these count every group the report holds,
+        // while `--limit` decides how many the listing below enumerates. The
+        // legend applies that limit and calls its own population listed, so
+        // one word for both would name two different sets in one view.
+        let reported = plural(groups.total, "reported group");
         if groups.fragment_scope > 0 {
             writeln!(
                 out,
-                "  of the {listed}, {} describe a repeated run inside units that are not clones \
+                "  of the {reported}, {} describe a repeated run inside units that are not clones \
                  of each other",
                 thousands(groups.fragment_scope),
             )?;
@@ -490,21 +495,25 @@ impl Report {
         }
         if groups.subsumed_runs > 0 {
             left_out.push(format!(
-                "{} covered by a longer run",
+                "{} covered by a longer finding",
                 thousands(groups.subsumed_runs),
             ));
         }
         if !left_out.is_empty() {
+            // "findings", not "runs": a duplicated function nested inside
+            // another duplicated function leaves the same way a run covered by
+            // a longer run does, and naming only runs would leave a reader
+            // counting the difference against the wrong total.
             writeln!(
                 out,
-                "  runs not among the {listed}: {}",
+                "  findings not among the {reported}: {}",
                 left_out.join("; "),
             )?;
         }
         if groups.test_code > 0 {
             writeln!(
                 out,
-                "  of the {listed}, {} are duplication inside test code, which repeats itself by \
+                "  of the {reported}, {} are duplication inside test code, which repeats itself by \
                  design; a group spanning a test and what it exercises is not counted here",
                 thousands(groups.test_code),
             )?;
@@ -600,6 +609,16 @@ impl Report {
                 out,
                 "{mark}warning: structural parsing reached its depth limit in {files} file(s); \
                  the deepest region of each was left out of analysis"
+            )?;
+        }
+        // The same fact for the mode that cuts fragments instead of parsing:
+        // the files were read whole, and the blocks below the extraction depth
+        // were not cut into anything a renamed-copy pass could match.
+        if let Some(bodies) = nesting_truncation_bodies(&summary.funnel) {
+            writeln!(
+                out,
+                "{mark}warning: fragment extraction reached its nesting limit in {bodies} \
+                 block(s); duplication confined to those bodies is not reported"
             )?;
         }
         // Then what qualifies the report without unsettling it: a rule that
@@ -722,8 +741,19 @@ impl Report {
                     format!(" (helper restarted {} time(s))", compiler.restarts)
                 },
             )?;
-            for (reason, count) in &compiler.unavailable {
-                writeln!(out, "    {count} {reason}")?;
+            // Both gaps are broken down, and each breakdown says which gap it
+            // belongs to: a file nothing describes how to compile and a helper
+            // that died are answered by different work, and unlabelled reason
+            // lines under one compiler line cannot be told apart.
+            if !compiler.not_asked_reasons.is_empty() {
+                writeln!(
+                    out,
+                    "    not asked: {}",
+                    by_reason(&compiler.not_asked_reasons)
+                )?;
+            }
+            if !compiler.unavailable.is_empty() {
+                writeln!(out, "    unanswered: {}", by_reason(&compiler.unavailable))?;
             }
             render_helper_diagnostics(out, &compiler.diagnostics)?;
             for refusal in &compiler.execution_refusals {
@@ -819,16 +849,25 @@ impl Report {
                 .iter()
                 .filter(|group| group.identifier_jaccard.is_some_and(|value| value < floor))
                 .count();
-            let unmeasured_clause = if unmeasured == 0 {
-                String::new()
+            // Only the reasons that applied are named. A mode measuring no
+            // identifier agreement at all leaves nothing below the floor, and
+            // a mode measuring all of it leaves nothing unmeasured; naming
+            // both regardless tells the reader the count may split two ways
+            // when it cannot, which is exactly the split they wanted read.
+            let reason = if below_floor == 0 {
+                "raw identifier agreement is not measured in this mode".to_string()
+            } else if unmeasured == 0 {
+                format!("raw identifier agreement below {floor:.2}")
             } else {
-                format!(" ({unmeasured} of them were not measured in this mode)")
+                format!(
+                    "raw identifier agreement below {floor:.2} ({unmeasured} of them were not \
+                     measured in this mode)"
+                )
             };
             writeln!(
                 out,
-                "{} group(s) are not listed: raw identifier agreement below {floor:.2}{}",
+                "{} group(s) are not listed: {reason}",
                 reported.len() - visible.len(),
-                unmeasured_clause,
             )?;
             debug_assert_eq!(reported.len() - visible.len(), below_floor + unmeasured);
         }
@@ -1232,6 +1271,7 @@ fn excluded_causes(summary: &Summary) -> Vec<String> {
         ("generated", excluded.generated),
         ("by glob", excluded.by_glob),
         ("too large", excluded.too_large),
+        ("build metadata too large", excluded.oversized_metadata),
         ("binary", excluded.binary),
         ("unreadable", excluded.unreadable),
         ("language-disabled", excluded.language_excluded),
@@ -1246,48 +1286,83 @@ fn excluded_causes(summary: &Summary) -> Vec<String> {
         .collect()
 }
 
+/// One compiler-coverage gap spelled out reason by reason, in the same
+/// vocabulary the JSON report uses.
+fn by_reason(counts: &std::collections::BTreeMap<String, u64>) -> String {
+    counts
+        .iter()
+        .map(|(reason, count)| format!("{count} {reason}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The ceilings this run analysed under, and the ones its diagnostics used.
+///
+/// Only what the recorded run actually held itself to. A mode leaves the
+/// ceilings its stages never consult absent (see [`Guardrails`]), and a line
+/// naming one of those would tell a reader to lower a number no stage of this
+/// run ever read.
 fn render_guardrails(summary: &Summary, out: &mut impl Write) -> io::Result<()> {
     let Some(guardrails) = &summary.guardrails else {
         return Ok(());
     };
+    let mut applied = vec![
+        format!("files over {} bytes skipped", guardrails.max_file_bytes),
+        format!(
+            "parse work capped at min(file ceiling, {} ms × {} bytes)",
+            guardrails.parse_timeout_ms,
+            crate::scan::runtime::PARSE_BYTES_PER_MILLISECOND,
+        ),
+        format!("{} ms helper deadline", guardrails.helper_timeout_ms),
+        format!("posting lists up to {}", guardrails.posting_cap),
+        format!("{} candidate pairs per pass", guardrails.pair_budget),
+    ];
+    if let Some(pairs) = guardrails.verification_budget {
+        applied.push(format!("{pairs} verification pairs"));
+    }
+    if let Some(cells) = guardrails.max_alignment_cells {
+        applied.push(format!("{cells} cells per alignment"));
+    }
+    if let Some(units) = guardrails.max_component {
+        applied.push(format!("{units} units per group"));
+    }
     writeln!(
         out,
-        "  {} profile: files over {} bytes skipped, parse work capped at min(file ceiling, {} ms × {} bytes), {} ms helper deadline, posting lists up to {}, {} candidate pairs per pass, {} verification pairs, {} cells per alignment, {} units per group",
+        "  {} profile: {}",
         guardrails.profile,
-        guardrails.max_file_bytes,
-        guardrails.parse_timeout_ms,
-        crate::scan::runtime::PARSE_BYTES_PER_MILLISECOND,
-        guardrails.helper_timeout_ms,
-        guardrails.posting_cap,
-        guardrails.pair_budget,
-        guardrails.verification_budget,
-        guardrails.max_alignment_cells,
-        guardrails.max_component,
+        applied.join(", "),
     )?;
-    write!(
-        out,
-        "  diagnostics: near-match band {}, at most {} near misses; sibling sweep {} comparisons, {} per group, {} total",
-        guardrails.near_miss_delta,
-        guardrails.near_miss_cap,
+    let mut diagnostics = Vec::new();
+    if let Some((band, cap)) = guardrails.near_miss_delta.zip(guardrails.near_miss_cap) {
+        diagnostics.push(format!("near-match band {band}, at most {cap} near misses"));
+    }
+    if let (Some(budget), Some(per_group), Some(total)) = (
         guardrails.sibling_candidate_budget,
         guardrails.sibling_per_group_cap,
         guardrails.sibling_total_cap,
-    )?;
+    ) {
+        diagnostics.push(format!(
+            "sibling sweep {budget} comparisons, {per_group} per group, {total} total"
+        ));
+    }
     if summary
         .funnel
         .iter()
         .any(|stage| stage.stage == "signature sibling entries")
-    {
-        write!(
-            out,
-            "; signature sibling sweep {} candidates, {} per group, {} total",
+        && let (Some(budget), Some(per_group), Some(total)) = (
             guardrails.signature_sibling_candidate_budget,
             guardrails.signature_sibling_per_group_cap,
             guardrails.signature_sibling_total_cap,
-        )?;
+        )
+    {
+        diagnostics.push(format!(
+            "signature sibling sweep {budget} candidates, {per_group} per group, {total} total"
+        ));
     }
-    writeln!(out)
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    writeln!(out, "  diagnostics: {}", diagnostics.join("; "))
 }
 
 /// What the baseline covered, said as counts and then as a before and an

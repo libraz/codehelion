@@ -153,7 +153,41 @@ fn sibling_signature_unit_count_rejects_a_negative_count() {
 fn baseline_creation_records_the_version_this_build_writes() {
     let conn = seeded();
     assert_eq!(version(&conn).unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 4);
+    assert_eq!(SCHEMA_VERSION, 5);
+}
+
+/// A database recorded before this baseline is refused rather than read.
+///
+/// This baseline added tables that such a database does not have, and nothing
+/// migrates one layout into the other. The recorded version is what turns that
+/// away at open time; without it, a report would reach a table its database was
+/// never created with, mid-read.
+#[test]
+fn a_database_recorded_before_this_baseline_is_refused_rather_than_read() {
+    let conn = seeded();
+    // The previous layout, reproduced by removing exactly what this one added.
+    conn.execute_batch(
+        "DROP TABLE artifact_analysis_source_map_resolution_source;
+         DROP TABLE artifact_analysis_source_map_resolution;
+         DROP TABLE artifact_analysis_containment;",
+    )
+    .unwrap();
+    conn.execute("UPDATE schema_meta SET version = ?1", [SCHEMA_VERSION - 1])
+        .unwrap();
+
+    let error = validate_existing(&conn).unwrap_err();
+    assert!(
+        matches!(error, StoreError::UnsupportedSchema { found } if found == SCHEMA_VERSION - 1),
+        "{error:?}"
+    );
+    assert!(
+        conn.prepare(
+            "SELECT ordinal FROM artifact_analysis_source_map_resolution
+             WHERE artifact_analysis_id = ?1",
+        )
+        .is_err(),
+        "the previous layout answered a read only this baseline can answer"
+    );
 }
 
 /// Creating the baseline under enforced foreign keys leaves its seeded
@@ -362,6 +396,62 @@ fn the_unmapped_columns_accept_every_reason_correlation_can_establish() {
         .is_err(),
         "a reason no build produces was accepted"
     );
+}
+
+/// A declared source-map reference that did not resolve is evidence too, so
+/// every reason the analysis can establish has to be writable — and a
+/// resolution that claims to be both resolved and unavailable has to not be.
+#[test]
+fn the_source_map_resolution_column_accepts_every_reason_an_analysis_can_establish() {
+    let conn = seeded();
+    conn.execute(
+        "INSERT INTO artifact_analysis
+             (id, schema_version, path, format, content_fingerprint, observed_bytes,
+              started_at, finished_at, status)
+         VALUES (1, 'fixture-v1', 'lib.wasm', 'wasm', randomblob(16), 1,
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', 'completed')",
+        [],
+    )
+    .unwrap();
+    for (ordinal, reason) in ArtifactAnalysisSourceMapReason::ALL.into_iter().enumerate() {
+        conn.execute(
+            "INSERT INTO artifact_analysis_source_map_resolution
+                 (artifact_analysis_id, ordinal, uri, local_path, reason)
+             VALUES (1, ?1, 'module.wasm.map', NULL, ?2)",
+            (i64::try_from(ordinal).unwrap(), reason.as_sql()),
+        )
+        .unwrap_or_else(|error| panic!("{} was refused: {error}", reason.as_sql()));
+    }
+    assert_eq!(
+        count(&conn, "artifact_analysis_source_map_resolution"),
+        i64::try_from(ArtifactAnalysisSourceMapReason::ALL.len()).unwrap()
+    );
+    assert!(
+        conn.execute(
+            "INSERT INTO artifact_analysis_source_map_resolution
+                 (artifact_analysis_id, ordinal, uri, local_path, reason)
+             VALUES (1, 100, 'module.wasm.map', NULL, 'no_such_reason')",
+            [],
+        )
+        .is_err(),
+        "a reason no build produces was accepted"
+    );
+    for (local_path, reason) in [
+        (None, None),
+        (Some("/fixtures/module.wasm.map"), Some("map_not_found")),
+    ] {
+        assert!(
+            conn.execute(
+                "INSERT INTO artifact_analysis_source_map_resolution
+                     (artifact_analysis_id, ordinal, uri, local_path, reason)
+                 VALUES (1, 101, 'module.wasm.map', ?1, ?2)",
+                (local_path, reason),
+            )
+            .is_err(),
+            "a resolution that is neither exactly resolved nor exactly unavailable was accepted: \
+             local_path={local_path:?}, reason={reason:?}"
+        );
+    }
 }
 
 /// A rule is content-addressed by what it matches, so two rows can never claim

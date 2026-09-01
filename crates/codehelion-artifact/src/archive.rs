@@ -21,6 +21,14 @@ use object::read::archive::ArchiveFile;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ArchiveBackend;
 
+/// First position a member header can occupy, past the archive magic.
+///
+/// Both flavours this backend claims start with an eight-byte magic. Special
+/// members the reader consumes on its own never become member facts of this
+/// IR, so an unreadable member found before any member was read is reported
+/// from here rather than from a position this backend never observed.
+const MEMBER_REGION_START: u64 = 8;
+
 impl ArtifactBackend for ArchiveBackend {
     fn format(&self) -> ArtifactFormat {
         ArtifactFormat::Archive
@@ -42,14 +50,25 @@ impl ArtifactBackend for ArchiveBackend {
         }
         let archive = ArchiveFile::parse(bytes).map_err(|error| malformed(error.to_string()))?;
         let mut ir = ArtifactIr::empty(ArtifactFormat::Archive, bytes);
+        let observed_bytes = ir.observed_bytes;
+        // Where the next member header begins, advanced only by members the
+        // container demonstrably holds. A member header that does not parse
+        // has no position of its own, so this is the last position about this
+        // archive that was actually observed.
+        let mut next_header = MEMBER_REGION_START;
         for member in archive.members() {
             let member = match member {
                 Ok(member) => member,
                 Err(error) => {
+                    // The unreadable bytes run from the last observed position
+                    // to the end of the input. Recording that span keeps the
+                    // record measured, where a member at the end of the
+                    // archive would name a position no member occupies and a
+                    // zero length that was never anyone's size.
                     ir.archive_members.push(incomplete_member(
                         "<truncated archive member>".to_owned(),
-                        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-                        0,
+                        next_header,
+                        observed_bytes.saturating_sub(next_header),
                         &error.to_string(),
                     ));
                     break;
@@ -58,6 +77,16 @@ impl ArtifactBackend for ArchiveBackend {
             let name = String::from_utf8_lossy(member.name()).into_owned();
             let (offset, size) = member.file_range();
             let thin = member.is_thin();
+            if !thin {
+                // Member data is padded to an even boundary, so a member whose
+                // range the input holds in full establishes where the header
+                // after it begins. A declared range running past the end
+                // establishes nothing, and thin members hold no local bytes.
+                let end = offset.saturating_add(size);
+                if end <= observed_bytes {
+                    next_header = end.saturating_add(end % 2).min(observed_bytes);
+                }
+            }
             let data = match member.data(bytes) {
                 Ok(data) => data,
                 Err(error) => {
@@ -127,6 +156,10 @@ impl ArtifactBackend for ArchiveBackend {
 }
 
 /// Record an unreadable archive member without discarding earlier members.
+///
+/// `offset` and `size` must be positions the parser observed: either the
+/// member's declared range or the span from the last observed position to the
+/// end of the input. Nothing about an unreadable member is inferred into them.
 fn incomplete_member(name: String, offset: u64, size: u64, error: &str) -> ArtifactArchiveMember {
     let identity = format!("{name}:{offset}:{size}");
     ArtifactArchiveMember {
@@ -309,6 +342,19 @@ mod tests {
         archive
     }
 
+    /// An archive whose trailing member header stops mid-write, which is what
+    /// an interrupted build or a partial download leaves behind. The returned
+    /// position is where that header begins.
+    fn archive_cut_inside_a_member_header() -> (Vec<u8>, u64) {
+        let mut archive = b"!<arch>\n".to_vec();
+        archive.extend(archive_member("left.obj", &coff_member(b"left")));
+        let header_start = archive.len() as u64;
+        let second = archive_member("right.obj", &coff_member(b"right"));
+        // Part of a member header is not a member header.
+        archive.extend(&second[..20]);
+        (archive, header_start)
+    }
+
     fn thin_archive_fixture() -> Vec<u8> {
         let mut archive = b"!<thin>\n".to_vec();
         archive.extend(archive_member("left.obj", b""));
@@ -358,6 +404,76 @@ mod tests {
             "the unreadable tail is accounted for: {:#?}",
             ir.archive_members
         );
+    }
+
+    /// An unreadable member has no position of its own, so the record for it
+    /// carries the span the parser could not read: it starts where the parser
+    /// stopped, never at the end of the archive, and its length is the extent
+    /// of that span rather than a zero that reads as a measured size.
+    #[test]
+    fn an_unreadable_member_is_recorded_at_the_position_the_parser_reached() {
+        let (bytes, header_start) = archive_cut_inside_a_member_header();
+
+        let ir = ArchiveBackend
+            .parse(&bytes)
+            .expect("a readable archive prefix remains useful");
+        assert!(
+            ir.archive_members
+                .iter()
+                .any(|member| member.name == "left.obj" && member.parse_error.is_none()),
+            "the complete leading member remains available: {:#?}",
+            ir.archive_members
+        );
+        let incomplete = unreadable_member(&ir);
+        assert_eq!(
+            incomplete.offset, header_start,
+            "the record starts where the parser stopped: {:#?}",
+            ir.archive_members
+        );
+        assert_ne!(
+            incomplete.offset, ir.observed_bytes,
+            "no member begins at the end of the archive: {:#?}",
+            ir.archive_members
+        );
+        assert_eq!(
+            incomplete.size,
+            ir.observed_bytes - header_start,
+            "the unread span is measured, not reported as empty: {:#?}",
+            ir.archive_members
+        );
+    }
+
+    /// Thin members hold no local bytes, so no member before the failure
+    /// established a position. The span then reaches back to the first
+    /// position a member header can occupy, which is still observed.
+    #[test]
+    fn an_unreadable_thin_member_spans_the_archive_from_its_member_region() {
+        let mut bytes = b"!<thin>\n".to_vec();
+        bytes.extend(archive_member("left.obj", b""));
+        bytes.extend(&archive_member("right.obj", b"")[..20]);
+
+        let ir = ArchiveBackend
+            .parse(&bytes)
+            .expect("a readable thin manifest prefix remains useful");
+        let incomplete = unreadable_member(&ir);
+        assert_eq!(incomplete.offset, MEMBER_REGION_START, "{ir:#?}");
+        assert_eq!(
+            incomplete.size,
+            ir.observed_bytes - MEMBER_REGION_START,
+            "{ir:#?}"
+        );
+    }
+
+    fn unreadable_member(ir: &ArtifactIr) -> &ArtifactArchiveMember {
+        ir.archive_members
+            .iter()
+            .find(|member| {
+                member
+                    .parse_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("truncated or unreadable"))
+            })
+            .expect("the unreadable bytes are accounted for")
     }
 
     #[test]

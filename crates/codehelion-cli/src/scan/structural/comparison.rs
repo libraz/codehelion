@@ -707,18 +707,26 @@ pub(super) fn cross_language_funnel(
     stats: &codehelion_core::semantic::CrossLanguageCandidateStats,
 ) -> Vec<report::FunnelStage> {
     vec![
-        report::FunnelStage::new("cross-language graphs", as_u64(stats.graphs))
-            .dropping("ineligible", as_u64(stats.ineligible_graphs)),
+        report::FunnelStage::new("cross-language graphs", as_u64(stats.graphs)).dropping(
+            report::FunnelCause::Ineligible,
+            as_u64(stats.ineligible_graphs),
+        ),
         report::FunnelStage::new(
             "cross-language candidate buckets",
             as_u64(stats.buckets.saturating_sub(stats.oversized_buckets)),
         )
-        .dropping("bucket_member_cap", as_u64(stats.oversized_buckets)),
+        .dropping(
+            report::FunnelCause::BucketMemberCap,
+            as_u64(stats.oversized_buckets),
+        ),
         report::FunnelStage::new(
             "cross-language candidate pairs",
             as_u64(stats.pairs_emitted),
         )
-        .dropping("pair_budget", as_u64(stats.pairs_budget_dropped)),
+        .dropping(
+            report::FunnelCause::PairBudget,
+            as_u64(stats.pairs_budget_dropped),
+        ),
     ]
 }
 

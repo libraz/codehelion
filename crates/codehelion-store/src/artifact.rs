@@ -43,6 +43,10 @@ pub struct ArtifactAnalysisSnapshot<'a> {
     pub finished_at: &'a str,
     /// Symbols the backend established, in deterministic parser order.
     pub symbols: &'a [ArtifactAnalysisSymbol],
+    /// Outcome of every source-map reference the artifact declared.
+    pub source_maps: &'a [ArtifactAnalysisSourceMap],
+    /// Limits installed for an artifact analysed under the untrusted preset.
+    pub containment: Option<ArtifactAnalysisContainment>,
     /// Source/artifact correspondences established by independent evidence.
     pub mappings: &'a [ArtifactAnalysisMapping],
     /// Symbols deliberately left unmapped rather than guessed.
@@ -79,6 +83,152 @@ pub struct ArtifactAnalysisCorrelation {
 
 /// Current record shape for an artifact correlation coverage summary.
 pub const ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION: &str = "artifact-correlation-summary-v1";
+
+/// Limits installed for one artifact analysed under the untrusted preset.
+///
+/// An analysis that ran without the preset has no such record. The values are
+/// the ones the run actually installed, so a later report states the same
+/// containment the analysis stated rather than the defaults of the build
+/// reading it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactAnalysisContainment {
+    /// Input ceiling the analysis refused to read past.
+    pub max_input_bytes: u64,
+    /// Deadline the isolated worker ran under.
+    pub worker_timeout_seconds: u64,
+    /// Virtual-memory ceiling installed in that worker.
+    pub worker_memory_limit_bytes: u64,
+}
+
+/// One source-map reference an artifact declared, with what resolving it
+/// established.
+///
+/// Resolution reads a local file at most; nothing is fetched, and no source
+/// text is retained. The token positions the analysis correlated with are
+/// deliberately not stored: they are parser-local evidence, and the mapping
+/// rows keep the stable identities that outlive them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactAnalysisSourceMap {
+    /// The reference exactly as the artifact declared it.
+    pub uri: String,
+    /// What resolving that reference established.
+    pub outcome: ArtifactAnalysisSourceMapOutcome,
+}
+
+/// The outcome of resolving one declared source-map reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactAnalysisSourceMapOutcome {
+    /// A local map was read, and named these sources.
+    Resolved {
+        /// Local path the reference resolved to.
+        local_path: String,
+        /// Source names the map declares, in the order the analysis reported.
+        sources: Vec<String>,
+    },
+    /// No local map was read, for one established reason.
+    Unavailable {
+        /// Why the reference did not resolve.
+        reason: ArtifactAnalysisSourceMapReason,
+    },
+}
+
+/// Reasons a declared source-map reference did not resolve to a local map.
+///
+/// The analysis produces these reasons and a report restates them, so both
+/// directions of the vocabulary are public.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactAnalysisSourceMapReason {
+    /// The reference names something other than a local relative path.
+    NonLocalReference,
+    /// The artifact's own directory could not be established.
+    ArtifactParentUnavailable,
+    /// Nothing exists at the resolved path.
+    MapNotFound,
+    /// The path resolves outside the artifact's directory.
+    OutsideArtifactDirectory,
+    /// The path is not a readable regular file.
+    MapNotReadable,
+    /// The map is larger than the configured input ceiling.
+    MapExceedsSizeLimit,
+    /// The file is a source map of a kind this build does not read.
+    UnsupportedSourceMapKind,
+    /// The file is not a decodable source map.
+    InvalidSourceMap,
+}
+
+impl ArtifactAnalysisSourceMapReason {
+    /// Every reason this build can record, in declaration order.
+    ///
+    /// The schema's vocabulary for the column is built from this list, so a
+    /// reason the analysis can produce is a reason the column accepts.
+    pub const ALL: [Self; 8] = [
+        Self::NonLocalReference,
+        Self::ArtifactParentUnavailable,
+        Self::MapNotFound,
+        Self::OutsideArtifactDirectory,
+        Self::MapNotReadable,
+        Self::MapExceedsSizeLimit,
+        Self::UnsupportedSourceMapKind,
+        Self::InvalidSourceMap,
+    ];
+
+    /// Where `self` sits in [`Self::ALL`]. Exhaustive, so a new reason cannot
+    /// compile without a place in the list.
+    const fn position(self) -> usize {
+        match self {
+            Self::NonLocalReference => 0,
+            Self::ArtifactParentUnavailable => 1,
+            Self::MapNotFound => 2,
+            Self::OutsideArtifactDirectory => 3,
+            Self::MapNotReadable => 4,
+            Self::MapExceedsSizeLimit => 5,
+            Self::UnsupportedSourceMapKind => 6,
+            Self::InvalidSourceMap => 7,
+        }
+    }
+
+    /// The stored spelling of this reason, which is also the spelling every
+    /// rendering of a report prints.
+    #[must_use]
+    pub const fn as_sql(self) -> &'static str {
+        match self {
+            Self::NonLocalReference => "non_local_reference",
+            Self::ArtifactParentUnavailable => "artifact_parent_unavailable",
+            Self::MapNotFound => "map_not_found",
+            Self::OutsideArtifactDirectory => "outside_artifact_directory",
+            Self::MapNotReadable => "map_not_readable",
+            Self::MapExceedsSizeLimit => "map_exceeds_size_limit",
+            Self::UnsupportedSourceMapKind => "unsupported_source_map_kind",
+            Self::InvalidSourceMap => "invalid_source_map",
+        }
+    }
+
+    /// The reason a stored or reported spelling names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::UnknownVocabulary`] for a spelling no build in
+    /// this vocabulary produces.
+    pub fn from_sql(value: &str) -> Result<Self, StoreError> {
+        Self::ALL
+            .into_iter()
+            .find(|reason| reason.as_sql() == value)
+            .ok_or_else(|| StoreError::UnknownVocabulary {
+                field: "artifact_analysis_source_map_resolution.reason",
+                value: value.to_owned(),
+            })
+    }
+}
+
+/// The list holds each source-map reason once, at the place the exhaustive
+/// match gives it.
+const _: () = {
+    let mut at = 0;
+    while at < ArtifactAnalysisSourceMapReason::ALL.len() {
+        assert!(ArtifactAnalysisSourceMapReason::ALL[at].position() == at);
+        at += 1;
+    }
+};
 
 /// One versioned source/artifact-correlated clone-group estimate.
 #[derive(Debug, Clone, PartialEq)]
@@ -859,6 +1009,8 @@ impl Store {
                 ],
             )?;
         }
+        record_source_maps(&tx, analysis_id, snapshot.source_maps)?;
+        record_containment(&tx, analysis_id, snapshot.containment)?;
         record_mappings(&tx, analysis_id, snapshot.mappings)?;
         for unmapped in snapshot.unmapped_symbols {
             tx.execute(
@@ -996,6 +1148,81 @@ fn record_clone_group_savings(
                 estimate.assumptions_json,
             ],
         )?;
+    }
+    Ok(())
+}
+
+/// Persist the ceilings an untrusted analysis installed.
+///
+/// An analysis that ran without the preset writes no row, which is what keeps
+/// a later report from presenting the reading build's defaults as limits some
+/// earlier run was held to.
+fn record_containment(
+    tx: &Transaction<'_>,
+    analysis_id: i64,
+    containment: Option<ArtifactAnalysisContainment>,
+) -> Result<(), StoreError> {
+    let Some(containment) = containment else {
+        return Ok(());
+    };
+    tx.execute(
+        "INSERT INTO artifact_analysis_containment
+             (artifact_analysis_id, max_input_bytes, worker_timeout_seconds,
+              worker_memory_limit_bytes)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            analysis_id,
+            i64::try_from(containment.max_input_bytes).unwrap_or(i64::MAX),
+            i64::try_from(containment.worker_timeout_seconds).unwrap_or(i64::MAX),
+            i64::try_from(containment.worker_memory_limit_bytes).unwrap_or(i64::MAX),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Persist the outcome of each declared source-map reference, in the order the
+/// analysis reported them.
+///
+/// The ordinal is the reference's position in that report and nothing else: it
+/// keeps the list in the order the artifact declared it, so a re-render prints
+/// the same sequence.
+fn record_source_maps(
+    tx: &Transaction<'_>,
+    analysis_id: i64,
+    source_maps: &[ArtifactAnalysisSourceMap],
+) -> Result<(), StoreError> {
+    for (ordinal, source_map) in source_maps.iter().enumerate() {
+        let ordinal = i64::try_from(ordinal).unwrap_or(i64::MAX);
+        let (local_path, reason) = match &source_map.outcome {
+            ArtifactAnalysisSourceMapOutcome::Resolved { local_path, .. } => {
+                (Some(local_path.as_str()), None)
+            }
+            ArtifactAnalysisSourceMapOutcome::Unavailable { reason } => {
+                (None, Some(reason.as_sql()))
+            }
+        };
+        tx.execute(
+            "INSERT INTO artifact_analysis_source_map_resolution
+                 (artifact_analysis_id, ordinal, uri, local_path, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![analysis_id, ordinal, source_map.uri, local_path, reason],
+        )?;
+        let ArtifactAnalysisSourceMapOutcome::Resolved { sources, .. } = &source_map.outcome else {
+            continue;
+        };
+        for (position, source) in sources.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO artifact_analysis_source_map_resolution_source
+                     (artifact_analysis_id, ordinal, position, source_name)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    analysis_id,
+                    ordinal,
+                    i64::try_from(position).unwrap_or(i64::MAX),
+                    source,
+                ],
+            )?;
+        }
     }
     Ok(())
 }

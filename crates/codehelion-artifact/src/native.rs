@@ -331,6 +331,7 @@ pub fn collect_text_symbols(
                 size_inferred: symbol.size() == 0,
                 code: code.to_vec(),
                 normalized,
+                body_fingerprint: None,
                 inline_stack: Vec::new(),
             });
             ranges.push(NativeSymbolRange {
@@ -447,6 +448,7 @@ where
             size_inferred: true,
             code: data.to_vec(),
             normalized,
+            body_fingerprint: None,
             inline_stack: Vec::new(),
         });
         ranges.push((symbol_fingerprint, section.address(), size));

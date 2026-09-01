@@ -456,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn file_backed_stores_use_wal_and_wait_for_a_concurrent_writer() {
+    fn file_backed_stores_open_in_wal_with_a_busy_timeout() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let store = Store::open(file.path()).unwrap();
         let journal_mode: String = store

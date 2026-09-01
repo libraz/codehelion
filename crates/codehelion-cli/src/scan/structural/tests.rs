@@ -555,7 +555,11 @@ fn denied_build_scripts_keep_their_cost_and_exact_permission() {
 
     let compiler = coverage(&answers);
 
-    assert_eq!(compiler.unavailable["requires_execution"], 1);
+    // A refusal is not a helper that failed: the file went unasked about, and
+    // what to do about it is the permission the refusal names.
+    assert_eq!(compiler.not_asked, 1);
+    assert_eq!(compiler.not_asked_reasons["requires_execution"], 1);
+    assert!(compiler.unavailable.is_empty());
     assert_eq!(compiler.execution_refusals.len(), 1);
     let refusal = &compiler.execution_refusals[0];
     assert_eq!(refusal.execution, "build-script");
@@ -974,7 +978,7 @@ fn semantic_candidate_cuts_are_visible_in_the_shared_funnel() {
         candidate
             .dropped
             .iter()
-            .all(|drop| drop.cause != "high_frequency"),
+            .all(|drop| drop.cause != "overshared_values"),
         "the pair stage does not mislabel omitted buckets as pairs"
     );
     let observations = funnel

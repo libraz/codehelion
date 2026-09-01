@@ -582,7 +582,8 @@ impl Store {
                         guardrail_near_miss_cap, guardrail_verification_budget,
                         guardrail_max_alignment_cells,
                         guardrail_signature_sibling_max_units_per_signature,
-                        common_signatures_skipped, largest_skipped_signature_units
+                        common_signatures_skipped, largest_skipped_signature_units,
+                        excluded_oversized_metadata
                  FROM run_summary WHERE scan_run_id = ?1",
                 params![run_id],
                 |row| {
@@ -625,6 +626,7 @@ impl Store {
                         excluded_generated: count(row.get(9)?),
                         excluded_by_glob: count(row.get(10)?),
                         excluded_too_large: count(row.get(11)?),
+                        excluded_oversized_metadata: count(row.get(46)?),
                         excluded_binary: count(row.get(12)?),
                         excluded_unreadable: count(row.get(13)?),
                         excluded_symlinks: count(row.get(14)?),
@@ -638,30 +640,22 @@ impl Store {
                             helper_timeout_ms: count(guardrail_helper_timeout_ms.unwrap_or(0)),
                             posting_cap: count(guardrail_posting_cap.unwrap_or(0)),
                             pair_budget: count(guardrail_pair_budget.unwrap_or(0)),
-                            near_miss_delta_bits: count(guardrail_near_miss_delta.unwrap_or(0)),
-                            near_miss_cap: count(guardrail_near_miss_cap.unwrap_or(0)),
-                            verification_budget: count(guardrail_verification_budget.unwrap_or(0)),
-                            max_alignment_cells: count(guardrail_max_alignment_cells.unwrap_or(0)),
-                            sibling_candidate_budget: count(
-                                guardrail_sibling_candidate_budget.unwrap_or(0),
-                            ),
-                            sibling_per_group_cap: count(
-                                guardrail_sibling_per_group_cap.unwrap_or(0),
-                            ),
-                            sibling_total_cap: count(guardrail_sibling_total_cap.unwrap_or(0)),
-                            signature_sibling_candidate_budget: count(
-                                guardrail_signature_sibling_candidate_budget.unwrap_or(0),
-                            ),
-                            signature_sibling_per_group_cap: count(
-                                guardrail_signature_sibling_per_group_cap.unwrap_or(0),
-                            ),
-                            signature_sibling_total_cap: count(
-                                guardrail_signature_sibling_total_cap.unwrap_or(0),
-                            ),
-                            signature_sibling_max_units_per_signature: count(
-                                guardrail_signature_sibling_max_units_per_signature.unwrap_or(0),
-                            ),
-                            max_component: count(guardrail_max_component.unwrap_or(0)),
+                            near_miss_delta_bits: guardrail_near_miss_delta.map(count),
+                            near_miss_cap: guardrail_near_miss_cap.map(count),
+                            verification_budget: guardrail_verification_budget.map(count),
+                            max_alignment_cells: guardrail_max_alignment_cells.map(count),
+                            sibling_candidate_budget: guardrail_sibling_candidate_budget.map(count),
+                            sibling_per_group_cap: guardrail_sibling_per_group_cap.map(count),
+                            sibling_total_cap: guardrail_sibling_total_cap.map(count),
+                            signature_sibling_candidate_budget:
+                                guardrail_signature_sibling_candidate_budget.map(count),
+                            signature_sibling_per_group_cap:
+                                guardrail_signature_sibling_per_group_cap.map(count),
+                            signature_sibling_total_cap: guardrail_signature_sibling_total_cap
+                                .map(count),
+                            signature_sibling_max_units_per_signature:
+                                guardrail_signature_sibling_max_units_per_signature.map(count),
+                            max_component: guardrail_max_component.map(count),
                         }),
                         folded_runs: count(row.get(31)?),
                         subsumed_runs: count(row.get(32)?),

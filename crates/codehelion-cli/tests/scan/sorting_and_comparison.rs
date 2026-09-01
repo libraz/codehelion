@@ -294,12 +294,16 @@ fn a_fast_record_replay_names_exactly_which_floor_candidates_were_unmeasured() {
         .expect("replay Fast report with an identifier floor");
     assert!(output.status.success(), "{output:?}");
     let text = String::from_utf8(output.stdout).expect("text output");
+    // Every Fast group is unmeasured, so the count the line names is the
+    // unmeasured one, and the floor it was given cannot be a second reason
+    // any of them is missing.
     assert!(
         text.contains(&format!(
-            "({unmeasured} of them were not measured in this mode)"
+            "{unmeasured} group(s) are not listed: raw identifier agreement is not measured in this mode"
         )),
         "{text}"
     );
+    assert!(!text.contains("raw identifier agreement below"), "{text}");
     let notes = String::from_utf8(output.stderr).expect("notes output");
     assert!(
         notes.contains(

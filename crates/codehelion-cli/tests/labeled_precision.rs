@@ -195,9 +195,16 @@ const CORPORA: &[Expected] = &[
         forward_confirmed: 41,
         forward_refuted: 20,
         fast: Verdicts {
-            confirmed: 30,
+            // One labelled duplication more, with no new finding behind it: its
+            // two regions sit one per member inside a longer run of verbatim
+            // tokens the fragment pass reports, so the report does show the
+            // duplication, and a label answered for that way is now credited to
+            // the finding that shows it instead of counting as unreported.
+            // Fast mode forms no groups, so nothing here follows from how
+            // groups are folded.
+            confirmed: 31,
             refuted: 27,
-            forward_confirmed: 30,
+            forward_confirmed: 31,
             forward_refuted: 27,
             // Verbatim runs the fragment pass reports and no label speaks
             // about, the longest a macro arm spelled out twice in full. Two of
@@ -299,20 +306,28 @@ const ORDERINGS: &[Ordering] = &[
         name: "priority",
         at_10: 1.0,
         at_50: 0.96,
-        map: 0.9274,
+        // Measured over one confirmed finding fewer. That finding was a
+        // smaller cut of a longer one — a closure and the routine that
+        // declares it, each reported against its counterpart — and one
+        // duplication is one finding, so the cut is folded into the routine.
+        // The labelled duplication it answered for is still confirmed, from
+        // inside the finding it was folded into, which is why no corpus
+        // precision moved with it.
+        map: 0.9290,
     },
     Ordering {
         name: "size",
         at_10: 1.0,
         at_50: 0.94,
-        // The baseline moved where the ranking did not, which is the population
-        // changing rather than the ordering. One confirmed finding pairs a
-        // `return true` against a `return 1`; with `true` read as a keyword the
-        // two no longer normalize alike, so the match ends before them and the
-        // finding is three tokens shorter. Sorting by length alone drops it
-        // past a few lookalikes, which costs more than the lookalike that left
-        // the population returns.
-        map: 0.8770,
+        // The baseline moves only with the population, never with the
+        // ordering, so it records the same fold and nothing else. Two other
+        // facts about the population it measures: one confirmed finding pairs
+        // a `return true` against a `return 1`, and with `true` read as a
+        // keyword the two no longer normalize alike, so the match ends before
+        // them and the finding is three tokens shorter — sorting by length
+        // alone drops it past a few lookalikes, which costs more than the
+        // lookalike that left the population returns.
+        map: 0.8772,
     },
 ];
 
@@ -325,7 +340,11 @@ const ORDERINGS: &[Ordering] = &[
 const BANDS: &[(&str, usize, usize)] = &[
     ("high", 43, 20),
     ("medium", 44, 38),
-    ("low", 14, 20),
+    // One confirmed finding fewer, and it is the smaller cut the ranking pins
+    // above account for: a closure folded into the routine that declares it.
+    // It scored into the lowest band, so the whole of its departure lands in
+    // this row and none of it in the two above.
+    ("low", 13, 20),
     // One refuted finding fewer, and it is the boolean-separated pair of
     // assignment runs the cjson row above accounts for. It was matched
     // verbatim and so never carried a similarity score, which is why the whole
@@ -374,7 +393,12 @@ const REASONS: &[(&str, usize, usize, usize)] = &[
 /// The last number is the one with an argument attached — it is the price of a
 /// length floor, and it is why there is not one — so it is pinned rather than
 /// printed and re-argued from memory.
-const SIZES: (u32, u32, u32, u32, usize) = (4, 96, 3, 26, 99);
+///
+/// One confirmed finding fewer sits in the range than the report once held: the
+/// smaller cut the ranking pins account for, folded into the routine that
+/// declares it. The spans themselves are unmoved, so the shortest and longest
+/// finding of each population are the same code they were.
+const SIZES: (u32, u32, u32, u32, usize) = (4, 96, 3, 26, 98);
 
 /// What a floor on each similarity axis could remove without hiding a real
 /// clone, as last measured.
@@ -912,6 +936,8 @@ fn compare_sizes(sizes: &SizeSplit, complaints: &mut String) {
     }
 }
 
+#[path = "labeled_precision/containment_cover.rs"]
+mod containment_cover;
 #[path = "labeled_precision/corpus_policy.rs"]
 mod corpus_policy;
 #[path = "labeled_precision/verdict_regression.rs"]

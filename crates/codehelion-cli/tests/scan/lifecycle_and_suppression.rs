@@ -771,6 +771,8 @@ fn record_artifact_savings(
             started_at: "2026-08-01T00:00:00Z",
             finished_at: "2026-08-01T00:00:01Z",
             symbols: &[],
+            source_maps: &[],
+            containment: None,
             mappings: &[],
             unmapped_symbols: &[],
             unmapped_sources: &[],

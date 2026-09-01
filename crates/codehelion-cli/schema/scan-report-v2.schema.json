@@ -274,6 +274,7 @@
             "by_glob",
             "skipped",
             "too_large",
+            "oversized_metadata",
             "binary",
             "unreadable",
             "walk_errors",
@@ -296,7 +297,12 @@
             "too_large": {
               "type": "integer",
               "minimum": 0,
-              "description": "Files over the configured size ceiling."
+              "description": "Source files over the configured size ceiling."
+            },
+            "oversized_metadata": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Recognised build-metadata files over that same ceiling."
             },
             "binary": {
               "type": "integer",
@@ -829,6 +835,7 @@
           "required": [
             "answered",
             "not_asked",
+            "not_asked_reasons",
             "unavailable",
             "restarts"
           ],
@@ -842,6 +849,14 @@
               "type": "integer",
               "minimum": 0,
               "description": "Files nobody was asked about: no installed helper reads their language, or nothing said which crate they belong to."
+            },
+            "not_asked_reasons": {
+              "type": "object",
+              "description": "The same files not_asked counts, by reason.",
+              "additionalProperties": {
+                "type": "integer",
+                "minimum": 0
+              }
             },
             "unavailable": {
               "type": "object",

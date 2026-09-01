@@ -168,14 +168,37 @@ fn distrusting_the_tree_lowers_the_ceilings_and_reports_them() {
     assert_eq!(guardrails["helper_timeout_ms"], 30_000);
     assert_eq!(guardrails["posting_cap"], 32);
     assert_eq!(guardrails["pair_budget"], 500_000);
-    assert_eq!(guardrails["verification_budget"], 100_000);
-    assert_eq!(guardrails["max_alignment_cells"], 250_000);
-    assert_eq!(guardrails["near_miss_delta"], 0.05);
-    assert_eq!(guardrails["near_miss_cap"], 1_000);
-    assert_eq!(guardrails["sibling_candidate_budget"], 50_000);
-    assert_eq!(guardrails["sibling_per_group_cap"], 8);
-    assert_eq!(guardrails["sibling_total_cap"], 1_000);
-    assert_eq!(guardrails["max_component"], 128);
+    // A Fast run states the ceilings its own stages take and no others. It
+    // verifies by comparing tokens, compares whole units, and runs neither the
+    // near-match band nor either sibling sweep, so naming those numbers would
+    // describe bounds nothing in this run was held to.
+    for absent in [
+        "verification_budget",
+        "max_alignment_cells",
+        "near_miss_delta",
+        "near_miss_cap",
+        "sibling_candidate_budget",
+        "sibling_per_group_cap",
+        "sibling_total_cap",
+        "max_component",
+    ] {
+        assert!(
+            guardrails[absent].is_null(),
+            "a fast run named {absent}, which no stage of it consults"
+        );
+    }
+
+    // The mode whose stages do take them says so, over the same tree.
+    let structural = scan_json_with(dir.path(), &["--untrusted", "--mode", "structural"]);
+    let structural = &structural["summary"]["guardrails"];
+    assert_eq!(structural["verification_budget"], 100_000);
+    assert_eq!(structural["max_alignment_cells"], 250_000);
+    assert_eq!(structural["near_miss_delta"], 0.05);
+    assert_eq!(structural["near_miss_cap"], 1_000);
+    assert_eq!(structural["sibling_candidate_budget"], 50_000);
+    assert_eq!(structural["sibling_per_group_cap"], 8);
+    assert_eq!(structural["sibling_total_cap"], 1_000);
+    assert_eq!(structural["max_component"], 128);
 }
 
 /// The profile has to be visible in the format a person reads, not only in the
@@ -196,13 +219,39 @@ fn the_text_report_says_the_run_was_told_to_distrust_the_tree() {
         "30000 ms helper deadline",
         "posting lists up to 32",
         "500000 candidate pairs per pass",
+    ] {
+        assert!(text.contains(ceiling), "{text}");
+    }
+    // Printed only where a stage of the run takes them, for the reason the
+    // JSON view leaves them out.
+    for absent in [
+        "verification pairs",
+        "cells per alignment",
+        "near-match band",
+        "sibling sweep",
+        "units per group",
+    ] {
+        assert!(
+            !text.contains(absent),
+            "a fast run printed {absent}, which no stage of it consults: {text}"
+        );
+    }
+
+    let structural = cmd()
+        .current_dir(dir.path())
+        .args(["scan", ".", "--untrusted", "--mode", "structural", "-vv"])
+        .output()
+        .expect("run scan");
+    assert!(structural.status.success(), "{structural:?}");
+    let structural = String::from_utf8(structural.stdout).expect("stdout is utf-8");
+    for ceiling in [
         "100000 verification pairs",
         "250000 cells per alignment",
         "near-match band 0.05, at most 1000 near misses",
         "sibling sweep 50000 comparisons, 8 per group, 1000 total",
         "128 units per group",
     ] {
-        assert!(text.contains(ceiling), "{text}");
+        assert!(structural.contains(ceiling), "{structural}");
     }
 }
 
@@ -337,7 +386,7 @@ fn a_posting_cap_marks_the_default_report_as_search_truncated() {
         .any(|drop| {
             matches!(
                 drop["cause"].as_str(),
-                Some("high_frequency" | "high_frequency_postings" | "class_cap")
+                Some("overshared_values" | "overshared_postings" | "class_cap")
             )
         });
     assert!(dropped, "the funnel records the posting ceiling");

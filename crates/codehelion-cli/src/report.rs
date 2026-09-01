@@ -1140,6 +1140,13 @@ pub struct CompilerCoverage {
     /// Files nobody was asked about: no helper here reads their language, or
     /// nothing said which unit they are compiled as.
     pub not_asked: u64,
+    /// The same files [`Self::not_asked`] counts, by reason.
+    ///
+    /// Named for the same purpose [`Self::unavailable`] is: a bare count says
+    /// a run was thin without saying what would thicken it, and a tree with no
+    /// compilation database above it asks something different of its reader
+    /// than a language no installed helper reads.
+    pub not_asked_reasons: BTreeMap<String, u64>,
     /// Files a compiler was asked about and could not answer for, by reason.
     ///
     /// Kept apart from `not_asked` because the two call for different things:
@@ -1181,6 +1188,14 @@ pub struct ExecutionRefusal {
 }
 
 /// The lowered ceilings a run worked under, and what asked for them.
+///
+/// A ceiling the selected mode's own stages never consult is absent rather
+/// than filled in. Fast lexes and pairs; it runs no precise verification, no
+/// component refinement, no near-match band and no sibling sweep, so stating
+/// those numbers beside the ones it did enforce would describe a run that
+/// never happened. Which ceilings a mode enforces is decided once, by
+/// `enforced_ceilings` in the scan runtime, beside the mapping that hands each
+/// stage its own ceiling.
 #[derive(Debug, Serialize)]
 pub struct Guardrails {
     /// The named profile that was asked for.
@@ -1200,40 +1215,52 @@ pub struct Guardrails {
     /// Largest number of candidate pairs any pairing pass examined.
     pub pair_budget: usize,
     /// Largest Structural pairs passed to precise verification.
-    pub verification_budget: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_budget: Option<usize>,
     /// Largest dynamic-programming cell count for one Structural alignment.
-    pub max_alignment_cells: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_alignment_cells: Option<usize>,
     /// Width of the estimated-Jaccard diagnostic band below the candidate threshold.
-    pub near_miss_delta: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub near_miss_delta: Option<f64>,
     /// Maximum near-miss diagnostics retained by one run.
-    pub near_miss_cap: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub near_miss_cap: Option<usize>,
     /// Largest number of sibling-sweep comparisons.
-    pub sibling_candidate_budget: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sibling_candidate_budget: Option<usize>,
     /// Maximum siblings retained by one primary group.
-    pub sibling_per_group_cap: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sibling_per_group_cap: Option<usize>,
     /// Maximum siblings retained by the whole run.
-    pub sibling_total_cap: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sibling_total_cap: Option<usize>,
     /// Largest number of signature-sibling candidates compared in one run.
-    pub signature_sibling_candidate_budget: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_sibling_candidate_budget: Option<usize>,
     /// Maximum signature siblings retained by one primary group.
-    pub signature_sibling_per_group_cap: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_sibling_per_group_cap: Option<usize>,
     /// Maximum signature siblings retained by the whole run.
-    pub signature_sibling_total_cap: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_sibling_total_cap: Option<usize>,
     /// Largest number of units that may share a signature before that
     /// signature stops counting as sibling evidence.
-    pub signature_sibling_max_units_per_signature: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_sibling_max_units_per_signature: Option<usize>,
     /// Largest related unit component refined as one group.
-    pub max_component: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_component: Option<usize>,
 }
 
 mod ranking;
 
 pub use ranking::{
-    FunnelDrop, FunnelStage, Member, RankingInfo, Sort, Suppression, SuppressionKind, UnusedRule,
-    canonical_member, canonical_position, compare_on, duplicated_tokens, identity_collapsed,
-    is_search_truncation, order, order_recorded, ranked, ranks_down, restored, search_truncated,
-    stored_funnel, stored_identity_collapsed, stored_rules, unapplied_suppression_policies,
-    unmeasured_in_this_mode,
+    FunnelCause, FunnelDrop, FunnelStage, Member, RankingInfo, Sort, Suppression, SuppressionKind,
+    UnusedRule, canonical_member, canonical_position, compare_on, duplicated_tokens,
+    identity_collapsed, is_search_truncation, order, order_recorded, ranked, ranks_down, restored,
+    search_truncated, stored_funnel, stored_identity_collapsed, stored_rules,
+    unapplied_suppression_policies, unmeasured_in_this_mode,
 };
 
 pub(crate) use ranking::append_stored_identity_stage;
@@ -1357,8 +1384,15 @@ pub struct ExcludedCounts {
     pub by_glob: u64,
     /// Files skipped for other causes (size, binary content, read errors).
     pub skipped: u64,
-    /// Files over the configured size ceiling.
+    /// Source files over the configured size ceiling.
     pub too_large: u64,
+    /// Recognised build-metadata files over that same ceiling.
+    ///
+    /// Named apart from [`Self::too_large`] because it costs the run something
+    /// else: a compilation database or manifest left unread describes a build
+    /// nothing else in the tree describes, so the findings that depended on it
+    /// are missing for a reason no count of skipped sources explains.
+    pub oversized_metadata: u64,
     /// Files identified as binary before parsing.
     pub binary: u64,
     /// Files the walker or frontend could not read.
@@ -1382,6 +1416,7 @@ impl ExcludedCounts {
         self.generated
             .saturating_add(self.by_glob)
             .saturating_add(self.too_large)
+            .saturating_add(self.oversized_metadata)
             .saturating_add(self.binary)
             .saturating_add(self.unreadable)
             .saturating_add(self.language_excluded)
@@ -2034,7 +2069,7 @@ pub use detail::{
 mod notes;
 
 pub use notes::search_truncation_note;
-use notes::{budget_note, depth_truncation_files, severed_note};
+use notes::{budget_note, depth_truncation_files, nesting_truncation_bodies, severed_note};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

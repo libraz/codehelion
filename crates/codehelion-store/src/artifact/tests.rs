@@ -196,6 +196,8 @@ fn artifact_ir_storage_requires_the_row_and_document_schemas_to_agree() {
         started_at: "2026-08-03T00:00:00Z",
         finished_at: "2026-08-03T00:00:01Z",
         symbols: &[],
+        source_maps: &[],
+        containment: None,
         mappings: &[],
         unmapped_symbols: &[],
         unmapped_sources: &[],
@@ -235,6 +237,8 @@ fn a_mapping_without_evidence_is_rejected_without_persisting_the_analysis() {
             started_at: "2026-07-30T00:00:00Z",
             finished_at: "2026-07-30T00:00:01Z",
             symbols: &[],
+            source_maps: &[],
+            containment: None,
             mappings: &mappings,
             unmapped_symbols: &[],
             unmapped_sources: &[],
@@ -270,6 +274,8 @@ fn artifact_analyses_with_distinct_build_variants_stay_distinct() {
                 started_at: "2026-07-30T00:00:00Z",
                 finished_at: "2026-07-30T00:00:01Z",
                 symbols: &[],
+                source_maps: &[],
+                containment: None,
                 mappings: &[],
                 unmapped_symbols: &[],
                 unmapped_sources: &[],
@@ -345,6 +351,26 @@ fn standalone_analysis_and_symbols_commit_together() {
         attributed_bytes: Some(8),
         build_variant_fingerprint: [5; 16],
     }];
+    let source_maps = [
+        ArtifactAnalysisSourceMap {
+            uri: "fixture.wasm.map".to_owned(),
+            outcome: ArtifactAnalysisSourceMapOutcome::Resolved {
+                local_path: "/fixtures/fixture.wasm.map".to_owned(),
+                sources: vec!["src/lib.rs".to_owned(), "src/main.rs".to_owned()],
+            },
+        },
+        ArtifactAnalysisSourceMap {
+            uri: "https://example.invalid/fixture.wasm.map".to_owned(),
+            outcome: ArtifactAnalysisSourceMapOutcome::Unavailable {
+                reason: ArtifactAnalysisSourceMapReason::NonLocalReference,
+            },
+        },
+    ];
+    let containment = ArtifactAnalysisContainment {
+        max_input_bytes: 1024,
+        worker_timeout_seconds: 30,
+        worker_memory_limit_bytes: 2048,
+    };
     let unmapped_symbols = [ArtifactAnalysisUnmappedSymbol {
         artifact_symbol_fingerprint: [7; 16],
         reason: ArtifactAnalysisUnmappedReason::DebugInfoMissing,
@@ -393,6 +419,8 @@ fn standalone_analysis_and_symbols_commit_together() {
             started_at: "2026-07-30T00:00:00Z",
             finished_at: "2026-07-30T00:00:01Z",
             symbols: &symbols,
+            source_maps: &source_maps,
+            containment: Some(containment),
             mappings: &mappings,
             unmapped_symbols: &unmapped_symbols,
             unmapped_sources: &unmapped_sources,
@@ -491,6 +519,10 @@ fn standalone_analysis_and_symbols_commit_together() {
         )
     );
     assert_eq!(stored_mappings[0].attributed_bytes, Some(8));
+    // Both facts come back as the analysis stated them, including the order of
+    // the references and of each map's sources.
+    assert_eq!(store.artifact_source_maps(id).unwrap(), source_maps);
+    assert_eq!(store.artifact_containment(id).unwrap(), Some(containment));
     let stored_unmapped = store.artifact_unmapped_symbols(id).unwrap();
     assert_eq!(stored_unmapped.len(), 1);
     assert_eq!(stored_unmapped[0].artifact_symbol_fingerprint, [7; 16]);

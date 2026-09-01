@@ -250,7 +250,7 @@ fn a_non_pair_ceiling_is_still_an_incomplete_search() {
             "funnel": [{
                 "stage": "postings",
                 "passed": 0,
-                "dropped": [{"cause": "high_frequency_postings", "count": 200}]
+                "dropped": [{"cause": "overshared_postings", "count": 200}]
             }],
         }
     });

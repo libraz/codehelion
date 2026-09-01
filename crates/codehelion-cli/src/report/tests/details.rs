@@ -648,7 +648,7 @@ fn a_candidate_search_cut_is_stated_as_a_note() {
         .render_notes(TextOptions::default(), &mut buffer)
         .unwrap();
     let text = String::from_utf8(buffer).unwrap();
-    assert!(text.contains("candidate search was truncated by high frequency"));
+    assert!(text.contains("candidate search was truncated by overshared values"));
     assert!(text.contains("may be missing from this report"));
 }
 
@@ -808,6 +808,34 @@ fn a_listing_of_nothing_explains_no_marks() {
     assert!(!text.contains("codehelion explain"), "{text}");
 }
 
+/// One word must not name two populations in one view. The composition lines
+/// count every group the report holds, while the legend counts the groups
+/// `--limit` actually enumerated; calling both "listed" tells a reader the
+/// listing holds groups it does not.
+#[test]
+fn the_composition_lines_do_not_call_an_unenumerated_population_listed() {
+    let mut report = sample_report();
+    report.summary.groups.total = 9;
+    report.summary.groups.fragment_scope = 1;
+    report.summary.groups.folded_runs = 4;
+    report.summary.groups.test_code = 1;
+    let text = rendered(&report, composition_detail());
+
+    for line in text.lines().filter(|line| line.contains("reported group")) {
+        assert!(
+            !line.contains("listed group"),
+            "a count of every group calls itself listed: {line}"
+        );
+    }
+    assert!(text.contains("of the 9 reported groups"), "{text}");
+    // The total is larger than what the listing enumerates, which is the case
+    // the two words have to stay apart in.
+    assert!(
+        report.summary.groups.total > u64::try_from(report.groups.len()).unwrap(),
+        "the fixture has to hold more groups than it lists"
+    );
+}
+
 /// The depth at which the composition of the group total is written.
 fn composition_detail() -> TextOptions {
     TextOptions {
@@ -837,17 +865,17 @@ fn each_part_of_the_group_total_names_the_total_it_is_part_of() {
     };
     let runs = line("describe a repeated run");
     assert!(
-        runs.contains("of the 3 listed groups, 1 describe"),
+        runs.contains("of the 3 reported groups, 1 describe"),
         "{text}"
     );
     let left_out = line("folded into groups that already cover them");
     assert!(
-        left_out.contains("runs not among the 3 listed groups: 4 folded"),
+        left_out.contains("findings not among the 3 reported groups: 4 folded"),
         "{text}"
     );
-    assert!(left_out.contains("2 covered by a longer run"), "{text}");
+    assert!(left_out.contains("2 covered by a longer finding"), "{text}");
     let suite = line("duplication inside test code");
-    assert!(suite.contains("of the 3 listed groups, 1 are"), "{text}");
+    assert!(suite.contains("of the 3 reported groups, 1 are"), "{text}");
 
     // The breakdown shares no total with the suppression split, which stands
     // after it rather than reading as its heading.
@@ -867,13 +895,13 @@ fn runs_left_out_of_the_listing_are_named_only_when_there_were_some() {
     let mut report = sample_report();
     report.summary.groups.fragment_scope = 1;
     let text = rendered(&report, composition_detail());
-    assert!(!text.contains("runs not among the"), "{text}");
+    assert!(!text.contains("findings not among the"), "{text}");
 
     report.summary.groups.folded_runs = 4;
     let folded = rendered(&report, composition_detail());
     assert!(
         folded.contains(
-            "runs not among the 2 listed groups: 4 folded into groups that already \
+            "findings not among the 2 reported groups: 4 folded into groups that already \
              cover them\n"
         ),
         "{folded}"
@@ -883,7 +911,8 @@ fn runs_left_out_of_the_listing_are_named_only_when_there_were_some() {
     report.summary.groups.subsumed_runs = 2;
     let subsumed = rendered(&report, composition_detail());
     assert!(
-        subsumed.contains("runs not among the 2 listed groups: 2 covered by a longer run\n"),
+        subsumed
+            .contains("findings not among the 2 reported groups: 2 covered by a longer finding\n"),
         "{subsumed}"
     );
 }
@@ -1011,7 +1040,7 @@ fn the_pipeline_counts_are_detail_the_verbose_view_asks_for() {
     let verbose = render(2);
     assert!(verbose.contains("candidate pipeline:"));
     assert!(verbose.contains("tokens"));
-    assert!(verbose.contains("(dropped: high frequency 3)"));
+    assert!(verbose.contains("(dropped: overshared values 3)"));
     // A cause that dropped nothing says nothing.
     assert!(!verbose.contains("hash collision"));
     assert!(!render(1).contains("candidate pipeline:"));
@@ -1024,7 +1053,7 @@ fn a_depth_limited_parse_is_stated_as_a_note() {
     report
         .summary
         .funnel
-        .push(FunnelStage::new("structural files", 2).dropping("depth_limit", 1));
+        .push(FunnelStage::new("structural files", 2).dropping(FunnelCause::DepthLimit, 1));
     let mut buffer = Vec::new();
     report
         .render_notes(TextOptions::default(), &mut buffer)

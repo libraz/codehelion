@@ -333,6 +333,130 @@ pub fn group(
     }
 }
 
+/// Where one unit sits, and which unit declares it.
+///
+/// Grouping is otherwise position-free — it orders by content keys and never
+/// reads a line number — so the one question that needs positions, whether a
+/// group is another group seen at a smaller cut, is answered from spans passed
+/// in rather than from anything grouping keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemberSpan {
+    /// Index of the file the unit sits in.
+    pub file: usize,
+    /// First source byte the unit covers.
+    pub start: usize,
+    /// One past the last source byte the unit covers.
+    pub end: usize,
+    /// The unit this one is a part of: itself where the unit is a declaration
+    /// — a function, a method — and the innermost declaration around it where
+    /// the unit is an expression written inside one, such as a closure.
+    ///
+    /// This is what separates a smaller cut of a unit from a unit that merely
+    /// sits inside another: a closure is the enclosing function at a smaller
+    /// extent, while a function nested in a function is a declaration of its
+    /// own that could be duplicated, moved or removed without the one holding
+    /// it changing at all.
+    pub declaration: usize,
+}
+
+/// Mark every group a longer group already accounts for, in group order.
+///
+/// A duplicated stretch of code is a duplicate at more than one cut: a
+/// duplicated function encloses a duplicated body, which encloses each of the
+/// duplicated runs it is made of, and every level of it is proposed
+/// independently. Reported apart they are one consolidation opportunity taking
+/// several of the report's top slots, each entry restating the one above it.
+///
+/// The rule is the one the run already applies to duplicated runs — a finding
+/// whose every occurrence sits inside an occurrence of a longer finding is
+/// that longer finding, seen smaller — extended to whole units. It is applied
+/// once, to the settled groups, so which candidate stage proposed a group
+/// cannot change whether it survives.
+///
+/// Position alone does not settle it, for three reasons that would each leave
+/// the reader with less than they had:
+///
+/// - a group whose members are *declarations* nested inside another group's
+///   members is a duplication of its own. A helper written inside two
+///   duplicated functions is duplicated code somebody can lift out on its own,
+///   whatever happens to the functions holding it, so nesting only accounts
+///   for a group whose members are the covering units at a smaller extent
+///   ([`MemberSpan::declaration`]);
+/// - a cover no longer than what it covers is not a longer cut of one
+///   duplication but a second statement about the same lines, and which of two
+///   such findings to keep is not a question about nesting;
+/// - a verbatim group nested inside one that only matches up to renaming makes
+///   the stricter claim of the two, so a cover has to classify at least as
+///   strictly ([`CloneClass`] runs from exact to gapped).
+///
+/// `spans` is indexed by unit index, as group members are. A member no span
+/// covers is never accounted for by anything, so a short slice folds nothing
+/// rather than folding on missing evidence.
+#[must_use]
+pub fn contained_groups(groups: &[StructuralGroup], spans: &[MemberSpan]) -> Vec<bool> {
+    // Widest cover first, so a group is judged against the longest thing that
+    // could account for it before anything shorter is considered. Only groups
+    // already settled become covers, so two groups covering each other cannot
+    // remove both.
+    let mut widest: Vec<usize> = (0..groups.len()).collect();
+    widest.sort_by_key(|&index| std::cmp::Reverse(covered_bytes(&groups[index], spans)));
+
+    let mut folded = vec![false; groups.len()];
+    let mut settled: Vec<usize> = Vec::with_capacity(groups.len());
+    for &inner in &widest {
+        if settled
+            .iter()
+            .any(|&outer| accounts_for(&groups[outer], &groups[inner], spans))
+        {
+            folded[inner] = true;
+        } else {
+            settled.push(inner);
+        }
+    }
+    folded
+}
+
+/// Source bytes a group's members cover, summed.
+fn covered_bytes(group: &StructuralGroup, spans: &[MemberSpan]) -> usize {
+    group
+        .members
+        .iter()
+        .filter_map(|&member| spans.get(member))
+        .map(|span| span.end.saturating_sub(span.start))
+        .sum()
+}
+
+/// Whether `outer` reports the code `inner` reports, and more of it.
+///
+/// `inner` is `outer` at a smaller cut when each of its members is a piece of
+/// one of `outer`'s members — the unit that declares it — and no two of them
+/// are pieces of the same one. So stated, the two groups are one set of units
+/// described at two extents, which is one finding; a group whose members
+/// declare themselves is a set of units of its own, however deeply it sits
+/// inside another.
+///
+/// The declaration a member names and the bytes it covers are asked together:
+/// a declaration index is a claim about the tree the units came from and the
+/// spans are what a reader is shown, and a fold needs both to agree.
+fn accounts_for(outer: &StructuralGroup, inner: &StructuralGroup, spans: &[MemberSpan]) -> bool {
+    if outer.clone_type > inner.clone_type
+        || covered_bytes(outer, spans) <= covered_bytes(inner, spans)
+    {
+        return false;
+    }
+    let mut claimed: BTreeSet<usize> = BTreeSet::new();
+    inner.members.iter().all(|&member| {
+        spans.get(member).is_some_and(|held| {
+            let declaring = held.declaration;
+            outer.members.contains(&declaring)
+                && claimed.insert(declaring)
+                && spans.get(declaring).is_some_and(|cover| {
+                    cover.file == held.file && cover.start <= held.start && held.end <= cover.end
+                })
+        })
+    })
+}
+
 /// The largest set refinement runs on as one piece.
 ///
 /// At least two, because a ceiling of one would cut every pair apart and leave

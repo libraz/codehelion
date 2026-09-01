@@ -1,12 +1,13 @@
 use super::reporting::PairEvidence;
 use super::{
-    BTreeMap, BTreeSet, BuildVariant, DirectoryPartition, FileFeatures, GroupDetail, GroupingUnit,
-    ResolvedTypes, SimilarityEdge, StructuralConfig, StructuralNearMiss, StructuralReport,
-    StructuralStats, StructuralUnit, SyntaxIrFile, Unit, UnitEvidence, VerifyConfig, candidate,
-    confirm_regions, control_flow, drop_subsumed, features, flatten_units_with_context,
-    fold_by_content, group_detail, grouping, grow_runs, lift_to_unit_pairs, maximal, near_match,
-    sweep_siblings_with_context, token_count_meets_minimum, unit_evidence, unit_meets_minimum,
-    unrepresented_pairs, verify, view,
+    BTreeMap, BTreeSet, BuildVariant, DirectoryPartition, FileFeatures, GroupDetail, GroupSiblings,
+    GroupingSet, GroupingUnit, ResolvedTypes, SimilarityEdge, StructuralConfig, StructuralNearMiss,
+    StructuralReport, StructuralStats, StructuralUnit, SyntaxIrFile, Unit, UnitEvidence, UnitKind,
+    VerifyConfig, candidate, confirm_regions, control_flow, drop_subsumed, features,
+    flatten_units_with_context, fold_by_content, group_detail, grouping, grow_runs,
+    lift_to_unit_pairs, maximal, near_match, sweep_siblings_with_context,
+    token_count_meets_minimum, unit_evidence, unit_meets_minimum, unrepresented_pairs, verify,
+    view,
 };
 
 /// Run the structural pipeline over parsed IR files.
@@ -239,6 +240,22 @@ fn analyze_resolved_inner(
         directory_partitions.is_some_and(|partitions| partitions.len() == files.len()),
     );
 
+    // Stage: one duplication, one finding. A duplicated function is also a
+    // duplicated body and a duplicated run, and each level is proposed on its
+    // own, so the containment among the settled findings is decided here —
+    // once, after every stage has had its say and before anything is reported
+    // or recorded. Deciding it per stage would let the next stage put the
+    // nested cut back.
+    //
+    // It runs after the carry-out of unrepresented pairs and after the sibling
+    // sweep on purpose: both ask which units a group already accounts for, and
+    // asking them about a group folded for nesting would return the nested cut
+    // as a pair or a sibling instead.
+    let mut groups = groups;
+    let mut details = details;
+    let mut siblings = siblings;
+    let subsumed_groups = fold_contained_groups(&mut groups, &mut details, &mut siblings, &units);
+
     let stats = StructuralStats {
         files: files.len(),
         units: units.len(),
@@ -255,7 +272,7 @@ fn analyze_resolved_inner(
         region_unresolved: dropped.unresolved,
         region_overlapping: dropped.overlapping,
         region_adjoining: dropped.adjoining,
-        region_subsumed: subsumed,
+        region_subsumed: subsumed + subsumed_groups,
         region_merged: merged,
         region_folded: folded,
         below_min_clone_token_regions,
@@ -284,6 +301,116 @@ fn analyze_resolved_inner(
         near_misses,
         stats,
     }
+}
+
+/// Fold every group a longer group already accounts for, returning how many
+/// went.
+///
+/// The rule itself is [`grouping::contained_groups`]; what happens here is
+/// that everything naming a group keeps naming the same group. Details are
+/// parallel to the groups, and a sibling names its owning group by index, so
+/// the survivors are renumbered rather than left pointing at whatever moved
+/// into their place. A sibling whose owning group is gone is a sibling of
+/// nothing and goes with it.
+fn fold_contained_groups(
+    groups: &mut GroupingSet,
+    details: &mut Vec<GroupDetail>,
+    siblings: &mut Vec<GroupSiblings>,
+    units: &[Unit],
+) -> usize {
+    let spans = member_spans(units);
+    let folded = grouping::contained_groups(&groups.groups, &spans);
+    let subsumed = folded.iter().filter(|&&folded| folded).count();
+    if subsumed == 0 {
+        return 0;
+    }
+
+    let mut moved_to: Vec<Option<usize>> = Vec::with_capacity(folded.len());
+    let mut kept = 0;
+    for &folded in &folded {
+        moved_to.push((!folded).then(|| {
+            kept += 1;
+            kept - 1
+        }));
+    }
+    groups.groups = std::mem::take(&mut groups.groups)
+        .into_iter()
+        .zip(&folded)
+        .filter_map(|(group, &folded)| (!folded).then_some(group))
+        .collect();
+    *details = std::mem::take(details)
+        .into_iter()
+        .zip(&folded)
+        .filter_map(|(detail, &folded)| (!folded).then_some(detail))
+        .collect();
+    *siblings = std::mem::take(siblings)
+        .into_iter()
+        .filter_map(|entry| {
+            let group = moved_to.get(entry.group).copied().flatten()?;
+            Some(GroupSiblings { group, ..entry })
+        })
+        .collect();
+    subsumed
+}
+
+/// Where each unit sits and which unit declares it, indexed by unit.
+///
+/// Units arrive in walk order — pre-order, children in source order, one file
+/// after another — so the units enclosing one are exactly the ones still open
+/// when it is reached, and a stack of those answers the question in one pass.
+///
+/// A closure is written inside a declaration and is that declaration at a
+/// smaller extent, so it names the innermost declaration around it. Everything
+/// else declares itself: a function nested in a function is a function, and
+/// the fold has to be able to tell that from a body seen smaller.
+fn member_spans(units: &[Unit]) -> Vec<grouping::MemberSpan> {
+    let mut spans: Vec<grouping::MemberSpan> = Vec::with_capacity(units.len());
+    let mut open: Vec<usize> = Vec::new();
+    for (index, unit) in units.iter().enumerate() {
+        while open
+            .last()
+            .is_some_and(|&enclosing| !encloses(&units[enclosing], unit))
+        {
+            open.pop();
+        }
+        // A closure the walk found outside every declaration — a top-level
+        // lambda, or one whose enclosing item the frontend could not read — is
+        // nothing's smaller extent, so it stands for itself.
+        let declaration = if declares_itself(unit.kind) {
+            index
+        } else {
+            open.last()
+                .map_or(index, |&enclosing| spans[enclosing].declaration)
+        };
+        spans.push(grouping::MemberSpan {
+            file: unit.file,
+            start: unit.range.start,
+            end: unit.range.end,
+            declaration,
+        });
+        open.push(index);
+    }
+    spans
+}
+
+/// Whether a unit is a declaration in its own right rather than an expression
+/// written inside one.
+///
+/// Matched exhaustively: a kind added later has to say which of the two it is,
+/// because reading it as a declaration keeps a finding a reader may not need
+/// and reading it as an expression removes one they do.
+const fn declares_itself(kind: UnitKind) -> bool {
+    match kind {
+        UnitKind::Function | UnitKind::Method | UnitKind::Impl | UnitKind::Record => true,
+        UnitKind::Closure => false,
+    }
+}
+
+/// Whether one unit's bytes lie inside another's.
+const fn encloses(outer: &Unit, inner: &Unit) -> bool {
+    outer.file == inner.file
+        && outer.range.start <= inner.range.start
+        && inner.range.end <= outer.range.end
 }
 
 /// The analysed units as the report carries them: what a reader can point at,

@@ -26,8 +26,10 @@ use codehelion_store::artifact::{
     ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION,
     ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION,
     ARTIFACT_ANALYSIS_SAVINGS_CALIBRATION_SCHEMA_VERSION, ArtifactAnalysisCloneGroupSavings,
-    ArtifactAnalysisCorrelation, ArtifactAnalysisMapping, ArtifactAnalysisSavingsCalibration,
-    ArtifactAnalysisSavingsConfidence, ArtifactAnalysisSnapshot, ArtifactAnalysisSourceKind,
+    ArtifactAnalysisContainment, ArtifactAnalysisCorrelation, ArtifactAnalysisMapping,
+    ArtifactAnalysisSavingsCalibration, ArtifactAnalysisSavingsConfidence,
+    ArtifactAnalysisSnapshot, ArtifactAnalysisSourceKind, ArtifactAnalysisSourceMap,
+    ArtifactAnalysisSourceMapOutcome, ArtifactAnalysisSourceMapReason as SourceMapReason,
     ArtifactAnalysisSymbol, ArtifactAnalysisUnmappedReason, ArtifactAnalysisUnmappedSource,
     ArtifactAnalysisUnmappedSourceReason, ArtifactAnalysisUnmappedSymbol,
     ArtifactSavingsCalibrationStatistics, MAX_ARTIFACT_IR_JSON_BYTES, MappingEvidence,
@@ -140,10 +142,17 @@ fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
     let source_maps = resolve_wasm_source_maps(&args.path, &artifact, args.max_bytes);
     let finished_at = crate::scan::rfc3339_now();
     let build_variant = read_build_variant(args.build_variant.as_deref())?;
+    let containment = untrusted_containment(args);
     worker::set_stage("persistence and source correlation");
+    // The facts the report states are the facts recorded with the analysis, so
+    // re-rendering it later reads them back rather than deriving them again.
+    let facts = AnalysisFacts {
+        source_maps: &source_maps,
+        containment: containment.as_ref(),
+    };
     let (analysis_id, correlation) = record(
         &artifact,
-        &source_maps,
+        &facts,
         args,
         &database,
         build_variant.as_ref(),
@@ -156,7 +165,7 @@ fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
         Some(analysis_id),
         build_variant.as_ref().map(BuildVariantEvidence::for_report),
     )
-    .with_containment(untrusted_containment(args))
+    .with_containment(containment)
     .with_source_maps(source_maps)
     .with_correlation(correlation);
     worker::set_stage("rendering");
@@ -210,6 +219,11 @@ use calibration::{calibration_comparison, render_calibration_csv, render_calibra
 use calibration::{csv, optional_f64};
 /// Render one stored artifact analysis in the requested output format.
 ///
+/// Everything the analysis stated is read back from its own rows — the
+/// correlation, the outcome of each declared source-map reference, and the
+/// ceilings an untrusted run installed — so this re-render says what that
+/// analysis said rather than what re-deriving it today would say.
+///
 /// # Errors
 ///
 /// Returns an error when the analysis cannot be loaded, decoded, rendered, or
@@ -255,6 +269,8 @@ pub fn report(args: &ArtifactReportArgs, out: &mut impl Write) -> Result<Outcome
         Some(analysis.analysis_id),
         build_variant,
     )
+    .with_containment(recorded_containment(&store, analysis_id)?)
+    .with_source_maps(recorded_source_maps(&store, analysis_id)?)
     .with_correlation(recorded_correlation(&store, analysis_id, &artifact)?);
     let mut rendered = Vec::new();
     match args.format {
@@ -503,9 +519,18 @@ struct CalibrationBaselineStratum {
     statistics: ArtifactSavingsCalibrationStatistics,
 }
 
+/// What one analysis established beside its IR.
+///
+/// Both values reach the report and the database from here, so a saved
+/// analysis carries everything its own rendering stated.
+struct AnalysisFacts<'a> {
+    source_maps: &'a [SourceMapResolution],
+    containment: Option<&'a ArtifactContainment>,
+}
+
 fn record(
     artifact: &ArtifactIr,
-    source_maps: &[SourceMapResolution],
+    facts: &AnalysisFacts<'_>,
     args: &ArtifactArgs,
     database: &FilePath,
     build_variant: Option<&BuildVariantEvidence>,
@@ -549,7 +574,7 @@ fn record(
     let linker_map = read_linker_map(args.linker_map.as_deref())?;
     let correlation = correlate_source_run(
         artifact,
-        &source_map_locations(source_maps),
+        &source_map_locations(facts.source_maps),
         args.source_run,
         build_variant,
         &linker_map,
@@ -581,6 +606,8 @@ fn record(
         started_at,
         finished_at,
         symbols: &symbols,
+        source_maps: &stored_source_maps(facts.source_maps)?,
+        containment: facts.containment.map(stored_containment),
         mappings: &correlation.mappings,
         unmapped_symbols: &correlation.unmapped_symbols,
         unmapped_sources: &correlation.unmapped_sources,
@@ -996,19 +1023,23 @@ fn resolve_wasm_source_map(
     uri: &str,
     max_bytes: u64,
 ) -> SourceMapResolution {
-    let unavailable = |reason| SourceMapResolution {
+    // The reasons come from the stored vocabulary, so what a report prints,
+    // what the database accepts, and what a re-render reads back are one list.
+    let unavailable = |reason: SourceMapReason| SourceMapResolution {
         uri: uri.to_owned(),
-        status: SourceMapResolutionStatus::Unavailable { reason },
+        status: SourceMapResolutionStatus::Unavailable {
+            reason: reason.as_sql(),
+        },
     };
     if uri.starts_with("data:")
         || uri.starts_with("//")
         || uri.contains("://")
         || FilePath::new(uri).is_absolute()
     {
-        return unavailable("non_local_reference");
+        return unavailable(SourceMapReason::NonLocalReference);
     }
     let Some(parent) = artifact_path.parent() else {
-        return unavailable("artifact_parent_unavailable");
+        return unavailable(SourceMapReason::ArtifactParentUnavailable);
     };
     // A bare filename's parent is the empty path, not the current directory,
     // even though that is where it resolves. Left as-is, canonicalizing it
@@ -1019,25 +1050,25 @@ fn resolve_wasm_source_map(
         parent
     };
     let Ok(root) = codehelion_core::paths::canonical(parent) else {
-        return unavailable("artifact_parent_unavailable");
+        return unavailable(SourceMapReason::ArtifactParentUnavailable);
     };
     let Ok(path) = codehelion_core::paths::canonical(&parent.join(uri)) else {
-        return unavailable("map_not_found");
+        return unavailable(SourceMapReason::MapNotFound);
     };
     if !path.starts_with(&root) {
-        return unavailable("outside_artifact_directory");
+        return unavailable(SourceMapReason::OutsideArtifactDirectory);
     }
     let Ok(metadata) = fs::metadata(&path) else {
-        return unavailable("map_not_readable");
+        return unavailable(SourceMapReason::MapNotReadable);
     };
     if !metadata.is_file() {
-        return unavailable("map_not_readable");
+        return unavailable(SourceMapReason::MapNotReadable);
     }
     if metadata.len() > max_bytes {
-        return unavailable("map_exceeds_size_limit");
+        return unavailable(SourceMapReason::MapExceedsSizeLimit);
     }
     let Ok(bytes) = read_artifact_input(&path, max_bytes, "source map") else {
-        return unavailable("map_not_readable");
+        return unavailable(SourceMapReason::MapNotReadable);
     };
     match sourcemap::decode_slice(&bytes) {
         Ok(sourcemap::DecodedMap::Regular(map)) => {
@@ -1067,9 +1098,100 @@ fn resolve_wasm_source_map(
                 },
             }
         }
-        Ok(_) => unavailable("unsupported_source_map_kind"),
-        Err(_) => unavailable("invalid_source_map"),
+        Ok(_) => unavailable(SourceMapReason::UnsupportedSourceMapKind),
+        Err(_) => unavailable(SourceMapReason::InvalidSourceMap),
     }
+}
+
+/// The persisted form of every resolved reference, keeping the outcome the
+/// analysis reported.
+///
+/// The token positions are deliberately left out: they are evidence for the
+/// correlation running now, and the mapping rows retain the stable identities
+/// that outlive them.
+fn stored_source_maps(
+    source_maps: &[SourceMapResolution],
+) -> Result<Vec<ArtifactAnalysisSourceMap>> {
+    source_maps
+        .iter()
+        .map(|resolution| {
+            let outcome = match &resolution.status {
+                SourceMapResolutionStatus::Resolved {
+                    local_path,
+                    sources,
+                    ..
+                } => ArtifactAnalysisSourceMapOutcome::Resolved {
+                    local_path: local_path.clone(),
+                    sources: sources.clone(),
+                },
+                SourceMapResolutionStatus::Unavailable { reason } => {
+                    ArtifactAnalysisSourceMapOutcome::Unavailable {
+                        reason: SourceMapReason::from_sql(reason)?,
+                    }
+                }
+            };
+            Ok(ArtifactAnalysisSourceMap {
+                uri: resolution.uri.clone(),
+                outcome,
+            })
+        })
+        .collect()
+}
+
+/// The source-map outcomes one saved analysis recorded, read back from its own
+/// rows.
+///
+/// Resolving the references again would let a re-render disagree with the
+/// analysis it claims to show: the artifact's directory can have changed since,
+/// and a reference that resolved then may not now.
+fn recorded_source_maps(store: &Store, analysis_id: i64) -> Result<Vec<SourceMapResolution>> {
+    store
+        .artifact_source_maps(analysis_id)?
+        .into_iter()
+        .map(|source_map| {
+            let status = match source_map.outcome {
+                ArtifactAnalysisSourceMapOutcome::Resolved {
+                    local_path,
+                    sources,
+                } => SourceMapResolutionStatus::Resolved {
+                    local_path,
+                    sources,
+                    // Correlation happened when the analysis ran, and its
+                    // result is read from the mapping rows.
+                    locations: Vec::new(),
+                },
+                ArtifactAnalysisSourceMapOutcome::Unavailable { reason } => {
+                    SourceMapResolutionStatus::Unavailable {
+                        reason: reason.as_sql(),
+                    }
+                }
+            };
+            Ok(SourceMapResolution {
+                uri: source_map.uri,
+                status,
+            })
+        })
+        .collect()
+}
+
+/// The persisted form of the ceilings an untrusted run installed.
+const fn stored_containment(containment: &ArtifactContainment) -> ArtifactAnalysisContainment {
+    ArtifactAnalysisContainment {
+        max_input_bytes: containment.max_input_bytes,
+        worker_timeout_seconds: containment.worker_timeout_seconds,
+        worker_memory_limit_bytes: containment.worker_memory_limit_bytes,
+    }
+}
+
+/// The ceilings one saved analysis ran under, read back from its own row.
+fn recorded_containment(store: &Store, analysis_id: i64) -> Result<Option<ArtifactContainment>> {
+    Ok(store
+        .artifact_containment(analysis_id)?
+        .map(|containment| ArtifactContainment {
+            max_input_bytes: containment.max_input_bytes,
+            worker_timeout_seconds: containment.worker_timeout_seconds,
+            worker_memory_limit_bytes: containment.worker_memory_limit_bytes,
+        }))
 }
 
 fn source_map_locations(source_maps: &[SourceMapResolution]) -> Vec<SourceMapLocation> {

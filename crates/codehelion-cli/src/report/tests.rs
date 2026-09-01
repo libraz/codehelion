@@ -110,6 +110,7 @@ pub(super) fn sample_report() -> Report {
                 by_glob: 0,
                 skipped: 0,
                 too_large: 0,
+                oversized_metadata: 0,
                 binary: 0,
                 unreadable: 0,
                 symlinks: 0,
@@ -151,8 +152,8 @@ pub(super) fn sample_report() -> Report {
             funnel: vec![
                 FunnelStage::new("tokens", 200),
                 FunnelStage::new("fingerprints", 64)
-                    .dropping("high_frequency", 3)
-                    .dropping("hash_collision", 0),
+                    .dropping(FunnelCause::OversharedValues, 3)
+                    .dropping(FunnelCause::HashCollision, 0),
                 FunnelStage::new("verified pairs", 2),
             ],
             split_components: 0,
@@ -177,6 +178,7 @@ fn text_exclusion_total_counts_each_cause_once() {
         by_glob: 2,
         skipped: 42,
         too_large: 3,
+        oversized_metadata: 2,
         binary: 4,
         unreadable: 5,
         symlinks: 7,
@@ -198,9 +200,40 @@ fn text_exclusion_total_counts_each_cause_once() {
         .expect("render report with exclusions");
     let text = String::from_utf8(rendered).expect("UTF-8 report");
     assert!(
-        text.contains("7 symlinks, 8 walk errors, 9 timed out (45 total)"),
+        text.contains("7 symlinks, 8 walk errors, 9 timed out (47 total)"),
         "{text}"
     );
+    // A metadata file the size ceiling excluded is named by its own cause. It
+    // is not a skipped source, and folding it into that count would leave the
+    // total larger than the causes that explain it.
+    assert!(text.contains("2 build metadata too large"), "{text}");
+}
+
+/// A compilation database or manifest left unread describes a build nothing
+/// else describes, so it has to reach the reader rather than disappearing into
+/// the skipped total.
+#[test]
+fn a_metadata_file_over_the_size_ceiling_is_named_in_text_and_in_json() {
+    let mut report = sample_report();
+    report.summary.excluded.oversized_metadata = 5;
+    report.summary.excluded.skipped = 5;
+
+    let mut rendered = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut rendered,
+        )
+        .expect("render report with an oversized metadata file");
+    let text = String::from_utf8(rendered).expect("UTF-8 report");
+    assert!(text.contains("5 build metadata too large"), "{text}");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&report.to_json().expect("serialize")).expect("valid JSON");
+    assert_eq!(json["summary"]["excluded"]["oversized_metadata"], 5);
 }
 
 /// One supplemental local mirror for the sample report's first primary group.
@@ -678,15 +711,15 @@ fn a_duplicated_run_states_its_extent_in_every_view() {
     // count says which total it belongs to.
     assert!(
         detailed.contains(
-            "of the 3 listed groups, 1 describe a repeated run inside units that are not clones \
+            "of the 3 reported groups, 1 describe a repeated run inside units that are not clones \
              of each other"
         ),
         "{detailed}"
     );
     assert!(
         detailed.contains(
-            "runs not among the 3 listed groups: 4 folded into groups that already cover them; \
-             2 covered by a longer run"
+            "findings not among the 3 reported groups: 4 folded into groups that already cover \
+             them; 2 covered by a longer finding"
         ),
         "{detailed}"
     );
@@ -963,18 +996,18 @@ fn signature_siblings_keep_their_identity_and_render_as_exact_matches() {
         helper_timeout_ms: 3,
         posting_cap: 4,
         pair_budget: 5,
-        verification_budget: 6,
-        max_alignment_cells: 7,
-        near_miss_delta: 0.1,
-        near_miss_cap: 8,
-        sibling_candidate_budget: 9,
-        sibling_per_group_cap: 10,
-        sibling_total_cap: 11,
-        signature_sibling_candidate_budget: 12,
-        signature_sibling_per_group_cap: 13,
-        signature_sibling_total_cap: 14,
-        signature_sibling_max_units_per_signature: 16,
-        max_component: 15,
+        verification_budget: Some(6),
+        max_alignment_cells: Some(7),
+        near_miss_delta: Some(0.1),
+        near_miss_cap: Some(8),
+        sibling_candidate_budget: Some(9),
+        sibling_per_group_cap: Some(10),
+        sibling_total_cap: Some(11),
+        signature_sibling_candidate_budget: Some(12),
+        signature_sibling_per_group_cap: Some(13),
+        signature_sibling_total_cap: Some(14),
+        signature_sibling_max_units_per_signature: Some(16),
+        max_component: Some(15),
     });
 
     let mut disabled_diagnostics = Vec::new();
@@ -1060,18 +1093,18 @@ fn sample_guardrails() -> Guardrails {
         helper_timeout_ms: 3,
         posting_cap: 4,
         pair_budget: 5,
-        verification_budget: 6,
-        max_alignment_cells: 7,
-        near_miss_delta: 0.1,
-        near_miss_cap: 8,
-        sibling_candidate_budget: 9,
-        sibling_per_group_cap: 10,
-        sibling_total_cap: 11,
-        signature_sibling_candidate_budget: 12,
-        signature_sibling_per_group_cap: 13,
-        signature_sibling_total_cap: 14,
-        signature_sibling_max_units_per_signature: 16,
-        max_component: 15,
+        verification_budget: Some(6),
+        max_alignment_cells: Some(7),
+        near_miss_delta: Some(0.1),
+        near_miss_cap: Some(8),
+        sibling_candidate_budget: Some(9),
+        sibling_per_group_cap: Some(10),
+        sibling_total_cap: Some(11),
+        signature_sibling_candidate_budget: Some(12),
+        signature_sibling_per_group_cap: Some(13),
+        signature_sibling_total_cap: Some(14),
+        signature_sibling_max_units_per_signature: Some(16),
+        max_component: Some(15),
     }
 }
 
@@ -1241,8 +1274,8 @@ fn supplemental_cap_note_requires_actual_dropped_entries() {
     report.siblings = vec![sample_siblings()];
     report.summary.funnel.push(
         FunnelStage::new("sibling entries", 1)
-            .dropping("sibling_total_cap", 2)
-            .dropping("sibling_candidate_budget", 0),
+            .dropping(FunnelCause::SiblingTotalCap, 2)
+            .dropping(FunnelCause::SiblingCandidateBudget, 0),
     );
     report.refresh_supplemental_summary();
 
@@ -1284,9 +1317,9 @@ fn signature_sibling_caps_are_supplemental_but_not_primary_search_truncation() {
     let mut report = sample_report();
     report.summary.funnel = vec![
         FunnelStage::new("signature sibling entries", 0)
-            .dropping("signature_sibling_candidate_budget", 2)
-            .dropping("signature_sibling_per_group_cap", 3)
-            .dropping("signature_sibling_total_cap", 4),
+            .dropping(FunnelCause::SignatureSiblingCandidateBudget, 2)
+            .dropping(FunnelCause::SignatureSiblingPerGroupCap, 3)
+            .dropping(FunnelCause::SignatureSiblingTotalCap, 4),
     ];
     assert!(!search_truncated(&report.summary.funnel));
 
@@ -1395,6 +1428,33 @@ fn identifier_floor_omits_unmeasured_clause_when_every_group_has_a_measure() {
     );
     assert!(
         !rendered.contains("not measured in this mode"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn identifier_floor_names_no_threshold_when_the_mode_measured_none() {
+    // A mode that measures no identifier agreement leaves nothing below the
+    // floor, so a threshold is not one of the reasons a group is missing.
+    let mut rendered = Vec::new();
+    sample_report()
+        .render_text(
+            TextOptions {
+                min_identifier_jaccard: Some(0.9),
+                ..TextOptions::default()
+            },
+            &mut rendered,
+        )
+        .unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+    assert!(
+        rendered.contains(
+            "1 group(s) are not listed: raw identifier agreement is not measured in this mode"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("raw identifier agreement below"),
         "{rendered}"
     );
 }
@@ -1594,7 +1654,7 @@ fn a_group_inside_the_suite_says_so_in_every_view() {
     let detailed = String::from_utf8(detailed).unwrap();
     assert!(
         detailed.contains(
-            "of the 2 listed groups, 1 are duplication inside test code, which repeats itself by \
+            "of the 2 reported groups, 1 are duplication inside test code, which repeats itself by \
              design"
         ),
         "{detailed}"
@@ -1908,6 +1968,7 @@ fn current_json_report_validates_against_the_shipped_schema() {
     with_execution_refusal.summary.compiler = Some(CompilerCoverage {
         answered: 0,
         not_asked: 0,
+        not_asked_reasons: BTreeMap::new(),
         unavailable: BTreeMap::from([("requires_execution".to_string(), 1)]),
         diagnostics: BTreeMap::new(),
         execution_refusals: vec![ExecutionRefusal {
@@ -1946,18 +2007,18 @@ fn current_json_report_validates_against_the_shipped_schema() {
         helper_timeout_ms: 3,
         posting_cap: 4,
         pair_budget: 5,
-        verification_budget: 6,
-        max_alignment_cells: 7,
-        near_miss_delta: 0.1,
-        near_miss_cap: 8,
-        sibling_candidate_budget: 9,
-        sibling_per_group_cap: 10,
-        sibling_total_cap: 11,
-        signature_sibling_candidate_budget: 12,
-        signature_sibling_per_group_cap: 13,
-        signature_sibling_total_cap: 14,
-        signature_sibling_max_units_per_signature: 16,
-        max_component: 15,
+        verification_budget: Some(6),
+        max_alignment_cells: Some(7),
+        near_miss_delta: Some(0.1),
+        near_miss_cap: Some(8),
+        sibling_candidate_budget: Some(9),
+        sibling_per_group_cap: Some(10),
+        sibling_total_cap: Some(11),
+        signature_sibling_candidate_budget: Some(12),
+        signature_sibling_per_group_cap: Some(13),
+        signature_sibling_total_cap: Some(14),
+        signature_sibling_max_units_per_signature: Some(16),
+        max_component: Some(15),
     });
     let mut old_v1: serde_json::Value =
         serde_json::from_str(&old_v1_report.to_json().unwrap()).unwrap();
@@ -2073,6 +2134,7 @@ fn denied_execution_is_actionable_in_json_and_text() {
     report.summary.compiler = Some(CompilerCoverage {
         answered: 0,
         not_asked: 0,
+        not_asked_reasons: BTreeMap::new(),
         unavailable: BTreeMap::from([("requires_execution".to_string(), 2)]),
         diagnostics: BTreeMap::from([("compiler library unavailable".to_string(), 2)]),
         execution_refusals: vec![ExecutionRefusal {
@@ -2115,6 +2177,49 @@ fn denied_execution_is_actionable_in_json_and_text() {
     assert!(text.contains("2 helper diagnostic: compiler library unavailable"));
     assert!(text.contains("build script has generated them"), "{text}");
     assert!(text.contains("--allow-execution=build-script"), "{text}");
+}
+
+/// A tree nothing describes how to compile and a language no installed helper
+/// reads are both files a compiler was never put to, and they call for
+/// different work. The count alone cannot be acted on, so each surface names
+/// the reason beside it.
+#[test]
+fn a_file_no_compiler_was_asked_about_is_named_by_its_reason_in_json_and_text() {
+    let mut report = sample_report();
+    report.summary.compiler = Some(CompilerCoverage {
+        answered: 0,
+        not_asked: 3,
+        not_asked_reasons: BTreeMap::from([
+            ("no_build_information".to_string(), 2),
+            ("not_supported".to_string(), 1),
+        ]),
+        unavailable: BTreeMap::new(),
+        diagnostics: BTreeMap::new(),
+        execution_refusals: Vec::new(),
+        restarts: 0,
+    });
+
+    let json: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    let coverage = &json["summary"]["compiler"];
+    assert_eq!(coverage["not_asked"], 3);
+    assert_eq!(coverage["not_asked_reasons"]["no_build_information"], 2);
+    assert_eq!(coverage["not_asked_reasons"]["not_supported"], 1);
+
+    let mut text = Vec::new();
+    report
+        .render_text(
+            TextOptions {
+                verbosity: 1,
+                ..TextOptions::default()
+            },
+            &mut text,
+        )
+        .unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(
+        text.contains("not asked: 2 no_build_information, 1 not_supported"),
+        "{text}"
+    );
 }
 
 #[test]

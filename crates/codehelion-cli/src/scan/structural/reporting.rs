@@ -10,8 +10,7 @@ use super::{
 };
 use codehelion_core::boilerplate::BOILERPLATE_VERSION;
 use codehelion_core::config::Stage;
-use codehelion_core::discovery::AnalysisMode;
-use codehelion_core::discovery::NORMALIZATION_VERSION;
+use codehelion_core::discovery::{AnalysisMode, NORMALIZATION_VERSION};
 use codehelion_core::features::FEATURE_SCHEMA_VERSION;
 use codehelion_core::grouping::GROUPING_VERSION;
 use codehelion_core::maximal::MAXIMAL_VERSION;
@@ -243,275 +242,6 @@ fn semantic_node_mappings(
         .collect()
 }
 
-/// The structural pipeline's pass counts, stage by stage.
-///
-/// The run forks after candidate extraction: whole units go to verification
-/// and grouping, while the statement windows that seeded the candidates are
-/// folded back into the maximal runs they describe and confirmed against the
-/// tokens they cover. The confirmed-run counts therefore continue the seed
-/// line, not the verified-pair line.
-#[allow(
-    clippy::too_many_lines,
-    reason = "the report deliberately presents the entire cross-mode funnel in one ordered definition"
-)]
-pub(super) fn funnel(
-    stats: &structural::StructuralStats,
-    semantic: &SemanticDetection,
-    parsed_files: u64,
-    depth_truncated_files: u64,
-    mode: AnalysisMode,
-) -> Vec<report::FunnelStage> {
-    let near = &stats.near_match;
-    let grouping = &stats.grouping;
-    let maximal = &stats.maximal;
-    let mut stages = vec![
-        report::FunnelStage::new(
-            "structural files",
-            parsed_files.saturating_sub(depth_truncated_files),
-        )
-        .dropping("depth_limit", depth_truncated_files),
-        report::FunnelStage::new("units", as_u64(stats.units)),
-        report::FunnelStage::new("indexed fragments", as_u64(stats.candidate.fragments))
-            .dropping("high_frequency", as_u64(stats.candidate.stop_fingerprints))
-            .dropping(
-                "high_frequency_postings",
-                as_u64(stats.candidate.stop_postings),
-            ),
-        report::FunnelStage::new("exact seed pairs", as_u64(stats.candidate.candidate_pairs))
-            .dropping(
-                "pair_budget",
-                as_u64(
-                    stats
-                        .candidate
-                        .available_pairs
-                        .saturating_sub(stats.candidate.candidate_pairs),
-                ),
-            ),
-        report::FunnelStage::new("near-match pairs", as_u64(near.candidate_pairs))
-            .dropping("too_few_shingles", as_u64(near.skipped_small))
-            .dropping("signed_unit_limit", as_u64(near.signed_limit_dropped))
-            .dropping("crowded_bucket", as_u64(near.stop_buckets))
-            .dropping("pair_budget", as_u64(near.budget_dropped))
-            .dropping("length_ratio", as_u64(near.filtered_by_size))
-            .dropping("estimated_jaccard", as_u64(near.filtered_by_jaccard)),
-        // This is a diagnostic side stream, not another candidate stage: it
-        // is deliberately limited to size-compatible proposals that already
-        // fell through the primary estimate gate.
-        report::FunnelStage::new("near-match near misses", as_u64(near.near_misses_retained))
-            .dropping("retention_cap", as_u64(near.near_miss_cap_dropped)),
-        report::FunnelStage::new("sibling entries", as_u64(stats.siblings.accepted))
-            .dropping(
-                "sibling_candidate_budget",
-                as_u64(stats.siblings.candidate_budget_dropped),
-            )
-            .dropping(
-                "sibling_per_group_cap",
-                as_u64(stats.siblings.per_group_cap_dropped),
-            )
-            .dropping(
-                "sibling_total_cap",
-                as_u64(stats.siblings.total_cap_dropped),
-            ),
-        report::FunnelStage::new(
-            "signature sibling entries",
-            as_u64(stats.signature_siblings.accepted),
-        )
-        .dropping(
-            "signature_sibling_candidate_budget",
-            as_u64(stats.signature_siblings.candidate_budget_dropped),
-        )
-        .dropping(
-            "signature_sibling_per_group_cap",
-            as_u64(stats.signature_siblings.per_group_cap_dropped),
-        )
-        .dropping(
-            "signature_sibling_total_cap",
-            as_u64(stats.signature_siblings.total_cap_dropped),
-        )
-        // Kept apart from the three caps above: a reader who cannot tell a
-        // candidate the sharing limit removed from one a cap dropped cannot
-        // tell which of the two to move.
-        .dropping(
-            "signature_shared_by_too_many_units",
-            as_u64(stats.signature_siblings.common_signature_dropped),
-        ),
-        report::FunnelStage::new(
-            "control-flow pairs",
-            as_u64(stats.control_flow.candidate_pairs),
-        )
-        .dropping(
-            "skeleton_too_small",
-            as_u64(stats.control_flow.skipped_shallow),
-        )
-        .dropping("common_skeleton", as_u64(stats.control_flow.stop_skeletons))
-        .dropping(
-            "common_skeleton_postings",
-            as_u64(stats.control_flow.stop_postings),
-        )
-        .dropping("pair_budget", as_u64(stats.control_flow.budget_dropped))
-        .dropping("length_ratio", as_u64(stats.control_flow.filtered_by_size)),
-        report::FunnelStage::new("unit pairs", as_u64(stats.unit_pairs))
-            .dropping("nested", as_u64(stats.nested_pairs))
-            .dropping("conditional_arms", as_u64(stats.alternative_pairs))
-            .dropping("divergent_shapes", as_u64(stats.divergent_shape_pairs))
-            .dropping(
-                "below_min_clone_tokens",
-                as_u64(stats.below_min_clone_token_pairs),
-            ),
-        report::FunnelStage::new("verified pairs", as_u64(stats.verified_pairs))
-            .dropping(
-                "verification_budget",
-                as_u64(stats.verification_budget_dropped),
-            )
-            .dropping("no_group_holds_both", as_u64(stats.unrepresented_pairs))
-            .dropping("a_group_says_it_already", as_u64(stats.described_pairs))
-            .dropping("the_ceiling_cut_the_set", as_u64(stats.severed_pairs)),
-        report::FunnelStage::new("components", as_u64(grouping.components)),
-        // This stage counts units, not groups: a medoid ejection or
-        // complete-linkage split only moves a unit into a later refinement
-        // pass, so neither is a permanent funnel drop. Every unit ends in one
-        // emitted group or as one final singleton.
-        report::FunnelStage::new(
-            "grouped units",
-            as_u64(grouping.units.saturating_sub(grouping.singletons)),
-        )
-        .dropping("left_alone", as_u64(grouping.singletons)),
-        report::FunnelStage::new(
-            "run seeds",
-            as_u64(maximal.seeds.saturating_sub(maximal.divergent_extent)),
-        )
-        .dropping("divergent_extent", as_u64(maximal.divergent_extent)),
-        report::FunnelStage::new("folded runs", as_u64(maximal.regions))
-            .dropping("below_minimum", as_u64(maximal.below_minimum))
-            .dropping("self_overlapping", as_u64(maximal.self_overlapping))
-            .dropping("contained", as_u64(maximal.absorbed)),
-        report::FunnelStage::new("duplicated runs", as_u64(maximal.shared)),
-        report::FunnelStage::new("joined runs", as_u64(stats.region_merged)),
-        // Runs, and only runs: what this row passes on and what it drops are
-        // both whole duplicated runs, so the two can be read against each
-        // other.
-        report::FunnelStage::new("confirmed runs", as_u64(stats.regions))
-            .dropping("same_content", as_u64(stats.region_folded))
-            .dropping("subsumed", as_u64(stats.region_subsumed))
-            .dropping(
-                "below_min_clone_tokens",
-                as_u64(stats.below_min_clone_token_regions),
-            ),
-        // The reasons confirmation sets an occurrence aside are about single
-        // occurrences, so they are stated where the value is occurrences too.
-        // Against a count of runs they would be a ratio of two different
-        // things, and a run holding four occurrences would let the drops
-        // exceed it.
-        report::FunnelStage::new("run occurrences", as_u64(stats.region_occurrences))
-            .dropping("unshared_content", as_u64(stats.region_singletons))
-            // Kept apart from `unshared_content`: an occurrence whose tokens
-            // were never established did not disagree with anything, and
-            // reading the two as one reason points an investigation at the
-            // content comparison instead of at the range that named no tokens.
-            .dropping("unresolved_occurrence", as_u64(stats.region_unresolved))
-            .dropping("overlapping_occurrence", as_u64(stats.region_overlapping))
-            .dropping("adjoining_occurrence", as_u64(stats.region_adjoining)),
-    ];
-    // A stage a mode never reaches is absent from its funnel rather than
-    // measured at zero: a run that asked no compiler about anything has no
-    // answer about registered-rule duplication, and a reader who found a zero
-    // there would take it for one.
-    if !Stage::Compiler.runs_in(mode) {
-        return stages;
-    }
-    let candidates = &semantic.candidates;
-    stages.extend([
-        report::FunnelStage::new(
-            "semantic API observations",
-            as_u64(semantic.registered_observations)
-                .saturating_add(as_u64(semantic.excluded_observations)),
-        )
-        .dropping(
-            "outside_registered_vocabulary",
-            as_u64(semantic.excluded_observations),
-        ),
-        // The denominator is every parser-owned unit normalization looked at:
-        // the graphs the extractor was presented with, plus the units that
-        // reached it with no graph to present. What passed is what the
-        // extractor found eligible, so the ineligible graphs are a drop rather
-        // than part of the value they are subtracted from.
-        report::FunnelStage::new(
-            "semantic graphs",
-            as_u64(
-                candidates
-                    .graphs
-                    .saturating_sub(candidates.ineligible_graphs),
-            ),
-        )
-        .dropping("ineligible", as_u64(candidates.ineligible_graphs))
-        .dropping(
-            "no_registered_operations",
-            as_u64(semantic.units_without_registered_operations),
-        )
-        .dropping(
-            "no_registered_rule_matched",
-            as_u64(semantic.units_no_registered_rule_claimed),
-        ),
-        // A member ceiling discards buckets, not a known number of pairs:
-        // omitted oversized buckets never enumerate their quadratic pair set.
-        // Keep that unit explicit so a bucket count cannot read as a pair
-        // count in the next stage.
-        report::FunnelStage::new(
-            "semantic candidate buckets",
-            as_u64(
-                candidates
-                    .buckets
-                    .saturating_sub(candidates.oversized_buckets),
-            ),
-        )
-        .dropping("bucket_member_cap", as_u64(candidates.oversized_buckets)),
-        report::FunnelStage::new("semantic candidate pairs", as_u64(candidates.pairs_emitted))
-            .dropping("pair_budget", as_u64(candidates.pairs_budget_dropped)),
-        // What a verified pair passes on to is grouping, so the pairs a
-        // disabled rule kept out of it are not among them. Grouping counts the
-        // same population from the other side, in
-        // `SemanticGroupingStats::considered_pairs`.
-        report::FunnelStage::new(
-            "semantic verified pairs",
-            as_u64(
-                semantic
-                    .verified_pairs
-                    .saturating_sub(semantic.disabled_pairs),
-            ),
-        )
-        .dropping("rule_disabled", as_u64(semantic.disabled_pairs)),
-        // Grouping is where a pair either reaches a group or does not, so the
-        // reasons it reached none are stated here rather than on the pair
-        // findings below, which are those same pairs written out. A pair
-        // refinement weighed and declined is a fact about the code; one the
-        // component ceiling severed is a fact about the ceiling, and the two
-        // are named apart so neither is counted twice.
-        report::FunnelStage::new(
-            "semantic pairs represented by groups",
-            as_u64(semantic.grouping.grouped_pairs),
-        )
-        .dropping(
-            "invalid_grouping_input",
-            as_u64(semantic.grouping.invalid_pairs),
-        )
-        .dropping(
-            "duplicate_relation",
-            as_u64(semantic.grouping.duplicate_pairs),
-        )
-        .dropping(
-            "no_group_holds_both",
-            as_u64(semantic.grouping.declined_pairs()),
-        )
-        .dropping(
-            "the_ceiling_cut_the_set",
-            as_u64(semantic.grouping.ceiling_severed_pairs),
-        ),
-        report::FunnelStage::new("restricted semantic groups", as_u64(semantic.groups.len())),
-        report::FunnelStage::new("restricted semantic pairs", as_u64(semantic.pairs.len())),
-    ]);
-    stages
-}
-
 /// Assemble the report model both output formats render from.
 pub(super) fn build_report(
     inputs: &ReportInputs<'_>,
@@ -688,6 +418,7 @@ pub(super) fn summary_row(
         excluded_generated: exclusions.generated,
         excluded_by_glob: exclusions.by_glob,
         excluded_too_large: exclusions.too_large,
+        excluded_oversized_metadata: exclusions.oversized_metadata,
         excluded_binary: exclusions.binary,
         excluded_unreadable: exclusions.unreadable + inputs.unreadable,
         excluded_symlinks: exclusions.symlinks,
@@ -730,6 +461,58 @@ pub(super) fn summary_row(
     })
 }
 
+/// This pipeline's funnel, assembled where every mode's is.
+///
+/// The stages themselves live in [`crate::scan::funnel`], which holds each
+/// mode's statistics to an exhaustive destructuring so a counter cannot be
+/// added without being given a place in a report. What is left here is the
+/// part that cannot move: the semantic record is private to this pipeline, so
+/// its counts are read locally and handed over.
+pub(super) fn funnel(
+    stats: &structural::StructuralStats,
+    semantic: &SemanticDetection,
+    parsed_files: u64,
+    depth_truncated_files: u64,
+    mode: AnalysisMode,
+) -> Vec<report::FunnelStage> {
+    crate::scan::funnel::structural(&crate::scan::funnel::StructuralFunnel {
+        stats,
+        semantic: semantic_funnel(semantic),
+        parsed_files,
+        depth_truncated_files,
+        compiler_ran: Stage::Compiler.runs_in(mode),
+    })
+}
+
+/// The compiler-backed counts the shared funnel builder needs.
+///
+/// The detection record is private to this pipeline, so its numbers are read
+/// here and the stages they become are still defined in one place.
+const fn semantic_funnel(semantic: &SemanticDetection) -> crate::scan::funnel::SemanticFunnel {
+    let candidates = &semantic.candidates;
+    crate::scan::funnel::SemanticFunnel {
+        registered_observations: semantic.registered_observations,
+        excluded_observations: semantic.excluded_observations,
+        graphs: candidates.graphs,
+        ineligible_graphs: candidates.ineligible_graphs,
+        units_without_registered_operations: semantic.units_without_registered_operations,
+        units_no_registered_rule_claimed: semantic.units_no_registered_rule_claimed,
+        buckets: candidates.buckets,
+        oversized_buckets: candidates.oversized_buckets,
+        pairs_emitted: candidates.pairs_emitted,
+        pairs_budget_dropped: candidates.pairs_budget_dropped,
+        verified_pairs: semantic.verified_pairs,
+        disabled_pairs: semantic.disabled_pairs,
+        grouped_pairs: semantic.grouping.grouped_pairs,
+        invalid_pairs: semantic.grouping.invalid_pairs,
+        duplicate_pairs: semantic.grouping.duplicate_pairs,
+        declined_pairs: semantic.grouping.declined_pairs(),
+        ceiling_severed_pairs: semantic.grouping.ceiling_severed_pairs,
+        groups: semantic.groups.len(),
+        pairs: semantic.pairs.len(),
+    }
+}
+
 /// Discovery exclusions shared by an invocation rather than tied to a parsed
 /// build-variant partition.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -737,6 +520,7 @@ pub(super) struct DiscoveryExclusions {
     pub(super) generated: u64,
     pub(super) by_glob: u64,
     pub(super) too_large: u64,
+    pub(super) oversized_metadata: u64,
     pub(super) binary: u64,
     pub(super) unreadable: u64,
     pub(super) symlinks: u64,
@@ -761,6 +545,7 @@ pub(super) fn discovery_exclusions(
             generated: as_u64(discovery.suppressed_generated.len()),
             by_glob: as_u64(glob_excluded),
             too_large: discovery.skipped.too_large,
+            oversized_metadata: discovery.skipped.oversized_metadata,
             binary: discovery.skipped.binary,
             unreadable: discovery.skipped.unreadable,
             symlinks: discovery.skipped.symlinks,

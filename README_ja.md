@@ -136,7 +136,7 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 - `--jobs <n>` は frontend の read/lex worker 数を指定します（host parallelism の 4 倍まで）。clone grouping と report rendering は serial です。省略した場合の worker 数はホストの並列度から自動で決まります。
 - `--no-ignore` は無視対象のファイルも読みます。`--follow-links` はシンボリックリンクを辿ります（既定では辿らず、種別ごとに数えて報告します）。`--compile-commands <path>` は自動選択の代わりに読む compilation database を指定します。
 - `--baseline <file>` は判断済みの finding と比較します。`--show-suppressed`、`--show-siblings`、`--show-near-misses` は text 出力を展開します。JSON と SARIF には常にこれらのデータが含まれます。`--siblings-by-signature` は Structural / Semantic モードでシグネチャによる sibling 生成を有効にします。既定では無効で、`--show-siblings` は text 表示だけを変えます。
-- `-v` / `-vv` は各グループについて書く量を、`--limit <n>` は列挙するグループ数を決めます。`--quiet` はグループだけを出力します。`--color <auto|always|never>` は端末判定を上書きし、`NO_COLOR` にも従います。
+- `-v` / `-vv` は各グループについて書く量を、`--limit <n>` は列挙するグループ数を決めます。`--quiet` はグループだけを出力します。省略した場合、text レポートはグループ 10 件と各グループの出現箇所 5 件までを列挙し、いくつ省いたかを述べます。`--limit <n>` が変えるのはグループ数だけで、両方の上限を外すのは `--limit 0` です。`--color <auto|always|never>` は端末判定を上書きし、`NO_COLOR` にも従います。
 - `--decoration <auto|unicode|ascii|none>` は一覧を描くグリフを選びます。色とは違って出力先には従いません。ファイルに書き出したレポートも端末と同じツリーを保ちます。エスケープシーケンスと違い、罫線素片はファイルの中でも読めるからです。`auto` は Windows を除いて罫線素片を使います。Windows のコンソールはアクティブなコードページ次第で描画が変わるためです。
 - `--include-trivial` は Structural / Semantic モードで predicate family を計測済みの priority に戻します。
 - `--fail-on-findings` は visible finding が残ると exit code 3 を返します。
@@ -223,9 +223,14 @@ codehelion artifact report --analysis 1 # 特定の保存済み解析を再描�
 codehelion artifact compare before/binary after/binary
 codehelion artifact calibration                 # 記録済みの計測を集計
 codehelion artifact calibration --source-run 1  # 特定のソーススキャンを集計
+codehelion artifact calibration --baseline earlier.json  # 以前の集計と並べる
 ```
 
 `artifact calibration` は計測を取るコマンドではなく読むコマンドなので、計測が 1 件も無ければ集計する対象もありません。計測を記録するのは `artifact compare` で、`--source-run` と `--clone-group` を `--before-build-variant` / `--after-build-variant` と併せて渡したときです。そのグループについて保存済みの見積もりと、2 つの成果物が実際に示したサイズ差を並べます。ここで必要になる見積もりは、先に `--source-run` と `--build-variant` を付けて実行した `artifact analyze` が残します。
+
+`--baseline <file>` には、以前 `artifact calibration --format json` が書き出した集計レポートを渡します。全体と stratum ごとに、各誤差統計が現在値との間でどれだけ動いたかを並べて表示します。行うのは比較と報告だけで、閾値は課さず、差が出ても失敗にはしません。calibration レポートのスキーマが異なるものは、比較せずエラーとして拒否します。
+
+キャリブレーション付きの比較から出てくる `verified_savings_bytes` は、2 つの成果物のあいだで観測されたサイズ差をまるごと、`--clone-group` で名指しした 1 つのクローングループに帰属させた値です。この比較が確かめるのは、両方の成果物が同じフォーマットであることと、宣言された build variant が同じであることだけで、それ以上は確かめません。依存の更新やツールチェーンの変更を一緒に拾ったビルド対では、その差も含めてリファクタリングの計測値として報告されます。この数値が言葉どおりの意味を持つのは、2 つの成果物がそれ以外の点で何も違わないときだけです。
 
 デバッグ情報は ELF build ID、Mach-O UUID、または PE CodeView/PDB identity が一致した場合にだけ受け入れます。`artifact analyze --debug-file companion` は source scan なしでも native debug companion を検査できます。source-artifact correlation を要求する場合にだけ `--source-run` と `--build-variant` を追加してください。`--build-variant manifest.json` を渡した場合、build variant の identity には正規化した JSON 値を使うため、空白や object member の順序は identity を変えません。
 
@@ -325,7 +330,7 @@ C++ と Rust では、同じシグネチャと同じ本体を持つ関数が ide
 
 ## 精度
 
-`make eval` による 0.4.0 時点の実測です。どちらのコーパスもリポジトリに入っているため、チェックアウトから再現できます。それぞれが何を答えられて何を答えられないかは `corpus/README.md` を参照してください。
+`make eval` による 0.4.0 時点の実測です。生成コーパスはリポジトリに入っているため、再現率の数値はチェックアウトだけで再現できます。ラベル付きケースがリポジトリに持つのは判定だけでソースは持たないため、適合率の数値を再現するには先に `corpus/scripts/materialize-labeled.sh` を実行する必要があります。それぞれが何を答えられて何を答えられないかは `corpus/README.md` を参照してください。
 
 **再現率 — 生成された 10 の変異コーパス、クローン対 43 件・意図的な非クローン 11 件。** 生成コーパスは自分が含むクローンをすべて把握しているので再現率を測れます。適合率は測れません。作られたときのクローンだけにラベルが付いているため、ラベルのない本物のコピーを検出すると減点になってしまうからです。
 
@@ -352,22 +357,22 @@ restricted-semantic の6コーパスはここでは採点していません。�
 |---|---|---|---|
 | fast-yaml | 1.0000 | 1 | 0 |
 | codehelion-store | 1.0000 | 2 | 0 |
+| cjson | 0.8235 | 14 | 3 |
 | bitflags | 0.7857 | 11 | 3 |
-| cjson | 0.7778 | 14 | 4 |
 | spdlog | 0.5833 | 21 | 15 |
 | serde-json | 0.5357 | 45 | 39 |
 | lz4 | 0.5357 | 15 | 13 |
 | tinyxml2 | 0.5263 | 10 | 9 |
-| **全ケース** | **0.5891** | **119** | **83** |
+| **全ケース** | **0.5920** | **119** | **82** |
 
-8件のうち2件は本プロジェクト作者自身のもので、いずれも 1.0000 です。除くと全体は 0.5829 になります。この2件が担う判定は 202 件中3件なので、どちらにしてもこの数字は残り6プロジェクトのものです。
+8件のうち2件は本プロジェクト作者自身のもので、いずれも 1.0000 です。除くと全体は 0.5859 になります。この2件が担う判定は 201 件中3件なので、どちらにしてもこの数字は残り6プロジェクトのものです。
 
-0.5891 はレポートを端から端まで読んだ場合の数字ですが、重複レポートはそう読むものではありません。同じ 202 件の判定に対して:
+0.5920 はレポートを端から端まで読んだ場合の数字ですが、重複レポートはそう読むものではありません。ある重複の短い切り口は、それを含む長い所見の中で示されるため順序の中に自分の位置を持ちません。単独の所見を持つ 200 件の判定に対して:
 
 | 並べ方 | p@10 | p@50 | MAP |
 |---|---|---|---|
-| priority | 1.0000 | 0.9600 | 0.9274 |
-| size | 1.0000 | 0.9400 | 0.8774 |
+| priority | 1.0000 | 0.9600 | 0.9290 |
+| size | 1.0000 | 0.9400 | 0.8772 |
 
 どちらの並べ方でも上位10件に誤検出は入りません。全体の数字が言っているのは末尾が半分近くノイズだということで、priority 順と `--mode structural` を選択肢ではなく既定にしているのはそのためです。
 

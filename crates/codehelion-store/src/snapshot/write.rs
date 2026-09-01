@@ -765,11 +765,12 @@ fn write_summary(
               guardrail_near_miss_delta, guardrail_near_miss_cap,
               guardrail_verification_budget, guardrail_max_alignment_cells,
               guardrail_signature_sibling_max_units_per_signature,
-              common_signatures_skipped, largest_skipped_signature_units)
+              common_signatures_skipped, largest_skipped_signature_units,
+              excluded_oversized_metadata)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
                  ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38,
-                 ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47)",
+                 ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48)",
         params![
             run_id,
             count(summary.analyzed_files.total),
@@ -814,31 +815,31 @@ fn write_summary(
             summary
                 .guardrails
                 .as_ref()
-                .map(|row| count(row.sibling_candidate_budget)),
+                .and_then(|row| row.sibling_candidate_budget.map(count)),
             summary
                 .guardrails
                 .as_ref()
-                .map(|row| count(row.sibling_per_group_cap)),
+                .and_then(|row| row.sibling_per_group_cap.map(count)),
             summary
                 .guardrails
                 .as_ref()
-                .map(|row| count(row.sibling_total_cap)),
+                .and_then(|row| row.sibling_total_cap.map(count)),
             summary
                 .guardrails
                 .as_ref()
-                .map(|row| count(row.signature_sibling_candidate_budget)),
+                .and_then(|row| row.signature_sibling_candidate_budget.map(count)),
             summary
                 .guardrails
                 .as_ref()
-                .map(|row| count(row.signature_sibling_per_group_cap)),
+                .and_then(|row| row.signature_sibling_per_group_cap.map(count)),
             summary
                 .guardrails
                 .as_ref()
-                .map(|row| count(row.signature_sibling_total_cap)),
+                .and_then(|row| row.signature_sibling_total_cap.map(count)),
             summary
                 .guardrails
                 .as_ref()
-                .map(|row| count(row.max_component)),
+                .and_then(|row| row.max_component.map(count)),
             count(summary.folded_runs),
             count(summary.subsumed_runs),
             count(summary.split_components),
@@ -850,25 +851,26 @@ fn write_summary(
             summary
                 .guardrails
                 .as_ref()
-                .map(|row| count(row.near_miss_delta_bits)),
+                .and_then(|row| row.near_miss_delta_bits.map(count)),
             summary
                 .guardrails
                 .as_ref()
-                .map(|row| count(row.near_miss_cap)),
+                .and_then(|row| row.near_miss_cap.map(count)),
             summary
                 .guardrails
                 .as_ref()
-                .map(|row| count(row.verification_budget)),
+                .and_then(|row| row.verification_budget.map(count)),
             summary
                 .guardrails
                 .as_ref()
-                .map(|row| count(row.max_alignment_cells)),
+                .and_then(|row| row.max_alignment_cells.map(count)),
             summary
                 .guardrails
                 .as_ref()
-                .map(|row| count(row.signature_sibling_max_units_per_signature)),
+                .and_then(|row| row.signature_sibling_max_units_per_signature.map(count)),
             count(summary.common_signatures_skipped),
             count(summary.largest_skipped_signature_units),
+            count(summary.excluded_oversized_metadata),
         ],
     )?;
     let mut insert_stage = tx.prepare_cached(

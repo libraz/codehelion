@@ -10,6 +10,13 @@
 //! [`Fragment::overlap`] with it is greater than or equal to the match
 //! threshold.
 //!
+//! A labelled clone pair has a second way to be answered for, because the
+//! report keeps one finding per duplication and shows the shorter cuts of one
+//! duplication inside the longest rather than beside it. [`confirms`] is the
+//! question a label asks — did the report point a reader at this duplication —
+//! and it takes either a finding with the label's bounds or a longer finding
+//! holding both labelled regions in members of its own.
+//!
 //! # True/false positives
 //!
 //! [`evaluate`] assumes a fully-labelled synthetic corpus: every genuine clone
@@ -38,7 +45,7 @@ mod stability;
 
 pub use adjudication::{
     Adjudication, AxisSplit, BandSplit, RankedVerdicts, ReasonSplit, SizeSplit, Verdict,
-    WidthFamily, adjudicate, verdict,
+    WidthFamily, adjudicate, confirms, verdict,
 };
 pub use stability::{Stability, stability, stability_by_rule};
 

@@ -63,8 +63,61 @@ pub(crate) fn guarded(mut cfg: Config, args: &ScanArgs) -> (Config, Option<repor
     let profile = codehelion_core::execution::Limits::untrusted();
     cfg.limits.clamp_to_untrusted(&profile);
     announce_process_memory(&hold_this_process_to(&StageLimits::of(&profile).process));
-    let guardrails = report::Guardrails::untrusted(&cfg.limits, &profile);
+    let guardrails =
+        report::Guardrails::untrusted_under(&cfg.limits, &profile, enforced_ceilings(args.mode));
     (cfg, Some(guardrails))
+}
+
+/// Which of the configured ceilings a mode's own stages actually consult.
+///
+/// The ceilings [`stage_limits`] hands to discovery, pairing and the process
+/// are taken by every source mode. The rest belong to stages only some modes
+/// run, and a mode that reports one it never consults is describing a bound
+/// nothing held it to. Stated here, beside the mapping that hands each stage
+/// its ceiling, so the answer is given once rather than restated by whoever
+/// prints it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ceiling {
+    /// Precise verification: the pair allowance and the alignment cell count.
+    Verification,
+    /// The largest related component refined as one group.
+    Grouping,
+    /// The estimated-Jaccard band and the near-miss retention ceiling.
+    NearMatch,
+    /// The two post-grouping sibling channels and their caps.
+    Siblings,
+}
+
+/// The ceilings one mode's stages take, as the list of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EnforcedCeilings(&'static [Ceiling]);
+
+impl EnforcedCeilings {
+    /// Whether this mode's own stages consult `ceiling`.
+    #[must_use]
+    pub(crate) fn holds(self, ceiling: Ceiling) -> bool {
+        self.0.contains(&ceiling)
+    }
+}
+
+/// The ceilings `mode` holds itself to.
+///
+/// Fast lexes and pairs. It verifies a candidate by comparing tokens rather
+/// than by alignment, compares whole units so nothing needs refining to a
+/// component ceiling, and runs neither the near-match band nor either sibling
+/// sweep — see [`engine_config`], which gives the engine the pairing limits
+/// and nothing else. Structural and Semantic build the stages that hold the
+/// rest (`scan::structural::suppression::structural_config`).
+pub(crate) const fn enforced_ceilings(mode: crate::cli::Mode) -> EnforcedCeilings {
+    match mode {
+        crate::cli::Mode::Fast => EnforcedCeilings(&[]),
+        crate::cli::Mode::Structural | crate::cli::Mode::Semantic => EnforcedCeilings(&[
+            Ceiling::Verification,
+            Ceiling::Grouping,
+            Ceiling::NearMatch,
+            Ceiling::Siblings,
+        ]),
+    }
 }
 
 /// The ceilings this run's stages work under.
@@ -862,7 +915,7 @@ mod tests {
         assert_eq!(candidates.max_bucket_members, reported.posting_cap);
         assert_eq!(candidates.max_candidate_pairs, reported.pair_budget);
         assert_eq!(
-            stages.grouping.grouping().max_component,
+            Some(stages.grouping.grouping().max_component),
             reported.max_component
         );
 
@@ -870,6 +923,53 @@ mod tests {
         stages.pairing.apply_to_engine(&mut engine);
         assert_eq!(engine.posting_cap, reported.posting_cap);
         assert_eq!(engine.pair_budget, reported.pair_budget);
+    }
+
+    /// A mode must not name a ceiling nothing it runs ever consults. Fast
+    /// lexes and pairs, so the verification, grouping, near-match and sibling
+    /// ceilings are absent from what it reports rather than printed beside the
+    /// ones that actually bounded the run.
+    #[test]
+    fn a_fast_run_reports_only_the_ceilings_its_own_stages_take() {
+        let profile = Limits::untrusted();
+        let mut cfg = Config::default();
+        cfg.limits.clamp_to_untrusted(&profile);
+
+        let fast = Guardrails::untrusted_under(
+            &cfg.limits,
+            &profile,
+            super::enforced_ceilings(crate::cli::Mode::Fast),
+        );
+        assert_eq!(fast.verification_budget, None);
+        assert_eq!(fast.max_alignment_cells, None);
+        assert_eq!(fast.max_component, None);
+        assert_eq!(fast.near_miss_delta, None);
+        assert_eq!(fast.near_miss_cap, None);
+        assert_eq!(fast.sibling_candidate_budget, None);
+        assert_eq!(fast.sibling_per_group_cap, None);
+        assert_eq!(fast.sibling_total_cap, None);
+        assert_eq!(fast.signature_sibling_candidate_budget, None);
+        assert_eq!(fast.signature_sibling_per_group_cap, None);
+        assert_eq!(fast.signature_sibling_total_cap, None);
+        assert_eq!(fast.signature_sibling_max_units_per_signature, None);
+        // What every source mode does hold itself to is still stated, or the
+        // flag would report nothing at all.
+        assert_eq!(fast.max_file_bytes, profile.max_file_bytes);
+        assert_eq!(fast.posting_cap, profile.posting_cap);
+
+        // A mode whose stages take them says so, and the numbers are the ones
+        // that pipeline configures its stages with.
+        for mode in [crate::cli::Mode::Structural, crate::cli::Mode::Semantic] {
+            let reported =
+                Guardrails::untrusted_under(&cfg.limits, &profile, super::enforced_ceilings(mode));
+            assert_eq!(
+                reported.verification_budget,
+                Some(profile.verification_budget)
+            );
+            assert_eq!(reported.max_component, Some(cfg.limits.max_component));
+            assert!(reported.near_miss_delta.is_some());
+            assert!(reported.sibling_total_cap.is_some());
+        }
     }
 
     /// A ceiling nobody set leaves each stage at the width measured for it.

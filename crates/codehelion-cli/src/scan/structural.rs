@@ -758,34 +758,50 @@ use semantic_analysis::{
 /// The restarts are summed across the helpers, because a restart is trouble the
 /// run had rather than trouble one program had: what a reader does with the
 /// number is decide whether a thin result was the tree's fault.
+///
+/// Which of the two gaps a file falls in is decided by its reason rather than
+/// by whether a process was started for it, so that a run and the record it
+/// leaves behind split the same three ways. The record has only the reason to
+/// go on: a helper that dies before its handshake is in no run's helper list
+/// and leaves nothing else to tell the two apart by.
 fn coverage(asked: &semantic::Answers) -> report::CompilerCoverage {
     let mut unavailable: BTreeMap<String, u64> = BTreeMap::new();
+    let mut not_asked_reasons: BTreeMap<String, u64> = BTreeMap::new();
     let mut diagnostics: BTreeMap<String, u64> = BTreeMap::new();
     let mut answered = 0;
     let mut not_asked = 0;
     let mut build_script_refused = 0_u64;
     for answer in &asked.per_source {
-        match answer {
-            semantic::Answer::Analyzed { .. } => answered += 1,
-            semantic::Answer::NotAsked { .. } => not_asked += 1,
+        let (reason, unit_diagnostics) = match answer {
+            semantic::Answer::Analyzed { .. } => {
+                answered += 1;
+                continue;
+            }
+            semantic::Answer::NotAsked { reason, .. } => (*reason, [].as_slice()),
             semantic::Answer::Unavailable {
                 reason,
                 diagnostics: unit_diagnostics,
                 ..
-            } => {
-                *unavailable.entry(reason.name().to_string()).or_default() += 1;
-                for diagnostic in unit_diagnostics {
-                    *diagnostics.entry(diagnostic.clone()).or_default() += 1;
-                }
-                // The only whole-unit `RequiresExecution` outcome the shipped
-                // helper emits is a Cargo build script. Procedural macros are
-                // recorded as individual unexpanded invocations instead, so
-                // this mapping neither guesses a broader permission nor
-                // hides the precise one the user can grant.
-                if *reason == codehelion_helper::ir::Unavailability::RequiresExecution {
-                    build_script_refused = build_script_refused.saturating_add(1);
-                }
-            }
+            } => (*reason, unit_diagnostics.as_slice()),
+        };
+        if reason.is_helper_failure() {
+            *unavailable.entry(reason.name().to_string()).or_default() += 1;
+        } else {
+            not_asked += 1;
+            *not_asked_reasons
+                .entry(reason.name().to_string())
+                .or_default() += 1;
+        }
+        for diagnostic in unit_diagnostics {
+            *diagnostics.entry(diagnostic.clone()).or_default() += 1;
+        }
+        // The only whole-unit `RequiresExecution` outcome the shipped helper
+        // emits is a Cargo build script. Procedural macros are recorded as
+        // individual unexpanded invocations instead, so this mapping neither
+        // guesses a broader permission nor hides the precise one the user can
+        // grant.
+        if reason == codehelion_helper::ir::Unavailability::RequiresExecution {
+            build_script_refused = build_script_refused.saturating_add(1);
         }
     }
     let execution_refusals = ExecutionPolicy::deny_all()
@@ -806,6 +822,7 @@ fn coverage(asked: &semantic::Answers) -> report::CompilerCoverage {
     report::CompilerCoverage {
         answered,
         not_asked,
+        not_asked_reasons,
         unavailable,
         diagnostics,
         execution_refusals,

@@ -71,7 +71,7 @@ doc: ## Build docs, failing on warnings
 	RUSTDOCFLAGS="-D warnings" $(ONESHOT) $(CARGO) doc --workspace --no-deps --all-features
 
 .PHONY: eval
-eval: ## Show detection accuracy over the committed corpora
+eval: ## Show detection accuracy over the generated and materialized corpora
 	$(CARGO) test -p codehelion --test corpus_accuracy -- --nocapture
 	$(CARGO) test -p codehelion --test labeled_precision -- --nocapture
 	$(CARGO) test -p codehelion --test candidate_stages -- --nocapture

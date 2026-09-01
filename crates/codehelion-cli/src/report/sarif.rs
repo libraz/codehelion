@@ -183,8 +183,9 @@ const NOTICES: [NoticeSpec; 6] = [
         short: "Files analysed without asking a compiler",
         full: "No compiler was asked about these files: no installed helper \
                reads their language, or nothing said which compilation unit \
-               they belong to. What is reported about them rests on what their \
-               source says alone.",
+               they belong to. The reason is given per group, because they \
+               call for different things. What is reported about them rests \
+               on what their source says alone.",
         level: "note",
     },
     NoticeSpec {
@@ -487,28 +488,11 @@ fn notifications(report: &Report) -> Vec<Notification> {
 fn occurrences(kind: Notice, report: &Report) -> Vec<(String, NotificationProperties)> {
     let compiler = report.summary.compiler.as_ref();
     match kind {
-        Notice::NotAsked => compiler
-            .filter(|coverage| coverage.not_asked > 0)
-            .map(|coverage| {
-                (
-                    format!(
-                        "{} file(s) were read without asking a compiler: no installed helper \
-                         reads their language, or nothing said which compilation unit they \
-                         belong to",
-                        coverage.not_asked
-                    ),
-                    NotificationProperties {
-                        files: Some(coverage.not_asked),
-                        reason: None,
-                        relationships: None,
-                        unparsed_tokens: None,
-                        unparsed_share: None,
-                        policies: None,
-                    },
-                )
-            })
-            .into_iter()
-            .collect(),
+        // One per reason, for the reason [`Notice::Unanswered`] is: a file
+        // nothing says how to compile and a file whose language no installed
+        // helper reads are answered by different work, and a single total
+        // would leave a consumer to guess which the run met.
+        Notice::NotAsked => not_asked_occurrences(compiler),
         // One per reason rather than one total: what to do about a project
         // whose build script was not allowed to run has nothing in common with
         // what to do about a helper that died, and a single number would leave
@@ -559,6 +543,34 @@ fn occurrences(kind: Notice, report: &Report) -> Vec<(String, NotificationProper
                 .collect()
         }
     }
+}
+
+/// Describe the files no compiler was put to, reason by reason.
+fn not_asked_occurrences(
+    compiler: Option<&CompilerCoverage>,
+) -> Vec<(String, NotificationProperties)> {
+    compiler
+        .into_iter()
+        .flat_map(|coverage| {
+            coverage
+                .not_asked_reasons
+                .iter()
+                .filter(|(_, count)| **count > 0)
+                .map(|(reason, count)| {
+                    (
+                        format!("{count} file(s) were read without asking a compiler: {reason}"),
+                        NotificationProperties {
+                            files: Some(*count),
+                            reason: Some(reason.clone()),
+                            relationships: None,
+                            unparsed_tokens: None,
+                            unparsed_share: None,
+                            policies: None,
+                        },
+                    )
+                })
+        })
+        .collect()
 }
 
 /// Describe compiler requests that could not supply an answer.

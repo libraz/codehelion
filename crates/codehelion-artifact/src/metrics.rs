@@ -971,6 +971,9 @@ mod tests {
                 version: "test-normal-v1".to_owned(),
                 bytes: bytes.to_vec(),
             }),
+            // Grouping within one artifact reads the exact code bytes, which
+            // are present here, rather than the cross-artifact body identity.
+            body_fingerprint: None,
             inline_stack: Vec::new(),
         }
     }

@@ -11,6 +11,7 @@
 //! files, glob-excluded files, unreadable files and engine budget exhaustion
 //! all surface as counts or notes, never as silent omissions.
 
+mod funnel;
 mod shared;
 pub mod structural;
 
@@ -604,34 +605,31 @@ pub(crate) fn file_counts(languages: impl IntoIterator<Item = Language>) -> File
 
 /// Convert one effective execution ceiling into its persisted summary shape.
 pub(crate) fn guardrails_row(guardrails: &report::Guardrails) -> GuardrailsRow {
+    // A ceiling this run's mode never consulted stays absent all the way into
+    // storage, so a replayed report states exactly the bounds the scan held
+    // itself to.
+    let ceiling = |value: Option<usize>| value.map(as_u64);
     GuardrailsRow {
         profile: guardrails.profile.clone(),
         max_file_bytes: guardrails.max_file_bytes,
         parse_timeout_ms: guardrails.parse_timeout_ms,
         helper_timeout_ms: guardrails.helper_timeout_ms,
-        posting_cap: u64::try_from(guardrails.posting_cap).unwrap_or(u64::MAX),
-        pair_budget: u64::try_from(guardrails.pair_budget).unwrap_or(u64::MAX),
-        near_miss_delta_bits: guardrails.near_miss_delta.to_bits(),
-        near_miss_cap: u64::try_from(guardrails.near_miss_cap).unwrap_or(u64::MAX),
-        verification_budget: u64::try_from(guardrails.verification_budget).unwrap_or(u64::MAX),
-        max_alignment_cells: u64::try_from(guardrails.max_alignment_cells).unwrap_or(u64::MAX),
-        sibling_candidate_budget: u64::try_from(guardrails.sibling_candidate_budget)
-            .unwrap_or(u64::MAX),
-        sibling_per_group_cap: u64::try_from(guardrails.sibling_per_group_cap).unwrap_or(u64::MAX),
-        sibling_total_cap: u64::try_from(guardrails.sibling_total_cap).unwrap_or(u64::MAX),
-        signature_sibling_candidate_budget: u64::try_from(
-            guardrails.signature_sibling_candidate_budget,
-        )
-        .unwrap_or(u64::MAX),
-        signature_sibling_per_group_cap: u64::try_from(guardrails.signature_sibling_per_group_cap)
-            .unwrap_or(u64::MAX),
-        signature_sibling_total_cap: u64::try_from(guardrails.signature_sibling_total_cap)
-            .unwrap_or(u64::MAX),
-        signature_sibling_max_units_per_signature: u64::try_from(
+        posting_cap: as_u64(guardrails.posting_cap),
+        pair_budget: as_u64(guardrails.pair_budget),
+        near_miss_delta_bits: guardrails.near_miss_delta.map(f64::to_bits),
+        near_miss_cap: ceiling(guardrails.near_miss_cap),
+        verification_budget: ceiling(guardrails.verification_budget),
+        max_alignment_cells: ceiling(guardrails.max_alignment_cells),
+        sibling_candidate_budget: ceiling(guardrails.sibling_candidate_budget),
+        sibling_per_group_cap: ceiling(guardrails.sibling_per_group_cap),
+        sibling_total_cap: ceiling(guardrails.sibling_total_cap),
+        signature_sibling_candidate_budget: ceiling(guardrails.signature_sibling_candidate_budget),
+        signature_sibling_per_group_cap: ceiling(guardrails.signature_sibling_per_group_cap),
+        signature_sibling_total_cap: ceiling(guardrails.signature_sibling_total_cap),
+        signature_sibling_max_units_per_signature: ceiling(
             guardrails.signature_sibling_max_units_per_signature,
-        )
-        .unwrap_or(u64::MAX),
-        max_component: u64::try_from(guardrails.max_component).unwrap_or(u64::MAX),
+        ),
+        max_component: ceiling(guardrails.max_component),
     }
 }
 
@@ -753,56 +751,6 @@ pub(crate) fn build_variant_settings(
     settings
 }
 
-/// The Fast pipeline's pass counts, stage by stage: a winnowed fingerprint
-/// index, the seed pairs its posting lists propose, the fragments the
-/// identifier-normalized pass cuts from those seeds, the pairs that pass
-/// proposes in turn, and the pairs that survive verification.
-///
-/// Both pairing stages carry their own budget accounting, because both hold
-/// their own allowance.
-fn funnel(stats: &engine::EngineStats, groups: usize) -> Vec<report::FunnelStage> {
-    vec![
-        report::FunnelStage::new("tokens", as_u64(stats.tokens)),
-        report::FunnelStage::new("fingerprints", as_u64(stats.raw_fingerprints)),
-        report::FunnelStage::new(
-            "indexed values",
-            as_u64(stats.raw_distinct.saturating_sub(stats.stop_fingerprints)),
-        )
-        .dropping("high_frequency", as_u64(stats.stop_fingerprints))
-        .dropping("high_frequency_postings", as_u64(stats.stop_postings)),
-        report::FunnelStage::new("seed pairs", as_u64(stats.seed_candidates)).dropping(
-            "pair_budget",
-            as_u64(
-                stats
-                    .raw_pairs_available
-                    .saturating_sub(stats.seed_candidates),
-            ),
-        ),
-        report::FunnelStage::new("fragments", as_u64(stats.fragments)).dropping(
-            "control_header_limit",
-            as_u64(stats.control_headers_over_limit),
-        ),
-        report::FunnelStage::new("fragment classes", as_u64(stats.fragment_classes))
-            .dropping("class_cap", as_u64(stats.class_cap_dropped))
-            .dropping("hash_collision", as_u64(stats.hash_collisions)),
-        // The two passes hold separate allowances, so each says separately how
-        // much of its own search it got through. One combined figure would let
-        // a pass that stopped early hide behind one that finished.
-        report::FunnelStage::new("fragment pairs", as_u64(stats.fragment_candidates)).dropping(
-            "pair_budget",
-            as_u64(
-                stats
-                    .fragment_pairs_available
-                    .saturating_sub(stats.fragment_candidates),
-            ),
-        ),
-        report::FunnelStage::new("verified pairs", as_u64(stats.pairs))
-            .dropping("conditional_arms", as_u64(stats.conditional_pairs)),
-        report::FunnelStage::new("clone groups", as_u64(groups))
-            .dropping("subsumed", as_u64(stats.subsumed_groups)),
-    ]
-}
-
 /// What the run reported about itself beyond the groups it found, in the shape
 /// the audit database stores.
 ///
@@ -825,6 +773,7 @@ fn summary_row(
         excluded_generated: as_u64(inputs.discovered.suppressed_generated.len()),
         excluded_by_glob: as_u64(inputs.glob_excluded),
         excluded_too_large: inputs.discovered.skipped.too_large,
+        excluded_oversized_metadata: inputs.discovered.skipped.oversized_metadata,
         excluded_binary: inputs.discovered.skipped.binary,
         excluded_unreadable: inputs.discovered.skipped.unreadable + inputs.unreadable,
         excluded_symlinks: inputs.discovered.skipped.symlinks,
@@ -846,7 +795,7 @@ fn summary_row(
         largest_skipped_signature_units: 0,
         pair_budget_exhausted: inputs.report.stats.pair_budget_exhausted,
         baseline_digest,
-        funnel: funnel(&inputs.report.stats, inputs.report.groups.len()),
+        funnel: funnel::fast(&inputs.report.stats, inputs.report.groups.len()),
         unused_suppressions: unused_suppressions(inputs),
     })
 }

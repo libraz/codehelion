@@ -443,9 +443,13 @@ pub(crate) fn report_database(
 pub(crate) fn restored_compiler_coverage(
     coverage: codehelion_store::compiler::CompilerCoverage,
 ) -> report::CompilerCoverage {
+    // Read off the reason a file went unasked about, which is where a refused
+    // execution is counted: the run reports the refusal with the permission
+    // that lifts it, and a replay that could not find the count would drop the
+    // one line saying what to do about it.
     let build_script_refused = coverage
-        .unavailable
-        .get("requires_execution")
+        .not_asked_reasons
+        .get(codehelion_helper::ir::Unavailability::RequiresExecution.name())
         .copied()
         .unwrap_or(0);
     let execution_refusals = codehelion_core::execution::ExecutionPolicy::deny_all()
@@ -466,6 +470,7 @@ pub(crate) fn restored_compiler_coverage(
     report::CompilerCoverage {
         answered: coverage.answered,
         not_asked: coverage.not_asked,
+        not_asked_reasons: coverage.not_asked_reasons,
         unavailable: coverage.unavailable,
         diagnostics: coverage.diagnostics,
         execution_refusals,

@@ -164,6 +164,10 @@ fn restored_compiler_coverage_keeps_each_outcome_distinct() {
     let coverage = codehelion_store::compiler::CompilerCoverage {
         answered: 4,
         not_asked: 2,
+        not_asked_reasons: std::collections::BTreeMap::from([
+            ("not_supported".to_string(), 1),
+            ("requires_execution".to_string(), 1),
+        ]),
         unavailable: std::collections::BTreeMap::from([
             ("missing-helper".to_string(), 3),
             ("timeout".to_string(), 1),
@@ -174,9 +178,17 @@ fn restored_compiler_coverage_keeps_each_outcome_distinct() {
     let restored = restored_compiler_coverage(coverage);
     assert_eq!(restored.answered, 4);
     assert_eq!(restored.not_asked, 2);
+    // The unasked files stay attributable: a replay that kept only the total
+    // would say a run was thin without saying what would thicken it.
+    assert_eq!(restored.not_asked_reasons["not_supported"], 1);
+    assert_eq!(restored.not_asked_reasons["requires_execution"], 1);
     assert_eq!(restored.unavailable["missing-helper"], 3);
     assert_eq!(restored.unavailable["timeout"], 1);
     assert_eq!(restored.restarts, 5);
+    // The refused build script is recovered from the reason it went unasked
+    // about, which is the only place a replay can still find it.
+    assert_eq!(restored.execution_refusals.len(), 1);
+    assert_eq!(restored.execution_refusals[0].files, 1);
 }
 
 #[test]

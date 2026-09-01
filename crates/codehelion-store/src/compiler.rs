@@ -99,12 +99,24 @@ impl CompilerOutcome {
 /// answered, one it was given and could not answer, and one nobody was asked
 /// about. Summing the last two would report a helper as having failed on files
 /// it was never shown.
+///
+/// Which of the two gaps a row belongs to is read off its reason, through
+/// [`Unavailability::is_helper_failure`], and never off the helper it names:
+/// a helper that fell over before saying who it was names nobody, and the
+/// failure it reported is still a failure.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompilerCoverage {
     /// Files a compiler answered about.
     pub answered: u64,
     /// Files nobody was asked about.
     pub not_asked: u64,
+    /// The same files [`Self::not_asked`] counts, by reason.
+    ///
+    /// Kept because the count alone says a run was thin without saying what
+    /// would thicken it: a build script waiting on permission to run is a
+    /// different request of the reader than a language no installed helper
+    /// reads.
+    pub not_asked_reasons: BTreeMap<String, u64>,
     /// Files a helper was asked about and could not answer, by reason.
     pub unavailable: BTreeMap<String, u64>,
     /// Bounded helper diagnostics, grouped by their exact text.

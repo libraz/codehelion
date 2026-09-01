@@ -901,6 +901,43 @@ impl Unavailability {
     pub const fn worth_retrying(self) -> bool {
         matches!(self, Self::HelperTimedOut | Self::HelperDied)
     }
+
+    /// Whether this reason is a helper that could not answer, rather than a
+    /// unit nothing was going to be asked about.
+    ///
+    /// This is the line a run's coverage is split along: files a compiler
+    /// answered for, files a helper was given and failed on, and files nobody
+    /// was asked about. The line is drawn on the reason and on nothing else —
+    /// a helper that fell over before its handshake leaves no identity behind,
+    /// and reading that silence as "nobody was asked" would file the failure
+    /// under the one outcome that says a helper was never involved.
+    ///
+    /// The four false answers are settled by the unit and its surroundings:
+    /// no helper here reads the language, nothing says how the file is
+    /// compiled, the dependency graph cannot be resolved under this run's
+    /// permissions, and analysing it would mean running the project's own
+    /// code. A run reports those as the coverage it never asked for, and what
+    /// they call for is a change to the project or to the run rather than a
+    /// look at a helper. The rest describe a conversation that started and did
+    /// not finish, and are counted under the reason it failed with.
+    ///
+    /// The match is exhaustive, so a reason added without a side to fall on
+    /// stops the crate compiling.
+    #[must_use]
+    pub const fn is_helper_failure(self) -> bool {
+        match self {
+            Self::RequiresExecution
+            | Self::MetadataUnavailable
+            | Self::NoBuildInformation
+            | Self::NotSupported => false,
+            Self::ToolchainMismatch
+            | Self::HelperTimedOut
+            | Self::HelperDied
+            | Self::UnreadableSchema
+            | Self::ResponseTooLarge
+            | Self::RestartBudgetExhausted => true,
+        }
+    }
 }
 
 /// `Unavailability::ALL` lists each reason once, at the place the exhaustive

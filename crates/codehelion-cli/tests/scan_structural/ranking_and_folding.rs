@@ -436,3 +436,62 @@ fn explain_says_which_fact_put_the_finding_where_it_is() {
         "{text}"
     );
 }
+
+/// A routine whose body is a closure holding another closure: one duplication
+/// the detector finds at three nested cuts.
+const NESTED_LEFT_RS: &str =
+    "pub fn mappings_left(canonical: &[u32], members: &[Vec<u32>]) -> Vec<(u32, u32, u32)> {
+    members
+        .iter()
+        .enumerate()
+        .skip(1)
+        .flat_map(|(member, corresponding)| {
+            (0..canonical.len().min(corresponding.len()))
+                .filter_map(move |node| {
+                    let node = u32::try_from(node).ok()?;
+                    let member = u32::try_from(member).ok()?;
+                    Some((member, node, node))
+                })
+        })
+        .collect()
+}
+";
+
+#[test]
+fn nested_cuts_of_one_duplication_are_folded_into_the_longest_and_counted() {
+    // Copying the routine duplicates its closures with it, so the function,
+    // the closure and the closure inside that one are each a clone of their
+    // counterpart. Three findings over one pair of units say one thing, and
+    // the reader going down the report meets it three times.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/left.rs"), NESTED_LEFT_RS).unwrap();
+    std::fs::write(
+        root.join("src/right.rs"),
+        NESTED_LEFT_RS.replace("mappings_left", "mappings_right"),
+    )
+    .unwrap();
+
+    let value = scan_json(root);
+
+    let groups = value["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1, "{groups:#?}");
+    // The one left is the longest cut: the whole routine, not a closure of it.
+    let members: Vec<(&str, u64)> = groups[0]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|member| {
+            (
+                member["file"].as_str().unwrap(),
+                member["end_line"].as_u64().unwrap() - member["start_line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(members, vec![("src/left.rs", 14), ("src/right.rs", 14)]);
+    // The two that went are accounted for where everything covered by a
+    // longer finding is accounted for.
+    assert_eq!(value["summary"]["groups"]["subsumed_runs"], 2);
+}

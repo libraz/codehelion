@@ -40,8 +40,6 @@ pub enum ComponentStatus {
     NotFound,
     /// Found, but this build could not use it.
     Unusable,
-    /// Planned, but not yet provided by this build.
-    NotImplemented,
 }
 
 impl ComponentStatus {
@@ -52,7 +50,6 @@ impl ComponentStatus {
             Self::Available => "available",
             Self::NotFound => "not found",
             Self::Unusable => "unusable",
-            Self::NotImplemented => "not implemented",
         }
     }
 }

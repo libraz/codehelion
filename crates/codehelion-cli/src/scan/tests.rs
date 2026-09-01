@@ -40,7 +40,7 @@ fn cross_language_comparison_stays_in_its_own_report_domain() {
         origin_variants: vec!["cpp".to_string(), "rust".to_string()],
         funnel: vec![
             report::FunnelStage::new("cross-language candidate buckets", 1)
-                .dropping("bucket_member_cap", 1),
+                .dropping(report::FunnelCause::BucketMemberCap, 1),
         ],
         search_truncated: true,
         groups: Vec::new(),
@@ -297,12 +297,16 @@ fn timestamps_are_fixed_width_rfc3339() {
 }
 
 fn scan_args(untrusted: bool) -> ScanArgs {
+    scan_args_for(Mode::Fast, untrusted)
+}
+
+fn scan_args_for(mode: Mode, untrusted: bool) -> ScanArgs {
     ScanArgs {
         helpers: Vec::new(),
         sort: SortAxis::default(),
         min_identifier_jaccard: None,
         path: PathBuf::from("."),
-        mode: Mode::Fast,
+        mode,
         format: Format::Text,
         output: None,
         force: false,
@@ -366,7 +370,7 @@ fn distrusting_the_tree_lowers_every_ceiling_and_says_which() {
         },
         ..Config::default()
     };
-    let (tightened, guardrails) = guarded(lax, &scan_args(true));
+    let (tightened, guardrails) = guarded(lax, &scan_args_for(Mode::Structural, true));
     let reported = guardrails.expect("a lowered ceiling is reported");
     assert_eq!(reported.profile, "untrusted");
     assert_eq!(tightened.limits.max_file_bytes, profile.max_file_bytes);
@@ -399,10 +403,10 @@ fn distrusting_the_tree_lowers_every_ceiling_and_says_which() {
         )
     );
 
-    // `Limits` is serialized with every ceiling as a named key. The
-    // guardrail object must be precisely that effective limit set plus its
-    // profile name, so a new `Limits` field cannot quietly avoid either
-    // clamping or report exposure.
+    // `Limits` is serialized with every ceiling as a named key. Under a mode
+    // whose stages take all of them, the guardrail object must be precisely
+    // that effective limit set plus its profile name, so a new `Limits` field
+    // cannot quietly avoid either clamping or report exposure.
     let expected = serde_json::to_value(&tightened.limits)
         .expect("limits serialize as an object")
         .as_object()

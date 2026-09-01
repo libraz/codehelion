@@ -538,3 +538,143 @@ fn one_components_similarities_do_not_leak_into_another() {
         }
     }
 }
+
+/// A group over one pair of units, given as spans into two files.
+fn cut(clone_type: CloneClass, members: [usize; 2]) -> StructuralGroup {
+    StructuralGroup {
+        clone_type,
+        confidence: Confidence::High,
+        canonical: members[0],
+        members: members.to_vec(),
+        medoid_similarities: vec![1.0, 1.0],
+        min_pairwise: 1.0,
+    }
+}
+
+/// Three cuts of one duplication: units 0-1 are the widest, then 2-3, then
+/// 4-5, each pair nested inside the one before it, on both sides.
+///
+/// Units 0 and 1 are the declarations; every other unit is an expression
+/// written inside one of them, so it names that declaration and is that unit
+/// at a smaller extent.
+fn nested_cut_spans() -> Vec<MemberSpan> {
+    vec![
+        MemberSpan {
+            file: 0,
+            start: 305,
+            end: 330,
+            declaration: 0,
+        },
+        MemberSpan {
+            file: 1,
+            start: 605,
+            end: 630,
+            declaration: 1,
+        },
+        MemberSpan {
+            file: 0,
+            start: 305,
+            end: 322,
+            declaration: 0,
+        },
+        MemberSpan {
+            file: 1,
+            start: 605,
+            end: 622,
+            declaration: 1,
+        },
+        MemberSpan {
+            file: 0,
+            start: 305,
+            end: 313,
+            declaration: 0,
+        },
+        MemberSpan {
+            file: 1,
+            start: 605,
+            end: 613,
+            declaration: 1,
+        },
+    ]
+}
+
+#[test]
+fn nested_cuts_of_one_duplication_leave_only_the_longest() {
+    let spans = nested_cut_spans();
+    let groups = [
+        cut(CloneClass::Type3, [4, 5]),
+        cut(CloneClass::Type3, [0, 1]),
+        cut(CloneClass::Type3, [2, 3]),
+    ];
+
+    let folded = contained_groups(&groups, &spans);
+
+    assert_eq!(folded, vec![true, false, true]);
+}
+
+#[test]
+fn a_cut_reaching_outside_its_cover_stays_a_group_of_its_own() {
+    // The second side sits where the longer cut does not reach, so the longer
+    // cut does not report this duplication at all.
+    let mut spans = nested_cut_spans();
+    spans[5] = MemberSpan {
+        file: 1,
+        start: 900,
+        end: 908,
+        declaration: 1,
+    };
+    let groups = [
+        cut(CloneClass::Type3, [0, 1]),
+        cut(CloneClass::Type3, [4, 5]),
+    ];
+
+    assert_eq!(contained_groups(&groups, &spans), vec![false, false]);
+}
+
+#[test]
+fn a_verbatim_cut_survives_a_longer_one_that_only_matches_renamed() {
+    // "These lines match up to renaming, and these of them match verbatim" is
+    // two facts, so the stricter one is not folded into the looser.
+    let spans = nested_cut_spans();
+    let groups = [
+        cut(CloneClass::Type3, [0, 1]),
+        cut(CloneClass::Type1, [4, 5]),
+    ];
+
+    assert_eq!(contained_groups(&groups, &spans), vec![false, false]);
+}
+
+#[test]
+fn a_nested_declaration_is_a_finding_of_its_own_while_a_cut_of_one_is_not() {
+    // Units 2 and 3 declare themselves — helpers written inside 0 and 1, the
+    // way a nested function is — while 4 and 5 are expressions of 0 and 1.
+    // Both pairs sit inside the covering units by position, and only the
+    // second pair is those units seen smaller.
+    let mut spans = nested_cut_spans();
+    spans[2].declaration = 2;
+    spans[3].declaration = 3;
+    let groups = [
+        cut(CloneClass::Type3, [0, 1]),
+        cut(CloneClass::Type3, [2, 3]),
+        cut(CloneClass::Type3, [4, 5]),
+    ];
+
+    assert_eq!(
+        contained_groups(&groups, &spans),
+        vec![false, false, true],
+        "a duplicated helper is a duplication, a smaller cut of one is not"
+    );
+}
+
+#[test]
+fn two_groups_over_one_stretch_cannot_remove_each_other() {
+    // Equal covers contain each other both ways. Neither is the longer cut of
+    // the other, so containment has nothing to say about the pair.
+    let spans = nested_cut_spans();
+    let groups = [
+        cut(CloneClass::Type3, [0, 1]),
+        cut(CloneClass::Type2, [0, 1]),
+    ];
+
+    assert_eq!(contained_groups(&groups, &spans), vec![false, false]);
+}

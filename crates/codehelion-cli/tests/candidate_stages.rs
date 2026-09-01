@@ -111,11 +111,15 @@ const CORPORA: &[Expected] = &[
         without_near_match: 1,
         without_shape_gate: 1,
     },
+    // One of the four was a smaller cut of another: a closure reported as a
+    // clone, and the routine declaring it reported as a clone of its
+    // counterpart. The two findings are one set of units at two extents, so
+    // the shorter one is folded into the longer and counted as covered by it.
     Expected {
         path: "labeled/codehelion-store/snapshot",
-        groups: 4,
-        without_near_match: 4,
-        without_shape_gate: 4,
+        groups: 3,
+        without_near_match: 3,
+        without_shape_gate: 3,
     },
     Expected {
         path: "labeled/cjson/snapshot",
@@ -129,11 +133,16 @@ const CORPORA: &[Expected] = &[
         without_near_match: 29,
         without_shape_gate: 29,
     },
+    // One of the eighty is a smaller cut of another and is folded into it. The
+    // two others nested inside a longer finding are not cuts of it but nested
+    // declarations — a helper written inside two routines that are copies of
+    // each other, and so a copied helper somebody can lift out on its own,
+    // whatever becomes of the routines holding it.
     Expected {
         path: "labeled/serde-json/snapshot",
-        groups: 80,
-        without_near_match: 80,
-        without_shape_gate: 80,
+        groups: 79,
+        without_near_match: 79,
+        without_shape_gate: 79,
     },
     Expected {
         path: "labeled/spdlog/snapshot",

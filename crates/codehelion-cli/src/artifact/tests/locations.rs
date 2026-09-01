@@ -66,6 +66,7 @@ fn dwarf_locations_map_only_units_in_the_explicit_source_run() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: vec![codehelion_artifact::ArtifactInlineFrame {
             evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
             source: "/work/src/main.cpp".to_owned(),
@@ -171,6 +172,7 @@ fn partial_fragment_attribution_is_proportional_and_not_exact() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: (1..=400)
             .map(|line| codehelion_artifact::ArtifactInlineFrame {
                 evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
@@ -243,6 +245,7 @@ fn pdb_location_maps_with_pdb_evidence() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: vec![codehelion_artifact::ArtifactInlineFrame {
             evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Pdb,
             source: "/work/src/main.cpp".to_owned(),
@@ -298,6 +301,7 @@ fn dwarf_frame_without_line_does_not_map_clone_fragments() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: vec![codehelion_artifact::ArtifactInlineFrame {
             evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
             source: "/work/src/main.cpp".to_owned(),
@@ -389,6 +393,7 @@ fn inline_stack_retains_every_source_origin_without_double_counting_symbol_bytes
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: vec![
             codehelion_artifact::ArtifactInlineFrame {
                 evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
@@ -645,6 +650,7 @@ fn demangled_name_maps_one_named_unit_as_weak_evidence() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
@@ -699,6 +705,7 @@ fn macro_definition_anchor_beats_an_unrelated_unit_label() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
@@ -804,6 +811,7 @@ fn matching_static_calls_add_independent_neighborhood_evidence() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let target = codehelion_artifact::ArtifactSymbol {
@@ -816,6 +824,7 @@ fn matching_static_calls_add_independent_neighborhood_evidence() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");

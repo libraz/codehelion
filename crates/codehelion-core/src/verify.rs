@@ -4,7 +4,7 @@
 //! The candidate stages ([`crate::candidate`], [`crate::near_match`]) propose
 //! pairs cheaply and over-approximate; this stage decides. It compares two
 //! units across several independent dimensions, keeps every dimension's score
-//! rather than collapsing to one opaque number (AGENTS.md §22), and only then
+//! rather than collapsing to one opaque number, and only then
 //! forms a composite and a clone classification.
 //!
 //! The dimensions:

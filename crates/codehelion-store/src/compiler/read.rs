@@ -119,22 +119,28 @@ pub(super) fn units(conn: &Connection, run_id: i64) -> Result<Vec<StoredCompiler
 /// A run that put nothing to a compiler has no rows and answers `None`,
 /// which is the claim that no compiler was asked — not that one was asked
 /// and said nothing.
+///
+/// The two gaps are told apart by the reason alone, the same way the run
+/// itself told them apart while it was scanning. Reading them off the helper
+/// column instead would work only while a failing helper still managed to
+/// name itself: a process that died before its handshake stores its reason
+/// beside no helper at all, and counting that as a file nobody was asked
+/// about would replace the diagnosis with its opposite.
 pub(super) fn coverage(
     conn: &Connection,
     run_id: i64,
 ) -> Result<Option<CompilerCoverage>, StoreError> {
     let mut statement = conn.prepare(
-        "SELECT compiler_helper_id IS NULL, unavailable_reason, unavailable_diagnostic, count(*)
+        "SELECT unavailable_reason, unavailable_diagnostic, count(*)
              FROM compiler_unit WHERE scan_run_id = ?1
-             GROUP BY compiler_helper_id IS NULL, unavailable_reason, unavailable_diagnostic",
+             GROUP BY unavailable_reason, unavailable_diagnostic",
     )?;
     let rows = statement
         .query_map([run_id], |row| {
             Ok((
-                row.get::<_, i64>(0)? != 0,
+                row.get::<_, Option<String>>(0)?,
                 row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(2)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -145,12 +151,18 @@ pub(super) fn coverage(
         restarts: restarts(conn, run_id)?,
         ..CompilerCoverage::default()
     };
-    for (unasked, reason, diagnostic, count) in rows {
+    for (reason, diagnostic, count) in rows {
         let count = u64::try_from(count).unwrap_or(0);
-        match (unasked, reason) {
-            (true, _) => coverage.not_asked += count,
-            (false, None) => coverage.answered += count,
-            (false, Some(reason)) => *coverage.unavailable.entry(reason).or_default() += count,
+        match reason {
+            None => coverage.answered += count,
+            Some(reason) => {
+                if unavailability(&reason)?.is_helper_failure() {
+                    *coverage.unavailable.entry(reason).or_default() += count;
+                } else {
+                    coverage.not_asked += count;
+                    *coverage.not_asked_reasons.entry(reason).or_default() += count;
+                }
+            }
         }
         if let Some(diagnostic) = diagnostic {
             *coverage.diagnostics.entry(diagnostic).or_default() += count;

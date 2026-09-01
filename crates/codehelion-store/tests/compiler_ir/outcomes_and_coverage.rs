@@ -74,10 +74,13 @@ fn a_helpers_bounded_diagnostic_round_trips_with_its_unavailable_unit() {
     let coverage = store.run_compiler_coverage(run).unwrap().unwrap();
     assert_eq!(coverage.diagnostics["no compiler library is installed"], 1);
 }
-/// A scan that asked nothing and one whose every answer was unavailable are
-/// different records, and only the latter has compiler-unit rows.
+/// A helper that fell over before its handshake named nobody, so its row
+/// names no helper — and the reason on that row is still a helper that was
+/// given the unit and failed on it. Counting the row by the helper it names
+/// would report the run as never having asked, which is the opposite of what
+/// it recorded and the only thing a replay has to go on.
 #[test]
-fn asking_and_failing_does_not_read_as_never_asking() {
+fn a_failure_recorded_beside_no_helper_still_counts_as_unavailable() {
     let (_dir, mut store, _path) = on_disk();
     let variant = variant();
     let silent = store
@@ -102,7 +105,50 @@ fn asking_and_failing_does_not_read_as_never_asking() {
     // than a gap in the record: nothing was left uncounted.
     let coverage = store.run_compiler_coverage(asked).unwrap().unwrap();
     assert_eq!(coverage.restarts, Some(0));
-    assert_eq!(coverage.not_asked, 1);
+    assert_eq!(coverage.unavailable["toolchain_mismatch"], 1);
+    assert_eq!(coverage.not_asked, 0);
+    assert!(coverage.not_asked_reasons.is_empty());
+}
+
+/// The other side of the same line: a unit ruled out by what it is rather than
+/// by a helper is one nobody was asked about, and stays that way whether or not
+/// a helper had already introduced itself by the time the run reached it.
+#[test]
+fn a_unit_ruled_out_before_any_helper_counts_as_not_asked() {
+    let (_dir, mut store, _path) = on_disk();
+    let variant = variant();
+    let run = store
+        .record_snapshot(&snapshot(
+            "/tree",
+            &variant,
+            vec![helper_row()],
+            vec![
+                unavailable(
+                    unit_ref("", "vendor/blob.c"),
+                    Unavailability::NotSupported,
+                    None,
+                ),
+                unavailable(
+                    unit_ref("", "src/orphan.rs"),
+                    Unavailability::NoBuildInformation,
+                    Some(0),
+                ),
+            ],
+        ))
+        .unwrap();
+
+    let coverage = store.run_compiler_coverage(run).unwrap().unwrap();
+    assert_eq!(coverage.not_asked, 2);
+    assert_eq!(
+        coverage.not_asked_reasons,
+        [
+            ("not_supported".to_string(), 1),
+            ("no_build_information".to_string(), 1),
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert!(coverage.unavailable.is_empty());
 }
 
 /// The counts a run reports about itself have to survive being recorded, and
@@ -150,15 +196,21 @@ fn how_much_a_compiler_spoke_for_is_counted_off_the_rows() {
         .unwrap()
         .expect("a compiler was asked about this run");
     assert_eq!(coverage.answered, 2);
-    assert_eq!(coverage.not_asked, 1);
+    // Two build scripts and a file no helper reads: none of the three is a
+    // helper that failed, whichever of them a process was started for.
+    assert_eq!(coverage.not_asked, 3);
     assert_eq!(
-        coverage.unavailable,
+        coverage.not_asked_reasons,
         [
             ("requires_execution".to_string(), 2),
-            ("helper_timed_out".to_string(), 1),
+            ("not_supported".to_string(), 1),
         ]
         .into_iter()
         .collect()
+    );
+    assert_eq!(
+        coverage.unavailable,
+        std::iter::once(("helper_timed_out".to_string(), 1)).collect()
     );
     assert_eq!(coverage.restarts, helper_row().restarts);
 }
@@ -295,8 +347,14 @@ fn a_reason_no_helper_could_avoid_does_not_take_the_analysed_units_with_it() {
     }
     let coverage = store.run_compiler_coverage(run).unwrap().unwrap();
     assert_eq!(coverage.answered, 1);
+    // Every reason is counted on exactly one side of the split, so a reason
+    // that fits neither would show up here as a unit that vanished.
     assert_eq!(
-        coverage.unavailable.values().sum::<u64>(),
+        coverage.unavailable.values().sum::<u64>() + coverage.not_asked,
         u64::try_from(Unavailability::ALL.len()).unwrap()
+    );
+    assert_eq!(
+        coverage.not_asked_reasons.values().sum::<u64>(),
+        coverage.not_asked
     );
 }

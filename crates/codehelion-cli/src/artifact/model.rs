@@ -429,6 +429,69 @@ pub(super) struct SymbolDelta {
     pub(super) size_delta_bytes: i128,
 }
 
+/// What a comparison established about one symbol, as [`SymbolDelta::kind`]
+/// spells it.
+///
+/// The first two name a symbol identity that occurs on one side only. The
+/// other two name one symbol found on both sides whose bytes are not the same
+/// bytes: identity is derived from the normalized instruction stream, which
+/// drops immediates, so a build that only rewrote a constant or narrowed its
+/// encoding arrives here rather than as an addition and a removal.
+pub(super) mod symbol_change {
+    /// A symbol identity present only in the later artifact.
+    pub(in crate::artifact) const ADDED: &str = "added";
+    /// A symbol identity present only in the earlier artifact.
+    pub(in crate::artifact) const REMOVED: &str = "removed";
+    /// One symbol found on both sides whose observed byte size changed.
+    pub(in crate::artifact) const RESIZED: &str = "resized";
+    /// One symbol found on both sides whose bytes changed while its observed
+    /// size did not.
+    pub(in crate::artifact) const MODIFIED: &str = "modified";
+}
+
+/// Whether this change names one symbol on both sides rather than one side.
+///
+/// A paired change is identified by the single fingerprint both sides share,
+/// so it stays readable without a name; an unpaired one carries a different
+/// fingerprint on each side and needs the name to be matched up by a reader.
+pub(super) fn pairs_both_artifacts(kind: &str) -> bool {
+    matches!(kind, symbol_change::RESIZED | symbol_change::MODIFIED)
+}
+
+/// The symbols one identity covers, as the earlier and the later artifact
+/// carry them.
+type SymbolsOfOneIdentity<'a> = (
+    Vec<&'a codehelion_artifact::ArtifactSymbol>,
+    Vec<&'a codehelion_artifact::ArtifactSymbol>,
+);
+
+/// Everything one comparison uses to tell two builds of one symbol apart.
+///
+/// [`ArtifactSymbol::fingerprint`] is the grouping key and stays so: it is the
+/// identity the rest of the artifact pipeline routes calls, duplicates and
+/// correlations through. It is derived from the normalized instruction stream,
+/// which deliberately drops immediates, so it cannot answer whether the bytes
+/// behind it moved. The body identity and the observed size answer that, and
+/// they are held beside the key rather than folded into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SymbolContent {
+    /// Identity of the instruction bytes including their immediates, absent
+    /// for a backend that does not decode operands.
+    body: Option<codehelion_artifact::ArtifactFingerprint>,
+    /// Observed byte size, which is evidence of a change on its own.
+    size: u64,
+}
+
+impl SymbolContent {
+    /// The content of one parser-established symbol.
+    const fn of(symbol: &codehelion_artifact::ArtifactSymbol) -> Self {
+        Self {
+            body: symbol.body_fingerprint,
+            size: symbol.size,
+        }
+    }
+}
+
 /// One equality-group change. `kind` identifies the independent equality
 /// relation so a normalized match is never presented as an exact-byte match.
 #[derive(Debug, Serialize)]
@@ -474,6 +537,8 @@ impl ArtifactComparisonReport {
         );
         let mut assumptions = vec![
             "symbol identity is content-derived; an equal name with a changed fingerprint is reported as modified"
+                .to_owned(),
+            "symbol identity drops instruction immediates, so a symbol found on both sides whose bytes still differ is reported as resized or modified rather than as unchanged"
                 .to_owned(),
             "observed_size_reduction_bytes is a measured artifact-byte difference, not a refactoring estimate"
                 .to_owned(),
@@ -624,52 +689,60 @@ pub(super) fn duplicate_group_deltas(
         .collect()
 }
 
+/// Every per-symbol difference between two artifacts, ordered by absolute size
+/// delta.
+///
+/// Symbols are collected under the identity the rest of the pipeline uses, and
+/// within one such group the members that carry the same bytes on both sides
+/// are struck off against each other first. What is left is one symbol the two
+/// builds disagree about: it is paired and reported as
+/// [`symbol_change::RESIZED`] or [`symbol_change::MODIFIED`], rather than
+/// silently cancelling because normalization erased what changed. Only members
+/// with nothing to pair against remain an addition or a removal.
 pub(super) fn symbol_deltas(before: &ArtifactIr, after: &ArtifactIr) -> Vec<SymbolDelta> {
-    let mut before_counts = symbol_counts(before);
-    let mut after_counts = symbol_counts(after);
-    let mut result = Vec::new();
-    for symbol in &after.symbols {
-        let Some(count) = after_counts.get_mut(&symbol.fingerprint) else {
-            continue;
-        };
-        if *count == 0 {
-            continue;
-        }
-        if let Some(prior) = before_counts.get_mut(&symbol.fingerprint) {
-            if *prior > 0 {
-                *prior -= 1;
-            } else {
-                result.push(SymbolDelta {
-                    kind: "added",
-                    name: symbol.name.clone(),
-                    fingerprint: symbol.fingerprint.to_hex(),
-                    size_delta_bytes: i128::from(symbol.size),
-                });
-            }
-        } else {
-            result.push(SymbolDelta {
-                kind: "added",
-                name: symbol.name.clone(),
-                fingerprint: symbol.fingerprint.to_hex(),
-                size_delta_bytes: i128::from(symbol.size),
-            });
-        }
-        *count -= 1;
-    }
+    let mut groups: BTreeMap<codehelion_artifact::ArtifactFingerprint, SymbolsOfOneIdentity<'_>> =
+        BTreeMap::new();
     for symbol in &before.symbols {
-        let Some(count) = before_counts.get_mut(&symbol.fingerprint) else {
-            continue;
-        };
-        if *count == 0 {
-            continue;
+        groups.entry(symbol.fingerprint).or_default().0.push(symbol);
+    }
+    for symbol in &after.symbols {
+        groups.entry(symbol.fingerprint).or_default().1.push(symbol);
+    }
+    let mut result = Vec::new();
+    for (fingerprint, (before_members, after_members)) in groups {
+        let fingerprint = fingerprint.to_hex();
+        let (before_changed, after_changed) = unmatched_content(before_members, after_members);
+        let mut before_changed = before_changed.into_iter();
+        let mut after_changed = after_changed.into_iter();
+        loop {
+            match (before_changed.next(), after_changed.next()) {
+                (Some(earlier), Some(later)) => result.push(SymbolDelta {
+                    kind: if earlier.size == later.size {
+                        symbol_change::MODIFIED
+                    } else {
+                        symbol_change::RESIZED
+                    },
+                    // Both sides share one identity, so either name is the
+                    // symbol's; the later artifact is what the report is about.
+                    name: later.name.clone().or_else(|| earlier.name.clone()),
+                    fingerprint: fingerprint.clone(),
+                    size_delta_bytes: difference(later.size, earlier.size),
+                }),
+                (Some(earlier), None) => result.push(SymbolDelta {
+                    kind: symbol_change::REMOVED,
+                    name: earlier.name.clone(),
+                    fingerprint: fingerprint.clone(),
+                    size_delta_bytes: -i128::from(earlier.size),
+                }),
+                (None, Some(later)) => result.push(SymbolDelta {
+                    kind: symbol_change::ADDED,
+                    name: later.name.clone(),
+                    fingerprint: fingerprint.clone(),
+                    size_delta_bytes: i128::from(later.size),
+                }),
+                (None, None) => break,
+            }
         }
-        result.push(SymbolDelta {
-            kind: "removed",
-            name: symbol.name.clone(),
-            fingerprint: symbol.fingerprint.to_hex(),
-            size_delta_bytes: -i128::from(symbol.size),
-        });
-        *count -= 1;
     }
     result.sort_by(|left, right| {
         right
@@ -679,6 +752,44 @@ pub(super) fn symbol_deltas(before: &ArtifactIr, after: &ArtifactIr) -> Vec<Symb
             .then_with(|| left.fingerprint.cmp(&right.fingerprint))
     });
     result
+}
+
+/// Strike off the members of one identity group that carry the same bytes on
+/// both sides, and return what each side has left.
+///
+/// Byte-equal members are the ones a comparison has nothing to say about, so
+/// cancelling them first is what keeps a symbol that did change from being
+/// paired against an unrelated twin. Both remainders come back in a
+/// content-then-offset order, so the pairing that follows does not depend on
+/// the order the symbols happened to be laid out in.
+fn unmatched_content<'a>(
+    before: Vec<&'a codehelion_artifact::ArtifactSymbol>,
+    after: Vec<&'a codehelion_artifact::ArtifactSymbol>,
+) -> SymbolsOfOneIdentity<'a> {
+    let mut unmatched: BTreeMap<SymbolContent, usize> = BTreeMap::new();
+    for symbol in &before {
+        *unmatched.entry(SymbolContent::of(symbol)).or_default() += 1;
+    }
+    let mut remaining_after = Vec::new();
+    for symbol in after {
+        match unmatched.get_mut(&SymbolContent::of(symbol)) {
+            Some(count) if *count > 0 => *count -= 1,
+            _ => remaining_after.push(symbol),
+        }
+    }
+    let mut remaining_before = Vec::new();
+    for symbol in before {
+        if let Some(count) = unmatched.get_mut(&SymbolContent::of(symbol))
+            && *count > 0
+        {
+            *count -= 1;
+            remaining_before.push(symbol);
+        }
+    }
+    let order = |symbol: &&codehelion_artifact::ArtifactSymbol| (symbol.size, symbol.offset);
+    remaining_before.sort_by_key(order);
+    remaining_after.sort_by_key(order);
+    (remaining_before, remaining_after)
 }
 
 pub(super) fn symbol_counts(
@@ -700,16 +811,26 @@ pub(super) fn count_difference(
         .sum()
 }
 
+/// How many named symbols one artifact carries differently from the other.
+///
+/// A name is counted when it belongs to exactly one symbol on each side and
+/// those two symbols are not the same symbol. That is a question about the
+/// grouping identity and about the bytes behind it: two builds of one function
+/// whose opcode sequence did not move share the identity, so the body identity
+/// and the observed size are what separate them, exactly as they do in
+/// [`symbol_deltas`].
 pub(super) fn modified_named_symbols(before: &ArtifactIr, after: &ArtifactIr) -> usize {
     let names = |artifact: &ArtifactIr| {
-        let mut result: BTreeMap<String, BTreeSet<codehelion_artifact::ArtifactFingerprint>> =
-            BTreeMap::new();
+        let mut result: BTreeMap<
+            String,
+            BTreeSet<(codehelion_artifact::ArtifactFingerprint, SymbolContent)>,
+        > = BTreeMap::new();
         for symbol in &artifact.symbols {
             if let Some(name) = symbol.name.as_deref() {
                 result
                     .entry(name.to_owned())
                     .or_default()
-                    .insert(symbol.fingerprint);
+                    .insert((symbol.fingerprint, SymbolContent::of(symbol)));
             }
         }
         result
@@ -718,10 +839,10 @@ pub(super) fn modified_named_symbols(before: &ArtifactIr, after: &ArtifactIr) ->
     let after_names = names(after);
     before_names
         .iter()
-        .filter(|(name, fingerprints)| {
-            fingerprints.len() == 1
-                && after_names.get(*name).is_some_and(|after_fingerprints| {
-                    after_fingerprints.len() == 1 && after_fingerprints != *fingerprints
+        .filter(|(name, identities)| {
+            identities.len() == 1
+                && after_names.get(*name).is_some_and(|after_identities| {
+                    after_identities.len() == 1 && after_identities != *identities
                 })
         })
         .count()
@@ -965,6 +1086,7 @@ pub(super) const ARTIFACT_CSV_HEADER: &[&str] = &[
     "source_map_uri",
     "source_map_local_path",
     "source_map_sources",
+    "duplicated_data_bytes",
 ];
 
 // Columns are only ever appended, so the published width never shrinks.
@@ -1023,6 +1145,7 @@ pub(super) mod column {
     pub(in crate::artifact) const SOURCE_MAP_URI: usize = 48;
     pub(in crate::artifact) const SOURCE_MAP_LOCAL_PATH: usize = 49;
     pub(in crate::artifact) const SOURCE_MAP_SOURCES: usize = 50;
+    pub(in crate::artifact) const DUPLICATED_DATA_BYTES: usize = 51;
 }
 
 /// Every comparison CSV column, in the order they are written, under the same
@@ -1125,6 +1248,7 @@ mod tests {
             size_inferred: false,
             code: vec![1, 2],
             normalized: None,
+            body_fingerprint: None,
             inline_stack: Vec::new(),
         }
     }

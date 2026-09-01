@@ -458,8 +458,15 @@ pub struct StructuralStats {
     /// statement for statement, inside one block. Those tile one stretch of
     /// code, so the run is that stretch's period rather than a copy of it.
     pub region_adjoining: usize,
-    /// Confirmed runs dropped because a longer run covers every one of their
+    /// Findings dropped because a longer finding covers every one of their
     /// occurrences and claims at least as much about them.
+    ///
+    /// One duplication is a duplicate at more than one cut — a duplicated
+    /// function encloses a duplicated body, which encloses the runs it is made
+    /// of — and every cut is proposed on its own. Confirmed runs and cohesive
+    /// groups are counted together here because a reader asking what was left
+    /// out is asking one question, and the answer is the same in both cases:
+    /// something longer already says it.
     pub region_subsumed: usize,
     /// Longer runs made by joining confirmed runs that describe one stretch at
     /// two offsets. The parts they cover leave through `region_subsumed`.

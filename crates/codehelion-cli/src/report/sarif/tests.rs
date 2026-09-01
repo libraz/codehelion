@@ -1,4 +1,5 @@
 use super::*;
+use crate::report::FunnelCause;
 use crate::report::tests::{sample_near_miss, sample_report, sample_siblings, structural_group};
 
 fn sarif(report: &Report) -> serde_json::Value {
@@ -324,14 +325,20 @@ fn the_run_property_bag_keeps_what_sarif_has_no_field_for() {
     assert_eq!(properties["run_id"], 1);
 }
 
-fn coverage(not_asked: u64, unavailable: &[(&str, u64)]) -> CompilerCoverage {
-    CompilerCoverage {
-        answered: 3,
-        not_asked,
-        unavailable: unavailable
+/// Coverage whose `not_asked` total is exactly what its reasons account for,
+/// because that is the only shape either producer can build.
+fn coverage(not_asked_reasons: &[(&str, u64)], unavailable: &[(&str, u64)]) -> CompilerCoverage {
+    let by_reason = |counts: &[(&str, u64)]| {
+        counts
             .iter()
             .map(|(reason, count)| ((*reason).to_string(), *count))
-            .collect(),
+            .collect::<BTreeMap<_, _>>()
+    };
+    CompilerCoverage {
+        answered: 3,
+        not_asked: not_asked_reasons.iter().map(|(_, count)| *count).sum(),
+        not_asked_reasons: by_reason(not_asked_reasons),
+        unavailable: by_reason(unavailable),
         diagnostics: BTreeMap::new(),
         execution_refusals: Vec::new(),
         restarts: 2,
@@ -345,7 +352,10 @@ fn coverage(not_asked: u64, unavailable: &[(&str, u64)]) -> CompilerCoverage {
 fn what_a_run_could_not_read_is_said_rather_than_left_to_the_property_bag() {
     let mut report = sample_report();
     report.summary.search_truncated = false;
-    let mut compiler = coverage(5, &[("helper_died", 1), ("requires_execution", 2)]);
+    let mut compiler = coverage(
+        &[("no_build_information", 4), ("not_supported", 1)],
+        &[("helper_died", 1), ("requires_execution", 2)],
+    );
     compiler
         .execution_refusals
         .push(crate::report::ExecutionRefusal {
@@ -363,16 +373,25 @@ fn what_a_run_could_not_read_is_said_rather_than_left_to_the_property_bag() {
     let notifications = run["invocations"][0]["toolExecutionNotifications"]
         .as_array()
         .unwrap();
-    assert_eq!(notifications.len(), 3);
+    assert_eq!(notifications.len(), 4);
 
-    assert_eq!(notifications[0]["descriptor"]["id"], "coverage/not-asked");
-    assert_eq!(notifications[0]["level"], "note");
-    assert_eq!(notifications[0]["properties"]["files"], 5);
+    // A file nothing describes how to compile and a file whose language no
+    // helper reads are both unasked, and each is named: a consumer reading
+    // one total cannot tell which of the two this run met.
+    for (at, reason, files) in [(0, "no_build_information", 4), (1, "not_supported", 1)] {
+        let notification = &notifications[at];
+        assert_eq!(notification["descriptor"]["id"], "coverage/not-asked");
+        assert_eq!(notification["level"], "note");
+        assert_eq!(notification["properties"]["reason"], reason);
+        assert_eq!(notification["properties"]["files"], files);
+        let message = notification["message"]["text"].as_str().unwrap();
+        assert!(message.contains(reason), "{message}");
+    }
 
     // One per reason: a build script nobody allowed to run and a helper
     // that died call for different things, and one total would leave a
     // reader to guess which they have.
-    for (at, reason, files) in [(1, "helper_died", 1), (2, "requires_execution", 2)] {
+    for (at, reason, files) in [(2, "helper_died", 1), (3, "requires_execution", 2)] {
         let notification = &notifications[at];
         assert_eq!(notification["descriptor"]["id"], "coverage/unanswered");
         assert_eq!(notification["level"], "warning");
@@ -432,7 +451,8 @@ fn grouping_and_parser_coverage_have_distinct_warnings() {
     let mut report = sample_report();
     report.summary.search_truncated = false;
     report.summary.funnel.push(
-        crate::report::FunnelStage::new("grouping", 12).dropping("the_ceiling_cut_the_set", 7),
+        crate::report::FunnelStage::new("grouping", 12)
+            .dropping(FunnelCause::TheCeilingCutTheSet, 7),
     );
     report.summary.unparsed = Some(crate::report::UnparsedCounts::from_counts(2, 75, 300));
 
@@ -484,7 +504,7 @@ fn a_run_with_nothing_to_report_about_itself_reports_nothing() {
     // Nor does a compiler that answered about everything file an empty one.
     let mut answered = sample_report();
     answered.summary.search_truncated = false;
-    answered.summary.compiler = Some(coverage(0, &[]));
+    answered.summary.compiler = Some(coverage(&[], &[]));
     let value = sarif(&answered);
     assert!(
         value["runs"][0]["invocations"][0]

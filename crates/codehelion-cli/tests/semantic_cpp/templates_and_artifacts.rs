@@ -294,8 +294,10 @@ fn a_cpp_tree_with_no_compilation_database_is_reported_rather_than_refused() {
     let report = scan(dir.path());
     let coverage = &report["summary"]["compiler"];
     assert_eq!(coverage["answered"].as_u64(), Some(0), "{coverage}");
+    // Nothing above the file says how it is compiled, so no helper was put to
+    // it. The report names that reason rather than only counting the file.
     assert_eq!(
-        coverage["unavailable"]["no_build_information"].as_u64(),
+        coverage["not_asked_reasons"]["no_build_information"].as_u64(),
         Some(1),
         "{coverage}"
     );
@@ -328,10 +330,22 @@ int total(const int *values, int count) {
     std::fs::write(root.join("lib.rs"), "pub fn marker() {}\n").expect("write Rust source");
 
     let report = scan(dir.path());
+    // Counted over the C++ partitions alone: the Rust partition of this tree
+    // has no build description either, and folding its file in would let the
+    // two C++ sources be off by one without the total moving.
     let no_build_sources: u64 = reports(&report)
         .into_iter()
+        .filter(|partition| {
+            partition["run"]["build_variant"]["languages"]
+                .as_array()
+                .is_some_and(|languages| {
+                    languages
+                        .iter()
+                        .any(|language| language.as_str() == Some("cpp"))
+                })
+        })
         .filter_map(|partition| {
-            partition["summary"]["compiler"]["unavailable"]["no_build_information"].as_u64()
+            partition["summary"]["compiler"]["not_asked_reasons"]["no_build_information"].as_u64()
         })
         .sum();
     assert_eq!(no_build_sources, 2, "{report}");

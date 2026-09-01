@@ -187,7 +187,7 @@ The main scan controls are:
 - `--jobs <n>` sets frontend read-and-lex workers (capped at four times host parallelism); clone grouping and report rendering remain serial. Omitted, the worker count follows host parallelism.
 - `--no-ignore` also reads ignored files, and `--follow-links` follows symbolic links, which are otherwise excluded and counted by type. `--compile-commands <path>` names the compilation database to read instead of the one discovery would pick.
 - `--baseline <file>` compares with accepted findings; `--show-suppressed`, `--show-siblings`, and `--show-near-misses` expand text output. JSON and SARIF retain those data regardless. `--siblings-by-signature` enables signature-based sibling generation in Structural and Semantic modes; it is off by default, while `--show-siblings` only changes text visibility.
-- `-v`/`-vv` choose how much is said about each group, `--limit <n>` how many groups are listed, and `--quiet` prints the groups alone. `--color <auto|always|never>` overrides the terminal detection, and `NO_COLOR` is honoured.
+- `-v`/`-vv` choose how much is said about each group, `--limit <n>` how many groups are listed, and `--quiet` prints the groups alone. Left out, a text report lists 10 groups with 5 occurrences under each and says how many it left out; `--limit <n>` changes the group count alone, and `--limit 0` lifts both. `--color <auto|always|never>` overrides the terminal detection, and `NO_COLOR` is honoured.
 - `--decoration <auto|unicode|ascii|none>` chooses the glyphs the listing is drawn with. Unlike colour it does not follow the destination: a report written to a file keeps the tree a terminal would have shown, because a box-drawing character in a file is still readable where an escape sequence is not. `auto` draws box-drawing characters everywhere except Windows, whose console depends on the active code page.
 - `--include-trivial` restores predicate families to their measured priority in Structural and Semantic mode.
 - `--fail-on-findings` returns exit code 3 when visible findings remain.
@@ -345,6 +345,7 @@ codehelion artifact report --analysis 1 # render a particular saved analysis
 codehelion artifact compare before/binary after/binary
 codehelion artifact calibration                 # summarize the recorded measurements
 codehelion artifact calibration --source-run 1  # summarize a particular source scan
+codehelion artifact calibration --baseline earlier.json  # set the summary beside an earlier one
 ```
 
 `artifact calibration` reads measurements rather than taking them, so it
@@ -354,6 +355,22 @@ when it is given `--source-run` and `--clone-group` together with
 estimate is then set beside the size difference the two artifacts actually
 show. The estimate it needs comes from an earlier `artifact analyze` run with
 `--source-run` and `--build-variant`.
+
+`--baseline <file>` takes a calibration report written earlier by
+`artifact calibration --format json` and prints the change in each error
+statistic, overall and per stratum, beside the current value. It compares and
+reports only: no threshold is enforced and nothing fails on a difference. A
+report written under a different calibration report schema is refused rather
+than compared against.
+
+The `verified_savings_bytes` that comes out of a calibrated comparison is the
+whole observed size difference between the two artifacts, assigned to the one
+clone group named by `--clone-group`. What the comparison establishes is that
+both artifacts are the same format and were built under the same declared
+build variant, and nothing beyond that: a pair of builds that also picked up a
+dependency update or a toolchain change reports that difference too, as the
+measured saving of the refactoring. The number means what it says only for a
+pair that differs in nothing else.
 
 Debug companions are accepted only after the matching ELF build ID, Mach-O UUID
 or PE CodeView/PDB identity has been verified. `artifact analyze --debug-file companion`
@@ -594,9 +611,11 @@ change before 1.0.
 
 ## Accuracy
 
-Measured with `make eval` at 0.4.0. Both corpora are committed, so these
-numbers are reproducible from a checkout. `corpus/README.md` explains why each
-half can answer only one of the two questions.
+Measured with `make eval` at 0.4.0. The generated corpora are committed, so the
+recall numbers are reproducible from a checkout on their own. The labelled
+cases commit their verdicts and not their sources, so the precision numbers
+need `corpus/scripts/materialize-labeled.sh` run first. `corpus/README.md`
+explains why each half can answer only one of the two questions.
 
 **Recall — ten generated mutation corpora, 43 clone pairs and 11 deliberate
 non-clones.** A generated corpus knows every clone it contains, so it can be
@@ -638,25 +657,27 @@ enumerated the clones in those projects first.
 |---|---|---|---|
 | fast-yaml | 1.0000 | 1 | 0 |
 | codehelion-store | 1.0000 | 2 | 0 |
+| cjson | 0.8235 | 14 | 3 |
 | bitflags | 0.7857 | 11 | 3 |
-| cjson | 0.7778 | 14 | 4 |
 | spdlog | 0.5833 | 21 | 15 |
 | serde-json | 0.5357 | 45 | 39 |
 | lz4 | 0.5357 | 15 | 13 |
 | tinyxml2 | 0.5263 | 10 | 9 |
-| **all cases** | **0.5891** | **119** | **83** |
+| **all cases** | **0.5920** | **119** | **82** |
 
 Two of the eight are this author's own projects, and both score 1.0000.
-Dropping them moves the aggregate to 0.5829 — they carry 3 of the 202
+Dropping them moves the aggregate to 0.5859 — they carry 3 of the 201
 verdicts, so the figure is the other six projects' either way.
 
-0.5891 is the figure for the whole report read end to end, which is not how a
-duplication report is read. Over the same 202 judged findings:
+0.5920 is the figure for the whole report read end to end, which is not how a
+duplication report is read. Over the 200 of those verdicts a finding of its own
+carries — the report shows a duplication that is a shorter cut of another
+inside the longer one, so it takes no place of its own in the order:
 
 | ordered by | p@10 | p@50 | MAP |
 |---|---|---|---|
-| priority | 1.0000 | 0.9600 | 0.9274 |
-| size | 1.0000 | 0.9400 | 0.8774 |
+| priority | 1.0000 | 0.9600 | 0.9290 |
+| size | 1.0000 | 0.9400 | 0.8772 |
 
 Nothing false reaches the first ten either way. What the aggregate says is that
 the tail is close to half noise, which is why the priority ordering and

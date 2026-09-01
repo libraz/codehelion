@@ -16,6 +16,7 @@ fn exact_generic_instantiation_key_maps_the_definition_origin() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
@@ -177,6 +178,7 @@ fn generic_origin_maps_one_source_to_each_instantiated_symbol() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let second = codehelion_artifact::ArtifactSymbol {
@@ -264,6 +266,7 @@ fn clang_template_display_key_maps_only_its_demangled_specialization() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
@@ -338,6 +341,7 @@ fn clang_template_owner_key_maps_only_its_member_specialization() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let units = [SourceUnitIdentity {
@@ -402,6 +406,7 @@ fn conflicting_generic_origin_and_name_candidates_remain_ambiguous() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
@@ -483,6 +488,7 @@ fn linker_map_recovers_an_unmapped_unit_without_basename_guessing() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
@@ -593,6 +599,7 @@ fn generic_origin_metrics_keep_normalized_duplicates_separate_from_savings() {
                 version: "test-normalization-v1".to_owned(),
                 bytes: vec![1, 2, 3],
             }),
+            body_fingerprint: None,
             inline_stack: Vec::new(),
         });
     }
@@ -883,6 +890,7 @@ fn symbol_assembled_from_two_files() -> codehelion_artifact::ArtifactSymbol {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: (1..=20)
             .map(|line| frame("/work/src/main.cpp", line))
             .chain((100..=109).map(|line| frame("/work/src/helper.cpp", line)))
@@ -1064,6 +1072,7 @@ fn same_named_units_remain_ambiguous_name_candidates() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
@@ -1142,6 +1151,7 @@ fn correlation_report_keeps_unmapped_bytes_and_reasons_visible() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let second = codehelion_artifact::ArtifactSymbol {
@@ -1154,6 +1164,7 @@ fn correlation_report_keeps_unmapped_bytes_and_reasons_visible() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
@@ -1203,6 +1214,7 @@ fn unreadable_debug_information_has_a_distinct_unmapped_reason() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
@@ -1239,6 +1251,7 @@ fn resolved_wasm_source_map_token_is_persisted_as_direct_mapping_evidence() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Wasm, b"fixture");
@@ -1300,6 +1313,7 @@ fn duplicated_symbol(offset: u64) -> codehelion_artifact::ArtifactSymbol {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: vec![codehelion_artifact::ArtifactInlineFrame {
             evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
             source: "/work/src/render.cpp".to_owned(),
@@ -1428,6 +1442,8 @@ fn duplicated_symbol_entries_survive_persistence() {
             started_at: "2026-01-01T00:00:00Z",
             finished_at: "2026-01-01T00:00:01Z",
             symbols: &symbols,
+            source_maps: &[],
+            containment: None,
             mappings: &rows.mappings,
             unmapped_symbols: &rows.unmapped_symbols,
             unmapped_sources: &rows.unmapped_sources,
@@ -1451,6 +1467,7 @@ fn equal_content_declarations_each_receive_their_own_name_mapping() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
@@ -1535,6 +1552,7 @@ fn source_map_evidence_removes_a_unit_from_the_unmapped_source_side() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Wasm, b"fixture");
@@ -1734,6 +1752,7 @@ fn a_source_map_correspondence_settles_which_side_the_unit_is_reported_on() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     });
 
@@ -1784,6 +1803,7 @@ fn a_linker_map_correspondence_settles_which_side_the_unit_is_reported_on() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: vec![codehelion_artifact::ArtifactInlineFrame {
             evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
             source: "/work/src/inlined.rs".to_owned(),
@@ -1829,6 +1849,7 @@ fn symbol_coverage_counts_one_population() {
             size_inferred: false,
             code: Vec::new(),
             normalized: None,
+            body_fingerprint: None,
             inline_stack: Vec::new(),
         },
         codehelion_artifact::ArtifactSymbol {
@@ -1841,6 +1862,7 @@ fn symbol_coverage_counts_one_population() {
             size_inferred: false,
             code: Vec::new(),
             normalized: None,
+            body_fingerprint: None,
             inline_stack: vec![codehelion_artifact::ArtifactInlineFrame {
                 evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
                 source: "/work/src/known.cpp".to_owned(),
@@ -1910,6 +1932,7 @@ fn one_file_spelled_with_either_separator_correlates_the_same_way() {
         size_inferred: false,
         code: Vec::new(),
         normalized: None,
+        body_fingerprint: None,
         inline_stack: vec![codehelion_artifact::ArtifactInlineFrame {
             evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Pdb,
             source: r"C:\work\src\render.cpp".to_owned(),
@@ -2097,6 +2120,7 @@ fn correlation_input(scale: &CorrelationScale) -> CorrelationInput {
             size_inferred: false,
             code: Vec::new(),
             normalized: None,
+            body_fingerprint: None,
             inline_stack: vec![codehelion_artifact::ArtifactInlineFrame {
                 evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
                 source: format!("/work/{}", file_path(position)),

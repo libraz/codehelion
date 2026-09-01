@@ -1,6 +1,56 @@
 use super::*;
 use crate::artifact::render::optional_bytes;
 
+/// A module whose two functions carry instruction bytes, one calling the
+/// other, alongside a data segment that carries bytes of its own.
+///
+/// A report has to withhold both, so a fixture with neither cannot show that
+/// it does.
+const CODE_MODULE: &[u8] = &[
+    0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 3, 2, 0, 0, 7, 7, 1, 3, b'f', b'o', b'o', 0,
+    0, 10, 9, 2, 4, 0, 16, 1, 11, 2, 0, 11, 11, 6, 1, 1, 3, b'a', b'b', b'c', 0, 18, 4, b'n', b'a',
+    b'm', b'e', 1, 11, 2, 0, 3, b'f', b'o', b'o', 1, 3, b'b', b'a', b'r',
+];
+
+/// [`CODE_MODULE`] with a third function `mid` inserted between the two.
+///
+/// The insertion moves `bar` from function index 1 to index 2 and rewrites
+/// the `call` immediate in `foo` accordingly, so every index in the module
+/// past the insertion point differs from the one before it.
+const CODE_MODULE_WITH_INSERTED_FUNCTION: &[u8] = &[
+    0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 4, 3, 0, 0, 0, 7, 7, 1, 3, b'f', b'o', b'o',
+    0, 0, 10, 13, 3, 4, 0, 16, 2, 11, 3, 0, 1, 11, 2, 0, 11, 11, 6, 1, 1, 3, b'a', b'b', b'c', 0,
+    23, 4, b'n', b'a', b'm', b'e', 1, 16, 3, 0, 3, b'f', b'o', b'o', 1, 3, b'm', b'i', b'd', 2, 3,
+    b'b', b'a', b'r',
+];
+
+/// Fail if any object anywhere under `value` carries instruction or segment
+/// bytes.
+///
+/// The whole tree is walked rather than the rendered text searched: a detail
+/// struct that started carrying bytes would appear as a new key at a depth
+/// this test does not know in advance, and a search for one spelling of one
+/// field would not see it.
+fn assert_no_raw_bytes(value: &serde_json::Value, path: &str) {
+    match value {
+        serde_json::Value::Object(members) => {
+            for (key, member) in members {
+                assert!(
+                    !matches!(key.as_str(), "code" | "bytes"),
+                    "{path}.{key} publishes raw artifact bytes"
+                );
+                assert_no_raw_bytes(member, &format!("{path}.{key}"));
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                assert_no_raw_bytes(item, &format!("{path}[{index}]"));
+            }
+        }
+        _ => {}
+    }
+}
+
 /// A format is one word, on the command line and in the report alike.
 ///
 /// The assertion a caller writes and the label they then read back have to
@@ -20,13 +70,28 @@ fn a_format_is_named_the_same_way_on_the_command_line_and_in_a_report() {
 
 #[test]
 fn wasm_report_is_versioned_and_does_not_expose_code_bytes() {
-    let artifact = WasmBackend.parse(b"\0asm\x01\0\0\0").unwrap();
+    let artifact = WasmBackend.parse(CODE_MODULE).unwrap();
+    assert!(
+        artifact
+            .symbols
+            .iter()
+            .any(|symbol| !symbol.code.is_empty()),
+        "the fixture must carry the instruction bytes the report has to withhold"
+    );
+    assert!(
+        artifact
+            .data_segments
+            .iter()
+            .any(|segment| !segment.bytes.is_empty()),
+        "the fixture must carry the segment bytes the report has to withhold"
+    );
+
     let report =
         ArtifactReport::from_ir(std::path::Path::new("fixture.wasm"), &artifact, None, None);
-    let json = serde_json::to_string(&report).unwrap();
-    assert!(json.contains(ARTIFACT_REPORT_SCHEMA_VERSION));
-    assert!(json.contains("fixture.wasm"));
-    assert!(!json.contains("\"code\": ["));
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["schema_version"], ARTIFACT_REPORT_SCHEMA_VERSION);
+    assert_eq!(json["path"], "fixture.wasm");
+    assert_no_raw_bytes(&json, "report");
 }
 
 #[test]
@@ -531,6 +596,7 @@ fn normalizable_symbol(
             version: "test-normal-v1".to_owned(),
             bytes: normalized.to_vec(),
         }),
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     }
 }
@@ -658,6 +724,14 @@ fn text_report_calls_duplicate_bytes_observed_not_savings() {
     }
 }
 
+/// Every size category reaches text, CSV and JSON under the name the schema
+/// declares, carrying its own value.
+///
+/// The categories are read back out of the serialized classification rather
+/// than listed here, so a category the classification gains and one rendering
+/// then omits fails this test instead of passing unremarked. Each field is
+/// given a distinct value, so a rendering that reached for the neighbouring
+/// field would report the neighbour's number and be caught.
 #[test]
 fn savings_categories_remain_distinct_in_every_artifact_report_format() {
     let artifact = WasmBackend.parse(b"\0asm\x01\0\0\0").unwrap();
@@ -666,51 +740,58 @@ fn savings_categories_remain_distinct_in_every_artifact_report_format() {
     report.sizes = metrics::SizeClassification {
         observed_bytes: 100,
         duplicated_bytes: 80,
+        // Normalized duplication stands beside byte-identical duplication and
+        // is added into neither it nor any savings value: it is reached
+        // through a rewriting rule, not observed directly.
         duplicated_bytes_normalized: Some(90),
-        retained_bytes: Some(60),
-        shared_dependency_bytes: Some(40),
-        duplicated_data_bytes: Some(30),
-        upper_bound_savings_bytes: Some(20),
-        estimated_refactor_savings_bytes: Some(EstimatedRefactorSavingsBytes(10)),
-        verified_savings_bytes: Some(VerifiedSavingsBytes(5)),
+        retained_bytes: Some(70),
+        shared_dependency_bytes: Some(60),
+        duplicated_data_bytes: Some(50),
+        upper_bound_savings_bytes: Some(40),
+        estimated_refactor_savings_bytes: Some(EstimatedRefactorSavingsBytes(30)),
+        verified_savings_bytes: Some(VerifiedSavingsBytes(20)),
         clone_confidence: EvidenceConfidence::High,
         savings_confidence: EvidenceConfidence::Low,
         assumptions: Vec::new(),
     };
+
     let json = serde_json::to_value(&report).unwrap();
-    for (field, expected) in [
-        ("observed_bytes", 100),
-        ("duplicated_bytes", 80),
-        // Normalized duplication stands beside byte-identical duplication and
-        // is added into neither it nor any savings value: it is reached
-        // through a rewriting rule, not observed directly.
-        ("duplicated_bytes_normalized", 90),
-        ("retained_bytes", 60),
-        ("shared_dependency_bytes", 40),
-        ("duplicated_data_bytes", 30),
-        ("upper_bound_savings_bytes", 20),
-        ("estimated_refactor_savings_bytes", 10),
-        ("verified_savings_bytes", 5),
-    ] {
-        assert_eq!(json["sizes"][field], expected, "unexpected {field}");
-    }
+    let categories: Vec<(String, i64)> = json["sizes"]
+        .as_object()
+        .expect("the classification serializes as an object")
+        .iter()
+        .filter_map(|(name, value)| Some((name.clone(), value.as_i64()?)))
+        .collect();
+    assert!(
+        !categories.is_empty(),
+        "no size category was recovered from the classification"
+    );
+    let distinct: BTreeSet<i64> = categories.iter().map(|(_, value)| *value).collect();
+    assert_eq!(
+        distinct.len(),
+        categories.len(),
+        "two categories share one value, so a rendering could confuse them: {categories:?}"
+    );
+
+    let text = rendered_text(&report, false);
     let mut csv = Vec::new();
     render_csv(&report, &mut csv).unwrap();
     let csv = String::from_utf8(csv).unwrap();
     let mut rows = csv.lines();
     let header: Vec<_> = rows.next().unwrap().split(',').collect();
     let summary: Vec<_> = rows.next().unwrap().split(',').collect();
-    for (field, expected) in [
-        ("observed_bytes", "100"),
-        ("duplicated_bytes", "80"),
-        ("duplicated_bytes_normalized", "90"),
-        ("retained_bytes", "60"),
-        ("upper_bound_savings_bytes", "20"),
-        ("estimated_refactor_savings_bytes", "10"),
-        ("verified_savings_bytes", "5"),
-    ] {
-        let index = header.iter().position(|value| *value == field).unwrap();
-        assert_eq!(summary[index], expected, "unexpected {field}");
+
+    for (name, value) in &categories {
+        assert!(
+            text.contains(&format!("  {name}: {value}")),
+            "the text report omits {name}"
+        );
+        let index = header
+            .iter()
+            .position(|column| column == name)
+            .unwrap_or_else(|| unreachable!("the CSV header omits {name}"));
+        assert_eq!(summary[index], value.to_string(), "unexpected CSV {name}");
+        assert_eq!(json["sizes"][name], *value, "unexpected JSON {name}");
     }
 }
 
@@ -753,6 +834,7 @@ fn comparison_uses_fingerprint_for_additions_and_names_for_modifications() {
         size_inferred: false,
         code: vec![1],
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     }];
     let mut after = before.clone();
@@ -816,6 +898,220 @@ fn comparison_uses_fingerprint_for_additions_and_names_for_modifications() {
     assert_comparison_csv_has_fixed_records(&report);
 }
 
+/// Inserting a function moves every later function index and every call
+/// immediate that names one, and neither belongs to a symbol's identity.
+///
+/// Both modules go through the parser, so the index assignment under test is
+/// the one the parser performs. The assertions name the symbols that did not
+/// change rather than the size of the shift, so the property holds however far
+/// the insertion moved them and however many callers it rewrote.
+#[test]
+fn an_inserted_function_leaves_the_other_symbols_identity_alone() {
+    let before = WasmBackend.parse(CODE_MODULE).unwrap();
+    let after = WasmBackend
+        .parse(CODE_MODULE_WITH_INSERTED_FUNCTION)
+        .unwrap();
+
+    let named = |artifact: &ArtifactIr, wanted: &str| {
+        artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name.as_deref() == Some(wanted))
+            .cloned()
+            .unwrap_or_else(|| unreachable!("{wanted} is one of the fixture's functions"))
+    };
+
+    // The variant has to actually move the pre-existing functions, or the
+    // property below would hold for a reason this test does not establish.
+    assert_eq!(after.symbols.len(), before.symbols.len() + 1);
+    assert_ne!(
+        named(&before, "foo").code,
+        named(&after, "foo").code,
+        "the insertion must rewrite the call immediate in foo"
+    );
+    assert_ne!(
+        named(&before, "bar").offset,
+        named(&after, "bar").offset,
+        "the insertion must move bar within the code section"
+    );
+
+    for function in ["foo", "bar"] {
+        assert_eq!(
+            named(&before, function).fingerprint,
+            named(&after, function).fingerprint,
+            "{function} lost its identity to an index shift"
+        );
+        // The identity that tells two builds of one symbol apart has to be as
+        // index-free as the one that pairs them, or a comparison reports every
+        // caller of a shifted function as changed.
+        assert_eq!(
+            named(&before, function).body_fingerprint,
+            named(&after, function).body_fingerprint,
+            "{function} lost its body identity to an index shift"
+        );
+        assert!(named(&after, function).body_fingerprint.is_some());
+    }
+
+    let report = ArtifactComparisonReport::new(
+        std::path::Path::new("before.wasm"),
+        &before,
+        None,
+        std::path::Path::new("after.wasm"),
+        &after,
+        None,
+    );
+    assert_eq!(
+        report
+            .symbol_deltas
+            .iter()
+            .map(|delta| (delta.kind, delta.name.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![("added", Some("mid"))]
+    );
+    assert_eq!(report.symbol_changes.added, 1);
+    assert_eq!(report.symbol_changes.removed, 0);
+    assert_eq!(report.symbol_changes.modified_named_symbols, 0);
+}
+
+/// A module with two named functions, each body supplied whole including its
+/// local declarations.
+///
+/// The module is assembled here rather than written out as bytes so that two
+/// builds of it can differ in one instruction and in nothing else.
+fn two_named_function_module(bodies: [&[u8]; 2]) -> Vec<u8> {
+    let mut module = vec![
+        0, 97, 115, 109, 1, 0, 0, 0, // magic and version
+        1, 4, 1, 0x60, 0, 0, // one type: [] -> []
+        3, 3, 2, 0, 0, // two functions of that type
+    ];
+    let mut code = vec![2];
+    for body in bodies {
+        code.push(u8::try_from(body.len()).expect("fixture body fits one byte"));
+        code.extend(body);
+    }
+    module.push(10);
+    module.push(u8::try_from(code.len()).expect("fixture code section fits one byte"));
+    module.extend(code);
+    // A `name` custom section calling function 0 `narrowed` and function 1
+    // `retuned`, so both changes below belong to a name a reader can act on.
+    let mut names = vec![2, 0, 8];
+    names.extend(b"narrowed");
+    names.extend([1, 7]);
+    names.extend(b"retuned");
+    let mut custom = vec![4, b'n', b'a', b'm', b'e', 1];
+    custom.push(u8::try_from(names.len()).expect("fixture name subsection fits one byte"));
+    custom.extend(names);
+    module.push(0);
+    module.push(u8::try_from(custom.len()).expect("fixture custom section fits one byte"));
+    module.extend(custom);
+    module
+}
+
+/// Normalization drops immediates on purpose, so a build that only rewrote a
+/// constant leaves both functions under the identity they already had. That is
+/// the characteristic effect of an optimizing build, and a comparison that
+/// pairs on identity alone reports it as no difference at all.
+///
+/// Both modules go through the parser, so what is compared is what the backend
+/// establishes rather than a pair of symbols written to agree.
+#[test]
+fn a_changed_immediate_is_reported_even_though_it_normalizes_away() {
+    // narrowed: i32.const 1000000 becomes i32.const 0, which is two bytes
+    // shorter. retuned: i32.const 1 becomes i32.const 2, same width.
+    let before = WasmBackend
+        .parse(&two_named_function_module([
+            &[0, 0x41, 0xc0, 0x84, 0x3d, 0x1a, 0x0b],
+            &[0, 0x41, 0x01, 0x1a, 0x0b],
+        ]))
+        .unwrap();
+    let after = WasmBackend
+        .parse(&two_named_function_module([
+            &[0, 0x41, 0x00, 0x1a, 0x0b],
+            &[0, 0x41, 0x02, 0x1a, 0x0b],
+        ]))
+        .unwrap();
+
+    let named = |artifact: &ArtifactIr, wanted: &str| {
+        artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name.as_deref() == Some(wanted))
+            .cloned()
+            .unwrap_or_else(|| unreachable!("{wanted} is one of the fixture's functions"))
+    };
+    // The fixture is only about immediates if normalization really erased the
+    // difference, which is what makes the identities equal on both sides.
+    for function in ["narrowed", "retuned"] {
+        assert_eq!(
+            named(&before, function).fingerprint,
+            named(&after, function).fingerprint,
+            "{function} must normalize to the identity it already had"
+        );
+        assert_ne!(
+            named(&before, function).body_fingerprint,
+            named(&after, function).body_fingerprint,
+            "{function} must differ in the bytes normalization dropped"
+        );
+    }
+    assert_eq!(named(&before, "narrowed").size, 7);
+    assert_eq!(named(&after, "narrowed").size, 5);
+    assert_eq!(
+        named(&before, "retuned").size,
+        named(&after, "retuned").size
+    );
+
+    let report = ArtifactComparisonReport::new(
+        std::path::Path::new("before.wasm"),
+        &before,
+        None,
+        std::path::Path::new("after.wasm"),
+        &after,
+        None,
+    );
+
+    assert_eq!(
+        report
+            .symbol_deltas
+            .iter()
+            .map(|delta| (delta.kind, delta.name.as_deref(), delta.size_delta_bytes))
+            .collect::<Vec<_>>(),
+        vec![
+            ("resized", Some("narrowed"), -2),
+            ("modified", Some("retuned"), 0),
+        ]
+    );
+    assert_eq!(report.symbol_changes.modified_named_symbols, 2);
+    assert_eq!(report.symbol_changes.added, 0);
+    assert_eq!(report.symbol_changes.removed, 0);
+
+    let json = serde_json::to_value(&report).unwrap();
+    assert_valid_schema(
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v2.schema.json",
+        ARTIFACT_COMPARISON_REPORT_JSON_SCHEMA,
+        &json,
+    );
+    let mut text = Vec::new();
+    render_compare_text(&report, &mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("resized narrowed"), "{text}");
+    assert!(text.contains("-2 bytes"), "{text}");
+    assert!(text.contains("modified retuned"), "{text}");
+
+    let mut csv = Vec::new();
+    render_compare_csv(&report, &mut csv).unwrap();
+    let csv = String::from_utf8(csv).unwrap();
+    assert!(
+        csv.lines()
+            .any(|row| row.starts_with("symbol-delta,") && row.contains(",resized,")),
+        "{csv}"
+    );
+    assert!(
+        csv.lines()
+            .any(|row| row.starts_with("symbol-delta,") && row.contains(",modified,")),
+        "{csv}"
+    );
+}
+
 #[test]
 fn comparison_reports_individual_duplicate_group_changes() {
     let mut before = WasmBackend.parse(b"\0asm\x01\0\0\0").unwrap();
@@ -834,6 +1130,7 @@ fn comparison_reports_individual_duplicate_group_changes() {
             size_inferred: false,
             code: vec![1, 2],
             normalized: None,
+            body_fingerprint: None,
             inline_stack: Vec::new(),
         })
         .collect();
@@ -876,6 +1173,7 @@ fn comparison_symbol(
         size_inferred: false,
         code: vec![1; usize::try_from(size).unwrap()],
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     }
 }
@@ -1113,6 +1411,13 @@ fn comparison_warns_when_neither_build_variant_is_supplied() {
             .unwrap()
             .contains("build variant warning: no build variants were supplied")
     );
+    let mut csv = Vec::new();
+    render_compare_csv(&report, &mut csv).unwrap();
+    assert!(
+        String::from_utf8(csv)
+            .unwrap()
+            .contains("build-variant-warning")
+    );
     let json = serde_json::to_value(&report).unwrap();
     assert!(
         json["build_variant_warning"]
@@ -1171,6 +1476,7 @@ fn report_keeps_duplicate_group_members_without_emitting_code() {
             size_inferred: false,
             code: vec![1, 2],
             normalized: None,
+            body_fingerprint: None,
             inline_stack: Vec::new(),
         })
         .collect();
@@ -1218,6 +1524,7 @@ fn dead_code_is_a_candidate_list_when_two_symbols_share_one_fingerprint() {
             size_inferred: false,
             code: vec![1, 2],
             normalized: None,
+            body_fingerprint: None,
             inline_stack: Vec::new(),
         })
         .collect();
@@ -1258,6 +1565,7 @@ fn dead_code_is_a_candidate_list_when_a_call_endpoint_matches_no_symbol() {
         size_inferred: false,
         code: vec![1, 2],
         normalized: None,
+        body_fingerprint: None,
         inline_stack: Vec::new(),
     }];
     artifact.calls.push(codehelion_artifact::ArtifactCall {

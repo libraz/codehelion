@@ -39,6 +39,11 @@
 //!   of the build variant, because results depend on it.
 //! - Savings and confidence live in separate columns; there is no single
 //!   collapsed score column.
+//! - What an artifact analysis established beside its IR is stored with it:
+//!   the outcome of every source-map reference the artifact declared, and the
+//!   ceilings an untrusted run installed. Re-rendering a saved analysis reads
+//!   these rows instead of deriving them again, so the two renderings of one
+//!   analysis cannot disagree.
 //! - A controlled vocabulary that has a producing type is written from that
 //!   type rather than restated here, so every value the analysis can produce
 //!   is a value its column accepts.
@@ -57,14 +62,17 @@ use codehelion_helper_protocol::ir::Unavailability;
 use rusqlite::Connection;
 
 use crate::StoreError;
-use crate::artifact::{ArtifactAnalysisUnmappedReason, ArtifactAnalysisUnmappedSourceReason};
+use crate::artifact::{
+    ArtifactAnalysisSourceMapReason, ArtifactAnalysisUnmappedReason,
+    ArtifactAnalysisUnmappedSourceReason,
+};
 
 /// The current local schema baseline this build reads.
 ///
 /// A database recorded under another one is rejected rather than migrated.
 /// The audit database holds derived scan state, so re-running the scan on a
 /// fresh path reproduces it without mutating the incompatible file.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Full current local database layout. Existing incompatible databases are
 /// not transformed; create a fresh database when this contract changes.
@@ -121,6 +129,12 @@ CREATE TABLE artifact_analysis_clone_group_savings (
     UNIQUE (artifact_analysis_id, source_scan_run_id, clone_group_fingerprint,
             source_build_variant_fingerprint, artifact_build_variant_fingerprint)
 ) STRICT;
+CREATE TABLE artifact_analysis_containment (
+    artifact_analysis_id      INTEGER PRIMARY KEY REFERENCES artifact_analysis (id) ON DELETE CASCADE,
+    max_input_bytes           INTEGER NOT NULL CHECK (max_input_bytes >= 0),
+    worker_timeout_seconds    INTEGER NOT NULL CHECK (worker_timeout_seconds >= 0),
+    worker_memory_limit_bytes INTEGER NOT NULL CHECK (worker_memory_limit_bytes >= 0)
+) STRICT;
 CREATE TABLE artifact_analysis_correlation (
     artifact_analysis_id       INTEGER PRIMARY KEY REFERENCES artifact_analysis (id) ON DELETE CASCADE,
     schema_version             TEXT NOT NULL,
@@ -151,6 +165,26 @@ CREATE TABLE artifact_analysis_savings_calibration (
     UNIQUE (artifact_analysis_id, source_scan_run_id, clone_group_fingerprint,
             source_build_variant_fingerprint, before_artifact_build_variant_fingerprint,
             after_artifact_fingerprint, after_artifact_build_variant_fingerprint)
+) STRICT;
+CREATE TABLE artifact_analysis_source_map_resolution (
+    artifact_analysis_id INTEGER NOT NULL REFERENCES artifact_analysis (id) ON DELETE CASCADE,
+    ordinal              INTEGER NOT NULL CHECK (ordinal >= 0),
+    uri                  TEXT NOT NULL,
+    local_path           TEXT,
+    reason               TEXT CHECK (reason IS NULL OR reason IN (:source_map_reason:)),
+    PRIMARY KEY (artifact_analysis_id, ordinal),
+    -- A reference either resolved to one local map or did not, for one reason.
+    CHECK ((local_path IS NULL) <> (reason IS NULL))
+) STRICT;
+CREATE TABLE artifact_analysis_source_map_resolution_source (
+    artifact_analysis_id INTEGER NOT NULL,
+    ordinal              INTEGER NOT NULL,
+    position             INTEGER NOT NULL CHECK (position >= 0),
+    source_name          TEXT NOT NULL,
+    PRIMARY KEY (artifact_analysis_id, ordinal, position),
+    FOREIGN KEY (artifact_analysis_id, ordinal)
+        REFERENCES artifact_analysis_source_map_resolution (artifact_analysis_id, ordinal)
+        ON DELETE CASCADE
 ) STRICT;
 CREATE TABLE artifact_analysis_source_mapping (
     id                          INTEGER PRIMARY KEY,
@@ -727,6 +761,7 @@ CREATE TABLE run_summary (
     pair_budget_exhausted INTEGER NOT NULL CHECK (pair_budget_exhausted IN (0, 1)),
     baseline_digest       TEXT,
     excluded_language     INTEGER NOT NULL,
+    excluded_oversized_metadata INTEGER NOT NULL,
     excluded_symlink_files INTEGER NOT NULL,
     excluded_symlink_directories INTEGER NOT NULL,
     guardrail_near_miss_delta INTEGER,
@@ -916,6 +951,14 @@ fn baseline_sql() -> String {
                 ArtifactAnalysisUnmappedSourceReason::ALL
                     .into_iter()
                     .map(ArtifactAnalysisUnmappedSourceReason::as_sql),
+            ),
+        )
+        .replace(
+            ":source_map_reason:",
+            &vocabulary(
+                ArtifactAnalysisSourceMapReason::ALL
+                    .into_iter()
+                    .map(ArtifactAnalysisSourceMapReason::as_sql),
             ),
         )
 }

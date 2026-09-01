@@ -146,10 +146,17 @@
       "type": "object",
       "required": ["kind", "name", "fingerprint", "size_delta_bytes"],
       "properties": {
-        "kind": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "description": "added and removed name a symbol identity present on one side only, and carry a different fingerprint on each side. resized and modified name one symbol found on both sides under a single fingerprint whose bytes are not the same bytes: that identity is derived from the normalized instruction stream, which drops immediates, so a build that only rewrote a constant or narrowed its encoding is reported here rather than as an addition and a removal. resized changed observed size, modified did not.",
+          "enum": ["added", "removed", "resized", "modified"]
+        },
         "name": { "type": ["string", "null"] },
         "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
-        "size_delta_bytes": { "type": "integer" }
+        "size_delta_bytes": {
+          "type": "integer",
+          "description": "Observed byte-size change from before to after. Zero for a modified symbol, whose bytes changed while its size did not."
+        }
       }
     },
     "duplicate_group_delta": {

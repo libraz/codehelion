@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::labels::LabelSet;
+use crate::labels::{LabelPair, LabelSet};
 use crate::schema::{Axes, DetectionResult, Finding, Fragment};
 
 use super::{covers, display_measure, matches_pair, ratio};
@@ -9,10 +9,14 @@ use super::{covers, display_measure, matches_pair, ratio};
 /// What a partial label set says about one detection run.
 ///
 /// Every finding falls into exactly one of confirmed / refuted / conflicting /
-/// unjudged, so the four counts sum to the number of findings.
+/// unjudged. The counts therefore sum to the number of findings, except for
+/// the labelled duplications the report shows only inside a longer finding,
+/// which [`adjudicate`] adds to `confirmed` because no finding carries their
+/// bounds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Adjudication {
-    /// Findings covering a labelled `clone_pair` and no labelled `non_clone`.
+    /// Findings covering a labelled `clone_pair` and no labelled `non_clone`,
+    /// plus the labelled pairs only a longer finding shows.
     pub confirmed: usize,
     /// Findings covering a labelled `non_clone` and no labelled `clone_pair`.
     pub refuted: usize,
@@ -60,6 +64,73 @@ impl Adjudication {
     }
 }
 
+/// Whether `member` holds the whole of `labelled`, in the same file.
+fn holds(member: &Fragment, labelled: &Fragment) -> bool {
+    labelled.line_count() > 0
+        && member.file == labelled.file
+        && member.start_line <= labelled.start_line
+        && labelled.end_line <= member.end_line
+}
+
+/// Whether `finding` shows the duplication `pair` names inside its own members.
+///
+/// A duplicated stretch of code is a duplicate at more than one cut, and the
+/// report keeps one finding per duplication: the longest cut is what it shows,
+/// and the shorter cuts of the same code are shown inside it rather than
+/// beside it. A label written against a shorter cut therefore names a
+/// duplication the reader is pointed at by a finding whose bounds are not the
+/// label's. [`covers`] cannot see that — it asks how much of a labelled region
+/// a member is, and a member several times the length of the region it holds
+/// answers "little" — so this asks the other question.
+///
+/// It is deliberately narrower than "a finding whose lines enclose the
+/// label's":
+///
+/// - both labelled regions must sit inside **one** finding, each within a
+///   member of its own. Two regions inside a single member is a finding that
+///   says nothing about how those two regions relate, and one region in each
+///   of two findings is two statements, neither of them this one;
+/// - the finding must classify at least as strictly as the label asks. This is
+///   the rule the fold itself applies when deciding a longer group may account
+///   for a shorter one: a verbatim label inside a finding that only matches up
+///   to renaming is not that label restated, and
+///   [`CloneType`](crate::schema::CloneType) runs from exact to gapped.
+fn shows_within(finding: &Finding, pair: &LabelPair) -> bool {
+    if pair.fragments.is_empty() || finding.clone_type > pair.clone_type {
+        return false;
+    }
+    let mut used: Vec<usize> = Vec::with_capacity(pair.fragments.len());
+    for labelled in &pair.fragments {
+        let held = finding
+            .fragments
+            .iter()
+            .enumerate()
+            .position(|(index, member)| !used.contains(&index) && holds(member, labelled));
+        match held {
+            Some(index) => used.push(index),
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Whether the report points a reader at the duplication `pair` names.
+///
+/// Either a finding carries the label's own bounds, which is [`matches_pair`],
+/// or a longer finding holds both labelled regions in members of its own, each
+/// region in a member no other region claims and under a clone class at least
+/// as strict as the label's. The two answer one question — did the tool put
+/// this duplication in front of somebody — and which of them answers it is a
+/// statement about where the report drew the edges, not about whether the
+/// duplication was found.
+#[must_use]
+pub fn confirms(results: &DetectionResult, pair: &LabelPair, threshold: f64) -> bool {
+    results
+        .findings
+        .iter()
+        .any(|finding| matches_pair(finding, pair, threshold) || shows_within(finding, pair))
+}
+
 /// Rule `results` against `labels`, scoring only what the labels speak about.
 ///
 /// `threshold` is the overlap threshold for the "covers" relation, as in
@@ -86,6 +157,32 @@ pub fn adjudicate(results: &DetectionResult, labels: &LabelSet, threshold: f64) 
                 adjudication.actionable_refuted += usize::from(finding.actionable);
             }
             Verdict::Unjudged => adjudication.unjudged += 1,
+        }
+    }
+    // A labelled duplication the report shows only inside a longer finding is
+    // still a duplication the report shows. No finding carries its bounds, so
+    // the loop above cannot count it, and leaving it out would score the fold
+    // that keeps one duplication to one finding as a loss of precision — the
+    // report says exactly what it said before, in one entry instead of two.
+    //
+    // Counted once, on the finding that shows it, and only where nothing else
+    // in the report already answers for it: a label two findings speak about
+    // is one duplication reported twice, which is what the fold removes.
+    for pair in &labels.clone_pairs {
+        if results
+            .findings
+            .iter()
+            .any(|finding| matches_pair(finding, pair, threshold))
+        {
+            continue;
+        }
+        if let Some(finding) = results
+            .findings
+            .iter()
+            .find(|finding| shows_within(finding, pair))
+        {
+            adjudication.confirmed += 1;
+            adjudication.actionable_confirmed += usize::from(finding.actionable);
         }
     }
     adjudication

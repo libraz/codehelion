@@ -20,6 +20,13 @@ use wasmparser::{
 /// Version of the immediate-free WebAssembly opcode representation.
 pub const WASM_NORMALIZATION_VERSION: &str = "wasm-opcode-v1";
 
+/// Version of the immediate-preserving WebAssembly body representation.
+///
+/// This is the level of detail between [`WASM_NORMALIZATION_VERSION`], which
+/// keeps opcodes alone, and the raw body bytes, which pin every function index
+/// a module happened to assign.
+pub const WASM_BODY_VERSION: &str = "wasm-body-v1";
+
 /// WebAssembly proposals this backend accepts, named rather than inherited.
 ///
 /// The same set drives validation and every later decode, so a module is
@@ -240,6 +247,7 @@ impl ArtifactBackend for WasmBackend {
                 version: std::mem::take(&mut function.normalized.version),
                 bytes: std::mem::take(&mut function.normalized.bytes),
             };
+            let body = std::mem::take(&mut function.body);
             let fingerprint = symbol_fingerprint(name.as_deref(), &normalized.bytes);
             by_index.insert(function.index, fingerprint);
             ir.symbols.push(ArtifactSymbol {
@@ -252,6 +260,7 @@ impl ArtifactBackend for WasmBackend {
                 size_inferred: false,
                 code: std::mem::take(&mut function.code),
                 normalized: Some(normalized),
+                body_fingerprint: Some(body_fingerprint(&body)),
                 inline_stack: Vec::new(),
             });
         }
@@ -450,6 +459,8 @@ struct PendingFunction {
     offset: u64,
     code: Vec<u8>,
     normalized: NormalizedInstructions,
+    /// The body bytes with every function-index immediate left out.
+    body: Vec<u8>,
     calls: Vec<PendingCall>,
     references: BTreeSet<u32>,
 }
@@ -500,19 +511,40 @@ fn parse_function(
     bytes: &[u8],
 ) -> Result<PendingFunction, ArtifactError> {
     let body_range = body.range();
-    let mut normalized = Vec::with_capacity(
-        usize::try_from(body_range.end.saturating_sub(body_range.start)).unwrap_or(0),
-    );
+    let capacity = usize::try_from(body_range.end.saturating_sub(body_range.start)).unwrap_or(0);
+    let mut normalized = Vec::with_capacity(capacity);
+    // The local declarations open the body and name no function, so they are
+    // carried into the immediate-preserving form exactly as they were read.
+    let operand_start = usize::try_from(
+        body.get_binary_reader_for_operators()
+            .map_err(|error| malformed(error.to_string()))?
+            .original_position(),
+    )
+    .map_err(|_| malformed("operator offset lies outside the input".to_owned()))?;
+    let body_start = usize::try_from(body_range.start)
+        .map_err(|_| malformed("function body lies outside the input".to_owned()))?;
+    let body_end = usize::try_from(body_range.end)
+        .map_err(|_| malformed("function body lies outside the input".to_owned()))?;
+    let mut form = Vec::with_capacity(capacity);
+    form.extend(span(bytes, body_start, operand_start)?);
     let mut calls = Vec::new();
     let mut references = BTreeSet::new();
     let operators = body
         .get_operators_reader()
         .map_err(|error| malformed(error.to_string()))?;
+    let mut pending: Option<PendingOperand> = None;
     for operator in operators.into_iter_with_offsets() {
         let (operator, offset) = operator.map_err(|error| malformed(error.to_string()))?;
         let offset = usize::try_from(offset)
             .map_err(|_| malformed("operator offset lies outside the input".to_owned()))?;
+        if let Some(previous) = pending.take() {
+            append_operand(&mut form, bytes, previous, offset)?;
+        }
         let opcode = append_opcode_key(&mut normalized, bytes, offset)?;
+        pending = Some(PendingOperand {
+            offset,
+            renumbers: names_a_function(&operator),
+        });
         match operator {
             Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
                 calls.push(PendingCall::Direct(function_index));
@@ -533,17 +565,71 @@ fn parse_function(
             _ => {}
         }
     }
+    if let Some(previous) = pending {
+        append_operand(&mut form, bytes, previous, body_end)?;
+    }
     Ok(PendingFunction {
         index,
-        offset: body.range().start,
+        offset: body_range.start,
         code: body.as_bytes().to_vec(),
         normalized: NormalizedInstructions {
             version: WASM_NORMALIZATION_VERSION.to_owned(),
             bytes: normalized,
         },
+        body: form,
         calls,
         references,
     })
+}
+
+/// One operator whose extent is known only once the next one is read.
+#[derive(Debug, Clone, Copy)]
+struct PendingOperand {
+    /// Where this operator starts in the module bytes.
+    offset: usize,
+    /// Whether its immediate is a function index, which renumbers when a
+    /// neighbouring function is inserted or removed.
+    renumbers: bool,
+}
+
+/// Whether this operator's immediate is a function index.
+///
+/// These are the only immediates the immediate-preserving form drops. A body
+/// that merely moved within its module rewrites them and nothing else, so
+/// keeping them would report every caller of a shifted function as changed.
+/// Every one of them is a single-byte opcode, which is what lets the opcode be
+/// kept while the index is dropped.
+const fn names_a_function(operator: &Operator<'_>) -> bool {
+    matches!(
+        operator,
+        Operator::Call { .. } | Operator::ReturnCall { .. } | Operator::RefFunc { .. }
+    )
+}
+
+/// Append one operator to the immediate-preserving form.
+///
+/// An operator that names a function contributes its opcode alone; every other
+/// operator contributes the bytes it occupies, immediates included.
+fn append_operand(
+    form: &mut Vec<u8>,
+    bytes: &[u8],
+    operand: PendingOperand,
+    end: usize,
+) -> Result<(), ArtifactError> {
+    let end = if operand.renumbers {
+        operand.offset.saturating_add(1)
+    } else {
+        end
+    };
+    form.extend(span(bytes, operand.offset, end)?);
+    Ok(())
+}
+
+/// Read one byte range that the input is required to contain.
+fn span(bytes: &[u8], start: usize, end: usize) -> Result<&[u8], ArtifactError> {
+    bytes
+        .get(start..end)
+        .ok_or_else(|| malformed("operator extent lies outside the input".to_owned()))
 }
 
 /// Encode an opcode without any of its value, index, or branch immediates, and
@@ -600,6 +686,21 @@ fn symbol_fingerprint(name: Option<&str>, normalized: &[u8]) -> ArtifactFingerpr
     ArtifactFingerprint::from_content("wasm-symbol", &bytes)
 }
 
+/// Identity of one body's instruction bytes with their immediate values.
+///
+/// The name is deliberately absent: this answers whether two bodies hold the
+/// same instructions, and the identity that pairs two symbols across a
+/// comparison carries the name already. The recipe version belongs to it for
+/// the same reason it belongs to [`symbol_fingerprint`] -- two forms produced
+/// by different rules must not collide.
+fn body_fingerprint(body: &[u8]) -> ArtifactFingerprint {
+    let mut bytes = Vec::with_capacity(body.len() + WASM_BODY_VERSION.len() + 8);
+    bytes.extend((WASM_BODY_VERSION.len() as u64).to_le_bytes());
+    bytes.extend(WASM_BODY_VERSION.as_bytes());
+    bytes.extend(body);
+    ArtifactFingerprint::from_content("wasm-symbol-body", &bytes)
+}
+
 const fn section_name(id: u8) -> Option<&'static str> {
     match id {
         0 => Some("custom"),
@@ -633,7 +734,6 @@ mod tests {
     use super::*;
     use crate::metrics;
     use proptest::prelude::*;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     const MODULE: &[u8] = &[
         0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 3, 2, 0, 0, 7, 7, 1, 3, b'f', b'o',
@@ -687,14 +787,23 @@ mod tests {
 
     proptest! {
         #[test]
-        fn arbitrary_and_truncated_wasm_bytes_never_panic(
+        fn arbitrary_prefixed_and_damaged_bytes_never_panic(
             bytes in prop::collection::vec(any::<u8>(), 0..2048),
+            position in any::<prop::sample::Index>(),
+            mask in 1_u8..=u8::MAX,
+            cut in any::<prop::sample::Index>(),
         ) {
-            let mut truncated = b"\0asm\x01\0\0\0".to_vec();
-            truncated.extend(&bytes);
-            for input in [&bytes, &truncated] {
-                let result = catch_unwind(AssertUnwindSafe(|| WasmBackend.parse(input)));
-                prop_assert!(result.is_ok());
+            let fixture = MODULE.to_vec();
+            let mut flipped = fixture.clone();
+            let at = position.index(flipped.len());
+            flipped[at] ^= mask;
+            let truncated = fixture[..cut.index(fixture.len())].to_vec();
+            let mut magic = b"\0asm\x01\0\0\0".to_vec();
+            magic.extend(&bytes);
+            for input in [&bytes, &flipped, &truncated, &magic] {
+                if let Err(failure) = crate::check_parse_answers(&WasmBackend, input) {
+                    return Err(TestCaseError::fail(failure));
+                }
             }
         }
     }
@@ -888,6 +997,42 @@ mod tests {
         assert!(dead.definitive);
     }
 
+    /// Normalization drops every immediate, so an optimizing build that only
+    /// rewrote a constant leaves the symbol identity alone. The body identity
+    /// is what still separates the two, and it stays blind to the function
+    /// index a call names, which renumbers for reasons the body did not cause.
+    #[test]
+    fn a_body_identity_follows_the_immediates_but_not_the_function_indices() {
+        // i32.const 1000000; drop; end, then the same with a narrow constant.
+        let wide =
+            two_function_module([&[0, 0x41, 0xc0, 0x84, 0x3d, 0x1a, 0x0b], &[0, 0x0b]], None);
+        let narrow = two_function_module([&[0, 0x41, 0x00, 0x1a, 0x0b], &[0, 0x0b]], None);
+        // call 1; end, then a module whose callee sits at another index.
+        let calls_one = two_function_module([&[0, 0x10, 1, 0x0b], &[0, 0x0b]], None);
+        let calls_zero = two_function_module([&[0, 0x10, 0, 0x0b], &[0, 0x0b]], None);
+
+        let parsed = |module: &[u8]| {
+            let artifact = WasmBackend.parse(module).expect("fixture parses");
+            let symbol = artifact.symbols[0].clone();
+            (
+                symbol.fingerprint,
+                symbol.body_fingerprint.expect("wasm decodes operands"),
+            )
+        };
+        let (wide_symbol, wide_body) = parsed(&wide);
+        let (narrow_symbol, narrow_body) = parsed(&narrow);
+        let (one_symbol, one_body) = parsed(&calls_one);
+        let (zero_symbol, zero_body) = parsed(&calls_zero);
+
+        assert_eq!(wide_symbol, narrow_symbol, "the opcodes did not change");
+        assert_ne!(wide_body, narrow_body, "the constant did change");
+        assert_eq!(one_symbol, zero_symbol);
+        assert_eq!(
+            one_body, zero_body,
+            "a call target is an index, and an index is not the body"
+        );
+    }
+
     /// A module without that global is the same module minus one root, which
     /// is what makes the reference above the reason the callee stays live.
     #[test]
@@ -962,6 +1107,7 @@ mod tests {
                     version: WASM_NORMALIZATION_VERSION.to_owned(),
                     bytes: Vec::new(),
                 },
+                body: Vec::new(),
                 calls: vec![
                     PendingCall::Indirect { type_index: 7 },
                     PendingCall::Untyped,
@@ -1275,6 +1421,7 @@ mod tests {
                     version: WASM_NORMALIZATION_VERSION.to_owned(),
                     bytes: Vec::new(),
                 },
+                body: Vec::new(),
                 calls: vec![PendingCall::Indirect { type_index: 7 }],
                 references: BTreeSet::new(),
             }],

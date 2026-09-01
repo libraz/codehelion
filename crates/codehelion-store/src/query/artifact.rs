@@ -1,5 +1,9 @@
 use std::collections::BTreeMap;
 
+use crate::artifact::{
+    ArtifactAnalysisContainment, ArtifactAnalysisSourceMap, ArtifactAnalysisSourceMapOutcome,
+    ArtifactAnalysisSourceMapReason,
+};
 use crate::lifecycle::{ARTIFACT_ANALYSIS_RECENCY, SelectedCloneGroupEstimate};
 
 use super::common::{
@@ -588,6 +592,127 @@ impl Store {
             calibrations.extend(self.artifact_savings_calibrations(source_scan_run_id, &hex)?);
         }
         Ok(calibrations)
+    }
+
+    /// The outcome of every source-map reference one analysis resolved, in the
+    /// order the artifact declared them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be read, a stored row is
+    /// neither resolved nor unavailable, or a reason comes from a newer
+    /// vocabulary.
+    pub fn artifact_source_maps(
+        &self,
+        analysis_id: i64,
+    ) -> Result<Vec<ArtifactAnalysisSourceMap>, StoreError> {
+        let mut sources = self.artifact_source_map_sources(analysis_id)?;
+        let mut statement = self.conn.prepare(
+            "SELECT ordinal, uri, local_path, reason
+             FROM artifact_analysis_source_map_resolution
+             WHERE artifact_analysis_id = ?1
+             ORDER BY ordinal ASC",
+        )?;
+        let rows = statement
+            .query_map([analysis_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(ordinal, uri, local_path, reason)| {
+                let outcome = match (local_path, reason) {
+                    (Some(local_path), None) => ArtifactAnalysisSourceMapOutcome::Resolved {
+                        local_path,
+                        sources: sources.remove(&ordinal).unwrap_or_default(),
+                    },
+                    (None, Some(reason)) => ArtifactAnalysisSourceMapOutcome::Unavailable {
+                        reason: ArtifactAnalysisSourceMapReason::from_sql(&reason)?,
+                    },
+                    _ => {
+                        return Err(StoreError::InvalidMappingEvidence {
+                            reason: "a source-map resolution is neither resolved nor unavailable"
+                                .to_owned(),
+                        });
+                    }
+                };
+                Ok(ArtifactAnalysisSourceMap { uri, outcome })
+            })
+            .collect()
+    }
+
+    /// The source names each resolved map declared, keyed by its resolution.
+    fn artifact_source_map_sources(
+        &self,
+        analysis_id: i64,
+    ) -> Result<BTreeMap<i64, Vec<String>>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT ordinal, source_name
+             FROM artifact_analysis_source_map_resolution_source
+             WHERE artifact_analysis_id = ?1
+             ORDER BY ordinal ASC, position ASC",
+        )?;
+        let rows = statement
+            .query_map([analysis_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut sources: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+        for (ordinal, source_name) in rows {
+            sources.entry(ordinal).or_default().push(source_name);
+        }
+        Ok(sources)
+    }
+
+    /// The ceilings one analysis ran under, when it ran under the untrusted
+    /// preset.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be read or a stored ceiling
+    /// is negative.
+    pub fn artifact_containment(
+        &self,
+        analysis_id: i64,
+    ) -> Result<Option<ArtifactAnalysisContainment>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT max_input_bytes, worker_timeout_seconds, worker_memory_limit_bytes
+                 FROM artifact_analysis_containment
+                 WHERE artifact_analysis_id = ?1",
+                [analysis_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(
+                |(max_input_bytes, worker_timeout_seconds, worker_memory_limit_bytes)| {
+                    Ok(ArtifactAnalysisContainment {
+                        max_input_bytes: nonnegative_u64(
+                            "artifact_analysis_containment.max_input_bytes",
+                            max_input_bytes,
+                        )?,
+                        worker_timeout_seconds: nonnegative_u64(
+                            "artifact_analysis_containment.worker_timeout_seconds",
+                            worker_timeout_seconds,
+                        )?,
+                        worker_memory_limit_bytes: nonnegative_u64(
+                            "artifact_analysis_containment.worker_memory_limit_bytes",
+                            worker_memory_limit_bytes,
+                        )?,
+                    })
+                },
+            )
+            .transpose()
     }
 
     /// Coverage figures recorded with one explicit source-run correlation.

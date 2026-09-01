@@ -4,7 +4,7 @@ use super::correlation::{AttributionBasis, RefactorSavingsAssumption};
 use super::model::{
     ARTIFACT_CSV_HEADER, ArtifactComparisonReport, ArtifactReport, AssumptionScope,
     COMPARE_CSV_HEADER, ReportAssumption, SourceMapResolutionStatus, column, compare_column,
-    comparison_assumptions, dead_code_unavailability, report_assumptions,
+    comparison_assumptions, dead_code_unavailability, pairs_both_artifacts, report_assumptions,
     retained_size_unavailability,
 };
 use super::{
@@ -561,6 +561,7 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
     // from this one record, rather than being reachable in two formats out of
     // three.
     summary[column::SHARED_DEPENDENCY_BYTES] = optional_bytes(report.sizes.shared_dependency_bytes);
+    summary[column::DUPLICATED_DATA_BYTES] = optional_bytes(report.sizes.duplicated_data_bytes);
     summary[column::CODE_SECTION_BYTES] = report.code_section_bytes.to_string();
     summary[column::DATA_SEGMENT_BYTES] = report.data_segment_bytes.to_string();
     summary[column::CLONE_CONFIDENCE] = format!("{:?}", report.sizes.clone_confidence);
@@ -1097,15 +1098,21 @@ pub(super) fn render_compare_text(
 fn render_symbol_deltas(deltas: &[super::model::SymbolDelta], out: &mut impl Write) -> Result<()> {
     let mut nameless = 0_usize;
     for delta in deltas {
-        let Some(name) = delta.name.as_deref() else {
-            nameless += 1;
-            continue;
-        };
-        writeln!(
-            out,
-            "  {} {} {} {:+} bytes",
-            delta.kind, name, delta.fingerprint, delta.size_delta_bytes
-        )?;
+        match delta.name.as_deref() {
+            Some(name) => writeln!(
+                out,
+                "  {} {} {} {:+} bytes",
+                delta.kind, name, delta.fingerprint, delta.size_delta_bytes
+            )?,
+            // A change found on both sides is identified by the one
+            // fingerprint they share, so it stays actionable unnamed.
+            None if pairs_both_artifacts(delta.kind) => writeln!(
+                out,
+                "  {} {} {:+} bytes",
+                delta.kind, delta.fingerprint, delta.size_delta_bytes
+            )?,
+            None => nameless += 1,
+        }
     }
     if nameless > 0 {
         writeln!(
