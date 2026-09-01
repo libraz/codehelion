@@ -158,6 +158,31 @@ fn start_through(script: &Path) -> Helper {
     started.expect("the helper should start and shake hands")
 }
 
+/// A program that starts the helper with no wrapper named in its environment.
+///
+/// The mirror of [`helper_inheriting`], and needed for the same reason: an
+/// environment variable outranks the file for these keys, so a suite run under
+/// a tool that names its own wrapper — a coverage run names one — would be
+/// asking whether the tree's choice wins against a choice already made. What
+/// the tree decides can only be read where nothing else has decided it.
+#[cfg(unix)]
+fn helper_choosing_nothing(at: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = at.join("start-helper-plain.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nunset RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER\nexec \"{}\"\n",
+            env!("CARGO_BIN_EXE_codehelion-backend-rust")
+        ),
+    )
+    .expect("write the starting script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make the starting script startable");
+    script
+}
+
 /// The tree names a program, nothing permitted running one, so nothing runs it
 /// — not while the build is described, which happens before any permission has
 /// been asked for, and not while a unit is analysed.
@@ -207,7 +232,8 @@ fn permitting_execution_lets_the_tree_choose_its_wrapper() {
     let wrapper = wrapper_touching(&marker, holder.path());
     let tree = tree_building_a_script(&wrapper);
 
-    let mut helper = helper().permitting(vec![Execution::BuildScript]);
+    let mut helper = start_through(&helper_choosing_nothing(holder.path()))
+        .permitting(vec![Execution::BuildScript]);
     let answer = helper
         .analyze(&tree.unit(), &[Capability::Types])
         .expect("the helper should answer");
