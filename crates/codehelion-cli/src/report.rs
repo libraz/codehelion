@@ -1662,6 +1662,18 @@ pub struct Group {
     /// means its members also appear elsewhere: these are the only findings
     /// that overlap.
     pub split_pair: bool,
+    /// The finding that already reports the stretch this one is a narrower
+    /// cut of, hex-encoded; `None` when no other finding in the run covers
+    /// every one of its occurrences.
+    ///
+    /// The engine folds the cuts that state the same thing. What it keeps
+    /// apart is the cuts that state different things about one place: four
+    /// statements matching verbatim inside eight that match up to renaming is
+    /// two facts, and dropping either would report less than was measured.
+    /// Both are worth keeping and neither is worth reading twice, so a finding
+    /// that sits inside another names the one reporting the wider stretch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub narrower_cut_of: Option<String>,
     /// Whether the effective suppression policy places this group after
     /// ordinary findings. Persisted in the report so consumers need not
     /// reconstruct policy from classifications.

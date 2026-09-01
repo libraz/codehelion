@@ -539,6 +539,11 @@ pub(crate) fn recorded_group(
         test_code_evidence: group.test_code_evidence,
         width_family: group.width_family,
         split_pair: group.split_pair,
+        // Settled from the run's whole set of findings once it is loaded, the
+        // same way a scan settles it once its own set is complete. Deriving it
+        // rather than storing it is what keeps a replay from disagreeing with
+        // the scan it replays.
+        narrower_cut_of: None,
         ranked_down: false,
         suppressed: recorded_suppression(suppress_reason, stored_suppression),
         // A recorded run is re-rendered on its own; a baseline is something a

@@ -192,6 +192,10 @@ pub(super) fn report_group(core: ReportGroupCore) -> report::Group {
         suppressed: None,
         baseline: None,
         split_pair: false,
+        // Which findings sit inside which is a question about the run's
+        // whole set, so it is settled once the set is complete rather than
+        // guessed at while one member of it is being built.
+        narrower_cut_of: None,
         ranked_down: false,
         semantic: None,
         artifact_savings: Vec::new(),

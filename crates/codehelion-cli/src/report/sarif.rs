@@ -805,6 +805,7 @@ impl<'a> ResultEntry<'a> {
                 test_code_evidence: group.test_code_evidence,
                 width_family: group.width_family,
                 split_pair: group.split_pair,
+                narrower_cut_of: group.narrower_cut_of.as_deref(),
                 ranked_down: group.ranked_down,
                 identity: group.identity.as_ref(),
                 suppressed: group.suppressed.as_ref(),
@@ -1010,6 +1011,11 @@ struct ResultProperties<'a> {
     test_code_evidence: Option<codehelion_core::test_code::TestCodeEvidence>,
     width_family: bool,
     split_pair: bool,
+    /// The finding already reporting a wider cut of this stretch, when one
+    /// does. Two cuts of one place are two findings and a consumer reading
+    /// results alone has nothing else that connects them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    narrower_cut_of: Option<&'a str>,
     /// Whether the effective policy places this group after ordinary findings.
     /// A consumer that only reads results otherwise cannot tell a group ranked
     /// down by policy from one that simply scored low.

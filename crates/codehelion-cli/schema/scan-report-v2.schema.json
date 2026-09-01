@@ -1084,6 +1084,10 @@
           "type": "boolean",
           "description": "Whether this is a verified pair reported on its own because no group could hold both members. Being a clone is not transitive, so a unit can be a copy of two units that are not copies of each other, and only one such relation fits in a group. These are the only findings whose members also appear in other findings."
         },
+        "narrower_cut_of": {
+          "$ref": "#/$defs/hex",
+          "description": "The finding already reporting a wider cut of the same stretch, when another finding in the run accounts for every occurrence of this one with an occurrence of its own. Cuts that state the same thing are folded by the engine; these state different things about one place, so both are reported and the smaller names the wider. Absent when nothing covers this finding."
+        },
         "ranked_down": {
           "type": "boolean",
           "description": "Whether the effective policy placed this finding after ordinary findings."

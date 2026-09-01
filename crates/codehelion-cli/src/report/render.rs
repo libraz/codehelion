@@ -1663,7 +1663,7 @@ fn group_kind(group: &Group, decoration: Decoration) -> String {
 
 /// The bracketed qualifications on a group's heading: why it is ranked where
 /// it is, and where it stands against the baseline.
-fn group_markers(group: &Group, palette: &Palette) -> String {
+fn group_markers(group: &Group, opts: TextOptions, palette: &Palette) -> String {
     // A group that is shown but ranked down says why: its place in the
     // ranking is explained rather than silently lowered.
     let marker = match (&group.suppressed, &group.boilerplate, group.test_code) {
@@ -1685,7 +1685,19 @@ fn group_markers(group: &Group, palette: &Palette) -> String {
     } else {
         String::new()
     };
-    format!("{}{overlap}{marker}", baseline_marker(group, palette))
+    // Cuts of one stretch are separate findings that say different things, so
+    // both are listed; read in order they are otherwise two entries about the
+    // same lines with nothing on either saying so.
+    let cut = group
+        .narrower_cut_of
+        .as_ref()
+        .map_or_else(String::new, |wider| {
+            format!(
+                " {}",
+                palette.yellow(&format!("[narrower cut of {}]", opts.id(wider)))
+            )
+        });
+    format!("{}{overlap}{cut}{marker}", baseline_marker(group, palette))
 }
 
 /// The occurrences one group writes, canonical first.
@@ -1742,7 +1754,7 @@ pub(super) fn render_group(
         "{gutter}  {}  {kind:kind_width$}  {tokens:>tokens_width$} tokens  {}{}",
         palette.priority(group.priority.value),
         palette.cyan(opts.id(&group.fingerprint)),
-        group_markers(group, palette),
+        group_markers(group, opts, palette),
         kind_width = columns.kind,
         tokens_width = columns.tokens,
     )?;

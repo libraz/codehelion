@@ -82,6 +82,59 @@ fn a_run_naming_a_place_inside_its_hosts_survives_the_fold() {
             .unwrap();
         assert!(member["tokens"].as_u64().unwrap() * 2 <= host["tokens"].as_u64().unwrap());
     }
+    // Two findings about the same lines, kept apart because they say different
+    // things. Read in order they would be two entries with nothing on either
+    // connecting them, so the smaller names the one reporting the wider cut.
+    assert_eq!(run["narrower_cut_of"], unit["fingerprint"]);
+    assert!(
+        unit.get("narrower_cut_of").is_none(),
+        "nothing reports a wider cut of the widest finding"
+    );
+}
+
+#[test]
+fn a_replay_names_the_same_wider_cut_the_scan_did() {
+    // Which findings sit inside which is a property of the run, not of the
+    // pipeline that assembled it. A scan and a replay of the same run reaching
+    // different answers would be two accounts of one set of findings.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/left.rs"), LOCAL_LEFT_RS).unwrap();
+    std::fs::write(root.join("src/right.rs"), LOCAL_RIGHT_RS).unwrap();
+
+    let scanned = scan_json(root);
+    let output = cmd()
+        .current_dir(root)
+        .args(["report", "--format", "json", "--limit", "0"])
+        .output()
+        .expect("run report");
+    assert!(output.status.success(), "{output:?}");
+    let replayed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+
+    let named = |value: &serde_json::Value| -> Vec<(String, Option<String>)> {
+        let mut pairs: Vec<(String, Option<String>)> = value["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|group| {
+                (
+                    group["fingerprint"].as_str().unwrap().to_string(),
+                    group["narrower_cut_of"].as_str().map(ToOwned::to_owned),
+                )
+            })
+            .collect();
+        pairs.sort();
+        pairs
+    };
+    let scanned = named(&scanned);
+    assert!(
+        scanned.iter().any(|(_, cover)| cover.is_some()),
+        "the fixture is the one where a run survives inside the group holding it"
+    );
+    assert_eq!(scanned, named(&replayed));
 }
 
 /// A function that measures its input twice over, so a run is duplicated
