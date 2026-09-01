@@ -391,6 +391,20 @@ pub enum ResponseBody {
         unit: UnitRef,
         /// Why it cannot be analyzed.
         reason: Unavailability,
+        /// What the helper has to say about this unit beyond the reason.
+        ///
+        /// Carried in the answer rather than left on standard error. The two
+        /// streams have no order between them, so a sentence written to one
+        /// just before the answer went out on the other reaches a reader at no
+        /// fixed time: late, it is filed against whichever unit was being asked
+        /// about when it finally arrived, or against none at all if the run had
+        /// no further units. A reason and the sentence explaining it are one
+        /// answer and travel as one.
+        ///
+        /// Defaulted so a helper built before this field still parses; such a
+        /// helper simply explains nothing here, which is what it did anyway.
+        #[serde(default)]
+        diagnostics: Vec<String>,
     },
     /// Shutdown acknowledged.
     Shutdown,

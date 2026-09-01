@@ -141,7 +141,10 @@
           "file": "src/render.rs",
           "variant": "target=host"
         },
-        "reason": "requires_execution"
+        "reason": "requires_execution",
+        "diagnostics": [
+          "running a build script was not permitted"
+        ]
       }
     },
     {

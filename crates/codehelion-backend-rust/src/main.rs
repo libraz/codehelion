@@ -75,9 +75,16 @@ fn main() -> std::process::ExitCode {
 #[derive(Default)]
 struct RustBackend {
     workspaces: Workspaces,
+    /// Sentences explaining the unit currently being answered, waiting to
+    /// travel with its answer.
+    refusals: Vec<String>,
 }
 
 impl Backend for RustBackend {
+    fn diagnostics(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.refusals)
+    }
+
     fn identity(&self) -> HelperIdentity {
         HelperIdentity {
             name: NAME.to_string(),
@@ -143,13 +150,17 @@ impl Backend for RustBackend {
                 Answer::Analyzed(ir)
             }
             Outcome::Unavailable { reason, why } => {
-                // On standard error, because standard output is the protocol.
-                // The reason travels on the wire and the sentence behind it
-                // does not: the client collects this stream per request and
-                // files it against the unit that was refused, which is the
-                // only place a run can be told which of the situations behind
-                // a reason it met.
-                eprintln!("{NAME}: {}: {}: {why}", request.unit.unit, reason.name());
+                // The reason travels on the wire and so does the sentence
+                // behind it: a reason names a class of situation, and which of
+                // them was met is the only thing that says what to do about it.
+                // Kept for this answer rather than written to standard error
+                // alone, because that stream has no order against the answers
+                // and what it carries cannot be filed against a unit.
+                let line = format!("{NAME}: {}: {}: {why}", request.unit.unit, reason.name());
+                self.refusals.push(line.clone());
+                // Also printed, for an operator watching the run. Standard
+                // output is the protocol, so it cannot go there.
+                eprintln!("{line}");
                 Answer::Unavailable(reason)
             }
         }

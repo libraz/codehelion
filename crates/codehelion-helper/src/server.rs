@@ -64,6 +64,22 @@ pub trait Backend {
 
     /// Analyse one unit.
     fn analyze(&mut self, request: &Analyze) -> Answer;
+
+    /// What this backend has to say about the unit it answered last, beyond the
+    /// reason it gave.
+    ///
+    /// Asked once, straight after [`Backend::analyze`], and emptied by the
+    /// asking: one helper answers about many units, and a sentence read whole
+    /// every time would be attached to every unit that came after the one it
+    /// explains.
+    ///
+    /// A backend that explains nothing keeps the default. Writing the sentence
+    /// to standard error instead does not answer the same question: that stream
+    /// has no order against this one, so what it carries reaches a reader at no
+    /// fixed time and cannot be filed against the unit it belongs to.
+    fn diagnostics(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Serve requests until the stream ends or a shutdown is asked for.
@@ -107,6 +123,10 @@ pub fn serve<B: Backend, R: Read, W: Write>(
                         body: ResponseBody::Unavailable {
                             unit: analyze.unit.clone(),
                             reason: Unavailability::ResponseTooLarge,
+                            // The answer that did not fit is what there was to
+                            // say; a second frame explaining the first would be
+                            // the thing this replacement exists to avoid.
+                            diagnostics: Vec::new(),
                         },
                     },
                 )?;
@@ -151,6 +171,10 @@ fn answer<B: Backend>(backend: &mut B, request: &Request) -> ResponseBody {
             Answer::Unavailable(reason) => ResponseBody::Unavailable {
                 unit: analyze.unit.clone(),
                 reason,
+                // Taken after the answer and sent with it, so the sentence and
+                // the reason it explains arrive together and about the same
+                // unit.
+                diagnostics: backend.diagnostics(),
             },
             Answer::Failed(failure) => ResponseBody::Failed(failure),
         },
@@ -201,6 +225,104 @@ mod tests {
             file: "src/lib.rs".to_string(),
             variant: "host".to_string(),
         }
+    }
+
+    /// A backend that explains one unit and then the next, differently.
+    struct Explaining {
+        said: Vec<String>,
+    }
+
+    impl Backend for Explaining {
+        fn identity(&self) -> HelperIdentity {
+            HelperIdentity {
+                name: "explaining".to_string(),
+                version: "0.1.0".to_string(),
+                protocol: PROTOCOL_VERSION,
+                toolchains: vec!["fixed 1.0".to_string()],
+                capabilities: vec![Capability::Types],
+                executes: Vec::new(),
+            }
+        }
+
+        fn describe(&mut self, _request: &DescribeBuild) -> Description {
+            Description::Build(BuildDescription::default())
+        }
+
+        fn analyze(&mut self, request: &Analyze) -> Answer {
+            self.said
+                .push(format!("{} has no build", request.unit.file));
+            Answer::Unavailable(Unavailability::NoBuildInformation)
+        }
+
+        fn diagnostics(&mut self) -> Vec<String> {
+            std::mem::take(&mut self.said)
+        }
+    }
+
+    /// The sentence explaining a unit travels in that unit's answer.
+    ///
+    /// Left on standard error it would reach a reader on a stream with no order
+    /// against the answers, so under load it lands against whichever unit was
+    /// being asked about when it arrived — or against none, when the unit it
+    /// explains was the last one.
+    #[test]
+    fn each_unavailable_answer_carries_the_explanation_of_its_own_unit() {
+        let asked: Vec<RequestBody> = ["src/one.c", "src/two.c"]
+            .into_iter()
+            .map(|file| {
+                RequestBody::Analyze(Analyze {
+                    unit: UnitRef {
+                        unit: file.to_string(),
+                        file: file.to_string(),
+                        variant: "host".to_string(),
+                    },
+                    compile_command: None,
+                    read_boundary: None,
+                    want: vec![Capability::Types],
+                    permitted: Vec::new(),
+                })
+            })
+            .collect();
+        let mut backend = Explaining { said: Vec::new() };
+
+        let mut input = Vec::new();
+        for (index, body) in asked.iter().enumerate() {
+            write_frame(
+                &mut input,
+                &Request {
+                    protocol_version: PROTOCOL_VERSION,
+                    id: index as u64,
+                    body: body.clone(),
+                },
+            )
+            .unwrap();
+        }
+        let mut output = Vec::new();
+        serve(&mut backend, &mut input.as_slice(), &mut output).unwrap();
+        let mut read = output.as_slice();
+        let mut explanations = Vec::new();
+        while let Some(response) = read_frame::<_, Response>(&mut read).unwrap() {
+            match response.body {
+                ResponseBody::Unavailable {
+                    unit, diagnostics, ..
+                } => explanations.push((unit.file, diagnostics)),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        assert_eq!(
+            explanations,
+            vec![
+                (
+                    "src/one.c".to_string(),
+                    vec!["src/one.c has no build".to_string()]
+                ),
+                (
+                    "src/two.c".to_string(),
+                    vec!["src/two.c has no build".to_string()]
+                ),
+            ]
+        );
     }
 
     fn conversation(requests: &[RequestBody]) -> (Vec<Response>, Fixed) {
@@ -292,9 +414,13 @@ mod tests {
             ResponseBody::Unavailable {
                 unit: answered,
                 reason,
+                diagnostics,
             } => {
                 assert_eq!(*answered, unit());
                 assert_eq!(*reason, Unavailability::RequiresExecution);
+                // This backend explains nothing, and the default says so
+                // rather than leaving the field to whatever ran before.
+                assert!(diagnostics.is_empty(), "{diagnostics:?}");
             }
             other => panic!("{other:?}"),
         }

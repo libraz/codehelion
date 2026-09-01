@@ -11,9 +11,15 @@
 //! thread and are collected with a deadline, which is the only way to put a
 //! bound on a peer that has stopped answering — a blocking read on a pipe has
 //! no timeout, and a helper stuck in a compiler loop will never close it. The
-//! helper's standard error is drained the whole time and kept, because the
-//! sentence that explains the failure is almost always there and is lost the
+//! helper's standard error is drained the whole time and kept, because a helper
+//! that dies explains itself there or nowhere, and what it said is lost the
 //! moment the process is reaped.
+//!
+//! What that stream is not is a way to explain one unit. It is drained by its
+//! own thread and has no order against the answers, so a sentence written just
+//! before an answer went out reaches this side at no fixed time: read after the
+//! next request, it describes a unit it has nothing to do with. A helper that
+//! has something to say about the unit it is answering puts it in that answer.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -281,6 +287,14 @@ pub struct Helper {
     /// still be waiting in the channel for a later request.
     poisoned_after_timeout: bool,
     permitted: Vec<Execution>,
+    /// What the most recent answer said about the unit it was about.
+    ///
+    /// Kept apart from [`Self::stderr`] because it arrives with the answer:
+    /// there is no order between an answer and the standard error stream, so a
+    /// sentence taken from that stream belongs to whichever unit was being
+    /// asked about when it happened to be delivered, which under load is not
+    /// the unit it explains.
+    answer_diagnostics: Vec<String>,
 }
 
 impl Helper {
@@ -347,6 +361,7 @@ impl Helper {
             next_id: 0,
             poisoned_after_timeout: false,
             permitted: Vec::new(),
+            answer_diagnostics: Vec::new(),
         };
         helper.shake_hands()?;
         Ok(helper)
@@ -405,12 +420,32 @@ impl Helper {
     /// one of them explains that one. Read whole every time, the same sentence
     /// would be attached to every unit that came after it, which reads as a
     /// project where everything went wrong for the same reason.
+    ///
+    /// Draining is what keeps that from happening, and it is why this is called
+    /// after every unit rather than only after a refused one. It is not,
+    /// however, enough to make what it returns belong to the unit just
+    /// answered: see [`Self::take_answer_diagnostics`].
     #[must_use]
     pub fn recent_diagnostics(&mut self) -> Vec<String> {
         self.stderr
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
+    }
+
+    /// What the most recent answer said about the unit it was about.
+    ///
+    /// This is the explanation a report can rely on. The helper put it in the
+    /// answer, so it arrived with the answer and is about that unit; what the
+    /// same helper printed on standard error arrives on a stream with no order
+    /// against the answers, and under load reaches the client after the unit it
+    /// explains has already been reported.
+    ///
+    /// Empty from a helper that puts nothing in its answers, which is the older
+    /// behaviour and leaves the standard error stream as the only source.
+    #[must_use]
+    pub fn take_answer_diagnostics(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.answer_diagnostics)
     }
 
     /// Whether a timeout made this helper conversation unsafe to reuse.
@@ -538,7 +573,14 @@ impl Helper {
                     Ok(Analysis::Missing(Unavailability::UnreadableSchema))
                 }
             }
-            ResponseBody::Unavailable { reason, .. } => Ok(Analysis::Missing(reason)),
+            ResponseBody::Unavailable {
+                reason,
+                diagnostics,
+                ..
+            } => {
+                self.answer_diagnostics = diagnostics;
+                Ok(Analysis::Missing(reason))
+            }
             _ => Err(HelperError::Died {
                 stderr: vec!["the helper answered an analysis with something else".into()],
             }),
@@ -940,18 +982,28 @@ impl Supervisor {
         }
     }
 
-    /// Keep what the helper printed while refusing a unit it answered about.
+    /// Keep what the helper said about a unit it could not answer for.
     ///
-    /// A helper that says a unit is unavailable has usually said why on its
-    /// standard error, and that sentence is the whole difference between a
-    /// report somebody can act on and a count of a reason's name.
+    /// A helper that says a unit is unavailable has usually said why, and that
+    /// sentence is the whole difference between a report somebody can act on
+    /// and a count of a reason's name.
+    ///
+    /// The answer is preferred over the standard error stream because only the
+    /// answer is ordered against the unit it belongs to. The stream is drained
+    /// either way — including after a unit that was answered — so that a line
+    /// delivered late is not read as belonging to whatever came next.
     fn keep_what_was_said_about(&mut self, analysis: &Analysis) {
         let Some(helper) = self.helper.as_mut() else {
             return;
         };
-        let said = helper.recent_diagnostics();
+        let printed = helper.recent_diagnostics();
+        let answered = helper.take_answer_diagnostics();
         if matches!(analysis, Analysis::Missing(_)) {
-            self.diagnostics = said;
+            self.diagnostics = if answered.is_empty() {
+                printed
+            } else {
+                answered
+            };
         }
     }
 

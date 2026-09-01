@@ -41,6 +41,7 @@ mod database;
 mod types;
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use codehelion_helper::PROTOCOL_VERSION;
 use codehelion_helper::ir::{COMPILER_IR_SCHEMA_VERSION, Unavailability};
@@ -55,23 +56,49 @@ use crate::database::Databases;
 /// The name this helper is known by, in `doctor` and in the audit database.
 const NAME: &str = "codehelion-backend-clang";
 
-/// Say on standard error why a request could not be answered.
+/// Refusal sentences produced while answering the unit currently being asked
+/// about, waiting to travel with that unit's answer.
 ///
-/// The client keeps what a helper printed while a unit went unanswered and
-/// reports it beside that unit, so a reason worked out here and kept here is a
-/// reason nobody can act on: a count of units with no build information says
-/// how many were refused and nothing about whether the fix is a compiler
-/// argument this program will not forward, a database that is not there, or a
-/// header that no command in the project compiles. Those have different
-/// answers, and only this side knows which one happened.
+/// A refusal is worked out deep inside the analysis, several calls below the
+/// answer that carries it, so it is left here rather than threaded back up
+/// through every return. The helper answers one unit at a time, so this holds
+/// one unit's sentences and is emptied when they are collected.
+static REFUSALS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Say why a request could not be answered.
 ///
-/// One line per refusal, because what the client keeps is bounded by lines: a
+/// The reason travels on the wire and this sentence explains it: a count of
+/// units with no build information says how many were refused and nothing
+/// about whether the fix is a compiler argument this program will not forward,
+/// a database that is not there, or a header that no command in the project
+/// compiles. Those have different answers, and only this side knows which one
+/// happened.
+///
+/// Recorded for the answer *and* printed on standard error. The answer is what
+/// a report reads, because it arrives with the unit it explains; the stream is
+/// for an operator watching a run, and for the refusals that happen before any
+/// unit was asked about, which no answer would carry.
+///
+/// One line per refusal, because what a client keeps is bounded by lines: a
 /// reason spread over several would cost the reasons after it.
 pub(crate) fn refused(why: &str) {
-    // Standard error, for the reason the whole stream exists here: standard
-    // output is the protocol, and a sentence written there is read as a
-    // malformed frame.
-    eprintln!("{NAME}: {why}");
+    let line = format!("{NAME}: {why}");
+    REFUSALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(line.clone());
+    // Standard output is the protocol, so a sentence written there is read as
+    // a malformed frame.
+    eprintln!("{line}");
+}
+
+/// The refusals recorded since this was last asked, leaving none behind.
+fn taken_refusals() -> Vec<String> {
+    std::mem::take(
+        &mut *REFUSALS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
 }
 
 fn main() -> std::process::ExitCode {
@@ -125,6 +152,10 @@ struct ClangBackend<'c> {
 }
 
 impl Backend for ClangBackend<'_> {
+    fn diagnostics(&mut self) -> Vec<String> {
+        taken_refusals()
+    }
+
     fn identity(&self) -> HelperIdentity {
         HelperIdentity {
             name: NAME.to_string(),

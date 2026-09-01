@@ -276,6 +276,7 @@ fn protocol_envelope() -> ProtocolEnvelope {
                 body: ResponseBody::Unavailable {
                     unit: protocol_unit(),
                     reason: Unavailability::RequiresExecution,
+                    diagnostics: vec!["running a build script was not permitted".to_owned()],
                 },
             },
             Response {

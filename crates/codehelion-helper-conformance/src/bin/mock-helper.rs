@@ -138,6 +138,7 @@ fn main() {
                 ResponseBody::Unavailable {
                     unit: analyze.unit,
                     reason: Unavailability::RequiresExecution,
+                    diagnostics: Vec::new(),
                 }
             }
             RequestBody::Analyze(_) if behaviour == "declines-analysis" => {
@@ -157,6 +158,10 @@ fn main() {
                 ResponseBody::Unavailable {
                     unit: analyze.unit,
                     reason: Unavailability::NoBuildInformation,
+                    // Left on standard error alone on purpose: this mock is
+                    // how the fallback for a helper that puts nothing in its
+                    // answers stays exercised.
+                    diagnostics: Vec::new(),
                 }
             }
             RequestBody::Analyze(analyze) if behaviour == "bounded" => {
@@ -169,6 +174,7 @@ fn main() {
                         ResponseBody::Unavailable {
                             unit: analyze.unit,
                             reason: Unavailability::NotSupported,
+                            diagnostics: Vec::new(),
                         }
                     }
                     _ => ResponseBody::Analyzed(Box::new(analyzed(analyze.unit))),
@@ -228,6 +234,7 @@ fn main() {
                     body: ResponseBody::Unavailable {
                         unit,
                         reason: Unavailability::ResponseTooLarge,
+                        diagnostics: Vec::new(),
                     },
                 },
             );
