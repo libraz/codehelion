@@ -676,13 +676,23 @@ mod tests {
     use super::{
         DwarfBudget, DwarfFrame, DwarfLineFrame, DwarfPathInterner, InternedFrame,
         attach_dwarf_frames_within, debug_section, file_index_value, frames_at_symbol_addresses,
-        resolve_source_path, source_frame, supports_address_join,
+        resolve_source_path, supports_address_join,
     };
     use crate::{
         ArtifactBackend, ArtifactFingerprint, ArtifactFormat, ArtifactInlineFrame, ArtifactIr,
     };
-    use gimli::{AttributeValue, DwarfSections, EndianSlice, RunTimeEndian};
-    use object::{Object, ObjectKind, ObjectSection};
+    use gimli::{AttributeValue, EndianSlice, RunTimeEndian};
+    use object::ObjectKind;
+
+    // What only the compiler-built object is read with. It is built where a C
+    // compiler and a linker can be run from a test, so what reads it is bound
+    // to the same platforms and so is what either of them names.
+    #[cfg(unix)]
+    use super::source_frame;
+    #[cfg(unix)]
+    use gimli::DwarfSections;
+    #[cfg(unix)]
+    use object::{Object, ObjectSection};
 
     const TEXT_FUNCTION: [u8; 8] = [0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xc3];
     const COMPILATION_DIRECTORY: &str = "/work";
