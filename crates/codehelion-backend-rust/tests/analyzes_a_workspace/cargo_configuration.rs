@@ -88,6 +88,10 @@ fn wrapper_touching(marker: &Path, at: &Path) -> PathBuf {
 /// decision rather than the permission's. Every other tree here stays without
 /// one, since a declared build script is refused on its own account and would
 /// stand in for the key each of those tests is about.
+///
+/// Confined to the platforms whose test asks for it, like the scripts it is
+/// built to be read beside.
+#[cfg(unix)]
 fn tree_building_a_script(wrapper: &Path) -> TreeNamingAProgram {
     let tree = tree_naming(wrapper);
     std::fs::write(tree.root.join("build.rs"), "fn main() {}\n").expect("write the build script");
