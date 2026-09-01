@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 390" width="960" height="390" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">成果物のフォーマットごとに確立できること</title>
+  <desc id="dsc">観測サイズと重複コードは、どのフォーマットについても報告します。retained size と shared size はコールグラフを必要とし、これを導けるのは WASM、ELF、静的アーカイブです。重複データは独立にサイズの付くデータ領域を必要とし、それを持つのは WASM です。ソース位置にはデバッグ情報が要ります。WASM は name セクションで関数単位まで、ELF は DWARF、Mach-O は identity の一致する dSYM、PE/COFF は一致する PDB、静的アーカイブは各メンバーが持つデバッグ情報です。フォーマットが供給できない量は unavailable として報告し、何が足りなかったかを述べる assumption を並べます。</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .band  { fill:#eaeef2 }
+    .rule  { stroke:#d0d7de }
+    .mark  { font-size:13px; fill:#0a5ca8 }
+    .none  { font-size:13px; fill:#8c959f }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .hd    { font-size:11.5px }
+    .r     { font-size:11.5px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .lbl   { font-size:10.5px; fill:#59636e; letter-spacing:.08em }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .box{fill:#161b22;stroke:#30363d} .band{fill:#161b22}
+      .rule{stroke:#30363d} .mark{fill:#79b8ff} .none{fill:#6e7781}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e} .lbl{fill:#8b949e}
+    }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="960" height="390" rx="12"/>
+
+  <text class="lbl" x="24" y="40">読むのはバイト列だけ — 成果物をロードも実行もしない</text>
+
+  <rect class="box" x="316" y="52" width="118" height="40" rx="6"/>
+  <text class="hd" x="375" y="77" text-anchor="middle">WASM</text>
+  <rect class="box" x="440" y="52" width="118" height="40" rx="6"/>
+  <text class="hd" x="499" y="77" text-anchor="middle">ELF</text>
+  <rect class="box" x="564" y="52" width="118" height="40" rx="6"/>
+  <text class="hd" x="623" y="77" text-anchor="middle">Mach-O</text>
+  <rect class="box" x="688" y="52" width="118" height="40" rx="6"/>
+  <text class="hd" x="747" y="77" text-anchor="middle">PE/COFF</text>
+  <rect class="box" x="812" y="52" width="118" height="40" rx="6"/>
+  <text class="hd" x="871" y="77" text-anchor="middle">アーカイブ</text>
+
+  <rect class="band" x="24" y="100" width="906" height="28" rx="4"/>
+  <text class="r"    x="36"  y="119">観測サイズ</text>
+  <text class="mark" x="375" y="120" text-anchor="middle">✓</text>
+  <text class="mark" x="499" y="120" text-anchor="middle">✓</text>
+  <text class="mark" x="623" y="120" text-anchor="middle">✓</text>
+  <text class="mark" x="747" y="120" text-anchor="middle">✓</text>
+  <text class="mark" x="871" y="120" text-anchor="middle">✓</text>
+
+  <text class="r"    x="36"  y="151">重複コード（バイト単位で一致）</text>
+  <text class="mark" x="375" y="152" text-anchor="middle">✓</text>
+  <text class="mark" x="499" y="152" text-anchor="middle">✓</text>
+  <text class="mark" x="623" y="152" text-anchor="middle">✓</text>
+  <text class="mark" x="747" y="152" text-anchor="middle">✓</text>
+  <text class="mark" x="871" y="152" text-anchor="middle">✓</text>
+
+  <rect class="band" x="24" y="164" width="906" height="28" rx="4"/>
+  <text class="r"    x="36"  y="183">重複コード（正規化後に一致）</text>
+  <text class="mark" x="375" y="184" text-anchor="middle">✓</text>
+  <text class="mark" x="499" y="184" text-anchor="middle">✓</text>
+  <text class="mark" x="623" y="184" text-anchor="middle">✓</text>
+  <text class="mark" x="747" y="184" text-anchor="middle">✓</text>
+  <text class="mark" x="871" y="184" text-anchor="middle">✓</text>
+
+  <text class="r"    x="36"  y="215">retained / shared size — コールグラフが必要</text>
+  <text class="mark" x="375" y="216" text-anchor="middle">✓</text>
+  <text class="mark" x="499" y="216" text-anchor="middle">✓</text>
+  <text class="none" x="623" y="216" text-anchor="middle">—</text>
+  <text class="none" x="747" y="216" text-anchor="middle">—</text>
+  <text class="mark" x="871" y="216" text-anchor="middle">✓</text>
+
+  <rect class="band" x="24" y="228" width="906" height="28" rx="4"/>
+  <text class="r"    x="36"  y="247">重複データ — サイズの付くデータ領域が必要</text>
+  <text class="mark" x="375" y="248" text-anchor="middle">✓</text>
+  <text class="none" x="499" y="248" text-anchor="middle">—</text>
+  <text class="none" x="623" y="248" text-anchor="middle">—</text>
+  <text class="none" x="747" y="248" text-anchor="middle">—</text>
+  <text class="none" x="871" y="248" text-anchor="middle">—</text>
+
+  <text class="r"       x="36"  y="279">ソース位置を運ぶもの</text>
+  <text class="xs mono" x="375" y="280" text-anchor="middle">name section</text>
+  <text class="xs mono" x="499" y="280" text-anchor="middle">DWARF</text>
+  <text class="xs mono" x="623" y="280" text-anchor="middle">dSYM</text>
+  <text class="xs mono" x="747" y="280" text-anchor="middle">PDB</text>
+  <text class="xs mono" x="871" y="280" text-anchor="middle">各メンバー</text>
+
+  <line class="rule" x1="24" y1="302" x2="936" y2="302"/>
+  <text class="s" x="24" y="324">フォーマットが供給できない量は unavailable として報告し、何が足りなかったかを述べる assumption を並べます。</text>
+  <text class="s" x="24" y="344">WASM が名指しできるのは関数単位までで行情報がないため、クローングループへのバイト帰属は届きません。</text>
+  <text class="s" x="24" y="364">正規化後の重複検出には x86 の命令アーキテクチャ、または WebAssembly 自身の opcode 列が必要です。</text>
+</svg>

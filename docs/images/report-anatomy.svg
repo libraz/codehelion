@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 410" width="960" height="410" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">One group in a text report</title>
+  <desc id="dsc">A clone group heading reads: position in the listing, the composed priority the listing is ordered on, the clone class and the number of occurrences, the length of the occurrence the group is measured against, and the group's stable id, which is the shortest prefix codehelion explain accepts. Under the heading, each occurrence names a file and line range; the diamond marks the occurrence the group is measured against, and the trailing name is the unit the occurrence sits in when the frontend can name one.</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .rule  { stroke:#e1e6eb }
+    .lnb   { fill:none; stroke:#8c959f; stroke-width:1.1; stroke-dasharray:3 3 }
+    .mk    { fill:#0a5ca8 }
+    .mkt   { font-size:10px; fill:#ffffff }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .s     { font-size:10.5px; fill:#59636e }
+    .r     { font-size:11px }
+    .lbl   { font-size:10.5px; fill:#59636e; letter-spacing:.08em }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    .l1    { font-size:12px }
+    .l2    { font-size:11px }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .box{fill:#161b22;stroke:#30363d} .rule{stroke:#21262d}
+      .lnb{stroke:#6e7781} .mk{fill:#79b8ff} .mkt{fill:#0d1117}
+      text{fill:#e6edf3} .s{fill:#8b949e} .lbl{fill:#8b949e}
+    }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="960" height="410" rx="12"/>
+
+  <text class="lbl" x="24" y="52">ONE GROUP, AS THE DEFAULT REPORT PRINTS IT</text>
+
+  <rect class="box" x="24" y="72" width="912" height="128" rx="8"/>
+
+  <circle class="mk" cx="56"  cy="90" r="9"/><text class="mkt" x="56"  y="94" text-anchor="middle">1</text>
+  <circle class="mk" cx="110" cy="90" r="9"/><text class="mkt" x="110" y="94" text-anchor="middle">2</text>
+  <circle class="mk" cx="180" cy="90" r="9"/><text class="mkt" x="180" y="94" text-anchor="middle">3</text>
+  <circle class="mk" cx="272" cy="90" r="9"/><text class="mkt" x="272" y="94" text-anchor="middle">4</text>
+  <circle class="mk" cx="366" cy="90" r="9"/><text class="mkt" x="366" y="94" text-anchor="middle">5</text>
+  <path class="lnb" d="M56,99 L56,107 M110,99 L110,107 M180,99 L180,107 M272,99 L272,107 M366,99 L366,107"/>
+
+  <text class="mono l1" x="56"  y="120" text-anchor="middle">#1</text>
+  <text class="mono l1" x="110" y="120" text-anchor="middle">0.67</text>
+  <text class="mono l1" x="180" y="120" text-anchor="middle">type-1 ×2</text>
+  <text class="mono l1" x="272" y="120" text-anchor="middle">240 tokens</text>
+  <text class="mono l1" x="366" y="120" text-anchor="middle">0f5065d5</text>
+
+  <text class="mono l2" x="44"  y="148">├─</text>
+  <text class="mono l2" x="76"  y="148" text-anchor="middle">◆</text>
+  <text class="mono l2" x="96"  y="148">crates/codehelion-cli/src/scan/store.rs:221-249</text>
+  <text class="mono l2" x="580" y="148" text-anchor="middle">tree_changes</text>
+
+  <text class="mono l2" x="44"  y="168">└─</text>
+  <text class="mono l2" x="96"  y="168">crates/codehelion-cli/src/scan/structural/store.rs:161-189</text>
+  <text class="mono l2" x="580" y="168" text-anchor="middle">tree_changes</text>
+
+  <path class="lnb" d="M76,172 L76,180 M580,172 L580,180"/>
+  <circle class="mk" cx="76"  cy="189" r="9"/><text class="mkt" x="76"  y="193" text-anchor="middle">6</text>
+  <circle class="mk" cx="580" cy="189" r="9"/><text class="mkt" x="580" y="193" text-anchor="middle">7</text>
+
+  <circle class="mk" cx="36" cy="232" r="8"/><text class="mkt" x="36" y="236" text-anchor="middle">1</text>
+  <text class="r" x="52" y="236">the position in this listing</text>
+  <circle class="mk" cx="36" cy="262" r="8"/><text class="mkt" x="36" y="266" text-anchor="middle">2</text>
+  <text class="r" x="52" y="266">the composed priority the listing is ordered on</text>
+  <circle class="mk" cx="36" cy="292" r="8"/><text class="mkt" x="36" y="296" text-anchor="middle">3</text>
+  <text class="r" x="52" y="296">the clone class, and how many occurrences the group has</text>
+  <circle class="mk" cx="36" cy="322" r="8"/><text class="mkt" x="36" y="326" text-anchor="middle">4</text>
+  <text class="r" x="52" y="326">the length of the occurrence the group is measured against</text>
+
+  <circle class="mk" cx="504" cy="232" r="8"/><text class="mkt" x="504" y="236" text-anchor="middle">5</text>
+  <text class="r" x="520" y="236">the stable group id — the shortest prefix <tspan class="mono">explain</tspan> accepts</text>
+  <circle class="mk" cx="504" cy="262" r="8"/><text class="mkt" x="504" y="266" text-anchor="middle">6</text>
+  <text class="r" x="520" y="266">the occurrence the group is measured against; read it first</text>
+  <circle class="mk" cx="504" cy="292" r="8"/><text class="mkt" x="504" y="296" text-anchor="middle">7</text>
+  <text class="r" x="520" y="296">the unit an occurrence sits in, where one can be named</text>
+
+  <line class="rule" x1="24" y1="352" x2="936" y2="352"/>
+  <text class="s" x="24" y="374">-v adds the ranking inputs and the similarity dimensions; -vv adds the candidate pipeline, the ceilings that applied, and full identifiers.</text>
+  <text class="s" x="24" y="394">--decoration ascii draws the same listing inside ASCII; --decoration none drops the tree entirely.</text>
+</svg>

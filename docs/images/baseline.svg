@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 390" width="960" height="390" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">Working with a baseline</title>
+  <desc id="dsc">Scan the tree, freeze the findings you have decided about with baseline create, remove some duplication, then scan again against the baseline. In the default suppress mode the frozen groups are hidden and what remains is what came after the baseline, which is the shape a CI check wants. In compare mode nothing is hidden: each group is marked as one the baseline froze or one it did not, and the tokens that went are reported beside the tokens that arrived.</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .box2  { fill:#f6f8fa; stroke:#d8dee4 }
+    .ext   { fill:none; stroke:#afb8c1; stroke-dasharray:5 4 }
+    .rule  { stroke:#e1e6eb }
+    .ln    { fill:none; stroke:#0a5ca8; stroke-width:1.4 }
+    .ah    { fill:#0a5ca8 }
+    .dot   { fill:#0a5ca8 }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:13px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .lbl   { font-size:10.5px; fill:#59636e; letter-spacing:.08em }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    .m11   { font-size:11px }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .box{fill:#161b22;stroke:#30363d} .box2{fill:#11161c;stroke:#30363d}
+      .ext{stroke:#484f58} .rule{stroke:#21262d}
+      .ln{stroke:#79b8ff} .ah{fill:#79b8ff} .dot{fill:#79b8ff}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e} .lbl{fill:#8b949e}
+    }
+  </style>
+
+  <defs>
+    <marker id="a" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ah" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="960" height="390" rx="12"/>
+
+  <rect class="box" x="36" y="64" width="204" height="76" rx="8"/>
+  <text class="mono m11" x="52" y="90">codehelion scan</text>
+  <text class="s" x="52" y="112">read the tree</text>
+
+  <rect class="box" x="264" y="64" width="204" height="76" rx="8"/>
+  <text class="mono m11" x="280" y="90">baseline create</text>
+  <text class="s" x="280" y="112">freeze what has already</text>
+  <text class="s" x="280" y="128">been decided about</text>
+
+  <rect class="ext" x="492" y="64" width="204" height="76" rx="8"/>
+  <text class="h" x="508" y="90">remove duplication</text>
+  <text class="s" x="508" y="112">and rewrite the code</text>
+  <text class="s" x="508" y="128">around it</text>
+
+  <rect class="box" x="720" y="64" width="204" height="76" rx="8"/>
+  <text class="mono m11" x="736" y="90">scan --baseline …</text>
+  <text class="s" x="736" y="112">read the tree against</text>
+  <text class="s" x="736" y="128">the record</text>
+
+  <path class="ln" d="M240,102 L260,102" marker-end="url(#a)"/>
+  <path class="ln" d="M468,102 L488,102" marker-end="url(#a)"/>
+  <path class="ln" d="M696,102 L716,102" marker-end="url(#a)"/>
+
+  <rect class="box2" x="24" y="176" width="440" height="140" rx="8"/>
+  <text class="mono m11" x="40" y="202">--baseline-mode suppress</text>
+  <text class="xs" x="448" y="202" text-anchor="end">default</text>
+  <line class="rule" x1="40" y1="212" x2="448" y2="212"/>
+  <circle class="dot" cx="46" cy="234" r="3"/><text class="s" x="60" y="238">the groups the baseline froze are hidden</text>
+  <circle class="dot" cx="46" cy="262" r="3"/><text class="s" x="60" y="266">what is left is what came after the baseline</text>
+  <circle class="dot" cx="46" cy="290" r="3"/><text class="s" x="60" y="294">the shape a CI check wants, with --fail-on-findings</text>
+
+  <rect class="box2" x="496" y="176" width="440" height="140" rx="8"/>
+  <text class="mono m11" x="512" y="202">--baseline-mode compare</text>
+  <line class="rule" x1="512" y1="212" x2="920" y2="212"/>
+  <circle class="dot" cx="518" cy="234" r="3"/><text class="s" x="532" y="238">nothing is hidden</text>
+  <circle class="dot" cx="518" cy="262" r="3"/><text class="s" x="532" y="266">each group is marked as frozen or not frozen</text>
+  <circle class="dot" cx="518" cy="290" r="3"/><text class="s" x="532" y="294">the tokens that went, beside the tokens that arrived</text>
+
+  <text class="s" x="24" y="346">Without both totals, four large duplications resolved into twenty small ones reads as a regression.</text>
+  <text class="s" x="24" y="366">A baseline names whole groups, so an occurrence's own id written into one matches nothing.</text>
+</svg>

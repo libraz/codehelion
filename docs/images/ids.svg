@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 452" width="960" height="452" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">Stable identifiers, and what moves them</title>
+  <desc id="dsc">Findings are named by content fingerprints: a unit fingerprint for a whole body, a fragment fingerprint for a run of statements inside one, a clone-group fingerprint for the group id printed in the heading, and a finding id for a single occurrence. Line numbers, AST node ids and symbol indexes are never inputs, so the same tree always produces the same ids and the same group order. Across runs, a group that keeps its content keeps its id; a group whose content changes gets a new id and a recorded lineage back to the group it came from.</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .box2  { fill:#f6f8fa; stroke:#d8dee4 }
+    .chip  { fill:#ffffff; stroke:#d8dee4 }
+    .rule  { stroke:#e1e6eb }
+    .ln    { fill:none; stroke:#0a5ca8; stroke-width:1.4 }
+    .lnb   { fill:none; stroke:#8c959f; stroke-width:1.2; stroke-dasharray:5 4 }
+    .ah    { fill:#0a5ca8 }
+    .ahb   { fill:#8c959f }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:13px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .lbl   { font-size:10.5px; fill:#59636e; letter-spacing:.08em }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    .m12   { font-size:12px }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .box{fill:#161b22;stroke:#30363d} .box2{fill:#11161c;stroke:#30363d}
+      .chip{fill:#161b22;stroke:#30363d} .rule{stroke:#21262d}
+      .ln{stroke:#79b8ff} .lnb{stroke:#6e7781} .ah{fill:#79b8ff} .ahb{fill:#6e7781}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e} .lbl{fill:#8b949e}
+    }
+  </style>
+
+  <defs>
+    <marker id="a" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ah" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+    <marker id="b" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ahb" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="960" height="452" rx="12"/>
+
+  <rect class="box" x="24" y="72" width="420" height="220" rx="8"/>
+  <text class="lbl" x="40" y="98">NAMED BY CONTENT</text>
+  <line class="rule" x1="40" y1="108" x2="428" y2="108"/>
+
+  <text class="mono m12" x="40" y="132">UnitFingerprint</text>
+  <text class="s"        x="40" y="148">one whole body — a function, a method</text>
+  <text class="mono m12" x="40" y="176">FragmentFingerprint</text>
+  <text class="s"        x="40" y="192">a run of statements inside one body</text>
+  <text class="mono m12" x="40" y="220">CloneGroupFingerprint</text>
+  <text class="s"        x="40" y="236">the id that closes a group's heading</text>
+  <text class="mono m12" x="40" y="264">FindingId</text>
+  <text class="s"        x="40" y="280">one occurrence, printed under -v</text>
+
+  <rect class="box" x="468" y="72" width="468" height="220" rx="8"/>
+  <text class="lbl" x="484" y="98">ACROSS RUNS</text>
+  <line class="rule" x1="484" y1="108" x2="920" y2="108"/>
+  <text class="xs" x="560" y="132" text-anchor="middle">run 1</text>
+  <text class="xs" x="820" y="132" text-anchor="middle">run 2</text>
+
+  <rect class="chip" x="484" y="146" width="152" height="34" rx="6"/>
+  <text class="mono m12" x="560" y="168" text-anchor="middle">0f5065d5</text>
+  <rect class="chip" x="744" y="146" width="152" height="34" rx="6"/>
+  <text class="mono m12" x="820" y="168" text-anchor="middle">0f5065d5</text>
+  <path class="ln" d="M640,163 L740,163" marker-end="url(#a)"/>
+  <text class="xs" x="690" y="156" text-anchor="middle">kept its identity</text>
+
+  <rect class="chip" x="484" y="216" width="152" height="34" rx="6"/>
+  <text class="mono m12" x="560" y="238" text-anchor="middle">baf4e127</text>
+  <rect class="chip" x="744" y="216" width="152" height="34" rx="6"/>
+  <text class="mono m12" x="820" y="238" text-anchor="middle">cabfd679</text>
+  <path class="lnb" d="M640,233 L740,233" marker-end="url(#b)"/>
+  <text class="xs" x="690" y="226" text-anchor="middle">inherited it</text>
+
+  <text class="s" x="484" y="276">The report says of each group which of the two happened.</text>
+
+  <rect class="box2" x="24" y="316" width="452" height="76" rx="8"/>
+  <text class="h" x="40" y="340">what leaves an id where it was</text>
+  <text class="s" x="40" y="360">a comment-only edit, a moved line, a renamed neighbour —</text>
+  <text class="s" x="40" y="378">which is what makes a suppression or a baseline hold</text>
+
+  <rect class="box2" x="496" y="316" width="440" height="76" rx="8"/>
+  <text class="h" x="512" y="340">what gives it a new one</text>
+  <text class="s" x="512" y="360">the content itself changing. The new group is reported</text>
+  <text class="s" x="512" y="378">with the lineage naming where it came from</text>
+
+  <text class="s" x="24" y="416">Line numbers, AST node ids and symbol indexes are never inputs to any of these.</text>
+  <text class="s" x="24" y="436">The same tree, read the same way, always produces the same ids and the same order.</text>
+</svg>

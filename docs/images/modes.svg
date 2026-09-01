@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 452" width="960" height="452" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">What each analysis mode measures</title>
+  <desc id="dsc">Fast measures identical Type-1 and renamed Type-2 copies from token equality alone. Structural adds gapped Type-3 copies, identifier agreement against the canonical member, per-dimension similarity, siblings and near misses, and the boilerplate, test-code and width-family policies. Semantic adds compiler-resolved types and names and the registered semantic rules on top of everything Structural measures. Fast and Structural never run the code they read; Semantic runs none of the project's own code unless an execution class is explicitly permitted.</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .band  { fill:#eaeef2 }
+    .rule  { stroke:#d0d7de }
+    .acc   { fill:#0a5ca8 }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:13px }
+    .r     { font-size:11.5px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .lbl   { font-size:10.5px; fill:#59636e; letter-spacing:.08em }
+    .mark  { font-size:13px; fill:#0a5ca8 }
+    .none  { font-size:13px; fill:#8c959f }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .box{fill:#161b22;stroke:#30363d} .band{fill:#161b22}
+      .rule{stroke:#30363d} .acc{fill:#79b8ff} .mark{fill:#79b8ff} .none{fill:#6e7781}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e} .lbl{fill:#8b949e}
+    }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="960" height="452" rx="12"/>
+
+  <text class="lbl" x="24" y="40">MEASURED BY</text>
+
+  <rect class="box" x="336" y="52" width="186" height="62" rx="8"/>
+  <text class="h"  x="429" y="80" text-anchor="middle">Fast</text>
+  <text class="xs" x="429" y="99" text-anchor="middle">token equality · the default</text>
+
+  <rect class="box" x="538" y="52" width="186" height="62" rx="8"/>
+  <text class="h"       x="631" y="80" text-anchor="middle">Structural</text>
+  <text class="xs mono" x="631" y="99" text-anchor="middle">--mode structural</text>
+
+  <rect class="box" x="740" y="52" width="186" height="62" rx="8"/>
+  <text class="h"       x="833" y="80" text-anchor="middle">Semantic</text>
+  <text class="xs mono" x="833" y="99" text-anchor="middle">--mode semantic</text>
+
+  <rect class="band" x="24" y="120" width="902" height="28" rx="4"/>
+  <text class="r"    x="36"  y="139">Type-1 — identical copies</text>
+  <text class="mark" x="429" y="140" text-anchor="middle">✓</text>
+  <text class="mark" x="631" y="140" text-anchor="middle">✓</text>
+  <text class="mark" x="833" y="140" text-anchor="middle">✓</text>
+
+  <text class="r"    x="36"  y="171">Type-2 — renamed identifiers, changed literals</text>
+  <text class="mark" x="429" y="172" text-anchor="middle">✓</text>
+  <text class="mark" x="631" y="172" text-anchor="middle">✓</text>
+  <text class="mark" x="833" y="172" text-anchor="middle">✓</text>
+
+  <rect class="band" x="24" y="184" width="902" height="28" rx="4"/>
+  <text class="r"    x="36"  y="203">Type-3 — added, removed or changed statements</text>
+  <text class="none" x="429" y="204" text-anchor="middle">—</text>
+  <text class="mark" x="631" y="204" text-anchor="middle">✓</text>
+  <text class="mark" x="833" y="204" text-anchor="middle">✓</text>
+
+  <text class="r"    x="36"  y="235">identifier agreement with the canonical member</text>
+  <text class="none" x="429" y="236" text-anchor="middle">—</text>
+  <text class="mark" x="631" y="236" text-anchor="middle">✓</text>
+  <text class="mark" x="833" y="236" text-anchor="middle">✓</text>
+
+  <rect class="band" x="24" y="248" width="902" height="28" rx="4"/>
+  <text class="r"    x="36"  y="267">similarity reported per dimension</text>
+  <text class="none" x="429" y="268" text-anchor="middle">—</text>
+  <text class="mark" x="631" y="268" text-anchor="middle">✓</text>
+  <text class="mark" x="833" y="268" text-anchor="middle">✓</text>
+
+  <text class="r"    x="36"  y="299">siblings and near misses</text>
+  <text class="none" x="429" y="300" text-anchor="middle">—</text>
+  <text class="mark" x="631" y="300" text-anchor="middle">✓</text>
+  <text class="mark" x="833" y="300" text-anchor="middle">✓</text>
+
+  <rect class="band" x="24" y="312" width="902" height="28" rx="4"/>
+  <text class="r"    x="36"  y="331">boilerplate, test-code and width-family policies</text>
+  <text class="none" x="429" y="332" text-anchor="middle">—</text>
+  <text class="mark" x="631" y="332" text-anchor="middle">✓</text>
+  <text class="mark" x="833" y="332" text-anchor="middle">✓</text>
+
+  <text class="r"    x="36"  y="363">compiler-resolved types, names and semantic rules</text>
+  <text class="none" x="429" y="364" text-anchor="middle">—</text>
+  <text class="none" x="631" y="364" text-anchor="middle">—</text>
+  <text class="mark" x="833" y="364" text-anchor="middle">✓</text>
+
+  <line class="rule" x1="24" y1="386" x2="936" y2="386"/>
+  <text class="s" x="24" y="410">A dimension a mode cannot measure is reported as absent, never guessed.</text>
+  <text class="s" x="24" y="430">Fast and Structural never run the code they read. Semantic starts a helper process, and runs none of the project's own code unless --allow-execution names a class.</text>
+</svg>

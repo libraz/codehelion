@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 390" width="960" height="390" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">What each artifact format can establish</title>
+  <desc id="dsc">Observed size and duplicate code are reported for every format. Retained and shared size need a call graph, which is derived for WASM, ELF and static archives. Duplicate data needs independently sized data regions, which WASM has. A source location needs debug evidence: the name section for WASM, which names whole symbols only, DWARF for ELF, a matching dSYM for Mach-O, a matching PDB for PE/COFF, and each delegated member's own debug metadata for a static archive. A quantity the format cannot supply is reported as unavailable beside an assumption naming what was missing.</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .band  { fill:#eaeef2 }
+    .rule  { stroke:#d0d7de }
+    .mark  { font-size:13px; fill:#0a5ca8 }
+    .none  { font-size:13px; fill:#8c959f }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .hd    { font-size:11.5px }
+    .r     { font-size:11.5px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .lbl   { font-size:10.5px; fill:#59636e; letter-spacing:.08em }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .box{fill:#161b22;stroke:#30363d} .band{fill:#161b22}
+      .rule{stroke:#30363d} .mark{fill:#79b8ff} .none{fill:#6e7781}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e} .lbl{fill:#8b949e}
+    }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="960" height="390" rx="12"/>
+
+  <text class="lbl" x="24" y="40">READ FROM THE BYTES — NEVER BY LOADING OR RUNNING THE ARTIFACT</text>
+
+  <rect class="box" x="316" y="52" width="118" height="40" rx="6"/>
+  <text class="hd" x="375" y="77" text-anchor="middle">WASM</text>
+  <rect class="box" x="440" y="52" width="118" height="40" rx="6"/>
+  <text class="hd" x="499" y="77" text-anchor="middle">ELF</text>
+  <rect class="box" x="564" y="52" width="118" height="40" rx="6"/>
+  <text class="hd" x="623" y="77" text-anchor="middle">Mach-O</text>
+  <rect class="box" x="688" y="52" width="118" height="40" rx="6"/>
+  <text class="hd" x="747" y="77" text-anchor="middle">PE/COFF</text>
+  <rect class="box" x="812" y="52" width="118" height="40" rx="6"/>
+  <text class="hd" x="871" y="77" text-anchor="middle">archive</text>
+
+  <rect class="band" x="24" y="100" width="906" height="28" rx="4"/>
+  <text class="r"    x="36"  y="119">observed size</text>
+  <text class="mark" x="375" y="120" text-anchor="middle">✓</text>
+  <text class="mark" x="499" y="120" text-anchor="middle">✓</text>
+  <text class="mark" x="623" y="120" text-anchor="middle">✓</text>
+  <text class="mark" x="747" y="120" text-anchor="middle">✓</text>
+  <text class="mark" x="871" y="120" text-anchor="middle">✓</text>
+
+  <text class="r"    x="36"  y="151">duplicate code, byte-identical</text>
+  <text class="mark" x="375" y="152" text-anchor="middle">✓</text>
+  <text class="mark" x="499" y="152" text-anchor="middle">✓</text>
+  <text class="mark" x="623" y="152" text-anchor="middle">✓</text>
+  <text class="mark" x="747" y="152" text-anchor="middle">✓</text>
+  <text class="mark" x="871" y="152" text-anchor="middle">✓</text>
+
+  <rect class="band" x="24" y="164" width="906" height="28" rx="4"/>
+  <text class="r"    x="36"  y="183">duplicate code, normalized</text>
+  <text class="mark" x="375" y="184" text-anchor="middle">✓</text>
+  <text class="mark" x="499" y="184" text-anchor="middle">✓</text>
+  <text class="mark" x="623" y="184" text-anchor="middle">✓</text>
+  <text class="mark" x="747" y="184" text-anchor="middle">✓</text>
+  <text class="mark" x="871" y="184" text-anchor="middle">✓</text>
+
+  <text class="r"    x="36"  y="215">retained and shared size — needs a call graph</text>
+  <text class="mark" x="375" y="216" text-anchor="middle">✓</text>
+  <text class="mark" x="499" y="216" text-anchor="middle">✓</text>
+  <text class="none" x="623" y="216" text-anchor="middle">—</text>
+  <text class="none" x="747" y="216" text-anchor="middle">—</text>
+  <text class="mark" x="871" y="216" text-anchor="middle">✓</text>
+
+  <rect class="band" x="24" y="228" width="906" height="28" rx="4"/>
+  <text class="r"    x="36"  y="247">duplicate data — needs sized data regions</text>
+  <text class="mark" x="375" y="248" text-anchor="middle">✓</text>
+  <text class="none" x="499" y="248" text-anchor="middle">—</text>
+  <text class="none" x="623" y="248" text-anchor="middle">—</text>
+  <text class="none" x="747" y="248" text-anchor="middle">—</text>
+  <text class="none" x="871" y="248" text-anchor="middle">—</text>
+
+  <text class="r"       x="36"  y="279">what carries a source location</text>
+  <text class="xs mono" x="375" y="280" text-anchor="middle">name section</text>
+  <text class="xs mono" x="499" y="280" text-anchor="middle">DWARF</text>
+  <text class="xs mono" x="623" y="280" text-anchor="middle">dSYM</text>
+  <text class="xs mono" x="747" y="280" text-anchor="middle">PDB</text>
+  <text class="xs mono" x="871" y="280" text-anchor="middle">each member</text>
+
+  <line class="rule" x1="24" y1="302" x2="936" y2="302"/>
+  <text class="s" x="24" y="324">A quantity the format cannot supply is reported as unavailable, beside an assumption naming what was missing.</text>
+  <text class="s" x="24" y="344">WASM names whole symbols and no source line, so clone-group byte attribution stays out of reach for it.</text>
+  <text class="s" x="24" y="364">Normalized duplicates need an x86 instruction architecture, or WebAssembly's own opcode stream.</text>
+</svg>

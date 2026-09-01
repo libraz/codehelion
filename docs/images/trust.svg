@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">What a scan reads, writes, and never does</title>
+  <desc id="dsc">Everything happens on the machine the scan is started on. codehelion reads the source tree as text, along with Cargo metadata, a compilation database, existing builds and verified debug companions, and it writes the recorded run into a local database plus whatever report was asked for. It has no network dependency, sends nothing anywhere, and does not execute the tree it reads. The single exception is an explicit per-run permission for a Semantic helper to run a project build script; untrusted mode permits no execution at all.</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .frame { fill:none; stroke:#d0d7de }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .box2  { fill:#f6f8fa; stroke:#d8dee4 }
+    .gate  { fill:#fdf6e3; stroke:#d4a72c }
+    .limt  { fill:#8a6400 }
+    .rule  { stroke:#e1e6eb }
+    .dot   { fill:#0a5ca8 }
+    .no    { fill:none; stroke:#8c959f; stroke-width:1.4 }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:12.5px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .lbl   { font-size:10.5px; fill:#59636e; letter-spacing:.08em }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    .m11   { font-size:11px }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .frame{stroke:#30363d} .box{fill:#161b22;stroke:#30363d}
+      .box2{fill:#11161c;stroke:#30363d} .rule{stroke:#21262d}
+      .gate{fill:#1b1710;stroke:#9e6a03} .limt{fill:#d29922} .dot{fill:#79b8ff} .no{stroke:#6e7781}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e} .lbl{fill:#8b949e}
+    }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="960" height="400" rx="12"/>
+
+  <rect class="frame" x="24" y="56" width="584" height="268" rx="10"/>
+  <text class="lbl" x="40" y="80">ON THIS MACHINE, AND NOWHERE ELSE</text>
+
+  <text class="lbl" x="40"  y="106">READS</text>
+  <text class="lbl" x="326" y="106">WRITES</text>
+
+  <rect class="box" x="40" y="118" width="270" height="48" rx="6"/>
+  <text class="h"  x="56" y="140">the source tree</text>
+  <text class="xs" x="56" y="157">read as text; nothing in it is run</text>
+
+  <rect class="box" x="40" y="178" width="270" height="48" rx="6"/>
+  <text class="h"  x="56" y="200">build description</text>
+  <text class="xs mono" x="56" y="217">Cargo metadata · compile_commands.json</text>
+
+  <rect class="box" x="40" y="238" width="270" height="48" rx="6"/>
+  <text class="h"  x="56" y="260">existing builds</text>
+  <text class="xs" x="56" y="277">and debug companions whose identity matches</text>
+
+  <rect class="box" x="326" y="118" width="266" height="48" rx="6"/>
+  <text class="h"       x="342" y="140">the recorded run</text>
+  <text class="xs mono" x="342" y="157">.codehelion/audit-v&lt;schema&gt;.db</text>
+
+  <rect class="box" x="326" y="178" width="266" height="48" rx="6"/>
+  <text class="h"  x="342" y="200">the report you asked for</text>
+  <text class="xs" x="342" y="217">text · JSON · SARIF, where you asked for it</text>
+
+  <text class="s" x="326" y="262">Both stay inside the machine the scan</text>
+  <text class="s" x="326" y="280">was started on.</text>
+
+  <rect class="box2" x="632" y="56" width="304" height="120" rx="8"/>
+  <text class="h" x="648" y="82">never, by construction</text>
+  <line class="rule" x1="648" y1="92" x2="920" y2="92"/>
+  <circle class="dot" cx="654" cy="112" r="3"/><text class="s" x="668" y="116">no network dependency</text>
+  <circle class="dot" cx="654" cy="134" r="3"/><text class="s" x="668" y="138">nothing sent anywhere, ever</text>
+  <circle class="dot" cx="654" cy="156" r="3"/><text class="s" x="668" y="160">no execution of the scanned tree</text>
+
+  <rect class="gate" x="632" y="196" width="304" height="128" rx="8"/>
+  <text class="h limt" x="648" y="222">the one gate</text>
+  <text class="mono m11" x="648" y="248">--allow-execution=build-script</text>
+  <text class="s" x="648" y="272">an explicit permission, given per run, for a</text>
+  <text class="s" x="648" y="290">Semantic helper to run a project build script.</text>
+  <text class="s" x="648" y="308">--untrusted permits no execution at all.</text>
+
+  <text class="s" x="24" y="356">Enforced by lint and dependency policy rather than by convention: clippy.toml disallows process spawning and sockets in the scan path,</text>
+  <text class="s" x="24" y="376">and cargo-deny refuses the common HTTP stacks outright, so a dependency cannot quietly reintroduce one.</text>
+</svg>

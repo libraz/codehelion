@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 372" width="960" height="372" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">What one scan does</title>
+  <desc id="dsc">A source tree is read by an error-tolerant lexer that removes comments and whitespace and normalizes identifiers and literals. The result is indexed by content into fingerprint postings, paired into candidates by exact seeds and near-match shingles, verified by alignment into per-dimension similarity, and grouped around a canonical member by complete linkage. Resource ceilings apply at the index, pairing, verification and grouping stages, and every ceiling that fires is counted in the report. The run is recorded into a local SQLite database, and the text, JSON and SARIF reports are exports of that recorded run.</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .box2  { fill:#f6f8fa; stroke:#d8dee4 }
+    .ext   { fill:none; stroke:#afb8c1; stroke-dasharray:5 4 }
+    .rule  { stroke:#e1e6eb }
+    .ln    { fill:none; stroke:#0a5ca8; stroke-width:1.4 }
+    .lnb   { fill:none; stroke:#8c959f; stroke-width:1.1; stroke-dasharray:4 4 }
+    .ah    { fill:#0a5ca8 }
+    .lim   { fill:#fdf6e3; stroke:#d4a72c }
+    .limt  { fill:#8a6400 }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:13px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .lbl   { font-size:10.5px; letter-spacing:.08em }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117}
+      .box{fill:#161b22;stroke:#30363d} .box2{fill:#11161c;stroke:#30363d}
+      .ext{stroke:#484f58} .rule{stroke:#21262d}
+      .ln{stroke:#79b8ff} .lnb{stroke:#6e7781} .ah{fill:#79b8ff}
+      .lim{fill:#1b1710;stroke:#9e6a03} .limt{fill:#d29922}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e}
+    }
+  </style>
+
+  <defs>
+    <marker id="a" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ah" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="960" height="372" rx="12"/>
+
+  <!-- resource ceilings -->
+  <text class="lbl limt" x="144" y="61" text-anchor="end">CEILINGS</text>
+  <rect class="lim" x="360" y="44" width="160" height="26" rx="6"/>
+  <text class="xs mono limt" x="440" y="61" text-anchor="middle">posting-cap</text>
+  <rect class="lim" x="544" y="44" width="160" height="26" rx="6"/>
+  <text class="xs mono limt" x="624" y="61" text-anchor="middle">pair-budget</text>
+  <rect class="lim" x="728" y="44" width="160" height="26" rx="6"/>
+  <text class="xs mono limt" x="808" y="61" text-anchor="middle">max-component</text>
+  <path class="lnb" d="M440,70 L440,84"/>
+  <path class="lnb" d="M624,70 L624,84"/>
+  <path class="lnb" d="M808,70 L808,84"/>
+
+  <!-- the tree being read -->
+  <rect class="ext" x="20" y="122" width="124" height="54" rx="8"/>
+  <text class="h"       x="82" y="146" text-anchor="middle">source tree</text>
+  <text class="xs mono" x="82" y="164" text-anchor="middle">rust · c · cpp</text>
+
+  <!-- stages -->
+  <rect class="box" x="176" y="84" width="160" height="128" rx="8"/>
+  <text class="h" x="256" y="110" text-anchor="middle">read</text>
+  <line class="rule" x1="190" y1="120" x2="322" y2="120"/>
+  <text class="s" x="256" y="140" text-anchor="middle">error-tolerant lexer</text>
+  <text class="s" x="256" y="158" text-anchor="middle">comments and</text>
+  <text class="s" x="256" y="176" text-anchor="middle">whitespace removed</text>
+
+  <rect class="box" x="360" y="84" width="160" height="128" rx="8"/>
+  <text class="h" x="440" y="110" text-anchor="middle">index</text>
+  <line class="rule" x1="374" y1="120" x2="506" y2="120"/>
+  <text class="s" x="440" y="140" text-anchor="middle">units and fragments</text>
+  <text class="s" x="440" y="158" text-anchor="middle">postings keyed by</text>
+  <text class="s" x="440" y="176" text-anchor="middle">content, not position</text>
+
+  <rect class="box" x="544" y="84" width="160" height="128" rx="8"/>
+  <text class="h" x="624" y="110" text-anchor="middle">pair and verify</text>
+  <line class="rule" x1="558" y1="120" x2="690" y2="120"/>
+  <text class="s" x="624" y="140" text-anchor="middle">exact seeds and</text>
+  <text class="s" x="624" y="158" text-anchor="middle">near-match shingles</text>
+  <text class="s" x="624" y="176" text-anchor="middle">aligned per dimension</text>
+
+  <rect class="box" x="728" y="84" width="160" height="128" rx="8"/>
+  <text class="h" x="808" y="110" text-anchor="middle">group</text>
+  <line class="rule" x1="742" y1="120" x2="874" y2="120"/>
+  <text class="s" x="808" y="140" text-anchor="middle">a canonical member</text>
+  <text class="s" x="808" y="158" text-anchor="middle">complete linkage</text>
+  <text class="s" x="808" y="176" text-anchor="middle">one stable group id</text>
+
+  <path class="ln" d="M144,149 L172,149" marker-end="url(#a)"/>
+  <path class="ln" d="M336,149 L356,149" marker-end="url(#a)"/>
+  <path class="ln" d="M520,149 L540,149" marker-end="url(#a)"/>
+  <path class="ln" d="M704,149 L724,149" marker-end="url(#a)"/>
+
+  <!-- what is kept, and what is rendered from it -->
+  <path class="ln" d="M808,212 L808,248" marker-end="url(#a)"/>
+  <rect class="box" x="544" y="252" width="344" height="58" rx="8"/>
+  <text class="h"       x="716" y="277" text-anchor="middle">the run, recorded locally</text>
+  <text class="xs mono" x="716" y="295" text-anchor="middle">.codehelion/audit-v&lt;schema&gt;.db</text>
+
+  <path class="ln" d="M540,281 L520,281" marker-end="url(#a)"/>
+  <rect class="box2" x="176" y="252" width="340" height="58" rx="8"/>
+  <text class="h"  x="346" y="277" text-anchor="middle">text · JSON · SARIF</text>
+  <text class="xs" x="346" y="295" text-anchor="middle">every report is an export of one recorded run</text>
+
+  <text class="s" x="20"  y="344">nothing leaves the machine, and nothing in the tree is executed</text>
+  <text class="s" x="940" y="344" text-anchor="end">dashed · read, never run</text>
+</svg>

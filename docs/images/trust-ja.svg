@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">スキャンが読むもの・書くもの・決してしないこと</title>
+  <desc id="dsc">処理はすべて、スキャンを開始したマシンの中で完結します。codehelion はソースツリーをテキストとして読み、Cargo metadata・compilation database・既存のビルド成果物・identity を検証したデバッグ情報も読みます。書くのはローカルデータベースへの実行記録と、要求されたレポートだけです。ネットワークへの依存を持たず、外部へ何も送らず、読み取ったツリーを実行しません。唯一の例外は、Semantic helper がプロジェクトの build script を実行するための、実行ごとに明示する許可です。untrusted モードでは実行を一切許可しません。</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .frame { fill:none; stroke:#d0d7de }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .box2  { fill:#f6f8fa; stroke:#d8dee4 }
+    .gate  { fill:#fdf6e3; stroke:#d4a72c }
+    .limt  { fill:#8a6400 }
+    .rule  { stroke:#e1e6eb }
+    .dot   { fill:#0a5ca8 }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:12.5px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .lbl   { font-size:10.5px; fill:#59636e; letter-spacing:.08em }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    .m11   { font-size:11px }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .frame{stroke:#30363d} .box{fill:#161b22;stroke:#30363d}
+      .box2{fill:#11161c;stroke:#30363d} .rule{stroke:#21262d}
+      .gate{fill:#1b1710;stroke:#9e6a03} .limt{fill:#d29922} .dot{fill:#79b8ff}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e} .lbl{fill:#8b949e}
+    }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="960" height="400" rx="12"/>
+
+  <rect class="frame" x="24" y="56" width="584" height="268" rx="10"/>
+  <text class="lbl" x="40" y="80">このマシンの中だけで完結する</text>
+
+  <text class="lbl" x="40"  y="106">読むもの</text>
+  <text class="lbl" x="326" y="106">書くもの</text>
+
+  <rect class="box" x="40" y="118" width="270" height="48" rx="6"/>
+  <text class="h"  x="56" y="140">ソースツリー</text>
+  <text class="xs" x="56" y="157">テキストとして読み、中のコードは実行しない</text>
+
+  <rect class="box" x="40" y="178" width="270" height="48" rx="6"/>
+  <text class="h"  x="56" y="200">ビルドの記述</text>
+  <text class="xs mono" x="56" y="217">Cargo metadata · compile_commands.json</text>
+
+  <rect class="box" x="40" y="238" width="270" height="48" rx="6"/>
+  <text class="h"  x="56" y="260">既存のビルド成果物</text>
+  <text class="xs" x="56" y="277">および identity が一致したデバッグ情報</text>
+
+  <rect class="box" x="326" y="118" width="266" height="48" rx="6"/>
+  <text class="h"       x="342" y="140">実行の記録</text>
+  <text class="xs mono" x="342" y="157">.codehelion/audit-v&lt;schema&gt;.db</text>
+
+  <rect class="box" x="326" y="178" width="266" height="48" rx="6"/>
+  <text class="h"  x="342" y="200">要求されたレポート</text>
+  <text class="xs" x="342" y="217">text · JSON · SARIF を指定の場所へ</text>
+
+  <text class="s" x="326" y="262">どちらもスキャンを開始したマシンの</text>
+  <text class="s" x="326" y="280">中に留まります。</text>
+
+  <rect class="box2" x="632" y="56" width="304" height="120" rx="8"/>
+  <text class="h" x="648" y="82">構造として行わないこと</text>
+  <line class="rule" x1="648" y1="92" x2="920" y2="92"/>
+  <circle class="dot" cx="654" cy="112" r="3"/><text class="s" x="668" y="116">ネットワークに依存しない</text>
+  <circle class="dot" cx="654" cy="134" r="3"/><text class="s" x="668" y="138">外部へ何も送信しない</text>
+  <circle class="dot" cx="654" cy="156" r="3"/><text class="s" x="668" y="160">スキャン対象のコードを実行しない</text>
+
+  <rect class="gate" x="632" y="196" width="304" height="128" rx="8"/>
+  <text class="h limt" x="648" y="222">唯一の例外</text>
+  <text class="mono m11" x="648" y="248">--allow-execution=build-script</text>
+  <text class="s" x="648" y="272">Semantic helper がプロジェクトの build script を</text>
+  <text class="s" x="648" y="290">実行するための、実行ごとに与える明示的な許可。</text>
+  <text class="s" x="648" y="308">--untrusted では実行を一切許可しません。</text>
+
+  <text class="s" x="24" y="356">運用上の約束ではなく lint と依存ポリシーで強制します。clippy.toml が scan path でのプロセス起動とソケットを禁止し、</text>
+  <text class="s" x="24" y="376">cargo-deny が主要な HTTP スタックを依存グラフごと拒否するため、依存経由で入り込むこともありません。</text>
+</svg>

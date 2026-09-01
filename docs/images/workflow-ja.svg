@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" width="960" height="360" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">リファクタのループ 1 周</title>
+  <desc id="dsc">Structural モードでスキャンし、目の前の作業に合う軸でレポートを並べ替え、先頭のグループを explain で開き、重複を取り除いて、もう一度スキャンしてリファクタを検査します。通常の規模のツリーならスキャンは数秒で終わるため、リファクタごとに 1 回走らせる運用が成り立ちます。結果を読むときの規則はひとつです。書いたばかりのヘルパが、置き換えたはずの呼び出し元と同じグループに現れたら、その呼び出し元は置換漏れです。</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .box2  { fill:#f6f8fa; stroke:#d8dee4 }
+    .ext   { fill:none; stroke:#afb8c1; stroke-dasharray:5 4 }
+    .rule  { stroke:#e1e6eb }
+    .ln    { fill:none; stroke:#0a5ca8; stroke-width:1.4 }
+    .lnr   { fill:none; stroke:#0a5ca8; stroke-width:1.2; stroke-dasharray:6 4 }
+    .ah    { fill:#0a5ca8 }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:12.5px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    .m11   { font-size:11px }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .box{fill:#161b22;stroke:#30363d} .box2{fill:#11161c;stroke:#30363d}
+      .ext{stroke:#484f58} .rule{stroke:#21262d}
+      .ln{stroke:#79b8ff} .lnr{stroke:#79b8ff} .ah{fill:#79b8ff}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e}
+    }
+  </style>
+
+  <defs>
+    <marker id="a" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ah" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="960" height="360" rx="12"/>
+
+  <rect class="box" x="20" y="40" width="168" height="92" rx="8"/>
+  <text class="mono m11" x="34" y="66">scan --mode</text>
+  <text class="mono m11" x="34" y="82">  structural</text>
+  <text class="s" x="34" y="106">ツリーを読む</text>
+
+  <rect class="box" x="208" y="40" width="168" height="92" rx="8"/>
+  <text class="mono m11" x="222" y="66">--sort …</text>
+  <text class="s" x="222" y="90">目の前の作業に合う</text>
+  <text class="s" x="222" y="106">軸で並べ替える</text>
+
+  <rect class="box" x="396" y="40" width="168" height="92" rx="8"/>
+  <text class="mono m11" x="410" y="66">explain &lt;id&gt;</text>
+  <text class="s" x="410" y="90">一覧の先頭にある</text>
+  <text class="s" x="410" y="106">グループを開く</text>
+
+  <rect class="ext" x="584" y="40" width="168" height="92" rx="8"/>
+  <text class="h" x="598" y="66">取り除く</text>
+  <text class="s" x="598" y="90">共通関数ひとつに畳む、</text>
+  <text class="s" x="598" y="106">または片方を消す</text>
+
+  <rect class="box" x="772" y="40" width="168" height="92" rx="8"/>
+  <text class="mono m11" x="786" y="66">scan --mode</text>
+  <text class="mono m11" x="786" y="82">  structural</text>
+  <text class="s" x="786" y="106">リファクタを検査する</text>
+
+  <path class="ln" d="M188,86 L204,86" marker-end="url(#a)"/>
+  <path class="ln" d="M376,86 L392,86" marker-end="url(#a)"/>
+  <path class="ln" d="M564,86 L580,86" marker-end="url(#a)"/>
+  <path class="ln" d="M752,86 L768,86" marker-end="url(#a)"/>
+
+  <path class="lnr" d="M856,132 L856,172 L104,172 L104,136" marker-end="url(#a)"/>
+  <text class="s" x="480" y="192" text-anchor="middle">通常の規模のツリーならスキャンは数秒で終わるので、リファクタごとに 1 回走らせる運用が成り立ちます</text>
+
+  <rect class="box2" x="24" y="226" width="912" height="98" rx="8"/>
+  <text class="h" x="40" y="252">再スキャンの結果を読むときの規則</text>
+  <line class="rule" x1="40" y1="262" x2="920" y2="262"/>
+  <text class="s" x="40" y="284">書いたばかりのヘルパが、置き換えたはずの呼び出し元と同じグループに現れたら、その呼び出し元は置換漏れです。</text>
+  <text class="s" x="40" y="304">これを報告するものは他にありません。コンパイルは通り挙動も変わらないため、テストが通ることは全部のコピーが消えた証拠になりません。</text>
+</svg>

@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 440" width="960" height="440" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">How occurrences become a group</title>
+  <desc id="dsc">Similarity is not transitive. A plain connected component would join A to B to C to D through a chain of pairwise matches, leaving A and D in one group although they are not alike at all. codehelion instead measures every candidate against a canonical member and admits only what clears the gate, so a chain cannot drag an unrelated unit in. What the gate leaves out is still reported: siblings, near misses, and verified pairs that no complete group can hold.</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .box2  { fill:#f6f8fa; stroke:#d8dee4 }
+    .ext   { fill:none; stroke:#afb8c1; stroke-dasharray:5 4 }
+    .node  { fill:#ffffff; stroke:#0a5ca8; stroke-width:1.4 }
+    .nodef { fill:#0a5ca8 }
+    .nodet { font-size:11px }
+    .nodetf{ font-size:11px; fill:#ffffff }
+    .ln    { fill:none; stroke:#0a5ca8; stroke-width:1.4 }
+    .lnb   { fill:none; stroke:#8c959f; stroke-width:1.2; stroke-dasharray:5 4 }
+    .rule  { stroke:#e1e6eb }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:13px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .lbl   { font-size:10.5px; fill:#59636e; letter-spacing:.08em }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .box{fill:#161b22;stroke:#30363d} .box2{fill:#11161c;stroke:#30363d}
+      .ext{stroke:#484f58} .rule{stroke:#21262d}
+      .node{fill:#161b22;stroke:#79b8ff} .nodef{fill:#79b8ff} .nodetf{fill:#0d1117}
+      .ln{stroke:#79b8ff} .lnb{stroke:#6e7781}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e} .lbl{fill:#8b949e}
+    }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="960" height="440" rx="12"/>
+
+  <!-- what a connected component would do -->
+  <rect class="box" x="24" y="72" width="440" height="200" rx="8"/>
+  <text class="lbl" x="40" y="98">A CHAIN OF PAIRWISE MATCHES</text>
+
+  <path class="ln" d="M99,150 L169,150"/>
+  <path class="ln" d="M199,150 L269,150"/>
+  <path class="ln" d="M299,150 L369,150"/>
+  <text class="xs mono" x="134" y="142" text-anchor="middle">0.85</text>
+  <text class="xs mono" x="234" y="142" text-anchor="middle">0.80</text>
+  <text class="xs mono" x="334" y="142" text-anchor="middle">0.78</text>
+
+  <circle class="node" cx="84"  cy="150" r="15"/><text class="nodet" x="84"  y="154" text-anchor="middle">A</text>
+  <circle class="node" cx="184" cy="150" r="15"/><text class="nodet" x="184" y="154" text-anchor="middle">B</text>
+  <circle class="node" cx="284" cy="150" r="15"/><text class="nodet" x="284" y="154" text-anchor="middle">C</text>
+  <circle class="node" cx="384" cy="150" r="15"/><text class="nodet" x="384" y="154" text-anchor="middle">D</text>
+
+  <path class="lnb" d="M84,167 Q234,227 384,167"/>
+  <text class="xs mono" x="234" y="214" text-anchor="middle">0.31</text>
+  <text class="s" x="234" y="250" text-anchor="middle">A and D end up in one group, unmeasured</text>
+
+  <!-- what codehelion does -->
+  <rect class="box" x="496" y="72" width="440" height="200" rx="8"/>
+  <text class="lbl" x="512" y="98">MEASURED AGAINST A CANONICAL MEMBER</text>
+
+  <circle class="ext" cx="610" cy="170" r="74"/>
+  <path class="ln" d="M626,158 L654,140"/>
+  <path class="ln" d="M626,182 L662,196"/>
+  <path class="lnb" d="M628,170 L774,170"/>
+  <text class="xs mono" x="648" y="128" text-anchor="end">0.85</text>
+  <text class="xs mono" x="650" y="218" text-anchor="end">0.80</text>
+  <text class="xs mono" x="706" y="162" text-anchor="middle">0.31</text>
+
+  <circle class="nodef" cx="610" cy="170" r="17"/><text class="nodetf" x="610" y="174" text-anchor="middle">◆</text>
+  <circle class="node"  cx="668" cy="132" r="15"/><text class="nodet"  x="668" y="136" text-anchor="middle">B</text>
+  <circle class="node"  cx="676" cy="204" r="15"/><text class="nodet"  x="676" y="208" text-anchor="middle">C</text>
+  <circle class="node"  cx="790" cy="170" r="15"/><text class="nodet"  x="790" y="174" text-anchor="middle">D</text>
+
+  <text class="xs" x="610" y="262" text-anchor="middle">the gate</text>
+  <text class="s"  x="856" y="200" text-anchor="middle">left out</text>
+
+  <text class="s" x="24"  y="296">A plain connected component keeps every chain it can build.</text>
+  <text class="s" x="496" y="296">Every member clears the gate against ◆, so no chain drags one in.</text>
+
+  <!-- what the gate leaves out is still reported -->
+  <rect class="box2" x="24" y="320" width="290" height="76" rx="8"/>
+  <text class="h" x="40" y="344">siblings</text>
+  <text class="s" x="40" y="364">an ungrouped unit that measures close</text>
+  <text class="s" x="40" y="382">to ◆, in a file the group occupies</text>
+
+  <rect class="box2" x="336" y="320" width="290" height="76" rx="8"/>
+  <text class="h" x="352" y="344">near misses</text>
+  <text class="s" x="352" y="364">proposals just under the gate, kept</text>
+  <text class="s" x="352" y="382">as a diagnostic band</text>
+
+  <rect class="box2" x="648" y="320" width="288" height="76" rx="8"/>
+  <text class="h" x="664" y="344">split pairs</text>
+  <text class="s" x="664" y="364">a verified pair no complete group</text>
+  <text class="s" x="664" y="382">can hold, reported below the groups</text>
+
+  <text class="s" x="24" y="424">Similarity is not transitive, so grouping never uses a plain connected component on its own.</text>
+</svg>

@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 452" width="960" height="452" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">各解析モードが測るもの</title>
+  <desc id="dsc">Fast はトークンの一致だけで Type-1（完全一致）と Type-2（リネーム）を測ります。Structural はさらに Type-3（欠落を伴うコピー）、canonical member に対する識別子の一致度、次元ごとの類似度、sibling と near miss、boilerplate・テストコード・整数幅ファミリの各ポリシーを測ります。Semantic はそれらに加えて、コンパイラが解決した型と名前、および登録済みの semantic ルールを測ります。Fast と Structural は読んだコードを実行しません。Semantic も、実行分類を明示的に許可しないかぎりプロジェクトのコードを実行しません。</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .band  { fill:#eaeef2 }
+    .rule  { stroke:#d0d7de }
+    .acc   { fill:#0a5ca8 }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:13px }
+    .r     { font-size:11.5px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .lbl   { font-size:10.5px; fill:#59636e; letter-spacing:.08em }
+    .mark  { font-size:13px; fill:#0a5ca8 }
+    .none  { font-size:13px; fill:#8c959f }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .box{fill:#161b22;stroke:#30363d} .band{fill:#161b22}
+      .rule{stroke:#30363d} .acc{fill:#79b8ff} .mark{fill:#79b8ff} .none{fill:#6e7781}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e} .lbl{fill:#8b949e}
+    }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="960" height="452" rx="12"/>
+
+  <text class="lbl" x="24" y="40">測定できるもの</text>
+
+  <rect class="box" x="336" y="52" width="186" height="62" rx="8"/>
+  <text class="h"  x="429" y="80" text-anchor="middle">Fast</text>
+  <text class="xs" x="429" y="99" text-anchor="middle">トークンの一致 · 既定</text>
+
+  <rect class="box" x="538" y="52" width="186" height="62" rx="8"/>
+  <text class="h"       x="631" y="80" text-anchor="middle">Structural</text>
+  <text class="xs mono" x="631" y="99" text-anchor="middle">--mode structural</text>
+
+  <rect class="box" x="740" y="52" width="186" height="62" rx="8"/>
+  <text class="h"       x="833" y="80" text-anchor="middle">Semantic</text>
+  <text class="xs mono" x="833" y="99" text-anchor="middle">--mode semantic</text>
+
+  <rect class="band" x="24" y="120" width="902" height="28" rx="4"/>
+  <text class="r"    x="36"  y="139">Type-1 — 完全一致のコピー</text>
+  <text class="mark" x="429" y="140" text-anchor="middle">✓</text>
+  <text class="mark" x="631" y="140" text-anchor="middle">✓</text>
+  <text class="mark" x="833" y="140" text-anchor="middle">✓</text>
+
+  <text class="r"    x="36"  y="171">Type-2 — 識別子のリネーム、リテラルの変更</text>
+  <text class="mark" x="429" y="172" text-anchor="middle">✓</text>
+  <text class="mark" x="631" y="172" text-anchor="middle">✓</text>
+  <text class="mark" x="833" y="172" text-anchor="middle">✓</text>
+
+  <rect class="band" x="24" y="184" width="902" height="28" rx="4"/>
+  <text class="r"    x="36"  y="203">Type-3 — 文の追加・削除・変更を伴うコピー</text>
+  <text class="none" x="429" y="204" text-anchor="middle">—</text>
+  <text class="mark" x="631" y="204" text-anchor="middle">✓</text>
+  <text class="mark" x="833" y="204" text-anchor="middle">✓</text>
+
+  <text class="r"    x="36"  y="235">canonical member に対する識別子の一致度</text>
+  <text class="none" x="429" y="236" text-anchor="middle">—</text>
+  <text class="mark" x="631" y="236" text-anchor="middle">✓</text>
+  <text class="mark" x="833" y="236" text-anchor="middle">✓</text>
+
+  <rect class="band" x="24" y="248" width="902" height="28" rx="4"/>
+  <text class="r"    x="36"  y="267">次元ごとに分けた類似度</text>
+  <text class="none" x="429" y="268" text-anchor="middle">—</text>
+  <text class="mark" x="631" y="268" text-anchor="middle">✓</text>
+  <text class="mark" x="833" y="268" text-anchor="middle">✓</text>
+
+  <text class="r"    x="36"  y="299">sibling と near miss</text>
+  <text class="none" x="429" y="300" text-anchor="middle">—</text>
+  <text class="mark" x="631" y="300" text-anchor="middle">✓</text>
+  <text class="mark" x="833" y="300" text-anchor="middle">✓</text>
+
+  <rect class="band" x="24" y="312" width="902" height="28" rx="4"/>
+  <text class="r"    x="36"  y="331">boilerplate・テストコード・整数幅ファミリの抑制</text>
+  <text class="none" x="429" y="332" text-anchor="middle">—</text>
+  <text class="mark" x="631" y="332" text-anchor="middle">✓</text>
+  <text class="mark" x="833" y="332" text-anchor="middle">✓</text>
+
+  <text class="r"    x="36"  y="363">コンパイラが解決した型・名前と semantic ルール</text>
+  <text class="none" x="429" y="364" text-anchor="middle">—</text>
+  <text class="none" x="631" y="364" text-anchor="middle">—</text>
+  <text class="mark" x="833" y="364" text-anchor="middle">✓</text>
+
+  <line class="rule" x1="24" y1="386" x2="936" y2="386"/>
+  <text class="s" x="24" y="410">そのモードで測れない次元は、推測せず「測定なし」として報告します。</text>
+  <text class="s" x="24" y="430">Fast と Structural は読んだコードを実行しません。Semantic は helper プロセスを起動しますが、--allow-execution が分類を指定しないかぎりプロジェクトのコードは実行しません。</text>
+</svg>

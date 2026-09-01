@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 452" width="960" height="452" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">安定した識別子と、それが変わるとき</title>
+  <desc id="dsc">finding は内容の fingerprint で名前を持ちます。本体ひとつを表す unit fingerprint、本体の中の文の連なりを表す fragment fingerprint、見出しに出るグループ ID を表す clone-group fingerprint、そして出現箇所ひとつを表す finding id です。行番号・AST ノード ID・シンボル索引は入力になりません。そのため同じツリーからは常に同じ ID と同じ順序が得られます。実行をまたいでも、内容が変わらないグループは同じ ID を保ち、内容が変わったグループは新しい ID を持ったうえで、どのグループから引き継いだかが記録されます。</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .box2  { fill:#f6f8fa; stroke:#d8dee4 }
+    .chip  { fill:#ffffff; stroke:#d8dee4 }
+    .rule  { stroke:#e1e6eb }
+    .ln    { fill:none; stroke:#0a5ca8; stroke-width:1.4 }
+    .lnb   { fill:none; stroke:#8c959f; stroke-width:1.2; stroke-dasharray:5 4 }
+    .ah    { fill:#0a5ca8 }
+    .ahb   { fill:#8c959f }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:13px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .lbl   { font-size:10.5px; fill:#59636e; letter-spacing:.08em }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    .m12   { font-size:12px }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .box{fill:#161b22;stroke:#30363d} .box2{fill:#11161c;stroke:#30363d}
+      .chip{fill:#161b22;stroke:#30363d} .rule{stroke:#21262d}
+      .ln{stroke:#79b8ff} .lnb{stroke:#6e7781} .ah{fill:#79b8ff} .ahb{fill:#6e7781}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e} .lbl{fill:#8b949e}
+    }
+  </style>
+
+  <defs>
+    <marker id="a" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ah" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+    <marker id="b" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ahb" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="960" height="452" rx="12"/>
+
+  <rect class="box" x="24" y="72" width="420" height="220" rx="8"/>
+  <text class="lbl" x="40" y="98">内容から名前を付ける</text>
+  <line class="rule" x1="40" y1="108" x2="428" y2="108"/>
+
+  <text class="mono m12" x="40" y="132">UnitFingerprint</text>
+  <text class="s"        x="40" y="148">本体ひとつ — 関数やメソッド</text>
+  <text class="mono m12" x="40" y="176">FragmentFingerprint</text>
+  <text class="s"        x="40" y="192">ひとつの本体の中にある文の連なり</text>
+  <text class="mono m12" x="40" y="220">CloneGroupFingerprint</text>
+  <text class="s"        x="40" y="236">グループ見出しの末尾に出る ID</text>
+  <text class="mono m12" x="40" y="264">FindingId</text>
+  <text class="s"        x="40" y="280">出現箇所ひとつ。-v で表示されます</text>
+
+  <rect class="box" x="468" y="72" width="468" height="220" rx="8"/>
+  <text class="lbl" x="484" y="98">実行をまたぐと</text>
+  <line class="rule" x1="484" y1="108" x2="920" y2="108"/>
+  <text class="xs" x="560" y="132" text-anchor="middle">run 1</text>
+  <text class="xs" x="820" y="132" text-anchor="middle">run 2</text>
+
+  <rect class="chip" x="484" y="146" width="152" height="34" rx="6"/>
+  <text class="mono m12" x="560" y="168" text-anchor="middle">0f5065d5</text>
+  <rect class="chip" x="744" y="146" width="152" height="34" rx="6"/>
+  <text class="mono m12" x="820" y="168" text-anchor="middle">0f5065d5</text>
+  <path class="ln" d="M640,163 L740,163" marker-end="url(#a)"/>
+  <text class="xs" x="690" y="156" text-anchor="middle">ID を保った</text>
+
+  <rect class="chip" x="484" y="216" width="152" height="34" rx="6"/>
+  <text class="mono m12" x="560" y="238" text-anchor="middle">baf4e127</text>
+  <rect class="chip" x="744" y="216" width="152" height="34" rx="6"/>
+  <text class="mono m12" x="820" y="238" text-anchor="middle">cabfd679</text>
+  <path class="lnb" d="M640,233 L740,233" marker-end="url(#b)"/>
+  <text class="xs" x="690" y="226" text-anchor="middle">引き継いだ</text>
+
+  <text class="s" x="484" y="276">レポートは各グループについてどちらだったかを述べます。</text>
+
+  <rect class="box2" x="24" y="316" width="452" height="76" rx="8"/>
+  <text class="h" x="40" y="340">ID が動かないもの</text>
+  <text class="s" x="40" y="360">コメントだけの編集、行の移動、隣接コードの改名。</text>
+  <text class="s" x="40" y="378">抑制設定と baseline が持続するのはこのためです</text>
+
+  <rect class="box2" x="496" y="316" width="440" height="76" rx="8"/>
+  <text class="h" x="512" y="340">ID が変わるもの</text>
+  <text class="s" x="512" y="360">内容そのものの変化。新しいグループは、どこから</text>
+  <text class="s" x="512" y="378">引き継いだかを示す lineage とともに報告されます</text>
+
+  <text class="s" x="24" y="416">行番号・AST ノード ID・シンボル索引は、いずれの入力にもなりません。</text>
+  <text class="s" x="24" y="436">同じツリーを同じ条件で読めば、常に同じ ID と同じ順序が得られます。</text>
+</svg>

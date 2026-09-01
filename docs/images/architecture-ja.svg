@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">crate とプロセス</title>
+  <desc id="dsc">CLI はコアエンジンに依存し、フロントエンド・ストア・成果物リーダーはコアと組み合わせて使う crate です。コアは compiler API をリンクせず、artifact crate にも依存しません。そのため成果物が無くてもソーススキャンは完全に成立します。コンパイラ由来の情報は独立した helper バイナリ（Rust 用と Clang 用）から取得し、バージョン付き protocol・capability negotiation・応答期限・クラッシュ隔離を伴って通信します。コンパイラがクラッシュしても終わるのは helper プロセスであってスキャンではありません。この 2 つの境界は make のターゲットが検査します。</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .frame { fill:none; stroke:#d0d7de }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .box2  { fill:#f6f8fa; stroke:#d8dee4 }
+    .ext   { fill:none; stroke:#afb8c1; stroke-dasharray:5 4 }
+    .rule  { stroke:#e1e6eb }
+    .ln    { fill:none; stroke:#0a5ca8; stroke-width:1.4 }
+    .lnb   { fill:none; stroke:#8c959f; stroke-width:1.2 }
+    .ah    { fill:#0a5ca8 }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:12.5px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .lbl   { font-size:10.5px; fill:#59636e; letter-spacing:.08em }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    .m11   { font-size:11px }
+    .m95   { font-size:9.5px }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .frame{stroke:#30363d} .box{fill:#161b22;stroke:#30363d}
+      .box2{fill:#11161c;stroke:#30363d} .ext{stroke:#484f58} .rule{stroke:#21262d}
+      .ln{stroke:#79b8ff} .lnb{stroke:#6e7781} .ah{fill:#79b8ff}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e} .lbl{fill:#8b949e}
+    }
+  </style>
+
+  <defs>
+    <marker id="a" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ah" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="960" height="400" rx="12"/>
+
+  <rect class="frame" x="24" y="56" width="584" height="268" rx="10"/>
+  <text class="lbl" x="40" y="80">ひとつのプロセス</text>
+
+  <rect class="box" x="44" y="100" width="150" height="56" rx="8"/>
+  <text class="mono m11" x="119" y="126" text-anchor="middle">codehelion</text>
+  <text class="xs"       x="119" y="143" text-anchor="middle">コマンドライン</text>
+
+  <rect class="box" x="238" y="100" width="170" height="56" rx="8"/>
+  <text class="mono m11" x="323" y="126" text-anchor="middle">codehelion-core</text>
+  <text class="xs"       x="323" y="143" text-anchor="middle">クローンエンジン</text>
+
+  <path class="ln" d="M194,128 L234,128" marker-end="url(#a)"/>
+
+  <path class="lnb" d="M92,196 L556,196"/>
+  <path class="ln"  d="M323,196 L323,160" marker-end="url(#a)"/>
+  <path class="lnb" d="M92,196 L92,214 M196,196 L196,214 M300,196 L300,214 M404,196 L404,214 M508,196 L508,214"/>
+
+  <rect class="box2" x="44"  y="214" width="96" height="44" rx="6"/>
+  <text class="mono m95" x="92"  y="234" text-anchor="middle">frontend-rust</text>
+  <text class="xs"       x="92"  y="250" text-anchor="middle">lexer · IR</text>
+  <rect class="box2" x="148" y="214" width="96" height="44" rx="6"/>
+  <text class="mono m95" x="196" y="234" text-anchor="middle">frontend-c</text>
+  <text class="xs"       x="196" y="250" text-anchor="middle">lexer · IR</text>
+  <rect class="box2" x="252" y="214" width="96" height="44" rx="6"/>
+  <text class="mono m95" x="300" y="234" text-anchor="middle">frontend-cpp</text>
+  <text class="xs"       x="300" y="250" text-anchor="middle">lexer · IR</text>
+  <rect class="box2" x="356" y="214" width="96" height="44" rx="6"/>
+  <text class="mono m95" x="404" y="234" text-anchor="middle">store</text>
+  <text class="xs"       x="404" y="250" text-anchor="middle">SQLite</text>
+  <rect class="box2" x="460" y="214" width="96" height="44" rx="6"/>
+  <text class="mono m95" x="508" y="234" text-anchor="middle">artifact</text>
+  <text class="xs"       x="508" y="250" text-anchor="middle">任意</text>
+
+  <text class="s" x="44" y="292">コアは compiler API をリンクせず、artifact crate にも依存しません。</text>
+  <text class="s" x="44" y="310">成果物がひとつも無くてもソーススキャンは完全に成立します。</text>
+
+  <text class="s" x="936" y="80" text-anchor="end">バージョン付き protocol · 応答期限 · クラッシュ隔離</text>
+
+  <rect class="ext" x="632" y="100" width="304" height="86" rx="8"/>
+  <text class="mono m11" x="648" y="128">codehelion-backend-rust</text>
+  <text class="xs" x="648" y="148">別プロセス。Semantic モードのときだけ起動</text>
+  <text class="xs" x="648" y="166">型 · 名前解決 · 呼び出し先</text>
+
+  <rect class="ext" x="632" y="212" width="304" height="86" rx="8"/>
+  <text class="mono m11" x="648" y="240">codehelion-backend-clang</text>
+  <text class="xs" x="648" y="260">別プロセス。システムの libclang が必要</text>
+  <text class="xs" x="648" y="278">型 · 名前解決 · 呼び出し先 · MIR CFG</text>
+
+  <path class="ln" d="M608,143 L628,143" marker-end="url(#a)"/>
+  <path class="ln" d="M608,255 L628,255" marker-end="url(#a)"/>
+
+  <text class="s" x="24" y="356">コンパイラがクラッシュしても終わるのは helper プロセスで、スキャンは該当ユニットを unavailable として記録し継続します。</text>
+  <text class="s" x="24" y="376">この 2 つの境界は口約束ではなく make verify-helper-boundaries と make verify-artifact-boundaries が検査します。</text>
+</svg>

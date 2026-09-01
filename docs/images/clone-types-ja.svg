@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" width="960" height="420" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">クローンの 3 つの型</title>
+  <desc id="dsc">1 つのルーチンと、その 3 通りのコピーです。Type-1 はトークンが同じコピーで、コメントだけの編集や改行の入れ替えで 1 件の finding が 2 件に割れることはありません。Type-2 は識別子のリネームとリテラルの変更を含みますが、トークンの形は保っています。Type-3 は途中に文の追加・削除・変更があるコピーで、Fast モードは到達せず、Structural モードがアラインメントとして測ります。比較は正規化の後に行われ、コメントと空白は除かれ、literal-normalization の設定がリテラルをどれだけ数えるかを決めます。</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .rule  { stroke:#e1e6eb }
+    .acc   { fill:#0a5ca8 }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:13px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .lbl   { font-size:10.5px; fill:#59636e; letter-spacing:.08em }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    .code  { font-size:12px }
+    .cd    { font-size:11.5px }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .box{fill:#161b22;stroke:#30363d} .rule{stroke:#21262d}
+      .acc{fill:#79b8ff}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e} .lbl{fill:#8b949e}
+    }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="960" height="420" rx="12"/>
+
+  <rect class="box" x="24" y="64" width="400" height="180" rx="8"/>
+  <text class="lbl" x="40" y="88">元のコード</text>
+  <line class="rule" x1="40" y1="98" x2="408" y2="98"/>
+  <text class="mono code" x="40" y="122" xml:space="preserve">fn total(items: &amp;[Item]) -&gt; u64 {</text>
+  <text class="mono code" x="40" y="140" xml:space="preserve">    let mut sum = 0;</text>
+  <text class="mono code" x="40" y="158" xml:space="preserve">    for item in items {</text>
+  <text class="mono code" x="40" y="176" xml:space="preserve">        sum += item.size;</text>
+  <text class="mono code" x="40" y="194" xml:space="preserve">    }</text>
+  <text class="mono code" x="40" y="212" xml:space="preserve">    sum</text>
+  <text class="mono code" x="40" y="230" xml:space="preserve">}</text>
+
+  <text class="s" x="24" y="274">比較は正規化の後に行います。コメントと空白は除かれ、</text>
+  <text class="s" x="24" y="292">リテラルをどれだけ数えるかは literal-normalization が決めます。</text>
+
+  <rect class="box" x="448" y="64" width="488" height="88" rx="8"/>
+  <text class="h"       x="464" y="88">Type-1 — 完全一致</text>
+  <text class="xs mono" x="920" y="88" text-anchor="end">fast</text>
+  <text class="mono cd" x="464" y="114">for item in items { sum += item.size; }</text>
+  <text class="s"       x="464" y="134">トークンが同じ。コメントだけの編集で finding が 2 つに割れません。</text>
+
+  <rect class="box" x="448" y="168" width="488" height="88" rx="8"/>
+  <text class="h"       x="464" y="192">Type-2 — 識別子のリネーム、リテラルの変更</text>
+  <text class="xs mono" x="920" y="192" text-anchor="end">fast</text>
+  <text class="mono cd" x="464" y="218">for <tspan class="acc">row</tspan> in <tspan class="acc">rows</tspan> { <tspan class="acc">acc</tspan> += <tspan class="acc">row</tspan>.size <tspan class="acc">* 8</tspan>; }</text>
+  <text class="s"       x="464" y="238">名前とリテラルは違い、トークンの形は同じ。</text>
+
+  <rect class="box" x="448" y="272" width="488" height="88" rx="8"/>
+  <text class="h"       x="464" y="296">Type-3 — 文の追加・削除・変更</text>
+  <text class="xs mono" x="920" y="296" text-anchor="end">structural</text>
+  <text class="mono cd" x="464" y="322">for row in rows { <tspan class="acc">if row.skip { continue; }</tspan> acc += … }</text>
+  <text class="s"       x="464" y="342">途中に欠落がある。どれだけ整列するかを Structural が測ります。</text>
+
+  <text class="s" x="24" y="394">グループの型は、そのすべての出現箇所に当てはまる最も強い型として報告します。</text>
+</svg>

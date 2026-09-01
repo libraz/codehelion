@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" width="960" height="420" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">The three clone types</title>
+  <desc id="dsc">One routine and three copies of it. A Type-1 copy has the same tokens, so a comment-only edit or a reflow does not split one finding into two. A Type-2 copy renames identifiers and changes literals while keeping the token shape. A Type-3 copy adds, removes or changes a statement in the middle, which Fast mode does not reach and Structural mode measures as an alignment. Comparison happens after normalization: comments and whitespace are removed, and the literal-normalization setting decides how much a literal counts.</desc>
+
+  <style>
+    .bg    { fill:#f6f8fa }
+    .box   { fill:#ffffff; stroke:#d8dee4 }
+    .rule  { stroke:#e1e6eb }
+    .acc   { fill:#0a5ca8 }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:13px }
+    .s     { font-size:10.5px; fill:#59636e }
+    .xs    { font-size:9.5px; fill:#59636e }
+    .lbl   { font-size:10.5px; fill:#59636e; letter-spacing:.08em }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+    .code  { font-size:12px }
+    .cd    { font-size:11.5px }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .box{fill:#161b22;stroke:#30363d} .rule{stroke:#21262d}
+      .acc{fill:#79b8ff}
+      text{fill:#e6edf3} .s{fill:#8b949e} .xs{fill:#8b949e} .lbl{fill:#8b949e}
+    }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="960" height="420" rx="12"/>
+
+  <!-- the original -->
+  <rect class="box" x="24" y="64" width="400" height="180" rx="8"/>
+  <text class="lbl" x="40" y="88">THE ORIGINAL</text>
+  <line class="rule" x1="40" y1="98" x2="408" y2="98"/>
+  <text class="mono code" x="40" y="122" xml:space="preserve">fn total(items: &amp;[Item]) -&gt; u64 {</text>
+  <text class="mono code" x="40" y="140" xml:space="preserve">    let mut sum = 0;</text>
+  <text class="mono code" x="40" y="158" xml:space="preserve">    for item in items {</text>
+  <text class="mono code" x="40" y="176" xml:space="preserve">        sum += item.size;</text>
+  <text class="mono code" x="40" y="194" xml:space="preserve">    }</text>
+  <text class="mono code" x="40" y="212" xml:space="preserve">    sum</text>
+  <text class="mono code" x="40" y="230" xml:space="preserve">}</text>
+
+  <text class="s" x="24" y="274">Comparison happens after normalization: comments and whitespace are</text>
+  <text class="s" x="24" y="292">removed, and literal-normalization decides how much a literal counts.</text>
+
+  <!-- the copies -->
+  <rect class="box" x="448" y="64" width="488" height="88" rx="8"/>
+  <text class="h"       x="464" y="88">Type-1 — identical</text>
+  <text class="xs mono" x="920" y="88" text-anchor="end">fast</text>
+  <text class="mono cd" x="464" y="114">for item in items { sum += item.size; }</text>
+  <text class="s"       x="464" y="134">The same tokens. A comment-only edit does not split one finding in two.</text>
+
+  <rect class="box" x="448" y="168" width="488" height="88" rx="8"/>
+  <text class="h"       x="464" y="192">Type-2 — renamed identifiers, changed literals</text>
+  <text class="xs mono" x="920" y="192" text-anchor="end">fast</text>
+  <text class="mono cd" x="464" y="218">for <tspan class="acc">row</tspan> in <tspan class="acc">rows</tspan> { <tspan class="acc">acc</tspan> += <tspan class="acc">row</tspan>.size <tspan class="acc">* 8</tspan>; }</text>
+  <text class="s"       x="464" y="238">The names and the literals differ; the shape of the tokens does not.</text>
+
+  <rect class="box" x="448" y="272" width="488" height="88" rx="8"/>
+  <text class="h"       x="464" y="296">Type-3 — added, removed or changed statements</text>
+  <text class="xs mono" x="920" y="296" text-anchor="end">structural</text>
+  <text class="mono cd" x="464" y="322">for row in rows { <tspan class="acc">if row.skip { continue; }</tspan> acc += … }</text>
+  <text class="s"       x="464" y="342">A gap in the middle. Structural mode measures how much still aligns.</text>
+
+  <text class="s" x="24" y="394">A group is reported as the strongest class that fits every occurrence in it.</text>
+</svg>
