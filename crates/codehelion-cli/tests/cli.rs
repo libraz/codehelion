@@ -866,6 +866,90 @@ fn readmes_document_the_cli_operations_flags_and_exit_statuses() {
     }
 }
 
+/// How a README names one artifact format in prose, in English and Japanese.
+///
+/// Matched exhaustively: a format added to the enum stops this compiling until
+/// it says how a reader is told about it, which is what stops a format
+/// shipping that the documents never mention.
+const fn readme_names(format: codehelion_artifact::ArtifactFormat) -> [&'static str; 2] {
+    use codehelion_artifact::ArtifactFormat;
+    match format {
+        ArtifactFormat::Wasm => ["WASM", "WASM"],
+        ArtifactFormat::Elf => ["ELF", "ELF"],
+        ArtifactFormat::MachO => ["Mach-O", "Mach-O"],
+        ArtifactFormat::PeCoff => ["PE/COFF", "PE/COFF"],
+        ArtifactFormat::Archive => ["static archives", "静的アーカイブ"],
+    }
+}
+
+/// The formats a capability holds for, as each README lists them.
+fn named_formats(
+    holds: impl Fn(&codehelion_artifact::ArtifactCapabilities) -> bool,
+) -> [String; 2] {
+    let mut listed: [Vec<&str>; 2] = [Vec::new(), Vec::new()];
+    for row in &codehelion_artifact::FORMAT_SUPPORT {
+        if !holds(&row.capabilities) {
+            continue;
+        }
+        for (language, name) in readme_names(row.format).into_iter().enumerate() {
+            listed[language].push(name);
+        }
+    }
+    [english_list(&listed[0]), listed[1].join("、")]
+}
+
+/// Names joined the way English prose joins them.
+fn english_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Both READMEs name every artifact format this build reads, and name the
+/// right ones as supplying each derived quantity.
+///
+/// The lists are written out of the support definitions rather than copied
+/// from them: a format added there, or a capability moved between formats,
+/// fails here until the documents say the same thing. What stays prose is the
+/// sentence around the lists.
+#[test]
+fn readmes_name_every_artifact_format_and_what_each_one_supplies() {
+    let readmes = [
+        include_str!("../../../README.md"),
+        include_str!("../../../README_ja.md"),
+    ];
+    let languages = ["English", "Japanese"];
+    for row in &codehelion_artifact::FORMAT_SUPPORT {
+        for (language, name) in readme_names(row.format).into_iter().enumerate() {
+            assert!(
+                readmes[language].contains(name),
+                "the {} README does not name {name}",
+                languages[language]
+            );
+        }
+    }
+    for (what, listed) in [
+        (
+            "a call graph",
+            named_formats(|capabilities| capabilities.call_graph),
+        ),
+        (
+            "independently sized data regions",
+            named_formats(|capabilities| capabilities.independent_data_segments),
+        ),
+    ] {
+        for (language, list) in listed.into_iter().enumerate() {
+            assert!(
+                readmes[language].contains(&list),
+                "the {} README does not name {list:?} as the formats supplying {what}",
+                languages[language]
+            );
+        }
+    }
+}
+
 #[test]
 fn readmes_document_canonical_build_variant_json_identities() {
     for readme in [

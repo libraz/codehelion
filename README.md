@@ -304,12 +304,12 @@ locally. They parse bytes; they never load or execute the inspected artifact.
 
 Observed size and duplicate code are reported for every format. The rest is
 what the format itself can establish: retained and shared size need a call
-graph, which is derived for WASM and ELF; duplicate data needs independently
-sized data regions, which WASM has; a source location needs debug evidence —
-DWARF for ELF, a matching dSYM for Mach-O, a matching PDB for PE/COFF, a
-recorded source-map URL for WASM. A quantity the format cannot supply is
-reported as unavailable beside an assumption naming what was missing, rather
-than as a number.
+graph, which is derived for WASM, ELF and static archives; duplicate data needs
+independently sized data regions, which WASM has; a source location needs debug
+evidence — DWARF for ELF, a matching dSYM for Mach-O, a matching PDB for
+PE/COFF, a recorded source-map URL for WASM. A quantity the format cannot
+supply is reported as unavailable beside an assumption naming what was missing,
+rather than as a number.
 
 These commands measure the artifact as it was built; they do not forecast what
 consolidating duplication in the source would take out of it. The gap between
@@ -662,8 +662,8 @@ enumerated the clones in those projects first.
 
 | case | Structural precision | confirmed | refuted |
 |---|---|---|---|
-| fast-yaml | 1.0000 | 1 | 0 |
 | codehelion-store | 1.0000 | 2 | 0 |
+| fast-yaml | 1.0000 | 1 | 0 |
 | cjson | 0.8235 | 14 | 3 |
 | bitflags | 0.7857 | 11 | 3 |
 | spdlog | 0.5833 | 21 | 15 |

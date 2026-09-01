@@ -372,6 +372,53 @@ const CORPORA: &[Expected] = &[
 ];
 
 /// Whether a per-type recall is what was recorded, absence included.
+/// The rows of the recall table both READMEs carry, written out of what this
+/// file records.
+///
+/// Generated rather than transcribed, for the reason the format-support
+/// document is: a detector change moves a recorded value here, the assertions
+/// below fail until somebody records the new one, and this then fails until
+/// the sentence a reader is given about it says the same thing. Transcribed,
+/// the second step simply never happened.
+///
+/// The rows and not the heading, because a translated README names the column
+/// in its own language while the numbers under it are the same numbers. What
+/// is claimed is in the rows: a corpus this file scores has to appear in both
+/// documents, with the value this file records, in the order the modes are
+/// recorded in.
+fn recall_rows() -> String {
+    let mut rows = String::new();
+    for (index, expected) in CORPORA.iter().enumerate() {
+        if index > 0 {
+            rows.push('\n');
+        }
+        write!(rows, "| {} |", expected.name).expect("writing to a string cannot fail");
+        for measurement in &expected.measurements {
+            write!(rows, " {:.4} |", measurement.recall).expect("writing to a string cannot fail");
+        }
+    }
+    rows
+}
+
+/// Both READMEs state the recall this file records, in the same table.
+///
+/// Read as a document rather than as separate claims: a corpus added here has
+/// to appear in both, and a value that moved has to move in both, because what
+/// is compared is the whole table.
+#[test]
+fn both_readmes_carry_the_recall_this_file_records() {
+    let rows = recall_rows();
+    for (language, readme) in [
+        ("English", include_str!("../../../README.md")),
+        ("Japanese", include_str!("../../../README_ja.md")),
+    ] {
+        assert!(
+            readme.contains(&rows),
+            "the {language} README does not carry the recorded recall rows:\n{rows}"
+        );
+    }
+}
+
 fn same_measure(measured: Option<f64>, recorded: Option<f64>) -> bool {
     match (measured, recorded) {
         (Some(left), Some(right)) => (left - right).abs() < 1e-9,

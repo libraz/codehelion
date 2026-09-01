@@ -331,6 +331,121 @@ const ORDERINGS: &[Ordering] = &[
     },
 ];
 
+/// The rows of the precision table both READMEs carry, and the rows of the
+/// ordering table under it, written out of what this file records.
+///
+/// Generated rather than transcribed, for the reason the format-support
+/// document is: a detector change moves a recorded value here, the assertions
+/// below fail until somebody records the new one, and this then fails until
+/// the sentence a reader is given about it says the same thing.
+///
+/// The rows and not the headings, because a translated README names its
+/// columns in its own language while the numbers under them are the same
+/// numbers. Cases are ordered by the precision they reached, highest first,
+/// which is the order a reader wants and which the recorded order is not.
+fn precision_rows() -> String {
+    let mut ordered: Vec<&Expected> = CORPORA.iter().collect();
+    ordered.sort_by(|left, right| {
+        precision_of(right)
+            .partial_cmp(&precision_of(left))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| judged(right).cmp(&judged(left)))
+    });
+    let mut rows = String::new();
+    for case in ordered {
+        writeln!(
+            rows,
+            "| {} | {:.4} | {} | {} |",
+            case.name,
+            precision_of(case),
+            case.confirmed,
+            case.refuted
+        )
+        .expect("writing to a string cannot fail");
+    }
+    rows
+}
+
+/// The aggregate row's cells, without the label a translated README writes in
+/// its own language.
+fn aggregate_cells() -> String {
+    let confirmed: usize = CORPORA.iter().map(|case| case.confirmed).sum();
+    let refuted: usize = CORPORA.iter().map(|case| case.refuted).sum();
+    format!(
+        "| **{:.4}** | **{confirmed}** | **{refuted}** |",
+        share(confirmed, refuted)
+    )
+}
+
+/// The rows of the ordering table both READMEs carry.
+fn ordering_rows() -> String {
+    let mut rows = String::new();
+    for (index, ordering) in ORDERINGS.iter().enumerate() {
+        if index > 0 {
+            rows.push('\n');
+        }
+        write!(
+            rows,
+            "| {} | {:.4} | {:.4} | {:.4} |",
+            ordering.name, ordering.at_10, ordering.at_50, ordering.map
+        )
+        .expect("writing to a string cannot fail");
+    }
+    rows
+}
+
+/// How many verdicts one case carries. The tie-break between equal rates: at
+/// the same rate, the case that judged more of the detector's output says more
+/// about it.
+const fn judged(case: &Expected) -> usize {
+    case.confirmed + case.refuted
+}
+
+/// What one case's recorded verdicts make its precision.
+fn precision_of(case: &Expected) -> f64 {
+    share(case.confirmed, case.refuted)
+}
+
+/// Confirmed as a share of everything judged; zero when nothing was judged.
+fn share(confirmed: usize, refuted: usize) -> f64 {
+    let judged = confirmed + refuted;
+    if judged == 0 {
+        return 0.0;
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "verdict counts are far below the range a double represents exactly"
+    )]
+    {
+        confirmed as f64 / judged as f64
+    }
+}
+
+/// Both READMEs state the precision and the ordering this file records.
+///
+/// Read as documents rather than as separate claims: a case added here has to
+/// appear in both, with the verdicts this file records, and the aggregate has
+/// to be the aggregate of them. The aggregate is compared without its label,
+/// which a translated README writes in its own language.
+#[test]
+fn both_readmes_carry_the_precision_this_file_records() {
+    for (what, rows) in [
+        ("precision", precision_rows()),
+        ("aggregate", aggregate_cells()),
+        ("ordering", ordering_rows()),
+    ] {
+        for (language, readme) in [
+            ("English", include_str!("../../../README.md")),
+            ("Japanese", include_str!("../../../README_ja.md")),
+        ] {
+            assert!(
+                readme.contains(&rows),
+                "the {language} README does not carry the recorded {what} rows:\n{rows}"
+            );
+        }
+    }
+}
+
 /// The verdicts under each confidence band, as last measured.
 ///
 /// Pinned for what a move would mean rather than for the values being right:
