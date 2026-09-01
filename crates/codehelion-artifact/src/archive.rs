@@ -379,7 +379,7 @@ mod tests {
         (archive, header_start)
     }
 
-    pub(super) fn thin_archive_fixture() -> Vec<u8> {
+    fn thin_archive_fixture() -> Vec<u8> {
         let mut archive = b"!<thin>\n".to_vec();
         archive.extend(archive_member("left.obj", b""));
         archive.extend(archive_member("right.obj", b""));
