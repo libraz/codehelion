@@ -50,8 +50,8 @@ impl ArtifactBackend for WasmBackend {
             if let Some((id, range)) = payload.as_section() {
                 ir.sections.push(ArtifactSection {
                     name: section_name(id).map(str::to_owned),
-                    offset: range.start as u64,
-                    size: range.len() as u64,
+                    offset: range.start,
+                    size: range.end.saturating_sub(range.start),
                     executable: id == 10,
                 });
             }
@@ -165,7 +165,7 @@ impl ArtifactBackend for WasmBackend {
                         ir.data_segments.push(ArtifactDataSegment {
                             fingerprint: ArtifactFingerprint::from_content("wasm-data", data.data),
                             section: Some(11),
-                            offset: data.range.start as u64,
+                            offset: data.range.start,
                             bytes: data.data.to_vec(),
                         });
                     }
@@ -325,13 +325,18 @@ fn parse_function(
     body: &wasmparser::FunctionBody<'_>,
     bytes: &[u8],
 ) -> Result<PendingFunction, ArtifactError> {
-    let mut normalized = Vec::with_capacity(body.range().len());
+    let body_range = body.range();
+    let mut normalized = Vec::with_capacity(
+        usize::try_from(body_range.end.saturating_sub(body_range.start)).unwrap_or(0),
+    );
     let mut calls = Vec::new();
     let operators = body
         .get_operators_reader()
         .map_err(|error| malformed(error.to_string()))?;
     for operator in operators.into_iter_with_offsets() {
         let (operator, offset) = operator.map_err(|error| malformed(error.to_string()))?;
+        let offset = usize::try_from(offset)
+            .map_err(|_| malformed("operator offset lies outside the input".to_owned()))?;
         append_opcode_key(&mut normalized, bytes, offset)?;
         match operator {
             Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
@@ -346,7 +351,7 @@ fn parse_function(
     }
     Ok(PendingFunction {
         index,
-        offset: body.range().start as u64,
+        offset: body.range().start,
         code: body.as_bytes().to_vec(),
         normalized: NormalizedInstructions {
             version: WASM_NORMALIZATION_VERSION.to_owned(),

@@ -123,7 +123,6 @@ fn attach_dwarf_frames_within<S: BuildHasher>(
             continue;
         };
         let mut entries = unit.entries();
-        let mut depth = 0isize;
         loop {
             let entry = match entries.next_dfs() {
                 Ok(Some(entry)) => entry,
@@ -133,8 +132,7 @@ fn attach_dwarf_frames_within<S: BuildHasher>(
                     break;
                 }
             };
-            let (delta, entry) = entry;
-            depth += delta;
+            let depth = entry.depth();
             if !matches!(
                 entry.tag(),
                 gimli::DW_TAG_subprogram | gimli::DW_TAG_inlined_subroutine
@@ -521,7 +519,7 @@ fn file_index_value<R: Reader>(value: &gimli::AttributeValue<R>) -> Option<u64> 
 fn source_frame<R: Reader>(
     dwarf: &gimli::Dwarf<R>,
     unit: &gimli::Unit<R>,
-    entry: &gimli::DebuggingInformationEntry<'_, '_, R>,
+    entry: &gimli::DebuggingInformationEntry<R>,
 ) -> Option<ArtifactInlineFrame> {
     let attributes = if entry.tag() == gimli::DW_TAG_inlined_subroutine {
         (
@@ -538,8 +536,6 @@ fn source_frame<R: Reader>(
     };
     let file_index = entry
         .attr_value(attributes.0)
-        .ok()
-        .flatten()
         .and_then(|value| file_index_value(&value))?;
     let line_program = unit.line_program.as_ref()?;
     let file = line_program.header().file(file_index)?;
@@ -554,14 +550,10 @@ fn source_frame<R: Reader>(
     let compilation_directory = unit.comp_dir.as_ref().and_then(reader_string);
     let line = entry
         .attr_value(attributes.1)
-        .ok()
-        .flatten()
         .and_then(|value| value.udata_value())
         .and_then(|value| u32::try_from(value).ok());
     let column = entry
         .attr_value(attributes.2)
-        .ok()
-        .flatten()
         .and_then(|value| value.udata_value())
         .and_then(|value| u32::try_from(value).ok());
     Some(ArtifactInlineFrame {
@@ -1272,7 +1264,7 @@ mod tests {
         while let Some(header) = units.next().expect("read unit header") {
             let unit = dwarf.unit(header).expect("read unit");
             let mut entries = unit.entries();
-            while let Some((_, entry)) = entries.next_dfs().expect("read entry") {
+            while let Some(entry) = entries.next_dfs().expect("read entry") {
                 if entry.tag() == gimli::DW_TAG_subprogram
                     && let Some(frame) = source_frame(&dwarf, &unit, entry)
                 {
@@ -1284,10 +1276,18 @@ mod tests {
     }
 
     /// Compile one translation unit with the host C compiler, keeping its debug
-    /// information. Only the compiler runs; the object is never loaded.
+    /// information. Only the compiler runs; the image is never loaded.
     ///
     /// The declared source names two functions on known lines, so a frame from
     /// a subprogram's declaration is recognisable by its line alone.
+    ///
+    /// Whether the unit is linked is not a stylistic choice; it is where each
+    /// object format holds readable debug information. In an unlinked ELF
+    /// object the line program stores its file and directory names as zero and
+    /// carries the real offsets in relocations against `.debug_line_str`, so
+    /// the names only resolve once a linker has applied them. A Mach-O link
+    /// goes the other way and moves debug information out of the image into a
+    /// debug map, leaving the DWARF behind in the unlinked object.
     #[cfg(unix)]
     #[allow(
         clippy::disallowed_types,
@@ -1302,22 +1302,23 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         ));
+        let linked = !cfg!(target_vendor = "apple");
         std::fs::create_dir_all(&directory).expect("create the compilation directory");
         let source = directory.join("unit.c");
-        let object = directory.join("unit.o");
+        let object = directory.join(if linked { "unit.so" } else { "unit.o" });
         std::fs::write(
             &source,
             "int declared_first(void) { return 1; }\nint declared_second(int value) { return value + 1; }\n",
         )
         .expect("write the translation unit");
-        let status = Command::new(compiler)
-            .arg("-g")
-            .arg("-O0")
-            .arg("-c")
-            .arg(&source)
-            .arg("-o")
-            .arg(&object)
-            .status();
+        let mut command = Command::new(compiler);
+        command.arg("-g").arg("-O0");
+        if linked {
+            command.arg("-shared").arg("-fPIC");
+        } else {
+            command.arg("-c");
+        }
+        let status = command.arg(&source).arg("-o").arg(&object).status();
         let bytes = match status {
             Ok(status) if status.success() => {
                 Some(std::fs::read(&object).expect("read the object"))
