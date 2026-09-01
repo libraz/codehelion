@@ -105,6 +105,203 @@ pub struct SizeClassification {
     pub assumptions: Vec<String>,
 }
 
+/// What a reported byte count is evidence of.
+///
+/// Six kinds, kept apart because a reader acts differently on each: a number
+/// read off the input, a count of excess among things found equal, a total
+/// reached by following call edges, a ceiling, a model output, and a
+/// before/after measurement of a controlled change. Mixing any two of them
+/// turns a number nobody measured into one a reader takes as measured, which
+/// is the one way these categories have gone wrong.
+///
+/// Carried by [`ReportedSize`], so a byte count cannot be reported without
+/// saying which of the six it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceScope {
+    /// Read directly off the input.
+    Observed,
+    /// Excess among occurrences found equal, counting every copy past the one
+    /// a reader would keep.
+    Duplicated,
+    /// A total reached by following the call edges the parser established.
+    Retained,
+    /// A ceiling on what something could occupy or free, and never a claim
+    /// that it can be freed.
+    UpperBound,
+    /// A model output, derived rather than measured.
+    Estimated,
+    /// The difference between two artifacts that differ in one controlled way.
+    Verified,
+}
+
+/// One kind of byte count a report states, whatever population it counts over.
+///
+/// Implemented once per population — the artifact as a whole, one clone group
+/// inside it — because the two count different things and a single list of
+/// them would let a value of one be read as a value of the other. What the
+/// populations share is this: every category names itself and declares the
+/// evidence behind it, so adding one is not possible without answering both.
+pub trait ReportedSize: Copy {
+    /// Field name under which every rendering states this category.
+    fn key(self) -> &'static str;
+
+    /// What the number is evidence of.
+    fn scope(self) -> EvidenceScope;
+}
+
+/// Every byte count a report states about one artifact as a whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeCategory {
+    /// The artifact's own length.
+    Observed,
+    /// Excess in byte-identical code groups.
+    Duplicated,
+    /// Excess in code groups equal only after normalization.
+    DuplicatedNormalized,
+    /// Bytes held by call-graph reachability.
+    Retained,
+    /// Bytes several dependency closures share.
+    SharedDependency,
+    /// Excess in byte-identical data groups.
+    DuplicatedData,
+    /// The ceiling built from directly observed exact duplication.
+    UpperBoundSavings,
+    /// A source-informed refactoring estimate.
+    EstimatedRefactorSavings,
+    /// A measured before/after reduction.
+    VerifiedSavings,
+}
+
+impl ReportedSize for SizeCategory {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Observed => "observed_bytes",
+            Self::Duplicated => "duplicated_bytes",
+            Self::DuplicatedNormalized => "duplicated_bytes_normalized",
+            Self::Retained => "retained_bytes",
+            Self::SharedDependency => "shared_dependency_bytes",
+            Self::DuplicatedData => "duplicated_data_bytes",
+            Self::UpperBoundSavings => "upper_bound_savings_bytes",
+            Self::EstimatedRefactorSavings => "estimated_refactor_savings_bytes",
+            Self::VerifiedSavings => "verified_savings_bytes",
+        }
+    }
+
+    fn scope(self) -> EvidenceScope {
+        match self {
+            Self::Observed => EvidenceScope::Observed,
+            Self::Duplicated | Self::DuplicatedNormalized | Self::DuplicatedData => {
+                EvidenceScope::Duplicated
+            }
+            Self::Retained | Self::SharedDependency => EvidenceScope::Retained,
+            Self::UpperBoundSavings => EvidenceScope::UpperBound,
+            Self::EstimatedRefactorSavings => EvidenceScope::Estimated,
+            Self::VerifiedSavings => EvidenceScope::Verified,
+        }
+    }
+}
+
+impl SizeCategory {
+    /// Every category, in the order a report states them.
+    ///
+    /// The list every rendering walks. A category left out of it would be one
+    /// no reader ever sees, so [`SizeClassification::stated`] is built from
+    /// this and nothing states its categories a second way.
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &[
+            Self::Observed,
+            Self::Duplicated,
+            Self::DuplicatedNormalized,
+            Self::Retained,
+            Self::SharedDependency,
+            Self::DuplicatedData,
+            Self::UpperBoundSavings,
+            Self::EstimatedRefactorSavings,
+            Self::VerifiedSavings,
+        ]
+    }
+
+    /// What a reader has to know about this number beyond its name, when
+    /// there is such a thing.
+    #[must_use]
+    pub const fn qualification(self) -> Option<&'static str> {
+        match self {
+            Self::Duplicated => Some("byte-identical groups only"),
+            Self::DuplicatedNormalized => Some("weaker evidence: equal after normalization"),
+            Self::UpperBoundSavings => Some("duplicate code only; upper bound, not guaranteed"),
+            Self::EstimatedRefactorSavings => {
+                Some("per-clone-group estimates appear under source correlation")
+            }
+            Self::VerifiedSavings => Some("requires a controlled artifact compare calibration"),
+            Self::Observed | Self::Retained | Self::SharedDependency | Self::DuplicatedData => None,
+        }
+    }
+}
+
+/// The duplication the upper bound is built from.
+///
+/// One list rather than a sentence about one: [`upper_bound_excludes`] derives
+/// what is left out from it, so a duplicated category added later appears in
+/// what a report says about the bound without anyone editing that sentence.
+pub const UPPER_BOUND_COUNTS: &[SizeCategory] = &[SizeCategory::Duplicated];
+
+/// The duplication the upper bound leaves out.
+///
+/// Every category counting duplication that [`UPPER_BOUND_COUNTS`] does not
+/// take. Normalized equality is reached through a rewriting rule and duplicate
+/// data is not code, so neither belongs in a bound over observed duplicate
+/// code — but which categories those are is read off the list rather than
+/// written down twice.
+#[must_use]
+pub fn upper_bound_excludes() -> Vec<SizeCategory> {
+    SizeCategory::all()
+        .iter()
+        .copied()
+        .filter(|category| {
+            category.scope() == EvidenceScope::Duplicated && !UPPER_BOUND_COUNTS.contains(category)
+        })
+        .collect()
+}
+
+impl SizeClassification {
+    /// Every category this classification states, with the value it holds.
+    ///
+    /// `None` is "the evidence for this is not there", never zero. Taken apart
+    /// exhaustively, so a category added to [`SizeCategory`] stops this
+    /// compiling until it says where its number comes from — and every
+    /// rendering walks this rather than listing the fields again.
+    #[must_use]
+    pub fn stated(&self) -> Vec<(SizeCategory, Option<i128>)> {
+        SizeCategory::all()
+            .iter()
+            .copied()
+            .map(|category| {
+                let bytes = match category {
+                    SizeCategory::Observed => Some(i128::from(self.observed_bytes)),
+                    SizeCategory::Duplicated => Some(i128::from(self.duplicated_bytes)),
+                    SizeCategory::DuplicatedNormalized => {
+                        self.duplicated_bytes_normalized.map(i128::from)
+                    }
+                    SizeCategory::Retained => self.retained_bytes.map(i128::from),
+                    SizeCategory::SharedDependency => self.shared_dependency_bytes.map(i128::from),
+                    SizeCategory::DuplicatedData => self.duplicated_data_bytes.map(i128::from),
+                    SizeCategory::UpperBoundSavings => {
+                        self.upper_bound_savings_bytes.map(i128::from)
+                    }
+                    SizeCategory::EstimatedRefactorSavings => self
+                        .estimated_refactor_savings_bytes
+                        .map(|value| i128::from(value.0)),
+                    SizeCategory::VerifiedSavings => {
+                        self.verified_savings_bytes.map(|value| i128::from(value.0))
+                    }
+                };
+                (category, bytes)
+            })
+            .collect()
+    }
+}
+
 /// Evidence strength reported without turning an observation into a promise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

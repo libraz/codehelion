@@ -1,5 +1,7 @@
 use super::*;
-use crate::artifact::render::optional_bytes;
+use crate::artifact::model::ARTIFACT_CSV_HEADER;
+use crate::artifact::render::{attribution_column, stated_bytes};
+use codehelion_artifact::metrics::ReportedSize;
 
 /// A module whose two functions carry instruction bytes, one calling the
 /// other, alongside a data segment that carries bytes of its own.
@@ -2348,10 +2350,39 @@ fn the_csv_summary_carries_every_size_category() {
         .pop()
         .expect("one summary record");
 
-    assert_eq!(
-        summary[column::SHARED_DEPENDENCY_BYTES],
-        optional_bytes(report.sizes.shared_dependency_bytes)
-    );
+    // Named for every category, so it checks every category: the one that
+    // went missing before was reachable in the text and JSON views while the
+    // record a consumer parses left it out, and a test naming one column
+    // could not have seen that.
+    let text = rendered_text(&report, false);
+    let json = serde_json::to_value(&report).unwrap();
+    for (category, bytes) in report.sizes.stated() {
+        assert!(
+            ARTIFACT_CSV_HEADER.contains(&category.key()),
+            "no column carries {}",
+            category.key()
+        );
+        let column = ARTIFACT_CSV_HEADER
+            .iter()
+            .position(|name| *name == category.key())
+            .expect("the header was just checked to hold this name");
+        assert_eq!(
+            summary[column],
+            stated_bytes(bytes),
+            "the summary record states {}",
+            category.key()
+        );
+        assert!(
+            text.contains(&format!("  {}: {}", category.key(), stated_bytes(bytes))),
+            "the text report states {}",
+            category.key()
+        );
+        assert!(
+            json["sizes"].get(category.key()).is_some(),
+            "the JSON report states {}",
+            category.key()
+        );
+    }
     assert_eq!(
         summary[column::CLONE_CONFIDENCE],
         format!("{:?}", report.sizes.clone_confidence)
@@ -2367,16 +2398,6 @@ fn the_csv_summary_carries_every_size_category() {
     assert_eq!(
         summary[column::DATA_SEGMENT_BYTES],
         report.data_segment_bytes.to_string()
-    );
-    let text = rendered_text(&report, false);
-    assert!(text.contains(&format!(
-        "  shared_dependency_bytes: {}",
-        optional_bytes(report.sizes.shared_dependency_bytes)
-    )));
-    let json = serde_json::to_value(&report).unwrap();
-    assert_eq!(
-        json["sizes"]["shared_dependency_bytes"],
-        serde_json::json!(report.sizes.shared_dependency_bytes)
     );
 }
 
@@ -2615,6 +2636,58 @@ fn csv_columns_carry_the_quantity_their_name_states() {
     assert_eq!(generic[column::INSTANTIATIONS], "1");
     assert_eq!(generic[column::ARTIFACT_SYMBOLS], "1");
     assert_eq!(generic[column::RETAINED_BYTES], "4");
+}
+
+/// Every byte count one clone-group attribution states reaches all three
+/// renderings, under the name that identifies it.
+///
+/// The clone-group counterpart of the artifact-wide check: three numbers of
+/// three different kinds sit on one record, and a reader taking any of them by
+/// position must never receive another.
+#[test]
+fn every_clone_group_byte_count_reaches_every_rendering() {
+    let artifact = resolved_call_graph_artifact();
+    let report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None)
+        .with_correlation(Some(populated_correlation()));
+    let record = artifact_csv_records(&report)
+        .into_iter()
+        .find(|record| record[column::RECORD_TYPE] == "clone-group-attribution")
+        .expect("one attribution record");
+    let text = rendered_text(&report, false);
+    let json = serde_json::to_value(&report).unwrap();
+    let attribution = &report
+        .correlation
+        .as_ref()
+        .expect("the report carries its correlation")
+        .clone_group_attributions[0];
+
+    for (category, bytes) in attribution.stated() {
+        assert!(
+            ARTIFACT_CSV_HEADER.contains(&category.key()),
+            "no column carries {}",
+            category.key()
+        );
+        assert_eq!(
+            record[attribution_column(category)],
+            bytes.map_or_else(String::new, |bytes| bytes.to_string()),
+            "the attribution record states {}",
+            category.key()
+        );
+        assert!(
+            json["correlation"]["clone_group_attributions"][0]
+                .get(category.key())
+                .is_some(),
+            "the JSON report states {}",
+            category.key()
+        );
+        if let Some(bytes) = bytes {
+            assert!(
+                text.contains(&bytes.to_string()),
+                "the text report states {}",
+                category.key()
+            );
+        }
+    }
 }
 
 /// Installed ceilings are part of what a report says about itself, in every

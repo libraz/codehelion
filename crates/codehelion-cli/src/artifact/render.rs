@@ -1,16 +1,14 @@
 //! Human-readable and CSV artifact report rendering.
 
-use super::correlation::{AttributionBasis, RefactorSavingsAssumption};
+use super::correlation::{self, AttributionBasis, RefactorSavingsAssumption};
 use super::model::{
     ARTIFACT_CSV_HEADER, ArtifactComparisonReport, ArtifactReport, AssumptionScope,
     COMPARE_CSV_HEADER, ReportAssumption, SourceMapResolutionStatus, column, compare_column,
     comparison_assumptions, dead_code_unavailability, pairs_both_artifacts, report_assumptions,
     retained_size_unavailability,
 };
-use super::{
-    Context, EstimatedRefactorSavingsBytes, Result, VerifiedSavingsBytes, Write, csv, metrics,
-    optional_f64,
-};
+use super::{Context, Result, Write, csv, metrics, optional_f64};
+use codehelion_artifact::metrics::ReportedSize;
 
 #[allow(clippy::too_many_lines)] // The report order is its public text contract.
 pub(super) fn render_text(
@@ -302,50 +300,21 @@ pub(super) fn render_text(
         )?;
     }
     writeln!(out, "size categories:")?;
-    writeln!(out, "  observed_bytes: {}", report.sizes.observed_bytes)?;
-    // Both duplicate counts appear here, each naming the evidence behind it.
-    // A reader who came for size reads this block and nothing else, and the
-    // normalized total was previously only three lines above, unlabelled.
-    writeln!(
-        out,
-        "  duplicated_bytes: {} (byte-identical groups only)",
-        report.sizes.duplicated_bytes
-    )?;
-    writeln!(
-        out,
-        "  duplicated_bytes_normalized: {} (weaker evidence: equal after normalization)",
-        optional_bytes(report.sizes.duplicated_bytes_normalized)
-    )?;
-    writeln!(
-        out,
-        "  retained_bytes: {}",
-        optional_bytes(report.sizes.retained_bytes)
-    )?;
-    writeln!(
-        out,
-        "  shared_dependency_bytes: {}",
-        optional_bytes(report.sizes.shared_dependency_bytes)
-    )?;
-    writeln!(
-        out,
-        "  duplicated_data_bytes: {}",
-        optional_bytes(report.sizes.duplicated_data_bytes)
-    )?;
-    writeln!(
-        out,
-        "  upper_bound_savings_bytes: {} (duplicate code only; upper bound, not guaranteed)",
-        optional_bytes(report.sizes.upper_bound_savings_bytes)
-    )?;
-    writeln!(
-        out,
-        "  estimated_refactor_savings_bytes: {} (per-clone-group estimates appear under source correlation)",
-        optional_estimated_savings(report.sizes.estimated_refactor_savings_bytes)
-    )?;
-    writeln!(
-        out,
-        "  verified_savings_bytes: {} (requires a controlled artifact compare calibration)",
-        optional_verified_savings(report.sizes.verified_savings_bytes)
-    )?;
+    // One line per category the classification states, in its order, each
+    // naming the evidence behind it. A reader who came for size reads this
+    // block and nothing else, so a category reachable only in another format
+    // would be one they never learn exists.
+    for (category, bytes) in report.sizes.stated() {
+        let qualification = category
+            .qualification()
+            .map_or_else(String::new, |note| format!(" ({note})"));
+        writeln!(
+            out,
+            "  {}: {}{qualification}",
+            category.key(),
+            stated_bytes(bytes)
+        )?;
+    }
     writeln!(
         out,
         "  clone_confidence: {:?}",
@@ -554,12 +523,46 @@ pub(super) fn optional_bytes(value: Option<u64>) -> String {
     value.map_or_else(|| "unavailable".to_owned(), |value| value.to_string())
 }
 
-fn optional_estimated_savings(value: Option<EstimatedRefactorSavingsBytes>) -> String {
-    value.map_or_else(|| "unavailable".to_owned(), |value| value.0.to_string())
+/// One stated size category's value, or the word for evidence that is absent.
+///
+/// The absence is spelled the same way whatever the category, because "the
+/// evidence for this is not there" is one fact and a reader comparing two
+/// lines should not have to tell two spellings of it apart.
+pub(super) fn stated_bytes(value: Option<i128>) -> String {
+    value.map_or_else(|| "unavailable".to_owned(), |value| value.to_string())
 }
 
-fn optional_verified_savings(value: Option<VerifiedSavingsBytes>) -> String {
-    value.map_or_else(|| "unavailable".to_owned(), |value| value.0.to_string())
+/// The column one clone-group byte count is written to.
+///
+/// Taken apart exhaustively for the same reason the artifact-wide mapping is:
+/// a count added to the attribution stops this compiling until it is given a
+/// column of its own, rather than sharing one with a count of another kind.
+pub(super) const fn attribution_column(category: correlation::GroupSizeCategory) -> usize {
+    match category {
+        correlation::GroupSizeCategory::Duplicated => column::DUPLICATED_BYTES,
+        correlation::GroupSizeCategory::EstimatedDuplicated => column::ESTIMATED_DUPLICATED_BYTES,
+        correlation::GroupSizeCategory::ContainingSymbols => column::CONTAINING_SYMBOL_BYTES,
+    }
+}
+
+/// The summary column one size category is written to.
+///
+/// Taken apart exhaustively: a category added to the classification stops this
+/// compiling until it is given a column, which is what stops a number reaching
+/// the text and JSON views while the record a consumer parses leaves it out.
+/// Columns are only ever appended, so a new category takes a new one.
+const fn summary_column(category: metrics::SizeCategory) -> usize {
+    match category {
+        metrics::SizeCategory::Observed => column::OBSERVED_BYTES,
+        metrics::SizeCategory::Duplicated => column::DUPLICATED_BYTES,
+        metrics::SizeCategory::DuplicatedNormalized => column::DUPLICATED_BYTES_NORMALIZED,
+        metrics::SizeCategory::Retained => column::RETAINED_BYTES,
+        metrics::SizeCategory::SharedDependency => column::SHARED_DEPENDENCY_BYTES,
+        metrics::SizeCategory::DuplicatedData => column::DUPLICATED_DATA_BYTES,
+        metrics::SizeCategory::UpperBoundSavings => column::UPPER_BOUND_SAVINGS_BYTES,
+        metrics::SizeCategory::EstimatedRefactorSavings => column::ESTIMATED_REFACTOR_SAVINGS_BYTES,
+        metrics::SizeCategory::VerifiedSavings => column::VERIFIED_SAVINGS_BYTES,
+    }
 }
 
 #[allow(clippy::too_many_lines)] // CSV records intentionally remain together to preserve one fixed schema.
@@ -568,9 +571,13 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
     let correlation = report.correlation.as_ref();
     let mut summary = artifact_csv_row("summary", report);
     summary[column::FINGERPRINT].clone_from(&report.fingerprint);
-    summary[column::DUPLICATED_BYTES] = report.sizes.duplicated_bytes.to_string();
-    summary[column::RETAINED_BYTES] = optional_bytes(report.sizes.retained_bytes);
-    summary[column::OBSERVED_BYTES] = report.sizes.observed_bytes.to_string();
+    // Every size category the classification states, written to the column
+    // that carries it. Walking the same list the text and JSON renderings walk
+    // is what keeps a category from being reachable in two formats out of
+    // three, which is how one of them went missing before.
+    for (category, bytes) in report.sizes.stated() {
+        summary[summary_column(category)] = stated_bytes(bytes);
+    }
     summary[column::SOURCE_RUN] =
         correlation.map_or_else(String::new, |value| value.source_run.to_string());
     summary[column::MAPPINGS] =
@@ -579,19 +586,6 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
         correlation.map_or_else(String::new, |value| value.mapped_symbols.to_string());
     summary[column::UNMAPPED_SYMBOLS] =
         correlation.map_or_else(String::new, |value| value.unmapped_symbols.to_string());
-    summary[column::UPPER_BOUND_SAVINGS_BYTES] =
-        optional_bytes(report.sizes.upper_bound_savings_bytes);
-    summary[column::ESTIMATED_REFACTOR_SAVINGS_BYTES] =
-        optional_estimated_savings(report.sizes.estimated_refactor_savings_bytes);
-    summary[column::VERIFIED_SAVINGS_BYTES] =
-        optional_verified_savings(report.sizes.verified_savings_bytes);
-    summary[column::DUPLICATED_BYTES_NORMALIZED] =
-        optional_bytes(report.sizes.duplicated_bytes_normalized);
-    // Every size category the text and JSON renderings expose is obtainable
-    // from this one record, rather than being reachable in two formats out of
-    // three.
-    summary[column::SHARED_DEPENDENCY_BYTES] = optional_bytes(report.sizes.shared_dependency_bytes);
-    summary[column::DUPLICATED_DATA_BYTES] = optional_bytes(report.sizes.duplicated_data_bytes);
     summary[column::CODE_SECTION_BYTES] = report.code_section_bytes.to_string();
     summary[column::DATA_SEGMENT_BYTES] = report.data_segment_bytes.to_string();
     summary[column::CLONE_CONFIDENCE] = format!("{:?}", report.sizes.clone_confidence);
@@ -734,9 +728,14 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
             let mut row = artifact_csv_row("clone-group-attribution", report);
             "clone-group-attribution".clone_into(&mut row[column::KIND]);
             row[column::FINGERPRINT].clone_from(&attribution.clone_group_fingerprint);
-            row[column::DUPLICATED_BYTES] = attribution
-                .duplicated_bytes
-                .map_or_else(String::new, |bytes| bytes.to_string());
+            // Every byte count the attribution states, written to the column
+            // that carries it. One absent value is spelled the same way as
+            // every other on this record: an empty field, never a word in a
+            // numeric column and never a zero.
+            for (category, bytes) in attribution.stated() {
+                row[attribution_column(category)] =
+                    bytes.map_or_else(String::new, |bytes| bytes.to_string());
+            }
             // The attributed count and the members it was drawn from each
             // carry the column that names them, so the ratio the text states
             // is recoverable here.
@@ -746,9 +745,6 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
             row[column::SOURCE_BUILD_VARIANT_FINGERPRINT]
                 .clone_from(&attribution.source_build_variant_fingerprint);
             row[column::CLONE_CONFIDENCE] = format!("{:.3}", attribution.clone_confidence);
-            row[column::ESTIMATED_DUPLICATED_BYTES] = attribution
-                .estimated_duplicated_bytes
-                .map_or_else(String::new, |bytes| bytes.to_string());
             // A group whose members were not all attributed carries no byte
             // total at all, so it names no evidence class either.
             row[column::ATTRIBUTION_BASIS] = attribution
@@ -766,8 +762,6 @@ pub(super) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Resul
             // measurements, so the containing size takes a column of its own
             // rather than standing in for a duplicated-byte total.
             row[column::CONTAINING_SYMBOLS] = attribution.containing_symbols.to_string();
-            row[column::CONTAINING_SYMBOL_BYTES] =
-                optional_bytes(attribution.containing_symbol_bytes);
             write_artifact_csv_row(out, &row)?;
         }
         for unit in &correlation.multiply_emitted_units {

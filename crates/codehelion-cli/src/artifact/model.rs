@@ -920,9 +920,26 @@ pub(super) struct ReportAssumption<'a> {
 /// report states them instead of asserting a single canned cause.
 const WITHDRAWN_SIZE_PREFIX: &str = "retained and shared dependency sizes need";
 
-/// The upper bound is a code total, and duplicate data is reported beside it.
-const UPPER_BOUND_EXCLUDES_DATA: &str =
-    "upper_bound_savings_bytes counts duplicate code only and excludes duplicated_data_bytes";
+/// What the upper bound leaves out, said in the categories it actually leaves
+/// out.
+///
+/// Derived from the list the bound is built from rather than written down
+/// beside it: a duplicated category added later appears in this sentence
+/// without anyone remembering to edit it, which is the failure the sentence
+/// existed to describe in the first place.
+fn upper_bound_omissions() -> String {
+    use metrics::ReportedSize as _;
+
+    let excluded: Vec<&str> = metrics::upper_bound_excludes()
+        .into_iter()
+        .map(metrics::ReportedSize::key)
+        .collect();
+    format!(
+        "{} counts duplicate code only and excludes {}",
+        metrics::SizeCategory::UpperBoundSavings.key(),
+        excluded.join(" and ")
+    )
+}
 
 /// Byte counts read from a container outlive the slice selected inside it.
 const CONTAINER_WIDE_OBSERVED_BYTES: &str = "observed byte counts cover the whole container, including the skipped architecture slices; only section, symbol and duplicate counts are limited to the selected architecture";
@@ -940,7 +957,7 @@ pub(super) fn qualify_sizes(
     skipped_architectures: &[String],
 ) {
     if sizes.upper_bound_savings_bytes.is_some() {
-        sizes.assumptions.push(UPPER_BOUND_EXCLUDES_DATA.to_owned());
+        sizes.assumptions.push(upper_bound_omissions());
     }
     if !skipped_architectures.is_empty() {
         sizes

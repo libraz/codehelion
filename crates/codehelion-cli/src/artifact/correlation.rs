@@ -53,6 +53,53 @@ pub(super) struct ArtifactCorrelationReport {
     pub(super) macro_origins: Vec<MacroOriginReport>,
 }
 
+/// Every byte count a report states about one clone group inside an artifact.
+///
+/// The clone-group population of [`metrics::ReportedSize`]. Kept apart from
+/// the artifact-wide categories because the two count over different things:
+/// one number is about a binary, the other about a set of members inside it,
+/// and a list holding both would let either be read as the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GroupSizeCategory {
+    /// Bytes attributable to the noncanonical members, every share observed.
+    Duplicated,
+    /// The same total when at least one share was divided by source lines.
+    EstimatedDuplicated,
+    /// Observed size of the symbols holding the members.
+    ContainingSymbols,
+}
+
+impl metrics::ReportedSize for GroupSizeCategory {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Duplicated => "duplicated_bytes",
+            Self::EstimatedDuplicated => "estimated_duplicated_bytes",
+            Self::ContainingSymbols => "containing_symbol_bytes",
+        }
+    }
+
+    fn scope(self) -> metrics::EvidenceScope {
+        match self {
+            Self::Duplicated => metrics::EvidenceScope::Duplicated,
+            Self::EstimatedDuplicated => metrics::EvidenceScope::Estimated,
+            // A symbol holds its members and is usually larger than them, so
+            // its size bounds what the group occupies rather than measuring it.
+            Self::ContainingSymbols => metrics::EvidenceScope::UpperBound,
+        }
+    }
+}
+
+impl GroupSizeCategory {
+    /// Every category, in the order a report states them.
+    pub(super) const fn all() -> &'static [Self] {
+        &[
+            Self::Duplicated,
+            Self::EstimatedDuplicated,
+            Self::ContainingSymbols,
+        ]
+    }
+}
+
 /// Conservative observed bytes attributed to one source clone group.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CloneGroupAttributionReport {
@@ -99,6 +146,29 @@ pub(super) struct CloneGroupAttributionReport {
     pub(super) containing_symbol_bytes: Option<u64>,
     /// Source clone score kept separate from mapping and model confidence.
     pub(super) clone_confidence: f64,
+}
+
+impl CloneGroupAttributionReport {
+    /// Every byte count this attribution states, with the value it holds.
+    ///
+    /// `None` is "the evidence for this is not there", never zero. Taken apart
+    /// exhaustively, so a count added to [`GroupSizeCategory`] stops this
+    /// compiling until it says where its number comes from, and every
+    /// rendering takes its numbers from here.
+    pub(super) fn stated(&self) -> Vec<(GroupSizeCategory, Option<u64>)> {
+        GroupSizeCategory::all()
+            .iter()
+            .copied()
+            .map(|category| {
+                let bytes = match category {
+                    GroupSizeCategory::Duplicated => self.duplicated_bytes,
+                    GroupSizeCategory::EstimatedDuplicated => self.estimated_duplicated_bytes,
+                    GroupSizeCategory::ContainingSymbols => self.containing_symbol_bytes,
+                };
+                (category, bytes)
+            })
+            .collect()
+    }
 }
 
 /// One source unit the artifact emitted as more than one body.
