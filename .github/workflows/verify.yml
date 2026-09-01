@@ -9,9 +9,16 @@ name: Verify
 # workflow with the rest of the tests, because a check performed only here is
 # one nobody is keeping: it goes unnoticed until a release, and by then what
 # broke it is many changes back.
+#
+# Prose is exempt here for the same reason it is in the CI workflow: a change
+# confined to Markdown or the documentation tree cannot move an answer that
+# costs three operating systems to obtain.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   workflow_dispatch:
 
 concurrency:

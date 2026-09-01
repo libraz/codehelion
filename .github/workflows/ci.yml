@@ -5,10 +5,23 @@ name: CI
 # the checks that need a second operating system, a compiler helper, or a real
 # build toolchain live in the verify workflow, which runs when a change lands
 # on main.
+#
+# Prose is exempt. A change that touches only Markdown or the documentation
+# tree cannot alter what any of these checks answer, so running them there
+# spends the whole workflow to re-confirm the previous result. The exemption is
+# by path, not by branch: a push carrying both prose and code is a code change
+# and still runs. The list is spelled out under each trigger because the
+# workflow parser does not resolve YAML anchors.
 on:
   push:
     branches: [main, develop]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   workflow_dispatch:
 
 concurrency:
