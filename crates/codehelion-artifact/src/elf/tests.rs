@@ -7,9 +7,8 @@ use object::{
     Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationFlags, RelocationKind,
     SymbolFlags, SymbolKind, SymbolScope,
 };
-use proptest::prelude::*;
 
-fn fixture() -> Vec<u8> {
+pub(super) fn fixture() -> Vec<u8> {
     let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
     let text = object.section_id(StandardSection::Text);
     let offset = object.append_section_data(text, &[0x90, 0xc3], 1);
@@ -432,29 +431,6 @@ fn external_debug_companion_with_the_same_build_id_is_accepted() {
         .parse_with_debug_companion(&artifact, Some(&artifact))
         .expect("matching build IDs permit the debug companion");
     assert_eq!(parsed.format, ArtifactFormat::Elf);
-}
-
-proptest! {
-    #[test]
-    fn arbitrary_prefixed_and_damaged_bytes_never_panic(
-        bytes in prop::collection::vec(any::<u8>(), 0..2048),
-        position in any::<prop::sample::Index>(),
-        mask in 1_u8..=u8::MAX,
-        cut in any::<prop::sample::Index>(),
-    ) {
-        let fixture = fixture();
-        let mut flipped = fixture.clone();
-        let at = position.index(flipped.len());
-        flipped[at] ^= mask;
-        let truncated = fixture[..cut.index(fixture.len())].to_vec();
-        let mut magic = b"\x7fELF".to_vec();
-        magic.extend(&bytes);
-        for input in [&bytes, &flipped, &truncated, &magic] {
-            if let Err(failure) = crate::check_parse_answers(&ElfBackend, input) {
-                return Err(TestCaseError::fail(failure));
-            }
-        }
-    }
 }
 
 #[test]

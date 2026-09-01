@@ -348,6 +348,17 @@ const fn malformed(message: String) -> ArtifactError {
     }
 }
 
+/// This build's reader for the format, the input it parses, and the magic that
+/// makes arbitrary bytes look like one of its own.
+#[cfg(test)]
+pub(crate) fn under_test() -> crate::FormatUnderTest {
+    crate::FormatUnderTest {
+        backend: &ElfBackend,
+        valid: tests::fixture(),
+        magics: &[b"\x7fELF"],
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests;

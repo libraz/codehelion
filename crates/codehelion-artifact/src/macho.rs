@@ -351,6 +351,17 @@ const fn malformed(message: String) -> ArtifactError {
     }
 }
 
+/// This build's reader for the format, the input it parses, and the magic that
+/// makes arbitrary bytes look like one of its own.
+#[cfg(test)]
+pub(crate) fn under_test() -> crate::FormatUnderTest {
+    crate::FormatUnderTest {
+        backend: &MachOBackend,
+        valid: tests::macho_fixture(),
+        magics: &[&[0xcf, 0xfa, 0xed, 0xfe], &[0xca, 0xfe, 0xba, 0xbe]],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -358,9 +369,8 @@ mod tests {
     use super::*;
     use object::write::{Object as WriteObject, StandardSection, Symbol, SymbolSection};
     use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
-    use proptest::prelude::*;
 
-    fn macho_fixture() -> Vec<u8> {
+    pub(super) fn macho_fixture() -> Vec<u8> {
         let mut object = WriteObject::new(
             BinaryFormat::MachO,
             Architecture::X86_64,
@@ -680,30 +690,5 @@ mod tests {
             .expect("fixture carries its instruction bytes");
         bytes[position] = 0x50;
         bytes
-    }
-
-    proptest::proptest! {
-        #[test]
-        fn arbitrary_prefixed_and_damaged_bytes_never_panic(
-            bytes in proptest::collection::vec(any::<u8>(), 0..2048),
-            position in any::<prop::sample::Index>(),
-            mask in 1_u8..=u8::MAX,
-            cut in any::<prop::sample::Index>(),
-        ) {
-            let fixture = macho_fixture();
-            let mut flipped = fixture.clone();
-            let at = position.index(flipped.len());
-            flipped[at] ^= mask;
-            let truncated = fixture[..cut.index(fixture.len())].to_vec();
-            let mut thin_magic = vec![0xcf, 0xfa, 0xed, 0xfe];
-            thin_magic.extend(&bytes);
-            let mut fat_magic = vec![0xca, 0xfe, 0xba, 0xbe];
-            fat_magic.extend(&bytes);
-            for input in [&bytes, &flipped, &truncated, &thin_magic, &fat_magic] {
-                if let Err(failure) = crate::check_parse_answers(&MachOBackend, input) {
-                    return Err(TestCaseError::fail(failure));
-                }
-            }
-        }
     }
 }

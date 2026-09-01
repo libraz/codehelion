@@ -605,6 +605,59 @@ pub(crate) fn is_coff_machine(bytes: &[u8]) -> bool {
     matches!(bytes.get(..2), Some([0x4c, 0x01] | [0x64, 0x86 | 0xaa]))
 }
 
+/// One format's reader, an input it parses, and the magic that makes an
+/// arbitrary byte string look like one of its own.
+///
+/// Supplied by the module that owns the format, because only it knows what a
+/// valid input for it looks like, and read by the one property below.
+#[cfg(test)]
+pub(crate) struct FormatUnderTest {
+    /// The backend that reads the format.
+    pub(crate) backend: &'static dyn ArtifactBackend,
+    /// An input the backend parses, which the property damages.
+    pub(crate) valid: Vec<u8>,
+    /// Byte strings the format is recognised by.
+    pub(crate) magics: &'static [&'static [u8]],
+}
+
+/// The reader this build carries for one format, or `None` when the feature
+/// that carries it is off.
+///
+/// Matched exhaustively: a format added to [`ArtifactFormat`] stops this
+/// compiling until it says which backend reads it and what a valid input for
+/// it looks like. That is what puts a new backend under the property below —
+/// wiring it up by hand per module is how the previous five came to be five
+/// copies of one test that a sixth backend could silently not join.
+#[cfg(test)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the None arms are the builds where a format's feature is off, which a full-feature check does not compile"
+)]
+fn under_test(format: ArtifactFormat) -> Option<FormatUnderTest> {
+    match format {
+        #[cfg(feature = "wasm")]
+        ArtifactFormat::Wasm => Some(wasm::under_test()),
+        #[cfg(not(feature = "wasm"))]
+        ArtifactFormat::Wasm => None,
+        #[cfg(feature = "elf")]
+        ArtifactFormat::Elf => Some(elf::under_test()),
+        #[cfg(not(feature = "elf"))]
+        ArtifactFormat::Elf => None,
+        #[cfg(feature = "macho")]
+        ArtifactFormat::MachO => Some(macho::under_test()),
+        #[cfg(not(feature = "macho"))]
+        ArtifactFormat::MachO => None,
+        #[cfg(feature = "pe")]
+        ArtifactFormat::PeCoff => Some(pe::under_test()),
+        #[cfg(not(feature = "pe"))]
+        ArtifactFormat::PeCoff => None,
+        #[cfg(feature = "archive")]
+        ArtifactFormat::Archive => Some(archive::under_test()),
+        #[cfg(not(feature = "archive"))]
+        ArtifactFormat::Archive => None,
+    }
+}
+
 /// Check that `backend` answers for `bytes` instead of unwinding.
 ///
 /// Every backend promises an answer for any byte string: either an IR for its
@@ -624,7 +677,7 @@ pub(crate) fn is_coff_machine(bytes: &[u8]) -> bool {
 /// whose result is discarded cannot make the property pass by accident.
 #[cfg(test)]
 pub(crate) fn check_parse_answers(
-    backend: &impl ArtifactBackend,
+    backend: &dyn ArtifactBackend,
     bytes: &[u8],
 ) -> Result<(), String> {
     let refusal =
@@ -748,6 +801,49 @@ mod tests {
             },
         ] {
             assert!(check_parse_answers(&Refusing(other), b"anything").is_err());
+        }
+    }
+
+    // Every backend this build carries answers for arbitrary, damaged and
+    // falsely-prefixed input instead of unwinding.
+    //
+    // One property over every format rather than a copy of it per module: the
+    // backends come from an exhaustive match on the format, and the formats
+    // come from the same table the support document is generated from, so a
+    // backend added later is under this without anyone wiring it up.
+    //
+    // Four shapes per format, because a random byte string almost never
+    // reaches a parser's interesting paths: the arbitrary bytes themselves, a
+    // valid input with one bit flipped, a valid input cut short, and the
+    // arbitrary bytes behind each of the format's own magics.
+    proptest::proptest! {
+        #[test]
+        fn every_backend_answers_for_arbitrary_damaged_and_prefixed_bytes(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..2048),
+            position in proptest::prelude::any::<proptest::sample::Index>(),
+            mask in 1_u8..=u8::MAX,
+            cut in proptest::prelude::any::<proptest::sample::Index>(),
+        ) {
+            for row in &FORMAT_SUPPORT {
+                let Some(subject) = under_test(row.format) else {
+                    continue;
+                };
+                let mut flipped = subject.valid.clone();
+                let at = position.index(flipped.len());
+                flipped[at] ^= mask;
+                let truncated = subject.valid[..cut.index(subject.valid.len())].to_vec();
+                let mut inputs = vec![bytes.clone(), flipped, truncated];
+                for magic in subject.magics {
+                    let mut prefixed = (*magic).to_vec();
+                    prefixed.extend(&bytes);
+                    inputs.push(prefixed);
+                }
+                for input in &inputs {
+                    if let Err(failure) = check_parse_answers(subject.backend, input) {
+                        return Err(proptest::test_runner::TestCaseError::fail(failure));
+                    }
+                }
+            }
         }
     }
 

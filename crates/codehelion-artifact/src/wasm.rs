@@ -728,14 +728,24 @@ const fn malformed(message: String) -> ArtifactError {
     }
 }
 
+/// This build's reader for the format, the input it parses, and the magic that
+/// makes arbitrary bytes look like one of its own.
+#[cfg(test)]
+pub(crate) fn under_test() -> crate::FormatUnderTest {
+    crate::FormatUnderTest {
+        backend: &WasmBackend,
+        valid: tests::MODULE.to_vec(),
+        magics: &[b"\0asm\x01\0\0\0"],
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::metrics;
-    use proptest::prelude::*;
 
-    const MODULE: &[u8] = &[
+    pub(super) const MODULE: &[u8] = &[
         0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 3, 2, 0, 0, 7, 7, 1, 3, b'f', b'o',
         b'o', 0, 0, 10, 9, 2, 4, 0, 16, 1, 11, 2, 0, 11, 11, 6, 1, 1, 3, b'a', b'b', b'c', 0, 18,
         4, b'n', b'a', b'm', b'e', 1, 11, 2, 0, 3, b'f', b'o', b'o', 1, 3, b'b', b'a', b'r',
@@ -783,29 +793,6 @@ mod tests {
             WasmBackend.parse(b"\0asm\x01\0\0\0\x0a"),
             Err(ArtifactError::Malformed { .. })
         ));
-    }
-
-    proptest! {
-        #[test]
-        fn arbitrary_prefixed_and_damaged_bytes_never_panic(
-            bytes in prop::collection::vec(any::<u8>(), 0..2048),
-            position in any::<prop::sample::Index>(),
-            mask in 1_u8..=u8::MAX,
-            cut in any::<prop::sample::Index>(),
-        ) {
-            let fixture = MODULE.to_vec();
-            let mut flipped = fixture.clone();
-            let at = position.index(flipped.len());
-            flipped[at] ^= mask;
-            let truncated = fixture[..cut.index(fixture.len())].to_vec();
-            let mut magic = b"\0asm\x01\0\0\0".to_vec();
-            magic.extend(&bytes);
-            for input in [&bytes, &flipped, &truncated, &magic] {
-                if let Err(failure) = crate::check_parse_answers(&WasmBackend, input) {
-                    return Err(TestCaseError::fail(failure));
-                }
-            }
-        }
     }
 
     #[test]

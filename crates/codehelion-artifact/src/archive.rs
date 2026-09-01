@@ -288,6 +288,17 @@ const fn malformed(message: String) -> ArtifactError {
     }
 }
 
+/// This build's reader for the format, the input it parses, and the magic that
+/// makes arbitrary bytes look like one of its own.
+#[cfg(test)]
+pub(crate) fn under_test() -> crate::FormatUnderTest {
+    crate::FormatUnderTest {
+        backend: &ArchiveBackend,
+        valid: tests::archive_fixture(),
+        magics: &[b"!<arch>\n", b"!<thin>\n"],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -295,7 +306,6 @@ mod tests {
     use super::*;
     use object::write::{Object as WriteObject, StandardSection, Symbol, SymbolSection};
     use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
-    use proptest::prelude::*;
 
     fn coff_member(name: &[u8]) -> Vec<u8> {
         coff_member_with_code(name, &[0x90, 0xc3])
@@ -333,7 +343,7 @@ mod tests {
         member
     }
 
-    fn archive_fixture() -> Vec<u8> {
+    pub(super) fn archive_fixture() -> Vec<u8> {
         let first = coff_member(b"left");
         let second = coff_member(b"right");
         let mut archive = b"!<arch>\n".to_vec();
@@ -639,30 +649,5 @@ mod tests {
                 .all(|symbol| symbol.normalized.is_some() && !symbol.code.is_empty()),
             "{ir:#?}"
         );
-    }
-
-    proptest::proptest! {
-        #[test]
-        fn arbitrary_prefixed_and_damaged_bytes_never_panic(
-            bytes in proptest::collection::vec(any::<u8>(), 0..2048),
-            position in any::<prop::sample::Index>(),
-            mask in 1_u8..=u8::MAX,
-            cut in any::<prop::sample::Index>(),
-        ) {
-            let fixture = archive_fixture();
-            let mut flipped = fixture.clone();
-            let at = position.index(flipped.len());
-            flipped[at] ^= mask;
-            let truncated = fixture[..cut.index(fixture.len())].to_vec();
-            let mut thick = b"!<arch>\n".to_vec();
-            thick.extend(&bytes);
-            let mut thin = b"!<thin>\n".to_vec();
-            thin.extend(&bytes);
-            for input in [&bytes, &flipped, &truncated, &thick, &thin] {
-                if let Err(failure) = crate::check_parse_answers(&ArchiveBackend, input) {
-                    return Err(TestCaseError::fail(failure));
-                }
-            }
-        }
     }
 }
