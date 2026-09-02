@@ -144,8 +144,12 @@ jobs:
       # change touching one member of a seam is often the right change, and a
       # check that cannot tell those apart belongs in the log where a reviewer
       # reads it rather than in a status that blocks the branch.
+      # `--no-record` because the database this would write to is thrown away
+      # with the runner. A generation nothing can ever be compared against is
+      # not a generation, and recording one here would only teach a reader to
+      # expect a trend that never survives the job.
       - name: Report seam metrics
-        run: cargo run -p codehelion -- seam
+        run: cargo run -p codehelion -- seam --no-record
       # `HEAD~1` rather than a branch name: a pull request is checked out as a
       # merge commit whose first parent is the base, so this reads the change
       # under review, and on a push it reads the commit that was pushed.
