@@ -59,6 +59,7 @@
 use std::collections::BTreeMap;
 
 use crate::candidate::{CandidatePair, StatementRun};
+use crate::containment_index::{ContainmentIndex, Rectangle};
 use crate::features::FeatureKind;
 use crate::ir::ByteRange;
 
@@ -369,112 +370,29 @@ fn remove_contained(mut regions: Vec<CloneRegion>) -> (Vec<CloneRegion>, usize) 
             region.b,
         )
     });
-    let mut index = ContainmentIndex::for_regions(&regions);
+    let rectangles: Vec<Rectangle> = regions.iter().map(region_rectangle).collect();
+    let mut index = ContainmentIndex::new(&rectangles);
     let mut kept = Vec::with_capacity(regions.len());
     let mut absorbed = 0;
-    for region in regions {
-        if index.contains(&region) {
+    for (region, rectangle) in regions.into_iter().zip(rectangles) {
+        if index.contains(rectangle) {
             absorbed += 1;
         } else {
-            index.insert(&region);
+            index.insert(rectangle);
             kept.push(region);
         }
     }
     (kept, absorbed)
 }
 
-/// Offline two-dimensional range index for the second half of a clone region.
-///
-/// The outer sweep supplies the first-span start condition. Each Fenwick node
-/// covers a prefix of second-span starts and holds another Fenwick tree over
-/// first-span ends. Its value is the greatest second-span end seen there, so a
-/// query proves all remaining containment conditions in `O(log² m)`.
-struct ContainmentIndex {
-    /// Sorted unique starts of the second span.
-    second_starts: Vec<usize>,
-    /// Per outer Fenwick node, the possible ends of the first span.
-    first_ends: Vec<Vec<usize>>,
-    /// Per outer Fenwick node, maximum second-span ends by reversed first end.
-    greatest_second_ends: Vec<Vec<usize>>,
-}
-
-impl ContainmentIndex {
-    fn for_regions(regions: &[CloneRegion]) -> Self {
-        let mut second_starts: Vec<usize> =
-            regions.iter().map(|region| region.b.range.start).collect();
-        second_starts.sort_unstable();
-        second_starts.dedup();
-
-        let mut first_ends = vec![Vec::new(); second_starts.len() + 1];
-        for region in regions {
-            let mut node = second_starts.partition_point(|&start| start < region.b.range.start) + 1;
-            while node < first_ends.len() {
-                first_ends[node].push(region.a.range.end);
-                node += lowbit(node);
-            }
-        }
-        for ends in &mut first_ends {
-            ends.sort_unstable();
-            ends.dedup();
-        }
-        let greatest_second_ends = first_ends
-            .iter()
-            .map(|ends| vec![0; ends.len() + 1])
-            .collect();
-
-        Self {
-            second_starts,
-            first_ends,
-            greatest_second_ends,
-        }
-    }
-
-    /// Record one earlier region from the first-span sweep.
-    fn insert(&mut self, region: &CloneRegion) {
-        let mut node = self
-            .second_starts
-            .partition_point(|&start| start < region.b.range.start)
-            + 1;
-        while node < self.first_ends.len() {
-            let ends = &self.first_ends[node];
-            let reversed = ends.len() - ends.partition_point(|&end| end < region.a.range.end);
-            let values = &mut self.greatest_second_ends[node];
-            let mut position = reversed;
-            while position < values.len() {
-                values[position] = values[position].max(region.b.range.end);
-                position += lowbit(position);
-            }
-            node += lowbit(node);
-        }
-    }
-
-    /// Whether an earlier region covers both spans of `region`.
-    fn contains(&self, region: &CloneRegion) -> bool {
-        let mut node = self
-            .second_starts
-            .partition_point(|&start| start <= region.b.range.start);
-        while node > 0 {
-            let ends = &self.first_ends[node];
-            let reversed = ends.len() - ends.partition_point(|&end| end < region.a.range.end);
-            let values = &self.greatest_second_ends[node];
-            let mut greatest = 0;
-            let mut position = reversed;
-            while position > 0 {
-                greatest = greatest.max(values[position]);
-                position -= lowbit(position);
-            }
-            if greatest >= region.b.range.end {
-                return true;
-            }
-            node -= lowbit(node);
-        }
-        false
-    }
-}
-
-/// Least significant set bit of a one-based Fenwick index.
-const fn lowbit(index: usize) -> usize {
-    index.isolate_lowest_one()
+/// The two source spans of a region, in the shape the containment index reads.
+const fn region_rectangle(region: &CloneRegion) -> Rectangle {
+    (
+        region.a.range.start,
+        region.a.range.end,
+        region.b.range.start,
+        region.b.range.end,
+    )
 }
 
 /// Collapse pairwise regions into one entry per duplicated run.

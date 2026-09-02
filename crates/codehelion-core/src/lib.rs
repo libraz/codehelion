@@ -10,6 +10,7 @@ pub mod candidate;
 pub mod clone_class;
 pub mod conditional;
 pub mod config;
+mod containment_index;
 pub mod control_flow;
 pub mod discovery;
 pub mod doctor;

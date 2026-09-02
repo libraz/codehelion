@@ -31,6 +31,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::containment_index::{ContainmentIndex, Rectangle};
 use crate::frontend::Token;
 
 use super::fingerprint::{
@@ -179,125 +180,14 @@ fn extend(
     (start_a, start_b, end_a - start_a)
 }
 
-/// An offline two-dimensional range index for the second half of a run pair.
-///
-/// The outer sweep admits only runs whose first span begins no later than the
-/// current one. Each Fenwick node covers a prefix of second-span starts and
-/// stores a second Fenwick tree of first-span ends, whose values are the
-/// greatest matching second-span end. A query consequently answers all three
-/// remaining containment conditions without scanning a file-pair bucket.
-struct ContainmentIndex {
-    /// Sorted unique second-span starts.
-    second_starts: Vec<usize>,
-    /// Per outer Fenwick node, sorted unique first-span ends that can enter it.
-    first_ends: Vec<Vec<usize>>,
-    /// Per outer Fenwick node, a max Fenwick tree over reversed first-end
-    /// positions. Reversing turns an `end >= threshold` query into a prefix.
-    greatest_second_end: Vec<Vec<usize>>,
-}
-
-impl ContainmentIndex {
-    fn for_runs(runs: &[Run]) -> Self {
-        Self::for_rectangles(&runs.iter().map(run_rectangle).collect::<Vec<_>>())
-    }
-
-    fn for_rectangles(rectangles: &[(usize, usize, usize, usize)]) -> Self {
-        let mut second_starts: Vec<usize> =
-            rectangles.iter().map(|&(_, _, start, _)| start).collect();
-        second_starts.sort_unstable();
-        second_starts.dedup();
-        let mut first_ends = vec![Vec::new(); second_starts.len() + 1];
-        for &(_, first_end, second_start, _) in rectangles {
-            let mut node = second_starts.partition_point(|&start| start < second_start) + 1;
-            while node < first_ends.len() {
-                first_ends[node].push(first_end);
-                node += lowbit(node);
-            }
-        }
-        for ends in &mut first_ends {
-            ends.sort_unstable();
-            ends.dedup();
-        }
-        let greatest_second_end = first_ends
-            .iter()
-            .map(|ends| vec![0; ends.len() + 1])
-            .collect();
-        Self {
-            second_starts,
-            first_ends,
-            greatest_second_end,
-        }
-    }
-
-    /// Record a possible outer run.
-    fn insert(&mut self, run: Run) {
-        self.insert_rectangle(run_rectangle(&run));
-    }
-
-    fn insert_rectangle(
-        &mut self,
-        (_first_start, first_end, second_start, second_end): (usize, usize, usize, usize),
-    ) {
-        let mut node = self
-            .second_starts
-            .partition_point(|&start| start < second_start)
-            + 1;
-        while node < self.first_ends.len() {
-            let ends = &self.first_ends[node];
-            let reversed = ends.len() - ends.partition_point(|&end| end < first_end);
-            let values = &mut self.greatest_second_end[node];
-            let mut position = reversed;
-            while position < values.len() {
-                values[position] = values[position].max(second_end);
-                position += lowbit(position);
-            }
-            node += lowbit(node);
-        }
-    }
-
-    /// Whether an already inserted run contains `run` on both spans.
-    fn contains(&self, run: Run) -> bool {
-        self.contains_rectangle(run_rectangle(&run))
-    }
-
-    fn contains_rectangle(
-        &self,
-        (_first_start, first_end, second_start, second_end): (usize, usize, usize, usize),
-    ) -> bool {
-        let mut node = self
-            .second_starts
-            .partition_point(|&start| start <= second_start);
-        while node > 0 {
-            let ends = &self.first_ends[node];
-            let reversed = ends.len() - ends.partition_point(|&end| end < first_end);
-            let values = &self.greatest_second_end[node];
-            let mut position = reversed;
-            let mut greatest = 0;
-            while position > 0 {
-                greatest = greatest.max(values[position]);
-                position -= lowbit(position);
-            }
-            if greatest >= second_end {
-                return true;
-            }
-            node -= lowbit(node);
-        }
-        false
-    }
-}
-
-const fn run_rectangle(run: &Run) -> (usize, usize, usize, usize) {
+/// The two spans of a matched run, in the shape the containment index reads.
+const fn run_rectangle(run: &Run) -> Rectangle {
     (
         run.a_start,
         run.a_start + run.len,
         run.b_start,
         run.b_start + run.len,
     )
-}
-
-/// Least significant set bit of a one-based Fenwick index.
-const fn lowbit(index: usize) -> usize {
-    index.isolate_lowest_one()
 }
 
 /// Drop duplicate runs, then every run nested inside a larger run of the
@@ -321,10 +211,11 @@ fn drop_nested(mut all: Vec<Run>) -> Vec<Run> {
                 std::cmp::Reverse(run.b_start + run.len),
             )
         });
-        let mut index = ContainmentIndex::for_runs(&ordered);
-        for run in ordered {
-            if !index.contains(run) {
-                index.insert(run);
+        let rectangles: Vec<Rectangle> = ordered.iter().map(run_rectangle).collect();
+        let mut index = ContainmentIndex::new(&rectangles);
+        for (run, rectangle) in ordered.into_iter().zip(rectangles) {
+            if !index.contains(rectangle) {
+                index.insert(rectangle);
                 kept.push(run);
             }
         }
@@ -358,15 +249,15 @@ fn drop_nested_matches(matches: Vec<FragmentMatch>) -> Vec<FragmentMatch> {
                 std::cmp::Reverse(matched.b.2),
             )
         });
-        let rectangles: Vec<_> = ordered.iter().map(fragment_rectangle).collect();
-        let mut index = ContainmentIndex::for_rectangles(&rectangles);
+        let rectangles: Vec<Rectangle> = ordered.iter().map(fragment_rectangle).collect();
+        let mut index = ContainmentIndex::new(&rectangles);
         let mut equal = std::collections::BTreeSet::new();
         for matched in ordered {
             let rectangle = fragment_rectangle(&matched);
             if !equal.insert(rectangle) {
                 kept.push(matched);
-            } else if !index.contains_rectangle(rectangle) {
-                index.insert_rectangle(rectangle);
+            } else if !index.contains(rectangle) {
+                index.insert(rectangle);
                 kept.push(matched);
             }
         }
@@ -374,13 +265,14 @@ fn drop_nested_matches(matches: Vec<FragmentMatch>) -> Vec<FragmentMatch> {
     kept
 }
 
-const fn fragment_rectangle(matched: &FragmentMatch) -> (usize, usize, usize, usize) {
+/// The two spans of a fragment match, in the shape the containment index reads.
+const fn fragment_rectangle(matched: &FragmentMatch) -> Rectangle {
     (matched.a.1, matched.a.2, matched.b.1, matched.b.2)
 }
 
 /// The file pair and the two spans of one pair, with the endpoints put in a
 /// fixed order so two statements of one relation compare as one shape.
-fn pair_rectangle(pair: &ClonePair) -> ((usize, usize), (usize, usize, usize, usize)) {
+fn pair_rectangle(pair: &ClonePair) -> ((usize, usize), Rectangle) {
     let (first, second) = if (pair.a.file, pair.a.token_start, pair.a.token_end)
         <= (pair.b.file, pair.b.token_start, pair.b.token_end)
     {
@@ -442,15 +334,15 @@ fn fold_restated_pairs(pairs: Vec<ClonePair>) -> (Vec<ClonePair>, usize) {
                 std::cmp::Reverse(second_end),
             )
         });
-        let rectangles: Vec<_> = bucket.iter().map(|pair| pair_rectangle(pair).1).collect();
-        let mut index = ContainmentIndex::for_rectangles(&rectangles);
+        let rectangles: Vec<Rectangle> = bucket.iter().map(|pair| pair_rectangle(pair).1).collect();
+        let mut index = ContainmentIndex::new(&rectangles);
         let mut equal = std::collections::BTreeSet::new();
         for pair in bucket {
             let rectangle = pair_rectangle(&pair).1;
             // Equal spans are the same relation stated once, not a narrower
             // restatement of it, so the first one through keeps its place.
-            if equal.insert(rectangle) && !index.contains_rectangle(rectangle) {
-                index.insert_rectangle(rectangle);
+            if equal.insert(rectangle) && !index.contains(rectangle) {
+                index.insert(rectangle);
                 kept.push(pair);
             }
         }
