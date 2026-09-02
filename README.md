@@ -92,13 +92,26 @@ report, so a run that could not finish the search says what it left unexamined.
 
 ## Install
 
+Every [release](https://github.com/libraz/codehelion/releases) attaches a
+prebuilt binary, so nothing has to be compiled to try it. The archive holds one
+self-contained executable named `codehelion`; SQLite is bundled.
+
+| platform | archive |
+|---|---|
+| Linux x86-64 | `codehelion-<version>-linux-x86_64.tar.gz` |
+| Linux ARM64 | `codehelion-<version>-linux-aarch64.tar.gz` |
+| macOS Apple silicon | `codehelion-<version>-macos-aarch64.tar.gz` |
+| Windows x86-64 | `codehelion-<version>-windows-x86_64.zip` |
+
+`SHA256SUMS` is attached beside them. With a Rust toolchain, `cargo install`
+builds the same binary from source instead:
+
 ```sh
 cargo install codehelion
 ```
 
-The result is a single self-contained binary named `codehelion`; SQLite is
-bundled. Everything here requires Rust 1.98 or newer, the optional Rust semantic
-helper included.
+That route requires Rust 1.98 or newer, the optional Rust semantic helper
+included.
 
 ```sh
 codehelion scan --mode structural     # read the tree, report the duplication
@@ -106,10 +119,20 @@ codehelion explain b92c1297           # open one group
 codehelion report --format json --output report.json
 ```
 
-Semantic mode additionally needs a helper per language
-(`cargo install codehelion-backend-rust`, `codehelion-backend-clang`);
-`codehelion doctor` reports what this machine has. Full setup:
-[Getting started](docs/en/getting-started.md).
+Semantic mode additionally needs a helper per language. Prebuilt helper archives
+(`codehelion-helpers-<version>-...`) are attached for Linux x86-64, macOS Apple
+silicon and Windows x86-64; elsewhere, `cargo install codehelion-backend-rust`
+and `codehelion-backend-clang` build them. `codehelion doctor` reports what this
+machine has. Full setup: [Getting started](docs/en/getting-started.md).
+
+## In CI
+
+`scan --fail-on-findings` against a baseline exits `3` when duplication arrives
+that the baseline does not already carry — a gate on what a change added, not on
+a percentage that raising the number would answer. `guard --deny-asymmetric`
+exits `3` when a change touched part of a seam and not the rest. `--format
+sarif` uploads into a code-scanning view.
+[Continuous integration](docs/en/continuous-integration.md) has all three.
 
 ## Documentation
 
@@ -125,6 +148,7 @@ Using it on a project: [The refactoring loop](docs/en/refactoring-workflow.md),
 [Baselines](docs/en/baselines.md), [Suppression](docs/en/suppression.md),
 [Configuration](docs/en/configuration.md),
 [Seam tracking](docs/en/seam-tracking.md),
+[Continuous integration](docs/en/continuous-integration.md),
 [The command line](docs/en/cli.md).
 
 Artifacts: [Artifact analysis](docs/en/artifact-analysis.md),
@@ -144,8 +168,14 @@ than its uncompressed size does.
 [`codehelion artifact analyze`](docs/en/artifact-analysis.md) measures that side
 separately. codehelion is not a mirror-consistency checker either: it reports the
 duplication it finds without claiming to have found every copy. The whole list is
-in [Limitations](docs/en/limitations.md), and the measured precision and recall
-are in [Accuracy](docs/en/accuracy.md).
+in [Limitations](docs/en/limitations.md).
+
+What is measured, over eight labelled snapshots of real projects: nothing false
+reaches the first ten findings (p@10 1.0000, MAP 0.9290) under the default
+priority ordering. Read end to end instead, the same verdicts give 0.5920 — the
+tail is close to half noise, which is why the report is ordered rather than
+merely listed. Both figures, their corpora and how to reproduce them are in
+[Accuracy](docs/en/accuracy.md).
 
 ## Development
 

@@ -995,3 +995,227 @@ fn sample_reports_describe_the_tree_they_were_run_against() {
         );
     }
 }
+
+/// The release archives the CLI build produces, as `<name>.<archive>` pairs.
+///
+/// Read out of the workflow rather than written here, because the point of the
+/// check is that the install tables and the matrix cannot drift apart: adding a
+/// target without offering it, or offering one the release never builds, both
+/// fail until the documents say what is actually attached.
+fn released_cli_archives() -> Vec<String> {
+    let workflow = include_str!("../../../../.github/workflows/release.yml");
+    let cli_job = workflow
+        .split_once("\n  build-cli:")
+        .expect("the release workflow must build the CLI")
+        .1;
+    let matrix = cli_job
+        .split_once("\n    steps:")
+        .expect("the CLI build job must have steps")
+        .0;
+
+    let mut archives = Vec::new();
+    let mut target = None;
+    for line in matrix.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix("- name: ") {
+            target = Some(name.to_owned());
+        } else if let Some(archive) = line.strip_prefix("archive: ")
+            && let Some(name) = target.take()
+        {
+            archives.push(format!("codehelion-<version>-{name}.{archive}"));
+        }
+    }
+    assert!(
+        !archives.is_empty(),
+        "no CLI release archive was read out of the workflow"
+    );
+    archives
+}
+
+/// The archives an install table names, in the order it lists them.
+///
+/// Read from the code spans, which is where an archive name is written; the
+/// helper archives are named `codehelion-helpers-<version>-...` and so do not
+/// answer to this.
+fn offered_cli_archives(document: &str) -> Vec<String> {
+    document
+        .split('`')
+        .filter(|span| span.starts_with("codehelion-<version>-"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The documents that tell a reader how to install name exactly the archives
+/// the release attaches.
+///
+/// A prebuilt binary is the route that needs no toolchain, so it is the one a
+/// first-time reader should meet first. Both directions are checked against the
+/// workflow: a target added without being offered leaves a reader building from
+/// source for no reason, and a target dropped from the matrix leaves the table
+/// pointing at a download that is not there. The second is the one that goes
+/// unnoticed, because nothing else fails.
+#[test]
+fn install_documents_offer_exactly_the_released_binaries() {
+    let released = released_cli_archives();
+    for (named, document) in [
+        ("README.md", include_str!("../../../../README.md")),
+        ("README_ja.md", include_str!("../../../../README_ja.md")),
+        (
+            "docs/en/getting-started.md",
+            include_str!("../../../../docs/en/getting-started.md"),
+        ),
+        (
+            "docs/ja/getting-started.md",
+            include_str!("../../../../docs/ja/getting-started.md"),
+        ),
+    ] {
+        let offered = offered_cli_archives(document);
+        for archive in &released {
+            assert!(
+                offered.contains(archive),
+                "{named} does not offer {archive}, which the release attaches"
+            );
+        }
+        for archive in &offered {
+            assert!(
+                released.contains(archive),
+                "{named} offers {archive}, which the release does not build"
+            );
+        }
+        assert!(
+            document.contains("SHA256SUMS"),
+            "{named} offers the archives without saying how to verify one"
+        );
+        assert!(
+            document.find("releases").is_some_and(|prebuilt| document
+                .find("cargo install codehelion")
+                .is_some_and(|from_source| prebuilt < from_source)),
+            "{named} must offer the prebuilt binaries before building from source"
+        );
+    }
+}
+
+/// The ordering figures reach the README, and the accuracy documents put them
+/// before the aggregate.
+///
+/// Both halves are about the order a reader meets the numbers in, which is the
+/// one thing about this measurement that is a decision rather than a result.
+/// The aggregate is the figure for reading the whole report end to end, and a
+/// reader who meets it first has been told the tool is half wrong before being
+/// told that nothing false reaches the first ten findings. Neither number
+/// moves; which one is read first does.
+#[test]
+fn accuracy_is_presented_ranking_first() {
+    // Taken from the document the accuracy tests pin, so the README cannot
+    // quote a figure that measurement has since moved.
+    let english = include_str!("../../../../docs/en/accuracy.md");
+    let priority = english
+        .lines()
+        .find(|line| line.starts_with("| priority |"))
+        .expect("the English accuracy document must carry the ordering table");
+    let cells: Vec<&str> = priority.split('|').map(str::trim).collect();
+    let (at_ten, mean_average) = (cells[2], cells[4]);
+
+    for (named, document) in [
+        ("README.md", include_str!("../../../../README.md")),
+        ("README_ja.md", include_str!("../../../../README_ja.md")),
+    ] {
+        for figure in [format!("p@10 {at_ten}"), format!("MAP {mean_average}")] {
+            assert!(
+                document.contains(&figure),
+                "{named} must state {figure} rather than send a reader to the \
+                 aggregate alone"
+            );
+        }
+        assert!(
+            document.contains("0.5920"),
+            "{named} states the ranking figures, so it must state the aggregate too"
+        );
+    }
+
+    for (named, document, ranking, aggregate) in [
+        (
+            "docs/en/accuracy.md",
+            english,
+            "## What the ordering is worth",
+            "## Precision",
+        ),
+        (
+            "docs/ja/accuracy.md",
+            include_str!("../../../../docs/ja/accuracy.md"),
+            "## 並べ方に何の価値があるか",
+            "## 適合率",
+        ),
+    ] {
+        let ranking = document
+            .find(ranking)
+            .unwrap_or_else(|| panic!("{named} is missing {ranking}"));
+        let aggregate = document
+            .find(aggregate)
+            .unwrap_or_else(|| panic!("{named} is missing {aggregate}"));
+        assert!(
+            ranking < aggregate,
+            "{named} must reach what the ordering is worth before the aggregate"
+        );
+    }
+}
+
+/// The continuous-integration pages state all three entry points, and state
+/// the baseline gate as a gate on what a change added.
+///
+/// The distinction is the reason the page exists. A gate on a duplication
+/// percentage is answered by raising the percentage, and it drifts on its own
+/// as a tree grows; a baseline names the groups, so what fails is an addition.
+/// A page that documented the flag without that would be documenting a
+/// threshold gate with extra steps.
+#[test]
+fn continuous_integration_documents_state_all_three_gates() {
+    for (named, document, ratio) in [
+        (
+            "docs/en/continuous-integration.md",
+            include_str!("../../../../docs/en/continuous-integration.md"),
+            "It is deliberately not a ratio.",
+        ),
+        (
+            "docs/ja/continuous-integration.md",
+            include_str!("../../../../docs/ja/continuous-integration.md"),
+            "これは意図して比率ではありません。",
+        ),
+    ] {
+        for snippet in [
+            "--fail-on-findings",
+            "--deny-asymmetric",
+            "--format sarif",
+            "github/codeql-action/upload-sarif",
+            "partialFingerprints",
+            "`3`",
+            ratio,
+        ] {
+            assert!(document.contains(snippet), "{named} is missing {snippet}");
+        }
+    }
+
+    for (named, document, page) in [
+        (
+            "README.md",
+            include_str!("../../../../README.md"),
+            "docs/en/continuous-integration.md",
+        ),
+        (
+            "README_ja.md",
+            include_str!("../../../../README_ja.md"),
+            "docs/ja/continuous-integration.md",
+        ),
+        (
+            "docs/en/cli.md",
+            include_str!("../../../../docs/en/cli.md"),
+            "continuous-integration.md",
+        ),
+        (
+            "docs/ja/cli.md",
+            include_str!("../../../../docs/ja/cli.md"),
+            "continuous-integration.md",
+        ),
+    ] {
+        assert!(document.contains(page), "{named} does not link to {page}");
+    }
+}

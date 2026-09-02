@@ -2,20 +2,36 @@
 
 ## Install
 
+Every [release](https://github.com/libraz/codehelion/releases) attaches a
+prebuilt binary, which is the shortest route: download, unpack, run. The archive
+holds one self-contained executable named `codehelion`; SQLite is bundled.
+
+| platform | archive |
+|---|---|
+| Linux x86-64 | `codehelion-<version>-linux-x86_64.tar.gz` |
+| Linux ARM64 | `codehelion-<version>-linux-aarch64.tar.gz` |
+| macOS Apple silicon | `codehelion-<version>-macos-aarch64.tar.gz` |
+| Windows x86-64 | `codehelion-<version>-windows-x86_64.zip` |
+
+`SHA256SUMS` is attached beside them, so an archive can be verified before it is
+unpacked.
+
+With a Rust toolchain, the same binary can be built from source:
+
 ```sh
 cargo install codehelion
 ```
 
-The result is a single self-contained binary named `codehelion`; SQLite is
-bundled. To build from a checkout instead:
+Or from a checkout:
 
 ```sh
 cargo install --path crates/codehelion-cli
 ```
 
-Everything here requires Rust 1.98 or newer, the optional Rust semantic helper
+Building requires Rust 1.98 or newer, the optional Rust semantic helper
 included. The analysis libraries that helper is built on set the floor, and it
-is one floor rather than one per component.
+is one floor rather than one per component. A downloaded binary needs no
+toolchain at all.
 
 ## The first scan
 

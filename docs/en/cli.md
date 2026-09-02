@@ -191,3 +191,7 @@ its `members`. An absent or empty ledger reports nothing and returns 0.
 - `2`: command-line usage was invalid.
 - `3`: `scan --fail-on-findings` found one or more visible findings, or
   `guard --deny-asymmetric` found one or more asymmetric changes.
+
+Both `3` cases exist to be wired into an automated check;
+[Continuous integration](continuous-integration.md) shows the two of them and
+the SARIF upload together.

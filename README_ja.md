@@ -65,11 +65,22 @@ open one: codehelion explain b92c1297 · list every group: --limit 0
 
 ## インストール
 
+各[リリース](https://github.com/libraz/codehelion/releases)にビルド済みバイナリが添付されているので、試すためにコンパイルする必要はありません。アーカイブに入っているのは `codehelion` という自己完結の実行ファイル 1 つで、SQLite は同梱されています。
+
+| プラットフォーム | アーカイブ |
+|---|---|
+| Linux x86-64 | `codehelion-<version>-linux-x86_64.tar.gz` |
+| Linux ARM64 | `codehelion-<version>-linux-aarch64.tar.gz` |
+| macOS Apple silicon | `codehelion-<version>-macos-aarch64.tar.gz` |
+| Windows x86-64 | `codehelion-<version>-windows-x86_64.zip` |
+
+`SHA256SUMS` も併せて添付されます。Rust ツールチェインがあるなら、`cargo install` が同じバイナリをソースからビルドします。
+
 ```sh
 cargo install codehelion
 ```
 
-生成されるのは `codehelion` という自己完結の単一バイナリで、SQLite は同梱されています。任意の Rust Semantic helper を含め、すべて Rust 1.98 以降が必要です。
+こちらの経路では、任意の Rust Semantic helper を含め Rust 1.98 以降が必要です。
 
 ```sh
 codehelion scan --mode structural     # ツリーを読み、重複を報告する
@@ -77,7 +88,11 @@ codehelion explain b92c1297           # グループを 1 つ開く
 codehelion report --format json --output report.json
 ```
 
-Semantic モードでは、解析したい言語ごとの helper も必要です（`cargo install codehelion-backend-rust`、`codehelion-backend-clang`）。このマシンに何があるかは `codehelion doctor` が報告します。導入手順は[はじめかた](docs/ja/getting-started.md)にあります。
+Semantic モードでは、解析したい言語ごとの helper も必要です。ビルド済みの helper アーカイブ（`codehelion-helpers-<version>-...`）は Linux x86-64・macOS Apple silicon・Windows x86-64 に添付されています。それ以外では `cargo install codehelion-backend-rust` と `codehelion-backend-clang` がビルドします。このマシンに何があるかは `codehelion doctor` が報告します。導入手順は[はじめかた](docs/ja/getting-started.md)にあります。
+
+## CI で使う
+
+baseline を渡した `scan --fail-on-findings` は、baseline に無い重複が現れたときに終了コード `3` を返します。これは変更が「増やしたもの」に対するゲートであって、数字を上げれば答えたことになるパーセンテージに対するものではありません。`guard --deny-asymmetric` は、変更が seam の一部に触れて残りに触れていないときに `3` を返します。`--format sarif` は code scanning のビューにアップロードできます。3 つとも[継続的インテグレーション](docs/ja/continuous-integration.md)にあります。
 
 ## ドキュメント
 
@@ -85,7 +100,7 @@ Semantic モードでは、解析したい言語ごとの helper も必要です
 
 出力を読む: [レポートの読み方](docs/ja/reading-a-report.md)、[クローンの型](docs/ja/clone-types.md)、[グループ化](docs/ja/grouping.md)、[安定した識別子](docs/ja/stable-ids.md)、[用語集](docs/ja/glossary.md)。
 
-プロジェクトで使う: [リファクタのループ](docs/ja/refactoring-workflow.md)、[baseline](docs/ja/baselines.md)、[抑制](docs/ja/suppression.md)、[設定](docs/ja/configuration.md)、[seam の追跡](docs/ja/seam-tracking.md)、[コマンドライン](docs/ja/cli.md)。
+プロジェクトで使う: [リファクタのループ](docs/ja/refactoring-workflow.md)、[baseline](docs/ja/baselines.md)、[抑制](docs/ja/suppression.md)、[設定](docs/ja/configuration.md)、[seam の追跡](docs/ja/seam-tracking.md)、[継続的インテグレーション](docs/ja/continuous-integration.md)、[コマンドライン](docs/ja/cli.md)。
 
 成果物: [成果物解析](docs/ja/artifact-analysis.md)、[calibration](docs/ja/calibration.md)。
 
@@ -93,7 +108,9 @@ Semantic モードでは、解析したい言語ごとの helper も必要です
 
 ## 主張しないこと
 
-finding が測るのは保守性であってサイズではありません。示すのは読み手が同期を取り続ける必要のあるコードであり、コンパイラが出力するバイト数ではありません。最適化器はソース上で重複したままのコードを畳みますし、成果物の圧縮後のサイズは非圧縮のサイズほどには動きません。そちらは [`codehelion artifact analyze`](docs/ja/artifact-analysis.md) が別に測ります。codehelion はミラー整合性検査ツールでもありません。見つけた重複を報告するだけで、すべてのコピーを見つけたとは主張しません。全体は[制限](docs/ja/limitations.md)に、実測した適合率と再現率は[精度](docs/ja/accuracy.md)にあります。
+finding が測るのは保守性であってサイズではありません。示すのは読み手が同期を取り続ける必要のあるコードであり、コンパイラが出力するバイト数ではありません。最適化器はソース上で重複したままのコードを畳みますし、成果物の圧縮後のサイズは非圧縮のサイズほどには動きません。そちらは [`codehelion artifact analyze`](docs/ja/artifact-analysis.md) が別に測ります。codehelion はミラー整合性検査ツールでもありません。見つけた重複を報告するだけで、すべてのコピーを見つけたとは主張しません。全体は[制限](docs/ja/limitations.md)にあります。
+
+実測した内容は次のとおりです。実プロジェクト 8 件のラベル付きスナップショットに対し、既定の priority 順では上位 10 件に誤りが 1 つも入りません（p@10 1.0000、MAP 0.9290）。同じ判定を端から端まで読むと 0.5920 で、末尾は約半分がノイズです。レポートを単に並べるのではなく順序付けているのはこのためです。両方の数字とコーパス、再現手順は[精度](docs/ja/accuracy.md)にあります。
 
 ## 開発
 

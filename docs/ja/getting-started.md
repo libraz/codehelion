@@ -2,17 +2,30 @@
 
 ## インストール
 
+各[リリース](https://github.com/libraz/codehelion/releases)にビルド済みバイナリが添付されており、これが最短の経路です。ダウンロードして展開すれば動きます。アーカイブに入っているのは `codehelion` という自己完結の実行ファイル 1 つで、SQLite は同梱されています。
+
+| プラットフォーム | アーカイブ |
+|---|---|
+| Linux x86-64 | `codehelion-<version>-linux-x86_64.tar.gz` |
+| Linux ARM64 | `codehelion-<version>-linux-aarch64.tar.gz` |
+| macOS Apple silicon | `codehelion-<version>-macos-aarch64.tar.gz` |
+| Windows x86-64 | `codehelion-<version>-windows-x86_64.zip` |
+
+`SHA256SUMS` も併せて添付されるので、展開する前にアーカイブを検証できます。
+
+Rust ツールチェインがあるなら、同じバイナリをソースからビルドできます。
+
 ```sh
 cargo install codehelion
 ```
 
-生成されるのは `codehelion` という自己完結の単一バイナリで、SQLite は同梱されています。チェックアウトからビルドする場合は次のとおりです。
+チェックアウトからビルドする場合は次のとおりです。
 
 ```sh
 cargo install --path crates/codehelion-cli
 ```
 
-任意の Rust Semantic helper を含め、すべて Rust 1.98 以降が必要です。この下限は helper が使う解析ライブラリが決めており、コンポーネントごとに分かれてはいません。
+ビルドには、任意の Rust Semantic helper を含め Rust 1.98 以降が必要です。この下限は helper が使う解析ライブラリが決めており、コンポーネントごとに分かれてはいません。ダウンロードしたバイナリにはツールチェインは要りません。
 
 ## 最初のスキャン
 

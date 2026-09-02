@@ -42,12 +42,30 @@ The six restricted-semantic corpora are not scored here. Each registered rule is
 asserted by its own tests, which state why a pair matched or was dropped — a
 stronger claim than a corpus average over rules that answer different questions.
 
-## Precision
+## What the ordering is worth
 
 Eight labelled snapshots of real projects, 141 clone-pair and 177 non-clone
 verdicts. Every group the detector reported on these trees carries a hand-written
 verdict, so precision is measurable. Recall is not: nobody enumerated the clones
 in those projects first.
+
+A duplication report is read from the top, so the first question those verdicts
+answer is how much of the top is right. Over the 200 of them a finding of its own
+carries — the report shows a duplication that is a shorter cut of another inside
+the longer one, so it takes no place of its own in the order:
+
+| ordered by | p@10 | p@50 | MAP |
+|---|---|---|---|
+| priority | 1.0000 | 0.9600 | 0.9290 |
+| size | 1.0000 | 0.9400 | 0.8772 |
+
+Nothing false reaches the first ten either way, which is why the priority
+ordering and `--mode structural` are defaults rather than options.
+
+## Precision
+
+Read end to end instead — every group on every tree, in no order — the same
+verdicts give this:
 
 | case | Structural precision | confirmed | refuted |
 |---|---|---|---|
@@ -61,25 +79,15 @@ in those projects first.
 | tinyxml2 | 0.5263 | 10 | 9 |
 | **all cases** | **0.5920** | **119** | **82** |
 
+What that aggregate says is that the tail is close to half noise. It is the
+figure for a way of reading the report that the report does not ask for, and it
+is published because the difference between the two numbers is the thing worth
+knowing: the ranking is doing the work, and a reader who ignores it is reading
+0.5920.
+
 Two of the eight are this author's own projects, and both score 1.0000. Dropping
 them moves the aggregate to 0.5859 — they carry 3 of the 201 verdicts, so the
 figure is the other six projects' either way.
-
-## What the ordering is worth
-
-0.5920 is the figure for the whole report read end to end, which is not how a
-duplication report is read. Over the 200 of those verdicts a finding of its own
-carries — the report shows a duplication that is a shorter cut of another inside
-the longer one, so it takes no place of its own in the order:
-
-| ordered by | p@10 | p@50 | MAP |
-|---|---|---|---|
-| priority | 1.0000 | 0.9600 | 0.9290 |
-| size | 1.0000 | 0.9400 | 0.8772 |
-
-Nothing false reaches the first ten either way. What the aggregate says is that
-the tail is close to half noise, which is why the priority ordering and
-`--mode structural` are defaults rather than options.
 
 ## Reproducing this
 

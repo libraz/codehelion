@@ -115,3 +115,5 @@ codehelion artifact calibration --baseline earlier.json  # 以前の集計と並
 - `1`: 実行上のエラーにより完了できませんでした。
 - `2`: コマンドラインの指定が不正です。
 - `3`: `scan --fail-on-findings` が 1 件以上の visible finding を検出したか、`guard --deny-asymmetric` が 1 件以上の非対称変更を検出しました。
+
+`3` になる 2 つはいずれも自動チェックに組み込むためにあります。両方と SARIF のアップロードをまとめて[継続的インテグレーション](continuous-integration.md)に置いています。
