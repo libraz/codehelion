@@ -1,8 +1,16 @@
-use super::{
-    ArmPath, BuildVariant, ContentNorm, DirectoryPartition, FileContext, FileFeatures, IrNode,
-    Resolution, ResolvedTypes, Shape, SyntaxIrFile, TestCodeEvidence, Token, Unit, UnitEvidence,
-    UnitKind, UnitView, boilerplate, stable_id, test_code, verify,
-};
+use super::Unit;
+use super::evidence::{ResolvedTypes, UnitEvidence};
+use super::model::DirectoryPartition;
+use crate::boilerplate;
+use crate::conditional::ArmPath;
+use crate::discovery::BuildVariant;
+use crate::engine::normalize::Resolution;
+use crate::features::FileFeatures;
+use crate::frontend::{Token, UnitKind};
+use crate::ir::{IrNode, Shape, SyntaxIrFile};
+use crate::stable_id::{self, ContentNorm, FileContext};
+use crate::test_code::{self, TestCodeEvidence};
+use crate::verify::{self, UnitView};
 
 /// Flatten every file's units into one global list, in IR-walk order, together
 /// with the index that maps a walk position to it. The walk order matches

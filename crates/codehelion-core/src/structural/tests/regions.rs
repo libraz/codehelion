@@ -458,7 +458,7 @@ fn an_occurrence_that_named_no_tokens_did_not_disagree_with_anything() {
         },
         Language::Cpp,
     );
-    let (confirmed, dropped) = crate::structural::confirm_regions(
+    let (confirmed, dropped) = crate::structural::regions::confirm_regions(
         std::slice::from_ref(&candidate),
         &[],
         &crate::structural::units::UnitIndex::dense(Vec::new()),

@@ -1,9 +1,14 @@
-use super::{
-    BTreeSet, DirectPropagation, FallibleKind, Language, OperationAttributes, OperationEdge,
-    OperationEdgeKind, OperationKind, OperationNode, SemanticGraphError, SemanticOperationGraph,
-    SemanticRuleMatcher, SemanticRuleScope, TypeTag, cross_language_api_correspondence,
-    match_same_variant_rule, registered_rules,
+use super::cross_language::cross_language_api_correspondence;
+use super::graph::{
+    DirectPropagation, FallibleKind, OperationAttributes, OperationEdge, OperationEdgeKind,
+    OperationKind, OperationNode, SemanticGraphError, SemanticOperationGraph,
 };
+use super::rules::{
+    SemanticRuleMatcher, SemanticRuleScope, match_same_variant_rule, registered_rules,
+};
+use crate::discovery::Language;
+use crate::types::TypeTag;
+use std::collections::BTreeSet;
 
 /// One compiler-independent observation eligible for a registered SOG rule.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -87,7 +87,7 @@ fn one_pair_proposed_by_every_stage_is_rejected_once() {
         stats: crate::control_flow::ControlFlowStats::default(),
     };
 
-    let lifted = crate::structural::lift_to_unit_pairs(
+    let lifted = crate::structural::pairs::lift_to_unit_pairs(
         &candidates,
         &near,
         &skeleton,
@@ -153,7 +153,7 @@ fn a_pair_naming_an_arm_no_build_takes_is_not_proposed() {
     let mut dead = ArmTracker::default();
     dead.begin(StaticCondition::False);
     units[0].arms = dead.current();
-    let lifted = crate::structural::lift_to_unit_pairs(
+    let lifted = crate::structural::pairs::lift_to_unit_pairs(
         &candidates,
         &near,
         &skeleton,
@@ -168,7 +168,7 @@ fn a_pair_naming_an_arm_no_build_takes_is_not_proposed() {
     assert_eq!(lifted.divergent, 0);
 
     units[0].arms = ArmPath::default();
-    let reachable = crate::structural::lift_to_unit_pairs(
+    let reachable = crate::structural::pairs::lift_to_unit_pairs(
         &candidates,
         &near,
         &skeleton,

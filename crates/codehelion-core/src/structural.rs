@@ -29,31 +29,15 @@
 //! ordered set, and grouping orders its own output. Nothing here executes target
 //! code — it only reads IR that was already produced from source.
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use crate::boilerplate::{self, Boilerplate};
-use crate::candidate::{self, CandidateConfig, CandidateStats};
+use crate::boilerplate::Boilerplate;
 use crate::clone_class::CloneClass;
 use crate::conditional::ArmPath;
-use crate::control_flow::{self, ControlFlowConfig, ControlFlowStats};
-use crate::discovery::{BuildVariant, Language};
-use crate::engine::{LiteralNorm, normalize::Resolution};
-use crate::features::{self, FileFeatures};
-use crate::frontend::{Lexeme, Token, TokenKind, UnitKind};
-use crate::grouping::{
-    self, GroupingConfig, GroupingSet, GroupingStats, GroupingUnit, SimilarityEdge,
-};
-use crate::ir::{ByteRange, IrNode, Shape, Signature, SyntaxIrFile};
-use crate::maximal::{self, MaximalConfig, RegionSide, RegionStats, SharedRegion};
-use crate::near_match::{self, NearMatchConfig, NearMatchStats};
-use crate::stable_id::{
-    self, CloneGroupFingerprint, ContentNorm, CrossVariantComparisonId, CrossVariantGroupId,
-    FileContext, FragmentFingerprint, UnitFingerprint,
-};
-use crate::substitution;
-use crate::test_code::{self, TestCodeEvidence};
+use crate::engine::normalize::Resolution;
+use crate::frontend::{Lexeme, UnitKind};
+use crate::ir::{ByteRange, Signature};
+use crate::stable_id::{FragmentFingerprint, UnitFingerprint};
+use crate::test_code::TestCodeEvidence;
 use crate::types::{ApiEvidence, TypeEvidence, TypeTag};
-use crate::verify::{self, SimilarityBreakdown, UnitView, VerifyConfig};
 
 mod analysis;
 mod evidence;
@@ -63,20 +47,6 @@ mod regions;
 mod reporting;
 mod siblings;
 mod units;
-
-use evidence::{UnitEvidence, token_count_meets_minimum, unit_evidence, unit_meets_minimum};
-use pairs::{lift_to_unit_pairs, unrepresented_pairs};
-use regions::{confirm_regions, drop_subsumed, fold_by_content, grow_runs};
-use reporting::{dominant_boilerplate_members, group_detail, written_once_per_width_members};
-use siblings::sweep_siblings_with_context;
-#[cfg(test)]
-use units::flatten_units;
-use units::{flatten_units_with_context, line_range, view};
-
-#[cfg(test)]
-use regions::{Confirmed, covers_run, merge_adjacent};
-#[cfg(test)]
-use reporting::{dominant_boilerplate, is_allocation_api, set_jaccard};
 
 pub use analysis::*;
 pub use evidence::*;

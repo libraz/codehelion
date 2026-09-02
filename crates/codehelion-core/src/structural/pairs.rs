@@ -1,9 +1,15 @@
+use super::Unit;
+use super::model::VerifiedPair;
+use super::reporting::{dominant_boilerplate_members, written_once_per_width_members};
 use super::units::UnitIndex;
-use super::{
-    BTreeMap, BTreeSet, BuildVariant, CloneClass, FileFeatures, FragmentFingerprint, GroupingSet,
-    SimilarityEdge, SyntaxIrFile, Unit, VerifiedPair, candidate, control_flow,
-    dominant_boilerplate_members, near_match, stable_id, verify, written_once_per_width_members,
-};
+use crate::clone_class::CloneClass;
+use crate::discovery::BuildVariant;
+use crate::features::FileFeatures;
+use crate::grouping::{GroupingSet, SimilarityEdge};
+use crate::ir::SyntaxIrFile;
+use crate::stable_id::{self, FragmentFingerprint};
+use crate::{candidate, control_flow, near_match, verify};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A candidate pair that is not a statement about any one program, and so is
 /// dropped before it reaches the judge.

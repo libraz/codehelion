@@ -18,16 +18,22 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
-use super::pairs::encloses;
-use super::{
-    DirectoryPartition, FileFeatures, GroupSiblings, GroupingSet, SiblingBasis, SiblingSweepStats,
-    SignatureSiblingSweepStats, StructuralConfig, StructuralSibling, SyntaxIrFile, Unit,
-    UnitEvidence, unit_meets_minimum, verify, view,
+use super::Unit;
+use super::evidence::{UnitEvidence, unit_meets_minimum};
+use super::model::{
+    DirectoryPartition, GroupSiblings, SiblingBasis, SiblingSweepStats, SignatureSiblingSweepStats,
+    StructuralConfig, StructuralSibling,
 };
+use super::pairs::encloses;
+use super::units::view;
 use crate::clone_class::CloneClass;
+use crate::features::FileFeatures;
+use crate::grouping::GroupingSet;
 use crate::grouping::StructuralGroup;
 use crate::ir::SignatureKey;
+use crate::ir::SyntaxIrFile;
 use crate::stable_id::UnitFingerprint;
+use crate::verify;
 use crate::verify::Confidence;
 
 /// Sweep ungrouped units beside established groups for incomplete mirrors.
@@ -720,10 +726,11 @@ mod tests {
     use crate::frontend::{SourceSpan, Token, TokenKind};
     use crate::grouping::{self, GroupingConfig, GroupingUnit, SimilarityEdge};
     use crate::ir::{ByteRange, IR_SCHEMA_VERSION, IrNode, Shape, Signature};
-    use crate::structural::{
-        DirectoryPartition, ResolvedTypes, SiblingBasis, SiblingConfig, SignatureSiblingConfig,
-        flatten_units, flatten_units_with_context, unit_evidence,
+    use crate::structural::evidence::{ResolvedTypes, unit_evidence};
+    use crate::structural::model::{
+        DirectoryPartition, SiblingBasis, SiblingConfig, SignatureSiblingConfig,
     };
+    use crate::structural::units::{flatten_units, flatten_units_with_context};
 
     fn variant() -> BuildVariant {
         BuildVariant::structural(

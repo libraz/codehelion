@@ -1,4 +1,5 @@
 use super::super::*;
+use std::collections::BTreeMap;
 
 #[test]
 fn a_plain_compiler_confirmed_loop_matches_a_registered_collection_pipeline() {

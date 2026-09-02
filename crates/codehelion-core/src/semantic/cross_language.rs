@@ -1,10 +1,15 @@
-use super::{
-    BTreeMap, DirectPropagation, FallibleKind, Language, OPTIONAL_VALIDATION_RULE, OperationKind,
-    OperationNode, RESULT_VALIDATION_RULE, SOG_SCHEMA_VERSION, SemanticCandidateConfig,
-    SemanticCandidatePair, SemanticOperationGraph, SemanticRule, SemanticRuleMatcher,
+use super::candidates::{SemanticCandidateConfig, SemanticCandidatePair};
+use super::graph::{
+    DirectPropagation, FallibleKind, OperationKind, OperationNode, SOG_SCHEMA_VERSION,
+    SemanticOperationGraph,
+};
+use super::rules::{
+    OPTIONAL_VALIDATION_RULE, RESULT_VALIDATION_RULE, SemanticRule, SemanticRuleMatcher,
     SemanticRulePattern, SemanticRuleScope, compatible_fallible_kinds, compatible_type_tags,
     direct_construct_matches, only_api_name,
 };
+use crate::discovery::Language;
+use std::collections::BTreeMap;
 
 /// One explicit correspondence between Rust and C++ standard-library APIs.
 ///

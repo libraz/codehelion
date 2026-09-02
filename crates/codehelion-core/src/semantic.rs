@@ -7,16 +7,13 @@
 //! sequence of registered transformations instead of turning this mode into a
 //! claim of general semantic equivalence.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::clone_class::CloneClass;
 use crate::discovery::Language;
-use crate::grouping::{self, GroupingConfig, GroupingUnit, SimilarityEdge};
 use crate::types::TypeTag;
-use crate::verify::Confidence;
 
 mod candidates;
 mod cross_language;
@@ -27,10 +24,6 @@ mod rules;
 use cross_language::{
     CROSS_LANGUAGE_OPTIONAL_VALIDATION_RULE, CROSS_LANGUAGE_RESULT_DIRECT_PROPAGATION_RULE,
     CROSS_LANGUAGE_RESULT_VALIDATION_RULE, CROSS_LANGUAGE_SEQUENCE_PIPELINE_RULE,
-};
-use rules::{
-    OPTIONAL_VALIDATION_RULE, RESULT_VALIDATION_RULE, compatible_fallible_kinds,
-    compatible_type_tags, direct_construct_matches, match_same_variant_rule, only_api_name,
 };
 
 #[cfg(test)]

@@ -1,19 +1,26 @@
-use super::regions::Dropped;
-use super::reporting::{PairEvidence, group_detail, group_fingerprint, verifier_calls};
-use super::{
-    Boilerplate, CloneClass, Confirmed, CrossVariantComparison, CrossVariantUnit,
-    DirectoryPartition, RegionOccurrence, RegionSide, ResolvedTypes, SignatureSiblingSweepStats,
-    StructuralConfig, StructuralRegion, Unit, compare_build_variants, covers_run,
-    dominant_boilerplate, drop_subsumed, features, flatten_units, fold_by_content,
-    is_allocation_api, merge_adjacent, set_jaccard, unit_evidence, unrepresented_pairs, view,
+use super::Unit;
+use super::evidence::{ResolvedTypes, unit_evidence};
+use super::model::{
+    CrossVariantComparison, CrossVariantUnit, DirectoryPartition, RegionOccurrence,
+    SignatureSiblingSweepStats, StructuralConfig, StructuralRegion, compare_build_variants,
 };
+use super::pairs::unrepresented_pairs;
+use super::regions::Dropped;
+use super::regions::{Confirmed, covers_run, drop_subsumed, fold_by_content, merge_adjacent};
+use super::reporting::{PairEvidence, group_detail, group_fingerprint, verifier_calls};
+use super::reporting::{dominant_boilerplate, is_allocation_api, set_jaccard};
+use super::units::{flatten_units, view};
+use crate::boilerplate::Boilerplate;
 use crate::candidate::StatementRun;
+use crate::clone_class::CloneClass;
 use crate::conditional::{ArmPath, ArmTracker, StaticCondition};
 use crate::discovery::{BuildVariant, Language, LanguageSelection};
 use crate::engine::{LiteralNorm, normalize::Resolution};
+use crate::features;
 use crate::frontend::{SourceSpan, Token, TokenKind, UnitKind};
 use crate::grouping;
 use crate::ir::{ByteRange, IR_SCHEMA_VERSION, IrNode, Shape, Signature, SyntaxIrFile};
+use crate::maximal::RegionSide;
 use crate::stable_id::{CloneGroupFingerprint, FragmentFingerprint, UnitFingerprint};
 use crate::types::TypeTag;
 use crate::verify::{Confidence, SimilarityBreakdown};

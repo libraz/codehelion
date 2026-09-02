@@ -1,11 +1,21 @@
-use super::{
-    BTreeMap, BTreeSet, Boilerplate, ByteRange, CandidateConfig, CandidateStats, CloneClass,
-    CloneGroupFingerprint, ControlFlowConfig, ControlFlowStats, CrossVariantComparisonId,
-    CrossVariantGroupId, FragmentFingerprint, GroupingConfig, GroupingSet, GroupingStats, Language,
-    Lexeme, LiteralNorm, MaximalConfig, NearMatchConfig, NearMatchStats, RegionStats,
-    SimilarityBreakdown, TestCodeEvidence, Token, UnitFingerprint, UnitKind, VerifyConfig,
-    stable_id, test_code, verify,
+use crate::boilerplate::Boilerplate;
+use crate::candidate::{CandidateConfig, CandidateStats};
+use crate::clone_class::CloneClass;
+use crate::control_flow::{ControlFlowConfig, ControlFlowStats};
+use crate::discovery::Language;
+use crate::engine::normalize::LiteralNorm;
+use crate::frontend::{Lexeme, Token, UnitKind};
+use crate::grouping::{GroupingConfig, GroupingSet, GroupingStats};
+use crate::ir::ByteRange;
+use crate::maximal::{MaximalConfig, RegionStats};
+use crate::near_match::{NearMatchConfig, NearMatchStats};
+use crate::stable_id::{
+    self, CloneGroupFingerprint, CrossVariantComparisonId, CrossVariantGroupId,
+    FragmentFingerprint, UnitFingerprint,
 };
+use crate::test_code::{self, TestCodeEvidence};
+use crate::verify::{self, SimilarityBreakdown, VerifyConfig};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Default largest shape-mix divergence a candidate pair may span.
 ///

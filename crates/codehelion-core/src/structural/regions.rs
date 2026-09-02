@@ -1,9 +1,16 @@
+use super::model::{RegionOccurrence, StructuralRegion};
 use super::units::UnitIndex;
-use super::{
-    BTreeMap, BTreeSet, BuildVariant, ByteRange, CloneClass, CloneGroupFingerprint, ContentNorm,
-    FileContext, FragmentFingerprint, LiteralNorm, RegionOccurrence, RegionSide, SharedRegion,
-    StructuralRegion, SyntaxIrFile, Token, line_range, maximal, stable_id,
+use super::units::line_range;
+use crate::clone_class::CloneClass;
+use crate::discovery::BuildVariant;
+use crate::engine::normalize::LiteralNorm;
+use crate::frontend::Token;
+use crate::ir::{ByteRange, SyntaxIrFile};
+use crate::maximal::{self, RegionSide, SharedRegion};
+use crate::stable_id::{
+    self, CloneGroupFingerprint, ContentNorm, FileContext, FragmentFingerprint,
 };
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Confirm candidate runs against the tokens they cover and split them into
 /// classes that genuinely hold the same content.

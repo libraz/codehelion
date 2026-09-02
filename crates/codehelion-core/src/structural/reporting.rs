@@ -1,9 +1,17 @@
-use super::{
-    BTreeMap, BTreeSet, BodyMateriality, Boilerplate, BuildVariant, CloneGroupFingerprint,
-    FileFeatures, FragmentFingerprint, GroupDetail, Lexeme, SimilarityBreakdown, SimilarityEdge,
-    SourceTokenSpan, StructuralConfig, SyntaxIrFile, Token, TokenKind, Unit, UnitEvidence,
-    UnitView, VerifyConfig, features, grouping, stable_id, substitution, test_code, verify, view,
-};
+use super::Unit;
+use super::evidence::UnitEvidence;
+use super::model::{BodyMateriality, GroupDetail, SourceTokenSpan, StructuralConfig};
+use super::units::view;
+use crate::boilerplate::Boilerplate;
+use crate::discovery::BuildVariant;
+use crate::features::{self, FileFeatures};
+use crate::frontend::{Lexeme, Token, TokenKind};
+use crate::grouping::{self, SimilarityEdge};
+use crate::ir::SyntaxIrFile;
+use crate::stable_id::{self, CloneGroupFingerprint, FragmentFingerprint};
+use crate::verify::{self, SimilarityBreakdown, UnitView, VerifyConfig};
+use crate::{substitution, test_code};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The verified pair evidence, addressable by unordered endpoint pair.
 ///

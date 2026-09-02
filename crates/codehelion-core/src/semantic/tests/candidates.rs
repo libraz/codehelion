@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::grouping::GroupingConfig;
 
 fn node(kind: OperationKind) -> OperationNode {
     OperationNode {

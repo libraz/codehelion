@@ -1,8 +1,9 @@
-use super::{
-    BTreeMap, BTreeSet, CloneClass, Confidence, GroupingConfig, GroupingUnit, OperationKind,
-    RuleMatch, SOG_SCHEMA_VERSION, SemanticOperationGraph, SemanticRule, SimilarityEdge, grouping,
-    match_registered_rule, registered_rules,
-};
+use super::graph::{OperationKind, SOG_SCHEMA_VERSION, SemanticOperationGraph};
+use super::rules::{RuleMatch, SemanticRule, match_registered_rule, registered_rules};
+use crate::clone_class::CloneClass;
+use crate::grouping::{self, GroupingConfig, GroupingUnit, SimilarityEdge};
+use crate::verify::Confidence;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Limits for the registered SOG candidate index.
 ///

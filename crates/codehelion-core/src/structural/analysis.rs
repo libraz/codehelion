@@ -1,14 +1,25 @@
-use super::reporting::PairEvidence;
-use super::{
-    BTreeMap, BTreeSet, BuildVariant, DirectoryPartition, FileFeatures, GroupDetail, GroupSiblings,
-    GroupingSet, GroupingUnit, ResolvedTypes, SimilarityEdge, StructuralConfig, StructuralNearMiss,
-    StructuralReport, StructuralStats, StructuralUnit, SyntaxIrFile, Unit, UnitEvidence, UnitKind,
-    VerifyConfig, candidate, confirm_regions, control_flow, drop_subsumed, features,
-    flatten_units_with_context, fold_by_content, group_detail, grouping, grow_runs,
-    lift_to_unit_pairs, maximal, near_match, sweep_siblings_with_context,
-    token_count_meets_minimum, unit_evidence, unit_meets_minimum, unrepresented_pairs, verify,
-    view,
+use super::Unit;
+use super::evidence::{
+    ResolvedTypes, UnitEvidence, token_count_meets_minimum, unit_evidence, unit_meets_minimum,
 };
+use super::model::{
+    DirectoryPartition, GroupDetail, GroupSiblings, StructuralConfig, StructuralNearMiss,
+    StructuralReport, StructuralStats, StructuralUnit,
+};
+use super::pairs::{lift_to_unit_pairs, unrepresented_pairs};
+use super::regions::{confirm_regions, drop_subsumed, fold_by_content, grow_runs};
+use super::reporting::PairEvidence;
+use super::reporting::group_detail;
+use super::siblings::sweep_siblings_with_context;
+use super::units::{flatten_units_with_context, view};
+use crate::discovery::BuildVariant;
+use crate::features::{self, FileFeatures};
+use crate::frontend::UnitKind;
+use crate::grouping::{self, GroupingSet, GroupingUnit, SimilarityEdge};
+use crate::ir::SyntaxIrFile;
+use crate::verify::{self, VerifyConfig};
+use crate::{candidate, control_flow, maximal, near_match};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Run the structural pipeline over parsed IR files.
 ///
