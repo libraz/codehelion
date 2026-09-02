@@ -37,8 +37,8 @@ path = "src/bin/bench.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-codehelion-core = { version = "0.5.0", path = "../codehelion-core" }
-codehelion-store = { version = "0.5.0", path = "../codehelion-store" }
+codehelion-core = { version = "0.6.0", path = "../codehelion-core" }
+codehelion-store = { version = "0.6.0", path = "../codehelion-store" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
@@ -48,9 +48,9 @@ assert_cmd = "2"
 # The frontends are here rather than above because only the `ir-dump` example
 # parses: the harness scores what a scan reported and never parses anything
 # itself.
-codehelion-frontend-c = { version = "0.5.0", path = "../codehelion-frontend-c" }
-codehelion-frontend-cpp = { version = "0.5.0", path = "../codehelion-frontend-cpp" }
-codehelion-frontend-rust = { version = "0.5.0", path = "../codehelion-frontend-rust" }
+codehelion-frontend-c = { version = "0.6.0", path = "../codehelion-frontend-c" }
+codehelion-frontend-cpp = { version = "0.6.0", path = "../codehelion-frontend-cpp" }
+codehelion-frontend-rust = { version = "0.6.0", path = "../codehelion-frontend-rust" }
 predicates = "3"
 
 [lints]

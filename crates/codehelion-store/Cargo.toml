@@ -10,8 +10,8 @@ description = "Local SQLite audit storage for the codehelion source-audit tool."
 
 [dependencies]
 blake3 = "1"
-codehelion-core = { version = "0.5.0", path = "../codehelion-core" }
-codehelion-helper-protocol = { version = "0.5.0", path = "../codehelion-helper-protocol" }
+codehelion-core = { version = "0.6.0", path = "../codehelion-core" }
+codehelion-helper-protocol = { version = "0.6.0", path = "../codehelion-helper-protocol" }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -9,11 +9,11 @@ homepage.workspace = true
 description = "Out-of-process C and C++ compiler helper for codehelion."
 
 [dependencies]
-codehelion-helper = { version = "0.5.0", path = "../codehelion-helper" }
+codehelion-helper = { version = "0.6.0", path = "../codehelion-helper" }
 # The compilation-database entry shape, which the scanner reads with the same
 # code: an entry is named by the words it records, so the two readers cannot
 # each have their own idea of where one word ends.
-codehelion-helper-protocol = { version = "0.5.0", path = "../codehelion-helper-protocol" }
+codehelion-helper-protocol = { version = "0.6.0", path = "../codehelion-helper-protocol" }
 # Clang through libclang's stable C ABI, loaded at run time rather than linked.
 # Loading it means this program builds on a machine that has no Clang and says
 # so when started, which is what an optional component has to be able to do;
