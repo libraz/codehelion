@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, PoisonError};
 
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::artifact::{
     ARTIFACT_ANALYSIS_SAVINGS_CALIBRATION_SCHEMA_VERSION, ArtifactAnalysisCloneGroupSavings,
@@ -139,6 +139,28 @@ pub(crate) fn remove_orphaned_fingerprints(
            )",
         [],
     )?)
+}
+
+/// Refuse a run that is absent or has not completed its scan invocation.
+///
+/// One rule for every caller: reading a run's results and connecting a run to a
+/// predecessor both require a finished invocation, and a partition still being
+/// assembled is not one. A [`Transaction`] dereferences to its connection, so
+/// the callers writing inside a transaction ask the same question of the rows
+/// their own transaction can see.
+pub(crate) fn ensure_completed_run(conn: &Connection, run_id: i64) -> Result<(), StoreError> {
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM scan_run WHERE id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match status.as_deref() {
+        Some("completed") => Ok(()),
+        Some(_) => Err(StoreError::RunNotCompleted { run_id }),
+        None => Err(StoreError::RunNotFound { run_id }),
+    }
 }
 
 /// Rows one table lost to the removal of a row it references.

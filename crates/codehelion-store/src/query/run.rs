@@ -159,19 +159,7 @@ impl Store {
     /// [`StoreError::RunNotCompleted`] for any non-completed row, or an
     /// underlying database error.
     pub fn ensure_completed_run(&self, run_id: i64) -> Result<(), StoreError> {
-        let status: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT status FROM scan_run WHERE id = ?1",
-                params![run_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        match status.as_deref() {
-            Some("completed") => Ok(()),
-            Some(_) => Err(StoreError::RunNotCompleted { run_id }),
-            None => Err(StoreError::RunNotFound { run_id }),
-        }
+        crate::lifecycle::ensure_completed_run(&self.conn, run_id)
     }
 
     /// The most recently started scan run, if any.

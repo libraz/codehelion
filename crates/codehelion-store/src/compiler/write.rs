@@ -4,6 +4,7 @@ use super::{
     Instantiation, ResolvedExpression, ResolvedSymbol, ResolvedType, SemanticConstruct, Snapshot,
     StoreError, Transaction, UnexpandedMacro, params,
 };
+use rusqlite::ToSql;
 
 /// Write a run's compiler results, returning the distinct IR schema versions
 /// they were written against.
@@ -167,28 +168,23 @@ fn write_semantic_constructs(
     unit_id: i64,
 ) -> Result<(), StoreError> {
     for (ordinal, construct) in constructs.iter().enumerate() {
-        let cells = AnchorCells::of(&construct.anchor);
-        tx.execute(
+        let fallible_kind = construct.fallible_kind.map(FallibleKind::name);
+        let direct_propagation = construct.direct_propagation.map(DirectPropagation::name);
+        insert_anchored_row(
+            tx,
             "INSERT INTO compiler_semantic_construct
              (compiler_unit_id, ordinal, kind, fallible_kind, direct_propagation, resource_kind, expansion_file, expansion_start_byte,
               expansion_end_byte, expansion_start_line, definition_file,
               definition_start_byte, definition_end_byte, definition_start_line)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![
-                unit_id,
-                index_of(ordinal),
-                construct.kind.name(),
-                construct.fallible_kind.map(FallibleKind::name),
-                construct.direct_propagation.map(DirectPropagation::name),
-                construct.resource_kind,
-                cells.file,
-                cells.start_byte,
-                cells.end_byte,
-                cells.start_line,
-                cells.definition_file,
-                cells.definition_start_byte,
-                cells.definition_end_byte,
-                cells.definition_start_line
+            unit_id,
+            ordinal,
+            &construct.anchor,
+            &[
+                &construct.kind.name(),
+                &fallible_kind,
+                &direct_propagation,
+                &construct.resource_kind,
             ],
         )?;
     }
@@ -201,27 +197,19 @@ fn write_expressions(
     unit_id: i64,
 ) -> Result<(), StoreError> {
     for (ordinal, expression) in expressions.iter().enumerate() {
-        let cells = AnchorCells::of(&expression.anchor);
-        tx.execute(
+        let type_index = i64::from(expression.type_index);
+        insert_anchored_row(
+            tx,
             "INSERT INTO compiler_expression
                  (compiler_unit_id, ordinal, type_index, expansion_file,
                   expansion_start_byte, expansion_end_byte, expansion_start_line,
                   definition_file, definition_start_byte, definition_end_byte,
                   definition_start_line)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                unit_id,
-                index_of(ordinal),
-                i64::from(expression.type_index),
-                cells.file,
-                cells.start_byte,
-                cells.end_byte,
-                cells.start_line,
-                cells.definition_file,
-                cells.definition_start_byte,
-                cells.definition_end_byte,
-                cells.definition_start_line,
-            ],
+            unit_id,
+            ordinal,
+            &expression.anchor,
+            &[&type_index],
         )?;
     }
     Ok(())
@@ -289,30 +277,25 @@ fn write_symbols(
     unit_id: i64,
 ) -> Result<(), StoreError> {
     for (ordinal, symbol) in symbols.iter().enumerate() {
-        let cells = AnchorCells::of(&symbol.anchor);
-        tx.execute(
+        let type_index = symbol.type_index.map(i64::from);
+        let external = i64::from(symbol.external);
+        insert_anchored_row(
+            tx,
             "INSERT INTO compiler_symbol
                  (compiler_unit_id, ordinal, symbol_id, name, symbol_kind, type_index, external,
                   expansion_file, expansion_start_byte, expansion_end_byte, expansion_start_line,
                   definition_file, definition_start_byte, definition_end_byte,
                   definition_start_line)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            params![
-                unit_id,
-                index_of(ordinal),
-                symbol.id,
-                symbol.name,
-                symbol.kind.name(),
-                symbol.type_index.map(i64::from),
-                i64::from(symbol.external),
-                cells.file,
-                cells.start_byte,
-                cells.end_byte,
-                cells.start_line,
-                cells.definition_file,
-                cells.definition_start_byte,
-                cells.definition_end_byte,
-                cells.definition_start_line,
+            unit_id,
+            ordinal,
+            &symbol.anchor,
+            &[
+                &symbol.id,
+                &symbol.name,
+                &symbol.kind.name(),
+                &type_index,
+                &external,
             ],
         )?;
     }
@@ -519,6 +502,42 @@ impl<'a> AnchorCells<'a> {
                 .map(|site| i64::from(site.start_line)),
         }
     }
+}
+
+/// Write one row of a table whose columns are the unit, the position in its
+/// list, the table's own columns, and then the eight anchor columns.
+///
+/// Every anchored payload table is laid out that way, so each caller states
+/// only what is its own — its statement and the values between the ordinal and
+/// the anchor — and the anchor columns are bound here, in the order
+/// [`AnchorCells`] declares them. The statements stay at their call sites: what
+/// a writer inserts and which columns it names is the thing worth reading.
+fn insert_anchored_row(
+    tx: &Transaction<'_>,
+    sql: &str,
+    unit_id: i64,
+    ordinal: usize,
+    anchor: &Anchor,
+    columns: &[&dyn ToSql],
+) -> Result<(), StoreError> {
+    let cells = AnchorCells::of(anchor);
+    let ordinal = index_of(ordinal);
+    let mut bound: Vec<&dyn ToSql> = Vec::with_capacity(columns.len() + 10);
+    bound.push(&unit_id);
+    bound.push(&ordinal);
+    bound.extend_from_slice(columns);
+    bound.extend_from_slice(&[
+        &cells.file,
+        &cells.start_byte,
+        &cells.end_byte,
+        &cells.start_line,
+        &cells.definition_file,
+        &cells.definition_start_byte,
+        &cells.definition_end_byte,
+        &cells.definition_start_line,
+    ]);
+    tx.execute(sql, bound.as_slice())?;
+    Ok(())
 }
 
 /// A byte offset as the column stores it. Saturating rather than failing: no

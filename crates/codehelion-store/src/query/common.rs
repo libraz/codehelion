@@ -7,6 +7,8 @@ use super::{
     StoredPriority, StoredRankingFacts, StoredSuppressionRef, params, stored_test_code_evidence,
 };
 
+pub(super) use crate::fingerprint::{parse_build_variant_reference, parse_hex_id};
+
 /// Join a clone group to a completed source scan.
 ///
 /// Every query whose answer names a clone group must use this exact fragment;
@@ -600,83 +602,9 @@ pub(super) fn positive_line(
         .transpose()
 }
 
-/// Reduce the 32-byte build-variant digest stored by `build_variant` to the
-/// 16-byte content-fingerprint reference used by source/artifact mappings.
-///
-/// The database records a full BLAKE3 digest for variant lookup, while mapping
-/// rows use the project's standard 128-bit fingerprint width. Taking the
-/// leading bytes preserves a deterministic reference without confusing this
-/// representation with one of the stable IDs parsed by [`parse_hex_id`].
-pub(super) fn parse_build_variant_reference(
-    hex: &str,
-) -> Result<BuildVariantFingerprint, StoreError> {
-    let malformed = || StoreError::MalformedId { id: hex.to_owned() };
-    if hex.len() != 64 || !hex.chars().all(|character| character.is_ascii_hexdigit()) {
-        return Err(malformed());
-    }
-    let mut out = [0_u8; 16];
-    for (index, chunk) in hex
-        .as_bytes()
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .take(out.len())
-        .enumerate()
-    {
-        let pair = core::str::from_utf8(chunk).map_err(|_| malformed())?;
-        out[index] = u8::from_str_radix(pair, 16).map_err(|_| malformed())?;
-    }
-    Ok(BuildVariantFingerprint::from_bytes(out))
-}
-
 pub(super) fn nonnegative_u64(field: &'static str, value: i64) -> Result<u64, StoreError> {
     u64::try_from(value).map_err(|_| StoreError::UnknownVocabulary {
         field,
         value: value.to_string(),
     })
-}
-
-/// Parse a 32-digit hex identifier into its 16 bytes.
-pub(super) fn parse_hex_id(hex: &str) -> Result<[u8; 16], StoreError> {
-    let malformed = || StoreError::MalformedId {
-        id: hex.to_string(),
-    };
-    if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(malformed());
-    }
-    let mut out = [0u8; 16];
-    for (i, chunk) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
-        let pair = core::str::from_utf8(chunk).map_err(|_| malformed())?;
-        out[i] = u8::from_str_radix(pair, 16).map_err(|_| malformed())?;
-    }
-    Ok(out)
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hex_ids_parse_and_reject_malformed_input() {
-        let parsed = parse_hex_id("000102030405060708090a0b0c0d0e0f").unwrap();
-        assert_eq!(parsed[0], 0);
-        assert_eq!(parsed[15], 0x0f);
-        assert!(parse_hex_id("").is_err());
-        assert!(parse_hex_id("zz0102030405060708090a0b0c0d0e0f").is_err());
-        assert!(parse_hex_id("00010203").is_err());
-    }
-
-    #[test]
-    fn build_variant_references_keep_the_first_128_bits_of_the_full_digest() {
-        let parsed = parse_build_variant_reference(
-            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-        )
-        .unwrap();
-        assert_eq!(
-            parsed.as_bytes(),
-            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-        );
-        assert!(parse_build_variant_reference("00010203").is_err());
-    }
 }
