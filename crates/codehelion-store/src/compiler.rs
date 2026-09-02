@@ -21,15 +21,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use codehelion_helper_protocol::ir::{
-    Anchor, BasicBlock, CallSite, CallTarget, CompilerIr, ControlFlowGraph, DataFlowSummary,
-    DirectPropagation, Edge, EdgeKind, EffectSummary, FallibleKind, Instantiation,
-    ResolvedExpression, ResolvedSymbol, ResolvedType, SemanticConstruct, SemanticConstructKind,
-    SourceRange, SymbolKind, TypeCategory, Unavailability, UnexpandedMacro, UnexpandedMacroReason,
-    UnitRef,
-};
-use codehelion_helper_protocol::protocol::{Capability, Execution, HelperIdentity};
-use rusqlite::{Row, Transaction, params};
+use codehelion_helper_protocol::ir::{Anchor, CompilerIr, SourceRange, Unavailability, UnitRef};
+use codehelion_helper_protocol::protocol::HelperIdentity;
+use rusqlite::{Row, Transaction};
 
 use crate::snapshot::Snapshot;
 use crate::{Store, StoreError};

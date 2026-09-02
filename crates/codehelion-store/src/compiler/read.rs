@@ -3,13 +3,19 @@ use std::collections::BTreeMap;
 use rusqlite::Connection;
 
 use super::{
-    BasicBlock, CallSite, CallTarget, Capability, CompilerCoverage, CompilerHelperRow, CompilerIr,
-    CompilerOutcome, ControlFlowGraph, DataFlowSummary, DirectPropagation, Edge, EdgeKind,
-    EffectSummary, Execution, FallibleKind, HelperIdentity, Instantiation, ResolvedExpression,
-    ResolvedSymbol, ResolvedType, Row, SemanticConstruct, SemanticConstructKind, SourceRange,
-    StoreError, StoredCompilerUnit, StoredExpansion, StoredHelperRef, SymbolKind, TypeCategory,
-    Unavailability, UnexpandedMacro, UnexpandedMacroReason, UnitRef, anchor_at, params,
+    CompilerCoverage, CompilerHelperRow, CompilerOutcome, StoredCompilerUnit, StoredExpansion,
+    StoredHelperRef, anchor_at,
 };
+use crate::StoreError;
+use codehelion_helper_protocol::ir::{
+    BasicBlock, CallSite, CallTarget, CompilerIr, ControlFlowGraph, DataFlowSummary,
+    DirectPropagation, Edge, EdgeKind, EffectSummary, FallibleKind, Instantiation,
+    ResolvedExpression, ResolvedSymbol, ResolvedType, SemanticConstruct, SemanticConstructKind,
+    SourceRange, SymbolKind, TypeCategory, Unavailability, UnexpandedMacro, UnexpandedMacroReason,
+    UnitRef,
+};
+use codehelion_helper_protocol::protocol::{Capability, Execution, HelperIdentity};
+use rusqlite::{Row, params};
 pub(super) fn helpers(
     conn: &Connection,
     run_id: i64,

@@ -1,11 +1,17 @@
 use super::BuildVariantFingerprint;
 use super::{
-    ArtifactAnalysisMappingConfidence, ArtifactAnalysisSourceKind, ArtifactMappingSqlRow, BTreeSet,
-    CrossLanguageGroupDetail, CrossLanguageGroupMember, CrossVariantGroupDetail,
-    CrossVariantGroupMember, MappingEvidence, OccurrenceDetail, OptionalExtension, Row,
-    SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION, Store, StoreError, StoredArtifactMapping, StoredMember,
-    StoredPriority, StoredRankingFacts, StoredSuppressionRef, params, stored_test_code_evidence,
+    ArtifactMappingSqlRow, CrossLanguageGroupDetail, CrossLanguageGroupMember,
+    CrossVariantGroupDetail, CrossVariantGroupMember, OccurrenceDetail, StoredArtifactMapping,
+    StoredMember, StoredPriority, StoredRankingFacts, StoredSuppressionRef,
+    stored_test_code_evidence,
 };
+use crate::artifact::{
+    ArtifactAnalysisMappingConfidence, ArtifactAnalysisSourceKind, MappingEvidence,
+    SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION,
+};
+use crate::{Store, StoreError};
+use rusqlite::{OptionalExtension, Row, params};
+use std::collections::BTreeSet;
 
 pub(super) use crate::fingerprint::{parse_build_variant_reference, parse_hex_id};
 

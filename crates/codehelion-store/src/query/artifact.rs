@@ -11,16 +11,20 @@ use super::common::{
     parse_hex_id,
 };
 use super::{
+    ArtifactMappingSqlRow, StoredArtifactAnalysis, StoredArtifactAnalysisCorrelation,
+    StoredArtifactAnalysisIdentity, StoredArtifactMapping, StoredArtifactUnmappedSource,
+    StoredArtifactUnmappedSymbol,
+};
+use crate::artifact::{
     ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION,
     ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION,
     ARTIFACT_ANALYSIS_SAVINGS_CALIBRATION_SCHEMA_VERSION, ArtifactAnalysisCloneGroupSavings,
     ArtifactAnalysisSavingsCalibration, ArtifactAnalysisSavingsConfidence,
     ArtifactAnalysisSourceKind, ArtifactAnalysisUnmappedReason,
-    ArtifactAnalysisUnmappedSourceReason, ArtifactMappingSqlRow, OptionalExtension, Store,
-    StoreError, StoredArtifactAnalysis, StoredArtifactAnalysisCorrelation,
-    StoredArtifactAnalysisIdentity, StoredArtifactMapping, StoredArtifactUnmappedSource,
-    StoredArtifactUnmappedSymbol, params,
+    ArtifactAnalysisUnmappedSourceReason,
 };
+use crate::{Store, StoreError};
+use rusqlite::{OptionalExtension, params};
 
 impl Store {
     /// Every mapping recorded for one artifact analysis, in stable evidence order.

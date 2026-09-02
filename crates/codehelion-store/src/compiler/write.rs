@@ -1,10 +1,14 @@
-use super::{
-    Anchor, BTreeSet, CallSite, CallTarget, CompilerHelperRow, CompilerIr, CompilerOutcome,
-    ControlFlowGraph, DataFlowSummary, DirectPropagation, EffectSummary, FallibleKind,
-    Instantiation, ResolvedExpression, ResolvedSymbol, ResolvedType, SemanticConstruct, Snapshot,
-    StoreError, Transaction, UnexpandedMacro, params,
+use super::{CompilerHelperRow, CompilerOutcome};
+use crate::StoreError;
+use crate::snapshot::Snapshot;
+use codehelion_helper_protocol::ir::{
+    Anchor, CallSite, CallTarget, CompilerIr, ControlFlowGraph, DataFlowSummary, DirectPropagation,
+    EffectSummary, FallibleKind, Instantiation, ResolvedExpression, ResolvedSymbol, ResolvedType,
+    SemanticConstruct, UnexpandedMacro,
 };
 use rusqlite::ToSql;
+use rusqlite::{Transaction, params};
+use std::collections::BTreeSet;
 
 /// Write a run's compiler results, returning the distinct IR schema versions
 /// they were written against.

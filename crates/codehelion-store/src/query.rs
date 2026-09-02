@@ -6,9 +6,9 @@
 //! members in the order the run recorded them — the same database always
 //! yields the same output.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use codehelion_core::semantic::{SOG_SCHEMA_VERSION, SemanticOperationGraph};
+use codehelion_core::semantic::SemanticOperationGraph;
 use codehelion_core::stable_id::{
     CloneGroupFingerprint, FindingId, FragmentFingerprint, GroupLineageId, UnitFingerprint,
 };
@@ -16,18 +16,10 @@ use codehelion_core::test_code::TestCodeEvidence;
 use rusqlite::{OptionalExtension, Row, params};
 
 use crate::artifact::{
-    ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION,
-    ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION,
-    ARTIFACT_ANALYSIS_SAVINGS_CALIBRATION_SCHEMA_VERSION, ArtifactAnalysisCloneGroupSavings,
-    ArtifactAnalysisMappingConfidence, ArtifactAnalysisSavingsCalibration,
-    ArtifactAnalysisSavingsConfidence, ArtifactAnalysisSourceKind, ArtifactAnalysisUnmappedReason,
-    ArtifactAnalysisUnmappedSourceReason, MappingEvidence, SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION,
+    ArtifactAnalysisMappingConfidence, ArtifactAnalysisSourceKind, ArtifactAnalysisUnmappedReason,
+    ArtifactAnalysisUnmappedSourceReason, MappingEvidence,
 };
 use crate::fingerprint::BuildVariantFingerprint;
-use crate::snapshot::{
-    FileCountsRow, FunnelDropRow, FunnelStageRow, GuardrailsRow, SummaryRow, UnparsedRow,
-    UnusedRuleRow,
-};
 use crate::{Store, StoreError};
 
 /// Summary of one recorded scan run.
