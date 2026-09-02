@@ -217,6 +217,11 @@ broke a seam still broke it. `history-limit` is a ceiling on how much history is
 read rather than a guarantee of how much there is; `--until <rev>` fixes the other
 end of the range, which is what makes two generations' numbers comparable.
 
+`codehelion seam` records what it measured into the local database described
+below, which is what a later report reads to set two generations beside each
+other. Which invocations record and which do not is on the
+[seam-tracking](seam-tracking.md) page.
+
 ## The local database
 
 Each scan creates its persistent local audit database at `.codehelion/audit.db`
@@ -252,3 +257,9 @@ path a run leaves that database exactly where it is, records into
 `--db` is refused instead, since writing somewhere else would ignore the path that
 was asked for. `codehelion doctor` lists every audit database in the directory,
 which of them this build can open, and which one a run would take.
+
+Nothing is lost that a fresh scan does not recreate. The audit database holds
+derived state, so a database an earlier build wrote costs the tree the runs it
+could have been compared against and nothing beyond that. Removing it is a
+decision left to the reader, since the file is as large as the one in use and
+only the reader knows whether an older build still opens it.

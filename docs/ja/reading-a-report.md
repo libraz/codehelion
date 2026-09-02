@@ -18,6 +18,25 @@ supplemental: 517 siblings (--show-siblings; 7,332 dropped by search ceilings), 
 
 1 行目はレポートそのものです。グループが何件で、どの型が何件で、抑制ルールで何件隠したかを示します。2 行目は、実行が見つけたものの一覧には昇格させなかったもの、つまり sibling と near miss です。どの上限が何件落としたかを別々に数えるので、どの上限を動かすべきかが読み取れます。3 行目は何を読んだかと、それを再現する run id です。
 
+## seam
+
+[seam](seam-tracking.md) とは、同じ意味論が複数の場所に実装されているパスの集合です。計測済みの seam があるとき、レポートはそれが何を要したかを述べます。
+
+```text
+seams: frontend-c-cpp 12 asymmetric changes, 7 breaches (last 6e014d86), 1,553 findings
+       readme-en-ja 1 asymmetric change, 1 breach (last 634aa5c9)
+       artifact-fixture-scripts 3 asymmetric changes, 1 breach (last 6f5d63c3)
+since seam run 2: frontend-c-cpp +1,553 findings
+```
+
+非対称変更と breach は `codehelion seam` が計測した値であり、ここで測り直したものではなく読み戻したものです。レポートはコミットを 1 件も開きません。`findings` はもう一方の側の値で、seam の内側に位置する重複の finding の件数です。数える対象は、その seam run を記録した時点で同じツリーについて最も新しく完了していたスキャンです。背後にスキャンの無い seam は finding の件数を持ちません。
+
+`since` の行は動いたものだけを名指しします。2 回の評価が同じ値であれば `since` の行そのものが出ません。差分を出すのは、同じ設定ダイジェストの下にある前回の実行が同じ seam を持っていた場合だけです。その後に台帳へ書き加えられた seam には前の世代が無く、何も無いものから引けば、台帳が伸びたことをコードが動いたこととして報告してしまいます。
+
+件数 0 は、その不在こそが答えである箇所にだけ `no breaches`、`no asymmetric changes` と語で書きます。何度も跨がれながら一度も breach していない seam は、跨ぐたびに修正を要する seam と区別するために台帳がある、まさにその事例だからです。
+
+この区画が出るのは、そのツリーについて `codehelion seam` の実行が記録されているときだけです。区画の無いレポートは、seam に費用が掛かっていない台帳ではなく、誰も評価していない台帳です。`codehelion scan` の全モードと `codehelion report` の text と JSON に入り、どちらの場合も SARIF には入りません。SARIF は finding のための形式であり、seam の要約は finding ではないからです。
+
 ## 注記と警告
 
 実行を限定する情報はレポートではなく標準エラー出力に回ります。これにより標準出力はパイプに流せる状態を保ちます。
@@ -91,7 +110,7 @@ codehelion scan --mode structural --sort identifier-jaccard --min-identifier-jac
 
 ## どれだけ表示するか
 
-省略した場合、text レポートはグループ 10 件と各グループの出現箇所 5 件までを列挙し、いくつ省いたかを述べます。`--limit <n>` が変えるのはグループ数だけで、両方の上限を外すのは `--limit 0` です。`--quiet` は見出し・要約・注記を省き、グループだけを出力します。
+省略した場合、text レポートはグループ 10 件と各グループの出現箇所 5 件までを列挙し、いくつ省いたかを述べます。`--limit <n>` が変えるのはグループ数だけで、両方の上限を外すのは `--limit 0` です。`--quiet` は見出し・seam の区画・要約・注記を省き、グループだけを出力します。
 
 `--show-suppressed`、`--show-siblings`、`--show-near-misses` は text の一覧を展開します。変えるのはテキストの可視性だけで、JSON と SARIF にはフラグに関係なくこれらのデータが含まれます。
 

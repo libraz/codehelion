@@ -28,6 +28,42 @@ not promote into the listing — siblings and near misses, with what each ceilin
 dropped counted separately, so a reader can tell which ceiling to move. The
 third is what was read, and the run id that replays it.
 
+## Seams
+
+A [seam](seam-tracking.md) is a set of paths that implement the same semantics in
+more than one place. Where one has been measured, the report says what it has
+cost:
+
+```text
+seams: frontend-c-cpp 12 asymmetric changes, 7 breaches (last 6e014d86), 1,553 findings
+       readme-en-ja 1 asymmetric change, 1 breach (last 634aa5c9)
+       artifact-fixture-scripts 3 asymmetric changes, 1 breach (last 6f5d63c3)
+since seam run 2: frontend-c-cpp +1,553 findings
+```
+
+The asymmetric changes and the breaches are what `codehelion seam` measured, read
+back rather than taken again: a report opens no commit. The `findings` count is
+the other side of it — duplication findings whose location falls inside the seam,
+taken from the newest completed scan of the same tree at the moment the seam run
+was recorded. A seam with no scan behind it carries no finding counts.
+
+The `since` line names only what moved. Two identical evaluations produce no
+`since` line at all. A delta is reported only where the previous run under the
+same settings digest carried the same seam: a seam written into the ledger since
+then has no earlier generation, and subtracting against nothing would report the
+ledger's growth as movement in the code.
+
+A count of zero is written as words — `no breaches`, `no asymmetric changes` —
+where its absence is the answer. A seam crossed repeatedly and never breached is
+exactly the case the ledger exists to tell apart from one that costs a fix every
+time.
+
+The block appears only when a `codehelion seam` run has been recorded for this
+tree. A report with no block is a ledger nobody has evaluated, not a ledger whose
+seams cost nothing. It is in the text and the JSON of `codehelion scan` in every
+mode and of `codehelion report`, and in neither case in SARIF: SARIF is shaped
+for findings, and a seam summary is not one.
+
 ## Notes and warnings
 
 Anything qualifying the run goes to the error stream rather than into the report,
@@ -125,8 +161,8 @@ value to compare, and the report says how many entries that left out.
 
 Left alone, a text report lists 10 groups with 5 occurrences under each and says
 how many it left out. `--limit <n>` changes the group count alone; `--limit 0`
-lifts both. `--quiet` prints the groups without the heading, the summary or the
-notes.
+lifts both. `--quiet` prints the groups without the heading, the seam block, the
+summary or the notes.
 
 `--show-suppressed`, `--show-siblings` and `--show-near-misses` expand the text
 listing. They change text visibility only: JSON and SARIF retain those data

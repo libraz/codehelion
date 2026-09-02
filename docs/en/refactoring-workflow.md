@@ -51,6 +51,31 @@ says whether one particular group is still in the latest run. A
 [baseline](baselines.md) is for freezing a threshold in CI; tracking a refactor in
 progress does not need one.
 
+## A seam is a different kind of work item
+
+A clone group names code that is repeated. A [seam](seam-tracking.md) names paths
+that have to move together, and the report says what not moving them has cost:
+
+```text
+seams: frontend-c-cpp 12 asymmetric changes, 7 breaches (last 6e014d86), 1,553 findings
+```
+
+The breach count is the one to order on. An asymmetric change is a commit that
+touched some of the members and left the rest alone, and plenty of those were the
+right change; a breach is one that a `fix:` to a member left alone followed, so
+the repository has already paid for the asymmetry once. The findings beside it
+are what a scan found inside those same paths, which is where the two kinds of
+work item meet: a seam that breaches and holds findings is one this loop can act
+on directly.
+
+Before the edit rather than after it,
+
+```sh
+codehelion guard --paths crates/codehelion-frontend-c/src/lex.rs
+```
+
+names the members that would have to move with the file in front of you.
+
 ## Whether the artifact got smaller
 
 That is a separate question. A finding names code a reader has to keep in step,

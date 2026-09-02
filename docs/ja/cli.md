@@ -27,6 +27,7 @@ codehelion doctor             # 利用可能な解析コンポーネントを表
 codehelion history            # 範囲内のコミットを分類し、何を読んだかを述べる
 codehelion seam               # 台帳が名指しする seam を計測
 codehelion seam --suggest     # 共変更だけから seam の候補を提示
+codehelion seam --no-record   # 評価を記録せずに seam を計測
 codehelion guard              # 変更を台帳に照らす
 codehelion guard --deny-asymmetric  # seam の一部だけを触る変更があれば exit 3
 codehelion guard --paths src/a.rs   # 編集前に、そのパスが属する seam を引く
@@ -99,6 +100,8 @@ codehelion artifact calibration --baseline earlier.json  # 以前の集計と並
 ## `seam`
 
 台帳の `[[seam]]` 項目ごとに、非対称変更が何件あったか、そのうち何件が breach になったか、直近の breach がいつだったかを報告します。`--suggest` を付けると、代わりに共変更だけから seam の候補を、各候補の coupling 値と support とともに提示します。台帳へ書き込むことはありません。`--path`・`--config`・`--until`・`--format`・`--output`・`--force` は `history` と同じです。[seam の追跡](seam-tracking.md)を参照してください。
+
+評価はローカルの監査データベースにも記録されます。あとのレポートが、その 1 つ前の世代と並べられるようにするためです。記録先のデータベースは `--db <file>` で指定でき、省略した場合は他のコマンドが自分で解決するのと同じものになります。`--no-record` は評価を報告するだけで記録しません。`--suggest` と `--until <rev>` も記録しません。候補の提示は計測ではなく、また意図的に短く切った範囲は、次の比較でコードが動いたものとして読まれてしまうからです。記録に失敗してもレポートはそのまま出力され、失敗は標準エラー出力に述べます。
 
 ## `guard`
 

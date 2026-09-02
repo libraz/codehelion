@@ -37,6 +37,7 @@ spell one name as both an array of tables and a table. See
 codehelion history                    # what the commit range holds
 codehelion seam                       # the ledger's seams, measured
 codehelion seam --suggest             # candidates from co-change alone
+codehelion seam --no-record           # measured, and not kept
 codehelion guard                      # the working tree against the ledger
 codehelion guard --since v0.4.0       # a revision range instead
 codehelion guard --paths crates/codehelion-frontend-c/src/lex.rs
@@ -88,6 +89,40 @@ per-invocation escape hatch, and that is deliberate: reporting is what happens
 unless somebody deliberately asked for the failure, so an exception flag would
 exist only to defeat the flag they turned on. A seam that reports more than a
 project wants to read is cut more finely in its `members`.
+
+## What a run records
+
+`codehelion seam` writes what it printed into the local audit database, as one
+generation of the measurement. That is what lets a report set the newest
+evaluation beside the one before it and name what moved; the counts a report
+carries are read back rather than taken again, since a report opens no commit.
+The block a report prints is described in
+[Reading a report](reading-a-report.md#seams). `--db <file>` names the database,
+and left off it is the one every other command resolves for itself — see
+[Configuration](configuration.md#the-local-database).
+
+Three invocations record nothing, each for its own reason:
+
+- `--suggest` proposes candidates instead of measuring the ledger. A proposal is
+  not a measurement: those pairs were never evaluated against the ledger, and
+  filing them as the newest generation of what the ledger costs would answer a
+  question nobody asked.
+- `--until <rev>` reads a range somebody deliberately cut short. Kept as the
+  newest generation, it would make the next comparison read the shorter question
+  as a change in the code.
+- `--no-record` is the explicit opt-out.
+
+Recording is not what the command was run for, so a recording that fails does not
+fail the run. A read-only checkout, or a database this build cannot open, costs
+the next run its comparison point and nothing else: the report still goes out, and
+the failure is a warning on the error stream the way a shallow history is. The
+counts are the answer the run was for.
+
+`history` and `guard` open no database at all. `history` reports the extent of a
+range rather than anything about the code in it, and `guard` judges the change in
+front of it, which the ledger and the working tree answer between them. Requiring
+a recorded run there would make the question unanswerable in exactly the checkouts
+it exists to be asked in.
 
 ## Candidates, and why promotion is by hand
 

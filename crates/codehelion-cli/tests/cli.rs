@@ -2244,3 +2244,114 @@ fn configuration_documents_state_every_seam_setting_and_its_default() {
         }
     }
 }
+
+/// Both report documents say when the seam block is absent, and what the
+/// finding count beside a seam was counted from.
+///
+/// Pinned because both are read wrongly by default. An absent block looks like
+/// a ledger that costs nothing rather than one nobody has evaluated, and a
+/// finding count printed beside two history-derived numbers looks like a third
+/// one, when it comes from a scan of the tree taken at the moment the seam run
+/// was recorded.
+#[test]
+fn report_documents_state_when_the_seam_block_is_absent_and_what_it_counts() {
+    let english = include_str!("../../../docs/en/reading-a-report.md");
+    for snippet in [
+        "The block appears only when a `codehelion seam` run has been recorded for this",
+        "A report with no block is a ledger nobody has evaluated, not a ledger whose",
+        "taken from the newest completed scan of the same tree at the moment the seam run",
+        "A seam with no scan behind it carries no finding counts.",
+    ] {
+        assert!(
+            english.contains(snippet),
+            "English report document is missing {snippet}"
+        );
+    }
+
+    let japanese = include_str!("../../../docs/ja/reading-a-report.md");
+    for snippet in [
+        "この区画が出るのは、そのツリーについて `codehelion seam` の実行が記録されているときだけです。",
+        "誰も評価していない台帳です",
+        "その seam run を記録した時点で同じツリーについて最も新しく完了していたスキャンです",
+        "背後にスキャンの無い seam は finding の件数を持ちません。",
+    ] {
+        assert!(
+            japanese.contains(snippet),
+            "Japanese report document is missing {snippet}"
+        );
+    }
+}
+
+/// Both seam-tracking documents say which invocations become a recorded
+/// generation and which do not, with the reason `--until` is among them.
+///
+/// The three exclusions have nothing in common on the surface, so a reader who
+/// is told only that `seam` records will read a missing generation as a bug.
+/// `--until` is the one nobody would guess: it is the flag the same page
+/// recommends for comparing two generations, and it is excluded precisely
+/// because a shortened range kept as the newest one would be read as movement
+/// in the code.
+#[test]
+fn seam_tracking_documents_state_which_invocations_record_and_which_do_not() {
+    let english = include_str!("../../../docs/en/seam-tracking.md");
+    for snippet in [
+        "Three invocations record nothing, each for its own reason:",
+        "`--until <rev>` reads a range somebody deliberately cut short. Kept as the",
+        "newest generation, it would make the next comparison read the shorter question",
+        "`--no-record` is the explicit opt-out.",
+        "`history` and `guard` open no database at all.",
+    ] {
+        assert!(
+            english.contains(snippet),
+            "English seam-tracking document is missing {snippet}"
+        );
+    }
+
+    let japanese = include_str!("../../../docs/ja/seam-tracking.md");
+    for snippet in [
+        "記録しない実行が 3 つあり、理由はそれぞれ別です。",
+        "`--until <rev>` が読むのは、誰かが意図的に短く切った範囲です。",
+        "「問いが短くなった」ことを「コードが動いた」こととして読んでしまいます",
+        "`--no-record` は明示的な opt-out です。",
+        "`history` と `guard` はデータベースを一切開きません。",
+    ] {
+        assert!(
+            japanese.contains(snippet),
+            "Japanese seam-tracking document is missing {snippet}"
+        );
+    }
+}
+
+/// Both configuration documents say that a database an earlier build wrote is
+/// not migrated, and what a run does instead.
+///
+/// The reader meets this as a second file appearing beside the first with no
+/// history in it, which reads as data loss unless the document has already
+/// said that the database holds derived state and that the old file was left
+/// alone deliberately.
+#[test]
+fn configuration_documents_state_that_an_earlier_schema_database_is_not_migrated() {
+    let english = include_str!("../../../docs/en/configuration.md");
+    for snippet in [
+        "A database written under a different schema is never migrated.",
+        "`audit-v<schema>.db` beside it, and says which file it used",
+        "Nothing is lost that a fresh scan does not recreate.",
+    ] {
+        assert!(
+            english.contains(snippet),
+            "English configuration document is missing {snippet}"
+        );
+    }
+
+    let japanese = include_str!("../../../docs/ja/configuration.md");
+    for snippet in [
+        "別のスキーマで書かれたデータベースが移行されることはありません。",
+        "隣の `audit-v<スキーマ>.db` へ記録して",
+        "それで失われるものは、スキャンをやり直せば復元できないものではありません。",
+    ] {
+        assert!(
+            japanese.contains(snippet),
+            "Japanese configuration document is missing {snippet}"
+        );
+    }
+}

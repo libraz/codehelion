@@ -28,6 +28,7 @@ codehelion doctor             # report available analysis components
 codehelion history            # classify the commits in the range and say what it read
 codehelion seam               # measure the seams the ledger names
 codehelion seam --suggest     # propose candidate seams from co-change alone
+codehelion seam --no-record   # measure the seams without recording the evaluation
 codehelion guard              # compare a change against the ledger
 codehelion guard --deny-asymmetric  # exit 3 when a change touched part of a seam
 codehelion guard --paths src/a.rs   # name the seam a path belongs to, before editing
@@ -158,6 +159,14 @@ has seen, how many of those became breaches, and when the most recent breach was
 coupling value and the support behind each; it never writes to the ledger. Takes
 the same `--path`, `--config`, `--until`, `--format`, `--output` and `--force`.
 See [Seam tracking](seam-tracking.md).
+
+An evaluation is also recorded in the local audit database, so a later report can
+set it beside the generation before it. `--db <file>` names the database to record
+into; left off, it is the one every other command resolves for itself.
+`--no-record` reports the evaluation without recording it. Neither `--suggest` nor
+`--until <rev>` records: a proposal is not a measurement, and a range deliberately
+cut short would be read by the next comparison as a change in the code. A
+recording that fails leaves the report standing and says so on the error stream.
 
 ## `guard`
 
