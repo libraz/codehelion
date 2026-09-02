@@ -4,13 +4,14 @@
 //! envelopes must evolve together. Constructors here own the common shape;
 //! each mode fills only the evidence it actually measured.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::engine::Instance;
 use codehelion_core::stable_id::{self, CloneGroupFingerprint, MemberIds, OccurrenceDiscriminator};
 use codehelion_store::snapshot::{
-    FileCountsRow, GroupRow, GuardrailsRow, MemberRow, PriorityRow, SummaryRow, UnparsedRow,
+    FileCountsRow, FileRow, GroupRow, GuardrailsRow, MemberRow, PriorityRow, SummaryRow,
+    UnparsedRow,
 };
 
 use crate::report::{self, Report};
@@ -296,6 +297,56 @@ pub(super) fn unused_suppressions(
             matched: 0,
         })
         .collect()
+}
+
+/// The tree a run read, keyed by path, as the content of each file.
+///
+/// Every source mode records the same tree and compares it with its
+/// predecessor's the same way, so what a tree *is* is settled once: two modes
+/// that keyed it differently would disagree about which files a later scan
+/// found changed.
+pub(super) fn file_tree(files: &[FileRow]) -> BTreeMap<String, String> {
+    files
+        .iter()
+        .map(|file| (file.relative_path.clone(), file.content_hash.clone()))
+        .collect()
+}
+
+/// What became of the tree between the run `since_run_id` recorded and this
+/// one.
+pub(super) fn tree_changes(
+    since_run_id: i64,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> report::TreeChanges {
+    let modified = after
+        .iter()
+        .filter(|(path, hash)| before.get(*path).is_some_and(|old| old != *hash))
+        .count();
+    let added = after
+        .keys()
+        .filter(|path| !before.contains_key(*path))
+        .count();
+    let removed = before
+        .keys()
+        .filter(|path| !after.contains_key(*path))
+        .count();
+    let unchanged = after
+        .iter()
+        .filter(|(path, hash)| before.get(*path) == Some(*hash))
+        .count();
+    report::TreeChanges {
+        since_run_id,
+        modified: u64::try_from(modified).unwrap_or(u64::MAX),
+        added: u64::try_from(added).unwrap_or(u64::MAX),
+        removed: u64::try_from(removed).unwrap_or(u64::MAX),
+        unchanged: u64::try_from(unchanged).unwrap_or(u64::MAX),
+    }
+}
+
+/// Whether the compared trees hold the same files with the same content.
+pub(super) const fn tree_unchanged(changes: &report::TreeChanges) -> bool {
+    changes.modified == 0 && changes.added == 0 && changes.removed == 0
 }
 
 #[cfg(test)]

@@ -583,14 +583,23 @@ impl Rules {
     /// decision recorded in one place, and pointing at that place is what a
     /// reader needs in order to reverse it.
     pub(crate) fn add_baseline(&mut self, file: &str, covered: BTreeMap<String, u64>) -> usize {
-        self.rows.push(SuppressionRuleRow {
-            scope: "baseline".to_string(),
-            pattern: file.to_string(),
-            reason: Some("recorded before this baseline".to_string()),
-        });
-        let index = self.rows.len() - 1;
+        let index = self.add_rule("baseline", file, "recorded before this baseline");
         self.baseline = Some((covered, index));
         index
+    }
+
+    /// Record one rule this run produced for itself, returning its index.
+    ///
+    /// What separates these rules is the scope a reader sees cited beside a
+    /// hidden finding — which question the rule answers about a group — not how
+    /// the rule is written down, so the writing down happens once.
+    fn add_rule(&mut self, scope: &str, pattern: &str, reason: &str) -> usize {
+        self.rows.push(SuppressionRuleRow {
+            scope: scope.to_string(),
+            pattern: pattern.to_string(),
+            reason: Some(reason.to_string()),
+        });
+        self.rows.len() - 1
     }
 
     /// The rule hiding a group because a baseline froze it, if one did.
@@ -606,12 +615,7 @@ impl Rules {
     /// rule describes what the group *is*, so it applies to every member at
     /// once instead of being evaluated per file.
     pub(crate) fn add_shape_rule(&mut self, pattern: &str, reason: &str) -> usize {
-        self.rows.push(SuppressionRuleRow {
-            scope: "ast_pattern".to_string(),
-            pattern: pattern.to_string(),
-            reason: Some(reason.to_string()),
-        });
-        self.rows.len() - 1
+        self.add_rule("ast_pattern", pattern, reason)
     }
 
     /// The configured rules whose selectors matched no source or finding in
@@ -651,12 +655,7 @@ impl Rules {
     /// carrying the test attribute is a test because it was declared one. As
     /// with a shape rule, it applies to a whole group rather than per file.
     pub(crate) fn add_attribute_rule(&mut self, pattern: &str, reason: &str) -> usize {
-        self.rows.push(SuppressionRuleRow {
-            scope: "attribute".to_string(),
-            pattern: pattern.to_string(),
-            reason: Some(reason.to_string()),
-        });
-        self.rows.len() - 1
+        self.add_rule("attribute", pattern, reason)
     }
 
     /// Evaluate one file: its path against the path globs, its unit names

@@ -25,13 +25,11 @@ use codehelion_core::discovery::{
     LanguageSelection, RustBuild, SourceUnit, content_hash,
 };
 use codehelion_core::engine::{self, LiteralNorm};
-use codehelion_core::frontend::Token;
 use codehelion_core::grouping::StructuralGroup;
 use codehelion_core::ir::{ByteRange, StructuralFrontend, SyntaxIrFile};
-use codehelion_core::priority::Weights;
 use codehelion_core::semantic::{
     CrossLanguageCandidateInput, SemanticCandidateStats, SemanticGroupingStats,
-    SemanticGroupingUnit, SemanticOperationGraph, SemanticRule, VerifiedSemanticPair,
+    SemanticGroupingUnit, SemanticOperationGraph, VerifiedSemanticPair,
     extract_cross_language_candidates, extract_registered_candidates,
     group_verified_semantic_pairs, registered_semantic_windows, verify_cross_language_candidates,
     verify_registered_candidates,
@@ -43,21 +41,17 @@ use codehelion_core::structural::{
 };
 use codehelion_core::test_code::{self, TestCodeEvidence};
 use codehelion_core::verify::WEIGHT_VERSION;
-use codehelion_store::compiler::{self as store_compiler, CompilerHelperRow, CompilerOutcome};
 use codehelion_store::snapshot::{
     CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow, CrossLanguageSemanticMemberRow,
-    CrossVariantComparisonSnapshot, CrossVariantGroupRow, CrossVariantMemberRow, FileRow, GroupRow,
-    MemberRow, NearMissRow, PriorityRow, SemanticEvidenceRow, SemanticNodeMappingRow,
-    SemanticOperationGraphRow, SiblingGroupRow, SiblingRow, SimilarityBreakdownRow, Snapshot,
-    SnapshotComparisons, StagedSnapshotPart, SummaryRow, UnitRow,
+    CrossVariantComparisonSnapshot, CrossVariantGroupRow, CrossVariantMemberRow,
+    SnapshotComparisons, StagedSnapshotPart, SummaryRow,
 };
 
 use super::{
     FileOutcome, ScanBaseline, as_u64, discover_sources, effective_jobs, filter_globs,
-    literal_norm, map_sources, open_store, parse_work_byte_limit, path_key, rfc3339_now,
+    literal_norm, map_sources, open_store, path_key, read_within_budget, rfc3339_now,
     scan_database_path, shared, write_partitioned_reports,
 };
-use crate::provenance::FromScannedTree;
 
 use crate::Outcome;
 use crate::cli::ScanArgs;
@@ -71,36 +65,18 @@ use codehelion_helper::ir::{ControlFlowGraph, DataFlowSummary, EdgeKind};
 use codehelion_helper::protocol::{CompileCommandSelector, Execution};
 use codehelion_helper::{Helper, SandboxRequest};
 
-/// The reporting metadata of one parsed source file.
-pub(super) struct SourceMeta {
-    relative_path: String,
-    /// Repository-relative parent key used only to build opaque core
-    /// directory partitions for signature siblings.
-    directory_key: String,
-    language: Language,
-    /// 1-based lines carrying an inline suppression marker.
-    marker_lines: Vec<u32>,
-    /// Source lines in the file.
-    lines: u64,
-    diagnostics: usize,
-    /// Tokens the parser could not attach to any structure.
-    unaccounted_tokens: u64,
-    /// Whether parsing stopped at the structural depth ceiling.
-    depth_truncated: bool,
-}
+mod model;
 
-/// One parsed source file: its Syntax IR plus the metadata that travels with
-/// it. The two are split apart before analysis, which consumes the IR files
-/// as one slice.
-struct ParsedSource {
-    meta: SourceMeta,
-    ir: SyntaxIrFile,
-}
+use model::{
+    CfgShape, CrossComparisonUnit, CrossLanguageComparisonUnit, ParsedSource, PartitionOutcome,
+    SemanticConfidenceEvidence, SemanticDetection, SemanticGroup, SemanticPair, SemanticUnitGraph,
+    SourceMeta,
+};
 
 /// Intern repository-relative parent directory keys deterministically before
 /// crossing into core. Raw paths remain a CLI/reporting concern; core sees
 /// only opaque integer partitions.
-pub(super) fn directory_partitions(files: &[SourceMeta]) -> Vec<DirectoryPartition> {
+fn directory_partitions(files: &[SourceMeta]) -> Vec<DirectoryPartition> {
     let mut keys: Vec<&str> = files
         .iter()
         .map(|file| file.directory_key.as_str())
@@ -125,185 +101,6 @@ pub(super) fn remove_signature_sibling_funnel_stage(summary: &mut SummaryRow) {
     summary
         .funnel
         .retain(|stage| stage.name != SIGNATURE_SIBLING_FUNNEL_STAGE);
-}
-
-/// One normalized SOG anchored to the syntactic unit it describes.
-#[derive(Debug, Clone)]
-struct SemanticUnitGraph {
-    unit: usize,
-    /// Deterministic rank of this window among the semantic windows hosted by
-    /// the same stable source unit. It distinguishes identical occurrences
-    /// without making a source position part of a stable identifier.
-    occurrence_rank: u32,
-    /// Exact source bytes for this semantic window, used only for reporting.
-    range: ByteRange,
-    /// First source line covered by this semantic window.
-    start_line: u32,
-    /// Last source line covered by this semantic window.
-    end_line: u32,
-    /// Parsed tokens covered by this semantic window.
-    token_count: usize,
-    graph: SemanticOperationGraph,
-    content: stable_id::FragmentFingerprint,
-    /// How completely the closed API registry described this parser-owned
-    /// unit. This may lower semantic confidence but never invents or removes
-    /// a registered-rule match.
-    normalization_confidence: f64,
-    /// Closed interactions observed inside this exact SOG window. An empty
-    /// set is unknown evidence, never a purity claim.
-    interactions: BTreeSet<String>,
-    /// Compiler-confirmed direct `filter`/`map` receiver flows in this exact
-    /// window. Missing evidence is neutral rather than a claim that no flow
-    /// exists.
-    data_flows: BTreeSet<(String, String)>,
-    /// Compiler-produced CFG shape that overlaps this exact window. It is
-    /// supplementary confidence evidence only; absence never removes a match.
-    cfg_shape: Option<CfgShape>,
-}
-
-/// A deliberately small, language-neutral summary of the CFG that covers one
-/// semantic window.
-///
-/// The summary counts blocks and interior edge kinds rather than preserving
-/// compiler-local block indices. It cannot establish semantic equivalence; it
-/// only corroborates or weakens a match the closed SOG rule already verified.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CfgShape {
-    blocks: u32,
-    flow_edges: u32,
-    taken_edges: u32,
-    not_taken_edges: u32,
-    unwind_edges: u32,
-    return_edges: u32,
-}
-
-/// Non-authoritative compiler evidence that can adjust one SOG match's
-/// confidence without changing whether the registered rule matched.
-#[derive(Clone, Copy)]
-struct SemanticConfidenceEvidence<'a> {
-    normalization: f64,
-    interactions: &'a BTreeSet<String>,
-    data_flows: &'a BTreeSet<(String, String)>,
-    cfg_shape: Option<CfgShape>,
-}
-
-impl SemanticUnitGraph {
-    const fn confidence_evidence(&self) -> SemanticConfidenceEvidence<'_> {
-        SemanticConfidenceEvidence {
-            normalization: self.normalization_confidence,
-            interactions: &self.interactions,
-            data_flows: &self.data_flows,
-            cfg_shape: self.cfg_shape,
-        }
-    }
-}
-
-/// One registered semantic correspondence between two whole units that no
-/// cohesive semantic group jointly represents.
-#[derive(Debug, Clone)]
-struct SemanticPair {
-    canonical: SemanticUnitGraph,
-    corresponding: SemanticUnitGraph,
-    rule: SemanticRule,
-    /// Rule confidence after the two normalizations' coverage is considered.
-    semantic_confidence: f64,
-}
-
-/// A cohesive registered-rule correspondence group, with a medoid chosen by
-/// the core-owned complete-linkage adapter.
-#[derive(Debug, Clone)]
-struct SemanticGroup {
-    canonical: SemanticUnitGraph,
-    /// The canonical member is first; every other member has a separately
-    /// verified correspondence to every member in this group.
-    members: Vec<SemanticUnitGraph>,
-    rule: SemanticRule,
-    semantic_confidence: f64,
-}
-
-/// Bounded registered-semantic matching plus the accounting that makes every
-/// omitted candidate visible in the scan funnel.
-#[derive(Debug, Clone)]
-struct SemanticDetection {
-    groups: Vec<SemanticGroup>,
-    pairs: Vec<SemanticPair>,
-    /// Every normalized graph retained for an explicit cross-language
-    /// comparison. Ordinary partition reports never inspect this collection.
-    units: Vec<SemanticUnitGraph>,
-    candidates: SemanticCandidateStats,
-    /// Compiler-resolved API observations accepted by the closed registry.
-    registered_observations: usize,
-    /// Compiler-resolved API observations that the closed registry declined
-    /// to normalize. They remain visible in the funnel but never become a
-    /// semantic finding by approximation.
-    excluded_observations: usize,
-    /// Parser-owned units in which normalization found no registered
-    /// operation at all: the closed registry recognized nothing the compiler
-    /// resolved there.
-    units_without_registered_operations: usize,
-    /// Parser-owned units that did hold registered operations, none of which
-    /// any registered rule claimed. Kept apart from
-    /// [`Self::units_without_registered_operations`] because the two send a
-    /// reader investigating a thin run to different places: one is a gap in
-    /// what the helper was asked, the other a gap in the rules.
-    units_no_registered_rule_claimed: usize,
-    verified_pairs: usize,
-    disabled_pairs: usize,
-    grouping: SemanticGroupingStats,
-}
-
-/// One owned unit retained solely until an opt-in cross-variant comparison is
-/// recorded. Normal partition reports never hold or consume these values.
-struct CrossComparisonUnit {
-    origin_variant: String,
-    language: Language,
-    file_path: String,
-    start_line: u32,
-    end_line: u32,
-    name: Option<String>,
-    tokens: Vec<Token>,
-}
-
-/// One owned semantic unit retained solely for an opt-in Rust-to-C++ comparison.
-struct CrossLanguageComparisonUnit {
-    origin_variant: String,
-    language: Language,
-    file_path: String,
-    start_line: u32,
-    end_line: u32,
-    name: Option<String>,
-    graph: SemanticOperationGraph,
-    occurrence: stable_id::FragmentFingerprint,
-    normalization_confidence: f64,
-    interactions: BTreeSet<String>,
-    data_flows: BTreeSet<(String, String)>,
-    cfg_shape: Option<CfgShape>,
-}
-
-impl CrossLanguageComparisonUnit {
-    const fn confidence_evidence(&self) -> SemanticConfidenceEvidence<'_> {
-        SemanticConfidenceEvidence {
-            normalization: self.normalization_confidence,
-            interactions: &self.interactions,
-            data_flows: &self.data_flows,
-            cfg_shape: self.cfg_shape,
-        }
-    }
-}
-
-/// The ordinary report plus source units available to an opt-in comparison.
-struct PartitionOutcome {
-    outcome: Outcome,
-    report: Report,
-    comparison_units: Vec<CrossComparisonUnit>,
-    cross_language_units: Vec<CrossLanguageComparisonUnit>,
-    /// Persistence errors are returned with the already-built report so the
-    /// caller can still publish an unrecorded result.
-    recording_error: Option<anyhow::Error>,
-    staged: Option<StagedSnapshotPart>,
-    /// The key the staged part was recorded under, read back by a later reuse
-    /// decision instead of rebuilt from a second copy of the recipe.
-    reuse_key: Option<ContentHash>,
 }
 
 fn reuse_semantic_partition(
@@ -852,12 +649,10 @@ fn parse_one(
     max_file_bytes: u64,
     budget: std::time::Duration,
 ) -> FileOutcome<ParsedSource> {
-    let limit = parse_work_byte_limit(max_file_bytes, budget);
-    if u64::try_from(source.source_bytes.len()).unwrap_or(u64::MAX) > limit {
+    let Some(read) = read_within_budget(source, max_file_bytes, budget) else {
         return FileOutcome::TimedOut;
-    }
-    let bytes = &source.source_bytes;
-    let text = String::from_utf8_lossy(bytes);
+    };
+    let text = read.text;
     let ir = match source.language {
         Language::Rust => codehelion_frontend_rust::ir::RustStructuralFrontend.parse(&text),
         Language::C => codehelion_frontend_c::ir::CStructuralFrontend.parse(&text),
@@ -874,11 +669,8 @@ fn parse_one(
             relative_path: path_key(&source.relative_path),
             directory_key,
             language: source.language,
-            marker_lines: suppress::marker_lines(
-                &FromScannedTree::found(text.as_ref()),
-                source.language,
-            ),
-            lines: u64::try_from(text.lines().count()).unwrap_or(u64::MAX),
+            marker_lines: read.marker_lines,
+            lines: read.lines,
             diagnostics: ir.diagnostics.len(),
             unaccounted_tokens,
             depth_truncated: ir.depth_truncated,
@@ -896,154 +688,17 @@ fn parse_one(
 mod suppression;
 
 use suppression::{
-    ReportableRegions, aggregate_test_code_evidence, compile_rules, evaluate_suppression,
-    mark_test_modules, mark_test_paths, presentation_suppression, region_identifier_jaccard,
+    aggregate_test_code_evidence, compile_rules, evaluate_suppression, mark_test_modules,
+    mark_test_paths, presentation_suppression, region_identifier_jaccard,
     region_test_code_evidence, reportable_regions, structural_config, unit_token_span,
 };
 
 #[cfg(test)]
 use suppression::{pair_shape_suppression, unanimous_boilerplate};
 
-/// Everything the report and the snapshot are assembled from.
-struct ReportInputs<'a> {
-    root: &'a Path,
-    db_path: &'a Path,
-    /// The `--db` the commands this report prints have to repeat.
-    replay_database: Option<&'a str>,
-    configuration: &'a report::ConfigurationInfo,
-    started_at: &'a str,
-    finished_at: &'a str,
-    variant: &'a BuildVariant,
-    files: &'a [SourceMeta],
-    irs: &'a [SyntaxIrFile],
-    analysis: &'a StructuralReport,
-    /// Cohesive registered-rule findings from complete-linkage refinement.
-    semantic_groups: &'a [SemanticGroup],
-    /// Explainable restricted-semantic correspondences produced from compiler
-    /// facts for this exact `BuildVariant`.
-    semantic_pairs: &'a [SemanticPair],
-    /// Bounded-candidate accounting for the restricted-semantic branch.
-    semantic_detection: &'a SemanticDetection,
-    /// Compiler answers whose IR schema versions qualify this run's detector
-    /// set. `None` for Structural mode, which does not ask a helper.
-    compiler_answers: Option<&'a semantic::Answers>,
-    rules: &'a suppress::Rules,
-    /// Selectors that matched scanned source, independently from the rule
-    /// that ultimately hid each finding.
-    matched_rules: &'a BTreeSet<usize>,
-    group_suppressed: &'a [Option<usize>],
-    /// The duplicated runs the report lists.
-    regions: &'a ReportableRegions,
-    /// The rule hiding each listed run, parallel to [`Self::regions`].
-    region_suppressed: &'a [Option<usize>],
-    /// What the report does with each classification a group can carry:
-    /// boilerplate shape, test-suite residence, width family, and being a
-    /// pair no group could hold.
-    suppression: &'a config::Suppression,
-    /// The rule hiding each verified pair no group could hold, parallel to
-    /// the analysis's own list of them.
-    pair_suppressed: &'a [Option<usize>],
-    /// The rule hiding each restricted-semantic pair, parallel to
-    /// [`Self::semantic_pairs`].
-    semantic_pair_suppressed: &'a [Option<usize>],
-    /// The rule hiding each cohesive semantic group, parallel to
-    /// [`Self::semantic_groups`].
-    semantic_group_suppressed: &'a [Option<usize>],
-    /// Rules hiding supplemental siblings, parallel to the nested sibling lists.
-    sibling_suppressed: &'a [Vec<Option<usize>>],
-    /// Rules hiding bounded near-match diagnostics.
-    near_miss_suppressed: &'a [Option<usize>],
-    /// Lowest normalized content-entropy ratio before a finding is noise.
-    entropy_ratio_floor: f64,
-    /// Literal strategy the group content is scored under.
-    literals: LiteralNorm,
-    glob_excluded: usize,
-    unreadable: u64,
-    timed_out: u64,
-    /// How the run weighs the priority measures against one another.
-    weights: Weights,
-    /// The run's minimum clone length, which the ranking reads sizes against.
-    min_clone_tokens: u64,
-    /// The axis the run puts its entries in order on.
-    sort: report::Sort,
-    reuse_allowed: bool,
-    untrusted: bool,
-    /// Whether the signature-based sibling detector ran for this snapshot.
-    siblings_by_signature: bool,
-}
+mod inputs;
 
-impl ReportInputs<'_> {
-    fn low_entropy(&self, entropy_bits: f64, token_count: usize) -> bool {
-        engine::entropy_ratio(entropy_bits, token_count) < self.entropy_ratio_floor
-    }
-
-    fn finding_suppression(
-        &self,
-        entropy_bits: f64,
-        token_count: usize,
-        rule: Option<usize>,
-    ) -> Option<report::Suppression> {
-        if self.low_entropy(entropy_bits, token_count) {
-            Some(report::Suppression {
-                kind: report::SuppressionKind::Noise,
-                reason: Some("low-entropy".to_string()),
-                scope: None,
-                pattern: None,
-                active: None,
-            })
-        } else {
-            rule.map(|rule| self.suppression(rule))
-        }
-    }
-
-    fn entropy_suppress_reason(&self, entropy_bits: f64, token_count: usize) -> Option<String> {
-        self.low_entropy(entropy_bits, token_count)
-            .then(|| "low-entropy".to_string())
-    }
-
-    /// The tokens one analysed unit covers, in its own file.
-    fn unit_tokens(&self, unit: &StructuralUnit) -> &[Token] {
-        codehelion_core::frontend::tokens_in_range(
-            &self.irs[unit.file].tokens,
-            unit.token_start,
-            unit.token_end,
-        )
-    }
-
-    /// The configured suppression rules whose selectors matched no scanned
-    /// source or finding in this run.
-    fn unused_suppressions(&self) -> Vec<report::UnusedRule> {
-        shared::unused_suppressions(
-            self.rules,
-            self.matched_rules.iter().copied().chain(
-                self.group_suppressed
-                    .iter()
-                    .chain(self.region_suppressed)
-                    .chain(self.pair_suppressed)
-                    .chain(self.semantic_pair_suppressed)
-                    .chain(self.semantic_group_suppressed)
-                    .chain(self.sibling_suppressed.iter().flatten())
-                    .chain(self.near_miss_suppressed)
-                    .filter_map(|rule| *rule),
-            ),
-        )
-    }
-
-    /// The tokens one occurrence of a duplicated run covers, in its own file.
-    fn region_tokens(&self, occurrence: &RegionOccurrence) -> &[Token] {
-        codehelion_core::frontend::tokens_in_range(
-            &self.irs[occurrence.file].tokens,
-            occurrence.token_start,
-            occurrence.token_end,
-        )
-    }
-
-    /// The suppression a report entry carries, from the index of the rule
-    /// that hid it.
-    fn suppression(&self, rule: usize) -> report::Suppression {
-        shared::rule_suppression(self.rules, rule)
-    }
-}
+use inputs::ReportInputs;
 
 /// Similarity reported for a confirmed duplicated run.
 ///

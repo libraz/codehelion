@@ -3,7 +3,6 @@ use super::runtime::*;
 use super::*;
 use crate::cli::SortAxis;
 use boon::{Compiler, Schemas};
-use codehelion_core::discovery::{BuildConfiguration, CppBuild};
 
 fn assert_valid_partitioned_schema(value: &Value) {
     let mut schemas = Schemas::new();
@@ -242,58 +241,6 @@ fn partition_heading_carries_the_stable_build_variant_identity() {
         heading,
         "Build variant aabb (mode: semantic; languages: c, cpp)"
     );
-}
-
-#[test]
-fn fresh_variant_settings_expose_the_compiler_inputs_that_define_identity() {
-    let variant = BuildVariant::semantic(
-        LanguageSelection {
-            rust: false,
-            c: false,
-            cpp: true,
-        },
-        Language::Cpp,
-        vec![BuildConfiguration::Cpp(Box::new(CppBuild {
-            compiler: "clang++".to_string(),
-            macros: vec!["-DENABLED=1".to_string()],
-            include_paths: vec!["include".to_string(), "generated".to_string()],
-            flags: vec!["-std=c++20".to_string()],
-            ..CppBuild::default()
-        }))],
-    );
-
-    assert_eq!(
-        build_variant_settings(&variant),
-        BTreeMap::from([(
-            String::from("cpp"),
-            BTreeMap::from([
-                (String::from("compiler"), vec![String::from("clang++")]),
-                (String::from("flags"), vec![String::from("-std=c++20")]),
-                (
-                    String::from("includes"),
-                    vec![String::from("include"), String::from("generated")]
-                ),
-                (String::from("macros"), vec![String::from("-DENABLED=1")]),
-            ])
-        )])
-    );
-}
-
-#[test]
-fn civil_conversion_matches_known_dates() {
-    assert_eq!(civil_from_days(0), (1970, 1, 1));
-    assert_eq!(civil_from_days(1), (1970, 1, 2));
-    assert_eq!(civil_from_days(19_723), (2024, 1, 1)); // leap year start
-    assert_eq!(civil_from_days(19_783), (2024, 3, 1)); // day after Feb 29
-    assert_eq!(civil_from_days(-1), (1969, 12, 31));
-}
-
-#[test]
-fn timestamps_are_fixed_width_rfc3339() {
-    let stamp = rfc3339_now();
-    assert_eq!(stamp.len(), "1970-01-01T00:00:00.000000Z".len());
-    assert!(stamp.ends_with('Z'));
-    assert_eq!(stamp.as_bytes()[10], b'T');
 }
 
 fn scan_args(untrusted: bool) -> ScanArgs {
@@ -540,19 +487,6 @@ fn an_unset_ceiling_leaves_the_engine_at_its_own_default() {
     let defaults = EngineConfig::default();
     assert_eq!(engine.posting_cap, defaults.posting_cap);
     assert_eq!(engine.pair_budget, defaults.pair_budget);
-}
-
-#[test]
-fn summary_file_counts_use_one_cross_mode_shape() {
-    assert_eq!(
-        file_counts([Language::Rust, Language::Cpp, Language::Rust, Language::C]),
-        FileCountsRow {
-            total: 4,
-            rust: 2,
-            c: 1,
-            cpp: 1,
-        }
-    );
 }
 
 #[test]

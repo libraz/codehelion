@@ -61,7 +61,6 @@ fn build_semantic_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group
     );
     let test_code_evidence =
         aggregate_test_code_evidence(inputs.analysis, members.iter().map(|member| member.unit));
-    let member_ranks = semantic_member_ranks(members.iter().copied());
     let canonical_unit = &inputs.analysis.units[pair.canonical.unit];
     let canonical_tokens = inputs.unit_tokens(canonical_unit);
     let entropy_bits = engine::content_entropy_bits(canonical_tokens, inputs.literals);
@@ -82,31 +81,7 @@ fn build_semantic_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group
         statements: None,
         confidence: pair.semantic_confidence,
         entropy_bits,
-        members: members
-            .iter()
-            .enumerate()
-            .map(|(position, member)| {
-                let unit = &inputs.analysis.units[member.unit];
-                let file = &inputs.files[unit.file];
-                report::Member {
-                    finding_id: stable_id::finding_id(
-                        &fingerprint,
-                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
-                        member_ranks[position],
-                    )
-                    .to_hex(),
-                    content: member.content.to_hex(),
-                    file: display_path(&file.relative_path),
-                    language: file.language.name().to_string(),
-                    start_line: member.start_line,
-                    end_line: member.end_line,
-                    unit: unit.name.as_deref().map(ToString::to_string),
-                    boilerplate: unit.boilerplate.map(|shape| shape.name().to_string()),
-                    tokens: u64::try_from(member.token_count).unwrap_or(u64::MAX),
-                    canonical: position == 0,
-                }
-            })
-            .collect(),
+        members: semantic_members(inputs, &fingerprint, members.iter().copied()),
     });
     assembled.test_code = test_code_evidence.is_some();
     assembled.test_code_evidence = test_code_evidence;
@@ -150,7 +125,6 @@ fn build_semantic_group(inputs: &ReportInputs<'_>, index: usize) -> report::Grou
         semantic_group.members.iter().map(|member| member.unit),
     );
     let node_mappings = semantic_node_mappings(&semantic_group.canonical, &semantic_group.members);
-    let member_ranks = semantic_member_ranks(semantic_group.members.iter());
     let canonical_unit = &inputs.analysis.units[semantic_group.canonical.unit];
     let canonical_tokens = inputs.unit_tokens(canonical_unit);
     let entropy_bits = engine::content_entropy_bits(canonical_tokens, inputs.literals);
@@ -161,32 +135,7 @@ fn build_semantic_group(inputs: &ReportInputs<'_>, index: usize) -> report::Grou
         statements: None,
         confidence: semantic_group.semantic_confidence,
         entropy_bits,
-        members: semantic_group
-            .members
-            .iter()
-            .enumerate()
-            .map(|(position, member)| {
-                let unit = &inputs.analysis.units[member.unit];
-                let file = &inputs.files[unit.file];
-                report::Member {
-                    finding_id: stable_id::finding_id(
-                        &fingerprint,
-                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
-                        member_ranks[position],
-                    )
-                    .to_hex(),
-                    content: member.content.to_hex(),
-                    file: display_path(&file.relative_path),
-                    language: file.language.name().to_string(),
-                    start_line: member.start_line,
-                    end_line: member.end_line,
-                    unit: unit.name.as_ref().map(ToString::to_string),
-                    boilerplate: unit.boilerplate.map(|shape| shape.name().to_string()),
-                    tokens: u64::try_from(member.token_count).unwrap_or(u64::MAX),
-                    canonical: position == 0,
-                }
-            })
-            .collect(),
+        members: semantic_members(inputs, &fingerprint, semantic_group.members.iter()),
     });
     assembled.test_code = test_code_evidence.is_some();
     assembled.test_code_evidence = test_code_evidence;
@@ -212,6 +161,89 @@ fn build_semantic_group(inputs: &ReportInputs<'_>, index: usize) -> report::Grou
     let mut group = report::ranked(assembled, &inputs.weights, inputs.min_clone_tokens);
     group.priority.semantic_confidence = Some(semantic_group.semantic_confidence);
     group
+}
+
+/// The occurrences of one unit-scoped finding, as the report lists them.
+///
+/// A group and a split pair list their members identically because a member is
+/// the same thing in both: a whole unit the run holds to be a copy of the
+/// others. Only what established the set differs, and that is said elsewhere.
+fn unit_members(
+    inputs: &ReportInputs<'_>,
+    fingerprint: &stable_id::CloneGroupFingerprint,
+    members: &[usize],
+) -> Vec<report::Member> {
+    members
+        .iter()
+        .zip(ranks_within_host(member_hosts(
+            &inputs.analysis.units,
+            members,
+        )))
+        .enumerate()
+        .map(|(position, (&member, rank))| {
+            let unit = &inputs.analysis.units[member];
+            let file = &inputs.files[unit.file];
+            report::Member {
+                finding_id: stable_id::finding_id(
+                    fingerprint,
+                    stable_id::OccurrenceScope::Unit(&unit.fingerprint),
+                    rank,
+                )
+                .to_hex(),
+                content: unit.content.to_hex(),
+                file: display_path(&file.relative_path),
+                language: file.language.name().to_string(),
+                start_line: unit.start_line,
+                end_line: unit.end_line,
+                unit: unit.name.as_deref().map(ToString::to_string),
+                boilerplate: unit.boilerplate.map(|shape| shape.name().to_string()),
+                tokens: u64::try_from(unit.token_end.saturating_sub(unit.token_start))
+                    .unwrap_or(u64::MAX),
+                canonical: position == 0,
+            }
+        })
+        .collect()
+}
+
+/// The occurrences of one restricted-semantic finding, as the report lists
+/// them.
+///
+/// A semantic window is anchored to its own span rather than to its host
+/// unit's, so it carries its own lines and token count while the unit around
+/// it supplies the name and the shape. The canonical member is first, which is
+/// how both a verified pair and a cohesive group arrive here.
+fn semantic_members<'a>(
+    inputs: &ReportInputs<'_>,
+    fingerprint: &stable_id::CloneGroupFingerprint,
+    members: impl IntoIterator<Item = &'a SemanticUnitGraph>,
+) -> Vec<report::Member> {
+    let members: Vec<&SemanticUnitGraph> = members.into_iter().collect();
+    members
+        .iter()
+        .zip(semantic_member_ranks(members.iter().copied()))
+        .enumerate()
+        .map(|(position, (member, rank))| {
+            let unit = &inputs.analysis.units[member.unit];
+            let file = &inputs.files[unit.file];
+            report::Member {
+                finding_id: stable_id::finding_id(
+                    fingerprint,
+                    stable_id::OccurrenceScope::Unit(&unit.fingerprint),
+                    rank,
+                )
+                .to_hex(),
+                content: member.content.to_hex(),
+                file: display_path(&file.relative_path),
+                language: file.language.name().to_string(),
+                start_line: member.start_line,
+                end_line: member.end_line,
+                unit: unit.name.as_deref().map(ToString::to_string),
+                boilerplate: unit.boilerplate.map(|shape| shape.name().to_string()),
+                tokens: u64::try_from(member.token_count).unwrap_or(u64::MAX),
+                canonical: position == 0,
+            }
+        })
+        .collect()
 }
 
 /// Produce explicit canonical-to-member node mappings for an entire cohesive
@@ -573,37 +605,7 @@ fn build_group(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
         statements: None,
         confidence: group.min_pairwise,
         entropy_bits,
-        members: group
-            .members
-            .iter()
-            .zip(ranks_within_host(member_hosts(
-                &inputs.analysis.units,
-                &group.members,
-            )))
-            .enumerate()
-            .map(|(position, (&member, rank))| {
-                let unit = &inputs.analysis.units[member];
-                let file = &inputs.files[unit.file];
-                report::Member {
-                    finding_id: stable_id::finding_id(
-                        &detail.fingerprint,
-                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
-                        rank,
-                    )
-                    .to_hex(),
-                    content: unit.content.to_hex(),
-                    file: display_path(&file.relative_path),
-                    language: file.language.name().to_string(),
-                    start_line: unit.start_line,
-                    end_line: unit.end_line,
-                    unit: unit.name.as_deref().map(ToString::to_string),
-                    boilerplate: unit.boilerplate.map(|shape| shape.name().to_string()),
-                    tokens: u64::try_from(unit.token_end.saturating_sub(unit.token_start))
-                        .unwrap_or(u64::MAX),
-                    canonical: position == 0,
-                }
-            })
-            .collect(),
+        members: unit_members(inputs, &detail.fingerprint, &group.members),
     });
     assembled.similarity = Some(similarity(group, detail));
     assembled.identifier_jaccard = detail.identifier_jaccard;
@@ -681,36 +683,7 @@ fn build_split_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group {
         statements: None,
         confidence: pair.similarity,
         entropy_bits,
-        members: members
-            .iter()
-            .zip(ranks_within_host(member_hosts(
-                &inputs.analysis.units,
-                members,
-            )))
-            .enumerate()
-            .map(|(position, (&member, rank))| {
-                let unit = &inputs.analysis.units[member];
-                let file = &inputs.files[unit.file];
-                report::Member {
-                    finding_id: stable_id::finding_id(
-                        &pair.fingerprint,
-                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
-                        rank,
-                    )
-                    .to_hex(),
-                    content: unit.content.to_hex(),
-                    file: display_path(&file.relative_path),
-                    language: file.language.name().to_string(),
-                    start_line: unit.start_line,
-                    end_line: unit.end_line,
-                    unit: unit.name.as_deref().map(ToString::to_string),
-                    boilerplate: unit.boilerplate.map(|shape| shape.name().to_string()),
-                    tokens: u64::try_from(unit.token_end.saturating_sub(unit.token_start))
-                        .unwrap_or(u64::MAX),
-                    canonical: position == 0,
-                }
-            })
-            .collect(),
+        members: unit_members(inputs, &pair.fingerprint, members),
     });
     assembled.identifier_jaccard = split_pair_identifier_jaccard(inputs, pair);
     assembled.similarity = pair.breakdown.map(|breakdown| report::Similarity {

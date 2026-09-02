@@ -164,12 +164,16 @@ pub(super) fn record_ranked(
     // cannot invalidate a judgement about detected duplication.
     detector_versions.push(("ranking".to_string(), cfg.priority.weights().recipe()));
     let root_path = path_key(inputs.root);
-    let current_tree = file_tree(&files);
+    let current_tree = shared::file_tree(&files);
     let predecessor =
         store.latest_compatible_run(&root_path, config_hash.as_str(), &variant.fingerprint())?;
     if let Some(previous) = predecessor.as_ref() {
         let previous_tree = store.run_tree(previous.id)?;
-        inputs.changes = Some(tree_changes(previous.id, &previous_tree, &current_tree));
+        inputs.changes = Some(shared::tree_changes(
+            previous.id,
+            &previous_tree,
+            &current_tree,
+        ));
         if inputs.reuse_allowed
             && store
                 .run_summary_row(previous.id)?
@@ -209,43 +213,6 @@ pub(super) fn record_ranked(
         .record_snapshot_with_predecessor(&snapshot, predecessor.as_ref().map(|run| run.id))?;
     inputs.run_id = Some(run_id);
     Ok(())
-}
-
-fn file_tree(files: &[FileRow]) -> BTreeMap<String, String> {
-    files
-        .iter()
-        .map(|file| (file.relative_path.clone(), file.content_hash.clone()))
-        .collect()
-}
-
-fn tree_changes(
-    since_run_id: i64,
-    before: &BTreeMap<String, String>,
-    after: &BTreeMap<String, String>,
-) -> report::TreeChanges {
-    let modified = after
-        .iter()
-        .filter(|(path, hash)| before.get(*path).is_some_and(|old| old != *hash))
-        .count();
-    let added = after
-        .keys()
-        .filter(|path| !before.contains_key(*path))
-        .count();
-    let removed = before
-        .keys()
-        .filter(|path| !after.contains_key(*path))
-        .count();
-    let unchanged = after
-        .iter()
-        .filter(|(path, hash)| before.get(*path) == Some(*hash))
-        .count();
-    report::TreeChanges {
-        since_run_id,
-        modified: u64::try_from(modified).unwrap_or(u64::MAX),
-        added: u64::try_from(added).unwrap_or(u64::MAX),
-        removed: u64::try_from(removed).unwrap_or(u64::MAX),
-        unchanged: u64::try_from(unchanged).unwrap_or(u64::MAX),
-    }
 }
 
 /// Open the current store, creating its parent directory when needed.

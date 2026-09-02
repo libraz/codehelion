@@ -359,6 +359,48 @@ pub(crate) fn parse_work_byte_limit(max_file_bytes: u64, budget: std::time::Dura
     max_file_bytes.min(milliseconds.saturating_mul(PARSE_BYTES_PER_MILLISECOND))
 }
 
+/// One source file's text, with the facts about the file itself that every
+/// analysis mode records.
+///
+/// Fast and Structural hand the text to different frontends, but what reading
+/// a file established has to be the same in both: the same lossy decoding, the
+/// same in-source suppression markers, and the same line count. Two readers
+/// deciding any of those separately would let one mode hide a finding the other
+/// reports.
+pub(crate) struct ReadSource<'a> {
+    /// The file as every frontend sees it.
+    pub(crate) text: std::borrow::Cow<'a, str>,
+    /// The lines carrying an in-source suppression marker.
+    pub(crate) marker_lines: Vec<u32>,
+    /// How many lines the file holds.
+    pub(crate) lines: u64,
+}
+
+/// Read one source file, or refuse it because the deterministic parse-work
+/// budget does not stretch to its size.
+///
+/// The refusal comes before any frontend work and before the file is decoded,
+/// which is what makes the budget a bound on work rather than a report of it.
+pub(crate) fn read_within_budget(
+    source: &SourceUnit,
+    max_file_bytes: u64,
+    budget: std::time::Duration,
+) -> Option<ReadSource<'_>> {
+    let limit = parse_work_byte_limit(max_file_bytes, budget);
+    if u64::try_from(source.source_bytes.len()).unwrap_or(u64::MAX) > limit {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&source.source_bytes);
+    Some(ReadSource {
+        marker_lines: suppress::marker_lines(
+            &FromScannedTree::found(text.as_ref()),
+            source.language,
+        ),
+        lines: u64::try_from(text.lines().count()).unwrap_or(u64::MAX),
+        text,
+    })
+}
+
 /// Run `frontend` over every source, letting `jobs` worker threads claim the
 /// next available source as soon as they finish their prior one.
 ///
@@ -457,12 +499,10 @@ fn lex_one(
     max_file_bytes: u64,
     budget: std::time::Duration,
 ) -> FileOutcome<LexedSource> {
-    let limit = parse_work_byte_limit(max_file_bytes, budget);
-    if u64::try_from(source.source_bytes.len()).unwrap_or(u64::MAX) > limit {
+    let Some(read) = read_within_budget(source, max_file_bytes, budget) else {
         return FileOutcome::TimedOut;
-    }
-    let bytes = &source.source_bytes;
-    let text = String::from_utf8_lossy(bytes);
+    };
+    let text = read.text;
     // One lex per file: the C-family arm paths are derived from the directives
     // that same lex passed, so no source is read twice.
     let (file, arm_paths) = match source.language {
@@ -498,11 +538,8 @@ fn lex_one(
         arm_paths,
         units: file.units,
         unit_lines,
-        marker_lines: suppress::marker_lines(
-            &FromScannedTree::found(text.as_ref()),
-            source.language,
-        ),
-        lines: u64::try_from(text.lines().count()).unwrap_or(u64::MAX),
+        marker_lines: read.marker_lines,
+        lines: read.lines,
         diagnostics: file.diagnostics.len(),
     }))
 }
