@@ -1,6 +1,6 @@
 use clang::{Entity, EntityKind, EntityVisitResult, Type};
 use codehelion_helper::ir::{
-    DirectPropagation, FallibleKind, SemanticConstruct, SemanticConstructKind,
+    Anchor, DirectPropagation, FallibleKind, SemanticConstruct, SemanticConstructKind,
 };
 
 use crate::types::category;
@@ -8,6 +8,61 @@ use crate::types::category;
 use super::Reading;
 
 impl Reading<'_> {
+    /// Read the parts both closed range-for rules need before they can say
+    /// what the loop does: the anchored `std::vector` the loop walks, the
+    /// element binding it writes, and the one statement its body is made of.
+    ///
+    /// Nothing comes back for a loop outside that shape — a range that is not
+    /// one direct standard vector binding, a missing body, or a body holding
+    /// anything other than a single statement — which leaves the loop outside
+    /// both vocabularies before either has to look at the statement.
+    fn plain_range_parts<'clang>(
+        &mut self,
+        entity: Entity<'clang>,
+    ) -> Option<(Anchor, String, Entity<'clang>)> {
+        if entity.get_kind() != EntityKind::ForRangeStmt {
+            return None;
+        }
+        let (source, binding) = direct_range_bindings(entity)?;
+        let source_anchor = direct_standard_vector_reference(entity, &source)
+            .and_then(|source| self.anchor(source))?;
+        let body = entity
+            .get_children()
+            .into_iter()
+            .find(|child| child.get_kind() == EntityKind::CompoundStmt)?;
+        let statements = body.get_children();
+        let [statement] = statements.as_slice() else {
+            return None;
+        };
+        Some((source_anchor, binding, *statement))
+    }
+
+    /// Record one closed range-for reading as the standard vector it reads and
+    /// the single operation the loop performs on each element.
+    fn record_plain_range(
+        &mut self,
+        source_anchor: Anchor,
+        operation_anchor: Anchor,
+        kind: SemanticConstructKind,
+    ) {
+        self.semantic_constructs.extend([
+            SemanticConstruct {
+                anchor: source_anchor,
+                kind: SemanticConstructKind::Source,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: None,
+            },
+            SemanticConstruct {
+                anchor: operation_anchor,
+                kind,
+                fallible_kind: None,
+                direct_propagation: None,
+                resource_kind: None,
+            },
+        ]);
+    }
+
     /// Record the deliberately small C++ counterpart of a plain Rust
     /// `for value in input { output.push(value) }` collection loop.
     ///
@@ -17,53 +72,23 @@ impl Reading<'_> {
     /// vectors and the selected method; the token check only proves that the
     /// sole argument is the range binding rather than a transformed expression.
     pub(super) fn remember_plain_range_collection(&mut self, entity: Entity<'_>) {
-        if entity.get_kind() != EntityKind::ForRangeStmt {
-            return;
-        }
-        let Some((source, binding)) = direct_range_bindings(entity) else {
-            return;
-        };
-        let Some(source_anchor) = direct_standard_vector_reference(entity, &source)
-            .and_then(|source| self.anchor(source))
-        else {
-            return;
-        };
-        let Some(body) = entity
-            .get_children()
-            .into_iter()
-            .find(|child| child.get_kind() == EntityKind::CompoundStmt)
-        else {
-            return;
-        };
-        let statements = body.get_children();
-        let [call] = statements.as_slice() else {
+        let Some((source_anchor, binding, call)) = self.plain_range_parts(entity) else {
             return;
         };
         if call.get_kind() != EntityKind::CallExpr
             || !call.get_reference().is_some_and(is_standard_vector_push)
-            || !direct_call_argument_is(*call, &binding)
+            || !direct_call_argument_is(call, &binding)
         {
             return;
         }
-        let Some(collect_anchor) = self.anchor(*call) else {
+        let Some(collect_anchor) = self.anchor(call) else {
             return;
         };
-        self.semantic_constructs.extend([
-            SemanticConstruct {
-                anchor: source_anchor,
-                kind: SemanticConstructKind::Source,
-                fallible_kind: None,
-                direct_propagation: None,
-                resource_kind: None,
-            },
-            SemanticConstruct {
-                anchor: collect_anchor,
-                kind: SemanticConstructKind::Collect,
-                fallible_kind: None,
-                direct_propagation: None,
-                resource_kind: None,
-            },
-        ]);
+        self.record_plain_range(
+            source_anchor,
+            collect_anchor,
+            SemanticConstructKind::Collect,
+        );
     }
 
     /// Record a direct numeric range-for accumulation as SOURCE/REDUCE.
@@ -73,52 +98,18 @@ impl Reading<'_> {
     /// the written loop binding as the untransformed right-hand side. It does
     /// not infer initialization, reduction identities, guards, or calls.
     pub(super) fn remember_plain_range_reduce(&mut self, entity: Entity<'_>) {
-        if entity.get_kind() != EntityKind::ForRangeStmt {
-            return;
-        }
-        let Some((source, binding)) = direct_range_bindings(entity) else {
-            return;
-        };
-        let Some(source_anchor) = direct_standard_vector_reference(entity, &source)
-            .and_then(|source| self.anchor(source))
-        else {
-            return;
-        };
-        let Some(body) = entity
-            .get_children()
-            .into_iter()
-            .find(|child| child.get_kind() == EntityKind::CompoundStmt)
-        else {
-            return;
-        };
-        let statements = body.get_children();
-        let [accumulation] = statements.as_slice() else {
+        let Some((source_anchor, binding, accumulation)) = self.plain_range_parts(entity) else {
             return;
         };
         if accumulation.get_kind() != EntityKind::CompoundAssignOperator
-            || !direct_numeric_accumulation(*accumulation, &binding)
+            || !direct_numeric_accumulation(accumulation, &binding)
         {
             return;
         }
-        let Some(reduce_anchor) = self.anchor(*accumulation) else {
+        let Some(reduce_anchor) = self.anchor(accumulation) else {
             return;
         };
-        self.semantic_constructs.extend([
-            SemanticConstruct {
-                anchor: source_anchor,
-                kind: SemanticConstructKind::Source,
-                fallible_kind: None,
-                direct_propagation: None,
-                resource_kind: None,
-            },
-            SemanticConstruct {
-                anchor: reduce_anchor,
-                kind: SemanticConstructKind::Reduce,
-                fallible_kind: None,
-                direct_propagation: None,
-                resource_kind: None,
-            },
-        ]);
+        self.record_plain_range(source_anchor, reduce_anchor, SemanticConstructKind::Reduce);
     }
 
     /// Keep an `if` that directly asks a standard fallible value whether it

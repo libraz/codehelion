@@ -559,29 +559,39 @@ fn direct_match_adapter(
     matched: &ast::MatchExpr,
     fallible_kind: FallibleKind,
 ) -> Option<DirectPropagation> {
-    match fallible_kind {
-        FallibleKind::Result => is_direct_result_match_adapter(sema, db, matched)
-            .then_some(DirectPropagation::ResultAdapter),
-        FallibleKind::Option => is_direct_option_match_adapter(sema, db, matched)
-            .then_some(DirectPropagation::OptionAdapter),
-    }
+    let direct_propagation = match fallible_kind {
+        FallibleKind::Result => DirectPropagation::ResultAdapter,
+        FallibleKind::Option => DirectPropagation::OptionAdapter,
+    };
+    is_direct_match_adapter(sema, db, matched, fallible_kind).then_some(direct_propagation)
 }
 
-fn is_direct_result_match_adapter(
+/// Whether a `match` hands both alternatives of a standard fallible value back
+/// exactly as they were matched.
+///
+/// Each of the type's two alternatives must appear once, unguarded, and be
+/// returned with the spelling its pattern wrote. That is the same rule for
+/// `Result` and `Option`; only the variant names differ, and that the empty
+/// `Option` alternative carries no payload to bind.
+fn is_direct_match_adapter(
     sema: &Semantics<'_, RootDatabase>,
     db: &RootDatabase,
     matched: &ast::MatchExpr,
+    fallible_kind: FallibleKind,
 ) -> bool {
     if standard_fallible_kind(sema, db, &ast::Expr::MatchExpr(matched.clone()))
-        != Some(FallibleKind::Result)
+        != Some(fallible_kind)
     {
         return false;
     }
     let Some(arms) = matched.match_arm_list() else {
         return false;
     };
-    let mut found_ok = false;
-    let mut found_err = false;
+    let alternatives = match fallible_kind {
+        FallibleKind::Result => [("Ok", true), ("Err", true)],
+        FallibleKind::Option => [("Some", true), ("None", false)],
+    };
+    let mut forwarded = [false; 2];
     for arm in arms.arms() {
         if arm.guard().is_some() {
             return false;
@@ -591,77 +601,37 @@ fn is_direct_result_match_adapter(
         };
         let pattern = compact_syntax(&pattern);
         let expression = compact_syntax(&expression);
-        let (variant, binding) = direct_result_arm(&pattern, &expression);
-        match variant {
-            Some("Ok") if !found_ok => found_ok = true,
-            Some("Err") if !found_err => found_err = true,
-            _ => return false,
-        }
-        if !is_plain_identifier(binding) {
-            return false;
-        }
-    }
-    found_ok && found_err
-}
-
-fn direct_result_arm<'a>(pattern: &'a str, expression: &'a str) -> (Option<&'static str>, &'a str) {
-    for variant in ["Ok", "Err"] {
-        let Some(binding) = pattern
-            .strip_prefix(variant)
-            .and_then(|text| text.strip_prefix('('))
-            .and_then(|text| text.strip_suffix(')'))
+        let Some(alternative) = alternatives
+            .iter()
+            .position(|&(variant, binds_value)| {
+                direct_adapter_arm(&pattern, &expression, variant, binds_value)
+            })
+            .filter(|alternative| !forwarded[*alternative])
         else {
-            continue;
+            return false;
         };
-        if expression == format!("{variant}({binding})") {
-            return (Some(variant), binding);
-        }
+        forwarded[alternative] = true;
     }
-    (None, "")
+    forwarded == [true; 2]
 }
 
-fn is_direct_option_match_adapter(
-    sema: &Semantics<'_, RootDatabase>,
-    db: &RootDatabase,
-    matched: &ast::MatchExpr,
-) -> bool {
-    if standard_fallible_kind(sema, db, &ast::Expr::MatchExpr(matched.clone()))
-        != Some(FallibleKind::Option)
-    {
-        return false;
+/// Whether one arm matches `variant` and hands it straight back.
+///
+/// `binds_value` separates an alternative carrying a payload, whose binding
+/// must be a plain name written again unchanged in the arm's expression, from
+/// the empty `Option` alternative, which is spelled bare on both sides.
+fn direct_adapter_arm(pattern: &str, expression: &str, variant: &str, binds_value: bool) -> bool {
+    if !binds_value {
+        return pattern == variant && expression == variant;
     }
-    let Some(arms) = matched.match_arm_list() else {
+    let Some(binding) = pattern
+        .strip_prefix(variant)
+        .and_then(|text| text.strip_prefix('('))
+        .and_then(|text| text.strip_suffix(')'))
+    else {
         return false;
     };
-    let mut found_some = false;
-    let mut found_none = false;
-    for arm in arms.arms() {
-        if arm.guard().is_some() {
-            return false;
-        }
-        let (Some(pattern), Some(expression)) = (arm.pat(), arm.expr()) else {
-            return false;
-        };
-        let pattern = compact_syntax(&pattern);
-        let expression = compact_syntax(&expression);
-        if let Some(binding) = pattern
-            .strip_prefix("Some(")
-            .and_then(|text| text.strip_suffix(')'))
-        {
-            if found_some
-                || expression != format!("Some({binding})")
-                || !is_plain_identifier(binding)
-            {
-                return false;
-            }
-            found_some = true;
-        } else if pattern == "None" && expression == "None" && !found_none {
-            found_none = true;
-        } else {
-            return false;
-        }
-    }
-    found_some && found_none
+    expression == format!("{variant}({binding})") && is_plain_identifier(binding)
 }
 
 fn compact_syntax(node: &impl AstNode) -> String {
