@@ -80,6 +80,19 @@ eval: ## Show detection accuracy over the generated and materialized corpora
 	$(CARGO) test -p codehelion --test labeled_precision -- --nocapture
 	$(CARGO) test -p codehelion --test candidate_stages -- --nocapture
 
+.PHONY: readme-sample
+readme-sample: ## Print the sample scan report the READMEs show
+	# Scans this tree the way the READMEs say the sample was produced. Reuse is
+	# off so the summary reads the same whether or not a previous run is on
+	# hand: a cache hit words that line differently, and a sample whose shape
+	# depends on the operator's database is not a sample anyone can reproduce.
+	#
+	# The block is printed, not substituted: the READMEs wrap it in prose, and
+	# the leading path is shortened by hand so the sample does not publish
+	# whoever ran it. Paste it into both READMEs; `docs_wording` then checks
+	# that the occurrences it names still resolve.
+	$(CARGO) run --release -p codehelion -- scan . --mode structural --limit 2 --no-reuse
+
 .PHONY: check
 check: format-check lint verify-helper-boundaries verify-artifact-boundaries verify-packaging test doc ## Run every CI check locally
 

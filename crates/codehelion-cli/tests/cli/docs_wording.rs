@@ -744,3 +744,240 @@ fn configuration_documents_state_that_an_earlier_schema_database_is_not_migrated
         );
     }
 }
+
+/// One `path:start-end  symbol` line out of the README's sample report.
+///
+/// The symbol names the unit the occurrence sits in, which for a duplicated
+/// statement run is not the code between `start` and `end`: the run is a
+/// stretch inside a function, and the function is declared above it. So the
+/// identifier is looked for in the file rather than in the range.
+struct SampleOccurrence<'a> {
+    path: &'a str,
+    start: usize,
+    end: usize,
+    symbol: &'a str,
+}
+
+impl SampleOccurrence<'_> {
+    const fn lines(&self) -> usize {
+        self.end + 1 - self.start
+    }
+}
+
+/// One group of the sample report: its heading and the occurrences under it.
+struct SampleGroup<'a> {
+    id: &'a str,
+    clone_type: &'a str,
+    occurrences: Vec<SampleOccurrence<'a>>,
+}
+
+/// The sample report a README shows, as the text between its fences.
+///
+/// Found by the header line the report itself prints rather than by the
+/// section heading above it, so the English and Japanese READMEs are read the
+/// same way even though only one of them has an English heading.
+fn sample_report(readme: &str) -> &str {
+    const FENCE: &str = "```text\ncodehelion scan";
+    let opened = readme
+        .find(FENCE)
+        .expect("a README must show a sample scan report");
+    let body = &readme[opened + "```text\n".len()..];
+    let closed = body
+        .find("\n```")
+        .expect("the sample report must be fenced");
+    &body[..closed]
+}
+
+/// The occurrence a line names, when it names one.
+///
+/// A line does when a whitespace-separated field spells `path:start-end`. The
+/// summary and legend lines carry no such field, so they are skipped without
+/// being named here — a legend that gets reworded stays out of this test's
+/// way.
+fn sample_occurrence(line: &str) -> Option<SampleOccurrence<'_>> {
+    let mut fields = line.split_whitespace();
+    loop {
+        let field = fields.next()?;
+        let Some((path, span)) = field.rsplit_once(':') else {
+            continue;
+        };
+        let Some((start, end)) = span.split_once('-') else {
+            continue;
+        };
+        let (Ok(start), Ok(end)) = (start.parse(), end.parse()) else {
+            continue;
+        };
+        return Some(SampleOccurrence {
+            path,
+            start,
+            end,
+            symbol: fields.next().unwrap_or_default(),
+        });
+    }
+}
+
+/// The groups a sample report shows, with the occurrences listed under each.
+///
+/// A heading opens a group and the occurrence lines beneath it belong to it,
+/// which is the same nesting the report draws with its tree characters.
+fn sample_groups(report: &str) -> Vec<SampleGroup<'_>> {
+    let mut groups: Vec<SampleGroup<'_>> = Vec::new();
+    for line in report.lines() {
+        if line.trim_start().starts_with('#') {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            groups.push(SampleGroup {
+                id: fields.last().copied().unwrap_or_default(),
+                clone_type: fields.get(2).copied().unwrap_or_default(),
+                occurrences: Vec::new(),
+            });
+        } else if let Some(occurrence) = sample_occurrence(line)
+            && let Some(group) = groups.last_mut()
+        {
+            group.occurrences.push(occurrence);
+        }
+    }
+    groups
+}
+
+/// One occurrence's lines, with whitespace collapsed.
+///
+/// Collapsed rather than compared byte for byte because that is the equality a
+/// Type-1 clone claims: the same tokens, indented however each site indents
+/// them.
+fn occurrence_text(root: &std::path::Path, occurrence: &SampleOccurrence<'_>) -> Vec<String> {
+    let file = root.join(occurrence.path);
+    let source = std::fs::read_to_string(&file).unwrap_or_else(|error| {
+        panic!(
+            "a README sample names {}, which cannot be read: {error}. \
+             Regenerate the block with `make readme-sample`",
+            occurrence.path
+        )
+    });
+    let lines: Vec<&str> = source.lines().collect();
+    assert!(
+        occurrence.start >= 1 && occurrence.end <= lines.len(),
+        "a README sample names {}:{}-{}, but that file has {} lines. \
+         Regenerate the block with `make readme-sample`",
+        occurrence.path,
+        occurrence.start,
+        occurrence.end,
+        lines.len()
+    );
+    assert!(
+        occurrence.symbol.is_empty() || source.contains(occurrence.symbol),
+        "a README sample names {} in {}, and that identifier is not written \
+         anywhere in the file. Regenerate the block with `make readme-sample`",
+        occurrence.symbol,
+        occurrence.path
+    );
+    lines[occurrence.start - 1..occurrence.end]
+        .iter()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
+/// The sample report both READMEs show still describes this tree.
+///
+/// Checked mechanically because the sample is a self-scan, and a self-scan's
+/// line references are invalidated by any edit above the lines they name —
+/// including a refactor that changes no output at all. Refreshing it by hand
+/// goes stale the same day, so this is what the reader is actually promised:
+/// the groups it shows are groups, and the occurrences it names still hold the
+/// code it claims they share.
+///
+/// A Type-1 group carries the check that means something. Its occurrences are
+/// the same tokens by definition, so reading both ranges out of the tree and
+/// comparing them re-derives the finding without running a scan — a stale
+/// range lands on unrelated code and the texts stop matching. Type-2 and
+/// Type-3 groups are only checked for shape, because what they claim is a
+/// similarity this test has no business recomputing.
+///
+/// The summary counts are deliberately left unpinned: they move with every
+/// commit, and asserting them would fail the suite on an axis that has nothing
+/// to do with detection. `make readme-sample` regenerates the block when the
+/// numbers are worth refreshing.
+#[test]
+fn readme_sample_reports_describe_the_tree_they_were_run_against() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+    for (readme, language) in [
+        (include_str!("../../../../README.md"), "English"),
+        (include_str!("../../../../README_ja.md"), "Japanese"),
+    ] {
+        let groups = sample_groups(sample_report(readme));
+        assert!(
+            !groups.is_empty(),
+            "the {language} README sample report shows no group"
+        );
+
+        for group in &groups {
+            assert!(
+                group.id.len() == 8 && group.id.chars().all(|it| it.is_ascii_hexdigit()),
+                "the {language} README sample heads a group with {}, which is not a clone id",
+                group.id
+            );
+            assert!(
+                group.occurrences.len() >= 2,
+                "the {language} README sample shows group {} with fewer than two \
+                 occurrences, which is not a clone group",
+                group.id
+            );
+
+            let texts: Vec<Vec<String>> = group
+                .occurrences
+                .iter()
+                .map(|occurrence| occurrence_text(&root, occurrence))
+                .collect();
+
+            if group.clone_type != "type-1" {
+                continue;
+            }
+            for (occurrence, text) in group.occurrences.iter().zip(&texts) {
+                assert_eq!(
+                    text,
+                    &texts[0],
+                    "the {language} README sample calls group {} type-1, but {}:{}-{} \
+                     does not hold the same code as {}:{}-{}. Regenerate the block with \
+                     `make readme-sample`",
+                    group.id,
+                    occurrence.path,
+                    occurrence.start,
+                    occurrence.end,
+                    group.occurrences[0].path,
+                    group.occurrences[0].start,
+                    group.occurrences[0].end
+                );
+                assert_eq!(
+                    occurrence.lines(),
+                    group.occurrences[0].lines(),
+                    "the {language} README sample gives the occurrences of group {} \
+                     different line counts",
+                    group.id
+                );
+            }
+        }
+    }
+
+    let english = sample_groups(sample_report(include_str!("../../../../README.md")));
+    let japanese = sample_groups(sample_report(include_str!("../../../../README_ja.md")));
+    let named = |groups: &[SampleGroup<'_>]| -> Vec<String> {
+        groups.iter().map(|group| group.id.to_owned()).collect()
+    };
+    assert_eq!(
+        named(&english),
+        named(&japanese),
+        "the two READMEs show the same sample run, so they must name the same groups"
+    );
+
+    // The footer offers one of the groups above it to open, so a reader who
+    // copies that line lands on a group the report actually showed.
+    let opened = sample_report(include_str!("../../../../README.md"))
+        .lines()
+        .find_map(|line| line.split("codehelion explain ").nth(1))
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("the English README sample must offer a group to open");
+    assert!(
+        english.iter().any(|group| group.id == opened),
+        "the English README sample offers {opened}, which is not one of the groups it shows"
+    );
+}

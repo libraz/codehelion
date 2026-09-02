@@ -81,6 +81,14 @@ What a merged change looks like:
   does and what the documents claim have not drifted apart — which also means a
   reflowed English paragraph can fail a test by splitting a pinned sentence
   across two lines.
+- **The README's sample report is a real scan of this tree**, so it is checked
+  rather than trusted: a test reads the groups it shows back out of the source
+  and fails when the ranges no longer hold the code the sample says they share.
+  Any edit above a quoted line can break it, including a refactor that changes
+  no output. `make readme-sample` prints a fresh block to paste into both
+  READMEs; shorten the leading path by hand, and leave the summary counts alone
+  otherwise — they are refreshed when a release is prepared, not per commit,
+  because pinning them would fail the suite on every change.
 
 ## Changing detection
 
