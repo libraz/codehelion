@@ -138,6 +138,33 @@ hermetic な CI や `PATH` の外への導入で使います。これらは `--c
 
 各実行の上位いくつのグループを比較して「見る価値のあった作業がどうなったか」を述べるかを決めます。合計は進捗ではなく重複量を数えるものであり、数千件のうち数件を片付けても合計はほとんど動きません。そのため比較は各実行の上位に対して行います。
 
+## seam
+
+seam とは、同じ意味論が複数の場所に実装されているパスの集合です。台帳は人が手で書くもので、`codehelion seam` と `codehelion guard` にとっての正本です。これを自動で発見したり書き換えたりする仕組みはありません。[seam の追跡](seam-tracking.md)を参照してください。
+
+```toml
+[[seam]]
+id = "frontend-c-cpp"
+members = ["crates/codehelion-frontend-c/**", "crates/codehelion-frontend-cpp/**"]
+note = "same semantics implemented twice across the two frontends"
+```
+
+`members` はリポジトリ相対のパスに対する glob で、seam には 2 つ以上必要です。`note` は何も読まない自由記述です。seam ごとに `[[seam]]` ブロックを繰り返します。
+
+設定は別の節に置きます。TOML では同じ名前を array of tables と table の両方には綴れないためです。
+
+```toml
+[seam-tracking]
+# breach-window = 20                # 非対称変更の後、何コミット以内の fix を breach とみなすか
+# history-limit = 2000              # 新しい順に読むコミット数の上限
+# max-commit-size = 30              # これより多くのファイルを触るコミットを coupling から除外
+# min-coupling = 0.60               # --suggest の足切り
+# min-support = 3                   # --suggest の足切り
+# suggest-depth = 2                 # --suggest が共変更を数える単位（パスの先頭 N 成分）
+```
+
+`max-commit-size` が効くのは coupling の計算だけで、breach の判定には効きません。大規模なリネームは触れた全ペアに support を配ってしまいますが、大きなコミットが seam を破ったのなら破ったことに変わりないからです。`history-limit` は読む履歴の量の天井であって、履歴がそれだけあることの保証ではありません。範囲のもう一方の端は `--until <rev>` で固定でき、これが世代の異なる数値を比較できる条件になります。
+
 ## ローカルデータベース
 
 各スキャンは既定で `.codehelion/audit.db` に永続的なローカル監査データベースを作ります。置き場所は scan root を含む Git リポジトリの直下で、サブディレクトリをスキャンしたときに新しいデータベースを作らずリポジトリのものを使い続けるためです。どのリポジトリにも属さない scan root は自分の下に持ちます。場所は `--db <path>` で上書きできます。

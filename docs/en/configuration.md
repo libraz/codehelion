@@ -180,6 +180,43 @@ of the work worth looking at. A total counts duplication rather than progress:
 closing a handful of groups out of thousands leaves it almost where it was, so
 the comparison is made over the top of each run.
 
+## Seams
+
+A seam is a set of paths that implement the same semantics in more than one place.
+The ledger is written by hand and is the source of truth for `codehelion seam` and
+`codehelion guard`; nothing discovers or edits it. See
+[Seam tracking](seam-tracking.md).
+
+```toml
+[[seam]]
+id = "frontend-c-cpp"
+members = ["crates/codehelion-frontend-c/**", "crates/codehelion-frontend-cpp/**"]
+note = "same semantics implemented twice across the two frontends"
+```
+
+`members` are globs over repository-relative paths, and a seam needs at least two
+of them. `note` is free text that nothing reads. Repeat the `[[seam]]` block for
+each seam.
+
+The settings are a separate section, because TOML cannot spell one name as both an
+array of tables and a table.
+
+```toml
+[seam-tracking]
+# breach-window = 20                # commits after an asymmetric change in which a fix counts as a breach
+# history-limit = 2000              # newest commits read
+# max-commit-size = 30              # commits touching more files than this are left out of coupling
+# min-coupling = 0.60               # --suggest floor
+# min-support = 3                   # --suggest floor
+# suggest-depth = 2                 # leading path components --suggest counts co-change over
+```
+
+`max-commit-size` applies to the coupling figures alone, not to breach detection:
+a sweeping rename hands support to every pair it touched, but a large commit that
+broke a seam still broke it. `history-limit` is a ceiling on how much history is
+read rather than a guarantee of how much there is; `--until <rev>` fixes the other
+end of the range, which is what makes two generations' numbers comparable.
+
 ## The local database
 
 Each scan creates its persistent local audit database at `.codehelion/audit.db`

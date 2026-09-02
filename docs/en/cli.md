@@ -25,6 +25,12 @@ codehelion cache clear --force # permanently delete the local audit database
 codehelion config init        # write a commented codehelion.toml template
 codehelion config show        # print the effective configuration
 codehelion doctor             # report available analysis components
+codehelion history            # classify the commits in the range and say what it read
+codehelion seam               # measure the seams the ledger names
+codehelion seam --suggest     # propose candidate seams from co-change alone
+codehelion guard              # compare a change against the ledger
+codehelion guard --deny-asymmetric  # exit 3 when a change touched part of a seam
+codehelion guard --paths src/a.rs   # name the seam a path belongs to, before editing
 ```
 
 ## `scan`
@@ -135,9 +141,41 @@ selects the slice of a universal Mach-O binary. `--build-variant`, `--source-run
 and `--linker-map` are the source-correlation inputs. See
 [Artifact analysis](artifact-analysis.md) and [Calibration](calibration.md).
 
+## `history`
+
+Reads the local commit records and nothing else: how many commits the range
+holds, how they classify as fix, feature or other, and which commits it starts
+and ends at. It opens no source file and reads no ledger. `--path <dir>` selects
+the repository, `--until <rev>` fixes the end of the range, and `--config <file>`
+names the configuration the range settings come from. `--format text|json`,
+`--output <file>` and `--force` behave as they do elsewhere.
+
+## `seam`
+
+Reports, for each `[[seam]]` entry in the ledger, how many asymmetric changes it
+has seen, how many of those became breaches, and when the most recent breach was.
+`--suggest` instead proposes candidate seams from co-change alone, with the
+coupling value and the support behind each; it never writes to the ledger. Takes
+the same `--path`, `--config`, `--until`, `--format`, `--output` and `--force`.
+See [Seam tracking](seam-tracking.md).
+
+## `guard`
+
+Compares one change against the ledger. By default it reads the working tree
+against `HEAD`; `--since <rev>` reads that revision to `HEAD` instead.
+`--paths <p>...` is the lookup to run before editing: it names the seam each path
+belongs to and the members that would have to move with it, reading the ledger
+alone and never opening git.
+
+`--deny-asymmetric` returns exit code 3 when a change touched some of a seam's
+members and not the others. Without it, `guard` reports and returns 0. There is
+no per-invocation exception; a seam that reports too much is cut more finely in
+its `members`. An absent or empty ledger reports nothing and returns 0.
+
 ## Exit status
 
 - `0`: command completed successfully.
 - `1`: an operational error prevented completion.
 - `2`: command-line usage was invalid.
-- `3`: `scan --fail-on-findings` found one or more visible findings.
+- `3`: `scan --fail-on-findings` found one or more visible findings, or
+  `guard --deny-asymmetric` found one or more asymmetric changes.

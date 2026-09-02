@@ -1,5 +1,9 @@
 # Glossary
 
+**asymmetric change** — a commit that touched some of a seam's members and left
+the others alone. A shape rather than a verdict: a correct change can be one. See
+[Seam tracking](seam-tracking.md).
+
 **baseline** — a file recording the findings a project has accepted, which later
 scans read to report what came after it. Names whole groups. See
 [Baselines](baselines.md).
@@ -7,6 +11,10 @@ scans read to report what came after it. Names whole groups. See
 **boilerplate classification** — a shape a body was recognised as: a trivial
 body, a forwarding call, a guarded dispatch. Recorded whatever the suppression
 policy does with it.
+
+**breach** — an asymmetric change followed, within the breach window, by a `fix:`
+commit touching a member the asymmetric change did not. Evidence that a seam is
+both real and costly.
 
 **build variant** — the conditions something was produced under. A source run has
 one, describing how the sources were read; an artifact has one you write as a JSON
@@ -23,6 +31,10 @@ pipeline is what `-vv` prints.
 
 **clone group** — the set of occurrences reported together as one finding, with
 one stable id.
+
+**co-change** — how often two paths are touched by the same commit, measured over
+the commit range. What `seam --suggest` proposes candidates from; it says nothing
+about whether the code in them is similar.
 
 **cohesion** — how tightly a group's members agree with one another, as opposed
 to each agreeing with the canonical member.
@@ -66,6 +78,10 @@ composition is configurable.
 
 **run** — one completed scan, recorded in the local database with an id that
 replays it.
+
+**seam** — a set of paths implementing the same semantics in more than one place,
+written down in `codehelion.toml`. The ledger is the source of truth; nothing
+discovers a seam on its own.
 
 **sibling** — an ungrouped unit retained beside a group as evidence: close to the
 canonical member, or matching its normalized signature. See

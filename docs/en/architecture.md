@@ -17,6 +17,17 @@ the artifact reader are what the core is used with.
 | `codehelion-artifact` | the compiled-artifact readers, one per format behind its own feature |
 | `codehelion-helper` / `-helper-protocol` | locating helper programs, and the wire types shared with them |
 | `codehelion-backend-rust` / `-backend-clang` | the helper binaries themselves |
+| `codehelion-history` | reading the local git history: commit records, their order, their classification |
+| `codehelion-seam` | evaluating the seam ledger against that history |
+
+`codehelion-history` reads git and nothing else. It does not depend on
+`codehelion-core` and knows nothing about ASTs, clone groups or the store, which
+is what lets it be tested on a fixture repository alone. `codehelion-seam` is the
+one place the two axes meet: it holds the ledger, the asymmetric-change and
+breach definitions, and the co-change figures behind `seam --suggest`.
+
+`codehelion-core` depends on neither, so a source audit still stands alone in a
+repository with no history worth reading and no ledger at all.
 
 ## Two boundaries that are checked rather than agreed
 

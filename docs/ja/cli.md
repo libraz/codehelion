@@ -24,6 +24,12 @@ codehelion cache clear --force # ローカル監査データベースを恒久�
 codehelion config init        # コメント付き codehelion.toml テンプレートを生成
 codehelion config show        # 有効な設定を表示
 codehelion doctor             # 利用可能な解析コンポーネントを表示
+codehelion history            # 範囲内のコミットを分類し、何を読んだかを述べる
+codehelion seam               # 台帳が名指しする seam を計測
+codehelion seam --suggest     # 共変更だけから seam の候補を提示
+codehelion guard              # 変更を台帳に照らす
+codehelion guard --deny-asymmetric  # seam の一部だけを触る変更があれば exit 3
+codehelion guard --paths src/a.rs   # 編集前に、そのパスが属する seam を引く
 ```
 
 ## `scan`
@@ -86,9 +92,23 @@ codehelion artifact calibration --baseline earlier.json  # 以前の集計と並
 
 `--input-format` は magic byte 検出が満たすべきフォーマットを表明し、`--arch` は universal Mach-O のスライスを選びます。`--build-variant`・`--source-run`・`--linker-map` はソース相関のための入力です。[成果物解析](artifact-analysis.md)と [calibration](calibration.md) を参照してください。
 
+## `history`
+
+ローカルのコミット記録だけを読みます。範囲に何件のコミットがあるか、それらが fix / feature / その他のどれに分類されるか、範囲の最初と最後がどのコミットかを出します。ソースファイルは開かず、台帳も読みません。`--path <dir>` でリポジトリを選び、`--until <rev>` で範囲の終端を固定し、`--config <file>` で範囲に関する設定の出所を指定します。`--format text|json`・`--output <file>`・`--force` は他のコマンドと同じ挙動です。
+
+## `seam`
+
+台帳の `[[seam]]` 項目ごとに、非対称変更が何件あったか、そのうち何件が breach になったか、直近の breach がいつだったかを報告します。`--suggest` を付けると、代わりに共変更だけから seam の候補を、各候補の coupling 値と support とともに提示します。台帳へ書き込むことはありません。`--path`・`--config`・`--until`・`--format`・`--output`・`--force` は `history` と同じです。[seam の追跡](seam-tracking.md)を参照してください。
+
+## `guard`
+
+変更 1 つを台帳に照らします。既定では作業ツリーと `HEAD` の差分を読み、`--since <rev>` を付けるとその revision から `HEAD` までの差分を読みます。`--paths <p>...` は編集前に走らせる照会で、指定したパスがどの seam に属し、一緒に動かす必要のあるメンバーがどれかを述べます。台帳だけを読み、git を開きません。
+
+`--deny-asymmetric` は、seam のメンバーの一部だけを触る変更があったときに exit code 3 を返します。付けなければ報告するだけで 0 を返します。実行単位の例外はありません。報告が多すぎる seam は `members` をより細かく切り直します。台帳が無い、または空の場合は何も報告せず 0 を返します。
+
 ## 終了コード
 
 - `0`: コマンドは成功しました。
 - `1`: 実行上のエラーにより完了できませんでした。
 - `2`: コマンドラインの指定が不正です。
-- `3`: `scan --fail-on-findings` が 1 件以上の visible finding を検出しました。
+- `3`: `scan --fail-on-findings` が 1 件以上の visible finding を検出したか、`guard --deny-asymmetric` が 1 件以上の非対称変更を検出しました。

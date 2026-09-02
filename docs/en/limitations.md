@@ -126,6 +126,33 @@ is done for Rust and for the Itanium C++ ABI; a C++ artifact decorated for the
 Microsoft ABI is still read for size and duplication, but reports no source
 correspondence rather than a guessed one.
 
+## What history cannot say about a seam
+
+A correct one-sided change cannot be told from a broken one. A fix belonging to
+one member alone is still reported as an asymmetric change, because the only
+evidence is which paths a commit touched. That is why reporting rather than
+failing is the default: `guard` says what it saw and exits `0` unless
+`--deny-asymmetric` was asked for. A seam that reports more than a project wants
+to read is cut more finely in its `members` rather than given an exception
+mechanism, since an exception would exist only to defeat the flag somebody
+deliberately turned on.
+
+History does not survive a rename. Rename detection is a similarity heuristic
+whose result moves with its threshold, so it is not used at all: a rename reads
+as a delete and an add, and a moved file starts its co-change history over. The
+ledger's globs are unaffected and still follow a directory that moves.
+
+Duplication inside a single file carries no time axis, because co-change is
+measured per path. Two copies in one file are touched by the same commits by
+construction, so history adds nothing to what a scan already says about them.
+
+A repository without Conventional Commits prefixes reports no breaches, while
+asymmetric changes are still detected. A breach is an asymmetric change
+followed by a `fix:` commit, and the prefix is the only thing that classifies
+one. There is no natural-language search over the message, because a keyword
+list is a heuristic and a heuristic is what makes two runs incomparable. See
+[Seam tracking](seam-tracking.md).
+
 ## The audit database is not migrated
 
 A database written under a different schema is never converted, so no history

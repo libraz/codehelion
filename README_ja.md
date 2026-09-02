@@ -79,7 +79,7 @@ Semantic モードでは、解析したい言語ごとの helper も必要です
 
 出力を読む: [レポートの読み方](docs/ja/reading-a-report.md)、[クローンの型](docs/ja/clone-types.md)、[グループ化](docs/ja/grouping.md)、[安定した識別子](docs/ja/stable-ids.md)、[用語集](docs/ja/glossary.md)。
 
-プロジェクトで使う: [リファクタのループ](docs/ja/refactoring-workflow.md)、[baseline](docs/ja/baselines.md)、[抑制](docs/ja/suppression.md)、[設定](docs/ja/configuration.md)、[コマンドライン](docs/ja/cli.md)。
+プロジェクトで使う: [リファクタのループ](docs/ja/refactoring-workflow.md)、[baseline](docs/ja/baselines.md)、[抑制](docs/ja/suppression.md)、[設定](docs/ja/configuration.md)、[seam の追跡](docs/ja/seam-tracking.md)、[コマンドライン](docs/ja/cli.md)。
 
 成果物: [成果物解析](docs/ja/artifact-analysis.md)、[calibration](docs/ja/calibration.md)。
 

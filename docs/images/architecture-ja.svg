@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" role="img" aria-labelledby="ttl dsc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 530" width="960" height="530" role="img" aria-labelledby="ttl dsc">
   <title id="ttl">crate とプロセス</title>
-  <desc id="dsc">CLI はコアエンジンに依存し、フロントエンド・ストア・成果物リーダーはコアと組み合わせて使う crate です。コアは compiler API をリンクせず、artifact crate にも依存しません。そのため成果物が無くてもソーススキャンは完全に成立します。コンパイラ由来の情報は独立した helper バイナリ（Rust 用と Clang 用）から取得し、バージョン付き protocol・capability negotiation・応答期限・クラッシュ隔離を伴って通信します。コンパイラがクラッシュしても終わるのは helper プロセスであってスキャンではありません。この 2 つの境界は make のターゲットが検査します。</desc>
+  <desc id="dsc">CLI はコアエンジンに依存し、フロントエンド・ストア・成果物リーダーはコアと組み合わせて使う crate です。コアは compiler API をリンクせず、artifact crate にも依存しません。そのため成果物が無くてもソーススキャンは完全に成立します。コンパイラ由来の情報は独立した helper バイナリ（Rust 用と Clang 用）から取得し、バージョン付き protocol・capability negotiation・応答期限・クラッシュ隔離を伴って通信します。コンパイラがクラッシュしても終わるのは helper プロセスであってスキャンではありません。この 2 つの境界は make のターゲットが検査します。同じプロセスの中にもうひとつのレーンとして時間軸があります。codehelion-history は git 履歴だけを読み、codehelion-seam はその履歴に対して seam 台帳を評価します。どちらもコアに依存しないので、ソーススキャンと seam チェックが共有するのはコマンドラインだけです。</desc>
 
   <style>
     .bg    { fill:#f6f8fa }
@@ -34,9 +34,9 @@
     </marker>
   </defs>
 
-  <rect class="bg" x="0" y="0" width="960" height="400" rx="12"/>
+  <rect class="bg" x="0" y="0" width="960" height="530" rx="12"/>
 
-  <rect class="frame" x="24" y="56" width="584" height="268" rx="10"/>
+  <rect class="frame" x="24" y="56" width="584" height="398" rx="10"/>
   <text class="lbl" x="40" y="80">ひとつのプロセス</text>
 
   <rect class="box" x="44" y="100" width="150" height="56" rx="8"/>
@@ -72,6 +72,23 @@
   <text class="s" x="44" y="292">コアは compiler API をリンクせず、artifact crate にも依存しません。</text>
   <text class="s" x="44" y="310">成果物がひとつも無くてもソーススキャンは完全に成立します。</text>
 
+  <path class="rule" d="M44,328 L588,328"/>
+  <text class="lbl" x="44"  y="346">時間軸</text>
+  <text class="s"   x="164" y="346">非対称変更・breach・共変更。コアはこの経路にありません。</text>
+
+  <path class="ln" d="M119,156 L119,176 L34,176 L34,362 L323,362 L323,374" marker-end="url(#a)"/>
+  <path class="ln" d="M119,362 L119,374" marker-end="url(#a)"/>
+
+  <rect class="box" x="44" y="378" width="150" height="56" rx="8"/>
+  <text class="mono m11" x="119" y="404" text-anchor="middle">codehelion-seam</text>
+  <text class="xs"       x="119" y="421" text-anchor="middle">seam の台帳</text>
+
+  <rect class="box" x="238" y="378" width="170" height="56" rx="8"/>
+  <text class="mono m11" x="323" y="404" text-anchor="middle">codehelion-history</text>
+  <text class="xs"       x="323" y="421" text-anchor="middle">git 履歴</text>
+
+  <path class="ln" d="M194,406 L234,406" marker-end="url(#a)"/>
+
   <text class="s" x="936" y="80" text-anchor="end">バージョン付き protocol · 応答期限 · クラッシュ隔離</text>
 
   <rect class="ext" x="632" y="100" width="304" height="86" rx="8"/>
@@ -87,6 +104,6 @@
   <path class="ln" d="M608,143 L628,143" marker-end="url(#a)"/>
   <path class="ln" d="M608,255 L628,255" marker-end="url(#a)"/>
 
-  <text class="s" x="24" y="356">コンパイラがクラッシュしても終わるのは helper プロセスで、スキャンは該当ユニットを unavailable として記録し継続します。</text>
-  <text class="s" x="24" y="376">この 2 つの境界は口約束ではなく make verify-helper-boundaries と make verify-artifact-boundaries が検査します。</text>
+  <text class="s" x="24" y="486">コンパイラがクラッシュしても終わるのは helper プロセスで、スキャンは該当ユニットを unavailable として記録し継続します。</text>
+  <text class="s" x="24" y="506">この 2 つの境界は口約束ではなく make verify-helper-boundaries と make verify-artifact-boundaries が検査します。</text>
 </svg>

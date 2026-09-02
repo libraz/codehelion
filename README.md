@@ -118,6 +118,7 @@ Reading the output: [Reading a report](docs/en/reading-a-report.md),
 Using it on a project: [The refactoring loop](docs/en/refactoring-workflow.md),
 [Baselines](docs/en/baselines.md), [Suppression](docs/en/suppression.md),
 [Configuration](docs/en/configuration.md),
+[Seam tracking](docs/en/seam-tracking.md),
 [The command line](docs/en/cli.md).
 
 Artifacts: [Artifact analysis](docs/en/artifact-analysis.md),

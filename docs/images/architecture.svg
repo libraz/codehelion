@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" role="img" aria-labelledby="ttl dsc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 530" width="960" height="530" role="img" aria-labelledby="ttl dsc">
   <title id="ttl">Crates and processes</title>
-  <desc id="dsc">The CLI depends on the core engine, and the frontends, the store and the artifact reader are the crates the core is used with. The core links no compiler API and does not depend on the artifact crate, so a source scan is complete without any artifact. Compiler evidence comes from separate helper binaries — one for Rust and one for Clang — reached over a versioned protocol with capability negotiation, a response deadline and crash isolation, so a compiler crash ends a helper process rather than the scan. Two make targets check both boundaries.</desc>
+  <desc id="dsc">The CLI depends on the core engine, and the frontends, the store and the artifact reader are the crates the core is used with. The core links no compiler API and does not depend on the artifact crate, so a source scan is complete without any artifact. Compiler evidence comes from separate helper binaries — one for Rust and one for Clang — reached over a versioned protocol with capability negotiation, a response deadline and crash isolation, so a compiler crash ends a helper process rather than the scan. Two make targets check both boundaries. A second lane in the same process is the time axis: the history crate reads the git history and nothing else, and the seam crate evaluates a seam ledger against it. Neither of the two depends on the core, so a source scan and a seam check share nothing but the command line.</desc>
 
   <style>
     .bg    { fill:#f6f8fa }
@@ -34,9 +34,9 @@
     </marker>
   </defs>
 
-  <rect class="bg" x="0" y="0" width="960" height="400" rx="12"/>
+  <rect class="bg" x="0" y="0" width="960" height="530" rx="12"/>
 
-  <rect class="frame" x="24" y="56" width="584" height="268" rx="10"/>
+  <rect class="frame" x="24" y="56" width="584" height="398" rx="10"/>
   <text class="lbl" x="40" y="80">ONE PROCESS</text>
 
   <rect class="box" x="44" y="100" width="150" height="56" rx="8"/>
@@ -72,6 +72,23 @@
   <text class="s" x="44" y="292">The core links no compiler API, and does not depend on the artifact</text>
   <text class="s" x="44" y="310">crate: a source scan is complete with no artifact anywhere.</text>
 
+  <path class="rule" d="M44,328 L588,328"/>
+  <text class="lbl" x="44"  y="346">THE TIME AXIS</text>
+  <text class="s"   x="164" y="346">asymmetric change, breach and co-change: the core is not on this path.</text>
+
+  <path class="ln" d="M119,156 L119,176 L34,176 L34,362 L323,362 L323,374" marker-end="url(#a)"/>
+  <path class="ln" d="M119,362 L119,374" marker-end="url(#a)"/>
+
+  <rect class="box" x="44" y="378" width="150" height="56" rx="8"/>
+  <text class="mono m11" x="119" y="404" text-anchor="middle">codehelion-seam</text>
+  <text class="xs"       x="119" y="421" text-anchor="middle">the seam ledger</text>
+
+  <rect class="box" x="238" y="378" width="170" height="56" rx="8"/>
+  <text class="mono m11" x="323" y="404" text-anchor="middle">codehelion-history</text>
+  <text class="xs"       x="323" y="421" text-anchor="middle">the git history</text>
+
+  <path class="ln" d="M194,406 L234,406" marker-end="url(#a)"/>
+
   <text class="s" x="936" y="80" text-anchor="end">a versioned protocol · a deadline · crash isolation</text>
 
   <rect class="ext" x="632" y="100" width="304" height="86" rx="8"/>
@@ -87,6 +104,6 @@
   <path class="ln" d="M608,143 L628,143" marker-end="url(#a)"/>
   <path class="ln" d="M608,255 L628,255" marker-end="url(#a)"/>
 
-  <text class="s" x="24" y="356">A compiler crash ends a helper process, not the scan: the run records that unit as unavailable and continues.</text>
-  <text class="s" x="24" y="376">Both boundaries are checked, not just agreed: make verify-helper-boundaries and make verify-artifact-boundaries.</text>
+  <text class="s" x="24" y="486">A compiler crash ends a helper process, not the scan: the run records that unit as unavailable and continues.</text>
+  <text class="s" x="24" y="506">Both boundaries are checked, not just agreed: make verify-helper-boundaries and make verify-artifact-boundaries.</text>
 </svg>

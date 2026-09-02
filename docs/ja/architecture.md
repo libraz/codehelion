@@ -15,6 +15,12 @@ workspace は `codehelion-*` crate の集合で、依存方向はひとつに固
 | `codehelion-artifact` | コンパイル済み成果物のリーダー。フォーマットごとに feature で分離 |
 | `codehelion-helper` / `-helper-protocol` | helper プログラムの探索と、helper と共有するワイヤ型 |
 | `codehelion-backend-rust` / `-backend-clang` | helper バイナリそのもの |
+| `codehelion-history` | ローカルの git 履歴の読み取り。コミット記録・その順序・その分類 |
+| `codehelion-seam` | seam の台帳をその履歴に照らして評価する層 |
+
+`codehelion-history` が読むのは git だけです。`codehelion-core` に依存せず、AST・クローングループ・ストアについて何も知りません。だから fixture リポジトリだけで単体テストできます。`codehelion-seam` は 2 つの軸が合流する唯一の場所で、台帳・非対称変更と breach の定義・`seam --suggest` の背後にある共変更の数値を持ちます。
+
+`codehelion-core` はそのどちらにも依存しません。読むに足る履歴が無く台帳も無いリポジトリでも、ソース監査は単体で成立します。
 
 ## 口約束ではなく検査される 2 つの境界
 
