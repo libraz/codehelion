@@ -6,8 +6,14 @@ use super::*;
 fn cross_language_comparison_identity_is_order_independent_and_policy_distinct() {
     let origins = vec!["cpp-variant".to_string(), "rust-variant".to_string()];
     let reverse = vec!["rust-variant".to_string(), "cpp-variant".to_string()];
+    let repeated = vec![
+        "rust-variant".to_string(),
+        "cpp-variant".to_string(),
+        "rust-variant".to_string(),
+    ];
     let language = cross_language_comparison_id(&origins);
     assert_eq!(language, cross_language_comparison_id(&reverse));
+    assert_eq!(language, cross_language_comparison_id(&repeated));
     assert_ne!(
         language.to_hex(),
         cross_variant_comparison_id(&origins).to_hex(),

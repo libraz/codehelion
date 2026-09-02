@@ -753,17 +753,11 @@ pub fn finding_id(
 /// produced them.
 #[must_use]
 pub fn cross_variant_comparison_id(origins: &[String]) -> CrossVariantComparisonId {
-    let mut origins = origins.to_vec();
-    origins.sort_unstable();
-    origins.dedup();
-    let mut hasher = IdHasher::new("cross-variant-comparison");
-    hasher.write_str(FP_SCHEMA_VERSION);
-    hasher.write_str(CROSS_VARIANT_POLICY_VERSION);
-    hasher.write_u32(u32::try_from(origins.len()).unwrap_or(u32::MAX));
-    for origin in origins {
-        hasher.write_str(&origin);
-    }
-    CrossVariantComparisonId(hasher.finish())
+    CrossVariantComparisonId(comparison_id(
+        "cross-variant-comparison",
+        CROSS_VARIANT_POLICY_VERSION,
+        origins,
+    ))
 }
 
 /// Identify an explicit Rust-to-C++ semantic comparison over origin variants.
@@ -773,17 +767,30 @@ pub fn cross_variant_comparison_id(origins: &[String]) -> CrossVariantComparison
 /// comparison domain used to prevent unrelated requests from joining.
 #[must_use]
 pub fn cross_language_comparison_id(origins: &[String]) -> CrossLanguageComparisonId {
+    CrossLanguageComparisonId(comparison_id(
+        "cross-language-comparison",
+        CROSS_LANGUAGE_POLICY_VERSION,
+        origins,
+    ))
+}
+
+/// Hash the canonical set of origin variants for one comparison domain.
+///
+/// Variant and language comparisons deliberately differ only in their domain
+/// and policy revision. Keeping the shared canonicalisation here prevents one
+/// identifier from silently changing its ordering or duplicate handling.
+fn comparison_id(domain: &str, policy_version: &str, origins: &[String]) -> [u8; 16] {
     let mut origins = origins.to_vec();
     origins.sort_unstable();
     origins.dedup();
-    let mut hasher = IdHasher::new("cross-language-comparison");
+    let mut hasher = IdHasher::new(domain);
     hasher.write_str(FP_SCHEMA_VERSION);
-    hasher.write_str(CROSS_LANGUAGE_POLICY_VERSION);
+    hasher.write_str(policy_version);
     hasher.write_u32(u32::try_from(origins.len()).unwrap_or(u32::MAX));
     for origin in origins {
         hasher.write_str(&origin);
     }
-    CrossLanguageComparisonId(hasher.finish())
+    hasher.finish()
 }
 
 /// Identify a verified group from an explicit Rust-to-C++ semantic comparison.
